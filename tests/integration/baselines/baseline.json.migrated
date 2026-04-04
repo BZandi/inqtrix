@@ -1,0 +1,1055 @@
+{
+  "meta": {
+    "timestamp": "2026-02-10T16:37:24.584490+00:00",
+    "endpoint": "http://127.0.0.1:5100",
+    "reasoning_model": "unbekannt",
+    "search_model": "unbekannt",
+    "agent_version": "ok",
+    "total_elapsed_s": 1207.5,
+    "promoted_at": "2026-02-10T16:58:57.904188+00:00"
+  },
+  "results": [
+    {
+      "question_id": "q001",
+      "question": "Vor kurzem sind die Aktienmärkte abgestürzt weil anscheinend ein neues Tool von einem der großen KI-Anbieter veröffentlicht wurde, was war das genau und was ist passiert bzw, was kann das Tool eigentlich?",
+      "category": "news",
+      "answer": "## Kurzfazit\n\nDer juengste Boersencrash Anfang Februar 2026 wurde primaer durch zwei Produktlaunches von **Anthropic** ausgeloest: das autonome KI-Agenten-Tool **Claude Cowork** (Ende Januar 2026) und das Sprachmodell **Claude Opus 4.6** (6. Februar 2026). Zusammen vernichteten diese Ankuendigungen geschaetzt **300 Milliarden bis 1 Billion US-Dollar** an Marktwert im Software- und Tech-Sektor, da Investoren eine fundamentale Disruption traditioneller Unternehmenssoftware befuerchteten. [48](https://fortune.com/2026/02/06/anthropic-claude-opus-4-6-stock-selloff-new-upgrade) [50](https://economictimes.com/news/international/us/why-anthropics-claude-cowork-sparked-300-billion-tech-market-sell-off-this-month-see-which-sectors-are-winning-and-losing-amid-ai-boom/articleshow/128122187.cms)\n\n---\n\n## Kernaussagen\n\n- **Anthropics Claude Cowork**, ein autonomer KI-Agent fuer Wissensarbeit, wurde Ende Januar 2026 veroeffentlicht und loeste Anfang Februar einen Sell-off von mindestens **300 Mrd. USD** aus. [50](https://economictimes.com/news/international/us/why-anthropics-claude-cowork-sparked-300-billion-tech-market-sell-off-this-month-see-which-sectors-are-winning-and-losing-amid-ai-boom/articleshow/128122187.cms)\n- Am **6. Februar 2026** folgte **Claude Opus 4.6**, das mit autonomen KI-\"Teams\" und einem Kontextfenster von **1 Million Tokens** neue Masstaebe setzte und den Ausverkauf verstaerkte. [48](https://fortune.com/2026/02/06/anthropic-claude-opus-4-6-stock-selloff-new-upgrade) [68](https://www.techcentral.ie/anthropic-launches-claude-opus-4-6-lets-ai-agents-collaborate)\n- **ServiceNow** verlor **42 %** in drei Monaten, **HubSpot, Atlassian und Zscaler** fielen um ueber **16 %**, **FactSet** um **10 %**, **Thomson Reuters** um **16 %** und **LegalZoom** um fast **20 %**. [62](https://www.zacks.com/stock/news/2842334/3-reasons-to-hold-servicenow-stock-despite-a-42-decline-in-3-months) [48](https://fortune.com/2026/02/06/anthropic-claude-opus-4-6-stock-selloff-new-upgrade) [52](https://abcnews.go.com/Business/new-ai-tool-hammered-software-stocks-week/story?id=129845251)\n- Der **S&P-500-Software-Index** lag **17 % im Minus** seit Jahresbeginn 2026; der Software-Sektor-ETF verzeichnete seine schlechteste Performance seit April 2025. [49](https://fortune.com/2026/02/09/anthropic-isnt-done-spooking-saas-investors) [71](https://www.trendingtopics.eu/anthropics-claude-opus-4-6-claims-top-spot-in-ai-rankings-beating-openai-and-google)\n- **Gewinner** des Umbruchs waren Cloud-Infrastruktur-Anbieter wie **Nvidia, Amazon (AWS) und Google Cloud**, da KI-Agenten massive Rechenleistung benoetigen. [50](https://economictimes.com/news/international/us/why-anthropics-claude-cowork-sparked-300-billion-tech-market-sell-off-this-month-see-which-sectors-are-winning-and-losing-amid-ai-boom/articleshow/128122187.cms)\n- Der **gleichgewichtete S&P 500** erreichte trotz der Tech-Verluste Rekordhochs – der Crash war sektoral konzentriert, keine breite Rezession. [80](https://fortune.com/2026/02/05/stocks-dumb-money-ai-tech-companies)\n- Fruehere Nutzer von Claude Cowork berichten von **15–30 % Zeitersparnis** bei Wissensarbeit wie Vertragspruefung, Compliance und Projektmanagement. [76](https://techwize.com/blog/claude-cowork-features-plugins-and-guide-2026)\n- **Deutsche Bank** hatte bereits im Januar 2026 gewarnt, dass 2026 das \"haerteste Jahr fuer KI\" werde – durch Desillusionierung und Neubewertung ueberzogener Erwartungen. [47](https://www.finanznachrichten.de/nachrichten-2026-01/67480835-deutsche-bank-warnt-hype-vorbei-warum-2026-das-haerteste-jahr-fuer-kuenstliche-intelligenz-wird-049.htm)\n\n---\n\n## Detailanalyse\n\n### Was ist Claude Cowork und was kann es?\n\n**Claude Cowork** ist ein autonomer KI-Agent, den Anthropic Ende Januar 2026 vorstellte. Im Kern handelt es sich um eine Weiterentwicklung von Anthropics bisherigem Entwicklertool \"Claude Code\" – allerdings mit einem entscheidend erweiterten Einsatzbereich: Cowork richtet sich nicht nur an Programmierer, sondern an **alle Wissensarbeiter** in Unternehmen. [76](https://techwize.com/blog/claude-cowork-features-plugins-and-guide-2026) [77](https://cameronxyz.substack.com/p/claude-code-next-era-agent-collaboration)\n\nDas Tool integriert sich ueber Anthropics **Model Context Protocol (MCP)** mit gaengiger Unternehmenssoftware wie **Slack, Jira, Figma, Snowflake, Box und Microsoft 365**. Zum Launch wurden **11 branchenspezifische Open-Source-Plugins** auf GitHub bereitgestellt, darunter ein besonders beachtetes **Legal-Plugin**, das Vertragspruefung, NDA-Triage (automatisierte Vorsortierung von Geheimhaltungsvereinbarungen), Compliance-Workflows und rechtliche Briefings automatisiert. [55](https://www.legalpracticeintelligence.com/blogs/technology-intelligence/anthropic-s-claude-ai-jolts-legal-tech-sector) [78](https://age-of-product.com/claude-cowork)\n\nGerade dieses Legal-Plugin war der Zuender fuer die Marktpanik: Investoren erkannten, dass KI-Agenten nicht nur Programmierer unterstuetzen, sondern ganze Geschaeftsprozesse in Bereichen wie Recht, Finanzen und Beratung uebernehmen koennten – genau die Maerkte, die bisher von teuren SaaS-Anbietern (Software-as-a-Service) wie **ServiceNow, Salesforce oder Thomson Reuters** bedient werden. [52](https://abcnews.go.com/Business/new-ai-tool-hammered-software-stocks-week/story?id=129845251)\n\n### Claude Opus 4.6 – der Verstaerker des Sell-offs\n\nNur wenige Tage spaeter, am **6. Februar 2026**, legte Anthropic mit **Claude Opus 4.6** nach. Dieses Modell brachte mehrere technische Durchbrueche: [68](https://www.techcentral.ie/anthropic-launches-claude-opus-4-6-lets-ai-agents-collaborate) [75](https://www.anthropic.com/claude/opus)\n\n| Merkmal | Details |\n|---|---|\n| **Kontextfenster** | 1 Million Tokens (Beta), bis zu 128k Output-Tokens |\n| **Benchmark** | 65,4 % auf Terminal-Bench 2.0; uebertrifft GPT-5.2 auf ausgewaehlten Aufgaben |\n| **Fast Mode** | Antworten bis zu 2,5x schneller als Standardmodus |\n| **Preise** | $5/$25 pro Mio. Tokens (Standard); $10/$37,50 bei >200k Tokens |\n| **Kernfeature** | Autonome KI-\"Teams\" – mehrere Agenten arbeiten koordiniert zusammen |\n\nDie Faehigkeit, **autonome KI-Teams** zu bilden, war der eigentliche Schock: Opus 4.6 ermoeglicht es, dass mehrere KI-Agenten parallel und koordiniert an komplexen Aufgaben arbeiten – etwa ein Agent recherchiert, ein zweiter schreibt Code, ein dritter prueft die Ergebnisse. [68](https://www.techcentral.ie/anthropic-launches-claude-opus-4-6-lets-ai-agents-collaborate) [73](https://www.theregister.com/2026/02/09/claude_opus_46_compiler) Das Modell ist bereits ueber **Amazon Bedrock** und **Microsoft Azure Foundry** verfuegbar. [72](https://aws.amazon.com/blogs/aws/aws-weekly-roundup-claude-opus-4-6-in-amazon-bedrock-aws-builder-id-sign-in-with-apple-and-more-february-9-2026) [74](https://azure.microsoft.com/en-us/blog/claude-opus-4-6-anthropics-powerful-model-for-coding-agents-and-enterprise-workflows-is-now-available-in-microsoft-foundry-on-azure)\n\n### Marktreaktion und betroffene Sektoren\n\nDie Marktreaktion war heftig und sektoral stark differenziert. Am staerksten betroffen waren **traditionelle Unternehmenssoftware-Anbieter**, deren Geschaeftsmodelle durch autonome KI-Agenten direkt bedroht erscheinen: [49](https://fortune.com/2026/02/09/anthropic-isnt-done-spooking-saas-investors) [53](https://www.latimes.com/business/story/2026-02-09/ai-fear-grips-wall-street-as-new-stock-market-reality-sets-in)\n\n- **SaaS-Unternehmen**: Salesforce, Adobe und ServiceNow fielen um **6–8 %** an einzelnen Tagen; ServiceNow kumuliert **-42 %** in drei Monaten.\n- **Daten- und Finanzdienstleister**: S&P Global, Moody's, Nasdaq Inc. und Thomson Reuters verloren **bis zu 20 %**; Morningstar verzeichnete die schlechteste Woche seit 2009.\n- **IT-Outsourcing**: Infosys und TCS (Tata Consultancy Services) waren ebenfalls stark betroffen, da KI-Agenten klassische Beratungs- und Outsourcing-Aufgaben substituieren koennten.\n- **Hardware/Chips**: AMD verlor **17 %**, waehrend **Nvidia** als Profiteur der steigenden Rechennachfrage relativ stabil blieb.\n\nBemerkenswert: Der **gleichgewichtete S&P 500** (bei dem jede Aktie gleich gewichtet wird, nicht nach Marktkapitalisierung) erreichte gleichzeitig Rekordhochs. [80](https://fortune.com/2026/02/05/stocks-dumb-money-ai-tech-companies) Das zeigt, dass der Crash kein breitflaechiges Marktproblem war, sondern eine gezielte **Neubewertung des Software-Sektors** angesichts der KI-Disruption.\n\n### Abgrenzung zum DeepSeek-Schock von 2025\n\nEs ist wichtig, diesen Crash vom sogenannten **\"DeepSeek-Schock\"** im Januar 2025 zu unterscheiden. Damals hatte das chinesische Startup DeepSeek sein Modell **R1** veroeffentlicht, das mit nur **6 Mio. USD Trainingskosten** aehnliche Leistungen wie Modelle erzielte, die ueber 500 Mio. USD gekostet hatten. [1](https://innfactory.ai/de/blog/deepseek-r1-chinesisches-ki-startup-sorgt-mit-neuem-ki-modell-fuer-aufsehen) [13](https://www.deraktionaer.de/artikel/medien-ittk-technologie/nvidia-465-milliarden-weg-groesster-verlust-der-boersen-geschichte-aktie-mit-verkaufssignal-20373791.html) Dieser Schock vernichtete ueber **1 Billion USD** an einem Tag und traf vor allem **Chip-Hersteller wie Nvidia (-17 %)**, weil Investoren befuerchteten, dass weniger GPU-Nachfrage bestehen wuerde.\n\nDer aktuelle Anthropic-Crash von Februar 2026 unterscheidet sich fundamental: Hier geht es nicht um guenstigere Hardware-Nutzung, sondern um die **Substitution ganzer Software-Geschaeftsmodelle** durch KI-Agenten. Die Verlierer sind diesmal SaaS- und Datenunternehmen, waehrend Hardware-Anbieter profitieren. [50](https://economictimes.com/news/international/us/why-anthropics-claude-cowork-sparked-300-billion-tech-market-sell-off-this-month-see-which-sectors-are-winning-and-losing-amid-ai-boom/articleshow/128122187.cms)\n\n---\n\n## Einordnung / Ausblick\n\nAnalysten von **Gartner** und **Wedbush** (Dan Ives) bezeichneten die Marktreaktion als uebertrieben – die Disruption durch KI-Agenten sei real, aber die Geschwindigkeit der Umstellung werde ueberschaetzt. [71](https://www.trendingtopics.eu/anthropics-claude-opus-4-6-claims-top-spot-in-ai-rankings-beating-openai-and-google) Gleichzeitig wurden die prognostizierten Gewinnwachstumsraten im S&P-500-Software-Sektor fuer 2026 von **16 % auf 19 %** angehoben – ein Hinweis darauf, dass die Fundamentaldaten des Sektors trotz der Panik intakt bleiben koennten. [49](https://fortune.com/2026/02/09/anthropic-isnt-done-spooking-saas-investors) Die entscheidende Frage fuer die kommenden Monate wird sein, ob Unternehmen wie ServiceNow und Salesforce KI-Agenten schnell genug in ihre eigenen Produkte integrieren koennen, oder ob Anthropic und OpenAI ihnen dauerhaft Marktanteile abnehmen. Die von **Amazon (200 Mrd. USD), Alphabet (180 Mrd. USD) und Meta (135 Mrd. USD)** angekuendigten KI-Investitionen fuer 2026 deuten darauf hin, dass der Infrastruktur-Boom trotz – oder gerade wegen – dieser Disruption weitergeht. [81](https://bits-chips.com/article/big-techs-ai-arms-race-drives-650-billion-dollar-capex-surge)\n\n---\n\n**Quellen:** [13](https://www.deraktionaer.de/artikel/medien-ittk-technologie/nvidia-465-milliarden-weg-groesster-verlust-der-boersen-geschichte-aktie-mit-verkaufssignal-20373791.html) | [47](https://www.finanznachrichten.de/nachrichten-2026-01/67480835-deutsche-bank-warnt-hype-vorbei-warum-2026-das-haerteste-jahr-fuer-kuenstliche-intelligenz-wird-049.htm) | [48](https://fortune.com/2026/02/06/anthropic-claude-opus-4-6-stock-selloff-new-upgrade) | [49](https://fortune.com/2026/02/09/anthropic-isnt-done-spooking-saas-investors) | [50](https://economictimes.com/news/international/us/why-anthropics-claude-cowork-sparked-300-billion-tech-market-sell-off-this-month-see-which-sectors-are-winning-and-losing-amid-ai-boom/articleshow/128122187.cms) | [52](https://abcnews.go.com/Business/new-ai-tool-hammered-software-stocks-week/story?id=129845251) | [53](https://www.latimes.com/business/story/2026-02-09/ai-fear-grips-wall-street-as-new-stock-market-reality-sets-in) | [55](https://www.legalpracticeintelligence.com/blogs/technology-intelligence/anthropic-s-claude-ai-jolts-legal-tech-sector) | [62](https://www.zacks.com/stock/news/2842334/3-reasons-to-hold-servicenow-stock-despite-a-42-decline-in-3-months) | [68](https://www.techcentral.ie/anthropic-launches-claude-opus-4-6-lets-ai-agents-collaborate) | [71](https://www.trendingtopics.eu/anthropics-claude-opus-4-6-claims-top-spot-in-ai-rankings-beating-openai-and-google) | [75](https://www.anthropic.com/claude/opus) | [76](https://techwize.com/blog/claude-cowork-features-plugins-and-guide-2026) | [80](https://fortune.com/2026/02/05/stocks-dumb-money-ai-tech-companies) | [81](https://bits-chips.com/article/big-techs-ai-arms-race-drives-650-billion-dollar-capex-surge)\n\n---\n*83 Quellen · 12 Suchen · 4 Runden · 4:12 min · Confidence 7/10*",
+      "metrics": {
+        "total_rounds": 4,
+        "total_elapsed_s": 252.68,
+        "final_confidence": 7,
+        "total_queries": 12,
+        "total_citations": 83,
+        "total_context_blocks": 8,
+        "competing_events_detected": true,
+        "stagnation_detected": false,
+        "total_prompt_tokens": 45966,
+        "total_completion_tokens": 19027
+      },
+      "iteration_logs": [
+        {
+          "node": "classify",
+          "timestamp": 1770741446.4334667,
+          "duration_s": 1.698,
+          "decision": "SEARCH",
+          "lang": "de",
+          "search_lang": "de",
+          "recency": "month",
+          "type": "news"
+        },
+        {
+          "node": "decompose",
+          "timestamp": 1770741448.7279377,
+          "duration_s": 2.293,
+          "sub_questions": [
+            "DeepSeek R1 AI model release January 2026 what is it and what can it do",
+            "stock market crash late January 2026 DeepSeek AI impact what happened"
+          ],
+          "sub_question_count": 2
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770741451.9616537,
+          "duration_s": 3.233,
+          "round": 0,
+          "new_queries": [
+            "DeepSeek R1 KI Modell Veröffentlichung Januar 2025 Fähigkeiten Funktionen Details",
+            "Börsencrash Januar 2025 DeepSeek AI Auswirkungen Technologieaktien Nvidia Kursverluste",
+            "DeepSeek R1 vs ChatGPT Vergleich open source Kosten günstiger Durchbruch 2025"
+          ],
+          "total_queries": 3
+        },
+        {
+          "node": "search",
+          "timestamp": 1770741480.432923,
+          "duration_s": 28.47,
+          "round": 0,
+          "queries_executed": 3,
+          "queries": [
+            "DeepSeek R1 KI Modell Veröffentlichung Januar 2025 Fähigkeiten Funktionen Details",
+            "Börsencrash Januar 2025 DeepSeek AI Auswirkungen Technologieaktien Nvidia Kursverluste",
+            "DeepSeek R1 vs ChatGPT Vergleich open source Kosten günstiger Durchbruch 2025"
+          ],
+          "sources_found": 3,
+          "total_citations": 23,
+          "context_blocks": 3
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770741486.2515857,
+          "duration_s": 5.818,
+          "round": 1,
+          "confidence": 7,
+          "gaps": "Das Ereignis (DeepSeek R1, 27. Januar 2025) liegt ca. 12,5 Monate vor dem heutigen Datum (10. Februar 2026), was die Bezeichnung 'vor kurzem' fragwürdig macht – möglicherweise ist ein aktuelleres Ereignis gemeint, das in den Recherche-Ergebnissen nicht gefunden wurde.",
+          "competing_events": "DeepSeek R1 Börsencrash (27. Januar 2025) vs. möglicherweise ein aktuelleres, nicht gefundenes KI-bezogenes Börsenereignis Anfang 2026",
+          "stagnation_detected": false,
+          "context_blocks": 3,
+          "done": false
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770741489.4269524,
+          "duration_s": 3.175,
+          "round": 1,
+          "new_queries": [
+            "AI stock market crash January February 2026 latest selloff technology stocks",
+            "DeepSeek new model release 2026 R2 update tool launch stock market reaction",
+            "Börsencrash KI Aktien 2026 neues Modell Veröffentlichung aktuell letzten Wochen"
+          ],
+          "total_queries": 6
+        },
+        {
+          "node": "search",
+          "timestamp": 1770741523.337868,
+          "duration_s": 33.91,
+          "round": 1,
+          "queries_executed": 3,
+          "queries": [
+            "AI stock market crash January February 2026 latest selloff technology stocks",
+            "DeepSeek new model release 2026 R2 update tool launch stock market reaction",
+            "Börsencrash KI Aktien 2026 neues Modell Veröffentlichung aktuell letzten Wochen"
+          ],
+          "sources_found": 3,
+          "total_citations": 47,
+          "context_blocks": 6
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770741531.4194198,
+          "duration_s": 8.081,
+          "round": 2,
+          "confidence": 7,
+          "gaps": "Die Frage bezieht sich auf \"vor kurzem\" (relativ zum 10. Feb 2026), und der DeepSeek-R1-Crash fand am 27. Januar 2025 statt – also vor über 12 Monaten. Es gibt Hinweise auf erneute Tech-Crashs Anfang 2026, aber kein spezifisches neues KI-Tool wurde als direkter Auslöser identifiziert. Möglicherweise meint der Fragesteller dennoch den DeepSeek-R1-Crash von Januar 2025, da kein aktuelleres passendes Ereignis gefunden wurde.",
+          "competing_events": "DeepSeek R1 Crash (27. Jan 2025) vs. breiter Tech/Software-Selloff Anfang 2026 (mehrere Faktoren: Anthropic Legal-Tools, S&P-Global-Prognosen, CapEx-Sorgen, DeepSeek-R2-Spekulationen, aber kein einzelnes neues Tool als klarer Auslöser)",
+          "stagnation_detected": false,
+          "context_blocks": 6,
+          "done": false
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770741534.3810542,
+          "duration_s": 2.961,
+          "round": 2,
+          "new_queries": [
+            "Anthropic AI legal tool launch January February 2026 stock market impact technology selloff",
+            "DeepSeek R2 release date 2026 announcement capabilities market crash trigger",
+            "tech stock crash February 2026 specific AI tool cause Nvidia semiconductor CapEx concerns timeline"
+          ],
+          "total_queries": 9
+        },
+        {
+          "node": "search",
+          "timestamp": 1770741578.4260597,
+          "duration_s": 44.044,
+          "round": 2,
+          "queries_executed": 3,
+          "queries": [
+            "Anthropic AI legal tool launch January February 2026 stock market impact technology selloff",
+            "DeepSeek R2 release date 2026 announcement capabilities market crash trigger",
+            "tech stock crash February 2026 specific AI tool cause Nvidia semiconductor CapEx concerns timeline"
+          ],
+          "sources_found": 3,
+          "total_citations": 67,
+          "context_blocks": 8
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770741586.9736364,
+          "duration_s": 8.547,
+          "round": 3,
+          "confidence": 7,
+          "gaps": "Es gibt zwei konkurrierende Ereignisse, aber die zeitliche Einordnung \"vor kurzem\" (relativ zum 10. Feb 2026) passt am besten zu Anthropics Claude Cowork Legal-Plugin (Ende Januar 2026) und Claude Opus 4.6 (6. Feb 2026), wobei auch der DeepSeek R1-Crash von Januar 2025 ausführlich dokumentiert ist.",
+          "competing_events": "DeepSeek R1 (Januar 2025, ~600 Mrd.–1 Bio. USD Verlust, Nvidia -17%) vs. Anthropic Claude Cowork/Opus 4.6 (Ende Jan/Anfang Feb 2026, ~300 Mrd.–1 Bio. USD Verlust, Software-Aktien -6–42%). Da \"vor kurzem\" zum 10. Feb 2026 passt, ist Anthropics Claude Cowork/Opus 4.6 das wahrscheinlich gemeinte Ereignis; DeepSeek R1 liegt über 12 Monate zurück.",
+          "stagnation_detected": false,
+          "context_blocks": 8,
+          "done": false
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770741590.1001074,
+          "duration_s": 3.125,
+          "round": 3,
+          "new_queries": [
+            "Anthropic Claude Opus 4.6 release February 2026 capabilities features stock market reaction",
+            "Claude Cowork autonomous AI agent February 2026 software developer jobs replacement market crash",
+            "AI market crash February 2026 which company tool caused billion dollar losses specific event"
+          ],
+          "total_queries": 12
+        },
+        {
+          "node": "search",
+          "timestamp": 1770741623.7906377,
+          "duration_s": 33.689,
+          "round": 3,
+          "queries_executed": 3,
+          "queries": [
+            "Anthropic Claude Opus 4.6 release February 2026 capabilities features stock market reaction",
+            "Claude Cowork autonomous AI agent February 2026 software developer jobs replacement market crash",
+            "AI market crash February 2026 which company tool caused billion dollar losses specific event"
+          ],
+          "sources_found": 3,
+          "total_citations": 83,
+          "context_blocks": 8
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770741632.8011847,
+          "duration_s": 9.01,
+          "round": 4,
+          "confidence": 7,
+          "gaps": "Keine wesentlichen Lücken – die Recherche identifiziert klar Anthropics Claude Cowork (Januar 2026) und Claude Opus 4.6 (6. Februar 2026) als Auslöser des Aktienmarkt-Einbruchs Anfang Februar 2026, inklusive Funktionsbeschreibung und Marktauswirkungen.",
+          "competing_events": "DeepSeek R1 (Januar 2025, ~1 Bio. USD Verlust) vs. Anthropic Claude Cowork + Opus 4.6 (Januar/Februar 2026, 300 Mrd.–1 Bio. USD Verlust) – da die Frage \"vor kurzem\" sagt und das heutige Datum 10.02.2026 ist, passt das Anthropic-Ereignis zeitlich; das DeepSeek-R1-Ereignis liegt über 12 Monate zurück.",
+          "stagnation_detected": false,
+          "context_blocks": 8,
+          "done": true
+        },
+        {
+          "node": "answer",
+          "timestamp": 1770741697.417229,
+          "duration_s": 64.615,
+          "answer_length": 12902,
+          "citation_count": 83,
+          "rounds": 4,
+          "elapsed_total_s": 252.7,
+          "confidence": 7
+        }
+      ]
+    },
+    {
+      "question_id": "q002",
+      "question": "Welches neuste Paper hat DeepSeek rausgebracht über Agentensysteme die zeigen wie ChatGPT funktioniert, es hat wohl für sehr viel aufsehen erregt und worum ging es dabei?",
+      "category": "academic",
+      "answer": "## Kurzfazit\n\nDeepSeek selbst hat kein Paper veröffentlicht, das zeigt, \"wie ChatGPT funktioniert\" oder dessen Agentensystem reverse-engineert. Was vermutlich gemeint ist: Im **Januar 2026** erschien auf arXiv das vielbeachtete Paper **\"Reasoning Models Generate Societies of Thought\"** (arXiv: 2601.10825), das anhand von **DeepSeek-R1** analysiert, wie Reasoning-Modelle intern eine Art **Multi-Agenten-Debatte simulieren** – also mehrere \"Stimmen\" mit unterschiedlichen Persönlichkeiten und Expertisen erzeugen, ohne dass ein explizites Multi-Agenten-Setup nötig ist. Dieses Paper hat für erhebliches Aufsehen gesorgt, weil es grundlegende Mechanismen offenlegt, die auch für Modelle wie ChatGPT relevant sind.\n\n---\n\n## Kernaussagen\n\n- **Das Paper analysiert 8.262 Reasoning-Traces** von DeepSeek-R1 (671B Parameter) und QwQ-32B und vergleicht sie mit Instruction-Tuned-Baselines wie DeepSeek-V3 [45](https://arxiv.org/abs/2601.10825).\n- **Reasoning-Modelle simulieren intern diverse Perspektiven** mit unterschiedlichen Persönlichkeitsmerkmalen (gemessen über Big-Five/BFI-10) und Domänenexpertise – bis zu **7 verschiedene Perspektiven** bei komplexen Aufgaben [47](https://the-decoder.com/study-finds-ai-reasoning-models-generate-a-society-of-thought-with-arguing-voices-inside-their-process).\n- **DeepSeek-R1 zeigt signifikant mehr Frage-Antwort-Verhalten** (β = 0,345, p < 10⁻³²³) und **Perspektivwechsel** (β = 0,213, p < 10⁻¹³⁷) als das Baseline-Modell DeepSeek-V3 [39](https://arxiv.org/html/2601.10825v1).\n- **Reconciliation** (das Zusammenführen widersprüchlicher Perspektiven) ist ein starker Prädiktor für korrekte Antworten (β = 0,423, p < 10⁻²⁷) [39](https://arxiv.org/html/2601.10825v1).\n- **Reinforcement Learning allein** (ohne explizites Multi-Agenten-Training) reicht aus, damit Modelle spontan konversationelle, debattenartige Verhaltensweisen entwickeln [62](https://arxiviq.substack.com/p/reasoning-models-generate-societies).\n- **Konversationsbasiertes Scaffolding** übertrifft Monolog-Training: Bei Qwen-2.5-3B erreichte es nach 40 Schritten **38 % Genauigkeit** gegenüber 28 % beim Monolog-Ansatz [39](https://arxiv.org/html/2601.10825v1).\n- **Es handelt sich nicht um ein DeepSeek-eigenes Paper**, sondern um eine externe Forschungsarbeit, die DeepSeek-R1 als Untersuchungsobjekt nutzt (unbestätigt, ob DeepSeek-Mitarbeiter beteiligt waren).\n- **Vorwürfe des Reverse Engineering von ChatGPT** existieren separat, sind aber nicht Gegenstand dieses Papers und bislang nicht belegt [24](https://economictimes.com/news/international/us/did-deepseek-do-reverse-engineering-and-learn-from-other-ai-models-like-chatgpt-and-anthropic-heres-what-techies-are-saying/articleshow/117638070.cms).\n\n---\n\n## Detailanalyse\n\n### Was das Paper \"Societies of Thought\" tatsächlich zeigt\n\nDas Paper mit der arXiv-Kennung **2601.10825** untersucht, wie Reasoning-Modelle wie DeepSeek-R1 ihre Chain-of-Thought-Traces strukturieren. Die zentrale Erkenntnis: Diese Modelle erzeugen intern eine **implizite Multi-Agenten-Simulation**. Statt eines linearen Gedankengangs treten in den Traces verschiedene \"Stimmen\" auf, die Fragen stellen, Gegenargumente liefern, Perspektiven wechseln und schließlich Widersprüche auflösen. Die Forscher nennen dieses Phänomen **\"Society of Thought\"** – eine Gesellschaft des Denkens innerhalb eines einzigen Modells [45](https://arxiv.org/abs/2601.10825) [47](https://the-decoder.com/study-finds-ai-reasoning-models-generate-a-society-of-thought-with-arguing-voices-inside-their-process).\n\nDie Persönlichkeitscharakterisierung der internen Perspektiven erfolgt über die **Big-Five-Persönlichkeitsmerkmale** (Extraversion, Verträglichkeit, Offenheit, Gewissenhaftigkeit, Neurotizismus). So agieren manche Perspektiven als \"kreative Ideengeber\" (hohe Offenheit), andere als \"Kritiker\" (niedrige Verträglichkeit). Die Expertise-Diversität wird über **Kosinus-Distanz in Domain-Embeddings** und **Sparse-Autoencoder-Features** quantifiziert, wobei 32.768 Features auf dem SlimPajama-3B-Korpus klassifiziert wurden [39](https://arxiv.org/html/2601.10825v1) [70](https://aiwiremedia.com/insights/explainers/reasoning-ai-models-think-through-internal-debates-study-finds).\n\n### Methodik und statistische Robustheit\n\nDie Studie stützt sich auf eine umfangreiche quantitative Analyse. Als **LLM-as-Judge** wurde **Gemini-2.5-Pro** eingesetzt, das die Perspektiven in den Traces identifiziert und charakterisiert. Die Inter-Rater-Übereinstimmung mit menschlichen Bewertern lag bei **ICC = 0,756**, mit GPT-5.2 bei **0,875** – solide, aber nicht perfekt, was die Autoren selbst als potenzielle Verzerrungsquelle benennen. Die Validierung auf dem **Intelligence Squared Debates Corpus** ergab eine Genauigkeit von **73 %**, gewichtet nach Perspektiven [39](https://arxiv.org/html/2601.10825v1).\n\nBesonders bemerkenswert: Die sozio-emotionalen Rollen basieren auf **Bales' Interaction Process Analysis**, einem etablierten sozialpsychologischen Framework. DeepSeek-R1 wies dabei höhere Jaccard-Indizes auf (β = 0,222 für ask/give-Paare, p < 10⁻¹⁸⁹), was auf eine stärker reziproke, dialogartige Struktur der Reasoning-Traces hindeutet [39](https://arxiv.org/html/2601.10825v1) [62](https://arxiviq.substack.com/p/reasoning-models-generate-societies).\n\n### Abgrenzung: Was das Paper NICHT ist\n\nEs ist wichtig, mehrere Verwechslungen auszuräumen:\n\n1. **Kein Reverse Engineering von ChatGPT:** Es gibt separate Vorwürfe, DeepSeek nutze Outputs von ChatGPT und Anthropic-Modellen zum Training. Diese Vorwürfe sind nicht Gegenstand dieses Papers und bislang nicht konkret belegt [24](https://economictimes.com/news/international/us/did-deepseek-do-reverse-engineering-and-learn-from-other-ai-models-like-chatgpt-and-anthropic-heres-what-techies-are-saying/articleshow/117638070.cms).\n\n2. **Kein DeepSeek-eigenes Architektur-Paper:** Das um Neujahr 2026 veröffentlichte DeepSeek-Paper zu **Manifold-Constrained Hyper-Connections (mHC)** behandelt eine Trainingsarchitektur für effizienteres Skalieren und hat keinen Bezug zu Agentensystemen oder Multi-Agenten-Simulation [28](https://www.scmp.com/tech/big-tech/article/3338427/deepseek-kicks-2026-paper-signalling-push-train-bigger-models-less).\n\n3. **Kein externes Multi-Agenten-System:** Das Paper beschreibt keine externe Architektur mit mehreren kooperierenden Modellen, sondern ein **emergentes Phänomen innerhalb eines einzelnen Modells**, das durch Reinforcement Learning entsteht [68](https://gigazine.net/gsc_news/en/20260205-ai-simulate-internal-debate-improve-accuracy).\n\n### Warum das Paper für Aufsehen sorgte\n\nDie Implikationen sind weitreichend: Wenn Reasoning-Modelle spontan Multi-Agenten-Debatten simulieren, bedeutet das, dass **Reinforcement Learning allein** – ohne explizites Training auf Dialogstrukturen – ausreicht, um komplexe deliberative Prozesse hervorzubringen. In RL-Experimenten mit Basismodellen (Qwen-2.5-3B, Llama-3.2-3B) entwickelten diese spontan konversationelle Verhaltensweisen wie \"Wait, let me see… Another idea…\", wenn sie ausschließlich für Genauigkeit belohnt wurden [69](https://www.webpronews.com/inside-adversarial-reasoning-how-ai-labs-are-teaching-models-to-think-by-fighting-themselves) [62](https://arxiviq.substack.com/p/reasoning-models-generate-societies). Dies wirft grundlegende Fragen über die Natur des maschinellen Denkens auf und hat Relevanz für alle Reasoning-Modelle – einschließlich OpenAIs o-series –, auch wenn das Paper diese nicht direkt getestet hat.\n\n---\n\n## Einordnung / Ausblick\n\nDas \"Societies of Thought\"-Paper liefert eine der bislang tiefgreifendsten Analysen darüber, **wie** Reasoning-Modelle denken – nicht nur **was** sie produzieren. Die Erkenntnis, dass ein einzelnes Modell intern eine Gesellschaft streitender Perspektiven simuliert, könnte das Design zukünftiger Trainingsmethoden grundlegend beeinflussen: Statt aufwendige Multi-Agenten-Pipelines zu bauen, ließe sich konversationelles Scaffolding direkt ins Training integrieren. Die Studie ist allerdings auf DeepSeek-R1 und QwQ-32B beschränkt; ob die Befunde auf proprietäre Modelle wie GPT-5 oder Claude generalisierbar sind, bleibt offen und wird von den Autoren als wichtige Forschungsfrage benannt [39](https://arxiv.org/html/2601.10825v1).\n\n---\n\n**Quellen:** [24](https://economictimes.com/news/international/us/did-deepseek-do-reverse-engineering-and-learn-from-other-ai-models-like-chatgpt-and-anthropic-heres-what-techies-are-saying/articleshow/117638070.cms) | [28](https://www.scmp.com/tech/big-tech/article/3338427/deepseek-kicks-2026-paper-signalling-push-train-bigger-models-less) | [39](https://arxiv.org/html/2601.10825v1) | [45](https://arxiv.org/abs/2601.10825) | [47](https://the-decoder.com/study-finds-ai-reasoning-models-generate-a-society-of-thought-with-arguing-voices-inside-their-process) | [62](https://arxiviq.substack.com/p/reasoning-models-generate-societies) | [68](https://gigazine.net/gsc_news/en/20260205-ai-simulate-internal-debate-improve-accuracy) | [69](https://www.webpronews.com/inside-adversarial-reasoning-how-ai-labs-are-teaching-models-to-think-by-fighting-themselves) | [70](https://aiwiremedia.com/insights/explainers/reasoning-ai-models-think-through-internal-debates-study-finds)\n\n---\n*71 Quellen · 12 Suchen · 4 Runden · 3:49 min · Confidence 7/10*",
+      "metrics": {
+        "total_rounds": 4,
+        "total_elapsed_s": 229.98,
+        "final_confidence": 7,
+        "total_queries": 12,
+        "total_citations": 71,
+        "total_context_blocks": 8,
+        "competing_events_detected": true,
+        "stagnation_detected": false,
+        "total_prompt_tokens": 42572,
+        "total_completion_tokens": 18272
+      },
+      "iteration_logs": [
+        {
+          "node": "classify",
+          "timestamp": 1770741706.2513978,
+          "duration_s": 8.824,
+          "decision": "SEARCH",
+          "lang": "de",
+          "search_lang": "en",
+          "recency": "month",
+          "type": "news"
+        },
+        {
+          "node": "decompose",
+          "timestamp": 1770741708.7797856,
+          "duration_s": 2.528,
+          "sub_questions": [
+            "DeepSeek latest paper about agent systems showing how ChatGPT works, caused a lot of attention recently",
+            "What is the content and key findings of DeepSeek's recent viral paper on agent systems related to ChatGPT"
+          ],
+          "sub_question_count": 2
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770741711.442013,
+          "duration_s": 2.661,
+          "round": 0,
+          "new_queries": [
+            "DeepSeek latest paper agent systems 2025 2026 viral AI research ChatGPT mechanism",
+            "DeepSeek R1 paper reasoning agents large language models breakthrough 2025 2026",
+            "DeepSeek new research paper how ChatGPT works agent architecture February 2026"
+          ],
+          "total_queries": 3
+        },
+        {
+          "node": "search",
+          "timestamp": 1770741745.171962,
+          "duration_s": 33.729,
+          "round": 0,
+          "queries_executed": 3,
+          "queries": [
+            "DeepSeek latest paper agent systems 2025 2026 viral AI research ChatGPT mechanism",
+            "DeepSeek R1 paper reasoning agents large language models breakthrough 2025 2026",
+            "DeepSeek new research paper how ChatGPT works agent architecture February 2026"
+          ],
+          "sources_found": 3,
+          "total_citations": 23,
+          "context_blocks": 3
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770741753.4281874,
+          "duration_s": 8.255,
+          "round": 1,
+          "confidence": 3,
+          "gaps": "Kein spezifisches DeepSeek-Paper über Agentensysteme, das erklärt wie ChatGPT funktioniert und großes Aufsehen erregt hat, wurde in den Recherche-Ergebnissen gefunden; die Frage vermischt möglicherweise mehrere Themen (DeepSeek-R1-Veröffentlichung, ChatGPT Agent Mode, Agenten-Benchmarks) oder bezieht sich auf ein konkretes Paper das nicht identifiziert werden konnte.",
+          "competing_events": "DeepSeek-R1 Paper (Januar 2025, großes Aufsehen, aber nicht über Agentensysteme die ChatGPT erklären) vs. OpenAI ChatGPT Agent Mode (Februar 2026, Agentensystem, aber von OpenAI nicht DeepSeek) vs. DeepSeek V3-Serie mit Agenten-Benchmarks (Dezember 2025, Agentenfähigkeiten, aber kein Paper das ChatGPT erklärt) — möglicherweise ist ein aktuelles, noch nicht in den Ergebnissen enthaltenes DeepSeek-Paper gemeint, oder der Fragesteller verwechselt/vermischt mehrere Ereignisse.",
+          "stagnation_detected": false,
+          "context_blocks": 3,
+          "done": false
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770741756.1574357,
+          "duration_s": 2.728,
+          "round": 1,
+          "new_queries": [
+            "DeepSeek paper reverse engineering ChatGPT operator agent system January February 2026",
+            "viral AI paper agent framework replicating ChatGPT architecture open source 2026",
+            "DeepSeek agentic reasoning paper controversial attention Reddit Twitter January 2026"
+          ],
+          "total_queries": 6
+        },
+        {
+          "node": "search",
+          "timestamp": 1770741786.27924,
+          "duration_s": 30.121,
+          "round": 1,
+          "queries_executed": 3,
+          "queries": [
+            "DeepSeek paper reverse engineering ChatGPT operator agent system January February 2026",
+            "viral AI paper agent framework replicating ChatGPT architecture open source 2026",
+            "DeepSeek agentic reasoning paper controversial attention Reddit Twitter January 2026"
+          ],
+          "sources_found": 3,
+          "total_citations": 41,
+          "context_blocks": 6
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770741794.592064,
+          "duration_s": 8.312,
+          "round": 2,
+          "confidence": 7,
+          "gaps": "Die Frage enthält eine fehlerhafte Prämisse – DeepSeek hat kein spezifisches Paper über \"Agentensysteme die zeigen wie ChatGPT funktioniert\" veröffentlicht; die nächstliegenden Kandidaten sind entweder das Paper \"Reasoning Models Generate Societies of Thought\" (arXiv, Jan 2026) über implizite Multi-Agenten-Interaktionen in Reasoning-Modellen oder das Manifold-Constrained Hyper-Connections Paper (Neujahr 2026), aber keines davon \"zeigt wie ChatGPT funktioniert\".",
+          "competing_events": "\"Reasoning Models Generate Societies of Thought\" (arXiv Jan 2026, Multi-Agenten-Reasoning in DeepSeek-R1) vs. Manifold-Constrained Hyper-Connections Paper (Neujahr 2026, Trainingsmethodik) vs. DeepSeek-R1 Release (Jan 2025, das für großes Aufsehen sorgte) – keines davon passt exakt zur Beschreibung in der Frage.",
+          "stagnation_detected": false,
+          "context_blocks": 5,
+          "done": false
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770741797.5604427,
+          "duration_s": 2.967,
+          "round": 2,
+          "new_queries": [
+            "DeepSeek R1 societies of thought paper emergent multi-agent behavior reasoning models arXiv 2026",
+            "DeepSeek viral paper January 2026 showing LLM internally simulates multiple agents debate",
+            "DeepSeek paper reveals how reasoning models create internal agent personas like ChatGPT o1 limitations critique"
+          ],
+          "total_queries": 9
+        },
+        {
+          "node": "search",
+          "timestamp": 1770741832.257735,
+          "duration_s": 34.697,
+          "round": 2,
+          "queries_executed": 3,
+          "queries": [
+            "DeepSeek R1 societies of thought paper emergent multi-agent behavior reasoning models arXiv 2026",
+            "DeepSeek viral paper January 2026 showing LLM internally simulates multiple agents debate",
+            "DeepSeek paper reveals how reasoning models create internal agent personas like ChatGPT o1 limitations critique"
+          ],
+          "sources_found": 3,
+          "total_citations": 59,
+          "context_blocks": 8
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770741839.530485,
+          "duration_s": 7.272,
+          "round": 3,
+          "confidence": 7,
+          "gaps": "Die Frage enthält eine leicht ungenaue Prämisse (\"Agentensysteme die zeigen wie ChatGPT funktioniert\") – das Paper zeigt nicht wie ChatGPT funktioniert, sondern wie Reasoning-Modelle intern Multi-Agenten-Diskurse simulieren; dennoch reichen die Informationen für eine fundierte Antwort.",
+          "competing_events": "Paper \"Reasoning Models Generate Societies of Thought\" (Januar 2026, arXiv 2601.10825 – analysiert interne Multi-Agenten-Simulation in DeepSeek-R1) vs. Paper \"Manifold-Constrained Hyper-Connections\" (ca. 1. Januar 2026 – Architektur-Paper zu mHC, kein Agenten-Thema). Das erstgenannte Paper passt deutlich besser zur Beschreibung in der Frage, da es Agenten-ähnliches Verhalten innerhalb von Reasoning-Modellen beschreibt und großes Aufsehen erregte.",
+          "stagnation_detected": false,
+          "context_blocks": 8,
+          "done": false
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770741842.2086964,
+          "duration_s": 2.677,
+          "round": 3,
+          "new_queries": [
+            "arXiv 2601.10825 Reasoning Models Generate Societies of Thought key findings summary 2026",
+            "Societies of Thought paper DeepSeek R1 multi-agent simulation practical implications limitations criticism",
+            "arXiv 2601.10825 authors methodology how reasoning models simulate internal debate agents emergent behavior"
+          ],
+          "total_queries": 12
+        },
+        {
+          "node": "search",
+          "timestamp": 1770741875.3460422,
+          "duration_s": 33.136,
+          "round": 3,
+          "queries_executed": 3,
+          "queries": [
+            "arXiv 2601.10825 Reasoning Models Generate Societies of Thought key findings summary 2026",
+            "Societies of Thought paper DeepSeek R1 multi-agent simulation practical implications limitations criticism",
+            "arXiv 2601.10825 authors methodology how reasoning models simulate internal debate agents emergent behavior"
+          ],
+          "sources_found": 3,
+          "total_citations": 71,
+          "context_blocks": 8
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770741883.1712992,
+          "duration_s": 7.824,
+          "round": 4,
+          "confidence": 7,
+          "gaps": "Die Frage enthält die Annahme, das Paper zeige \"wie ChatGPT funktioniert\" – die Recherche zeigt jedoch, dass das Paper \"Reasoning Models Generate Societies of Thought\" (Januar 2026) analysiert, wie Reasoning-Modelle wie DeepSeek-R1 intern Multi-Agenten-Diskurse simulieren, nicht wie ChatGPT funktioniert; die Annahme in der Frage ist teilweise falsch/verzerrt, aber das gemeinte Paper ist mit hoher Wahrscheinlichkeit identifiziert.",
+          "competing_events": "\"Reasoning Models Generate Societies of Thought\" (arXiv, Januar 2026, über implizite Multi-Agenten-Simulation in DeepSeek-R1) vs. DeepSeek mHC-Paper (Neujahr 2026, über Trainingsarchitektur, kein Agenten-Bezug) – das erstgenannte passt deutlich besser zur Frage.",
+          "stagnation_detected": false,
+          "context_blocks": 8,
+          "done": true
+        },
+        {
+          "node": "answer",
+          "timestamp": 1770741927.4052587,
+          "duration_s": 44.233,
+          "answer_length": 9304,
+          "citation_count": 71,
+          "rounds": 4,
+          "elapsed_total_s": 230.0,
+          "confidence": 7
+        }
+      ]
+    },
+    {
+      "question_id": "q003",
+      "question": "Welche konkreten rechtlichen Konsequenzen hat der EU AI Act, der seit Februar 2025 schrittweise in Kraft tritt, für Open-Source-KI-Modelle wie LLaMA, Mistral und DeepSeek, und haben Unternehmen bereits dagegen geklagt?",
+      "category": "complex",
+      "answer": "\n\n# Rechtliche Konsequenzen des EU AI Act für Open-Source-KI-Modelle\n\n## Kurzfazit\n\nDer EU AI Act gewährt Open-Source-GPAI-Modellen (General Purpose AI) begrenzte Befreiungen von Dokumentations- und Informationspflichten, unterwirft sie aber weiterhin allen Verboten, Transparenzpflichten und Hochrisiko-Anforderungen. Die Befreiungen greifen nur unter engen Voraussetzungen – insbesondere dürfen die Modelle nicht monetarisiert werden und kein systemisches Risiko darstellen. Bis Anfang 2026 sind **keine Klagen oder größeren rechtlichen Anfechtungen** gegen den AI Act durch Unternehmen – einschließlich Open-Source-Anbieter – bekannt geworden [9](https://datainnovation.org/2024/03/the-eus-ai-act-creates-regulatory-complexity-for-open-source-ai).\n\n---\n\n## Kernaussagen\n\n- **Begrenzte Befreiungen:** Open-Source-GPAI-Modelle sind unter Artikel 53(1)(a-b) von zwei spezifischen Pflichten befreit: der Erstellung technischer Dokumentation und der Bereitstellung von Informationen an nachgelagerte KI-Systemanbieter [1](https://www.freshfields.com/en/our-thinking/campaigns/tech-data-and-ai-the-digital-frontier/eu-digital-strategy/artificial-intelligence-act) [8](https://linuxfoundation.eu/newsroom/ai-act-explainer).\n\n- **Keine Befreiung bei systemischem Risiko:** Modelle, die mit mehr als **10^25 FLOPs** trainiert wurden, gelten als systemisch riskant und unterliegen den vollen GPAI-Pflichten – unabhängig vom Open-Source-Status [2](https://ai-act-law.eu/recital/104).\n\n- **Monetarisierung schließt Befreiung aus:** Werden Open-Source-Modelle gegen Entgelt bereitgestellt oder anderweitig monetarisiert, entfällt die Privilegierung gemäß Erwägungsgrund 103 [5](https://www.orrick.com/en/Insights/2024/09/The-EU-AI-Act-Application-to-Open-Source-Projects).\n\n- **Verbotene Praktiken gelten ausnahmslos:** Seit dem **2. Februar 2025** sind manipulative KI, Social Scoring, ungezieltes Gesichtsbild-Scraping und Emotionserkennung am Arbeitsplatz verboten – ohne jede Open-Source-Ausnahme [11](https://www.europarl.europa.eu/topics/en/article/20230601STO93804/eu-ai-act-first-regulation-on-artificial-intelligence).\n\n- **GPAI-Pflichten seit August 2025 anwendbar:** Seit dem **2. August 2025** müssen alle GPAI-Anbieter (mit oder ohne Open-Source-Lizenz) die einschlägigen Pflichten erfüllen, sofern keine Befreiung greift [12](https://www.steptoe.com/en/news-publications/steptechtoe-blog/eu-ai-act-obligations-for-gpai-models-now-applicable.html).\n\n- **DeepSeek zeigt Compliance-Schwächen:** Eine COMPL-AI-Bewertung vom Februar 2025 identifizierte bei DeepSeek-Modellen erhöhte Anfälligkeit für **Goal Hijacking und Prompt Leakage** sowie erhöhte Bias-Werte, bei gleichzeitig starker Toxizitätskontrolle [3](https://latticeflow.ai/news/deepseek-eu-ai-act-compliance-evaluation) [6](https://insait.ai/deepseek-evaluation).\n\n- **Bußgelder bis 35 Mio. Euro oder 7 % des Jahresumsatzes** drohen bei Verstößen gegen verbotene Praktiken; für GPAI-spezifische Verstöße bis **15 Mio. Euro oder 3 %** des weltweiten Jahresumsatzes [7](https://www.artificial-intelligence-act.com) [14](https://www.skadden.com/insights/publications/2025/08/eus-general-purpose-ai-obligations).\n\n- **Keine Klagen bekannt:** Bis Februar 2026 wurden keine größeren Klagen oder rechtlichen Anfechtungen gegen den EU AI Act durch Unternehmen eingereicht [9](https://datainnovation.org/2024/03/the-eus-ai-act-creates-regulatory-complexity-for-open-source-ai) [10](https://www.jdsupra.com/legalnews/the-ai-regulation-landscape-for-2026-7255123).\n\n---\n\n## Detailanalyse\n\n### Umfang und Grenzen der Open-Source-Befreiungen\n\nDie Open-Source-Privilegierung im EU AI Act ist deutlich enger gefasst, als es auf den ersten Blick erscheint. Artikel 53 befreit qualifizierende Modelle lediglich von **zwei** der zahlreichen GPAI-Pflichten: der technischen Dokumentation und der Informationsweitergabe an Downstream-Anbieter. Alle übrigen Pflichten – darunter die Einhaltung des Urheberrechts, die Veröffentlichung einer Zusammenfassung der Trainingsdaten und die Benennung eines EU-Bevollmächtigten – bleiben bestehen [8](https://linuxfoundation.eu/newsroom/ai-act-explainer) [13](https://technologyquotient.freshfields.com/post/102kxqo/eu-ai-act-unpacked-27-guidelines-on-the-scope-of-obligations-for-general-purpos).\n\nUm die Befreiung zu beanspruchen, müssen vier kumulative Voraussetzungen erfüllt sein: (1) eine qualifizierende Open-Source-Lizenz, (2) keine Monetarisierung, (3) öffentliche Zugänglichkeit von Parametern und Architektur und (4) kein systemisches Risiko [5](https://www.orrick.com/en/Insights/2024/09/The-EU-AI-Act-Application-to-Open-Source-Projects). Gerade der Monetarisierungsausschluss ist für Unternehmen wie Meta (LLaMA) oder Mistral relevant, die ihre Modelle zwar unter permissiven Lizenzen veröffentlichen, aber kommerzielle Dienste darauf aufbauen. Ob die jeweilige Lizenzstruktur und das Geschäftsmodell die Befreiung tatsächlich auslösen, ist im Einzelfall zu prüfen.\n\n### Konkrete Auswirkungen auf LLaMA, Mistral und DeepSeek\n\n**Meta LLaMA** wird unter einer eigenen Community-Lizenz veröffentlicht, die kommerzielle Nutzung unter bestimmten Bedingungen erlaubt. Da Meta selbst LLaMA-basierte Dienste monetarisiert, dürfte die Open-Source-Befreiung für Meta als Anbieter **nicht greifen** – das Unternehmen müsste die vollen GPAI-Pflichten erfüllen [5](https://www.orrick.com/en/Insights/2024/09/The-EU-AI-Act-Application-to-Open-Source-Projects).\n\n**Mistral** als französisches Unternehmen mit Sitz in der EU ist direkt dem AI Act unterworfen. Mistral bietet sowohl Open-Source-Modelle als auch kommerzielle API-Dienste an. Für die kommerziellen Angebote gelten die vollen Pflichten; für rein unter Open-Source-Lizenz veröffentlichte Modelle könnten die Befreiungen greifen, sofern die übrigen Voraussetzungen erfüllt sind (unbestätigt, da keine spezifische Quelle zur Mistral-Compliance vorliegt).\n\n**DeepSeek** ist besonders interessant: Die destillierten Modelle DeepSeek R1 8B und R1 14B basieren auf **LLaMA 3.1 8B** bzw. **Qwen 2.5 14B** [3](https://latticeflow.ai/news/deepseek-eu-ai-act-compliance-evaluation). Als chinesisches Unternehmen, das Modelle in der EU bereitstellt, muss DeepSeek einen **EU-Bevollmächtigten** benennen. Die COMPL-AI-Bewertung vom Februar 2025 zeigte konkrete Schwachstellen: Die Modelle waren anfälliger für **Goal Hijacking** (ein Angreifer lenkt das Modell auf unbeabsichtigte Ziele um) und **Prompt Leakage** (unbeabsichtigte Offenlegung von Systemprompts) als ihre jeweiligen Basismodelle. Gleichzeitig wiesen sie erhöhte Bias-Werte auf, schnitten aber bei der Toxizitätskontrolle besser ab [6](https://insait.ai/deepseek-evaluation). Diese Schwächen könnten bei einer regulatorischen Prüfung relevant werden.\n\n### Zeitlicher Rahmen und Durchsetzung\n\nDer EU AI Act entfaltet seine Wirkung in mehreren Stufen:\n\n| Datum | Pflicht |\n|---|---|\n| **2. Februar 2025** | Verbotene KI-Praktiken (Artikel 5), KI-Kompetenzpflichten |\n| **2. August 2025** | GPAI-Pflichten inkl. Open-Source-Befreiungen (Artikel 53-54) |\n| **2. August 2026** | Vollständige Anwendung: Hochrisiko-Systeme, Transparenzpflichten |\n| **2. August 2027** | Hochrisiko-Systeme in regulierten Produkten |\n\n[11](https://www.europarl.europa.eu/topics/en/article/20230601STO93804/eu-ai-act-first-regulation-on-artificial-intelligence) [18](https://www.gtlaw.com/en/insights/2025/7/eu-ai-act-key-compliance-considerations-ahead-of-august-2025)\n\nFür **vor August 2025 existierende Modelle** gilt eine Übergangsfrist mit vollständiger Compliance-Pflicht bis August 2027 [14](https://www.skadden.com/insights/publications/2025/08/eus-general-purpose-ai-obligations). Das EU AI Office veröffentlichte im Juli 2025 Leitlinien und genehmigte im August 2025 einen freiwilligen **GPAI Code of Practice**, der als Orientierungshilfe dient [17](https://www.twobirds.com/en/insights/2025/taking-the-eu-ai-act-to-practice-how-the-final-gpai-guidelines-shape-the-ai-regulatory-landscape).\n\n### Hochrisiko-Systeme: Keine Open-Source-Ausnahme\n\nBesonders relevant: Wenn Open-Source-Modelle in **Hochrisiko-KI-Systeme** integriert werden – etwa für biometrische Identifikation, kritische Infrastruktur oder Personalentscheidungen – gelten die vollen Pflichten des Artikels 6 ohne jede Open-Source-Befreiung [1](https://www.freshfields.com/en/our-thinking/campaigns/tech-data-and-ai-the-digital-frontier/eu-digital-strategy/artificial-intelligence-act). Open-Source-Komponenten, die in solche Systeme eingebaut werden, sind lediglich nach Artikel 25(4) von der Berichtspflicht an nachgelagerte Anbieter ausgenommen [8](https://linuxfoundation.eu/newsroom/ai-act-explainer).\n\n---\n\n## Einordnung / Ausblick\n\nDer EU AI Act schafft für Open-Source-KI ein regulatorisches Spannungsfeld: Einerseits erkennt der Gesetzgeber den Innovationswert offener Modelle an und gewährt gezielte Erleichterungen; andererseits sind die Befreiungen so eng gefasst, dass sie für die meisten kommerziell relevanten Anbieter kaum greifen dürften. Die **Abwesenheit von Klagen** bis Februar 2026 deutet darauf hin, dass die Branche vorerst auf Compliance statt Konfrontation setzt – möglicherweise auch, weil die schärfsten Pflichten (Hochrisiko-Systeme) erst ab August 2026 vollständig durchgesetzt werden. Die eigentliche Bewährungsprobe steht noch bevor: Wenn das EU AI Office ab 2026 aktiv Durchsetzungsmaßnahmen ergreift, wird sich zeigen, ob die Grenzziehung zwischen privilegiertem Open Source und regulierungspflichtigem GPAI in der Praxis tragfähig ist.\n\n---\n\n**Quellen:** [1](https://www.freshfields.com/en/our-thinking/campaigns/tech-data-and-ai-the-digital-frontier/eu-digital-strategy/artificial-intelligence-act) | [2](https://ai-act-law.eu/recital/104) | [3](https://latticeflow.ai/news/deepseek-eu-ai-act-compliance-evaluation) | [5](https://www.orrick.com/en/Insights/2024/09/The-EU-AI-Act-Application-to-Open-Source-Projects) | [6](https://insait.ai/deepseek-evaluation) | [7](https://www.artificial-intelligence-act.com) | [8](https://linuxfoundation.eu/newsroom/ai-act-explainer) | [9](https://datainnovation.org/2024/03/the-eus-ai-act-creates-regulatory-complexity-for-open-source-ai) | [10](https://www.jdsupra.com/legalnews/the-ai-regulation-landscape-for-2026-7255123) | [11](https://www.europarl.europa.eu/topics/en/article/20230601STO93804/eu-ai-act-first-regulation-on-artificial-intelligence) | [12](https://www.steptoe.com/en/news-publications/steptechtoe-blog/eu-ai-act-obligations-for-gpai-models-now-applicable.html) | [13](https://technologyquotient.freshfields.com/post/102kxqo/eu-ai-act-unpacked-27-guidelines-on-the-scope-of-obligations-for-general-purpos) | [14](https://www.skadden.com/insights/publications/2025/08/eus-general-purpose-ai-obligations) | [17](https://www.twobirds.com/en/insights/2025/taking-the-eu-ai-act-to-practice-how-the-final-gpai-guidelines-shape-the-ai-regulatory-landscape) | [18](https://www.gtlaw.com/en/insights/2025/7/eu-ai-act-key-compliance-considerations-ahead-of-august-2025)\n\n---\n*18 Quellen · 3 Suchen · 1 Runde · 1:44 min · Confidence 9/10*",
+      "metrics": {
+        "total_rounds": 1,
+        "total_elapsed_s": 104.76,
+        "final_confidence": 9,
+        "total_queries": 3,
+        "total_citations": 18,
+        "total_context_blocks": 3,
+        "competing_events_detected": false,
+        "stagnation_detected": false,
+        "total_prompt_tokens": 11489,
+        "total_completion_tokens": 9022
+      },
+      "iteration_logs": [
+        {
+          "node": "classify",
+          "timestamp": 1770741938.5933237,
+          "duration_s": 11.18,
+          "decision": "SEARCH",
+          "lang": "de",
+          "search_lang": "en",
+          "recency": "month",
+          "type": "news"
+        },
+        {
+          "node": "decompose",
+          "timestamp": 1770741941.5379503,
+          "duration_s": 2.943,
+          "sub_questions": [
+            "Welche konkreten rechtlichen Konsequenzen hat der EU AI Act für Open-Source-KI-Modelle wie LLaMA, Mistral und DeepSeek, insbesondere seit dem schrittweisen Inkrafttreten ab Februar 2025?",
+            "Welche Ausnahmen oder Sonderregelungen sieht der EU AI Act für Open-Source-KI-Modelle vor?",
+            "Haben Unternehmen bereits gegen den EU AI Act geklagt, insbesondere im Zusammenhang mit Open-Source-KI-Modellen?"
+          ],
+          "sub_question_count": 3
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770741944.2082772,
+          "duration_s": 2.669,
+          "round": 0,
+          "new_queries": [
+            "EU AI Act 2025 2026 open source AI models exemptions obligations LLaMA Mistral DeepSeek",
+            "EU AI Act legal challenges lawsuits companies open source AI regulation 2025 2026",
+            "EU AI Act open source exception general purpose AI GPAI compliance requirements February 2025"
+          ],
+          "total_queries": 3
+        },
+        {
+          "node": "search",
+          "timestamp": 1770741979.9392672,
+          "duration_s": 35.73,
+          "round": 0,
+          "queries_executed": 3,
+          "queries": [
+            "EU AI Act 2025 2026 open source AI models exemptions obligations LLaMA Mistral DeepSeek",
+            "EU AI Act legal challenges lawsuits companies open source AI regulation 2025 2026",
+            "EU AI Act open source exception general purpose AI GPAI compliance requirements February 2025"
+          ],
+          "sources_found": 3,
+          "total_citations": 18,
+          "context_blocks": 3
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770741984.7518544,
+          "duration_s": 4.812,
+          "round": 1,
+          "confidence": 9,
+          "gaps": "Es fehlen spezifische Details zu eventuellen informellen Beschwerden oder Lobby-Aktivitäten gegen den AI Act, aber die Kernfrage nach konkreten Klagen wird klar beantwortet (keine bekannt bis Anfang 2026).",
+          "competing_events": "",
+          "stagnation_detected": false,
+          "context_blocks": 3,
+          "done": true
+        },
+        {
+          "node": "answer",
+          "timestamp": 1770742032.1677465,
+          "duration_s": 47.415,
+          "answer_length": 11067,
+          "citation_count": 18,
+          "rounds": 1,
+          "elapsed_total_s": 104.8,
+          "confidence": 9
+        }
+      ]
+    },
+    {
+      "question_id": "q004",
+      "question": "Sollen zahnärztliche Leistungen zukünftig privatisiert werden? In welche Richtung gehen die Diskussionen?",
+      "category": "news",
+      "answer": "## Kurzfazit\n\nDer Vorstoß des CDU-Wirtschaftsrats vom 1. Februar 2026, zahnärztliche Behandlungen aus dem GKV-Leistungskatalog zu streichen, ist politisch gescheitert, bevor er überhaupt ernsthaft verhandelt wurde. Gesundheitsministerin **Nina Warken (CDU)**, Kanzler **Friedrich Merz**, die SPD, die Grünen sowie sämtliche relevanten Fachverbände haben den Vorschlag kategorisch abgelehnt. Die Diskussion bewegt sich eindeutig in Richtung Beibehaltung der zahnärztlichen Versorgung als GKV-Leistung – mit dem Fokus auf Prävention und Effizienzsteigerung statt Leistungskürzungen.\n\n---\n\n## Kernaussagen\n\n- **Der CDU-Wirtschaftsrat** (ein CDU-naher Unternehmerverband, kein offizielles Parteigremium) forderte am 1. Februar 2026 in seinem Papier „Agenda für die Arbeitnehmer in Deutschland\", Zahnarztbehandlungen und Kieferorthopädie aus der GKV-Solidarfinanzierung herauszunehmen. [45](https://www.drohnen.de/78705/agenda-fuer-arbeitnehmer-2026-das-fordert-der-wirtschaftsrat-der-cdu-konkret)\n\n- **Die Bundesregierung erteilte dem Vorschlag am 2. Februar 2026 eine klare Absage.** Stellvertretender Regierungssprecher Steffen Meyer erklärte: „Derartige Pläne gibt es nicht.\" [3](https://www.tagesspiegel.de/politik/derartige-plane-gibt-es-nicht-regierung-erteilt-planen-zur-privatisierung-von-zahnbehandlungen-absage-15206472.html)\n\n- **Die GKV-Ausgaben für Zahnmedizin** betrugen 2024 rund **18,2 Mrd. Euro**, was nur **5,6–5,8 % der GKV-Gesamtausgaben** entspricht – ein Anteil, der seit 2003 von 8,7 % kontinuierlich gesunken ist. [28](https://www.kzbv.de/pressemitteilungen/effizient-wirtschaftlich-vorbildlich-zahnmedizin-zeigt-weg-zu-stabilem-gesundheitswesen-auf)\n\n- **92 % der Befragten** wollen GKV-Zuschüsse für Zahnersatz beibehalten; der Vorschlag stößt auf breite gesellschaftliche Ablehnung. [35](https://www.n-tv.de/politik/Beim-Zahnersatz-verstehen-die-Befragten-keinen-Spass-id30346154.html)\n\n- **KZBV, BZÄK, vdek und Hausärzteverband** lehnen die Privatisierung geschlossen ab und warnen vor höheren Folgekosten durch unterlassene Prävention. [42](https://www.krankenkassen-direkt.de/news/mitteilung/Abschaffung-Zahnarztleistungen-vdek-Gesunde-Zaehne-duerfen-keine-Frage-des-Geldbeutels-sein-4461272.html)\n\n- **20,7 % der Bevölkerung** meiden bereits heute den Zahnarztbesuch aus Kostengründen – eine Privatisierung würde dieses Problem massiv verschärfen. [4](https://www.implantate.com/news/sollen-zahnbehandlungen-kassenleistungen-bleiben-oder-den-zahnarzt-selbst-zahlen.html)\n\n- **Deutschland belegt Platz 2 nach Japan** beim Anteil öffentlich finanzierter Zahnmedizin im OECD-Vergleich – ein Erfolgsmodell, das international als vorbildlich gilt. [4](https://www.implantate.com/news/sollen-zahnbehandlungen-kassenleistungen-bleiben-oder-den-zahnarzt-selbst-zahlen.html)\n\n- Die eigentlichen Reformvorschläge werden von der **GKV-Finanzkommission** erwartet, deren erster Bericht **Ende März 2026** vorliegen soll. [39](https://www.aok.de/pp/gg/update/gkv-reformkommission)\n\n---\n\n## Detailanalyse\n\n### Der Vorstoß des CDU-Wirtschaftsrats\n\nDas am 1. Februar 2026 veröffentlichte Reformpapier „Agenda für die Arbeitnehmer in Deutschland\" enthält den zentralen Satz: *„Verschiedene Leistungen, etwa Zahnarztbehandlungen, lassen sich generell gut privat absichern und sollten nicht länger im Umlageverfahren den Beitragszahlern zur Last fallen.\"* [49](https://www.evangelisch.de/inhalte/252464/02-02-2026/kassen-sollen-keine-zahnbehandlung-mehr-bezahlen) Der Vorsitzende **Wolfgang Steiger** verteidigte das Papier als Teil eines Gesamtkonzepts, das Steuerreformen und mehr Eigenverantwortung vorsehe. [21](https://wirtschaftsrat.de/de/documents/3387/The_Pioneer_Wir_haben_ein_Gesamtkonzept_vorgelegt_030226.pdf) Wichtig ist die Einordnung: Der CDU-Wirtschaftsrat ist kein offizielles Parteigremium, sondern ein wirtschaftsliberaler Unternehmerverband mit Nähe zur CDU. Seine Vorschläge haben keinen bindenden Charakter für die Regierungspolitik. Dennoch löste das Papier eine intensive öffentliche Debatte aus, weil es einen Tabubruch in der Sozialpolitik markierte.\n\n### Die politische Reaktion: Breite Ablehnung über Parteigrenzen hinweg\n\nDie Geschwindigkeit und Einmütigkeit der Ablehnung war bemerkenswert. Bereits am 2. Februar 2026 – einen Tag nach Veröffentlichung – schloss Gesundheitsministerin **Nina Warken (CDU)** eine Umsetzung kategorisch aus und sprach von einer „Abkehr vom Solidaritätsprinzip\". [6](https://www.aok.de/pp/gg/update/warken-schliesst-streichung-von-zahnleistungen-aus) Kanzler **Friedrich Merz** distanzierte sich ebenfalls. [48](https://www.spiegel.de/politik/deutschland/cdu-wirtschaftsrat-zahnarztkosten-cdu-sozialpolitiker-und-gruene-lehnen-vorschlag-ab-a-8fa99bab-7f76-49b3-ba7e-bcf79b843cc9) CDA-Chef **Dennis Radtke** kritisierte „Superprivilegierte\", die solche Vorschläge machten. Aus der Opposition lehnten **Karl Lauterbach** (SPD) und **Janosch Dahmen** (Grüne) den Vorschlag als „gesundheitspolitischen Irrweg\" ab. [10](https://www.pharmazeutische-zeitung.de/breite-ablehnung-fuer-forderungen-aus-der-cdu-162424) Lauterbach warnte konkret vor erhöhten Folgekosten etwa durch Diabetes-Komplikationen. [60](https://www.cash-online.de/a/lauterbach-warnt-vor-privatisierung-von-zahnarztkosten-711086)\n\n### Fachliche Argumente gegen die Privatisierung\n\nDie Gegenargumente der Fachverbände sind substanziell und ökonomisch fundiert. **KZBV-Vorstandschef Martin Hendges** und **BZÄK-Präsidentin Romy Ermler** warnten, eine Ausgliederung führe zum Gegenteil von Einsparungen. [62](https://www.deutsche-apotheker-zeitung.de/autoren/news/artikel/2026/02/04/gkv-ohne-zahnbehandlungen-teurer-sparvorschlag) Die Zahnmedizin hat ihren Ausgabenanteil an der GKV seit 2003 von **8,7 % auf 5,7 %** gesenkt – trotz Leistungserweiterungen. [28](https://www.kzbv.de/pressemitteilungen/effizient-wirtschaftlich-vorbildlich-zahnmedizin-zeigt-weg-zu-stabilem-gesundheitswesen-auf) Die Zahl der Füllungen ist seit 2014 um **16,2 %** zurückgegangen, was als Beleg für erfolgreiche Prävention gilt. [63](https://www.kzbv.de/presse/pressemitteilungen/aktuelle-pressemitteilungen) Sozialpolitikforscher **Heinz Rothgang** (Universität Bremen) wies darauf hin, dass die Verwaltungskosten privater Versicherer doppelt so hoch seien wie bei der GKV – eine Privatisierung würde also systemische Mehrkosten erzeugen. [62](https://www.deutsche-apotheker-zeitung.de/autoren/news/artikel/2026/02/04/gkv-ohne-zahnbehandlungen-teurer-sparvorschlag) Der **vdek** brachte es auf die Formel: „Gesunde Zähne dürfen keine Frage des Geldbeutels sein.\" [42](https://www.krankenkassen-direkt.de/news/mitteilung/Abschaffung-Zahnarztleistungen-vdek-Gesunde-Zaehne-duerfen-keine-Frage-des-Geldbeutels-sein-4461272.html)\n\n### Soziale Dimension und Versorgungsrealität\n\nDie sozialpolitische Sprengkraft des Vorschlags wird durch Versorgungsdaten untermauert. Schlechte Zahngesundheit korreliert stark mit **niedrigem Einkommen, geringer Bildung und Migrationshintergrund**; der Zahnstatus gilt als einer der deutlichsten Marker sozialer Ungleichheit. [59](https://www.wiwo.de/politik/deutschland/sozialstaat-debatte-der-zahnstatus-ist-einer-der-deutlichsten-marker-sozialer-ungleichheit/100196757.html) Unbehandelte Zahnerkrankungen erhöhen das Risiko für **Herzinfarkte, Diabetes-Komplikationen und systemische Infektionen**. [46](https://www.handelsblatt.com/politik/deutschland/cdu-zahnbehandlung-bleibt-kassenleistung-warum-das-kosten-spart/100196689.html) Bereits heute liegen die Eigenanteile bei einem Implantat mit Krone bei **2.500–2.800 Euro** nach Abzug der Kassenleistung. [30](https://www.securvita.de/info-service-fur-versicherte/zahnersatz-eigenanteile.html) Zwar haben **17,8 Millionen Deutsche** eine Zahnzusatzversicherung, doch das bedeutet im Umkehrschluss, dass rund **55 Millionen GKV-Versicherte** keine solche Police besitzen. [32](https://www.dasinvestment.com/gothaer-zahnzusatzversicherungen-krankenzusatzversicherungen-studie) Eine vollständige Privatisierung würde diese Gruppe besonders hart treffen.\n\n---\n\n## Einordnung / Ausblick\n\nDer Vorstoß des CDU-Wirtschaftsrats ist als politischer Testballon einzuordnen, der innerhalb von 24 Stunden abgeschossen wurde. Die eigentliche Reformdebatte findet in der **GKV-Finanzkommission** statt, deren erster Bericht Ende März 2026 erwartet wird. [39](https://www.aok.de/pp/gg/update/gkv-reformkommission) Dort dürften eher Effizienzmaßnahmen, Bewertungsanpassungen und strukturelle Reformen diskutiert werden – nicht aber die Herauslösung ganzer Leistungsbereiche. Die Zahnmedizin hat sich mit ihrem Präventionserfolg und dem sinkenden Ausgabenanteil eine starke Verhandlungsposition erarbeitet. Wahrscheinlicher als Kürzungen bei der Zahnmedizin sind Sparmaßnahmen in anderen GKV-Bereichen – der GKV-Spitzenverband prüft etwa bereits eine **Kürzung bei Psychotherapie um 10 %**. [25](https://www.infranken.de/ratgeber/karriere-geld/krankenkassen-leistungen-kuerzen-ab-maerz-psychotherapeutische-behandlungen-gkv-vorgehen-aussagen-art-6319371)\n\n> Die Privatisierung zahnärztlicher Leistungen ist nach aktuellem Stand politisch nicht durchsetzbar und fachlich kontraproduktiv. Die Diskussion bewegt sich klar in Richtung Beibehaltung und Stärkung der präventionsorientierten Zahnversorgung innerhalb der GKV.\n\n---\n\n**Quellen:** [3](https://www.tagesspiegel.de/politik/derartige-plane-gibt-es-nicht-regierung-erteilt-planen-zur-privatisierung-von-zahnbehandlungen-absage-15206472.html) | [4](https://www.implantate.com/news/sollen-zahnbehandlungen-kassenleistungen-bleiben-oder-den-zahnarzt-selbst-zahlen.html) | [6](https://www.aok.de/pp/gg/update/warken-schliesst-streichung-von-zahnleistungen-aus) | [10](https://www.pharmazeutische-zeitung.de/breite-ablehnung-fuer-forderungen-aus-der-cdu-162424) | [21](https://wirtschaftsrat.de/de/documents/3387/The_Pioneer_Wir_haben_ein_Gesamtkonzept_vorgelegt_030226.pdf) | [25](https://www.infranken.de/ratgeber/karriere-geld/krankenkassen-leistungen-kuerzen-ab-maerz-psychotherapeutische-behandlungen-gkv-vorgehen-aussagen-art-6319371) | [28](https://www.kzbv.de/pressemitteilungen/effizient-wirtschaftlich-vorbildlich-zahnmedizin-zeigt-weg-zu-stabilem-gesundheitswesen-auf) | [30](https://www.securvita.de/info-service-fur-versicherte/zahnersatz-eigenanteile.html) | [32](https://www.dasinvestment.com/gothaer-zahnzusatzversicherungen-krankenzusatzversicherungen-studie) | [35](https://www.n-tv.de/politik/Beim-Zahnersatz-verstehen-die-Befragten-keinen-Spass-id30346154.html) | [39](https://www.aok.de/pp/gg/update/gkv-reformkommission) | [42](https://www.krankenkassen-direkt.de/news/mitteilung/Abschaffung-Zahnarztleistungen-vdek-Gesunde-Zaehne-duerfen-keine-Frage-des-Geldbeutels-sein-4461272.html) | [45](https://www.drohnen.de/78705/agenda-fuer-arbeitnehmer-2026-das-fordert-der-wirtschaftsrat-der-cdu-konkret) | [46](https://www.handelsblatt.com/politik/deutschland/cdu-zahnbehandlung-bleibt-kassenleistung-warum-das-kosten-spart/100196689.html) | [48](https://www.spiegel.de/politik/deutschland/cdu-wirtschaftsrat-zahnarztkosten-cdu-sozialpolitiker-und-gruene-lehnen-vorschlag-ab-a-8fa99bab-7f76-49b3-ba7e-bcf79b843cc9) | [49](https://www.evangelisch.de/inhalte/252464/02-02-2026/kassen-sollen-keine-zahnbehandlung-mehr-bezahlen) | [59](https://www.wiwo.de/politik/deutschland/sozialstaat-debatte-der-zahnstatus-ist-einer-der-deutlichsten-marker-sozialer-ungleichheit/100196757.html) | [60](https://www.cash-online.de/a/lauterbach-warnt-vor-privatisierung-von-zahnarztkosten-711086) | [62](https://www.deutsche-apotheker-zeitung.de/autoren/news/artikel/2026/02/04/gkv-ohne-zahnbehandlungen-teurer-sparvorschlag)\n\n---\n*77 Quellen · 12 Suchen · 4 Runden · 4:04 min · Confidence 7/10*",
+      "metrics": {
+        "total_rounds": 4,
+        "total_elapsed_s": 244.43,
+        "final_confidence": 7,
+        "total_queries": 12,
+        "total_citations": 77,
+        "total_context_blocks": 8,
+        "competing_events_detected": true,
+        "stagnation_detected": false,
+        "total_prompt_tokens": 51750,
+        "total_completion_tokens": 22757
+      },
+      "iteration_logs": [
+        {
+          "node": "classify",
+          "timestamp": 1770742040.9561813,
+          "duration_s": 8.779,
+          "decision": "SEARCH",
+          "lang": "de",
+          "search_lang": "de",
+          "recency": "month",
+          "type": "news"
+        },
+        {
+          "node": "decompose",
+          "timestamp": 1770742043.414033,
+          "duration_s": 2.457,
+          "sub_questions": [
+            "Diskussion Privatisierung zahnärztliche Leistungen Deutschland aktuelle Debatte",
+            "Zukunft Zahnmedizin gesetzliche Krankenversicherung Reform Richtung Diskussionen"
+          ],
+          "sub_question_count": 2
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770742047.2730007,
+          "duration_s": 3.858,
+          "round": 0,
+          "new_queries": [
+            "Privatisierung zahnärztliche Leistungen Deutschland Debatte 2025 2026 gesetzliche Krankenversicherung",
+            "Zahnmedizin Reform GKV Leistungskatalog Eigenanteil Diskussion Bundestag 2025",
+            "KZBV Kassenzahnärztliche Vereinigung Zukunft Zahnversorgung Finanzierung Position 2025 2026"
+          ],
+          "total_queries": 3
+        },
+        {
+          "node": "search",
+          "timestamp": 1770742078.2439654,
+          "duration_s": 30.97,
+          "round": 0,
+          "queries_executed": 3,
+          "queries": [
+            "Privatisierung zahnärztliche Leistungen Deutschland Debatte 2025 2026 gesetzliche Krankenversicherung",
+            "Zahnmedizin Reform GKV Leistungskatalog Eigenanteil Diskussion Bundestag 2025",
+            "KZBV Kassenzahnärztliche Vereinigung Zukunft Zahnversorgung Finanzierung Position 2025 2026"
+          ],
+          "sources_found": 3,
+          "total_citations": 20,
+          "context_blocks": 3
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770742083.1590636,
+          "duration_s": 4.914,
+          "round": 1,
+          "confidence": 7,
+          "gaps": "",
+          "competing_events": "CDU-Wirtschaftsrat-Vorstoß November 2025 vs. CDU-Wirtschaftsrat-Reformpapier Februar 2026 – möglicherweise zwei Stufen desselben Vorstoßes oder ein Datierungsfehler; die Kernaussage (Privatisierungsforderung wurde breit abgelehnt, Regierung schließt Streichung aus) ist in beiden Fällen identisch.",
+          "stagnation_detected": false,
+          "context_blocks": 3,
+          "done": false
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770742086.841206,
+          "duration_s": 3.681,
+          "round": 1,
+          "new_queries": [
+            "CDU Wirtschaftsrat Privatisierung Zahnmedizin Vorstoß November 2025 Februar 2026 Reaktionen Ablehnung",
+            "Koalitionsvertrag 2025 2026 zahnärztliche Versorgung GKV Leistungskürzung Bundesregierung Position",
+            "Zahnzusatzversicherung Trend Deutschland 2026 Eigenanteile Zahnersatz steigend Zwei-Klassen-Medizin Kritik"
+          ],
+          "total_queries": 6
+        },
+        {
+          "node": "search",
+          "timestamp": 1770742122.17086,
+          "duration_s": 35.329,
+          "round": 1,
+          "queries_executed": 3,
+          "queries": [
+            "CDU Wirtschaftsrat Privatisierung Zahnmedizin Vorstoß November 2025 Februar 2026 Reaktionen Ablehnung",
+            "Koalitionsvertrag 2025 2026 zahnärztliche Versorgung GKV Leistungskürzung Bundesregierung Position",
+            "Zahnzusatzversicherung Trend Deutschland 2026 Eigenanteile Zahnersatz steigend Zwei-Klassen-Medizin Kritik"
+          ],
+          "sources_found": 3,
+          "total_citations": 36,
+          "context_blocks": 6
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770742130.3659039,
+          "duration_s": 8.194,
+          "round": 2,
+          "confidence": 7,
+          "gaps": "Keine – die Recherche deckt den aktuellen Vorstoß des CDU-Wirtschaftsrats (1./2. Februar 2026), die breite Ablehnung durch Regierung, Fachverbände und Opposition sowie die laufenden Reformprozesse (Sozialstaatskommission, GKV-Finanzkommission bis Ende März 2026) umfassend ab.",
+          "competing_events": "CDU-Wirtschaftsrat-Vorstoß November 2025 (Block 2) vs. CDU-Wirtschaftsrat-Reformpapier 1. Februar 2026 (Blocks 1/4) – möglicherweise zwei aufeinanderfolgende Vorstöße oder dasselbe Papier mit unterschiedlicher Datierung.",
+          "stagnation_detected": false,
+          "context_blocks": 6,
+          "done": false
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770742133.7447727,
+          "duration_s": 3.378,
+          "round": 2,
+          "new_queries": [
+            "Sozialstaatskommission GKV Finanzkommission Ergebnisse März 2026 zahnärztliche Leistungen Empfehlungen",
+            "CDU Wirtschaftsrat Reformpapier Februar 2026 Zahnmedizin Herauslösung GKV konkreter Inhalt Wortlaut",
+            "Vergleich europäische Länder Zahnversorgung privat gesetzlich Niederlande Schweiz Modell Erfahrungen"
+          ],
+          "total_queries": 9
+        },
+        {
+          "node": "search",
+          "timestamp": 1770742172.2640452,
+          "duration_s": 38.518,
+          "round": 2,
+          "queries_executed": 3,
+          "queries": [
+            "Sozialstaatskommission GKV Finanzkommission Ergebnisse März 2026 zahnärztliche Leistungen Empfehlungen",
+            "CDU Wirtschaftsrat Reformpapier Februar 2026 Zahnmedizin Herauslösung GKV konkreter Inhalt Wortlaut",
+            "Vergleich europäische Länder Zahnversorgung privat gesetzlich Niederlande Schweiz Modell Erfahrungen"
+          ],
+          "sources_found": 3,
+          "total_citations": 57,
+          "context_blocks": 8
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770742180.170496,
+          "duration_s": 7.906,
+          "round": 3,
+          "confidence": 7,
+          "gaps": "Keine – die Recherche deckt den aktuellen Vorstoß des CDU-Wirtschaftsrats (Februar 2026), die Reaktionen von Regierung, Opposition, Standesorganisationen und Kassen sowie den Stand der GKV-Finanzkommission umfassend ab.",
+          "competing_events": "CDU-Wirtschaftsrat-Vorstoß November 2025 (Block 2) vs. CDU-Wirtschaftsrat-Reformpapier 1. Februar 2026 (Blocks 1/4) – möglicherweise zwei aufeinanderfolgende Vorstöße oder dasselbe Papier mit unterschiedlicher Datierung.",
+          "stagnation_detected": false,
+          "context_blocks": 7,
+          "done": false
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770742183.715925,
+          "duration_s": 3.544,
+          "round": 3,
+          "new_queries": [
+            "Zahnärzte Privatisierung Gegenargumente Versorgungsforschung soziale Ungleichheit Evidenz Deutschland 2025 2026",
+            "GKV Spitzenverband Stellungnahme Zahnmedizin Leistungskatalog Kürzung Ablehnung Februar 2026",
+            "Bundeszahnärztekammer BZÄK Position Herauslösung Zahnmedizin GKV Pressemitteilung 2026"
+          ],
+          "total_queries": 12
+        },
+        {
+          "node": "search",
+          "timestamp": 1770742213.106233,
+          "duration_s": 29.388,
+          "round": 3,
+          "queries_executed": 3,
+          "queries": [
+            "Zahnärzte Privatisierung Gegenargumente Versorgungsforschung soziale Ungleichheit Evidenz Deutschland 2025 2026",
+            "GKV Spitzenverband Stellungnahme Zahnmedizin Leistungskatalog Kürzung Ablehnung Februar 2026",
+            "Bundeszahnärztekammer BZÄK Position Herauslösung Zahnmedizin GKV Pressemitteilung 2026"
+          ],
+          "sources_found": 3,
+          "total_citations": 77,
+          "context_blocks": 8
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770742217.9195564,
+          "duration_s": 4.812,
+          "round": 4,
+          "confidence": 7,
+          "gaps": "",
+          "competing_events": "CDU-Wirtschaftsrat-Vorstoß November 2025 (Block 2) vs. CDU-Wirtschaftsrat-Reformpapier 1. Februar 2026 (Blocks 1/4) – möglicherweise zwei aufeinanderfolgende Vorstöße oder dasselbe Papier mit unterschiedlicher Datierung.",
+          "stagnation_detected": false,
+          "context_blocks": 8,
+          "done": true
+        },
+        {
+          "node": "answer",
+          "timestamp": 1770742276.6079316,
+          "duration_s": 58.688,
+          "answer_length": 11715,
+          "citation_count": 77,
+          "rounds": 4,
+          "elapsed_total_s": 244.4,
+          "confidence": 7
+        }
+      ]
+    },
+    {
+      "question_id": "q005",
+      "question": "Ich habe gehört, dass Google Anfang 2026 Gemini komplett eingestellt und durch ein neues Modell namens Astra ersetzt hat — stimmt das und was steckt dahinter?",
+      "category": "negative_evidence",
+      "answer": "## Kurzfazit\n\nNein, das stimmt nicht. Google hat Gemini **nicht** eingestellt und **nicht** durch ein Modell namens \"Astra\" ersetzt. Im Gegenteil: Gemini ist Anfang 2026 Googles zentrale KI-Plattform und wird aktiv weiterentwickelt — zuletzt mit dem Rollout von **Gemini 3** (ab Ende 2025/Januar 2026). Project Astra ist ein **Forschungsprototyp** von Google DeepMind, dessen Funktionen schrittweise **in Gemini integriert** werden, nicht umgekehrt. [14](https://blog.google/innovation-and-ai/products/google-ai-updates-january-2026) [34](https://deepmind.google/models/project-astra)\n\n---\n\n## Kernaussagen\n\n- **Gemini ist aktiv und wächst:** Die Gemini-App hat Stand Anfang 2026 über **650 Millionen monatliche Nutzer** und mehr als **13 Millionen Entwickler**. [21](https://blog.google/products-and-platforms/products/gemini/gemini-3)\n- **Gemini 3 ist das aktuelle Modell:** Der Rollout begann Ende November 2025 und setzte sich bis Januar 2026 fort, mit Varianten wie Gemini 3 Pro, Flash und Deep Think. [19](https://www.tomsguide.com/ai/google-gemini/gemini-3-is-packed-with-features-but-these-are-the-3-you-need-to-know-about) [24](https://ai.google.dev/gemini-api/docs/gemini-3)\n- **Project Astra ist kein eigenstaendiges Produkt:** Es handelt sich um einen DeepMind-Forschungsprototyp fuer multimodale KI (Videoverstaendnis, Umgebungserkennung, Echtzeit-Interaktion), der nie als separates Verbraucherprodukt veroeffentlicht wurde. [13](https://www.tomsguide.com/ai/what-is-project-astra-what-you-need-to-know-about-google-deepminds-ai-initiative) [34](https://deepmind.google/models/project-astra)\n- **Astra-Funktionen fliessen in Gemini ein:** Features wie Echtzeit-Bildschirmfreigabe und Videoverstaendnis sind bereits in **Gemini Live** verfuegbar. [31](https://techcrunch.com/2025/05/20/project-astra-comes-to-google-search-gemini-and-developers) [28](https://blog.google/innovation-and-ai/models-and-research/google-deepmind/gemini-universal-ai-assistant)\n- **Google Assistant wird durch Gemini ersetzt** — nicht durch Astra. Der vollstaendige Uebergang auf Android wurde auf **2026** verschoben. [1](https://www.thurrott.com/mobile/android/330937/google-delays-full-gemini-rollout-on-android-to-2026) [5](https://9to5google.com/2025/12/19/google-assistant-gemini-2026)\n- **Es gibt keine glaubwuerdigen Berichte** ueber ein Rebranding oder eine Einstellung von Gemini zugunsten von Astra. [35](https://www.androidcentral.com/apps-software/google-gemini)\n- **Gemini 4** ist Stand Februar 2026 nicht offiziell angekuendigt; Spekulationen deuten auf eine Veroeffentlichung spaeter im Jahr hin. [17](https://blog.google/innovation-and-ai/products/gemini-app/gemini-drop-january-2026)\n\n---\n\n## Detailanalyse\n\n### Was ist Project Astra wirklich?\n\nProject Astra wurde erstmals auf der **Google I/O im Mai 2024** vorgestellt. Es ist ein Forschungsprojekt von Google DeepMind mit dem Ziel, einen \"universellen KI-Assistenten\" zu entwickeln, der in Echtzeit Video, Audio und visuelle Umgebungen verstehen kann. [13](https://www.tomsguide.com/ai/what-is-project-astra-what-you-need-to-know-about-google-deepminds-ai-initiative) Im Dezember 2024 erhielt der Prototyp Updates auf Basis von **Gemini 2.0**, darunter verbesserter multilingualer Dialog, Tool-Nutzung (Google Search, Lens, Maps) und ein Gedaechtnis von bis zu 10 Minuten. [10](https://blog.google/innovation-and-ai/models-and-research/google-deepmind/google-gemini-ai-update-december-2024)\n\nEntscheidend: Astra war bis Dezember 2024 auf **vertrauenswuerdige Tester** mit Android-Phones und Prototyp-Brillen beschraenkt. Eine Bewertung vom Maerz 2025 bestaetigte, dass sich Astra weiterhin in der Phase eines Forschungsprototyps befand — ohne oeffentliche Veroeffentlichung oder angekuendigtes Datum. [12](https://infoelectroo.com/google-project-astra-launch-2026) Stand Februar 2026 ist Project Astra **nicht als vollstaendiges Verbraucherprodukt** erschienen. [34](https://deepmind.google/models/project-astra)\n\n### Wie verhaelt sich Astra zu Gemini?\n\nDie Beziehung ist eindeutig hierarchisch: **Gemini ist die Plattform, Astra liefert Technologie-Bausteine**. Google hat Astra-Funktionen wie Echtzeit-Bildschirmfreigabe und Videoverstaendnis in **Gemini Live** integriert, das auf Geraeten wie dem Pixel 9 und Galaxy S25 verfuegbar ist. [31](https://techcrunch.com/2025/05/20/project-astra-comes-to-google-search-gemini-and-developers) [28](https://blog.google/innovation-and-ai/models-and-research/google-deepmind/gemini-universal-ai-assistant)\n\nGemini 3 Flash bietet zudem eine Funktion namens **Agentic Vision**, die auf Astra-Forschung basiert und aktive Bildexploration ermoeglicht. [17](https://blog.google/innovation-and-ai/products/gemini-app/gemini-drop-january-2026) Die Marke \"Astra\" taucht also als Feature-Bezeichnung innerhalb des Gemini-Oekosystems auf, nicht als Ersatz dafuer. Google priorisiert ausserdem Sicherheitstests mit Prototypen wie **Project Mariner** und **Jules**, bevor Astra-Technologien breiter in Produkte einfliessen. [9](https://techcrunch.com/2024/10/29/google-says-its-next-gen-ai-agents-wont-launch-until-2025-at-the-earliest)\n\n### Aktueller Stand von Gemini Anfang 2026\n\nGemini ist weit davon entfernt, eingestellt zu werden. Im Januar 2026 gab es umfangreiche Updates:\n\n- **Personal Intelligence (Beta)** startete am 20. Januar 2026 in den USA und verbindet Gmail, Photos, YouTube und Search zu einem personalisierten KI-Erlebnis. [14](https://blog.google/innovation-and-ai/products/google-ai-updates-january-2026) [32](https://www.datacamp.com/blog/gemini-personal-intelligence)\n- **Chrome** erhielt Gemini-3-Funktionen wie **Auto Browse** und ein neues Side-Panel. [25](https://blog.google/products-and-platforms/products/chrome/gemini-3-auto-browse)\n- **Gemini 3 Deep Think** erzielte Benchmark-Spitzenwerte: **93,8 %** auf GPQA Diamond und **45,1 %** auf ARC-AGI-2. [19](https://www.tomsguide.com/ai/google-gemini/gemini-3-is-packed-with-features-but-these-are-the-3-you-need-to-know-about)\n- **Veo 3.1** (Videogenerierung) erzeugt 8-sekuendige Videos in 720p/1080p mit synchronisiertem Audio. [21](https://blog.google/products-and-platforms/products/gemini/gemini-3)\n- Google plant, den **Google Assistant bis Maerz 2026 oder spaeter** vollstaendig durch Gemini auf Android zu ersetzen. [1](https://www.thurrott.com/mobile/android/330937/google-delays-full-gemini-rollout-on-android-to-2026) [4](https://www.seroundtable.com/google-gemini-assistant-2026-later-40634.html)\n\n### Woher kommt das Geruecht?\n\nDie Verwechslung duerfte daher ruehren, dass Google in Pressemitteilungen und auf Konferenzen haeufig **Astra und Gemini im selben Atemzug** nennt. Wenn Astra-Funktionen in Gemini integriert werden, kann der Eindruck entstehen, Astra \"uebernehme\" Gemini. Zudem kuendigte Google-CEO Sundar Pichai im Oktober 2024 an, dass \"Astra-Technologien\" 2025 ausgeliefert wuerden [9](https://techcrunch.com/2024/10/29/google-says-its-next-gen-ai-agents-wont-launch-until-2025-at-the-earliest) — was manche als Produktstart missverstanden haben koennten. Tatsaechlich meinte er die Integration in bestehende Gemini-Produkte.\n\n---\n\n## Einordnung / Ausblick\n\nDie Behauptung, Gemini sei eingestellt und durch Astra ersetzt worden, ist **eindeutig falsch**. Gemini ist Googles strategische KI-Marke mit massiver Nutzerbasis und aktivem Modell-Rollout. Project Astra fungiert als Forschungs-Pipeline, deren Innovationen in Gemini einfliessen — vergleichbar mit der Rolle, die DeepMind-Forschung generell fuer Google-Produkte spielt. Fuer spaeter im Jahr 2026 wird spekuliert, dass **Gemini 4** weitere Astra-Funktionen integrieren koennte, insbesondere fuer Android, Wear OS und Google Home. [28](https://blog.google/innovation-and-ai/models-and-research/google-deepmind/gemini-universal-ai-assistant) Die Marke Gemini duerfte auf absehbare Zeit Googles zentrale KI-Identitaet bleiben.\n\n---\n\n**Quellen:** [1](https://www.thurrott.com/mobile/android/330937/google-delays-full-gemini-rollout-on-android-to-2026) | [5](https://9to5google.com/2025/12/19/google-assistant-gemini-2026) | [9](https://techcrunch.com/2024/10/29/google-says-its-next-gen-ai-agents-wont-launch-until-2025-at-the-earliest) | [10](https://blog.google/innovation-and-ai/models-and-research/google-deepmind/google-gemini-ai-update-december-2024) | [13](https://www.tomsguide.com/ai/what-is-project-astra-what-you-need-to-know-about-google-deepminds-ai-initiative) | [14](https://blog.google/innovation-and-ai/products/google-ai-updates-january-2026) | [19](https://www.tomsguide.com/ai/google-gemini/gemini-3-is-packed-with-features-but-these-are-the-3-you-need-to-know-about) | [21](https://blog.google/products-and-platforms/products/gemini/gemini-3) | [25](https://blog.google/products-and-platforms/products/chrome/gemini-3-auto-browse) | [28](https://blog.google/innovation-and-ai/models-and-research/google-deepmind/gemini-universal-ai-assistant) | [31](https://techcrunch.com/2025/05/20/project-astra-comes-to-google-search-gemini-and-developers) | [34](https://deepmind.google/models/project-astra) | [35](https://www.androidcentral.com/apps-software/google-gemini)\n\n---\n*37 Quellen · 6 Suchen · 2 Runden · 2:05 min · Confidence 9/10*",
+      "metrics": {
+        "total_rounds": 2,
+        "total_elapsed_s": 125.63,
+        "final_confidence": 9,
+        "total_queries": 6,
+        "total_citations": 37,
+        "total_context_blocks": 6,
+        "competing_events_detected": false,
+        "stagnation_detected": false,
+        "total_prompt_tokens": 18299,
+        "total_completion_tokens": 9684
+      },
+      "iteration_logs": [
+        {
+          "node": "classify",
+          "timestamp": 1770742286.9986234,
+          "duration_s": 10.381,
+          "decision": "SEARCH",
+          "lang": "de",
+          "search_lang": "en",
+          "recency": "week",
+          "type": "news"
+        },
+        {
+          "node": "decompose",
+          "timestamp": 1770742289.7016666,
+          "duration_s": 2.702,
+          "sub_questions": [
+            "Hat Google Anfang 2026 das Gemini-Modell komplett eingestellt?",
+            "Hat Google ein neues KI-Modell namens Astra als Ersatz für Gemini veröffentlicht?",
+            "Was ist der aktuelle Stand von Google Gemini und Google Project Astra im Februar 2026?"
+          ],
+          "sub_question_count": 3
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770742291.8676665,
+          "duration_s": 2.165,
+          "round": 0,
+          "new_queries": [
+            "Google Gemini discontinued replaced by Astra 2026",
+            "Google Project Astra AI model release status February 2026",
+            "Google Gemini latest news updates January February 2026 successor model"
+          ],
+          "total_queries": 3
+        },
+        {
+          "node": "search",
+          "timestamp": 1770742317.96981,
+          "duration_s": 26.101,
+          "round": 0,
+          "queries_executed": 3,
+          "queries": [
+            "Google Gemini discontinued replaced by Astra 2026",
+            "Google Project Astra AI model release status February 2026",
+            "Google Gemini latest news updates January February 2026 successor model"
+          ],
+          "sources_found": 3,
+          "total_citations": 18,
+          "context_blocks": 3
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770742323.2835073,
+          "duration_s": 5.313,
+          "round": 1,
+          "confidence": 7,
+          "gaps": "Keine – die Recherche belegt eindeutig, dass Gemini Anfang 2026 NICHT eingestellt wurde (Gemini 3 wurde im Januar 2026 ausgerollt) und Project Astra ein Forschungsprototyp ist, der in Gemini integriert wird, nicht Gemini ersetzt.",
+          "competing_events": "",
+          "stagnation_detected": false,
+          "context_blocks": 3,
+          "done": false
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770742326.0486026,
+          "duration_s": 2.764,
+          "round": 1,
+          "new_queries": [
+            "Google Gemini 3 rollout features capabilities January 2026 details",
+            "Google Project Astra integration into Gemini app 2026 multimodal assistant",
+            "Google AI rebrand rumors Gemini replaced Astra fact check February 2026"
+          ],
+          "total_queries": 6
+        },
+        {
+          "node": "search",
+          "timestamp": 1770742355.125019,
+          "duration_s": 29.076,
+          "round": 1,
+          "queries_executed": 3,
+          "queries": [
+            "Google Gemini 3 rollout features capabilities January 2026 details",
+            "Google Project Astra integration into Gemini app 2026 multimodal assistant",
+            "Google AI rebrand rumors Gemini replaced Astra fact check February 2026"
+          ],
+          "sources_found": 3,
+          "total_citations": 37,
+          "context_blocks": 6
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770742361.0724015,
+          "duration_s": 5.947,
+          "round": 2,
+          "confidence": 9,
+          "gaps": "Keine — die Recherche belegt konsistent über 37 Quellen und 6 Blöcke, dass Gemini Anfang 2026 NICHT eingestellt wurde und Astra kein eigenständiges Ersatzmodell ist; die Annahme in der Frage ist falsch.",
+          "competing_events": "",
+          "stagnation_detected": false,
+          "context_blocks": 6,
+          "done": true
+        },
+        {
+          "node": "answer",
+          "timestamp": 1770742402.243023,
+          "duration_s": 41.17,
+          "answer_length": 9207,
+          "citation_count": 37,
+          "rounds": 2,
+          "elapsed_total_s": 125.6,
+          "confidence": 9
+        }
+      ]
+    },
+    {
+      "question_id": "q006",
+      "question": "Welches KI-Unternehmen hat im Januar oder Februar 2026 den größten Durchbruch bei autonomen Coding-Agenten erzielt, die eigenständig ganze Software-Projekte umsetzen können?",
+      "category": "factual",
+      "answer": "## Kurzfazit\n\nIm Zeitraum Januar/Februar 2026 lieferten sich **OpenAI** und **Anthropic** ein enges Rennen um die Spitzenposition bei autonomen Coding-Agenten. Den groessten messbaren Durchbruch erzielte **OpenAI mit GPT-5.3-Codex** (angekuendigt am 5. Februar 2026), das neue Bestwerte auf den Benchmarks **SWE-Bench Pro** und **Terminal-Bench 2.0** erreichte und als erstes Modell eine \"High\"-Cybersicherheitsbewertung erhielt [66](https://openai.com/index/introducing-gpt-5-3-codex). Anthropics **Claude Opus 4.6** setzte mit ueber 500 entdeckten Zero-Day-Schwachstellen und einem 1-Million-Token-Kontextfenster jedoch einen qualitativ ebenso beeindruckenden Kontrapunkt [27](https://www.anthropic.com/news/claude-opus-4-6).\n\n---\n\n## Kernaussagen\n\n- **GPT-5.3-Codex** fuehrt das Terminal-Bench-2.0-Leaderboard an: Der Wrapper \"Simple Codex\" erreicht **75,1 %**, gefolgt von \"CodeBrain-1\" mit **70,3 %** – beide basierend auf GPT-5.3-Codex [55](https://www.tbench.ai/leaderboard/terminal-bench/2.0).\n- OpenAI gibt an, GPT-5.3-Codex sei **25 % schneller bei agentischen Aufgaben** als sein Vorgaenger und habe eigenstaendig Training, Deployment und Evaluierungen debuggt [66](https://openai.com/index/introducing-gpt-5-3-codex).\n- **Claude Opus 4.6** identifizierte und validierte ueber **500 hochkritische Zero-Day-Schwachstellen** in Open-Source-Projekten – ohne spezialisierte Fuzzing-Tools [56](https://thehackernews.com/2026/02/claude-opus-46-finds-500-high-severity.html).\n- Claude Code unterstuetzt Kontexte von bis zu **1 Million Tokens** (Beta) und kann Aufgaben mit einer Dauer von ueber **30 Stunden** autonom bearbeiten [2](https://resources.anthropic.com/hubfs/2026%20Agentic%20Coding%20Trends%20Report.pdf?hsLang=en).\n- **Cognition Devin 2.0** wird als Agent mit dem hoechsten Autonomiegrad in Produktionsumgebungen eingestuft, kostet jedoch **500 USD/Monat** und liegt bei Benchmarks hinter den beiden Spitzenreitern [4](https://playcode.io/blog/best-ai-coding-agents-2026).\n- **Snowflake Cortex Code** (3. Februar 2026) adressiert eine Nische: Enterprise-Data-Context fuer Snowflake-native Entwicklung, ist aber kein General-Purpose-Coding-Agent [20](https://www.snowflake.com/en/news/press-releases/snowflake-unveils-cortex-code-an-ai-coding-agent-that-drastically-increases-productivity-by-understanding-your-enterprise-data-context).\n- Der Gesamtmarkt fuer AI-Coding-Agents erreichte bis Dezember 2025 ca. **4 Milliarden Dollar**, wobei GitHub Copilot, Claude Code und Cursor zusammen ueber **70 % Marktanteil** halten [72](https://www.cbinsights.com/research/report/coding-ai-market-share-december-2025).\n- Trotz aller Fortschritte: KI-generierter Code enthaelt laut Studien **1,7-mal mehr Bugs** als menschlicher Code, und die Merge-Rate bei komplexen Features faellt unter **50 %** [47](https://stackoverflow.blog/2026/01/28/are-bugs-and-incidents-inevitable-with-ai-coding-agents).\n\n---\n\n## Detailanalyse\n\n### OpenAI GPT-5.3-Codex: Benchmark-Dominanz und Systemintegration\n\nOpenAI kuendigte GPT-5.3-Codex am **5. Februar 2026** an und positionierte es als das leistungsfaehigste agentische Coding-Modell des Unternehmens [66](https://openai.com/index/introducing-gpt-5-3-codex). Das Modell kombiniert die Coding-Staerken von GPT-5.2-Codex mit dem breiteren Fachwissen von GPT-5.2 und erreicht neue State-of-the-Art-Ergebnisse auf **SWE-Bench Pro** und **Terminal-Bench 2.0** [66](https://openai.com/index/introducing-gpt-5-3-codex). Auf dem Terminal-Bench-2.0-Leaderboard belegen GPT-5.3-Codex-basierte Wrapper die beiden Spitzenpositionen mit 75,1 % bzw. 70,3 % [55](https://www.tbench.ai/leaderboard/terminal-bench/2.0). Allerdings ist zu beachten, dass die offiziellen OpenAI-Dokumente den konkreten Score von 75,1 % nicht explizit nennen – dieser stammt vom unabhaengigen Leaderboard [55](https://www.tbench.ai/leaderboard/terminal-bench/2.0).\n\nBesonders bemerkenswert ist die **\"High\"-Cybersicherheitsbewertung** unter OpenAIs Preparedness Framework – eine Premiere fuer ein KI-Modell [69](https://cdn.openai.com/pdf/23eca107-a9b1-4d2c-b156-7deb4fbc697c/GPT-5-3-Codex-System-Card-02.pdf). Fruehere Versionen des Modells haben laut OpenAI eigenstaendig Trainingslaeufe, Deployments und Evaluierungen debuggt, was auf ein hohes Mass an autonomer Problemloesungsfaehigkeit hindeutet [66](https://openai.com/index/introducing-gpt-5-3-codex). Der Rollout erfolgt ueber die Codex-App, CLI, IDE-Erweiterungen und seit dem **9. Februar 2026** auch ueber GitHub Copilot [65](https://github.blog/changelog/2026-02-09-gpt-5-3-codex-is-now-generally-available-for-github-copilot).\n\n### Anthropic Claude Opus 4.6: Sicherheitsforschung und Langzeit-Autonomie\n\nAnthropics Antwort kam mit **Claude Opus 4.6**, das ebenfalls im Februar 2026 veroeffentlicht wurde [27](https://www.anthropic.com/news/claude-opus-4-6). Der qualitativ herausragendste Beitrag ist die Entdeckung von ueber **500 Zero-Day-Schwachstellen** in Open-Source-Projekten wie Ghostscript, OpenSC und CGIF [56](https://thehackernews.com/2026/02/claude-opus-46-finds-500-high-severity.html) [30](https://www.axios.com/2026/02/05/anthropic-claude-opus-46-software-hunting). Die Schwachstellen wurden durch Git-Commit-Analyse und Mustersuche gefunden – ohne spezialisierte Fuzzing-Tools. Anthropic validierte alle Funde und koordinierte die Behebung mit den Maintainern [52](https://fudzilla.com/anthropics-newest-ai-model-squashed-500-zero-day-bugs).\n\nAuf Terminal-Bench 2.0 erreicht Claude Opus 4.6 je nach Wrapper **58,0 % bis 69,9 %** – deutlich hinter GPT-5.3-Codex, aber eine klare Verbesserung gegenueber dem Vorgaenger Opus 4.5 (59,8 %) [57](https://www.vellum.ai/blog/claude-opus-4-6-benchmarks) [55](https://www.tbench.ai/leaderboard/terminal-bench/2.0). Der entscheidende Differenzierungsfaktor ist das **1-Million-Token-Kontextfenster** (Beta), das Aufgaben mit einer Laufzeit von ueber 30 Stunden ermoeglicht [2](https://resources.anthropic.com/hubfs/2026%20Agentic%20Coding%20Trends%20Report.pdf?hsLang=en). Fuer grosse, langlebige Softwareprojekte ist dies ein erheblicher Vorteil gegenueber Modellen mit kleinerem Kontext.\n\n### Cognition Devin 2.0 und Snowflake Cortex Code: Nischenstaerken\n\n**Devin 2.0** von Cognition wird in Vergleichen als das Tool mit dem hoechsten Autonomiegrad fuer End-to-End-Aufgaben eingestuft [4](https://playcode.io/blog/best-ai-coding-agents-2026). Goldman Sachs setzt Devin bereits als \"ersten KI-Mitarbeiter\" ein [12](https://www.ibm.com/think/news/goldman-sachs-first-ai-employee-devin). Allerdings fehlen fuer Devin 2.0 vergleichbare Benchmark-Ergebnisse auf SWE-Bench Pro oder Terminal-Bench 2.0, was einen direkten Vergleich erschwert. Der Preis von **500 USD/Monat** positioniert es klar im Enterprise-Segment [64](https://mikemason.ca/writing/ai-coding-agents-jan-2026).\n\n**Snowflake Cortex Code** (angekuendigt am 3. Februar 2026) ist ein spezialisierter Agent fuer Snowflake-native Entwicklung mit Enterprise-Datenkontext [20](https://www.snowflake.com/en/news/press-releases/snowflake-unveils-cortex-code-an-ai-coding-agent-that-drastically-increases-productivity-by-understanding-your-enterprise-data-context). Es unterstuetzt MCP-Integrationen fuer Jira und GitHub [39](https://www.snowflake.com/en/blog/agentic-ai-developer-platform), ist aber kein General-Purpose-Coding-Agent und konkurriert daher nicht direkt mit GPT-5.3-Codex oder Claude Opus 4.6.\n\n### Realitaetscheck: Grenzen autonomer Coding-Agenten\n\nTrotz der beeindruckenden Fortschritte bleiben erhebliche Limitierungen bestehen. Laut Gartner scheitern **60 % der KI-Agenten-Pilotprojekte** an Planungs- und Aufgabenzerlegungsfehlern [46](https://www.avidclan.com/blog/syntax-to-agents-see-how-ai-agents-are-destroying-developers-jobs). KI-generierter Code enthaelt **1,7-mal mehr Bugs** als menschlicher Code und **75 % mehr Logik-/Korrektheitsfehler** [47](https://stackoverflow.blog/2026/01/28/are-bugs-and-incidents-inevitable-with-ai-coding-agents). Bei komplexen Feature-Entwicklungen faellt die Merge-Rate unter 50 %, waehrend einfache Aufgaben wie Dokumentation eine Rate von 84 % erreichen [2](https://resources.anthropic.com/hubfs/2026%20Agentic%20Coding%20Trends%20Report.pdf?hsLang=en). Die kumulative Genauigkeit sinkt bei mehrstufigen Aufgaben drastisch: Bei 95 % Genauigkeit pro Einzelschritt verbleiben nach 10 Schritten nur noch ca. **60 % Gesamtgenauigkeit** [5](https://python.plainenglish.io/top-7-breakthrough-ai-technologies-to-watch-in-2026-11cecf79077f).\n\n---\n\n## Einordnung / Ausblick\n\nGemessen an Benchmark-Ergebnissen hat **OpenAI mit GPT-5.3-Codex** den groessten messbaren Durchbruch erzielt – es dominiert die wichtigsten Leaderboards und bietet die breiteste Plattformintegration ueber GitHub Copilot. **Anthropic** punktet dagegen mit dem groessten Kontextfenster und der spektakulaersten Sicherheitsanwendung (500+ Zero-Days), was fuer langlebige, sicherheitskritische Projekte entscheidend sein kann. Ein einheitlicher, direkter Benchmark-Vergleich aller Agenten (inklusive Devin 2.0) existiert Stand Februar 2026 nicht [26](https://aitoolanalysis.com/ai-agents-for-developers-2026). Die Branche befindet sich im Uebergang von Copiloten zu autonomen Systemen, wobei Governance, Fehlerfortpflanzung und Observability die zentralen Herausforderungen fuer den produktiven Einsatz bleiben [34](https://ctomagazine.com/autonomous-ai-agents-enterprise-ai).\n\n> Die Frage \"Wer hat den groessten Durchbruch erzielt?\" haengt letztlich von der Definition ab: **Benchmark-Performance** spricht fuer OpenAI, **Sicherheitsforschung und Langzeit-Autonomie** fuer Anthropic, **Produktionsautonomie** fuer Cognition.\n\n---\n\n**Quellen:** [2](https://resources.anthropic.com/hubfs/2026%20Agentic%20Coding%20Trends%20Report.pdf?hsLang=en) | [4](https://playcode.io/blog/best-ai-coding-agents-2026) | [5](https://python.plainenglish.io/top-7-breakthrough-ai-technologies-to-watch-in-2026-11cecf79077f) | [20](https://www.snowflake.com/en/news/press-releases/snowflake-unveils-cortex-code-an-ai-coding-agent-that-drastically-increases-productivity-by-understanding-your-enterprise-data-context) | [26](https://aitoolanalysis.com/ai-agents-for-developers-2026) | [27](https://www.anthropic.com/news/claude-opus-4-6) | [30](https://www.axios.com/2026/02/05/anthropic-claude-opus-46-software-hunting) | [34](https://ctomagazine.com/autonomous-ai-agents-enterprise-ai) | [39](https://www.snowflake.com/en/blog/agentic-ai-developer-platform) | [47](https://stackoverflow.blog/2026/01/28/are-bugs-and-incidents-inevitable-with-ai-coding-agents) | [52](https://fudzilla.com/anthropics-newest-ai-model-squashed-500-zero-day-bugs) | [55](https://www.tbench.ai/leaderboard/terminal-bench/2.0) | [56](https://thehackernews.com/2026/02/claude-opus-46-finds-500-high-severity.html) | [57](https://www.vellum.ai/blog/claude-opus-4-6-benchmarks) | [65](https://github.blog/changelog/2026-02-09-gpt-5-3-codex-is-now-generally-available-for-github-copilot) | [66](https://openai.com/index/introducing-gpt-5-3-codex) | [69](https://cdn.openai.com/pdf/23eca107-a9b1-4d2c-b156-7deb4fbc697c/GPT-5-3-Codex-System-Card-02.pdf) | [72](https://www.cbinsights.com/research/report/coding-ai-market-share-december-2025)\n\n---\n*79 Quellen · 12 Suchen · 4 Runden · 4:09 min · Confidence 7/10*",
+      "metrics": {
+        "total_rounds": 4,
+        "total_elapsed_s": 249.85,
+        "final_confidence": 7,
+        "total_queries": 12,
+        "total_citations": 79,
+        "total_context_blocks": 8,
+        "competing_events_detected": true,
+        "stagnation_detected": false,
+        "total_prompt_tokens": 40548,
+        "total_completion_tokens": 18231
+      },
+      "iteration_logs": [
+        {
+          "node": "classify",
+          "timestamp": 1770742411.7612014,
+          "duration_s": 9.508,
+          "decision": "SEARCH",
+          "lang": "de",
+          "search_lang": "en",
+          "recency": "week",
+          "type": "news"
+        },
+        {
+          "node": "decompose",
+          "timestamp": 1770742413.5017738,
+          "duration_s": 1.74,
+          "sub_questions": [
+            "Welches KI-Unternehmen hat im Januar oder Februar 2026 den größten Durchbruch bei autonomen Coding-Agenten erzielt, die eigenständig ganze Software-Projekte umsetzen können?"
+          ],
+          "sub_question_count": 1
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770742416.5631292,
+          "duration_s": 3.061,
+          "round": 0,
+          "new_queries": [
+            "autonomous coding agents breakthrough January February 2026 AI company software projects",
+            "AI coding agent full software development autonomously 2026 latest news",
+            "best autonomous AI software engineer agent 2026 Devin Cognition competitors breakthrough"
+          ],
+          "total_queries": 3
+        },
+        {
+          "node": "search",
+          "timestamp": 1770742446.7815318,
+          "duration_s": 30.218,
+          "round": 0,
+          "queries_executed": 3,
+          "queries": [
+            "autonomous coding agents breakthrough January February 2026 AI company software projects",
+            "AI coding agent full software development autonomously 2026 latest news",
+            "best autonomous AI software engineer agent 2026 Devin Cognition competitors breakthrough"
+          ],
+          "sources_found": 3,
+          "total_citations": 18,
+          "context_blocks": 3
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770742455.3858361,
+          "duration_s": 8.603,
+          "round": 1,
+          "confidence": 3,
+          "gaps": "Kein einzelnes Unternehmen wird in den Quellen als klarer Gewinner eines 'größten Durchbruchs' im Januar/Februar 2026 identifiziert; die Recherche zeigt ein breites Feld (Devin/Cognition, Cursor, Claude Code, GitHub Copilot etc.) ohne eindeutiges herausragendes Einzelereignis, und explizit wird festgestellt, dass kein Agent vollständig autonome ganze Software-Projekte umsetzen kann.",
+          "competing_events": "Devin/Cognition (Devin 2.0, agent-native IDE, Enterprise-Partnerschaften mit Goldman Sachs/Infosys) vs Anthropic Claude Code (Agentic Coding Trends Report 2026) vs Accenture (CES 2026, 15. Jan. 2026, agentenbasierte KI) vs Cursor Composer/Agent vs GitHub Copilot Agent Mode – kein einzelner klarer 'größter Durchbruch' identifizierbar",
+          "stagnation_detected": false,
+          "context_blocks": 3,
+          "done": false
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770742458.4545007,
+          "duration_s": 3.067,
+          "round": 1,
+          "new_queries": [
+            "biggest AI coding agent announcement February 2026 launch release",
+            "Cognition Devin 2.0 vs Anthropic Claude Code vs Cursor agent comparison February 2026 benchmark",
+            "autonomous AI software engineering agent breakthrough news January February 2026 site:techcrunch.com OR site:theverge.com"
+          ],
+          "total_queries": 6
+        },
+        {
+          "node": "search",
+          "timestamp": 1770742483.3414803,
+          "duration_s": 24.886,
+          "round": 1,
+          "queries_executed": 3,
+          "queries": [
+            "biggest AI coding agent announcement February 2026 launch release",
+            "Cognition Devin 2.0 vs Anthropic Claude Code vs Cursor agent comparison February 2026 benchmark",
+            "autonomous AI software engineering agent breakthrough news January February 2026 site:techcrunch.com OR site:theverge.com"
+          ],
+          "sources_found": 3,
+          "total_citations": 38,
+          "context_blocks": 6
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770742491.9409158,
+          "duration_s": 8.598,
+          "round": 2,
+          "confidence": 7,
+          "gaps": "Die Frage unterstellt einen einzelnen, klar definierten \"größten Durchbruch\", aber die Recherche zeigt konsistent, dass es keinen solchen singulären Durchbruch gab – stattdessen gab es mehrere inkrementelle Fortschritte verschiedener Unternehmen, und kein Agent kann 2026 vollständig autonom ganze Software-Projekte umsetzen.",
+          "competing_events": "Cognition Devin 2.0 (laufend, höchste Autonomie-Einstufung) vs. Anthropic Claude Code/Opus 4.6 (Feb 2026, führend bei Terminal-Bench 2.0, 500+ Zero-Day-Funde) vs. Snowflake Cortex Code (3. Feb 2026, neuer nativer Coding-Agent) vs. Apple Xcode 26.3 mit Claude/Codex-Integration (3. Feb 2026) – die Prämisse eines einzelnen \"größten Durchbruchs\" ist falsch; es handelt sich um parallele, inkrementelle Fortschritte mehrerer Unternehmen.",
+          "stagnation_detected": false,
+          "context_blocks": 6,
+          "done": false
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770742494.70636,
+          "duration_s": 2.765,
+          "round": 2,
+          "new_queries": [
+            "Snowflake Cortex Code agent vs Apple Xcode 26 Claude Codex integration February 2026 comparison review",
+            "AI coding agent limitations failures 2026 cannot build full software projects autonomously criticism",
+            "Terminal-Bench 2.0 benchmark results February 2026 Claude Opus 4.6 zero-day vulnerabilities coding"
+          ],
+          "total_queries": 9
+        },
+        {
+          "node": "search",
+          "timestamp": 1770742541.6374261,
+          "duration_s": 46.93,
+          "round": 2,
+          "queries_executed": 3,
+          "queries": [
+            "Snowflake Cortex Code agent vs Apple Xcode 26 Claude Codex integration February 2026 comparison review",
+            "AI coding agent limitations failures 2026 cannot build full software projects autonomously criticism",
+            "Terminal-Bench 2.0 benchmark results February 2026 Claude Opus 4.6 zero-day vulnerabilities coding"
+          ],
+          "sources_found": 3,
+          "total_citations": 58,
+          "context_blocks": 8
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770742550.0032508,
+          "duration_s": 8.365,
+          "round": 3,
+          "confidence": 7,
+          "gaps": "Es gibt keinen einzelnen, eindeutigen \"größten Durchbruch\" – die Frage impliziert ein singuläres Ereignis, aber die Recherche zeigt mehrere parallele Fortschritte ohne klaren Konsens über einen einzigen Gewinner.",
+          "competing_events": "Anthropic Claude Opus 4.6 (Feb 2026, Terminal-Bench-Führung bei Claude-basierten Agents, 500+ Zero-Day-Funde) vs OpenAI Codex/GPT-5.3-Codex (Feb 2026, höchster Terminal-Bench-2.0-Score mit 75.1%) vs Cognition Devin 2.0 (Jan/Feb 2026, höchste Autonomie-Einstufung für End-to-End-Projekte) vs Snowflake Cortex Code (3. Feb 2026, enterprise-nativer Coding-Agent)",
+          "stagnation_detected": false,
+          "context_blocks": 8,
+          "done": false
+        },
+        {
+          "node": "plan",
+          "timestamp": 1770742553.175824,
+          "duration_s": 3.172,
+          "round": 3,
+          "new_queries": [
+            "enterprise adoption autonomous coding agents early 2026 which company leading real world deployment production",
+            "OpenAI GPT-5.3 Codex agent Terminal-Bench score 75.1 percent February 2026 announcement details",
+            "AI coding agent market share revenue growth January February 2026 Anthropic OpenAI Cognition Snowflake comparison"
+          ],
+          "total_queries": 12
+        },
+        {
+          "node": "search",
+          "timestamp": 1770742588.6063805,
+          "duration_s": 35.43,
+          "round": 3,
+          "queries_executed": 3,
+          "queries": [
+            "enterprise adoption autonomous coding agents early 2026 which company leading real world deployment production",
+            "OpenAI GPT-5.3 Codex agent Terminal-Bench score 75.1 percent February 2026 announcement details",
+            "AI coding agent market share revenue growth January February 2026 Anthropic OpenAI Cognition Snowflake comparison"
+          ],
+          "sources_found": 3,
+          "total_citations": 79,
+          "context_blocks": 8
+        },
+        {
+          "node": "evaluate",
+          "timestamp": 1770742596.9886494,
+          "duration_s": 8.381,
+          "round": 4,
+          "confidence": 7,
+          "gaps": "Es gibt keinen einzelnen, eindeutigen \"größten Durchbruch\" – mehrere Unternehmen haben im Januar/Februar 2026 bedeutende Fortschritte erzielt, wobei OpenAI (GPT-5.3-Codex, 5. Feb 2026) und Anthropic (Claude Opus 4.6) die stärksten Kandidaten sind, aber kein einheitlicher Konsens existiert.",
+          "competing_events": "OpenAI GPT-5.3-Codex (5. Feb 2026, SOTA auf SWE-Bench Pro & Terminal-Bench 2.0) vs. Anthropic Claude Opus 4.6 (Feb 2026, 500+ Zero-Days, Terminal-Bench-Führung je nach Wrapper) vs. Cognition Devin 2.0 (Anfang 2026, höchste Autonomie in Produktion) vs. Snowflake Cortex Code (3. Feb 2026, Enterprise-Data-Context-Agent)",
+          "stagnation_detected": false,
+          "context_blocks": 8,
+          "done": true
+        },
+        {
+          "node": "answer",
+          "timestamp": 1770742652.1032906,
+          "duration_s": 55.114,
+          "answer_length": 11271,
+          "citation_count": 79,
+          "rounds": 4,
+          "elapsed_total_s": 249.9,
+          "confidence": 7
+        }
+      ]
+    }
+  ]
+}

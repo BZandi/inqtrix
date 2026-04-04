@@ -1,0 +1,185 @@
+{
+  "meta": {
+    "timestamp": "",
+    "endpoint": "http://127.0.0.1:5100",
+    "reasoning_model": "claude-opus-4.6-agent",
+    "search_model": "perplexity-sonar-pro-agent",
+    "summarize_model": "claude-opus-4.6-agent",
+    "agent_version": "ok",
+    "total_elapsed_s": 810.58,
+    "promoted_at": ""
+  },
+  "result": {
+    "question_id": "q003",
+    "question": "Welche konkreten rechtlichen Konsequenzen hat der EU AI Act, der seit Februar 2025 schrittweise in Kraft tritt, für Open-Source-KI-Modelle wie LLaMA, Mistral und DeepSeek, und haben Unternehmen bereits dagegen geklagt?",
+    "category": "complex",
+    "answer": "\n\n## Kurzfazit\n\nDer EU AI Act gewährt Open-Source-GPAI-Modellen (General-Purpose AI Models) eine **eingeschränkte Befreiung** von bestimmten Dokumentations- und Informationspflichten, belässt aber wesentliche Pflichten – insbesondere zur Urheberrechts-Compliance und Trainingsdaten-Transparenz – vollständig in Kraft. Modelle mit **systemischem Risiko** (ab ca. 10^25 FLOPs Trainingsaufwand) erhalten keinerlei Open-Source-Privilegien. Direkte Klagen gegen den AI Act selbst sind bislang nicht bekannt, wohl aber erste juristische Auseinandersetzungen im Umfeld vergleichbarer Offenlegungspflichten.\n\n---\n\n## Kernaussagen\n\n- **Partielle Befreiung nach Art. 53(2):** Open-Source-GPAI-Anbieter sind von der Pflicht zur technischen Dokumentation und zur Informationsweitergabe an nachgelagerte Integratoren befreit – vorausgesetzt, die Lizenz erlaubt freien Zugang, Modifikation und Weiterverbreitung ohne restriktive Bedingungen wie Nicht-Kommerzialität. [6](https://artificialintelligenceact.eu/article/53) [4](https://thelens.slaughterandmay.com/post/102kzax/what-do-the-open-source-exemptions-for-gpai-models-mean-for-you-the-eu-ai-act-gu)\n\n- **Verbleibende Pflichten:** Auch befreite Open-Source-Modelle müssen eine **Urheberrechts-Compliance-Richtlinie** gemäß der EU-Richtlinie 2019/790 vorhalten und eine **öffentliche Zusammenfassung der Trainingsdaten** nach einer Vorlage des AI Office veröffentlichen. [5](https://linuxfoundation.eu/newsroom/ai-act-explainer) [37](https://www.activemind.legal/legislation/ai-act/article-53)\n\n- **Systemisches Risiko hebt alle Befreiungen auf:** Modelle, die mit mehr als **10^25 FLOPs** trainiert wurden, gelten als GPAI mit systemischem Risiko und unterliegen sämtlichen Pflichten einschließlich Risikobewertungen, Vorfallmeldungen und Cybersicherheitsmaßnahmen nach Art. 55. [23](https://artificialintelligenceact.eu/gpai-guidelines-overview) [36](https://prighter.com/tr/resources/ai-act-obligations-for-general-purpose-ai-models)\n\n- **Monetarisierung disqualifiziert:** Sobald ein Modell über Gebühren, kommerzielle Lizenzierung oder Werbung monetarisiert wird, entfällt die Open-Source-Befreiung. [1](https://openfuture.eu/observatory/aia-open-source) [8](https://www.jdsupra.com/legalnews/the-eu-ai-act-open-source-exceptions-9085314)\n\n- **Bußgelder:** Bei Verstößen drohen bis zu **35 Millionen Euro oder 7 % des weltweiten Jahresumsatzes** – je nachdem, welcher Betrag höher ist. [9](https://www.digitalapplied.com/blog/eu-ai-act-2026-compliance-european-business-guide)\n\n- **LLaMA 4 mit EU-Einschränkung:** Metas LLaMA-4-Lizenz untersagt explizit die Nutzung durch EU-Einrichtungen zur Umgehung der GPAI-Regeln – eine Klausel, die bei LLaMA 2 und 3 nicht existierte. [16](https://dionwiggins.substack.com/p/llama-4-is-banned-in-the-eu-open)\n\n- **DeepSeek zeigt Compliance-Lücken:** In der COMPL-AI-Bewertung (ETH Zürich/INSAIT/LatticeFlow) schneiden DeepSeeks destillierte Modelle bei Cybersicherheit und Bias unterdurchschnittlich ab; Italien hat DeepSeek unter Berufung auf DSGVO-Bedenken blockiert. [12](https://latticeflow.ai/news/deepseek-eu-ai-act-compliance-evaluation) [14](https://insait.ai/deepseek-evaluation)\n\n- **Keine direkte Klage gegen den AI Act bekannt**, aber xAI klagte im Dezember 2025 gegen Kaliforniens vergleichbare Trainingsdaten-Offenlegungspflicht (AB 2013), und die Möglichkeit von Nichtigkeitsklagen nach Art. 263 AEUV gegen delegierte Rechtsakte wird juristisch diskutiert. [19](https://www.mayerbrown.com/en/insights/publications/2025/11/legal-grounds-for-challenging-the-overreach-of-european-regulations-on-us-based-companies) [22](https://www.bakerbotts.com/thought-leadership/publications/2026/january/ai-legal-watch---january)\n\n---\n\n## Detailanalyse\n\n### Die Open-Source-Befreiung und ihre Grenzen\n\nArt. 53(2) des EU AI Act schafft eine **zweistufige Befreiungsstruktur** für GPAI-Modelle mit qualifizierender Open-Source-Lizenz. Befreit wird von: (a) der Erstellung und Bereitstellung umfassender technischer Dokumentation und (b) der Informationsweitergabe an nachgelagerte Anbieter, die das Modell in eigene Systeme integrieren. Die Lizenz muss dabei den freien Zugang zu Modellparametern, Gewichten, Architekturinformationen und Nutzungsinformationen gewährleisten. [6](https://artificialintelligenceact.eu/article/53) [2](https://www.orrick.com/en/Insights/2024/09/The-EU-AI-Act-Application-to-Open-Source-Projects)\n\nEntscheidend ist, was **nicht** befreit wird: Die Pflicht zur Veröffentlichung einer Urheberrechts-Policy im Einklang mit der EU-Richtlinie 2019/790 (Text- und Data-Mining-Vorbehalte) sowie die Pflicht zur Veröffentlichung einer hinreichend detaillierten Zusammenfassung der Trainingsdaten bleiben bestehen. Das AI Office hat hierfür eine standardisierte Vorlage entwickelt. [37](https://www.activemind.legal/legislation/ai-act/article-53) [35](https://digital-strategy.ec.europa.eu/en/faqs/general-purpose-ai-models-ai-act-questions-answers) Diese Restpflichten sind keineswegs trivial: Gerade die Trainingsdaten-Transparenz stellt für Anbieter wie DeepSeek, die Teile ihrer Trainingsdaten nicht offenlegen, eine erhebliche Hürde dar.\n\n### Zeitlicher Rahmen und Grandfathering\n\nDie Pflichten treten **gestaffelt** in Kraft. Verbotene KI-Praktiken (Art. 5) – etwa Social Scoring oder biometrische Echtzeit-Identifikation in öffentlichen Räumen – gelten bereits seit dem **2. Februar 2025**. Die GPAI-spezifischen Pflichten nach Art. 53 greifen ab dem **2. August 2025** für neu auf den Markt gebrachte Modelle. Hochrisiko-Pflichten nach Art. 6 werden ab dem **2. August 2026** durchgesetzt. [29](https://www.gtlaw.com/en/insights/2025/7/eu-ai-act-key-compliance-considerations-ahead-of-august-2025) [15](https://www.orrick.com/en/Insights/2025/11/The-EU-AI-Act-6-Steps-to-Take-Before-2-August-2026)\n\nFür GPAI-Modelle, die **vor dem 2. August 2025** auf dem Markt waren, gilt eine Übergangsfrist bis zum **2. August 2027** (sog. Grandfathering-Klausel). Das bedeutet, dass etwa LLaMA 3.1 oder Mistral-Modelle, die vor diesem Stichtag veröffentlicht wurden, noch zwei Jahre Schonfrist genießen. Neuere Versionen wie LLaMA 4 fallen hingegen sofort unter die neuen Regeln. [3](https://www.arnoldporter.com/en/perspectives/advisories/2025/08/does-your-company-have-eu-ai-act-compliance-obligations) [9](https://www.digitalapplied.com/blog/eu-ai-act-2026-compliance-european-business-guide)\n\n### Konkrete Auswirkungen auf LLaMA, Mistral und DeepSeek\n\n| Aspekt | LLaMA (Meta) | Mistral | DeepSeek |\n|---|---|---|---|\n| **Lizenzqualifikation** | LLaMA 4 enthält restriktive Klauseln (EU-Nutzungsverbot für Regulierungsumgehung), was die Open-Source-Qualifikation infrage stellt [16](https://dionwiggins.substack.com/p/llama-4-is-banned-in-the-eu-open) | Mistral-Modelle mit Apache-2.0-Lizenz qualifizieren sich grundsätzlich (unbestätigt für alle Varianten) | Lizenzstatus variiert je nach Modell |\n| **Systemisches Risiko** | Größere LLaMA-Modelle könnten den 10^25-FLOPs-Schwellenwert erreichen | Bislang unter dem Schwellenwert (unbestätigt) | DeepSeek-R1 (671B) könnte den Schwellenwert erreichen (unbestätigt) |\n| **Compliance-Stand** | Keine öffentliche Trainingsdaten-Zusammenfassung bekannt | Europäischer Anbieter mit Nähe zu Regulierungsbehörden | COMPL-AI-Bewertung zeigt erhebliche Lücken bei Cybersicherheit und Bias [12](https://latticeflow.ai/news/deepseek-eu-ai-act-compliance-evaluation) |\n| **Besonderheiten** | Lizenzänderung bei LLaMA 4 signalisiert strategische Distanzierung vom EU-Markt | Profitiert als EU-Unternehmen von Sandbox-Zugang [28](https://artificialintelligenceact.eu/small-businesses-guide-to-the-ai-act) | Italien hat DeepSeek wegen DSGVO-Bedenken blockiert [10](https://www.eenewseurope.com/en/latticeflow-ai-finds-eu-ai-act-compliance-gaps-in-deepseek-models) |\n\nDeepSeeks destillierte Modelle (R1 8B auf Basis von LLaMA 3.1 8B; R1 14B auf Basis von Qwen 2.5 14B) zeigen in der **COMPL-AI-Bewertung** – einem Framework mit 27 Benchmarks, das die AI-Act-Anforderungen operationalisiert – die niedrigsten Werte bei **Goal Hijacking** und **Prompt Leakage** (Cybersicherheit) sowie unterdurchschnittliche Bias-Werte, schneiden aber bei Toxizitätsminderung vergleichsweise gut ab. [14](https://insait.ai/deepseek-evaluation)\n\n### Klagen und juristische Gegenwehr\n\nDirekte Klagen gegen den EU AI Act selbst sind **zum jetzigen Zeitpunkt nicht öffentlich bekannt**. Allerdings gibt es relevante juristische Entwicklungen im Umfeld:\n\n- **xAI (Elon Musk)** reichte im **Dezember 2025** eine Klage gegen Kaliforniens Gesetz **AB 2013** ein, das ähnliche Trainingsdaten-Offenlegungspflichten wie der AI Act vorsieht. [22](https://www.bakerbotts.com/thought-leadership/publications/2026/january/ai-legal-watch---january)\n- Die Kanzlei **Mayer Brown** analysierte im November 2025 explizit die **rechtlichen Grundlagen für Anfechtungen** der extraterritorialen Reichweite europäischer Regulierung auf US-Unternehmen. Nichtigkeitsklagen gegen die geplanten **17 delegierten und implementierenden Rechtsakte** der EU-Kommission sind nach **Art. 263 AEUV** grundsätzlich möglich. [19](https://www.mayerbrown.com/en/insights/publications/2025/11/legal-grounds-for-challenging-the-overreach-of-european-regulations-on-us-based-companies)\n- Der im November 2025 vorgeschlagene **Digital Omnibus** zielt darauf ab, die Hochrisiko-Pflichten über August 2026 hinaus zu verschieben – ein Zeichen dafür, dass auch innerhalb der EU-Institutionen Bedenken hinsichtlich der Umsetzbarkeit bestehen. [22](https://www.bakerbotts.com/thought-leadership/publications/2026/january/ai-legal-watch---january)\n\n---\n\n## Einordnung / Ausblick\n\nDer EU AI Act schafft für Open-Source-KI ein **regulatorisches Paradoxon**: Die Befreiungen sind real, aber eng begrenzt, und die verbleibenden Pflichten – insbesondere die Trainingsdaten-Transparenz – treffen gerade jene Anbieter am härtesten, deren Geschäftsmodell auf Offenheit basiert, deren Trainingsdaten aber oft nicht vollständig dokumentiert sind. Die strategische Reaktion von Meta (Lizenzeinschränkungen bei LLaMA 4) und die Blockade von DeepSeek in Italien deuten darauf hin, dass der AI Act bereits **marktgestaltende Wirkung** entfaltet, noch bevor die Hauptpflichten vollständig durchgesetzt werden. Ob es zu formellen Klagen kommt, dürfte maßgeblich davon abhängen, wie die EU-Kommission die delegierten Rechtsakte ausgestaltet und ob der freiwillige **GPAI Code of Practice** – dessen Angemessenheitsprüfung für Juli 2025 vorgesehen war – als praxistauglicher Compliance-Pfad akzeptiert wird. [26](https://artificialintelligenceact.eu/code-of-practice-overview) [24](https://digital-strategy.ec.europa.eu/en/policies/guidelines-gpai-providers)\n\n---\n\n**Quellen:** [1](https://openfuture.eu/observatory/aia-open-source) | [2](https://www.orrick.com/en/Insights/2024/09/The-EU-AI-Act-Application-to-Open-Source-Projects) | [3](https://www.arnoldporter.com/en/perspectives/advisories/2025/08/does-your-company-have-eu-ai-act-compliance-obligations) | [4](https://thelens.slaughterandmay.com/post/102kzax/what-do-the-open-source-exemptions-for-gpai-models-mean-for-you-the-eu-ai-act-gu) | [5](https://linuxfoundation.eu/newsroom/ai-act-explainer) | [6](https://artificialintelligenceact.eu/article/53) | [8](https://www.jdsupra.com/legalnews/the-eu-ai-act-open-source-exceptions-9085314) | [9](https://www.digitalapplied.com/blog/eu-ai-act-2026-compliance-european-business-guide) | [10](https://www.eenewseurope.com/en/latticeflow-ai-finds-eu-ai-act-compliance-gaps-in-deepseek-models) | [12](https://latticeflow.ai/news/deepseek-eu-ai-act-compliance-evaluation) | [14](https://insait.ai/deepseek-evaluation) | [15](https://www.orrick.com/en/Insights/2025/11/The-EU-AI-Act-6-Steps-to-Take-Before-2-August-2026) | [16](https://dionwiggins.substack.com/p/llama-4-is-banned-in-the-eu-open) | [19](https://www.mayerbrown.com/en/insights/publications/2025/11/legal-grounds-for-challenging-the-overreach-of-european-regulations-on-us-based-companies) | [22](https://www.bakerbotts.com/thought-leadership/publications/2026/january/ai-legal-watch---january) | [23](https://artificialintelligenceact.eu/gpai-guidelines-overview) | [24](https://digital-strategy.ec.europa.eu/en/policies/guidelines-gpai-providers) | [26](https://artificialintelligenceact.eu/code-of-practice-overview) | [28](https://artificialintelligenceact.eu/small-businesses-guide-to-the-ai-act) | [29](https://www.gtlaw.com/en/insights/2025/7/eu-ai-act-key-compliance-considerations-ahead-of-august-2025) | [35](https://digital-strategy.ec.europa.eu/en/faqs/general-purpose-ai-models-ai-act-questions-answers) | [36](https://prighter.com/tr/resources/ai-act-obligations-for-general-purpose-ai-models) | [37](https://www.activemind.legal/legislation/ai-act/article-53)\n\n---\n*39 Quellen · 6 Suchen · 1 Runde · 1:49 min · Confidence 8/10*",
+    "metrics": {
+      "total_rounds": 1,
+      "total_elapsed_s": 109.46,
+      "final_confidence": 8,
+      "total_queries": 6,
+      "total_citations": 39,
+      "total_context_blocks": 6,
+      "competing_events_detected": false,
+      "stagnation_detected": false,
+      "total_prompt_tokens": 19057,
+      "total_completion_tokens": 13068,
+      "falsification_triggered": false,
+      "evidence_consistency_final": 9,
+      "evidence_sufficiency_final": 7,
+      "utility_scores": [
+        0.71
+      ],
+      "utility_stop_triggered": false,
+      "plateau_stop_triggered": false
+    },
+    "iteration_logs": [
+      {
+        "node": "classify",
+        "duration_s": 11.151,
+        "decision": "SEARCH",
+        "lang": "de",
+        "search_lang": "en",
+        "recency": "month",
+        "type": "news"
+      },
+      {
+        "node": "decompose",
+        "duration_s": 3.223,
+        "sub_questions": [
+          "Welche konkreten rechtlichen Konsequenzen hat der EU AI Act für Open-Source-KI-Modelle wie LLaMA, Mistral und DeepSeek seit dem schrittweisen Inkrafttreten ab Februar 2025?",
+          "Welche Ausnahmen oder Sonderregelungen sieht der EU AI Act speziell für Open-Source-KI-Modelle vor?",
+          "Haben Unternehmen gegen den EU AI Act geklagt, insbesondere im Zusammenhang mit Open-Source-KI-Modellen, Stand February 2026?"
+        ],
+        "sub_question_count": 3
+      },
+      {
+        "node": "plan",
+        "duration_s": 3.943,
+        "round": 0,
+        "new_queries": [
+          "EU AI Act open source AI models exemptions obligations 2025 2026",
+          "EU AI Act impact LLaMA Mistral DeepSeek compliance requirements general purpose AI",
+          "EU AI Act lawsuits legal challenges companies open source artificial intelligence 2026",
+          "EU AI Act GPAI open source exception free license obligations transparency",
+          "European Union AI regulation open source developers small enterprises compliance burden 2025",
+          "EU AI Act Article 53 open source model providers systemic risk obligations"
+        ],
+        "total_queries": 6
+      },
+      {
+        "node": "search",
+        "duration_s": 20.379,
+        "round": 0,
+        "queries_executed": 6,
+        "queries": [
+          "EU AI Act open source AI models exemptions obligations 2025 2026",
+          "EU AI Act impact LLaMA Mistral DeepSeek compliance requirements general purpose AI",
+          "EU AI Act lawsuits legal challenges companies open source artificial intelligence 2026",
+          "EU AI Act GPAI open source exception free license obligations transparency",
+          "European Union AI regulation open source developers small enterprises compliance burden 2025",
+          "EU AI Act Article 53 open source model providers systemic risk obligations"
+        ],
+        "sources_found": 6,
+        "total_citations": 39,
+        "context_blocks": 6,
+        "sources_summary": [
+          {
+            "query": "EU AI Act open source AI models exemptions obligations 2025 2026",
+            "summary": "- Der EU AI Act befreit Open-Source-KI-Systeme grundsätzlich von den Vorschriften, es sei denn, sie werden als hochriskant, verboten (Art. 5) oder als transparenzpflichtig (Art. 50) eingestuft.\n- Anbieter von Open-Source-GPAIMs sind gemäß Art. 53(2) von zwei Pflichten befreit: (a) technische Dokumentation und (b) Informationsweitergabe an nachgelagerte Integratoren, sofern die Lizenz bestimmte Kriterien erfüllt (öffentliche Parameter/Gewichte/Architektur/Nutzung, keine Monetarisierung).\n- Diese Befreiung gilt nicht für GPAIMs mit systemischem Risiko; für diese gelten alle Pflichten nach Art. 53.\n- Auch bei befreiten Open-Source-GPAIMs bleiben zwei Pflichten bestehen: eine Urheberrechts-Compliance-Richtlinie (Art. 53(1)(c)) und eine öffentliche Zusammenfassung der Trainingsdaten (Art. 53(1)(d)).\n- Nicht-EU-Anbieter von Open-Source-GPAIMs sind gemäß Art. 54(6) von der Pflicht befreit, einen EU-Vertreter zu benennen.\n- Open-Source-Drittanbieter-Tools (keine GPAIMs) sind gemäß Art. 25(4) von der Berichtspflicht gegenüber Anbietern von Hochrisikosystemen befreit.\n- Verbote nach Art. 5 traten am 2. Februar 2025 in Kraft; GPAIM-Pflichten gelten ab dem 2. August 2025 für neue Modelle; vor 2025 existierende GPAIMs müssen bis zum 2. August 2027 konform sein.\n- Monetarisierung (z. B. Gebührenerhebung) disqualifiziert ein Modell von der Open-Source-Befreiung; Namensnennung und gleiche Lizenzbedingungen sind hingegen zulässig.",
+            "urls": [
+              "https://openfuture.eu/observatory/aia-open-source",
+              "https://www.orrick.com/en/Insights/2024/09/The-EU-AI-Act-Application-to-Open-Source-Projects",
+              "https://www.arnoldporter.com/en/perspectives/advisories/2025/08/does-your-company-have-eu-ai-act-compliance-obligations",
+              "https://thelens.slaughterandmay.com/post/102kzax/what-do-the-open-source-exemptions-for-gpai-models-mean-for-you-the-eu-ai-act-gu",
+              "https://linuxfoundation.eu/newsroom/ai-act-explainer"
+            ]
+          },
+          {
+            "query": "EU AI Act impact LLaMA Mistral DeepSeek compliance requirements general purpose AI",
+            "summary": "- Der EU AI Act stuft LLaMA, Mistral und DeepSeek als General-Purpose AI (GPAI) Modelle ein, mit Compliance-Pflichten ab dem 2. August 2025 und vollständigen Hochrisiko-Regeln ab dem 2. August 2026.\n- Bei Nichteinhaltung drohen Bußgelder von bis zu 35 Millionen Euro oder 7 % des weltweiten Jahresumsatzes.\n- Verbotene Praktiken (z. B. Social Scoring, biometrische Echtzeit-Identifikation) gelten seit Februar 2025.\n- GPAI-Modelle, die vor dem 2. August 2025 auf den Markt gebracht wurden, sind durch eine Grandfathering-Klausel von sofortiger rückwirkender Compliance ausgenommen.\n- Die LLaMA-4-Lizenz von Meta untersagt die Nutzung durch EU-Einrichtungen, um GPAI-Regeln zu umgehen – eine Einschränkung, die bei LLaMA 2 und 3 nicht existierte.\n- DeepSeeks destillierte Modelle (R1 8B basierend auf LLaMA 3.1 8B; R1 14B basierend auf Qwen 2.5 14B) zeigen in der COMPL-AI-Bewertung die niedrigsten Werte bei Cybersicherheit (Goal Hijacking, Prompt Leakage) und unterdurchschnittliche Bias-Werte, schneiden aber bei Toxizitätsminderung gut ab.\n- COMPL-AI wurde von ETH Zürich, INSAIT und LatticeFlow AI entwickelt und übersetzt die Anforderungen des AI Acts in 27 Benchmarks zur GPAI-Bewertung.\n- Italien hat DeepSeek blockiert, unter anderem wegen DSGVO-Bedenken im Zusammenhang mit Datenhaltung in China.",
+            "urls": [
+              "https://www.digitalapplied.com/blog/eu-ai-act-2026-compliance-european-business-guide",
+              "https://www.eenewseurope.com/en/latticeflow-ai-finds-eu-ai-act-compliance-gaps-in-deepseek-models",
+              "https://cee.pwc.com/eu-ai-act-compliance-and-transformation.html",
+              "https://latticeflow.ai/news/deepseek-eu-ai-act-compliance-evaluation",
+              "https://digital-strategy.ec.europa.eu/en/policies/regulatory-framework-ai"
+            ]
+          },
+          {
+            "query": "EU AI Act lawsuits legal challenges companies open source artificial intelligence 2026",
+            "summary": "- Der EU AI Act trat am 1. August 2024 in Kraft.\n- Wichtige Fristen für Transparenz- und Hochrisiko-Regeln liegen im August 2026, volle Hochrisiko-Compliance im August 2027.\n- Die EU-Kommission plant 17 delegierte/implementierende Rechtsakte; Nichtigkeitsklagen dagegen sind nach Artikel 263 AEUV möglich.\n- xAI reichte im Dezember 2025 eine Klage gegen Kaliforniens Gesetz AB 2013 zu Trainingsdaten-Offenlegungspflichten ein.\n- GPAI-Modelle mit freien/offenen Lizenzen sind von technischer Dokumentation und Informationsweitergabe befreit, es sei denn, sie gelten als systemisches Risiko (z. B. >10^25 FLOPs).\n- Ein freiwilliger GPAI Code of Practice soll bis August 2026 vorliegen.\n- Der im November 2025 vorgeschlagene Digital Omnibus zielt darauf ab, Hochrisiko-Pflichten über August 2026 hinaus zu verschieben; er erfordert Parlamentszustimmung bis zum 2. August 2026.\n- Bei Verstößen gegen den AI Act drohen Bußgelder von bis zu 35 Millionen Euro oder 7 % des weltweiten Jahresumsatzes.",
+            "urls": [
+              "https://digital-strategy.ec.europa.eu/en/policies/regulatory-framework-ai",
+              "https://www.gunder.com/en/news-insights/insights/2026-ai-laws-update-key-regulations-and-practical-guidance",
+              "https://linuxfoundation.eu/newsroom/ai-act-explainer",
+              "https://www.bakerdonelson.com/2026-ai-legal-forecast-from-innovation-to-compliance",
+              "https://www.mayerbrown.com/en/insights/publications/2025/11/legal-grounds-for-challenging-the-overreach-of-european-regulations-on-us-based-companies"
+            ]
+          },
+          {
+            "query": "EU AI Act GPAI open source exception free license obligations transparency",
+            "summary": "- Unter dem EU AI Act sind Anbieter von GPAI-Modellen mit qualifizierender Open-Source-Lizenz von bestimmten Pflichten befreit, müssen aber eine Zusammenfassung der Trainingsdaten veröffentlichen und die EU-Urheberrechtsrichtlinie einhalten.\n- GPAI-Modelle mit systemischen Risiken (typischerweise trainiert mit über 10²⁵ FLOPs) unterliegen vollen Pflichten einschließlich Modellevaluierungen, Vorfallmeldungen und Cybersicherheit.\n- Eine qualifizierende Lizenz muss Nutzung, Zugang, Modifikation und Weiterverbreitung ohne restriktive Bedingungen wie Nicht-Kommerzialität, Weiterverbreitungsverbote oder Nutzergrößenbeschränkungen erlauben.\n- Die Befreiungen entfallen, wenn das Modell monetarisiert wird, etwa durch kommerzielle Lizenzierung, kostenpflichtige Dienste, Werbung oder Nutzerdatenverarbeitung.\n- Die GPAI-Pflichten gelten ab dem 2. August 2025.\n- Der freiwillige GPAI Code of Practice soll im Mai 2025 vorliegen und kann zur Compliance-Demonstration genutzt werden, bis harmonisierte Standards existieren.\n- Im Juli 2025 veröffentlichte Leitlinien klären den Anwendungsbereich, einschließlich eines Schwellenwerts von 10²³ FLOPs für die GPAI-Klassifizierung (spezialisierte Modelle ausgenommen).\n- Open-Source-Status bietet bei GPAI-Modellen mit systemischem Risiko keine Befreiungen; volle Pflichten nach Artikeln 53 und 55 gelten.",
+            "urls": [
+              "https://artificialintelligenceact.eu/gpai-guidelines-overview",
+              "https://linuxfoundation.eu/newsroom/ai-act-explainer",
+              "https://digital-strategy.ec.europa.eu/en/policies/guidelines-gpai-providers",
+              "https://artificialintelligenceact.eu/high-level-summary",
+              "https://artificialintelligenceact.eu/code-of-practice-overview"
+            ]
+          },
+          {
+            "query": "European Union AI regulation open source developers small enterprises compliance burden 2025",
+            "summary": "- **GPAI-Modelle unter freien/Open-Source-Lizenzen** sind laut Artikel 53(2) von technischer Dokumentation und Informationspflichten gegenüber nachgelagerten Integratoren befreit, müssen aber Urheberrechtsrichtlinien und öffentliche Zusammenfassungen der Trainingsdaten einhalten (Artikel 53(1d)).\n- **GPAI-Modelle mit systemischem Risiko** müssen auch bei Open-Source-Freigabe alle Pflichten erfüllen, darunter Vorfallmeldung und Cybersicherheit (Artikel 55(1c-d)).\n- **Verbotene KI-Praktiken** (Artikel 5) gelten seit dem **2. Februar 2025**; GPAI-Pflichten treten am **2. August 2025** in Kraft; Hochrisiko-Pflichten (Artikel 6) ab **2. August 2026**.\n- **Bußgelder bei Nichteinhaltung** betragen bis zu **35 Millionen Euro oder 7 % des weltweiten Jahresumsatzes**.\n- **KMU-Definition** im Kontext des AI Acts: weniger als **250 Beschäftigte**, unter **50 Mio. € Umsatz** oder unter **43 Mio. € Bilanzsumme**.\n- **KMU erhalten priorisierten, kostenfreien Zugang zu regulatorischen Sandboxes** zum Testen von KI-Systemen, mit vereinfachten Verfahren und Gebührenbefreiungen.\n- **Der freiwillige Code of Practice für GPAI** war bis zum **2. Mai 2025** fällig und enthält Transparenzvorlagen zur Unterstützung der Compliance.\n- **Open-Source-Drittanbieter-Tools**, die keine GPAI-Modelle sind und in Hochrisikosysteme integriert werden, sind laut Artikel 25(4) von Dokumentationspflichten gegenüber nachgelagerten Anbietern befreit.",
+            "urls": [
+              "https://linuxfoundation.eu/newsroom/ai-act-explainer",
+              "https://artificialintelligenceact.eu/small-businesses-guide-to-the-ai-act",
+              "https://www.gtlaw.com/en/insights/2025/7/eu-ai-act-key-compliance-considerations-ahead-of-august-2025",
+              "https://www.modelop.com/ai-governance/ai-regulations-standards/eu-ai-act",
+              "https://www.artificial-intelligence-act.com"
+            ]
+          },
+          {
+            "query": "EU AI Act Article 53 open source model providers systemic risk obligations",
+            "summary": "- **Artikel 53(2) EU AI Act** befreit Open-Source-GPAI-Anbieter nur von den Pflichten (a) technische Dokumentation und (b) Informationspflicht gegenüber nachgelagerten Anbietern, **nicht** jedoch von den Pflichten (c) Urheberrechts-Policy und (d) Zusammenfassung der Trainingsdaten.\n- **Die Ausnahme nach Artikel 53(2) gilt nicht für GPAI-Modelle mit systemischen Risiken**; diese müssen alle Pflichten aus Artikel 53 vollständig erfüllen.\n- **Artikel 55** verpflichtet Anbieter von GPAI-Modellen mit systemischen Risiken zusätzlich zu Risikobewertungen, Vorfallmeldungen und Cybersicherheitsmaßnahmen.\n- **Die Urheberrechts-Policy (Art. 53(1)(c))** muss im Einklang mit der **Richtlinie (EU) 2019/790** stehen und den Stand der Technik berücksichtigen.\n- **Die Zusammenfassung der Trainingsdaten (Art. 53(1)(d))** muss anhand einer Vorlage des AI Office veröffentlicht werden; diese Vorlage wurde Stand **Januar 2025** entwickelt.\n- **Die Regelungen gelten ab dem 2. August 2025** für Anbieter, die Modelle auf dem EU-Markt bereitstellen, einschließlich extraterritorialer Anwendung.\n- **Der General-Purpose AI Code of Practice** soll im **Juli 2025** auf Angemessenheit geprüft werden und kann zusammen mit harmonisierten Standards eine Konformitätsvermutung begründen.\n- **Erwägungsgrund 112** weist darauf hin, dass bei systemischen Risiken Maßnahmen möglicherweise bereits **vor der Veröffentlichung** eines Modells ergriffen werden müssen.",
+            "urls": [
+              "https://linuxfoundation.eu/newsroom/ai-act-explainer",
+              "https://artificialintelligenceact.eu/article/53",
+              "https://digital-strategy.ec.europa.eu/en/faqs/general-purpose-ai-models-ai-act-questions-answers",
+              "https://prighter.com/tr/resources/ai-act-obligations-for-general-purpose-ai-models",
+              "https://www.activemind.legal/legislation/ai-act/article-53"
+            ]
+          }
+        ]
+      },
+      {
+        "node": "evaluate",
+        "duration_s": 8.294,
+        "round": 1,
+        "confidence": 8,
+        "gaps": "Es fehlen spezifische Informationen darüber, ob Unternehmen direkt gegen den EU AI Act in Bezug auf Open-Source-KI-Modelle geklagt haben – die Recherche zeigt lediglich xAIs Klage gegen ein kalifornisches Gesetz (AB 2013) und allgemeine Hinweise auf Klagemöglichkeiten nach Art. 263 AEUV, aber keine konkreten Klagen gegen den AI Act selbst bezüglich Open-Source-Regelungen.",
+        "competing_events": "",
+        "stagnation_detected": false,
+        "falsification_triggered": false,
+        "evidence_consistency": 9,
+        "evidence_sufficiency": 7,
+        "utility_score": 0.71,
+        "utility_stop": false,
+        "plateau_stop": false,
+        "context_blocks": 6,
+        "done": true,
+        "reasoning": "STATUS: SUFFICIENT\nCONFIDENCE: 8\nGAPS: Es fehlen spezifische Informationen darüber, ob Unternehmen direkt gegen den EU AI Act in Bezug auf Open-Source-KI-Modelle geklagt haben – die Recherche zeigt lediglich xAIs Klage gegen ein kalifornisches Gesetz (AB 2013) und allgemeine Hinweise auf Klagemöglichkeiten nach Art. 263 AEUV, aber keine konkreten Klagen gegen den AI Act selbst bezüglich Open-Source-Regelungen.\nCONTRADICTIONS: Nein – die Quellen sind weitgehend konsistent in Bezug auf die Open-Source-Befreiungen (Art. 53(2)), die verbleibenden Pflichten (Urheberrechts-Policy, Trainingsdaten-Zusammenfassung), die Ausnahme bei systemischem Risiko und die Zeitpläne. Kleinere Unterschiede bestehen bei der Angabe des Datums für den Code of Practice (Mai 2025 vs. Juli 2025), was aber verschiedene Meilensteine (Veröffentlichung vs. Prüfung) betrifft.\nIRRELEVANT: Keine\nCOMPETING_EVENTS: Keine – die Frage bezieht sich eindeutig auf den EU AI Act mit schrittweisem Inkrafttreten ab Februar 2025, was durch alle Blöcke konsistent bestätigt wird (Art. 5-Verbote ab 2. Februar 2025, GPAI-Pflichten ab 2. August 2025, Hochrisiko ab 2. August 2026).\nEVIDENCE_CONSISTENCY: 9\nEVIDENCE_SUFFICIENCY: 7"
+      },
+      {
+        "node": "answer",
+        "duration_s": 62.465,
+        "answer_length": 12858,
+        "citation_count": 39,
+        "rounds": 1,
+        "elapsed_total_s": 109.5,
+        "confidence": 8
+      }
+    ]
+  }
+}

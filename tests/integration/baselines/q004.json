@@ -1,0 +1,263 @@
+{
+  "meta": {
+    "timestamp": "",
+    "endpoint": "http://127.0.0.1:5100",
+    "reasoning_model": "claude-opus-4.6-agent",
+    "search_model": "perplexity-sonar-pro-agent",
+    "summarize_model": "claude-opus-4.6-agent",
+    "agent_version": "ok",
+    "total_elapsed_s": 810.58,
+    "promoted_at": ""
+  },
+  "result": {
+    "question_id": "q004",
+    "question": "Sollen zahnärztliche Leistungen zukünftig privatisiert werden? In welche Richtung gehen die Diskussionen?",
+    "category": "news",
+    "answer": "## Kurzfazit\n\nDie Privatisierung zahnärztlicher Leistungen ist politisch vom Tisch – zumindest in dieser Legislaturperiode. Der **CDU-Wirtschaftsrat** hatte Mitte Januar 2026 die vollständige Streichung zahnärztlicher Leistungen aus dem GKV-Katalog gefordert, doch die **Bundesregierung unter Gesundheitsministerin Nina Warken (CDU)** erteilte dem Vorschlag eine klare Absage [1](https://www.hausaerztlichepraxis.digital/politik/regierung-erteilt-privatisierung-der-zahnmedizin-eine-absage-174386.html) [6](https://www.aok.de/pp/gg/update/warken-schliesst-streichung-von-zahnleistungen-aus). Die Debatte offenbart jedoch tieferliegende Spannungen zwischen GKV-Finanzierungsdruck und dem Solidarprinzip, die mittelfristig nicht verschwinden werden.\n\n---\n\n## Kernaussagen\n\n- **Der CDU-Wirtschaftsrat** bezifferte die moegliche Einsparung durch eine Privatisierung auf **17–18 Milliarden Euro jaehrlich** und bettete den Vorschlag in eine breitere Agenda zur Senkung der Sozialabgaben ein [46](https://www.zm-online.de/news/detail/cdu-wirtschaftsrat-fordert-ausgliederung-der-zahnmedizin-aus-der-gkv) [23](https://das-unternehmer-wissen.de/finanzen/reform-hammer-2026-cdu-wirtschaftsrat-will-zahnarzt-aus-gkv-streichen-und-sozialleistungen-kappen).\n\n- **Die Ablehnung war parteiuebergreifend:** SPD, Gruene, Linke, die CDA (Arbeitnehmerflügel der CDU) sowie KZBV, BZÄK und der Verband der Ersatzkassen (vdek) wiesen den Vorschlag zurueck [55](https://www.spiegel.de/politik/deutschland/cdu-wirtschaftsrat-zahnarztkosten-cdu-sozialpolitiker-und-gruene-lehnen-vorschlag-ab-a-8fa99bab-7f76-49b3-ba7e-bcf79b843cc9) [7](https://www.vdek.com/presse/pressemitteilungen/2026/cdu-wirtschaftsrat-abschaffung-zahnarzt-leistungen.html).\n\n- **Rund 92 % der Bevoelkerung** lehnen laut Umfragen eine Privatisierung zahnärztlicher Leistungen ab [9](https://www.procontra-online.de/recht-politik/artikel/steile-thesen-2026-zahnschutz-wird-privatsache).\n\n- **Der zahnärztliche Anteil an den GKV-Ausgaben ist seit Jahren ruecklaeufig:** von **8,7 %** (2003) auf **5,7 %** (Q1–Q3 2025) – ein Beleg fuer die Wirksamkeit des praevention-orientierten Ansatzes [12](https://www.vdek.com/presse/daten/d_ausgaben_zahnaerztliche_behandlung.html) [54](https://www.zm-online.de/news/detail/zahnmedizin-zeigt-weg-zu-stabilem-gesundheitswesen-auf).\n\n- **Die GKV verzeichnete 2024 Verluste von 6 Milliarden Euro**, bei Zusatzbeitraegen von **2,5–2,92 %** im Jahr 2025 – der Finanzierungsdruck bleibt der eigentliche Treiber der Debatte [10](https://www.septodont.de/media-content/btp-gkv-finanzierung-beist-sich-schwarz-rot-bei-der-stabilisierung-die-zahne-aus).\n\n- **Mediziner warnen:** Der Zahnstatus ist einer der **deutlichsten Marker sozialer Ungleichheit**; unterlassene Vorsorge fuehrt zu Folgeerkrankungen wie Herzinfarkten und Diabetes [57](https://www.wiwo.de/politik/deutschland/sozialstaat-debatte-der-zahnstatus-ist-einer-der-deutlichsten-marker-sozialer-ungleichheit/100196757.html) [5](https://www.apotheken-umschau.de/gesundheitspolitik/zahnarzt-privat-zahlen-medizin-warnt-deutlich-vor-cdu-vorschlag-1471963.html).\n\n- **Eine Finanzkommission** soll bis Ende Maerz 2026 Einsparpotenziale im GKV-System pruefen – zahnärztliche Leistungen koennten dabei erneut auf den Pruefstand kommen [8](https://www.gelbe-liste.de/politik-verbaende/bundesregierung-cdu-zahnarztkosten).\n\n---\n\n## Detailanalyse\n\n### Der Vorstoss des CDU-Wirtschaftsrats und seine Motive\n\nDer CDU-Wirtschaftsrat – ein einflussreicher, aber parteilich nicht weisungsgebundener Verband von Unternehmern – veroeffentlichte im Januar 2026 seine **„Agenda fuer Arbeitnehmer in Deutschland\"**. Darin wurde gefordert, zahnärztliche Leistungen vollstaendig aus dem GKV-Leistungskatalog zu streichen und durch private Absicherung zu ersetzen [46](https://www.zm-online.de/news/detail/cdu-wirtschaftsrat-fordert-ausgliederung-der-zahnmedizin-aus-der-gkv). Das Kalkuel: Durch die Einsparung von geschaetzten **17–18 Milliarden Euro** koennten die Sozialabgaben gesenkt und die Lohnnebenkosten fuer Arbeitgeber reduziert werden [23](https://das-unternehmer-wissen.de/finanzen/reform-hammer-2026-cdu-wirtschaftsrat-will-zahnarzt-aus-gkv-streichen-und-sozialleistungen-kappen). Die SPD-Fraktion kritisierte dies als Versuch, **Arbeitgeber aus ihrem Beitrag zur Krankenversicherung herauszunehmen** [25](https://www.deutschlandfunk.de/bundesregierung-plant-keine-privatisierung-von-zahnarztkosten-100.html). Bemerkenswert ist, dass der Vorschlag auch innerhalb der CDU auf massiven Widerstand stiess: Gesundheitsministerin Warken und der Arbeitnehmerflügel CDA distanzierten sich umgehend [6](https://www.aok.de/pp/gg/update/warken-schliesst-streichung-von-zahnleistungen-aus).\n\n### Warum die Zahnmedizin als Sparziel ins Visier geraet\n\nDie GKV steht unter erheblichem Finanzierungsdruck. **2024 beliefen sich die Verluste auf 6 Milliarden Euro**, und die Zusatzbeitraege stiegen 2025 auf bis zu **2,92 %** [10](https://www.septodont.de/media-content/btp-gkv-finanzierung-beist-sich-schwarz-rot-bei-der-stabilisierung-die-zahne-aus). Die zahnärztlichen Gesamtausgaben lagen 2024 bei rund **18,2 Milliarden Euro** [12](https://www.vdek.com/presse/daten/d_ausgaben_zahnaerztliche_behandlung.html) – auf den ersten Blick ein grosser Posten. Allerdings zeigt der langfristige Trend das Gegenteil eines Kostenproblems: Der Anteil zahnärztlicher Leistungen an den GKV-Gesamtausgaben sank von **8,7 % (2003) auf 5,7 % (2025)**, waehrend die GKV-Gesamtausgaben 2025 um **7,8 %** stiegen, der zahnärztliche Bereich aber nur um **3,9 %** [54](https://www.zm-online.de/news/detail/zahnmedizin-zeigt-weg-zu-stabilem-gesundheitswesen-auf) [22](https://www.zwp-online.info/zwpnews/dental-news/branchenmeldungen/effizient-wirtschaftlich-vorbildlich-zahnmedizin-zeigt-weg-zu-stabilem-gesundheitswesen-auf). Die Einfuehrung des **befundbezogenen Festzuschusssystems 2005** hatte die Zahnersatz-Ausgaben sogar um **33,7 %** gesenkt [14](https://www.aok.de/pp/gg/daten-und-analysen/zahnersatz). Die KZBV und BZÄK bezeichnen den Vorschlag daher als **„medizinisch falsch, unsozial und oekonomisch kurzsichtig\"** [50](https://www.kzvn.de/2026/02/06/zahnmedizin-muss-bestandteil-der-gesetzlichen-krankenversicherung-bleiben).\n\n### Soziale und medizinische Risiken einer Privatisierung\n\nDie gewichtigsten Gegenargumente sind medizinischer und sozialer Natur. **Gruenen-Gesundheitsexperte Janosch Dahmen** verwies darauf, dass der Zahnstatus einer der deutlichsten Marker sozialer Ungleichheit sei [57](https://www.wiwo.de/politik/deutschland/sozialstaat-debatte-der-zahnstatus-ist-einer-der-deutlichsten-marker-sozialer-ungleichheit/100196757.html). Bereits heute tragen Patienten erhebliche Eigenanteile: **Implantate kosten ab 1.500 Euro** und sind reine Privatleistung, bei Zahnersatz uebernehmen Kassen je nach Bonusheft nur **60–75 %** der Regelversorgungskosten [44](https://www.stern.de/wirtschaft/zahnarztkosten-selbst-zahlen--was-patienten-heute-schon-zahlen-muessen-37106828.html) [11](https://www.kzbv.de/zahnaerzte/rechtsgrundlagen/festzuschuesse/festzuschussbetraege). Eine vollstaendige Privatisierung wuerde insbesondere Geringverdiener treffen, die heute ueber eine **Haertefallregelung** Anspruch auf **100 % Kostenubernahme** fuer Zahnersatz haben [59](https://www.dasinvestment.com/verbraucherzentrale-nrw-zahnersatz-kostenlos).\n\nDas britische Beispiel dient als Warnung: Dort schoben **2024 rund 40 % der einkommensschwachen Bevoelkerung** Zahnbehandlungen wegen niedriger oeffentlicher Zuschuesse auf [56](https://web.de/magazine/politik/inland/zahnarzt-privatversicherte-cdu-wirtschaftsrat-sorgt-empoerung-41854438). Unterlassene Zahnvorsorge fuehrt nachweislich zu schwerwiegenden Folgeerkrankungen – **Parodontitis** erhoet das Risiko fuer Herzinfarkte, Schlaganfaelle und Diabetes erheblich [5](https://www.apotheken-umschau.de/gesundheitspolitik/zahnarzt-privat-zahlen-medizin-warnt-deutlich-vor-cdu-vorschlag-1471963.html). Die vermeintlichen Einsparungen wuerden durch hoehere Behandlungskosten in anderen Bereichen der GKV teilweise wieder aufgezehrt.\n\n### Positionen der Fachverbaende und Koalitionsvertrag\n\nDie **KZBV** fordert in ihrer **Agenda Mundgesundheit** (Januar 2025) das Gegenteil einer Privatisierung: stabile Finanzierung fuer inhabergefuehrte Praxen, vollumfaengliche Verguetung von Praeventionsmassnahmen wie der Parodontitistherapie und Buerokratieabbau [19](https://www.kzbv.de/pressemitteilungen/zahnmedizinische-versorgung-zukunftsfest-machen). Die **DGZMK** hat mit ihrem Papier **„Perspektive Zahnmedizin 2030\"** aehnliche Positionen formuliert [17](https://www.dgzmk.de/aktuelles-karten?article=dgzmk-positionspapier-perspektive-zahnmedizin-2030). Der **Koalitionsvertrag** zwischen CDU/CSU und SPD erwaehnt Zahnaerzte nur an einer Stelle – bei der Staerkung der Laenderbeteiligung in der **Bedarfsplanung** – und enthaelt keinerlei Hinweise auf Leistungskuerzungen [26](https://www.zwp-online.info/zwpnews/dental-news/branchenmeldungen/zum-koalitionsvertrag-aus-medizinrechtlicher-und-gesundheitspolitischer-sicht) [28](https://www.cmshs-bloggt.de/rechtsthemen/koalitionsvertrag-2025/der-gesundheitssektor-im-koalitionsvertrag). Ein geplantes **iMVZ-Regulierungsgesetz** soll zudem investorenbetriebene Medizinische Versorgungszentren transparenter gestalten [24](https://www.zm-online.de/news/detail/union-und-spd-wollen-imvz-per-gesetz-regulieren).\n\n---\n\n## Einordnung und Ausblick\n\nDie Debatte um eine Privatisierung zahnärztlicher Leistungen ist politisch entschieden – vorerst. Der Vorstoss des CDU-Wirtschaftsrats war primaer ein **sozialpolitisches Signalexperiment**, das die Schmerzgrenzen der Koalition austesten sollte, und ist an der breiten Ablehnungsfront gescheitert. Entscheidend wird jedoch, was die **Finanzkommission bis Ende Maerz 2026** empfiehlt [8](https://www.gelbe-liste.de/politik-verbaende/bundesregierung-cdu-zahnarztkosten). Sollte der GKV-Finanzierungsdruck weiter steigen, sind inkrementelle Anpassungen – etwa hoehere Eigenanteile oder eine Einschraenkung des Leistungskatalogs bei Zahnersatz – wahrscheinlicher als eine Komplett-Privatisierung. Die Zahnmedizin hat mit ihrem praevention-orientierten Modell und dem sinkenden Ausgabenanteil allerdings ein starkes Argument, dass sie eher Teil der Loesung als Teil des Problems ist [22](https://www.zwp-online.info/zwpnews/dental-news/branchenmeldungen/effizient-wirtschaftlich-vorbildlich-zahnmedizin-zeigt-weg-zu-stabilem-gesundheitswesen-auf).\n\n---\n\n**Quellen:** [1](https://www.hausaerztlichepraxis.digital/politik/regierung-erteilt-privatisierung-der-zahnmedizin-eine-absage-174386.html) | [5](https://www.apotheken-umschau.de/gesundheitspolitik/zahnarzt-privat-zahlen-medizin-warnt-deutlich-vor-cdu-vorschlag-1471963.html) | [6](https://www.aok.de/pp/gg/update/warken-schliesst-streichung-von-zahnleistungen-aus) | [7](https://www.vdek.com/presse/pressemitteilungen/2026/cdu-wirtschaftsrat-abschaffung-zahnarzt-leistungen.html) | [8](https://www.gelbe-liste.de/politik-verbaende/bundesregierung-cdu-zahnarztkosten) | [9](https://www.procontra-online.de/recht-politik/artikel/steile-thesen-2026-zahnschutz-wird-privatsache) | [10](https://www.septodont.de/media-content/btp-gkv-finanzierung-beist-sich-schwarz-rot-bei-der-stabilisierung-die-zahne-aus) | [12](https://www.vdek.com/presse/daten/d_ausgaben_zahnaerztliche_behandlung.html) | [14](https://www.aok.de/pp/gg/daten-und-analysen/zahnersatz) | [19](https://www.kzbv.de/pressemitteilungen/zahnmedizinische-versorgung-zukunftsfest-machen) | [22](https://www.zwp-online.info/zwpnews/dental-news/branchenmeldungen/effizient-wirtschaftlich-vorbildlich-zahnmedizin-zeigt-weg-zu-stabilem-gesundheitswesen-auf) | [23](https://das-unternehmer-wissen.de/finanzen/reform-hammer-2026-cdu-wirtschaftsrat-will-zahnarzt-aus-gkv-streichen-und-sozialleistungen-kappen) | [25](https://www.deutschlandfunk.de/bundesregierung-plant-keine-privatisierung-von-zahnarztkosten-100.html) | [46](https://www.zm-online.de/news/detail/cdu-wirtschaftsrat-fordert-ausgliederung-der-zahnmedizin-aus-der-gkv) | [54](https://www.zm-online.de/news/detail/zahnmedizin-zeigt-weg-zu-stabilem-gesundheitswesen-auf) | [55](https://www.spiegel.de/politik/deutschland/cdu-wirtschaftsrat-zahnarztkosten-cdu-sozialpolitiker-und-gruene-lehnen-vorschlag-ab-a-8fa99bab-7f76-49b3-ba7e-bcf79b843cc9) | [57](https://www.wiwo.de/politik/deutschland/sozialstaat-debatte-der-zahnstatus-ist-einer-der-deutlichsten-marker-sozialer-ungleichheit/100196757.html)\n\n---\n*60 Quellen · 9 Suchen · 2 Runden · 2:14 min · Confidence 9/10*",
+    "metrics": {
+      "total_rounds": 2,
+      "total_elapsed_s": 134.96,
+      "final_confidence": 9,
+      "total_queries": 9,
+      "total_citations": 60,
+      "total_context_blocks": 8,
+      "competing_events_detected": false,
+      "stagnation_detected": false,
+      "total_prompt_tokens": 34446,
+      "total_completion_tokens": 17150,
+      "falsification_triggered": false,
+      "evidence_consistency_final": 9,
+      "evidence_sufficiency_final": 9,
+      "utility_scores": [
+        0.77,
+        0.65
+      ],
+      "utility_stop_triggered": false,
+      "plateau_stop_triggered": false
+    },
+    "iteration_logs": [
+      {
+        "node": "classify",
+        "duration_s": 7.678,
+        "decision": "SEARCH",
+        "lang": "de",
+        "search_lang": "de",
+        "recency": "month",
+        "type": "news"
+      },
+      {
+        "node": "decompose",
+        "duration_s": 2.35,
+        "sub_questions": [
+          "Diskussion Privatisierung zahnärztliche Leistungen Deutschland aktuelle Debatte",
+          "Zukunft Zahnmedizin gesetzliche Krankenversicherung Reform Richtung Diskussion"
+        ],
+        "sub_question_count": 2
+      },
+      {
+        "node": "plan",
+        "duration_s": 5.315,
+        "round": 0,
+        "new_queries": [
+          "Privatisierung zahnärztliche Leistungen Deutschland Debatte 2025 2026 Pro Contra",
+          "Reform Zahnersatz gesetzliche Krankenversicherung GKV Eigenanteil Entwicklung",
+          "Kassenzahnärztliche Vereinigung KZBV Positionspapier Zukunft Zahnmedizin Finanzierung",
+          "FDP CDU SPD Parteien Zahnmedizin Privatisierung Gesundheitspolitik Koalitionsvertrag 2025",
+          "Niederlande Schweiz Modell Zahnbehandlung privat Versicherung Vergleich Deutschland",
+          "Zweiklassenmedizin Zahnarzt Selbstzahler Kassenpatienten Zugang Versorgung Kritik"
+        ],
+        "total_queries": 6
+      },
+      {
+        "node": "search",
+        "duration_s": 19.869,
+        "round": 0,
+        "queries_executed": 6,
+        "queries": [
+          "Privatisierung zahnärztliche Leistungen Deutschland Debatte 2025 2026 Pro Contra",
+          "Reform Zahnersatz gesetzliche Krankenversicherung GKV Eigenanteil Entwicklung",
+          "Kassenzahnärztliche Vereinigung KZBV Positionspapier Zukunft Zahnmedizin Finanzierung",
+          "FDP CDU SPD Parteien Zahnmedizin Privatisierung Gesundheitspolitik Koalitionsvertrag 2025",
+          "Niederlande Schweiz Modell Zahnbehandlung privat Versicherung Vergleich Deutschland",
+          "Zweiklassenmedizin Zahnarzt Selbstzahler Kassenpatienten Zugang Versorgung Kritik"
+        ],
+        "sources_found": 6,
+        "total_citations": 45,
+        "context_blocks": 6,
+        "sources_summary": [
+          {
+            "query": "Privatisierung zahnärztliche Leistungen Deutschland Debatte 2025 2026 Pro Contra",
+            "summary": "- **Februar 2026:** Ein Positionspapier des CDU-Wirtschaftsrats forderte die Streichung zahnärztlicher Leistungen aus dem GKV-Katalog.\n- **Ministerin Nina Warken (CDU)** sowie die Bundesregierung lehnten den Vorschlag ab.\n- **GKV-Ausgaben für Zahnbehandlungen bis Q3 2025:** 10,5 Milliarden Euro, entsprechend ca. 5,7 % der Gesamtausgaben.\n- **Anteil zahnärztlicher Leistungen an GKV-Ausgaben:** 8,7 % (2003), 6,9 % (2013), 6,1 % (2023), 5,7 % (Q1–Q3 2025) – rückläufiger Trend.\n- **Laut CDU-Wirtschaftsrat** würde die Streichung jährlich 17–18 Milliarden Euro einsparen.\n- **Kritik kam parteiübergreifend** von SPD, Grünen, Linken und CDA sowie von KZBV, BZÄK und vdek.\n- **Eine Finanzkommission** soll Einsparpotenziale bis Ende März 2026 prüfen.\n- **Contra-Argument:** Privatisierung gefährde das Solidarprinzip und könne zu Folgekosten durch unterlassene Vorsorge führen (z. B. Herzkrankheiten, Diabetes).",
+            "urls": [
+              "https://www.hausaerztlichepraxis.digital/politik/regierung-erteilt-privatisierung-der-zahnmedizin-eine-absage-174386.html",
+              "https://www.deutschlandfunk.de/bundesregierung-plant-keine-privatisierung-von-zahnarztkosten-102.html",
+              "https://www.implantate.com/news/sollen-zahnbehandlungen-kassenleistungen-bleiben-oder-den-zahnarzt-selbst-zahlen.html",
+              "https://www.cash-online.de/a/lauterbach-warnt-vor-privatisierung-von-zahnarztkosten-711086",
+              "https://www.apotheken-umschau.de/gesundheitspolitik/zahnarzt-privat-zahlen-medizin-warnt-deutlich-vor-cdu-vorschlag-1471963.html"
+            ]
+          },
+          {
+            "query": "Reform Zahnersatz gesetzliche Krankenversicherung GKV Eigenanteil Entwicklung",
+            "summary": "- Seit 2005 gilt in der GKV ein befundbezogenes Festzuschusssystem für Zahnersatz, das in der Regelversorgung 60 % der durchschnittlichen Kosten abdeckt (bis zu 75 % bei lückenlos geführtem Bonusheft).\n- Ab 1. Januar 2026 steigt der ZE-Punktwert für Zahnersatz um 4,78 % auf 1,1844 €.\n- Die Einführung des Festzuschusssystems 2005 führte zu einem Ausgabenrückgang um 33,7 % (von 3,67 auf 2,43 Mrd. €).\n- Die Zahl der Zahnersatzfälle sank langfristig von 9,78 Mio. (2015) auf 7,74 Mio., während die Ausgaben durch Anpassungen auf ca. 4,17 Mrd. € stiegen.\n- Zahnärztliche Leistungen inklusive Zahnersatz machen ca. 5,6–5,8 % der GKV-Gesamtausgaben aus; 2024 lagen die Gesamtausgaben für zahnärztliche Leistungen bei 18,2 Mrd. €.\n- Der CDU-Wirtschaftsrat schlug 2026 vor, Zahnleistungen komplett zu privatisieren (geschätzte Einsparung 18 Mrd. €); dieser Vorschlag wurde u. a. von Gesundheitsministerin Nina Warken (CDU) und laut Angaben 92 % der Bevölkerung abgelehnt.\n- Die GKV verzeichnete 2024 Verluste von 6 Mrd. €; die Zusatzbeiträge lagen 2025 bei 2,5–2,92 %.\n- Ab 2003 galt eine Mindestzuzahlung von 10 % für Zuzahlungen in der GKV.",
+            "urls": [
+              "https://www.procontra-online.de/recht-politik/artikel/steile-thesen-2026-zahnschutz-wird-privatsache",
+              "https://www.septodont.de/media-content/btp-gkv-finanzierung-beist-sich-schwarz-rot-bei-der-stabilisierung-die-zahne-aus",
+              "https://www.kzbv.de/zahnaerzte/rechtsgrundlagen/festzuschuesse/festzuschussbetraege",
+              "https://www.vdek.com/presse/daten/d_ausgaben_zahnaerztliche_behandlung.html",
+              "https://www.handelsblatt.com/politik/deutschland/cdu-zahnbehandlung-bleibt-kassenleistung-warum-das-kosten-spart/100196689.html"
+            ]
+          },
+          {
+            "query": "Kassenzahnärztliche Vereinigung KZBV Positionspapier Zukunft Zahnmedizin Finanzierung",
+            "summary": "- Die KZBV hat kein explizit betiteltes Positionspapier \"Zukunft Zahnmedizin Finanzierung\" veröffentlicht.\n- Die KZBV formuliert in ihrer **Agenda Mundgesundheit** (Januar 2025) Positionen zur Finanzierung der Zahnmedizin im GKV-System.\n- Laut KZBV hat der präventiv ausgerichtete Ansatz den Anteil zahnärztlicher Leistungen an den GKV-Ausgaben seit 2001 um über 30 % gesenkt.\n- Der aktuelle Anteil zahnärztlicher Leistungen an den GKV-Gesamtausgaben liegt laut KZBV bei ca. 5,7–5,8 %.\n- Die Agenda Mundgesundheit fasst Forderungen der KZBV für die **21. Legislaturperiode** zusammen.\n- Die **DGZMK** hat ein Papier mit dem Titel **\"Perspektive Zahnmedizin 2030\"** veröffentlicht.\n- Die KZBV kritisiert kurzsichtige Kostendämpfungspolitik und fordert stabile Finanzierung für inhabergeführte Praxen sowie Bürokratieabbau.\n- Die KZBV fordert die vollumfängliche Vergütung von Präventionsmaßnahmen wie der Parodontitistherapie als Früherkennung.",
+            "urls": [
+              "https://www.dgzmk.de/aktuelles-karten?article=dgzmk-positionspapier-perspektive-zahnmedizin-2030",
+              "https://www.bzaek.de/gesundheitspolitische-positionen-zur-bundestagswahl-2025.html",
+              "https://www.kzbv.de/pressemitteilungen/zahnmedizinische-versorgung-zukunftsfest-machen",
+              "https://www.septodont.de/media-content/btp-gkv-finanzierung-beist-sich-schwarz-rot-bei-der-stabilisierung-die-zahne-aus",
+              "https://www.iww.de/zr/allgemeine-zahnheilkunde/positionspapier-dgzmk-beschreibt-perspektive-zahnmedizin2030-f134717"
+            ]
+          },
+          {
+            "query": "FDP CDU SPD Parteien Zahnmedizin Privatisierung Gesundheitspolitik Koalitionsvertrag 2025",
+            "summary": "- Der **CDU-Wirtschaftsrat** veröffentlichte Mitte **Januar 2026** ein Positionspapier, das die Streichung von Zahnarztleistungen aus der GKV forderte.\n- Ein **Regierungssprecher** lehnte diese Vorschläge ab und stellte klar, dass derartige Pläne nicht existierten.\n- **Gesundheitsministerin Nina Warken (CDU)** widersprach der Forderung, Zahnbehandlungen zur Privatsache zu machen.\n- Der **Koalitionsvertrag** zwischen CDU/CSU und SPD erwähnt Zahnärzte nur an **einer Stelle**: bei der Stärkung der Länderbeteiligung in Zulassungsausschüssen und der Bedarfsplanung.\n- Die Koalition plant laut Vertrag, es den Ländern zu ermöglichen, die **Bedarfsplanung für Zahnärztinnen und Zahnärzte selbst vorzunehmen**.\n- Ein geplantes **iMVZ-Regulierungsgesetz** soll investorenbetriebene Medizinische Versorgungszentren transparenter gestalten.\n- Die **SPD-Fraktion** kritisierte den Vorstoß des CDU-Wirtschaftsrats als Versuch, Arbeitgeber aus ihrem Beitrag zur Krankenversicherung herauszunehmen.\n- Die **FDP** ist nicht Teil der aktuellen Bundesregierung; der Koalitionsvertrag wurde zwischen CDU/CSU und SPD geschlossen.",
+            "urls": [
+              "https://das-unternehmer-wissen.de/finanzen/reform-hammer-2026-cdu-wirtschaftsrat-will-zahnarzt-aus-gkv-streichen-und-sozialleistungen-kappen",
+              "https://www.zm-online.de/news/detail/union-und-spd-wollen-imvz-per-gesetz-regulieren",
+              "https://www.deutschlandfunk.de/bundesregierung-plant-keine-privatisierung-von-zahnarztkosten-100.html",
+              "https://www.zwp-online.info/zwpnews/dental-news/branchenmeldungen/zum-koalitionsvertrag-aus-medizinrechtlicher-und-gesundheitspolitischer-sicht",
+              "https://www.freitag.de/autoren/helena-steinhaus/cdu-wirtschaftsrat-wenn-lobbyisten-die-axt-an-den-sozialstaat-legen"
+            ]
+          },
+          {
+            "query": "Niederlande Schweiz Modell Zahnbehandlung privat Versicherung Vergleich Deutschland",
+            "summary": "- Eine Studie des Instituts der Deutschen Zahnärzte (IDZ) vergleicht standardisierte Behandlungen in Dänemark, Deutschland, den Niederlanden, der Schweiz und Ungarn.\n- Bei der Modellgussprothese liegt Deutschland auf Rang 4 von 5 Ländern (Index Deutschland=100).\n- Bei der vollverblendeten Brücke liegt Deutschland auf Rang 2 (hinter der Schweiz).\n- In Deutschland beträgt der Material- und Laborkostenanteil 61,3 % der Gesamtkosten, in Dänemark 43,6 %.\n- In der Schweiz deckt die gesetzliche Krankenversicherung zahnärztliche Behandlungen in der Regel nicht (Ausnahmen: Notfälle).\n- In den Niederlanden deckt die Basisversicherung für Erwachsene nur Vorsorge (Untersuchungen, Hygiene); Zahnersatz ist größtenteils selbst zu zahlen oder über Zusatzversicherung abgedeckt.\n- In der Schweiz und den Niederlanden tragen Patienten bei Prothetik nahezu 100 % der Kosten selbst.\n- Die zugrunde liegenden Daten stammen aus Studien um 2013–2015 (EURO-Z-Studie).",
+            "urls": [
+              "https://www.zm-online.de/news/detail/ze-zahnarzt-und-zahntechnikkosten-im-vergleich",
+              "https://www.zm-online.de/artikel/2015/zahnaerztliche-leistungen-kontext-europa/zahnaerztliche-leistungen-in-europa",
+              "https://www.idz.institute/fileadmin/Content/Publikationen-PDF/Bd_34-EURO-Z_II.pdf",
+              "https://de.dental-tribune.com/news/vergleich-zahnmedizinischer-versorgungssysteme-in-europa",
+              "https://www.cosmetic-dental.de/wp-content/uploads/2015/10/Info1-00.pdf"
+            ]
+          },
+          {
+            "query": "Zweiklassenmedizin Zahnarzt Selbstzahler Kassenpatienten Zugang Versorgung Kritik",
+            "summary": "- **83 % der Deutschen** sehen laut Umfragen eine Benachteiligung von Kassenpatienten gegenüber Privatversicherten.\n- **89 % der Bevölkerung** sind gesetzlich krankenversichert, **9,5 %** sind privatversichert.\n- Kassenpatienten haben nach **§ 12 SGB V** Anspruch auf ausreichende, zweckmäßige und wirtschaftliche Leistungen (Regelversorgung).\n- Die Abrechnung nach **GOZ** (Gebührenordnung für Zahnärzte) für Privatpatienten ist ca. **70 % teurer** als die Kassenabrechnung nach **BEMA**.\n- **Implantate** kosten ab ca. **1.500 €** und sind rein privat zu finanzieren, da sie nicht zur Kassenleistung gehören.\n- Bei **Zahnersatz** übernehmen gesetzliche Kassen je nach Bonusheft **38–75 %** der Kosten; den Rest tragen Patienten selbst.\n- Die **CDU** hat Vorschläge gemacht, Zahnleistungen aus der gesetzlichen Krankenversicherung (GKV) zu streichen, was von Medizinern, Sozialverbänden und Politikern kritisiert wurde.\n- Eine **Härtefallregelung** ermöglicht Geringverdienern eine **100 % Kostenübernahme** für Zahnersatz durch die gesetzliche Kasse.",
+            "urls": [
+              "https://www.zwp-online.info/zwpnews/dental-news/branchenmeldungen/zweiklassenmedizin-deutschland",
+              "https://www.zahnarztpraxis-in-leonberg.de/blog/werden-kassenpatienten-anders-behandelt-als-privatpatienten",
+              "https://www.focus.de/die-debatte/eigenverantwortung-oder-zwei-klassen-medizin-leser-streiten-ueber-cdu-zahnarztplaene_3371b027-059d-476e-9039-be781cfe8cf6.html",
+              "https://www.primomedico.com/de/artikel/privatbehandlung-als-kassenpatient-so-klappt-der-weg-in-die-privatklinik",
+              "https://www.apotheken-umschau.de/gesundheitspolitik/zahnarzt-privat-zahlen-medizin-warnt-deutlich-vor-cdu-vorschlag-1471963.html"
+            ]
+          }
+        ]
+      },
+      {
+        "node": "evaluate",
+        "duration_s": 5.534,
+        "round": 1,
+        "confidence": 7,
+        "gaps": "",
+        "competing_events": "",
+        "stagnation_detected": false,
+        "falsification_triggered": false,
+        "evidence_consistency": 9,
+        "evidence_sufficiency": 9,
+        "utility_score": 0.77,
+        "utility_stop": false,
+        "plateau_stop": false,
+        "context_blocks": 5,
+        "done": false,
+        "reasoning": "STATUS: SUFFICIENT\nCONFIDENCE: 9\nGAPS: Keine\nCONTRADICTIONS: Ja – Kleinere Abweichungen bei den genauen Zahlen (z.B. Einsparung 17–18 Mrd. vs. 18 Mrd.; Anteil 5,7 % vs. 5,6–5,8 %), aber inhaltlich konsistent; alle Quellen stimmen überein, dass der Vorschlag des CDU-Wirtschaftsrats abgelehnt wurde.\nIRRELEVANT: 5\nCOMPETING_EVENTS: Keine – Es handelt sich durchgängig um denselben Vorgang: Positionspapier des CDU-Wirtschaftsrats (Januar 2026) und die darauffolgende politische Debatte mit Ablehnung durch Bundesregierung und breite Kritik.\nEVIDENCE_CONSISTENCY: 9\nEVIDENCE_SUFFICIENCY: 9"
+      },
+      {
+        "node": "plan",
+        "duration_s": 3.474,
+        "round": 1,
+        "new_queries": [
+          "Zahnärztliche Versorgung Ausgliederung GKV Diskussion Januar Februar 2026 aktuell",
+          "Bundesgesundheitsministerium Zahnmedizin Leistungskatalog Kürzung Eigenverantwortung Reform 2025 2026",
+          "Patientenschützer Verbraucherzentrale Kritik Privatisierung Zahnleistungen soziale Ungleichheit Versorgungslücke"
+        ],
+        "total_queries": 9
+      },
+      {
+        "node": "search",
+        "duration_s": 16.489,
+        "round": 1,
+        "queries_executed": 3,
+        "queries": [
+          "Zahnärztliche Versorgung Ausgliederung GKV Diskussion Januar Februar 2026 aktuell",
+          "Bundesgesundheitsministerium Zahnmedizin Leistungskatalog Kürzung Eigenverantwortung Reform 2025 2026",
+          "Patientenschützer Verbraucherzentrale Kritik Privatisierung Zahnleistungen soziale Ungleichheit Versorgungslücke"
+        ],
+        "sources_found": 3,
+        "total_citations": 60,
+        "context_blocks": 8,
+        "sources_summary": [
+          {
+            "query": "Zahnärztliche Versorgung Ausgliederung GKV Diskussion Januar Februar 2026 aktuell",
+            "summary": "- Der CDU-Wirtschaftsrat fordert in seiner „Agenda für Arbeitnehmer in Deutschland\" die Ausgliederung zahnärztlicher Leistungen aus dem GKV-Leistungskatalog.\n- Laut Wirtschaftsrat macht der zahnmedizinische Bereich 5,6 % der GKV-Gesamtausgaben aus.\n- Weitere Vorschläge des Wirtschaftsrats umfassen die Begrenzung des Arbeitslosengeldes auf ein Jahr und die Anhebung des Rentenalters.\n- Bundesgesundheitsministerin Nina Warken (CDU) schloss eine Streichung zahnärztlicher Leistungen aus der GKV explizit aus.\n- BZÄK und KZBV lehnen die Forderung ab und bezeichnen sie als „medizinisch falsch, unsozial, ökonomisch kurzsichtig\".\n- Der Verband der Ersatzkassen (vdek) positioniert sich dafür, dass zahnärztliche Versorgung zwingend in die GKV gehört.\n- Die Festzuschüsse bei Zahnersatz in der GKV betragen 60–75 %.\n- Die Debatte flammte Anfang 2026 (Januar/Februar) auf; die Bundesregierung hat keine Pläne zur Umsetzung einer Privatisierung.",
+            "urls": [
+              "https://www.zm-online.de/news/detail/cdu-wirtschaftsrat-fordert-ausgliederung-der-zahnmedizin-aus-der-gkv",
+              "https://www.focus.de/finanzen/versicherungen/zahnmedizin-unter-druck-wo-die-gkv-bald-leistungen-streichen-koennte_c8de9913-2fd5-4409-ae8d-66dc673fd87c.html",
+              "https://www.aok.de/pp/gg/update/warken-schliesst-streichung-von-zahnleistungen-aus",
+              "https://www.kzvbw.de/aktuelles/2026/zahnmedizin-aus-dem-gkv-leistungskatalog-streichen-sagen-sie-uns-ihre-meinung-zur-aktuellen-debatte",
+              "https://www.gelbe-liste.de/politik-verbaende/bundesregierung-cdu-zahnarztkosten"
+            ]
+          },
+          {
+            "query": "Bundesgesundheitsministerium Zahnmedizin Leistungskatalog Kürzung Eigenverantwortung Reform 2025 2026",
+            "summary": "- Der CDU-Wirtschaftsrat forderte 2025/2026 eine Reform des Leistungskatalogs in der Zahnmedizin mit Streichung zahnärztlicher Leistungen aus der GKV.\n- Bundesgesundheitsministerin Nina Warken lehnte den Vorschlag kategorisch ab.\n- Festzuschüsse zu Zahnersatz in der GKV betragen 60–75 % je nach Bonusheft.\n- GKV-Ausgaben stiegen 2025 um 7,8 %, der zahnärztliche Bereich jedoch nur um 3,9 %.\n- Der zahnärztliche Bereich machte 5,7 % der GKV-Gesamtausgaben aus.\n- Seit 2014 sank die Zahl der Füllungen um 16,2 %, was auf Prävention zurückgeführt wird.\n- BMG, SPD, Grüne, Linke und die KZBV lehnten den Vorschlag des CDU-Wirtschaftsrats ab.\n- In Leserdebatten forderten 24 % Krankenkassenreformen vor Leistungskürzungen.",
+            "urls": [
+              "https://www.kzbv.de/presse/pressemitteilungen/pressemitteilungen-2025",
+              "https://www.focus.de/die-debatte/eigenverantwortung-oder-zwei-klassen-medizin-leser-streiten-ueber-cdu-zahnarztplaene_3371b027-059d-476e-9039-be781cfe8cf6.html",
+              "https://www.bundesgesundheitsministerium.de/themen/gesundheitswesen/gesundheitsberufe/zahnaerzte.html",
+              "https://hpd.de/artikel/zahnmedizin-privat-nicht-geht-geht-nicht-23782",
+              "https://www.zm-online.de/news/detail/zahnmedizin-zeigt-weg-zu-stabilem-gesundheitswesen-auf"
+            ]
+          },
+          {
+            "query": "Patientenschützer Verbraucherzentrale Kritik Privatisierung Zahnleistungen soziale Ungleichheit Versorgungslücke",
+            "summary": "- **CDU-Wirtschaftsrat** forderte, Zahnleistungen aus dem GKV-Katalog zu streichen und privat abzuwickeln, um Sozialabgaben zu senken.\n- **Bundesregierung, SPD, Grüne und Zahnärztekammern** lehnten den Vorschlag ab.\n- **Grünen-Experte Janosch Dahmen** bezeichnete den Zahnstatus als Marker sozialer Ungleichheit und warnte vor Folgeerkrankungen wie Herzinfarkten und Infektionen bei aufgeschobenen Behandlungen.\n- **Gesundheitsministerin Nina Warken** schloss eine Umsetzung aus, da sie dem Solidarsystem widerspreche.\n- **Kassen gaben 2025 ca. 10,5 Mrd. Euro** für Zahnbehandlungen aus; Patienten tragen bereits heute hohe Privatkosten (z. B. Implantate 1.500–2.500 €).\n- **Verbraucherzentrale** warnt vor unzureichender Aufklärung bei IGeL-Leistungen, nennt Ozontherapie als Beispiel auf der „Roten Liste\" ohne nachgewiesenen Nutzen.\n- **In Großbritannien** schoben laut Angaben 2024 rund 40 % der Ärmeren Zahnbehandlungen wegen niedriger öffentlicher Zuschüsse auf.\n- **Verbraucherzentrale** weist darauf hin, dass Geringverdiener bei sehr niedrigem Einkommen Anspruch auf kostenlosen Zahnersatz und Festzuschüsse haben.",
+            "urls": [
+              "https://www.deutschlandfunk.de/bundesregierung-plant-keine-privatisierung-von-zahnarztkosten-102.html",
+              "https://web.de/magazine/politik/inland/zahnarzt-privatversicherte-cdu-wirtschaftsrat-sorgt-empoerung-41854438",
+              "https://www.verbraucherzentrale.de/wissen/gesundheit-pflege/aerzte-und-kliniken/selbstzahlerleistungen-beim-arzt-und-zahnarzt-55427",
+              "https://www.wiwo.de/politik/deutschland/sozialstaat-debatte-der-zahnstatus-ist-einer-der-deutlichsten-marker-sozialer-ungleichheit/100196757.html",
+              "https://www.verbraucherzentrale.de/zuzahlungen-und-anderer-aerger-beim-zahnarzt-wir-schaffen-durchblick-107503"
+            ]
+          }
+        ]
+      },
+      {
+        "node": "evaluate",
+        "duration_s": 4.271,
+        "round": 2,
+        "confidence": 9,
+        "gaps": "",
+        "competing_events": "",
+        "stagnation_detected": false,
+        "falsification_triggered": false,
+        "evidence_consistency": 9,
+        "evidence_sufficiency": 9,
+        "utility_score": 0.65,
+        "utility_stop": false,
+        "plateau_stop": false,
+        "context_blocks": 8,
+        "done": true,
+        "reasoning": "STATUS: SUFFICIENT\nCONFIDENCE: 9\nGAPS: Keine\nCONTRADICTIONS: Nein – alle Quellen stimmen im Kern überein: Der CDU-Wirtschaftsrat forderte die Privatisierung, die Bundesregierung und breite Mehrheit lehnen dies ab.\nIRRELEVANT: Keine\nCOMPETING_EVENTS: Keine – es handelt sich durchgehend um denselben Vorgang (CDU-Wirtschaftsrat-Positionspapier Januar 2026 und die darauf folgenden Reaktionen).\nEVIDENCE_CONSISTENCY: 9\nEVIDENCE_SUFFICIENCY: 9"
+      },
+      {
+        "node": "answer",
+        "duration_s": 69.968,
+        "answer_length": 12577,
+        "citation_count": 60,
+        "rounds": 2,
+        "elapsed_total_s": 135.0,
+        "confidence": 9
+      }
+    ]
+  }
+}

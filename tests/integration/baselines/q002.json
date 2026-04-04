@@ -1,0 +1,421 @@
+{
+  "meta": {
+    "timestamp": "",
+    "endpoint": "http://127.0.0.1:5100",
+    "reasoning_model": "claude-opus-4.6-agent",
+    "search_model": "perplexity-sonar-pro-agent",
+    "summarize_model": "claude-opus-4.6-agent",
+    "agent_version": "ok",
+    "total_elapsed_s": 810.58,
+    "promoted_at": ""
+  },
+  "result": {
+    "question_id": "q002",
+    "question": "Welches neuste Paper hat DeepSeek rausgebracht über Agentensysteme die zeigen wie ChatGPT funktioniert, es hat wohl für sehr viel aufsehen erregt und worum ging es dabei?",
+    "category": "academic",
+    "answer": "## Kurzfazit\n\nDeepSeek hat im Zeitraum Januar–Februar 2026 **kein Paper speziell über Agentensysteme veröffentlicht, das zeigt, wie ChatGPT funktioniert**. Die Beschreibung in der Frage passt auf kein einzelnes identifizierbares Paper exakt. Das Paper, das zuletzt für das **meiste Aufsehen** gesorgt hat, ist die Arbeit zu **Manifold-Constrained Hyper-Connections (mHC)** vom Januar 2026 – allerdings behandelt es Trainingsarchitektur, nicht Agentensysteme. Der grösste \"Aufsehen-Moment\" von DeepSeek insgesamt war die Veröffentlichung von **DeepSeek-R1** im Januar 2025, das als \"Sputnik-Moment\" der KI-Branche bezeichnet wurde.\n\n---\n\n## Kernaussagen\n\n- **Kein DeepSeek-Paper zu Agentensystemen identifizierbar:** In den arXiv-Veröffentlichungen von DeepSeek-AI für 2025–2026 wurde keine Arbeit gefunden, die Multi-Agent-Systeme beschreibt und gleichzeitig die Funktionsweise von ChatGPT offenlegt [1][34].\n- **mHC-Paper (Januar 2026)** ist die jüngste aufsehenerregende Publikation von DeepSeek. Es behandelt eine neue Architekturkomponente für stabileres Training grosser Modelle, nicht Agentensysteme [6][10][60].\n- **DeepSeek-R1 (Januar 2025)** war der eigentliche \"Sputnik-Moment\": Ein Reasoning-Modell mit **671B Parametern**, trainiert für nur **5,6 Mio. Dollar**, das in Benchmarks mit GPT-4 konkurrierte und **57,2 Mio. Downloads** erreichte [11][70][73].\n- **DeepSeek plant Agentensysteme für Ende 2025/2026**, hat dazu aber noch kein wissenschaftliches Paper veröffentlicht [1][35].\n- **Conditional Memory via Scalable Lookup** (Januar 2026) ist ein weiteres aktuelles DeepSeek-Paper, behandelt aber Speicherarchitekturen, keine Agentensysteme [74][75].\n- **MetaGPT-Integrationen** mit DeepSeek-Modellen existieren als Praxisbeispiele für Multi-Agent-Frameworks, sind aber keine DeepSeek-Forschungspublikationen [34].\n- Die Frage könnte auf eine **Verwechslung oder Vermischung** mehrerer Nachrichtenmeldungen zurückgehen – etwa R1s Aufsehen + Agenten-Ankündigungen + mHC-Paper.\n\n---\n\n## Detailanalyse\n\n### Das mHC-Paper – DeepSeeks jüngste aufsehenerregende Publikation\n\nDas Paper **\"Manifold-Constrained Hyper-Connections\"** (arXiv: 2512.24880v2) wurde am **5. Januar 2026** auf arXiv veröffentlicht und von **19 Forschern** unter Beteiligung von DeepSeek-Mitgründer **Liang Wenfeng** verfasst [6][58][60]. Es löst ein konkretes Problem: Bei herkömmlichen Hyper-Connections (HC) kommt es bei grossen Modellen (27B Parameter, Tiefe 64) zu einer **~3000-fachen Signalverstärkung**, die zu katastrophalen Verlustspitzen nach ca. 12.000 Trainingsschritten führt. mHC begrenzt diese Verstärkung auf **~1,6-fach** durch Projektion der Mischmatrizen auf das **Birkhoff-Polytop** (die Menge doppelt stochastischer Matrizen) mittels des **Sinkhorn-Knopp-Algorithmus** [58][64]. The Neuron Daily beschrieb das Paper als Lösung für das Problem, das \"100-Millionen-Dollar-Trainingsläufe zum Absturz bringt\" [10]. Es handelt sich jedoch um eine **Architektur-Innovation**, nicht um ein Paper über Agentensysteme oder die Funktionsweise von ChatGPT.\n\n### DeepSeek-R1 – Der eigentliche \"Sputnik-Moment\"\n\nFalls die Frage auf das Paper abzielt, das \"für sehr viel Aufsehen erregt\" hat, ist **DeepSeek-R1** (arXiv: 2501.12948) der wahrscheinlichste Kandidat [73][14]. Im Januar 2025 veröffentlicht, demonstrierte es, dass ein Reasoning-Modell mit **Reinforcement Learning** (ohne aufwändiges Supervised Fine-Tuning) trainiert werden kann und dabei Leistungen auf GPT-4-Niveau erreicht – zu einem Bruchteil der Kosten (**5,6 Mio. vs. geschätzte 100 Mio. Dollar** für GPT-4) [11][12]. Das Paper wurde später in **Nature** (Band 645, S. 633–638) publiziert [73]. R1 nutzt eine **Mixture-of-Experts-Architektur** (MoE), bei der nur ein Teil der 671B Parameter pro Inferenzschritt aktiv ist, was die Effizienz drastisch steigert [14][18]. In Silicon Valley wurde der Release als **\"Sputnik-Moment\"** bezeichnet, weil er die Annahme erschütterte, dass nur westliche Tech-Konzerne mit Milliarden-Budgets konkurrenzfähige Frontier-Modelle bauen können [70][76]. Allerdings beschreibt auch dieses Paper keine Agentensysteme und erklärt nicht direkt, \"wie ChatGPT funktioniert\".\n\n### DeepSeeks Agenten-Pläne – angekündigt, aber kein Paper\n\nDeepSeek hat einen **vollautonomen KI-Agenten** für Ende 2025/Anfang 2026 angekündigt, mit Fokus auf Multi-Step-Aufgaben, Tool-Integration und minimaler menschlicher Aufsicht [1][35]. Das Jahr 2026 wird in China als **\"Year of Agent Monetization\"** bezeichnet [35]. Konkret plant DeepSeek einen KI-Suchdienst und agentenbasierte Produkte [1]. Jedoch gibt es dazu **keine wissenschaftliche Publikation auf arXiv** [1][34]. Praxisbeispiele wie **MetaGPT mit Ollama** zeigen, wie DeepSeek-Modelle (R1, V3.2) in Multi-Agent-Frameworks für rollenbasierte Automatisierung eingesetzt werden können [34], aber diese stammen von Dritten, nicht von DeepSeek selbst.\n\n### Mögliche Verwechslung: OpenAIs ChatGPT-Agent\n\nOpenAI hat seinerseits einen **ChatGPT-Agenten** vorgestellt, der als Browser-basierter Agent Aufgaben autonom ausführen kann [29]. Es ist möglich, dass die Frage auf Berichterstattung abzielt, die DeepSeeks Agenten-Ankündigungen mit OpenAIs ChatGPT-Agent-Release vermischt. Der Artikel von \"Understanding AI\" beschreibt den ChatGPT-Agenten als \"big improvement, but not yet reliable\" [29]. DeepSeek wurde in diesem Kontext als günstigere Alternative diskutiert [40][54], aber ein Paper, das \"zeigt, wie ChatGPT funktioniert\", existiert in dieser Form nicht.\n\n---\n\n## Einordnung / Ausblick\n\nDie Beschreibung in der Frage – ein DeepSeek-Paper über Agentensysteme, das zeigt, wie ChatGPT funktioniert und viel Aufsehen erregt hat – lässt sich keiner einzelnen Publikation eindeutig zuordnen. Am wahrscheinlichsten handelt es sich um eine **Vermischung** aus dem Aufsehen um DeepSeek-R1 (das zeigte, dass man ChatGPT-Niveau-Modelle günstig trainieren kann), den Agenten-Ankündigungen für 2026 und dem mHC-Paper als jüngster Publikation. Sollte in den kommenden Wochen ein spezifisches Agenten-Paper von DeepSeek erscheinen – etwa im Kontext des angekündigten **DeepSeek-V4** (Februar 2026) [45] – könnte dies die gesuchte Veröffentlichung sein, die zum Zeitpunkt dieser Antwort (10. Februar 2026) aber noch nicht identifizierbar ist (unbestätigt).\n\n---\n\n**Quellen:** [1](https://techstrong.ai/features/deepseek-plans-ai-agent-rollout-in-late-2025) | [6](https://www.scmp.com/tech/big-tech/article/3338427/deepseek-kicks-2026-paper-signalling-push-train-bigger-models-less) | [10](https://www.theneurondaily.com/p/deepseek-just-fixed-what-breaks-100m-ai-training-runs) | [11](https://markets.financialcontent.com/stocks/article/tokenring-2026-2-6-the-deepseek-r1-effect-how-a-6-million-model-shattered-the-ai-scaling-myth) | [14](https://www.vellum.ai/blog/the-training-of-deepseek-r1-and-ways-to-use-it) | [29](https://www.understandingai.org/p/chatgpt-agent-a-big-improvement-but) | [34](https://www.ibm.com/think/tutorials/multi-agent-prd-ai-automation-metagpt-ollama-deepseek) | [35](https://www.unily.com/resources/blogs/deepseek-and-the-future-of-enterprise-ai-agents) | [45](https://introl.com/blog/deepseek-v4-february-2026-coding-model-release) | [58](https://vizuara.substack.com/p/mhc-manifold-constrained-hyper-connections) | [60](https://deepseek.ai/blog/deepseek-mhc-manifold-constrained-hyper-connections) | [64](https://arxiv.org/pdf/2512.24880) | [70](https://www.novaedgedigitallabs.tech/Blog/deepseek-shock-chinese-ai-disrupts-silicon-valley) | [73](https://arxiv.org/abs/2501.12948) | [74](https://arxiv.org/html/2601.07372v1) | [76](https://hls.harvard.edu/today/deepseek-chatgpt-and-the-global-fight-for-technological-supremacy)\n\n---\n*82 Quellen · 15 Suchen · 4 Runden · 2:57 min · Confidence 7/10*",
+    "metrics": {
+      "total_rounds": 4,
+      "total_elapsed_s": 177.46,
+      "final_confidence": 7,
+      "total_queries": 15,
+      "total_citations": 82,
+      "total_context_blocks": 7,
+      "competing_events_detected": true,
+      "stagnation_detected": false,
+      "total_prompt_tokens": 46206,
+      "total_completion_tokens": 19783,
+      "falsification_triggered": false,
+      "evidence_consistency_final": 8,
+      "evidence_sufficiency_final": 7,
+      "utility_scores": [
+        0.56,
+        0.67,
+        0.27,
+        0.63
+      ],
+      "utility_stop_triggered": false,
+      "plateau_stop_triggered": false
+    },
+    "iteration_logs": [
+      {
+        "node": "classify",
+        "duration_s": 9.789,
+        "decision": "SEARCH",
+        "lang": "de",
+        "search_lang": "en",
+        "recency": "month",
+        "type": "news"
+      },
+      {
+        "node": "decompose",
+        "duration_s": 2.275,
+        "sub_questions": [
+          "DeepSeek latest paper about agent systems showing how ChatGPT works, caused a lot of attention recently",
+          "What is the content and main findings of DeepSeek's recent viral paper on agent systems and large language models"
+        ],
+        "sub_question_count": 2
+      },
+      {
+        "node": "plan",
+        "duration_s": 3.506,
+        "round": 0,
+        "new_queries": [
+          "DeepSeek latest paper agent systems ChatGPT mechanism 2025 2026",
+          "DeepSeek viral research paper how large language models work internally agents",
+          "DeepSeek new paper reinforcement learning agent architecture breakthrough 2025 2026",
+          "DeepSeek R1 paper reasoning agents emergent behavior chain of thought",
+          "DeepSeek paper reverse engineering ChatGPT agent framework controversy",
+          "DeepSeek AI recent publication multi-agent systems LLM arxiv 2025 2026"
+        ],
+        "total_queries": 6
+      },
+      {
+        "node": "search",
+        "duration_s": 16.484,
+        "round": 0,
+        "queries_executed": 6,
+        "queries": [
+          "DeepSeek latest paper agent systems ChatGPT mechanism 2025 2026",
+          "DeepSeek viral research paper how large language models work internally agents",
+          "DeepSeek new paper reinforcement learning agent architecture breakthrough 2025 2026",
+          "DeepSeek R1 paper reasoning agents emergent behavior chain of thought",
+          "DeepSeek paper reverse engineering ChatGPT agent framework controversy",
+          "DeepSeek AI recent publication multi-agent systems LLM arxiv 2025 2026"
+        ],
+        "sources_found": 6,
+        "total_citations": 35,
+        "context_blocks": 6,
+        "sources_summary": [
+          {
+            "query": "DeepSeek latest paper agent systems ChatGPT mechanism 2025 2026",
+            "summary": "- DeepSeek veröffentlichte das **R1 Reasoning Model** im Januar 2025 mit Trainingskosten von ca. **6 Millionen Dollar** gegenüber ca. **100 Millionen Dollar** für GPT-4.\n- **DeepSeek-V3.2 und V3.2-Speciale** wurden am **1. Dezember 2025** veröffentlicht und nutzen **DeepSeek Sparse Attention (DSA)** für 50–75 % niedrigere Inferenzkosten bei langen Kontexten.\n- V3.2 wurde über **1.800+ Umgebungen** und **85.000+ Instruktionen** für Tool-Interaktionen trainiert.\n- Benchmarks: **96 % auf AIME** (Mathematikwettbewerb), **83,3 % Genauigkeit** bei der IMO 2025 (Goldmedaillen-Niveau), **118/120 beim Putnam-Score**.\n- Ein vollständig autonomer **AI-Agent** ist für Ende 2025 geplant; das Nachfolgemodell **R2** soll ebenfalls Ende 2025 erscheinen.\n- DeepSeek-Agenten sind ca. **90 % günstiger** in Training und Inferenz als vergleichbare OpenAI-Modelle.\n- OpenAIs Inferenzkosten werden für 2025 auf **7 Milliarden Dollar** beziffert.\n- **DeepSeekMath-V2** mit selbstverifizierbarem Reasoning (Proof-Generator + Verifier-Loop) wurde im **November 2025** vorgestellt.",
+            "urls": [
+              "https://techstrong.ai/features/deepseek-plans-ai-agent-rollout-in-late-2025",
+              "https://www.voiceflow.com/blog/what-is-deepseek",
+              "https://c3.unu.edu/blog/inside-deepseeks-end-of-year-ai-breakthrough-what-the-new-models-deliver",
+              "https://www.piie.com/blogs/realtime-economics/2026/how-ai-boom-shrugged-deepseek-shock-and-keeps-gaining-steam",
+              "https://deepseek.ai/blog/deepseek-guide-2026"
+            ]
+          },
+          {
+            "query": "DeepSeek viral research paper how large language models work internally agents",
+            "summary": "- Das mHC-Paper wurde im Januar 2026 auf arXiv veröffentlicht und von Mitgründer Liang Wenfeng sowie 19 Forschern mitverfasst, darunter Zhenda Xie, Yixuan Wei und Huanqi Cao.\n- Die Architektur wurde an Modellen mit 3B, 9B und 27B Parametern getestet.\n- DeepSeek-R1 hat 671B Parameter.\n- Die Trainingskosten von DeepSeek-R1 werden mit 5,6 Millionen US-Dollar angegeben.\n- DeepSeek-R1 produziert bei neutralen Prompts in 19 % der Fälle verwundbaren Code; bei politisch sensiblen Triggern steigt dieser Anteil um bis zu 50 %.\n- Italien blockierte DeepSeek unter Berufung auf die DSGVO; das US-Militär verbot die Nutzung.\n- DeepSeek erreichte einen Marktanteil von 89 % in China.\n- DeepSeek kam in Südkorea regulatorischen Anforderungen zügig nach.",
+            "urls": [
+              "https://www.scmp.com/tech/big-tech/article/3338427/deepseek-kicks-2026-paper-signalling-push-train-bigger-models-less",
+              "https://www.crowdstrike.com/en-us/blog/crowdstrike-researchers-identify-hidden-vulnerabilities-ai-coded-software",
+              "https://ai-regulation.com/deepseek-one-year-later-regulatory-storm-global-surge",
+              "https://www.constellationr.com/blog-news/insights/deepseeks-paper-latest-evidence-ai-muscle-head-era-coming-end",
+              "https://www.theneurondaily.com/p/deepseek-just-fixed-what-breaks-100m-ai-training-runs"
+            ]
+          },
+          {
+            "query": "DeepSeek new paper reinforcement learning agent architecture breakthrough 2025 2026",
+            "summary": "- DeepSeek R1 wurde im Januar 2025 veröffentlicht und soll rund 6 Millionen US-Dollar Trainingskosten verursacht haben.\n- Das Modell basiert auf einer Mixture-of-Experts-Architektur mit 671 Milliarden Gesamtparametern, von denen pro Token nur 37 Milliarden aktiviert werden.\n- DeepSeek-R1 erreichte auf dem AIME-Benchmark einen pass@1-Wert von 79,8 % bis 86,7 %.\n- DeepSeek-R1-Zero wurde mittels reinem Reinforcement Learning ohne gelabelte Daten trainiert.\n- Anstelle von Proximal Policy Optimization (PPO) wird Group Relative Policy Optimization (GRPO) eingesetzt, was den Speicher- und Rechenbedarf für das RL laut Quelle halbieren soll.\n- Das Training umfasst einen fünfstufigen Prozess auf Basis von DeepSeek-V3-Base, wobei in der ersten Stufe nur wenige tausend Datenpunkte als Cold-Start-Daten verwendet werden.\n- Das Modell steht unter der MIT-Lizenz als Open Source zur Verfügung.\n- Laut Quelle übertrifft ein destilliertes 14B-Modell von R1 ein dichtes 32B-Modell in der Leistung.",
+            "urls": [
+              "https://markets.financialcontent.com/stocks/article/tokenring-2026-2-6-the-deepseek-r1-effect-how-a-6-million-model-shattered-the-ai-scaling-myth",
+              "https://www.ibm.com/think/insights/deepseek-breakthrough-is-a-win-for-innovation-and-accessibility",
+              "https://magazine.sebastianraschka.com/p/state-of-llms-2025",
+              "https://www.vellum.ai/blog/the-training-of-deepseek-r1-and-ways-to-use-it",
+              "https://academic.oup.com/nsr/article/12/3/nwaf044/8010848"
+            ]
+          },
+          {
+            "query": "DeepSeek R1 paper reasoning agents emergent behavior chain of thought",
+            "summary": "- DeepSeek-R1-Zero basiert auf DeepSeek-V3-Base und nutzt das GRPO-RL-Framework; der pass@1-Score auf AIME 2024 steigt von 15,6 % auf 71,0 % (86,7 % mit Majority Voting) nach tausenden RL-Schritten.\n- DeepSeek-R1 erreicht 97,3 % auf MATH-500, 90,8 % auf MMLU und 71,5 % auf GPQA Diamond.\n- Das destillierte Modell DeepSeek-R1-Distill-Qwen-7B erreicht 55,5 % auf AIME 2024.\n- Destillierte Modelle umfassen Größen von 1,5B bis 70B Parametern auf Basis von Qwen und Llama.\n- Das zugehörige Paper trägt den Titel „DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning\".\n- DeepSeek-R1-Zero wurde rein durch Reinforcement Learning ohne Supervised Fine-Tuning (SFT) trainiert und entwickelte emergente Verhaltensweisen wie Self-Verification, Reflection und lange Chain-of-Thought-Generierung.\n- DeepSeek-R1 verwendet ein mehrstufiges Training: Cold-Start-SFT-Daten für Lesbarkeit und Sprachkonsistenz, gefolgt von RL-Phasen für Mustererkennung und Alignment mit menschlichen Präferenzen.\n- Alle Modelle wurden als Open Source veröffentlicht.",
+            "urls": [
+              "https://www.thewirechina.com/wp-content/uploads/2025/01/DeepSeek-R1-Document.pdf",
+              "https://kili-technology.com/blog/understanding-deepseek-r1",
+              "https://arxiv.org/pdf/2501.12948",
+              "https://thirdeyedata.ai/all-about-emergent-behavior-in-large-language-models",
+              "https://developer.nvidia.com/blog/build-ai-agents-with-expert-reasoning-capabilities-using-deepseek-r1-nim"
+            ]
+          },
+          {
+            "query": "DeepSeek paper reverse engineering ChatGPT agent framework controversy",
+            "summary": "- OpenAI beschuldigte DeepSeek Anfang 2025, ChatGPT-Ausgaben zur Destillation eigener Modelle (DeepSeek-R1 und DeepSeek-V3) genutzt zu haben.\n- DeepSeek soll laut Berichten mit etwa einem Zehntel der typischen US-amerikanischen KI-Trainingsrechenleistung gearbeitet haben.\n- OpenAIs Nutzungsbedingungen verbieten die Verwendung von ChatGPT-Ausgaben zum Aufbau konkurrierender KI-Modelle.\n- DeepSeek-R1 soll laut Berichten eine Leistung erreicht haben, die mit OpenAIs geschlossenem Modell o1 vergleichbar ist.\n- Die italienische Datenschutzbehörde GPDP forderte DeepSeek auf, innerhalb von 20 Tagen seine Trainingsdaten offenzulegen.\n- Microsoft und OpenAI untersuchten DeepSeek auf möglichen unautorisierten Zugang zu Technologie.\n- Cybersicherheitsfirmen Kela und Netskope wiesen auf Datenschutz- und Sicherheitsrisiken bei DeepSeek hin, darunter Klartext-Logs und offengelegte API-Schlüssel.\n- Rechtsexperten argumentierten, dass öffentlich zugängliche ChatGPT-Ausgaben weder Geschäftsgeheimnisse noch Urheberrechtsschutz erfüllen und Destillation als Fair Use gelten könnte.",
+            "urls": [
+              "https://caldwelllaw.com/news/legal-perspectives-training-ai-models-like-chatgpt-and-deepseek-without-intellectual-property-infringement",
+              "https://noma.security/blog/open-ai-chatgpt-agent-a-cisos-guide",
+              "https://www.malwarebytes.com/blog/news/2025/01/the-deepseek-controversy-authorities-ask-where-the-data-comes-from-and-where-it-goes",
+              "https://ppc.land/google-exposes-the-uncomfortable-truth-about-fake-ai-agents",
+              "https://www.winston.com/en/insights-news/is-ai-distillation-by-deepseek-ip-theft"
+            ]
+          },
+          {
+            "query": "DeepSeek AI recent publication multi-agent systems LLM arxiv 2025 2026",
+            "summary": "- **DeepSeek R1**: Reasoning-Modell, veröffentlicht im Januar 2025.\n- **DeepSeek R2**: Geplant als Nachfolger von R1 für Ende 2025, mit erweiterten agentischen Funktionen.\n- **Vollautonomer KI-Agent**: Von DeepSeek für Ende 2026 angekündigt, mit Fokus auf Multi-Step-Aufgaben, Tool-Integration und minimaler menschlicher Aufsicht.\n- **DeepSeek V3.2**: Veröffentlicht im Dezember 2025.\n- **2026 als „Year of Agent Monetization\"**: So wird das Jahr in China im Kontext des Wettbewerbs mit OpenAI und anderen bezeichnet.\n- **MetaGPT mit Ollama**: Als Beispiel für Multi-Agent-Framework genannt, in dem DeepSeek-Modelle (R1, V3.2) für PRD-Automatisierung mit spezialisierten rollenbasierten Agenten eingesetzt werden.\n- **Keine arXiv-Publikationen**: In Suchergebnissen für 2025–2026 wurden keine arXiv-Veröffentlichungen von DeepSeek speziell zu Multi-Agent-Systemen mit LLMs identifiziert.\n- **Zuverlässigkeitskritik**: R1 wird im Einsatz als Browser-Agent als unzuverlässig kritisiert.",
+            "urls": [
+              "https://techstrong.ai/features/deepseek-plans-ai-agent-rollout-in-late-2025",
+              "https://www.global-aice.com/the-arrival-of-deepseek-r1-why-ai-multi-agent-systems-like-adgo-are-more-important-than-ever",
+              "https://www.voiceflow.com/blog/what-is-deepseek",
+              "https://www.youtube.com/watch?v=qsqOlVa5zG0",
+              "https://www.ibm.com/think/tutorials/multi-agent-prd-ai-automation-metagpt-ollama-deepseek"
+            ]
+          }
+        ]
+      },
+      {
+        "node": "evaluate",
+        "duration_s": 7.267,
+        "round": 1,
+        "confidence": 3,
+        "gaps": "Die Frage bezieht sich auf ein spezifisches DeepSeek-Paper über \"Agentensysteme die zeigen wie ChatGPT funktioniert\", das für großes Aufsehen gesorgt haben soll – ein solches Paper wurde in den Recherche-Ergebnissen nicht eindeutig identifiziert; es könnte sich um das mHC-Paper (Januar 2026, Block 2) handeln oder um ein anderes nicht gefundenes Paper zu Agentensystemen.",
+        "competing_events": "DeepSeek R1 Paper (Januar 2025, Reasoning via RL – kein Agenten-Paper) vs. mHC-Paper (Januar 2026, Architektur-Effizienz – kein explizites Agenten-Paper) vs. DeepSeek V3.2 (Dezember 2025, Tool-Interaktionen/agentische Funktionen) vs. mögliches unbekanntes Paper über Agentensysteme/ChatGPT-Reverse-Engineering",
+        "stagnation_detected": false,
+        "falsification_triggered": false,
+        "evidence_consistency": 4,
+        "evidence_sufficiency": 2,
+        "utility_score": 0.56,
+        "utility_stop": false,
+        "plateau_stop": false,
+        "context_blocks": 3,
+        "done": false,
+        "reasoning": "STATUS: INSUFFICIENT\nCONFIDENCE: 3\nGAPS: Die Frage bezieht sich auf ein spezifisches DeepSeek-Paper über \"Agentensysteme die zeigen wie ChatGPT funktioniert\", das für großes Aufsehen gesorgt haben soll – ein solches Paper wurde in den Recherche-Ergebnissen nicht eindeutig identifiziert; es könnte sich um das mHC-Paper (Januar 2026, Block 2) handeln oder um ein anderes nicht gefundenes Paper zu Agentensystemen.\nCONTRADICTIONS: Nein – keine direkten Widersprüche, aber die Recherche-Ergebnisse decken das spezifisch angefragte Paper nicht klar ab.\nIRRELEVANT: 3,4,5\nCOMPETING_EVENTS: DeepSeek R1 Paper (Januar 2025, Reasoning via RL – kein Agenten-Paper) vs. mHC-Paper (Januar 2026, Architektur-Effizienz – kein explizites Agenten-Paper) vs. DeepSeek V3.2 (Dezember 2025, Tool-Interaktionen/agentische Funktionen) vs. mögliches unbekanntes Paper über Agentensysteme/ChatGPT-Reverse-Engineering\nEVIDENCE_CONSISTENCY: 4\nEVIDENCE_SUFFICIENCY: 2"
+      },
+      {
+        "node": "plan",
+        "duration_s": 2.971,
+        "round": 1,
+        "new_queries": [
+          "DeepSeek paper open source replication ChatGPT o1 reasoning agent viral January February 2026",
+          "DeepSeek agentic system paper reverse engineer OpenAI GPT architecture controversy 2026",
+          "DeepSeek V3 R1 tool use agent capabilities paper showing how ChatGPT works under the hood"
+        ],
+        "total_queries": 9
+      },
+      {
+        "node": "search",
+        "duration_s": 19.986,
+        "round": 1,
+        "queries_executed": 3,
+        "queries": [
+          "DeepSeek paper open source replication ChatGPT o1 reasoning agent viral January February 2026",
+          "DeepSeek agentic system paper reverse engineer OpenAI GPT architecture controversy 2026",
+          "DeepSeek V3 R1 tool use agent capabilities paper showing how ChatGPT works under the hood"
+        ],
+        "sources_found": 3,
+        "total_citations": 51,
+        "context_blocks": 6,
+        "sources_summary": [
+          {
+            "query": "DeepSeek paper open source replication ChatGPT o1 reasoning agent viral January February 2026",
+            "summary": "- DeepSeek-R1 nutzt eine Mixture-of-Experts-Architektur, die pro Anfrage nur 37 Milliarden von insgesamt 671 Milliarden Parametern aktiviert.\n- DeepSeek-R1 wurde Anfang 2025 die Nr. 1-App im Apple App Store.\n- DeepSeek-R1 ist laut Angaben ca. 96 % günstiger pro Token als ChatGPT.\n- DeepSeek-R1 erreicht ca. 90 % Genauigkeit auf fortgeschrittenen Mathematik-Benchmarks, verglichen mit ca. 83 % bei ChatGPT.\n- Das Training von DeepSeek-R1 umfasst einen vierstufigen Prozess, darunter Rejection Sampling auf 600.000 Reasoning- und 200.000 allgemeinen Aufgaben.\n- ChatGPT nutzt Supervised Fine-Tuning gefolgt von Reinforcement Learning from Human Feedback (RLHF); DeepSeek-R1 setzt auf einen Cold-Start-SFT-Ansatz mit synthetischen Reasoning-Daten.\n- ChatGPT hat bis Anfang 2026 GPT-5 und GPT-5.2 eingeführt, einschließlich eines Agent Mode für Web-Automatisierung und dynamischer Reasoning-Steuerung (Light, Standard, Extended).\n- DeepSeek erfordert manuelles Routing von Anfragen an verschiedene Modellvarianten (Chat, Reasoner, Coder, R1), während ChatGPT über adaptives Reasoning verfügt, das die Denktiefe automatisch anpasst.",
+            "urls": [
+              "https://www.frontiersin.org/journals/artificial-intelligence/articles/10.3389/frai.2025.1576992/full",
+              "https://www.interconnects.ai/p/deepseek-r1-recipe-for-o1",
+              "https://www.youtube.com/watch?v=wvkLUBJdgEY",
+              "https://www.clickrank.ai/chatgpt-vs-deepseek",
+              "https://www.datagrid.com/blog/chatgpt-vs-deepseek-ai-agent-architects"
+            ]
+          },
+          {
+            "query": "DeepSeek agentic system paper reverse engineer OpenAI GPT architecture controversy 2026",
+            "summary": "- DeepSeek veröffentlichte Anfang 2026 ein Paper zu **Manifold-Constrained Hyper-Connections (mHC)**, getestet an Modellen mit 3B, 9B und 27B Parametern.\n- DeepSeek publizierte am **13. Januar 2026** eine Arbeit zu Engram-Memory für Long-Context-Verarbeitung.\n- DeepSeeks V4-Coding-Modell war für circa **17. Februar 2026** angekündigt, mit MoE-Architektur und über 1 Million Token Kontextlänge.\n- OpenAI kündigte die **Abschaltung von GPT-4o zum 13. Februar 2026** an.\n- Gegen OpenAI liefen **8–13 Klagen**, die GPT-4o sykophantische Eigenschaften vorwarfen, welche zu psychischen Krisen, Suiziden und Gewalt beigetragen haben sollen.\n- Eine Petition gegen die GPT-4o-Abschaltung bzw. zu dessen Problemen sammelte **über 20.000 Unterschriften**.\n- Nur **0,1 % der Nutzer** wählten GPT-4o noch aktiv; die meisten wurden auf GPT-5.2 umgestellt.\n- Im **August 2025** hatte GPT-5 GPT-4o als Standard ersetzt, was zu Nutzerprotesten und einer vorübergehenden Wiederherstellung von GPT-4o führte.",
+            "urls": [
+              "https://www.ibm.com/think/news/deepseek-mhc-new-architecture",
+              "https://timesofindia.indiatimes.com/technology/tech-news/why-openai-decided-to-kill-the-ai-model-that-has-reportedly-left-thousands-of-users-screaming-im-alive-today-because-of-this-model/articleshow/128157584.cms",
+              "https://www.scmp.com/tech/big-tech/article/3338427/deepseek-kicks-2026-paper-signalling-push-train-bigger-models-less",
+              "https://www.nxcode.io/resources/news/gpt-4o-retirement-2026",
+              "https://introl.com/blog/deepseek-v4-february-2026-coding-model-release"
+            ]
+          },
+          {
+            "query": "DeepSeek V3 R1 tool use agent capabilities paper showing how ChatGPT works under the hood",
+            "summary": "- **DeepSeek-R1** basiert auf einer Transformer-Architektur mit Mixture of Experts (MoE) und Multi-Head Latent Attention (MLA), wobei 37 Milliarden von insgesamt 671 Milliarden Parametern aktiv sind.\n- **DeepSeek-R1** unterstützt einen Kontextumfang von 128.000 Tokens.\n- **DeepSeek-R1** erreicht auf dem MMLU-Benchmark einen Wert von 90,8 %.\n- **DeepSeek-R1** wird mittels Reinforcement Learning (GRPO) auf der DeepSeek-V3-Basis trainiert, ergänzt durch Cold-Start-SFT, Rejection Sampling und mehrstufiges Training für Chain-of-Thought-Reasoning.\n- **ChatGPT** nutzt eine Dense-Transformer-Architektur mit vollständiger Parameteraktivierung und wird über Pre-Training, SFT und RLHF trainiert.\n- Bei PDE/ODE-Lösung und Neural-Operator-Learning übertrifft **ChatGPT o3-mini-high** häufig DeepSeek R1 in Genauigkeit, Geschwindigkeit und adaptiven Methoden (z. B. implizite Solver, adaptive Schrittweiten).\n- **DeepSeek R1** zeigt Stärken bei Generalisierung (z. B. L-förmige Domänen), weist aber langsamere Antwortzeiten und gelegentliche Fehler bei Skalierung/Vorzeichen auf.\n- **DeepSeek-R1** ist Open Source; die internen Architekturdetails und Parameteranzahl von ChatGPT sind nicht öffentlich zugänglich.",
+            "urls": [
+              "https://arxiv.org/html/2502.17764v1",
+              "https://www.frontiersin.org/journals/artificial-intelligence/articles/10.3389/frai.2025.1576992/full",
+              "https://www.ijfmr.com/papers/2025/1/36941.pdf",
+              "https://arxiv.org/pdf/2501.12948",
+              "https://pmc.ncbi.nlm.nih.gov/articles/PMC12188495"
+            ]
+          }
+        ]
+      },
+      {
+        "node": "evaluate",
+        "duration_s": 9.711,
+        "round": 2,
+        "confidence": 7,
+        "gaps": "Die Frage beschreibt ein spezifisches Paper über \"Agentensysteme die zeigen wie ChatGPT funktioniert\" — ein solches Paper existiert nach 51 durchsuchten Quellen nicht in dieser Form; das nächstliegende aufsehenerregende Paper ist das mHC-Paper (Manifold-Constrained Hyper-Connections) von Januar 2026, das jedoch nicht über Agentensysteme handelt und nicht zeigt \"wie ChatGPT funktioniert\", sondern eine neue Architektur für effizienteres Training großer Modelle vorschlägt. Die Prämisse der Frage vermischt wahrscheinlich mehrere Themen (DeepSeek R1 als günstigere Alternative zu ChatGPT + Agenten-Pläne + mHC-Paper).",
+        "competing_events": "mHC-Paper (Januar 2026, neue Architektur, viel Aufsehen) vs. DeepSeek-R1 (Januar 2025, Reasoning-Modell das zeigte dass ChatGPT-Niveau günstiger erreichbar ist, enormes Aufsehen) vs. Engram-Memory-Paper (13. Januar 2026) — der Fragesteller meint vermutlich DeepSeek-R1 (Januar 2025) oder verwechselt/vermischt es mit dem mHC-Paper (Januar 2026)",
+        "stagnation_detected": false,
+        "falsification_triggered": false,
+        "evidence_consistency": 8,
+        "evidence_sufficiency": 7,
+        "utility_score": 0.67,
+        "utility_stop": false,
+        "plateau_stop": false,
+        "context_blocks": 6,
+        "done": false,
+        "reasoning": "STATUS: SUFFICIENT\nCONFIDENCE: 7\nGAPS: Die Frage beschreibt ein spezifisches Paper über \"Agentensysteme die zeigen wie ChatGPT funktioniert\" — ein solches Paper existiert nach 51 durchsuchten Quellen nicht in dieser Form; das nächstliegende aufsehenerregende Paper ist das mHC-Paper (Manifold-Constrained Hyper-Connections) von Januar 2026, das jedoch nicht über Agentensysteme handelt und nicht zeigt \"wie ChatGPT funktioniert\", sondern eine neue Architektur für effizienteres Training großer Modelle vorschlägt. Die Prämisse der Frage vermischt wahrscheinlich mehrere Themen (DeepSeek R1 als günstigere Alternative zu ChatGPT + Agenten-Pläne + mHC-Paper).\nCONTRADICTIONS: Nein — die Quellen sind konsistent darin, dass kein DeepSeek-Paper über \"Agentensysteme die zeigen wie ChatGPT funktioniert\" existiert; Block 3 bestätigt explizit: \"Keine arXiv-Publikationen zu Multi-Agent-Systemen mit LLMs identifiziert.\"\nIRRELEVANT: Keine (alle Blöcke liefern relevanten Kontext zur Einordnung)\nCOMPETING_EVENTS: mHC-Paper (Januar 2026, neue Architektur, viel Aufsehen) vs. DeepSeek-R1 (Januar 2025, Reasoning-Modell das zeigte dass ChatGPT-Niveau günstiger erreichbar ist, enormes Aufsehen) vs. Engram-Memory-Paper (13. Januar 2026) — der Fragesteller meint vermutlich DeepSeek-R1 (Januar 2025) oder verwechselt/vermischt es mit dem mHC-Paper (Januar 2026)\nEVIDENCE_CONSISTENCY: 8\nEVIDENCE_SUFFICIENCY: 7"
+      },
+      {
+        "node": "plan",
+        "duration_s": 2.865,
+        "round": 2,
+        "new_queries": [
+          "DeepSeek R1 January 2025 paper showing ChatGPT level performance cheaper what exactly did it reveal",
+          "DeepSeek mHC manifold constrained hyper connections paper January 2026 new architecture details findings",
+          "DeepSeek agent paper 2025 2026 limitations critique comparison OpenAI multi-agent framework"
+        ],
+        "total_queries": 12
+      },
+      {
+        "node": "search",
+        "duration_s": 23.551,
+        "round": 2,
+        "queries_executed": 3,
+        "queries": [
+          "DeepSeek R1 January 2025 paper showing ChatGPT level performance cheaper what exactly did it reveal",
+          "DeepSeek mHC manifold constrained hyper connections paper January 2026 new architecture details findings",
+          "DeepSeek agent paper 2025 2026 limitations critique comparison OpenAI multi-agent framework"
+        ],
+        "sources_found": 3,
+        "total_citations": 69,
+        "context_blocks": 9,
+        "sources_summary": [
+          {
+            "query": "DeepSeek R1 January 2025 paper showing ChatGPT level performance cheaper what exactly did it reveal",
+            "summary": "- DeepSeek-R1 wurde in etwa 55 Tagen auf 2.048 Nvidia H800 GPUs trainiert, zu Kosten von rund 5,5 Millionen US-Dollar – weniger als ein Zehntel der geschätzten Trainingskosten von ChatGPT.\n- Das Modell nutzt eine Mixture-of-Experts-Architektur (MoE) mit 671 Milliarden Parametern, aktiviert jedoch nur 37 Milliarden pro Anfrage.\n- DeepSeek-R1 erreichte auf fortgeschrittenen Mathematik-Benchmarks etwa 90 % Genauigkeit, verglichen mit 83 % bei ChatGPT.\n- Auf dem MATH-Benchmark erzielte DeepSeek-R1 konkret 90,2 %, zum damaligen Zeitpunkt der höchste Wert im Feld.\n- Bei deutschen medizinischen Multiple-Choice-Fragen erreichte DeepSeek 96 % Genauigkeit gegenüber 92,5 % bei ChatGPT; der Unterschied war statistisch nicht signifikant.\n- Das R1-Paper stammt aus dem Januar 2025 und wurde in Nature behandelt.\n- DeepSeek wurde nach Veröffentlichung die meistgeladene kostenlose KI-App im U.S. iOS App Store.",
+            "urls": [
+              "https://formative.jmir.org/2025/1/e77357",
+              "https://www.geeksforgeeks.org/websites-apps/deepseek-vs-chatgpt",
+              "https://async.com/blog/chatgpt-vs-deepseek",
+              "https://www.computer.org/csdl/magazine/co/2025/09/11134651/29olWahHqxy",
+              "https://pmc.ncbi.nlm.nih.gov/articles/PMC12757712"
+            ]
+          },
+          {
+            "query": "DeepSeek mHC manifold constrained hyper connections paper January 2026 new architecture details findings",
+            "summary": "- **mHC** stammt von DeepSeek und wurde laut Angabe am **5. Januar 2026** auf arXiv veröffentlicht (arXiv:2512.24880v2).\n- Die Methode nutzt den **Sinkhorn-Knopp-Algorithmus**, um Mischmatrizen auf die Menge **doppelt stochastischer Matrizen** (Birkhoff-Polytop) zu projizieren.\n- HC verwendet typischerweise eine **Expansionsrate von N=4** parallelen Pfaden im Residualstrom.\n- Uneingeschränktes HC verursacht laut Paper bei **27B-Parametern (Tiefe 64)** eine **~3000-fache Signalverstärkung**; mHC begrenzt diese auf **~1,6-fach**.\n- Verlustspitzen traten beim uneingeschränkten HC nach **~12.000 Trainingsschritten** auf.\n- Auf dem **BBH-Benchmark** erreicht das 27B-MoE-Modell mit mHC **51,0**, verglichen mit **48,9 (HC)** und **43,8 (Baseline)**.\n- Der Trainingsoverhead von mHC beträgt laut Angabe **6,7 %**, realisiert durch Custom-CUDA-Kernel (TileLang), Kernel-Fusion und DualPipe-Scheduling.\n- Getestet wurde an **3B-, 9B- und 27B-MoE-Modellen**, die an der DeepSeek-V3-Architektur orientiert sind.",
+            "urls": [
+              "https://vizuara.substack.com/p/mhc-manifold-constrained-hyper-connections",
+              "https://www.ibm.com/think/news/deepseek-mhc-new-architecture",
+              "https://www.youtube.com/watch?v=HmhV76_3nuA",
+              "https://deepseek.ai/blog/deepseek-mhc-manifold-constrained-hyper-connections",
+              "https://arxiv.org/abs/2512.24880"
+            ]
+          },
+          {
+            "query": "DeepSeek agent paper 2025 2026 limitations critique comparison OpenAI multi-agent framework",
+            "summary": "- DeepSeek R1 baute in vergleichenden Tests 14 von 15 Projekten erfolgreich (93 %), Gemini 2.0 Flash 11 von 15 (73 %), ChatGPT 9 von 15 (60 %).\n- DeepSeek R1 kostet im Betrieb ca. 30-mal weniger als OpenAIs o1 bei vergleichbarer oder besserer Leistung in Mathe- und Code-Benchmarks.\n- DeepSeek hat ein Kontextfenster von 128.000 Token; GPT-5 bietet über 400.000 Token.\n- DeepSeek verarbeitet ausschließlich Text; Bilder, Audio und Video werden nicht unterstützt.\n- DeepSeek bietet keine formalen SLAs, keine dedizierten Support-Teams und keine garantierten Antwortzeiten.\n- DeepSeek steht unter MIT-Lizenz mit vollständig offenen Modellgewichten und ermöglicht Self-Hosting ohne Vendor-Lock-in.\n- DeepSeek V4 wird für etwa Mitte Februar 2026 erwartet und soll Kontexte von über einer Million Token verarbeiten können; interne Benchmarks berichten von einer 97 %-Erfolgsrate bei Needle-in-a-Haystack-Tests (gegenüber 84,2 % bei Vorgängermodellen).\n- DeepSeek bietet vier spezialisierte Varianten (Chat, Reasoner, Coder, R1), die manuelles Query-Routing erfordern, während GPT-5 automatisch zwischen schnellem und Reasoning-Modus wechselt.",
+            "urls": [
+              "https://arxiv.org/abs/2512.02556",
+              "https://www.datagrid.com/blog/chatgpt-vs-deepseek-ai-agent-architects",
+              "https://langcopilot.com/posts/2025-11-01-top-multi-agent-ai-frameworks-2024-guide",
+              "https://www.piie.com/blogs/realtime-economics/2026/how-ai-boom-shrugged-deepseek-shock-and-keeps-gaining-steam",
+              "https://365datascience.com/trending/deepseek-vs-openai"
+            ]
+          }
+        ]
+      },
+      {
+        "node": "evaluate",
+        "duration_s": 7.418,
+        "round": 3,
+        "confidence": 4,
+        "gaps": "Die Frage beschreibt ein DeepSeek-Paper über \"Agentensysteme die zeigen wie ChatGPT funktioniert\" – kein gefundenes Paper passt exakt auf diese Beschreibung; das mHC-Paper (Januar 2026) betrifft Architektur-Optimierung (Hyper-Connections), nicht Agentensysteme die ChatGPT erklären; möglicherweise ist ein anderes/aktuelleres Paper gemeint oder die Fragestellung basiert auf einer falschen Prämisse.",
+        "competing_events": "mHC-Paper (5. Januar 2026, Architektur-Optimierung) vs. DeepSeek-R1 (Januar 2025, Reasoning-Modell das für großes Aufsehen sorgte) vs. möglicherweise ein nicht gefundenes Paper über Agentensysteme/Reverse-Engineering von ChatGPT",
+        "stagnation_detected": false,
+        "falsification_triggered": false,
+        "evidence_consistency": 7,
+        "evidence_sufficiency": 3,
+        "utility_score": 0.27,
+        "utility_stop": false,
+        "plateau_stop": false,
+        "context_blocks": 5,
+        "done": false,
+        "reasoning": "STATUS: INSUFFICIENT\nCONFIDENCE: 4\nGAPS: Die Frage beschreibt ein DeepSeek-Paper über \"Agentensysteme die zeigen wie ChatGPT funktioniert\" – kein gefundenes Paper passt exakt auf diese Beschreibung; das mHC-Paper (Januar 2026) betrifft Architektur-Optimierung (Hyper-Connections), nicht Agentensysteme die ChatGPT erklären; möglicherweise ist ein anderes/aktuelleres Paper gemeint oder die Fragestellung basiert auf einer falschen Prämisse.\nCONTRADICTIONS: Nein – die Quellen sind intern konsistent, aber keines der gefundenen Papers matcht die spezifische Beschreibung \"Agentensysteme die zeigen wie ChatGPT funktioniert\".\nIRRELEVANT: 4,6,7,9\nCOMPETING_EVENTS: mHC-Paper (5. Januar 2026, Architektur-Optimierung) vs. DeepSeek-R1 (Januar 2025, Reasoning-Modell das für großes Aufsehen sorgte) vs. möglicherweise ein nicht gefundenes Paper über Agentensysteme/Reverse-Engineering von ChatGPT\nEVIDENCE_CONSISTENCY: 7\nEVIDENCE_SUFFICIENCY: 3"
+      },
+      {
+        "node": "plan",
+        "duration_s": 2.819,
+        "round": 3,
+        "new_queries": [
+          "DeepSeek paper viral February 2026 reddit hacker news discussion what paper everyone talking about",
+          "DeepSeek 2026 new paper list all publications arxiv January February complete overview",
+          "site:reddit.com DeepSeek paper agent ChatGPT 2026 buzz controversy"
+        ],
+        "total_queries": 15
+      },
+      {
+        "node": "search",
+        "duration_s": 15.871,
+        "round": 3,
+        "queries_executed": 3,
+        "queries": [
+          "DeepSeek paper viral February 2026 reddit hacker news discussion what paper everyone talking about",
+          "DeepSeek 2026 new paper list all publications arxiv January February complete overview",
+          "site:reddit.com DeepSeek paper agent ChatGPT 2026 buzz controversy"
+        ],
+        "sources_found": 3,
+        "total_citations": 82,
+        "context_blocks": 8,
+        "sources_summary": [
+          {
+            "query": "DeepSeek paper viral February 2026 reddit hacker news discussion what paper everyone talking about",
+            "summary": "- Das DeepSeek-Paper zu \"Manifold-Constrained Hyper-Connections\" (mHC) wurde Anfang Februar 2026 veröffentlicht und von DeepSeek-Gründer Liang Wenfeng mitautorisiert.\n- mHC wurde an Modellen mit 3B, 9B und 27B Parametern getestet und zeigte stabiles Skalieren ohne zusätzlichen Aufwand gegenüber konventionellen Hyper-Connections (HC).\n- DeepSeeks R1-Modell (Release Januar 2026) erreichte 57,2 Millionen Downloads und Platz 1 in den App-Stores weltweit.\n- Der R1-Release wurde in Silicon Valley als \"Sputnik-Moment\" bezeichnet.\n- Das mHC-Paper wird als Lösung für instabile Trainingsläufe im Bereich von 100 Millionen Dollar beschrieben.\n- DeepSeek plant laut Berichten einen KI-Suchdienst und KI-Agenten bis Ende 2026.\n- Über das Paper wurde u. a. in SCMP, TechXplore und The Neuron Daily berichtet.",
+            "urls": [
+              "https://www.novaedgedigitallabs.tech/Blog/deepseek-shock-chinese-ai-disrupts-silicon-valley",
+              "https://www.scmp.com/tech/big-tech/article/3338427/deepseek-kicks-2026-paper-signalling-push-train-bigger-models-less",
+              "https://techxplore.com/news/2026-01-deepseek-ai-gains-traction-nations.html",
+              "https://ai-regulation.com/deepseek-one-year-later-regulatory-storm-global-surge",
+              "https://www.theneurondaily.com/p/deepseek-just-fixed-what-breaks-100m-ai-training-runs"
+            ]
+          },
+          {
+            "query": "DeepSeek 2026 new paper list all publications arxiv January February complete overview",
+            "summary": "- **mHC: Manifold-Constrained Hyper-Connections** wurde Anfang Januar 2026 auf arXiv veröffentlicht; getestet auf Modellen mit 3B, 9B und 27B Parametern; Co-Autoren sind u. a. Shengding Hu, Yuqing Wang, Jingyang Yuan, Lean Wang und Liang Wenfeng (DeepSeek-AI).\n- **DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning** trägt die arXiv-Kennung 2501.12948 (v1: 22. Januar 2025; v2: 4. Januar 2026) und wurde in Nature (Band 645, S. 633–638, 2025) veröffentlicht.\n- **Conditional Memory via Scalable Lookup** erschien im Januar 2026 auf arXiv (2601.07372v1); Autoren sind u. a. Han Zhang und Huishuai Zhang (Peking University) sowie Mitglieder des DeepSeek-AI-Teams (u. a. Damai Dai).\n- Das Paper zu Conditional Memory vergleicht Modelle wie Dense-4B und MoE-27B auf Benchmarks wie MMLU und ARC und referenziert DeepSeek-V3 sowie Multi-head Latent Attention (MLA).\n- Das mHC-Paper wurde laut Angaben an einem Donnerstag (vermutlich 8. Januar 2026) veröffentlicht; Mitgründer Liang Wenfeng wird als Co-Autor genannt.\n- DeepSeek-V3.2 (Dezember 2025, arXiv: 2512.02556) wird als Vorgängerarbeit genannt und nutzt DeepSeek Sparse Attention sowie RL-Skalierung.\n- In verwandten Arbeiten werden MMLU-Ergebnisse von bis zu 64,5 % sowie Verbesserungen bei Long-Context-Verarbeitung und Mathematik-/Reasoning-Aufgaben berichtet.\n- Für den Zeitraum Januar–Februar 2026 (Stand 10. Februar) werden insgesamt drei Publikationen von DeepSeek-AI auf arXiv identifiziert.",
+            "urls": [
+              "https://www.scmp.com/tech/big-tech/article/3338427/deepseek-kicks-2026-paper-signalling-push-train-bigger-models-less",
+              "https://arxiv.org/abs/2512.02556",
+              "https://arxiv.org/abs/2501.12948",
+              "https://arxiv.org/pdf/2512.24880",
+              "https://arxiv.org/html/2601.07372v1"
+            ]
+          },
+          {
+            "query": "site:reddit.com DeepSeek paper agent ChatGPT 2026 buzz controversy",
+            "summary": "- DeepSeek veröffentlichte sein R1-Modell im Januar 2025 mit angeblichen Entwicklungskosten von nur 5,6 Millionen Dollar, verglichen mit 100 Millionen Dollar für ChatGPT bei OpenAI.\n- OpenAI leitete Untersuchungen ein, ob DeepSeek deren Modelle unzulässig destilliert habe.\n- Cybersicherheitsforscher äußerten Bedenken über mögliche Datenübertragungen nach China.\n- DeepSeek wurde als deutlich anfälliger für Jailbreaking-Angriffe als ChatGPT eingestuft.\n- Das Modell zeigt signifikante Zensur bei politisch sensiblen Themen, insbesondere zu China, Taiwan und den Protesten auf dem Tiananmen-Platz 1989.\n- Mehrere Regierungen, darunter Indien, warnten Bürger und Beamte vor der Nutzung von DeepSeek wegen Datenschutz- und Überwachungsbedenken.",
+            "urls": [
+              "https://hls.harvard.edu/today/deepseek-chatgpt-and-the-global-fight-for-technological-supremacy",
+              "https://www.youtube.com/watch?v=ZoS2b5zJXR8",
+              "https://moderndiplomacy.eu/2025/03/20/deepseeks-censorship-controversy-a-global-shake-up-in-ai-development",
+              "https://www.politico.com/news/2026/01/27/cisa-madhu-gottumukkala-chatgpt-00749361",
+              "https://cybersecurityasia.net/security-china-deepseek-ai-model"
+            ]
+          }
+        ]
+      },
+      {
+        "node": "evaluate",
+        "duration_s": 7.07,
+        "round": 4,
+        "confidence": 7,
+        "gaps": "Die Frage beschreibt ein Paper über \"Agentensysteme die zeigen wie ChatGPT funktioniert\" — kein solches Paper existiert; das aufsehenerregendste DeepSeek-Paper Anfang 2026 ist das mHC-Paper (Manifold-Constrained Hyper-Connections), das sich mit Trainingsarchitektur/Stabilität befasst, nicht mit Agentensystemen oder der Funktionsweise von ChatGPT. Die Prämisse der Frage scheint falsch oder stark verzerrt zu sein.",
+        "competing_events": "mHC-Paper (Januar 2026) vs. DeepSeek-R1 (Januar 2025, \"Sputnik-Moment\") vs. Conditional Memory Paper (Januar 2026) — keines davon passt zur Beschreibung \"Agentensysteme die zeigen wie ChatGPT funktioniert\"; R1 kommt der Beschreibung \"viel Aufsehen\" am nächsten, ist aber kein Paper über Agentensysteme.",
+        "stagnation_detected": false,
+        "falsification_triggered": false,
+        "evidence_consistency": 8,
+        "evidence_sufficiency": 7,
+        "utility_score": 0.63,
+        "utility_stop": false,
+        "plateau_stop": false,
+        "context_blocks": 7,
+        "done": true,
+        "reasoning": "STATUS: SUFFICIENT\nCONFIDENCE: 7\nGAPS: Die Frage beschreibt ein Paper über \"Agentensysteme die zeigen wie ChatGPT funktioniert\" — kein solches Paper existiert; das aufsehenerregendste DeepSeek-Paper Anfang 2026 ist das mHC-Paper (Manifold-Constrained Hyper-Connections), das sich mit Trainingsarchitektur/Stabilität befasst, nicht mit Agentensystemen oder der Funktionsweise von ChatGPT. Die Prämisse der Frage scheint falsch oder stark verzerrt zu sein.\nCONTRADICTIONS: Nein — alle Quellen stimmen überein, dass das prominenteste DeepSeek-Paper Anfang 2026 das mHC-Paper ist; kein Paper über \"Agentensysteme die zeigen wie ChatGPT funktioniert\" wurde gefunden.\nIRRELEVANT: 8\nCOMPETING_EVENTS: mHC-Paper (Januar 2026) vs. DeepSeek-R1 (Januar 2025, \"Sputnik-Moment\") vs. Conditional Memory Paper (Januar 2026) — keines davon passt zur Beschreibung \"Agentensysteme die zeigen wie ChatGPT funktioniert\"; R1 kommt der Beschreibung \"viel Aufsehen\" am nächsten, ist aber kein Paper über Agentensysteme.\nEVIDENCE_CONSISTENCY: 8\nEVIDENCE_SUFFICIENCY: 7"
+      },
+      {
+        "node": "answer",
+        "duration_s": 45.868,
+        "answer_length": 7750,
+        "citation_count": 82,
+        "rounds": 4,
+        "elapsed_total_s": 177.5,
+        "confidence": 7
+      }
+    ]
+  }
+}

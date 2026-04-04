@@ -1,0 +1,422 @@
+{
+  "meta": {
+    "timestamp": "",
+    "endpoint": "http://127.0.0.1:5100",
+    "reasoning_model": "claude-opus-4.6-agent",
+    "search_model": "perplexity-sonar-pro-agent",
+    "summarize_model": "claude-opus-4.6-agent",
+    "agent_version": "ok",
+    "total_elapsed_s": 810.58,
+    "promoted_at": ""
+  },
+  "result": {
+    "question_id": "q006",
+    "question": "Welches KI-Unternehmen hat im Januar oder Februar 2026 den größten Durchbruch bei autonomen Coding-Agenten erzielt, die eigenständig ganze Software-Projekte umsetzen können?",
+    "category": "factual",
+    "answer": "## Kurzfazit\n\nDer groesste Durchbruch bei autonomen Coding-Agenten Anfang 2026 geht an **OpenAI mit GPT-5.3-Codex**, das am **5. Februar 2026** veroeffentlicht wurde und neue Hoechstwerte auf mehreren Benchmarks erzielte – insbesondere **77,3 % auf Terminal-Bench 2.0** und Rekordwerte auf SWE-Bench Pro, OSWorld und GDPval [70](https://openai.com/index/introducing-gpt-5-3-codex). Nahezu zeitgleich veroeffentlichte **Anthropic Claude Opus 4.6**, das mit einem **1-Million-Token-Kontextfenster** und Multi-Agenten-Teams ebenfalls einen bedeutenden Sprung darstellt [46](https://techcrunch.com/2026/02/05/anthropic-releases-opus-4-6-with-new-agent-teams). Beide Releases markieren einen Paradigmenwechsel hin zu KI-Systemen, die eigenstaendig mehrtaegige Softwareprojekte bearbeiten koennen.\n\n---\n\n## Kernaussagen\n\n- **GPT-5.3-Codex** erreichte **77,3 %** auf Terminal-Bench 2.0, waehrend Claude Opus 4.6 dort bei **65,4 %** lag – ein Vorsprung von fast 12 Prozentpunkten [67](https://www.nxcode.io/resources/news/gpt-5-3-codex-vs-claude-opus-4-6-ai-coding-comparison-2026).\n- OpenAI stellte mit GPT-5.3-Codex die Begleitplattform **Frontier** vor, die Enterprise-Agenten-Management fuer Multi-Tage-Projekte ermoeglicht [45](https://www.eweek.com/news/gpt-5-3-codex-openai-agentic-ai-launch).\n- Claude Opus 4.6 kontert mit einem **1-Million-Token-Kontextfenster** (Beta) und einem neuartigen **„Adaptive Thinking\"-Protokoll**, das die Reasoning-Tiefe autonom steuert [43](https://www.digitalapplied.com/blog/claude-opus-4-6-release-features-benchmarks-guide).\n- In einem **Sicherheitsaudit einer 20.000-Zeilen-Codebasis** fand Opus 4.6 im Single-Pass **18 Probleme**, Codex im Chunked-Modus nur **12** – ein Vorteil fuer Opus bei Codeanalyse grosser Kontexte [67](https://www.nxcode.io/resources/news/gpt-5-3-codex-vs-claude-opus-4-6-ai-coding-comparison-2026).\n- GPT-5.3-Codex ist **25 % schneller** in der Inferenz als sein Vorgaenger und wird mit **$6/$30 pro Million Tokens** bepreist; Opus 4.6 ist mit **$5/$25** rund **17 % guenstiger** [74](https://www.digitalapplied.com/blog/gpt-5-3-codex-release-features-benchmarks-guide) [43](https://www.digitalapplied.com/blog/claude-opus-4-6-release-features-benchmarks-guide).\n- **Cognition Devin 2.0** und **Replit Agent 3** sind relevante Wettbewerber, erreichen aber nicht die Benchmark-Werte der beiden Spitzenmodelle und adressieren eher spezifische Nischen [95](https://siliconangle.com/2025/04/03/cognition-ai-launches-revamped-coding-assistant-devin-2-0-much-lower-starting-price) [62](https://serenitiesai.com/articles/replit-agent-2026-features-pricing-review).\n- Laut LinearB-Daten sind agentenbasierte Pull Requests **2,6-mal groesser**, haben aber eine Akzeptanzrate von nur **32,7 %** gegenueber **84,4 %** bei manuellen PRs – ein Hinweis auf noch bestehende Qualitaetsluecken [49](https://linearb.io/resources/software-engineering-benchmarks-report).\n\n---\n\n## Detailanalyse\n\n### GPT-5.3-Codex: Der Benchmark-Koenig\n\nOpenAIs GPT-5.3-Codex stellt den quantitativ staerksten Fortschritt dar. Das Modell wurde am 5. Februar 2026 veroeffentlicht und erzielte auf **vier unabhaengigen Benchmarks** neue Hoechstwerte: SWE-Bench Pro, Terminal-Bench 2.0, OSWorld und GDPval [70](https://openai.com/index/introducing-gpt-5-3-codex). Besonders bemerkenswert ist der Terminal-Bench-2.0-Wert von **77,3 %**, der die Faehigkeit misst, komplexe Aufgaben ueber Kommandozeilen-Interaktionen autonom zu loesen [81](https://www.tbench.ai/leaderboard/terminal-bench/2.0).\n\nEin technisches Novum ist die Tatsache, dass OpenAI-Ingenieure fruehere Versionen von GPT-5.3-Codex zum **Self-Debugging waehrend des eigenen Trainings und Deployments** einsetzten – das Modell half also bei seiner eigenen Entwicklung [20](https://www.ibm.com/think/podcasts/mixture-of-experts/anthropic-vs-openai-claude-opus-4-6-gpt-5-3-codex). Die neue Plattform **Frontier** ermoeglicht es Unternehmen, mehrere Codex-Agenten parallel auf mehrtaegige Projekte anzusetzen, inklusive CLI- und App-Zugang [45](https://www.eweek.com/news/gpt-5-3-codex-openai-agentic-ai-launch). Fortune berichtete allerdings auch ueber **„beispiellose Cybersicherheitsrisiken\"**, die mit der Autonomie von GPT-5.3-Codex einhergehen [72](https://fortune.com/2026/02/05/openai-gpt-5-3-codex-warns-unprecedented-cybersecurity-risks).\n\n### Claude Opus 4.6: Der Kontext-Champion\n\nAnthropic veroeffentlichte Claude Opus 4.6 innerhalb einer Stunde nach OpenAIs Release – ein klares Signal des Wettbewerbsdrucks [39](https://evrimagaci.org/gpt/anthropic-unveils-claude-opus-46-amid-ai-industry-turmoil-527113). Der groesste Differenzierungsfaktor ist das **1-Million-Token-Kontextfenster**, das etwa 1.500 Seiten Text entspricht und es dem Modell ermoeglicht, gesamte Codebasen in einem einzigen Durchlauf zu analysieren [43](https://www.digitalapplied.com/blog/claude-opus-4-6-release-features-benchmarks-guide). Dies erklaert, warum Opus 4.6 im Sicherheitsaudit einer 20.000-Zeilen-Codebasis **50 % mehr Probleme** identifizierte als Codex [67](https://www.nxcode.io/resources/news/gpt-5-3-codex-vs-claude-opus-4-6-ai-coding-comparison-2026).\n\nDas **„Adaptive Thinking\"-Protokoll** erlaubt dem Modell, die Tiefe seines Reasoning-Prozesses je nach Aufgabenkomplexitaet autonom zu skalieren [20](https://www.ibm.com/think/podcasts/mixture-of-experts/anthropic-vs-openai-claude-opus-4-6-gpt-5-3-codex). Zusaetzlich fuehrte Anthropic **Multi-Agenten-Teams** ein, bei denen mehrere Opus-4.6-Instanzen Aufgaben untereinander aufteilen koennen [46](https://techcrunch.com/2026/02/05/anthropic-releases-opus-4-6-with-new-agent-teams). Ein neuer **„Fast Mode\"** (Research Preview) verspricht bis zu **2,5-fache Geschwindigkeit** bei hoeherem Preis [40](https://timesofindia.indiatimes.com/technology/tech-news/anthropic-claud-opus-4-6-gets-fast-mode-what-is-it-and-how-it-is-different-from-standard-mode/articleshow/128068700.cms).\n\n### Devin 2.0 und Replit Agent 3: Starke Nischenplayer\n\n**Cognition Devin 2.0** wurde bereits im April 2025 lanciert, mit Enterprise-Updates im Januar 2026 [95](https://siliconangle.com/2025/04/03/cognition-ai-launches-revamped-coding-assistant-devin-2-0-much-lower-starting-price). Goldman Sachs setzte Devin als **ersten KI-Mitarbeiter** ein und berichtete von rund **20 % Produktivitaetssteigerung** [14](https://www.ibm.com/think/news/goldman-sachs-first-ai-employee-devin). Allerdings liegt Devins Fokus auf der Integration in bestehende Workflows (Terminal, Browser, Editor gleichzeitig) und weniger auf roher Benchmark-Performance. Der Preis von **500 USD/Monat** positioniert es klar im Enterprise-Segment [12](https://aidevdayindia.org/blogs/lmsys-chatbot-arena-current-rankings/best-ai-agents-for-autonomous-coding-2026.html).\n\n**Replit Agent 3** beeindruckte mit der Faehigkeit, **135 Apps in 24 Stunden** zu erstellen (Rokt-Fallstudie) und eine vollstaendige Aufgabenverwaltungs-App mit Authentifizierung und PostgreSQL in unter 15 Minuten zu generieren [23](https://replit.com/discover/best-ai-coding-assistant) [62](https://serenitiesai.com/articles/replit-agent-2026-features-pricing-review). Fuer komplexe Randfaelle war jedoch weiterhin manuelles Debugging erforderlich. Direkte Benchmark-Vergleiche mit GPT-5.3-Codex oder Opus 4.6 liegen nicht vor [67](https://www.nxcode.io/resources/news/gpt-5-3-codex-vs-claude-opus-4-6-ai-coding-comparison-2026).\n\n### Die Realitaetspruefung: Qualitaet vs. Geschwindigkeit\n\nDie LinearB-Analyse von ueber **8,1 Millionen Pull Requests** zeigt ein differenziertes Bild: Agentenbasierte PRs sind zwar **2,6-mal groesser**, haben aber **5,3-mal laengere Pickup-Zeiten** und eine Akzeptanzrate von nur **32,7 %** gegenueber **84,4 %** bei manuellen PRs [49](https://linearb.io/resources/software-engineering-benchmarks-report). Das bedeutet: Autonome Agenten produzieren mehr Code, aber dieser erfordert deutlich mehr menschliche Ueberpruefung. Cortex bestaetigt diesen Befund mit der Einschaetzung, dass KI Engineering **schneller, aber nicht unbedingt besser** macht [53](https://www.cortex.io/post/ai-is-making-engineering-faster-but-not-better-state-of-ai-benchmark-2026).\n\n---\n\n## Einordnung / Ausblick\n\nDer **5. Februar 2026** markiert einen Wendepunkt: Erstmals koennen zwei konkurrierende KI-Modelle eigenstaendig mehrtaegige Softwareprojekte bearbeiten, sich selbst debuggen und in Multi-Agenten-Konfigurationen zusammenarbeiten. **GPT-5.3-Codex fuehrt bei Benchmarks und Ausfuehrungsgeschwindigkeit**, waehrend **Claude Opus 4.6 bei Kontextverstaendnis und Kosteneffizienz punktet** – die Wahl haengt vom Anwendungsfall ab. Microsoft bezeichnet 2026 als **„Year of the Agent\"** [4](https://news.microsoft.com/source/features/ai/whats-next-in-ai-7-trends-to-watch-in-2026), doch die niedrige Akzeptanzrate agentenbasierter PRs zeigt, dass **Human-in-the-Loop-Governance** auf absehbare Zeit unverzichtbar bleibt. Google hat in diesem Zeitraum kein vergleichbares autonomes Coding-Produkt vorgestellt und konzentrierte sich stattdessen auf multilinguale KI-Forschung [22](https://www.theneurondaily.com/p/google-cracked-the-code-for-400-languages).\n\n---\n\n**Quellen:** [4](https://news.microsoft.com/source/features/ai/whats-next-in-ai-7-trends-to-watch-in-2026) | [12](https://aidevdayindia.org/blogs/lmsys-chatbot-arena-current-rankings/best-ai-agents-for-autonomous-coding-2026.html) | [14](https://www.ibm.com/think/news/goldman-sachs-first-ai-employee-devin) | [20](https://www.ibm.com/think/podcasts/mixture-of-experts/anthropic-vs-openai-claude-opus-4-6-gpt-5-3-codex) | [22](https://www.theneurondaily.com/p/google-cracked-the-code-for-400-languages) | [23](https://replit.com/discover/best-ai-coding-assistant) | [39](https://evrimagaci.org/gpt/anthropic-unveils-claude-opus-46-amid-ai-industry-turmoil-527113) | [40](https://timesofindia.indiatimes.com/technology/tech-news/anthropic-claud-opus-4-6-gets-fast-mode-what-is-it-and-how-it-is-different-from-standard-mode/articleshow/128068700.cms) | [43](https://www.digitalapplied.com/blog/claude-opus-4-6-release-features-benchmarks-guide) | [45](https://www.eweek.com/news/gpt-5-3-codex-openai-agentic-ai-launch) | [46](https://techcrunch.com/2026/02/05/anthropic-releases-opus-4-6-with-new-agent-teams) | [49](https://linearb.io/resources/software-engineering-benchmarks-report) | [53](https://www.cortex.io/post/ai-is-making-engineering-faster-but-not-better-state-of-ai-benchmark-2026) | [62](https://serenitiesai.com/articles/replit-agent-2026-features-pricing-review) | [67](https://www.nxcode.io/resources/news/gpt-5-3-codex-vs-claude-opus-4-6-ai-coding-comparison-2026) | [70](https://openai.com/index/introducing-gpt-5-3-codex) | [72](https://fortune.com/2026/02/05/openai-gpt-5-3-codex-warns-unprecedented-cybersecurity-risks) | [74](https://www.digitalapplied.com/blog/gpt-5-3-codex-release-features-benchmarks-guide) | [81](https://www.tbench.ai/leaderboard/terminal-bench/2.0) | [95](https://siliconangle.com/2025/04/03/cognition-ai-launches-revamped-coding-assistant-devin-2-0-much-lower-starting-price)\n\n---\n*101 Quellen · 15 Suchen · 4 Runden · 3:11 min · Confidence 7/10*",
+    "metrics": {
+      "total_rounds": 4,
+      "total_elapsed_s": 191.58,
+      "final_confidence": 7,
+      "total_queries": 15,
+      "total_citations": 101,
+      "total_context_blocks": 11,
+      "competing_events_detected": true,
+      "stagnation_detected": false,
+      "total_prompt_tokens": 52370,
+      "total_completion_tokens": 21721,
+      "falsification_triggered": false,
+      "evidence_consistency_final": 6,
+      "evidence_sufficiency_final": 7,
+      "utility_scores": [
+        0.65,
+        0.56,
+        0.55,
+        0.51
+      ],
+      "utility_stop_triggered": false,
+      "plateau_stop_triggered": true
+    },
+    "iteration_logs": [
+      {
+        "node": "classify",
+        "duration_s": 8.181,
+        "decision": "SEARCH",
+        "lang": "de",
+        "search_lang": "en",
+        "recency": "month",
+        "type": "news"
+      },
+      {
+        "node": "decompose",
+        "duration_s": 2.046,
+        "sub_questions": [
+          "Welches KI-Unternehmen hat im Januar oder Februar 2026 den größten Durchbruch bei autonomen Coding-Agenten erzielt?",
+          "Welche autonomen Coding-Agenten können Anfang 2026 eigenständig ganze Software-Projekte umsetzen?"
+        ],
+        "sub_question_count": 2
+      },
+      {
+        "node": "plan",
+        "duration_s": 4.298,
+        "round": 0,
+        "new_queries": [
+          "autonomous coding agents breakthrough January February 2026 AI company",
+          "AI software engineering agent full project development 2026 latest news",
+          "Devin Cognition AI coding agent 2026 update autonomous software development",
+          "OpenAI Anthropic Google autonomous coding agent 2026 breakthrough announcement",
+          "best AI coding agents 2026 build entire software projects independently comparison",
+          "autonomous AI developer agent startup funding launch early 2026"
+        ],
+        "total_queries": 6
+      },
+      {
+        "node": "search",
+        "duration_s": 17.819,
+        "round": 0,
+        "queries_executed": 6,
+        "queries": [
+          "autonomous coding agents breakthrough January February 2026 AI company",
+          "AI software engineering agent full project development 2026 latest news",
+          "Devin Cognition AI coding agent 2026 update autonomous software development",
+          "OpenAI Anthropic Google autonomous coding agent 2026 breakthrough announcement",
+          "best AI coding agents 2026 build entire software projects independently comparison",
+          "autonomous AI developer agent startup funding launch early 2026"
+        ],
+        "sources_found": 6,
+        "total_citations": 38,
+        "context_blocks": 6,
+        "sources_summary": [
+          {
+            "query": "autonomous coding agents breakthrough January February 2026 AI company",
+            "summary": "- **C3 AI** veröffentlichte einen Blogpost, der **Autonomous Coding Agents (ACAs)** als zentrale Weiterentwicklung über Entwicklerproduktivität hinaus beschreibt.\n- C3 AI nutzt laut eigener Darstellung **OpenHands** als Grundlage für cloud-native ACA-Systeme.\n- C3 AI entwickelte ein modulares System namens **Alchemist**, das ACAs zur Erstellung, Simulation und Optimierung von Entscheidungsprozessen aus natürlicher Sprache einsetzt.\n- C3 AI beschreibt ACA-gestützte Tools namens **STAFF** zur Datenintegration und Workflow-Generierung für nicht-technische Nutzer, mit Sandboxed Execution und Governance-Funktionen.\n- Als generalistische ACAs werden **Claude Code, Devin, Cursor, OpenHands und Windsurf** genannt, die komplexe Coding-Aufgaben über LLMs und Reasoning-Loops bewältigen.\n- **Microsoft** bezeichnet 2026 als **„the year of the agent\"** und plant Plattformen für Enterprise-Agentenflotten mit Memory und Echtzeitdaten.\n- Laut Umfragen erwarten **70 % der Führungskräfte** eine operative Transformation durch autonome Agenten.\n- Als weitere agentenbasierte IDEs und Tools werden **Anti-Gravity, Windsurf und OpenClaw** im Kontext Anfang 2026 genannt.",
+            "urls": [
+              "https://c3.ai/blog/autonomous-coding-agents-beyond-developer-productivity",
+              "https://www.youtube.com/watch?v=4s5Ih04syFE",
+              "https://www.digitalbricks.ai/blog-posts/2026-the-year-of-the-ai-agent",
+              "https://news.microsoft.com/source/features/ai/whats-next-in-ai-7-trends-to-watch-in-2026",
+              "https://www.faros.ai/blog/best-ai-coding-agents-2026"
+            ]
+          },
+          {
+            "query": "AI software engineering agent full project development 2026 latest news",
+            "summary": "- Produktivitätsgewinne durch KI-Agenten im SDLC werden mit 20–50 % beziffert, wobei 27 % der KI-Arbeit auf zuvor übersprungene Aufgaben wie Papercuts entfallen.\n- Traditionelle menschliche Codierleistung wird mit ca. 500 LOC pro Tag angegeben.\n- Das Tool Fountain wird mit 50 % schnelleren Workflows im Zusammenhang mit Multi-Agenten-Teams genannt.\n- Zapier wird als früher Anwender genannt, der agentenbasierte Workflow-Automatisierung organisationsweit einsetzt.\n- Der Workshop AGENT 2026 findet im Rahmen der Konferenz ICSE statt und behandelt Robustheit, AgentOps und Verifikation in Multi-Agenten-Systemen.\n- Als konkrete Tools für überwachte agentenbasierte Workflows werden Claude Code, Cursor und Conductor genannt.\n- Agentenbasiertes Coding soll auch Nicht-Ingenieuren (z. B. in Vertrieb/Marketing) zugänglich gemacht werden, einschließlich Unterstützung für Legacy-Sprachen wie COBOL.\n- „Human-in-the-Loop\"-Governance wird für sensible Aktionen (z. B. Produktionsdatenbanken) als verpflichtend beschrieben, ergänzt durch Least-Privilege-Zugriff.",
+            "urls": [
+              "https://www.boundev.com/blog/ai-agents-transforming-sdlc-2026",
+              "https://resources.anthropic.com/hubfs/2026%20Agentic%20Coding%20Trends%20Report.pdf?hsLang=en",
+              "https://conf.researchr.org/home/icse-2026/agent-2026",
+              "https://www.kdnuggets.com/how-to-become-an-ai-engineer-in-2026-a-self-study-roadmap",
+              "https://addyosmani.com/blog/ai-coding-workflow"
+            ]
+          },
+          {
+            "query": "Devin Cognition AI coding agent 2026 update autonomous software development",
+            "summary": "- **Devin** wurde von **Cognition** entwickelt und wird als autonomer KI-Coding-Agent beschrieben.\n- **Goldman Sachs** setzte Devin im **Juli 2025** als ersten KI-Mitarbeiter ein; CIO **Marco Argenti** erklärte, es solle die Entwicklerproduktivität um ca. **20 %** steigern.\n- Devin kann auf ein Terminal, einen Code-Editor und einen Browser gleichzeitig zugreifen.\n- Devin arbeitet in einer **Sandbox-Umgebung**.\n- Der Preis für Devin liegt bei **500 USD/Monat** für Enterprise-Teams.\n- **Cursor** wird zum Vergleich mit **20 USD/Monat** angegeben.\n- Devin wird als besonders geeignet für Greenfield-Projekte, Bugfixes, Legacy-Code-Modernisierung und große Refactoring-Aufgaben beschrieben.",
+            "urls": [
+              "https://aidevdayindia.org/blogs/lmsys-chatbot-arena-current-rankings/best-ai-agents-for-autonomous-coding-2026.html",
+              "https://www.apriorit.com/dev-blog/software-development-trends",
+              "https://www.ibm.com/think/news/goldman-sachs-first-ai-employee-devin",
+              "https://tech-stack.com/blog/software-development-trends-2025",
+              "https://playcode.io/blog/best-ai-coding-agents-2026"
+            ]
+          },
+          {
+            "query": "OpenAI Anthropic Google autonomous coding agent 2026 breakthrough announcement",
+            "summary": "- **OpenAI** veröffentlichte **GPT-5.3-Codex** Anfang Februar 2026, spezialisiert auf agentic Coding mit Multi-Tage-Projekten, CLI/App-Zugang und einer Begleitplattform namens **Frontier** für AI-Agent-Management.\n- **Anthropic** veröffentlichte **Claude Opus 4.6** Anfang Februar 2026, innerhalb einer Stunde nach OpenAIs Release.\n- Claude Opus 4.6 verfügt über ein **1-Million-Token-Kontextfenster** und ein Protokoll namens **\"adaptive thinking\"** zur autonomen Steuerung der Reasoning-Tiefe.\n- OpenAI-Ingenieure nutzten frühe Versionen von GPT-5.3-Codex zum **Self-Debugging während Training und Deployment**.\n- **Google** hat kein vergleichbares autonomes Coding-Agent-Produkt veröffentlicht; Googles Fokus lag auf multilingualer KI-Ausbildung über **400+ Sprachen** im Rahmen der **ATLAS-Studie**.\n- Es gab **keine gemeinsame Ankündigung** von OpenAI, Anthropic und Google zu einem kollaborativen autonomen Coding-Agenten (Stand Anfang Februar 2026).\n- Weitere genannte KI-Coding-Assistenten im Jahr 2026 sind **Replit Agent 3**, **Cursor** und **GitHub Copilot**.\n- Für Oversight und Interpretierbarkeit von Coding-Agenten werden Tools wie **LayerLens** und **Goodfires Interpretability-Plattform** genannt.",
+            "urls": [
+              "https://www.ibm.com/think/podcasts/mixture-of-experts/anthropic-vs-openai-claude-opus-4-6-gpt-5-3-codex",
+              "https://thesequence.substack.com/p/the-sequence-radar-803-last-week",
+              "https://www.theneurondaily.com/p/google-cracked-the-code-for-400-languages",
+              "https://replit.com/discover/best-ai-coding-assistant",
+              "https://nationalinterest.org/blog/techland/the-agentic-ai-revolution-how-2026-will-reshape-technology-and-statecraft"
+            ]
+          },
+          {
+            "query": "best AI coding agents 2026 build entire software projects independently comparison",
+            "summary": "- **Cursor AI** erstellte in Tests eine Full-Stack-CRUD-Anwendung mit Angular und .NET 8 in etwa einer Stunde.\n- **Cursor AI** kostet 20 $/Monat (Standard) oder 40 $/Monat (Advanced).\n- **Claude Code** Pro-Abonnement kostet 20 $/Monat.\n- **Devin** von Cognition kostet 500 $/Monat und richtet sich an Enterprise-Teams.\n- **GitHub Copilot** kostet 10 $/Monat für Einzelpersonen oder 19 $/Nutzer/Monat für Teams.\n- **GitHub Copilot** unterstützt Integration in VS Code, JetBrains und Vim.\n- **MetaGPT** weist Agenten Rollen innerhalb einer virtuellen Softwarefirma zu und generiert aus einem einzigen Prompt Anforderungen, Design-Dokumente und Code.\n- **GitHub Copilot** kann keine Terminal-Befehle direkt ausführen.",
+            "urls": [
+              "https://playcode.io/blog/best-ai-coding-agents-2026",
+              "https://www.capsolver.com/blog/AI/top-9-ai-agent-frameworks-in-2026",
+              "https://www.dataworks.ie/comparing-ai-coding-assistants-cursor-ai-vs-vs-code-copilot-ai-agents",
+              "https://www.lindy.ai/blog/ai-coding-agents",
+              "https://www.faros.ai/blog/best-ai-coding-agents-2026"
+            ]
+          },
+          {
+            "query": "autonomous AI developer agent startup funding launch early 2026",
+            "summary": "- Cognition Labs hat seinen Sitz in San Francisco und entwickelt den autonomen Coding-Agenten **Devin** zur Automatisierung von Software-Engineering-Workflows.\n- Cognition Labs ist seit **4 Jahren** im Geschäft.\n- Der Markt für autonome KI-Agenten wächst laut Angaben mit einer **CAGR von 45,8 % im Zeitraum 2025–2030**.\n- Investoren haben zuletzt **über 2 Milliarden US-Dollar** in Agentic-AI-Startups investiert.\n- **Y Combinator** finanziert **148 KI-Assistenten-Startups**.\n- Über **157 finanzierte KI-Firmen** werden auf Top-KI-Listen geführt, darunter von **Sequoia** und **a16z** unterstützte Unternehmen.\n- **OpenAI** wird mit einer Bewertung von **500 Milliarden US-Dollar** genannt.\n- Zu den genannten Unternehmen im Bereich KI-Agenten zählen **RTS Labs** (USA), **Azumo** (San Francisco), **Moveworks** (USA) und **SoluLab** (Indien).",
+            "urls": [
+              "https://rtslabs.com/top-ai-agent-development-companies",
+              "https://entrepreneurloop.com/ai-agent-startup-ideas",
+              "https://www.intellectyx.com/ai-agent-development-companies-in-usa",
+              "https://masterofcode.com/blog/top-ai-agent-development-companies",
+              "https://topstartups.io/?industries=Artificial+Intelligence"
+            ]
+          }
+        ]
+      },
+      {
+        "node": "evaluate",
+        "duration_s": 8.176,
+        "round": 1,
+        "confidence": 4,
+        "gaps": "Es gibt keinen eindeutigen Konsens darüber, welches einzelne Unternehmen den \"größten Durchbruch\" erzielt hat; die Frage impliziert ein klar identifizierbares Einzelereignis, aber die Recherche zeigt mehrere konkurrierende Entwicklungen (OpenAI GPT-5.3-Codex, Anthropic Claude Opus 4.6, Cognition/Devin) ohne objektives Ranking des \"größten\" Durchbruchs.",
+        "competing_events": "OpenAI GPT-5.3-Codex mit Frontier-Plattform (Anfang Feb 2026) vs Anthropic Claude Opus 4.6 (Anfang Feb 2026, innerhalb einer Stunde nach OpenAI) vs Cognition/Devin (kontinuierliche Weiterentwicklung, kein spezifischer Jan/Feb 2026-Meilenstein gefunden)",
+        "stagnation_detected": false,
+        "falsification_triggered": false,
+        "evidence_consistency": 4,
+        "evidence_sufficiency": 5,
+        "utility_score": 0.65,
+        "utility_stop": false,
+        "plateau_stop": false,
+        "context_blocks": 6,
+        "done": false,
+        "reasoning": "STATUS: INSUFFICIENT\nCONFIDENCE: 4\nGAPS: Es gibt keinen eindeutigen Konsens darüber, welches einzelne Unternehmen den \"größten Durchbruch\" erzielt hat; die Frage impliziert ein klar identifizierbares Einzelereignis, aber die Recherche zeigt mehrere konkurrierende Entwicklungen (OpenAI GPT-5.3-Codex, Anthropic Claude Opus 4.6, Cognition/Devin) ohne objektives Ranking des \"größten\" Durchbruchs.\nCONTRADICTIONS: Ja – Block 4 nennt sowohl OpenAI (GPT-5.3-Codex mit Frontier-Plattform für Multi-Tage-Projekte) als auch Anthropic (Claude Opus 4.6 mit 1M-Token-Kontext) als nahezu gleichzeitige Releases Anfang Februar 2026, was die Bestimmung eines einzelnen \"größten Durchbruchs\" erschwert. Devin/Cognition wird in anderen Blöcken als führend bei autonomem Coding beschrieben, aber ohne spezifischen Jan/Feb 2026-Durchbruch.\nIRRELEVANT: Keine\nCOMPETING_EVENTS: OpenAI GPT-5.3-Codex mit Frontier-Plattform (Anfang Feb 2026) vs Anthropic Claude Opus 4.6 (Anfang Feb 2026, innerhalb einer Stunde nach OpenAI) vs Cognition/Devin (kontinuierliche Weiterentwicklung, kein spezifischer Jan/Feb 2026-Meilenstein gefunden)\nEVIDENCE_CONSISTENCY: 4\nEVIDENCE_SUFFICIENCY: 5"
+      },
+      {
+        "node": "plan",
+        "duration_s": 2.762,
+        "round": 1,
+        "new_queries": [
+          "OpenAI GPT-5.3 Codex Frontier platform launch date February 2026 vs Anthropic Claude Opus 4.6 comparison",
+          "biggest AI coding agent breakthrough February 2026 benchmark results autonomous software engineering",
+          "AI coding agent limitations problems failures early 2026 autonomous software projects criticism"
+        ],
+        "total_queries": 9
+      },
+      {
+        "node": "search",
+        "duration_s": 27.872,
+        "round": 1,
+        "queries_executed": 3,
+        "queries": [
+          "OpenAI GPT-5.3 Codex Frontier platform launch date February 2026 vs Anthropic Claude Opus 4.6 comparison",
+          "biggest AI coding agent breakthrough February 2026 benchmark results autonomous software engineering",
+          "AI coding agent limitations problems failures early 2026 autonomous software projects criticism"
+        ],
+        "sources_found": 3,
+        "total_citations": 60,
+        "context_blocks": 9,
+        "sources_summary": [
+          {
+            "query": "OpenAI GPT-5.3 Codex Frontier platform launch date February 2026 vs Anthropic Claude Opus 4.6 comparison",
+            "summary": "- **Claude Opus 4.6** und **GPT-5.3-Codex** wurden beide am **5. Februar 2026** veröffentlicht, wobei Opus 4.6 kurz vor GPT-5.3-Codex erschien.\n- Claude Opus 4.6 bietet ein **Kontextfenster von 1 Million Tokens** (Beta, mit Premium-Preisen über 200k Tokens).\n- Claude Opus 4.6 verfügt über einen **„Fast Mode\"**, der bis zu **2,5-mal schneller** sein soll (Research Preview, höhere Kosten).\n- GPT-5.3-Codex ist laut Angaben **25 % schneller** als GPT-5.2-Codex insgesamt.\n- Claude Opus 4.6 unterstützt **128k Output-Tokens** und erreichte laut Angaben Rekordwerte auf **SWE-bench Pro**.\n- GPT-5.3-Codex erreichte laut Angaben neue Höchstwerte auf **SWE-Bench Pro, Terminal-Bench, OSWorld und GDPval**.\n- Claude Opus 4.6 wird u. a. über **GitHub Copilot** und die **Claude API** angeboten, mit Preisen von **$5/$25 pro Million Tokens**; als Unternehmenskunde wird **Goldman Sachs** genannt.\n- Claude Opus 4.6 hat laut Angaben eine Nutzungsbegrenzung von z. B. **50 Nachrichten pro 5 Stunden** im Pro-Plan.",
+            "urls": [
+              "https://evrimagaci.org/gpt/anthropic-unveils-claude-opus-46-amid-ai-industry-turmoil-527113",
+              "https://timesofindia.indiatimes.com/technology/tech-news/anthropic-claud-opus-4-6-gets-fast-mode-what-is-it-and-how-it-is-different-from-standard-mode/articleshow/128068700.cms",
+              "https://punemirror.com/technology/anthropic/claude-ai/claude-opus-4-6-powerful-upgrade",
+              "https://www.thurrott.com/a-i/openai-a-i/332421/openai-releases-gpt-5-3-codex",
+              "https://www.digitalapplied.com/blog/claude-opus-4-6-release-features-benchmarks-guide"
+            ]
+          },
+          {
+            "query": "biggest AI coding agent breakthrough February 2026 benchmark results autonomous software engineering",
+            "summary": "- Claude Opus 4.6 von Anthropic wurde um den 6. Februar 2026 veröffentlicht und verfügt über ein Kontextfenster von 1 Million Tokens (Beta).\n- GPT-5.3 Codex von OpenAI und Claude Opus 4.6 wurden in einem Benchmark auf einem React-Repository mit 150.000 Knoten getestet.\n- LinearB analysierte über 8,1 Millionen Pull Requests von 4.800 Teams im Rahmen ihrer 2026-Benchmarks.\n- Laut LinearB sind agentenbasierte KI-Pull-Requests 2,6-mal größer, haben aber 5,3-mal längere Pickup-Zeiten als manuelle.\n- Die Akzeptanzrate agentenbasierter KI-PRs liegt bei 32,7 % gegenüber 84,4 % bei manuellen PRs.\n- Replit Agent 3 erstellte 135 Apps innerhalb von 24 Stunden.\n- Claude Opus 4.6 unterstützt Multi-Agenten-Teams zur Aufgabenteilung sowie Dokument- und Tabellenanalyse neben Coding.\n- Anthropics Produkt „Cowork\" bietet Plug-ins für Coding-Workflows; OpenAIs „Frontier\" stellt Enterprise-Agenten bereit.",
+            "urls": [
+              "https://replit.com/discover/best-ai-coding-assistant",
+              "https://www.scribd.com/document/983996371/LinearB-2026-Software-Engineering-Benchmarks-Report",
+              "https://www.infoworld.com/article/4108092/6-ai-breakthroughs-that-will-define-2026.html",
+              "https://linearb.io/resources/software-engineering-benchmarks-report",
+              "https://www.marketingprofs.com/opinions/2026/54257/ai-update-february-6-2026-ai-news-and-views-from-the-past-week"
+            ]
+          },
+          {
+            "query": "AI coding agent limitations problems failures early 2026 autonomous software projects criticism",
+            "summary": "- Laut dem Text haben nur 12 % der Organisationen geeignete Daten für den Einsatz von KI-Agenten.\n- Enterprise-Gen-AI-Pilotprojekte weisen eine Misserfolgsquote von 95 % auf; interne Eigenentwicklungen erreichen eine Erfolgsquote von 22 %, Partnerschaften hingegen 67 %.\n- 40 % der agentischen KI-Projekte scheitern; als Beispiel werden AutoGPT-Schleifen genannt, die 400 US-Dollar verbrannten.\n- 90 % der Pilotprojekte scheitern beim Übergang in die Produktion.\n- KI-Agenten haben Schwierigkeiten mit Aufgaben, die 8–10 Stunden dauern, bedingt durch LLM-Kontextlimits.\n- Dateien über 500 KB werden häufig von der Indexierung ausgeschlossen, was dateiübergreifende Refactorings einschränkt.\n- Agenten erzeugen Anfragen mit bis zu 100-facher menschlicher Rate, was APIs überlastet und ERP-Systeme zum Absturz bringen kann.\n- Polling verursacht laut Text 95 % Token-Verschwendung.",
+            "urls": [
+              "https://dev.to/blackgirlbytes/my-predictions-for-mcp-and-ai-assisted-coding-in-2026-16bm",
+              "https://treyee.ai/blog/enterprise-ai-adoption-strategy-latin-america-2026",
+              "https://resources.anthropic.com/hubfs/2026%20Agentic%20Coding%20Trends%20Report.pdf?hsLang=en",
+              "https://coastalcloud.us/resources/6-reasons-ai-strategy-fails-2026",
+              "https://news.mit.edu/2026/helping-ai-agents-search-to-get-best-results-from-llms-0205"
+            ]
+          }
+        ]
+      },
+      {
+        "node": "evaluate",
+        "duration_s": 7.168,
+        "round": 2,
+        "confidence": 6,
+        "gaps": "Es gibt keinen einzelnen klaren \"größten Durchbruch\" eines Unternehmens; stattdessen lieferten OpenAI (GPT-5.3-Codex) und Anthropic (Claude Opus 4.6) am 5. Februar 2026 quasi gleichzeitig konkurrierende Releases, wobei die Frage nach DEM größten Durchbruch subjektiv bleibt.",
+        "competing_events": "OpenAI GPT-5.3-Codex (5. Feb 2026) vs Anthropic Claude Opus 4.6 (5. Feb 2026) vs Cognition Devin (bereits seit 2025 etabliert, kein neuer Durchbruch Jan/Feb 2026) vs Replit Agent 3 (135 Apps in 24h, Feb 2026)",
+        "stagnation_detected": false,
+        "falsification_triggered": false,
+        "evidence_consistency": 5,
+        "evidence_sufficiency": 6,
+        "utility_score": 0.56,
+        "utility_stop": false,
+        "plateau_stop": false,
+        "context_blocks": 7,
+        "done": false,
+        "reasoning": "STATUS: SUFFICIENT\nCONFIDENCE: 6\nGAPS: Es gibt keinen einzelnen klaren \"größten Durchbruch\" eines Unternehmens; stattdessen lieferten OpenAI (GPT-5.3-Codex) und Anthropic (Claude Opus 4.6) am 5. Februar 2026 quasi gleichzeitig konkurrierende Releases, wobei die Frage nach DEM größten Durchbruch subjektiv bleibt.\nCONTRADICTIONS: Ja — Block 4 sagt Claude Opus 4.6 erschien \"innerhalb einer Stunde nach OpenAIs Release\", Block 7 sagt umgekehrt \"Opus 4.6 kurz vor GPT-5.3-Codex\"; die Reihenfolge ist unklar. Beide beanspruchen Rekordwerte auf SWE-bench Pro.\nIRRELEVANT: 6,9\nCOMPETING_EVENTS: OpenAI GPT-5.3-Codex (5. Feb 2026) vs Anthropic Claude Opus 4.6 (5. Feb 2026) vs Cognition Devin (bereits seit 2025 etabliert, kein neuer Durchbruch Jan/Feb 2026) vs Replit Agent 3 (135 Apps in 24h, Feb 2026)\nEVIDENCE_CONSISTENCY: 5\nEVIDENCE_SUFFICIENCY: 6"
+      },
+      {
+        "node": "plan",
+        "duration_s": 2.655,
+        "round": 2,
+        "new_queries": [
+          "Replit Agent 3 135 apps 24 hours February 2026 autonomous coding benchmark",
+          "OpenAI GPT-5.3 Codex vs Claude Opus 4.6 vs Replit Agent 3 head to head coding comparison February 2026",
+          "real world developer experience autonomous coding agents February 2026 production software projects practical results"
+        ],
+        "total_queries": 12
+      },
+      {
+        "node": "search",
+        "duration_s": 16.697,
+        "round": 2,
+        "queries_executed": 3,
+        "queries": [
+          "Replit Agent 3 135 apps 24 hours February 2026 autonomous coding benchmark",
+          "OpenAI GPT-5.3 Codex vs Claude Opus 4.6 vs Replit Agent 3 head to head coding comparison February 2026",
+          "real world developer experience autonomous coding agents February 2026 production software projects practical results"
+        ],
+        "sources_found": 3,
+        "total_citations": 78,
+        "context_blocks": 10,
+        "sources_summary": [
+          {
+            "query": "Replit Agent 3 135 apps 24 hours February 2026 autonomous coding benchmark",
+            "summary": "- Rokt erstellte mithilfe von Replit Agent innerhalb von 24 Stunden 135 interne Anwendungen.\n- Replit Agent erreichte in Benchmarks für Codegenerierung und Codequalität den höchsten Rang.\n- Replit Agent 3 erstellte eine Aufgabenverwaltungs-App mit Benutzerauthentifizierung und PostgreSQL-Datenbankanbindung in unter 15 Minuten.\n- In einem weiteren Benchmark generierte Replit Agent eine vollständige App in etwa 5 Minuten.\n- Agent 3 erstellt auf Basis natürlichsprachlicher Eingaben autonom komplette Anwendungen inklusive Dateistruktur, Abhängigkeiten, Datenbank-Setup, API-Integrationen und Deployment.\n- Die Ausführung erfolgt in isolierten Cloud-Containern von Replit.\n- Der Agent verfügt über autonome Testfunktionen und unterstützt Checkpoints mit Snapshots für Planungs-, Coding-, Test- und Korrekturphasen.\n- Bei komplexen Randfällen traten fehlende Funktionen und Fehler auf, die manuelles Debugging erforderten.",
+            "urls": [
+              "https://hackceleration.com/replit-review",
+              "https://replit.com/discover/best-ai-coding-assistant",
+              "https://serenitiesai.com/articles/replit-agent-2026-features-pricing-review",
+              "https://localaimaster.com/tools/best-ai-coding-tools",
+              "https://research.aimultiple.com/ai-code-editor"
+            ]
+          },
+          {
+            "query": "OpenAI GPT-5.3 Codex vs Claude Opus 4.6 vs Replit Agent 3 head to head coding comparison February 2026",
+            "summary": "- **GPT-5.3 Codex und Claude Opus 4.6** wurden beide um den **5. Februar 2026** veröffentlicht.\n- GPT-5.3 Codex erreichte auf **Terminal-Bench 2.0** einen Wert von **77,3 %**, Claude Opus 4.6 erreichte **65,4 %**.\n- Claude Opus 4.6 erzielte auf **MRCR v2 (1M Context)** einen Wert von **76 %**.\n- Claude Opus 4.6 bietet ein **Context Window von 1 Million Tokens (Beta)**, GPT-5.3 Codex bietet **256K Tokens**.\n- GPT-5.3 Codex wird mit **25 % schnellerer Inferenz** als Claude Opus 4.6 angegeben.\n- **Preise pro 1 Million Tokens:** GPT-5.3 Codex kostet **$6/$30**, Claude Opus 4.6 kostet **$5/$25** (als **17 % günstiger** bezeichnet).\n- In einem **Sicherheitsaudit eines 20.000-Zeilen-Codebasis** fand Codex **12 Probleme** (chunked), Opus fand **18 Probleme** (single-pass).\n- Für **Replit Agent 3** existieren laut den Quellen **keine Benchmark-Vergleiche** gegenüber GPT-5.3 Codex oder Claude Opus 4.6 (Stand Februar 2026).",
+            "urls": [
+              "https://www.nxcode.io/resources/news/gpt-5-3-codex-vs-claude-opus-4-6-ai-coding-comparison-2026",
+              "https://community.openai.com/t/introducing-gpt-5-3-codex-the-most-powerful-interactive-and-productive-codex-yet/1373453",
+              "https://www.youtube.com/watch?v=gmSnQPzoYHA",
+              "https://openai.com/index/introducing-gpt-5-3-codex",
+              "https://www.youtube.com/watch?v=c31Ow23mErE"
+            ]
+          },
+          {
+            "query": "real world developer experience autonomous coding agents February 2026 production software projects practical results",
+            "summary": "- Laut Studien an Open-Source-Repositories steigern Agenten die Entwicklungsgeschwindigkeit (Commits, PRs) anfänglich um 20–35 %, wobei der Effekt über die Zeit nachlässt und die Komplexitätsschulden um bis zu 35 % steigen.\n- Die reale Nutzung von Agenten in GitHub-Projekten liegt bei 15–22 %.\n- Devin kostet 500 $/Monat, GitHub Copilot Workspace 10 $/Monat, Cursor Composer 20 $/Monat und PlayCode Agent 9,99 $/Monat (Stand 2026).\n- Xcode 26.3 unterstützt Claude Agent und Codex als integrierte Agenten.\n- Anthropic bestätigt in einem Bericht von 2026, dass Agenten reale Features ausliefern, wobei lang laufende Agenten (Tage/Wochen) komplette Systeme unter strategischer Aufsicht erstellen.\n- Cursor-Schwärme (Multi-Agenten-Teams) werden eingesetzt, um komplexe Systeme wie Webbrowser zu bauen.\n- Faros AI weist auf Produktivitätsparadoxe in großen Teams hin und betont die Notwendigkeit von Messung.\n- PlayCode Agent erstellt vollständige Websites aus natürlichsprachlichen Eingaben auf Englisch.",
+            "urls": [
+              "https://codeagni.com/blog-details?slug=ai-coding-agents-2026-the-new-frontier-of-intelligent-development-workflows",
+              "https://playcode.io/blog/best-ai-coding-agents-2026",
+              "https://www.apple.com/newsroom/2026/02/xcode-26-point-3-unlocks-the-power-of-agentic-coding",
+              "https://resources.anthropic.com/hubfs/2026%20Agentic%20Coding%20Trends%20Report.pdf?hsLang=en",
+              "https://arxiv.org/pdf/2601.13597"
+            ]
+          }
+        ]
+      },
+      {
+        "node": "evaluate",
+        "timestamp": 1770752689.9092767,
+        "duration_s": 8.19,
+        "round": 3,
+        "confidence": 7,
+        "gaps": "Es gibt keinen eindeutigen Konsens über \"den größten Durchbruch\" eines einzelnen Unternehmens; die Frage impliziert einen klaren Gewinner, aber die Evidenz zeigt ein Kopf-an-Kopf-Rennen zwischen OpenAI (GPT-5.3-Codex) und Anthropic (Claude Opus 4.6), beide veröffentlicht am 5. Februar 2026, mit jeweils unterschiedlichen Stärken in verschiedenen Benchmarks.",
+        "competing_events": "OpenAI GPT-5.3-Codex (5. Feb 2026) vs Anthropic Claude Opus 4.6 (5. Feb 2026) vs Cognition Devin (bereits seit 2025 etabliert) vs Replit Agent 3 (Anfang 2026, 135 Apps in 24h)",
+        "stagnation_detected": false,
+        "falsification_triggered": false,
+        "evidence_consistency": 5,
+        "evidence_sufficiency": 7,
+        "utility_score": 0.55,
+        "utility_stop": false,
+        "plateau_stop": false,
+        "context_blocks": 10,
+        "done": false,
+        "reasoning": "STATUS: SUFFICIENT\nCONFIDENCE: 7\nGAPS: Es gibt keinen eindeutigen Konsens über \"den größten Durchbruch\" eines einzelnen Unternehmens; die Frage impliziert einen klaren Gewinner, aber die Evidenz zeigt ein Kopf-an-Kopf-Rennen zwischen OpenAI (GPT-5.3-Codex) und Anthropic (Claude Opus 4.6), beide veröffentlicht am 5. Februar 2026, mit jeweils unterschiedlichen Stärken in verschiedenen Benchmarks.\nCONTRADICTIONS: Ja — GPT-5.3-Codex führt bei Terminal-Bench 2.0 (77,3% vs 65,4%) und Inferenzgeschwindigkeit (+25%), während Claude Opus 4.6 beim Kontextfenster (1M vs 256K Tokens), Sicherheitsaudit-Erkennung (18 vs 12 Probleme) und SWE-bench Pro führt; die Quellen sind sich nicht einig, welches Modell insgesamt überlegen ist. Auch Replit Agent 3 wird als praktischer Durchbruch genannt (135 Apps in 24h), hat aber keine vergleichbaren Benchmarks.\nIRRELEVANT: Keine\nCOMPETING_EVENTS: OpenAI GPT-5.3-Codex (5. Feb 2026) vs Anthropic Claude Opus 4.6 (5. Feb 2026) vs Cognition Devin (bereits seit 2025 etabliert) vs Replit Agent 3 (Anfang 2026, 135 Apps in 24h)\nEVIDENCE_CONSISTENCY: 5\nEVIDENCE_SUFFICIENCY: 7"
+      },
+      {
+        "node": "plan",
+        "duration_s": 3.174,
+        "round": 3,
+        "new_queries": [
+          "SWE-bench verified leaderboard results February 2026 top scoring AI coding agent",
+          "enterprise adoption autonomous coding agents January February 2026 case studies revenue impact",
+          "Cognition Devin 2.0 2026 update vs OpenAI Codex vs Claude Opus autonomous project completion rate"
+        ],
+        "total_queries": 15
+      },
+      {
+        "node": "search",
+        "duration_s": 16.486,
+        "round": 3,
+        "queries_executed": 3,
+        "queries": [
+          "SWE-bench verified leaderboard results February 2026 top scoring AI coding agent",
+          "enterprise adoption autonomous coding agents January February 2026 case studies revenue impact",
+          "Cognition Devin 2.0 2026 update vs OpenAI Codex vs Claude Opus autonomous project completion rate"
+        ],
+        "sources_found": 3,
+        "total_citations": 101,
+        "context_blocks": 12,
+        "sources_summary": [
+          {
+            "query": "SWE-bench verified leaderboard results February 2026 top scoring AI coding agent",
+            "summary": "- **Claude Opus 4.5** führt das SWE-rebench-Leaderboard mit einer Resolved Rate von **63,3 %** an (Stand: Februar 2026).\n- **gpt-5.2-2025-12-11-xhigh** belegt Platz 2 mit **61,5 %** Resolved Rate bei Kosten von **1,46 $ pro Problem**.\n- **Gemini 3 Flash Preview** erreicht Platz 3 mit **60,0 %** Resolved Rate bei den niedrigsten Kosten der Top 10 (**0,29 $ pro Problem**).\n- **Claude Sonnet 4.5** erreicht **57,5 %** Resolved Rate mit einem Pass@5-Wert von **75,0 %**.\n- **OpenHands + Claude 4.5 Extended Thinking** erzielt **72 %** auf SWE-bench Verified – der höchste gemeldete Agent-Score.\n- **Kimi K2 Instruct** erreicht auf dem ursprünglichen SWE-bench-Leaderboard **43,80 %**.\n- Höhere Angaben (z. B. Claude Opus 4.5/4.6 bei **80,8–80,9 %**) erscheinen in Blogbeiträgen, stehen aber im Widerspruch zum primären Leaderboard.\n- **GLM-4.7** belegt Platz 10 mit **51,3 %** Resolved Rate bei Kosten von **0,40 $ pro Problem**.",
+            "urls": [
+              "https://swe-rebench.com",
+              "https://localaimaster.com/blog/openhands-vs-swe-agent",
+              "https://www.tbench.ai/leaderboard/terminal-bench/2.0",
+              "https://dev.to/aristoaistack/best-ai-coding-assistants-2026-honest-comparison-436p",
+              "https://www.swebench.com"
+            ]
+          },
+          {
+            "query": "enterprise adoption autonomous coding agents January February 2026 case studies revenue impact",
+            "summary": "- **ApolloMD** nutzte Adonis AI im Revenue Cycle Management mit 90 % autonomer Problemlösung und sparte damit Tausende Arbeitsstunden ein.\n- **JPMorgan Chase** sparte durch KI-Agenten 360.000 Stunden jährlich, erzielte 20 % mehr Umsatz im Asset Management (im Jahresvergleich) und beschleunigte Research um 95 %.\n- **Coupa** erzielte mit einer agentischen KI-Revenue-Engine 276 % ROI, 35 % höheren ROMI und 22 % niedrigere Akquisitionskosten.\n- **Salesforce** berichtete von 15 % mehr Deals, 25 % kürzeren Verkaufszyklen; 83 % der KI-nutzenden Teams erreichten Umsatzziele gegenüber 66 % ohne KI.\n- **Talent Inc.** erzielte mit KI-Agenten (Decision AI & Report AI) 78,57 % Zeitersparnis und einen signifikanten Umsatzanstieg.\n- Unternehmen berichten allgemein von 3–15 % Umsatzwachstum, bis zu 18 % ROI und bis zu 52 % Kostensenkung durch KI-Workflows.\n- Für den Zeitraum Januar–Februar 2026 existieren **keine dokumentierten Fallstudien** zu autonomen Coding-Agenten mit belegter Umsatzwirkung; verfügbare Quellen sind Prognosen oder Beispiele vor 2026.\n- Unternehmen priorisieren den **internen Einsatz** agentischer KI (einschließlich autonomer Coding-Agenten) aus Sicherheitsgründen gegenüber externem B2B-/B2C-Einsatz.",
+            "urls": [
+              "https://cloudsecurityalliance.org/blog/2026/01/16/my-top-10-predictions-for-agentic-ai-in-2026",
+              "https://www.adonis.io/resources/ai-agents-autonomously-transforming-revenue-cycle-management",
+              "https://masterofcode.com/blog/ai-agent-statistics",
+              "https://ctomagazine.com/autonomous-ai-agents-enterprise-ai",
+              "https://www.multimodal.dev/post/useful-ai-agent-case-studies"
+            ]
+          },
+          {
+            "query": "Cognition Devin 2.0 2026 update vs OpenAI Codex vs Claude Opus autonomous project completion rate",
+            "summary": "- Devin 2.0 von Cognition AI wurde im April 2025 lanciert, mit weiteren Updates im Januar 2026.\n- Devin 2.0 benötigte im Februar 2025 durchschnittlich 7,8 Minuten für Junior-Level-Aufgaben.\n- Devin 2.0 Preise starten bei 20 USD/Monat (9 ACUs, ca. 11 USD/Stunde).\n- OpenAI Codex (GPT-5.2/5.3-Codex) erhielt Updates zwischen Dezember 2025 und Februar 2026.\n- GPT-5.2-Codex erreichte ca. 80 % auf dem SWE-Bench-Verified-Benchmark (dreifache Verbesserung).\n- OpenAI Codex unterstützt ein Kontextfenster von 400.000 Tokens; ein Demo-Projekt (Rennspiel) verbrauchte 7 Millionen Tokens.\n- Über 1 Million Entwickler nutzten OpenAI Codex vor dem offiziellen App-Launch.\n- Claude Opus (Version 4.6 erwähnt) bietet ein Kontextfenster von 1 Million Tokens (ca. 1.500 Seiten).",
+            "urls": [
+              "https://www.adweek.com/creativity/openai-super-bowl-codex-commercial",
+              "https://siliconangle.com/2025/04/03/cognition-ai-launches-revamped-coding-assistant-devin-2-0-much-lower-starting-price",
+              "https://almcorp.com/blog/openai-codex-app-macos-guide-features-pricing-security",
+              "https://devops.com/devins-latest-update-brings-major-enterprise-features-and-developer-improvements",
+              "https://www.digitalapplied.com/blog/gpt-5-2-codex-openai-model-guide-2026"
+            ]
+          }
+        ]
+      },
+      {
+        "node": "evaluate",
+        "duration_s": 8.39,
+        "round": 4,
+        "confidence": 7,
+        "gaps": "Kein einzelnes Unternehmen wird in den Quellen eindeutig als \"größter Durchbruch\" identifiziert; OpenAI (GPT-5.3-Codex) und Anthropic (Claude Opus 4.6) liegen sehr nah beieinander, wobei OpenAI in mehr Benchmarks führt, aber die Frage nach dem \"größten Durchbruch\" subjektiv bleibt.",
+        "competing_events": "OpenAI GPT-5.3-Codex (5. Feb 2026) vs. Anthropic Claude Opus 4.6 (5. Feb 2026) vs. Cognition Devin 2.0 (Updates Jan 2026) vs. Replit Agent 3 (Anfang 2026) — alle im relevanten Zeitraum, wobei GPT-5.3-Codex und Claude Opus 4.6 die prominentesten Kandidaten sind",
+        "stagnation_detected": false,
+        "falsification_triggered": false,
+        "evidence_consistency": 6,
+        "evidence_sufficiency": 7,
+        "utility_score": 0.51,
+        "utility_stop": false,
+        "plateau_stop": true,
+        "context_blocks": 11,
+        "done": true,
+        "reasoning": "STATUS: SUFFICIENT\nCONFIDENCE: 7\nGAPS: Kein einzelnes Unternehmen wird in den Quellen eindeutig als \"größter Durchbruch\" identifiziert; OpenAI (GPT-5.3-Codex) und Anthropic (Claude Opus 4.6) liegen sehr nah beieinander, wobei OpenAI in mehr Benchmarks führt, aber die Frage nach dem \"größten Durchbruch\" subjektiv bleibt.\nCONTRADICTIONS: Ja — SWE-bench-Werte variieren stark zwischen Quellen (z.B. Claude Opus 4.5/4.6 bei 63,3% vs. 80,8-80,9% in Blogposts; GPT-5.2-Codex bei 61,5% vs. 80% auf SWE-Bench-Verified). Terminal-Bench 2.0 zeigt GPT-5.3-Codex klar vorne (77,3% vs. 65,4%), während Claude Opus 4.6 beim Kontextfenster (1M vs. 256K Tokens) und Sicherheitsaudit-Erkennung führt.\nIRRELEVANT: 11\nCOMPETING_EVENTS: OpenAI GPT-5.3-Codex (5. Feb 2026) vs. Anthropic Claude Opus 4.6 (5. Feb 2026) vs. Cognition Devin 2.0 (Updates Jan 2026) vs. Replit Agent 3 (Anfang 2026) — alle im relevanten Zeitraum, wobei GPT-5.3-Codex und Claude Opus 4.6 die prominentesten Kandidaten sind\nEVIDENCE_CONSISTENCY: 6\nEVIDENCE_SUFFICIENCY: 7"
+      },
+      {
+        "node": "answer",
+        "duration_s": 57.653,
+        "answer_length": 11121,
+        "citation_count": 101,
+        "rounds": 4,
+        "elapsed_total_s": 191.6,
+        "confidence": 7
+      }
+    ]
+  }
+}

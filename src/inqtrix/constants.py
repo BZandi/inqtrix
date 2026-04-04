@@ -1,0 +1,24 @@
+""" Static default constants for agent behavior."""
+
+from __future__ import annotations
+
+MAX_ROUNDS = 4
+CONFIDENCE_STOP = 8
+MAX_CONTEXT = 12
+FIRST_ROUND_QUERIES = 6
+ANSWER_PROMPT_CITATIONS_MAX = 60
+
+# Timeouts (seconds)
+REASONING_TIMEOUT = 120
+SEARCH_TIMEOUT = 60
+SUMMARIZE_TIMEOUT = 60
+MAX_TOTAL_SECONDS = 300
+
+MAX_QUESTION_LENGTH = 10_000
+
+# Search cache defaults
+SEARCH_CACHE_MAXSIZE = 256
+SEARCH_CACHE_TTL = 3600
+
+# Risk scoring
+HIGH_RISK_SCORE_THRESHOLD = 4

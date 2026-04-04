@@ -1,0 +1,181 @@
+# ============================================================
+# Inqtrix YAML Configuration — Reference File
+# ============================================================
+#
+# Copy `.env.example` to `.env` for local secrets, then copy this
+# file to `inqtrix.yaml` (or `inqtrix.yml` or `.inqtrix.yaml`) in
+# your working directory and adapt it.
+#
+# In HTTP server mode (`python -m inqtrix`), this YAML file is
+# auto-detected in the current working directory.
+# You can also point to a custom path via `INQTRIX_CONFIG=/path/to/file.yaml`.
+#
+# In library mode, `ResearchAgent()` reads process env vars and a local
+# `.env`, but does NOT auto-load YAML. If you want YAML-backed library
+# setup, bridge it manually through `load_config()`,
+# `config_to_settings()`, and `create_providers_from_config()`.
+#
+# API keys use ${ENV_VAR} syntax and are resolved from `.env`
+# or real environment variables at startup. NEVER put plain-text
+# secrets in this file.
+#
+# Real process environment variables override `.env` values.
+# `.env` is mainly for local development.
+#
+# Without a YAML file, the HTTP server falls back to pure
+# environment-variable configuration (full backwards compatibility).
+#
+# Role mapping reminder:
+# - reasoning = query planning + final answer synthesis
+# - classify = classify + decompose
+# - summarize = result summarization + claim extraction
+# - evaluate = evidence sufficiency / stop decision
+# - search = web search provider
+#
+# If `classify`, `summarize`, or `evaluate` are omitted, they fall back
+# to `reasoning`.
+#
+# Optional `fallbacks:` blocks are validated by the schema, but are not
+# currently used as runtime retry chains.
+# ============================================================
+
+
+# ── Example 1: LiteLLM Proxy (recommended for production) ───
+#
+# All models go through a single LiteLLM proxy that handles
+# routing, rate limiting, and key management.
+
+# providers:
+#   litellm-proxy:
+#     base_url: "http://litellm-proxy:4000/v1"
+#     api_key: "${LITELLM_API_KEY}"
+#
+# models:
+#   claude-opus:
+#     provider: litellm-proxy
+#     model_id: "claude-opus-4.6-agent"
+#
+#   claude-haiku:
+#     provider: litellm-proxy
+#     model_id: "claude-haiku-4"
+#
+#   sonar-pro:
+#     provider: litellm-proxy
+#     model_id: "perplexity-sonar-pro-agent"
+#
+# agents:
+#   default:
+#     roles:
+#       reasoning: claude-opus
+#       classify: claude-haiku
+#       summarize: claude-haiku
+#       evaluate: claude-haiku
+#       search: sonar-pro
+#     settings:
+#       max_rounds: 4
+#       confidence_stop: 8
+
+
+# ── Example 2: Direct OpenAI + Perplexity (no proxy) ────────
+#
+# Connect directly to each provider's API.  Each provider
+# has its own base_url and api_key.
+
+# providers:
+#   openai:
+#     base_url: "https://api.openai.com/v1"
+#     api_key: "${OPENAI_API_KEY}"
+#
+#   perplexity:
+#     base_url: "https://api.perplexity.ai"
+#     api_key: "${PERPLEXITY_API_KEY}"
+#
+# models:
+#   strong:
+#     provider: openai
+#     model_id: "gpt-4o"
+#     params:
+#       temperature: 0.0
+#
+#   small:
+#     provider: openai
+#     model_id: "gpt-4o-mini"
+#
+#   web:
+#     provider: perplexity
+#     model_id: "sonar-pro"
+#
+# agents:
+#   default:
+#     roles:
+#       reasoning: strong
+#       classify: small
+#       summarize: small
+#       evaluate: small
+#       search: web
+#     settings:
+#       max_rounds: 4
+#       confidence_stop: 8
+#       high_risk_classify_escalate: true
+#       high_risk_evaluate_escalate: true
+#       max_total_seconds: 300
+
+
+# ── Example 3: Local Ollama + Perplexity (cost-free reasoning) ─
+#
+# Run reasoning and summarization locally via Ollama,
+# only pay for web search through Perplexity.
+
+# providers:
+#   local-ollama:
+#     base_url: "http://localhost:11434/v1"
+#     api_key: "ollama"
+#
+#   perplexity:
+#     base_url: "https://api.perplexity.ai"
+#     api_key: "${PERPLEXITY_API_KEY}"
+#
+# models:
+#   mistral-7b:
+#     provider: local-ollama
+#     model_id: "mistral:7b"
+#
+#   llama3-70b:
+#     provider: local-ollama
+#     model_id: "llama3:70b"
+#
+#   sonar-pro:
+#     provider: perplexity
+#     model_id: "sonar-pro"
+#
+# agents:
+#   default:
+#     roles:
+#       reasoning: llama3-70b
+#       classify: mistral-7b
+#       summarize: mistral-7b
+#       evaluate: mistral-7b
+#       search: sonar-pro
+#     settings:
+#       max_rounds: 3
+#       reasoning_timeout: 180
+#       summarize_timeout: 90
+
+
+# ── Server settings (optional, applies to all examples) ──────
+#
+# server:
+#   max_concurrent: 3
+#   session_ttl_seconds: 1800
+#   session_max_count: 20
+
+
+# ── Parity tooling (optional) ─────────────────────────────
+#
+# The parity CLI can use an analysis model for a deeper
+# compare report over iteration logs, query trajectories,
+# stop logic, and final answers.
+
+# parity:
+#   analysis_model: gpt-4o-mini
+#   analysis_timeout: 180

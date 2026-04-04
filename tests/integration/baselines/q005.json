@@ -1,0 +1,185 @@
+{
+  "meta": {
+    "timestamp": "",
+    "endpoint": "http://127.0.0.1:5100",
+    "reasoning_model": "claude-opus-4.6-agent",
+    "search_model": "perplexity-sonar-pro-agent",
+    "summarize_model": "claude-opus-4.6-agent",
+    "agent_version": "ok",
+    "total_elapsed_s": 810.58,
+    "promoted_at": ""
+  },
+  "result": {
+    "question_id": "q005",
+    "question": "Ich habe gehört, dass Google Anfang 2026 Gemini komplett eingestellt und durch ein neues Modell namens Astra ersetzt hat — stimmt das und was steckt dahinter?",
+    "category": "negative_evidence",
+    "answer": "## Kurzfazit\n\nNein, das stimmt nicht. **Google hat Gemini Anfang 2026 weder eingestellt noch durch Project Astra ersetzt.** Das Gegenteil ist der Fall: Gemini ist Stand Februar 2026 Googles zentrale KI-Plattform mit über **750 Millionen monatlich aktiven Nutzern** [21](https://techcrunch.com/2026/02/04/googles-gemini-app-has-surpassed-750m-monthly-active-users) und wird gerade massiv ausgebaut. Project Astra ist ein Forschungsprojekt von Google DeepMind, dessen Funktionen schrittweise **in Gemini integriert** werden — es handelt sich also um eine Ergaenzung, nicht um einen Ersatz.\n\n---\n\n## Kernaussagen\n\n- **Gemini ist aktiver denn je:** Die Gemini-App hat im Q4 2025 die Marke von 750 Millionen monatlich aktiven Nutzern ueberschritten [21](https://techcrunch.com/2026/02/04/googles-gemini-app-has-surpassed-750m-monthly-active-users). Von Einstellung kann keine Rede sein.\n- **Gemini 3 ist das aktuelle Flaggschiff-Modell** und treibt AI Overviews in der Google-Suche, Personal Intelligence in Gmail/Photos sowie Chrome-Funktionen wie Auto Browse an [22](https://blog.google/innovation-and-ai/products/google-ai-updates-january-2026).\n- **Gemini 3.0 General Availability** wird voraussichtlich am **12. Februar 2026** offiziell freigegeben [14](https://ai.google.dev/gemini-api/docs/changelog).\n- **Project Astra ist kein eigenstaendiges Produkt**, sondern ein Forschungsprototyp fuer multimodale Echtzeit-Interaktionen (Video, Kamera, Umgebungserkennung), der in bestehende Gemini-Dienste einfliesst [11](https://deepmind.google/models/project-astra).\n- **Astra-Funktionen wie Echtzeit-Videoverstaendnis und Bildschirmfreigabe** sind bereits in **Gemini Live** und **Google Search Live** verfuegbar [9](https://techcrunch.com/2025/05/20/project-astra-comes-to-google-search-gemini-and-developers).\n- **Aeltere Gemini-Modelle werden abgeschaltet**, was moeglicherweise zur Verwirrung beitraegt: Gemini 2.0 Flash und verwandte Modelle werden bis **31. Maerz 2026** eingestellt [8](https://ai.google.dev/gemini-api/docs/deprecations) — das betrifft aber nur veraltete API-Versionen, nicht die Plattform insgesamt.\n- **Gemini ersetzt Google Assistant**, nicht umgekehrt: Die Umstellung auf Android-Geraeten wurde von Ende 2025 auf 2026 verschoben [1](https://9to5google.com/2025/12/19/google-assistant-gemini-2026) [3](https://www.thurrott.com/mobile/android/330937/google-delays-full-gemini-rollout-on-android-to-2026).\n- **Gemini 4.0** wird spekulativ fuer spaeter 2026 erwartet, was die Weiterentwicklung der Plattform unterstreicht [34](https://9to5google.com/2026/01/02/google-in-2026-what-to-expect-video).\n\n---\n\n## Detailanalyse\n\n### Woher kommt das Geruecht?\n\nDie Verwechslung duerfte mehrere Ursachen haben. Erstens schaltet Google regelmaessig **aeltere Modellversionen** ab — etwa `gemini-2.0-flash` und `gemini-2.0-flash-lite` zum 31. Maerz 2026 [8](https://ai.google.dev/gemini-api/docs/deprecations). Wer solche Deprecation-Meldungen oberflaechlich liest, koennte faelschlich schlussfolgern, dass Gemini insgesamt eingestellt wird. Zweitens hat Project Astra durch Demonstrationen auf der Google I/O 2025 erhebliche Medienaufmerksamkeit erhalten [9](https://techcrunch.com/2025/05/20/project-astra-comes-to-google-search-gemini-and-developers), was den Eindruck eines voellig neuen Produkts erwecken kann. Tatsaechlich ist Astra aber ein **Forschungsprogramm innerhalb von Google DeepMind**, dessen Ergebnisse ueber Gemini ausgeliefert werden.\n\n### Was ist Project Astra genau?\n\nProject Astra ist ein spezialisierter KI-Assistenten-Prototyp mit Fokus auf **multimodale Echtzeit-Interaktionen** — also die Faehigkeit, ueber Kamera, Mikrofon und Bildschirm gleichzeitig die Umgebung wahrzunehmen und darauf zu reagieren [11](https://deepmind.google/models/project-astra) [10](https://www.impetus.com/resources/blog/googles-project-astra-the-ai-assistant-revolution-we-didnt-see-coming). Konkret kann Astra:\n\n- **Konversationskontext bis zu 10 Minuten** pro Sitzung aufrechterhalten [30](https://slashdot.org/software/comparison/Gemini-Google-vs-Project-Astra)\n- **Geraeteuebergreifend** arbeiten (Smartphone, Prototyp-Brillen) ohne Kontextverlust [31](https://blog.google/innovation-and-ai/models-and-research/google-deepmind/gemini-universal-ai-assistant)\n- Ueber eine **Live API** Entwicklern Sprach- und visuelle Interaktionen mit niedriger Latenz bereitstellen [9](https://techcrunch.com/2025/05/20/project-astra-comes-to-google-search-gemini-and-developers)\n\nGoogle arbeitet zudem mit **Samsung** und **Warby Parker** an Smart Glasses, die Astra-Funktionen nutzen sollen — allerdings ohne festgelegtes Startdatum [9](https://techcrunch.com/2025/05/20/project-astra-comes-to-google-search-gemini-and-developers). Entscheidend ist: Astra hat **kein eigenes Veröffentlichungsdatum als eigenstaendiges Produkt**. Stattdessen werden seine Faehigkeiten schrittweise ueber **Gemini Live, Google Search, Lens** und die Live API verteilt.\n\n### Aktueller Stand von Gemini (Februar 2026)\n\nGemini befindet sich in einer Phase massiver Expansion, nicht des Rueckbaus:\n\n| Funktion | Status | Quelle |\n|---|---|---|\n| **Gemini 3 Flash** | Standard fuer AI Overviews weltweit | [22](https://blog.google/innovation-and-ai/products/google-ai-updates-january-2026) |\n| **Personal Intelligence** | Opt-in-Beta in den USA (Gmail, Photos, YouTube) | [37](https://blog.google/innovation-and-ai/products/gemini-app/gemini-drop-january-2026) |\n| **Chrome Auto Browse** | Aktiv fuer mehrstufige Web-Aufgaben | [22](https://blog.google/innovation-and-ai/products/google-ai-updates-january-2026) |\n| **Gemini 3 Deep Think** | Exklusiv fuer Ultra-Abonnenten (Mathematik, Logik) | [37](https://blog.google/innovation-and-ai/products/gemini-app/gemini-drop-january-2026) |\n| **Computer Use Tool** | Seit 29. Januar 2026 fuer gemini-3-pro/flash-preview | [14](https://ai.google.dev/gemini-api/docs/changelog) |\n| **Workspace-Integration** | Erweiterter Zugang fuer Workspace-Nutzer | [39](https://workspaceupdates.googleblog.com/2026/02/google-workspace-ai-expanded-access.html) |\n\nZusaetzlich hat Gemini 3 Flash eine Funktion namens **Agentic Vision** eingefuehrt, die aktive Bildexploration zur Reduzierung von Halluzinationen ermoeglicht [22](https://blog.google/innovation-and-ai/products/google-ai-updates-january-2026). Das Modell **Genie 3** (ein sogenanntes World Model fuer interaktive Welterstellung) wurde ebenfalls fuer Ultra-Abonnenten geoeffnet [37](https://blog.google/innovation-and-ai/products/gemini-app/gemini-drop-january-2026).\n\n### Gemini ersetzt Google Assistant — nicht umgekehrt\n\nEin weiterer haeufiger Verwechslungspunkt: **Gemini loest Google Assistant ab**, nicht andersherum. Die vollstaendige Umstellung auf Android-Phones, Tablets, Wear OS, Google TV und Android Auto war urspruenglich fuer Ende 2025 geplant, wurde aber auf **2026** verschoben [1](https://9to5google.com/2025/12/19/google-assistant-gemini-2026) [3](https://www.thurrott.com/mobile/android/330937/google-delays-full-gemini-rollout-on-android-to-2026) [5](https://economictimes.com/tech/artificial-intelligence/google-assistant-to-stay-on-devices-till-2026-as-gemini-upgrade-gets-a-new-deadline/articleshow/126095789.cms). Nach der Umstellung wird die eigenstaendige Google Assistant App eingestellt, einschliesslich der iOS-Version [6](https://nokiapoweruser.com/google-is-killing-these-android-features-in-2026-full-list).\n\n---\n\n## Einordnung / Ausblick\n\nDas Geruecht einer Gemini-Einstellung ist faktisch falsch und basiert wahrscheinlich auf einer Vermischung von Modell-Deprecations, der Astra-Berichterstattung und der Assistant-Abschaltung. Googles Strategie ist eindeutig: **Gemini ist die Dachmarke**, unter der saemtliche KI-Funktionen — einschliesslich der Astra-Forschungsergebnisse — gebuendelt werden. Fuer spaeter 2026 wird spekulativ **Gemini 4.0** erwartet [34](https://9to5google.com/2026/01/02/google-in-2026-what-to-expect-video), zusammen mit neuer Hardware wie Smart Glasses und Gemini-faehigen Google-Home-Lautsprechern. Wer also auf Gemini setzt — sei es als Endnutzer oder Entwickler — kann davon ausgehen, dass die Plattform auf absehbare Zeit Googles zentrale KI-Infrastruktur bleibt.\n\n---\n\n**Quellen:** [1](https://9to5google.com/2025/12/19/google-assistant-gemini-2026) | [3](https://www.thurrott.com/mobile/android/330937/google-delays-full-gemini-rollout-on-android-to-2026) | [5](https://economictimes.com/tech/artificial-intelligence/google-assistant-to-stay-on-devices-till-2026-as-gemini-upgrade-gets-a-new-deadline/articleshow/126095789.cms) | [8](https://ai.google.dev/gemini-api/docs/deprecations) | [9](https://techcrunch.com/2025/05/20/project-astra-comes-to-google-search-gemini-and-developers) | [10](https://www.impetus.com/resources/blog/googles-project-astra-the-ai-assistant-revolution-we-didnt-see-coming) | [11](https://deepmind.google/models/project-astra) | [14](https://ai.google.dev/gemini-api/docs/changelog) | [21](https://techcrunch.com/2026/02/04/googles-gemini-app-has-surpassed-750m-monthly-active-users) | [22](https://blog.google/innovation-and-ai/products/google-ai-updates-january-2026) | [30](https://slashdot.org/software/comparison/Gemini-Google-vs-Project-Astra) | [31](https://blog.google/innovation-and-ai/models-and-research/google-deepmind/gemini-universal-ai-assistant) | [34](https://9to5google.com/2026/01/02/google-in-2026-what-to-expect-video) | [37](https://blog.google/innovation-and-ai/products/gemini-app/gemini-drop-january-2026) | [39](https://workspaceupdates.googleblog.com/2026/02/google-workspace-ai-expanded-access.html)\n\n---\n*39 Quellen · 6 Suchen · 1 Runde · 1:22 min · Confidence 10/10*",
+    "metrics": {
+      "total_rounds": 1,
+      "total_elapsed_s": 82.43,
+      "final_confidence": 10,
+      "total_queries": 6,
+      "total_citations": 39,
+      "total_context_blocks": 6,
+      "competing_events_detected": false,
+      "stagnation_detected": false,
+      "total_prompt_tokens": 14334,
+      "total_completion_tokens": 8951,
+      "falsification_triggered": false,
+      "evidence_consistency_final": 10,
+      "evidence_sufficiency_final": 10,
+      "utility_scores": [
+        0.8
+      ],
+      "utility_stop_triggered": false,
+      "plateau_stop_triggered": false
+    },
+    "iteration_logs": [
+      {
+        "node": "classify",
+        "duration_s": 10.696,
+        "decision": "SEARCH",
+        "lang": "de",
+        "search_lang": "en",
+        "recency": "week",
+        "type": "news"
+      },
+      {
+        "node": "decompose",
+        "duration_s": 2.647,
+        "sub_questions": [
+          "Hat Google Anfang 2026 das Gemini-Modell komplett eingestellt?",
+          "Hat Google ein neues KI-Modell namens Astra als Ersatz für Gemini veröffentlicht?",
+          "Was ist der aktuelle Stand von Google Gemini und Google Project Astra im Februar 2026?"
+        ],
+        "sub_question_count": 3
+      },
+      {
+        "node": "plan",
+        "duration_s": 3.2,
+        "round": 0,
+        "new_queries": [
+          "Google Gemini discontinued replaced by Astra 2026",
+          "Google Project Astra AI model release date 2026",
+          "Google Gemini status February 2026 latest news",
+          "Google new AI model replacing Gemini 2026 announcement",
+          "Google DeepMind Astra vs Gemini rebrand or replacement 2026",
+          "Google AI product lineup changes early 2026 Gemini future"
+        ],
+        "total_queries": 6
+      },
+      {
+        "node": "search",
+        "duration_s": 16.209,
+        "round": 0,
+        "queries_executed": 6,
+        "queries": [
+          "Google Gemini discontinued replaced by Astra 2026",
+          "Google Project Astra AI model release date 2026",
+          "Google Gemini status February 2026 latest news",
+          "Google new AI model replacing Gemini 2026 announcement",
+          "Google DeepMind Astra vs Gemini rebrand or replacement 2026",
+          "Google AI product lineup changes early 2026 Gemini future"
+        ],
+        "sources_found": 6,
+        "total_citations": 39,
+        "context_blocks": 6,
+        "sources_summary": [
+          {
+            "query": "Google Gemini discontinued replaced by Astra 2026",
+            "summary": "- Google Gemini ist dabei, **Google Assistant** auf Android-Geräten zu ersetzen – nicht umgekehrt.\n- Die Umstellung von Google Assistant auf Gemini war ursprünglich für **Ende 2025** geplant, hat sich jedoch bis **2026** verzögert.\n- **Project Astra** ist eine separate Google-Forschungsinitiative für einen universellen KI-Assistenten mit visueller Wahrnehmung und Umgebungserkennung.\n- Funktionen von Project Astra werden **in Gemini integriert**, u. a. über Gemini Live.\n- Google plant 2026 die Einbettung von Gemini in Search, Workspace, Android, Smart-Home-Geräte und Google Cloud.\n- **Gemini 4** wird als nächste große Modellversion erwartet, mit Verbesserungen bei Kontextfenstern, multimodalem Verständnis und Reasoning.\n- Stand **Februar 2026** wurde Gemini weder eingestellt noch durch Astra ersetzt.",
+            "urls": [
+              "https://9to5google.com/2025/12/19/google-assistant-gemini-2026",
+              "https://www.youtube.com/watch?v=g0UZT5n6Uf8",
+              "https://www.thurrott.com/mobile/android/330937/google-delays-full-gemini-rollout-on-android-to-2026",
+              "https://www.seroundtable.com/google-gemini-assistant-2026-later-40634.html",
+              "https://economictimes.com/tech/artificial-intelligence/google-assistant-to-stay-on-devices-till-2026-as-gemini-upgrade-gets-a-new-deadline/articleshow/126095789.cms"
+            ]
+          },
+          {
+            "query": "Google Project Astra AI model release date 2026",
+            "summary": "- Google hat kein offizielles Veröffentlichungsdatum für Project Astra als eigenständiges KI-Modell bekannt gegeben.\n- Project Astra befindet sich in frühen Test- und Prototyp-Phasen.\n- Anfang 2026 ermöglicht Project Astra **Echtzeit-Video- und Bildschirmfreigabe-Funktionen in Gemini Live**, die allen Nutzern zur Verfügung stehen.\n- Project Astra betreibt eine neue **Search Live-Funktion**, die es Nutzern erlaubt, über ihre Smartphone-Kamera Fragen zur Umgebung zu stellen.\n- Google arbeitet daran, Project Astras Fähigkeiten auf Smart Glasses zu bringen, entwickelt mit Partnern wie **Samsung** und **Warby Parker** – ohne festgelegtes Startdatum.\n- Statt einer eigenständigen Veröffentlichung werden die Funktionen schrittweise über mehrere Plattformen verteilt: **Gemini Live, Google Search, Lens** und eine **Live API** für Entwickler.\n- Die Live API ermöglicht Sprach- und visuelle Interaktionen mit niedriger Latenz.\n- Die schrittweise Einführung der Funktionen erfolgt im Laufe des Jahres **2026** ohne ein einzelnes koordiniertes Launch-Event.",
+            "urls": [
+              "https://techcrunch.com/2025/05/20/project-astra-comes-to-google-search-gemini-and-developers",
+              "https://www.impetus.com/resources/blog/googles-project-astra-the-ai-assistant-revolution-we-didnt-see-coming",
+              "https://www.youtube.com/watch?v=g0UZT5n6Uf8",
+              "https://deepmind.google/models/project-astra",
+              "https://www.youtube.com/watch?v=7Y3N1-WO3rs"
+            ]
+          },
+          {
+            "query": "Google Gemini status February 2026 latest news",
+            "summary": "- **Gemini 3.0 General Availability** wird voraussichtlich am **12. Februar 2026** veröffentlicht.\n- Am **17. Februar 2026** werden die Modelle `gemini-2.5-flash-preview-09-25`, `imagen-4.0-generate-preview-06-06` und `imagen-4.0-ultra-generate-preview-06-06` abgeschaltet.\n- Am **31. März 2026** werden `gemini-2.0-flash`, `gemini-2.0-flash-001`, `gemini-2.0-flash-lite` und `gemini-2.0-flash-lite-001` abgeschaltet.\n- **Computer Use Tool Support** wurde am **29. Januar 2026** für `gemini-3-pro-preview` und `gemini-3-flash-preview` eingeführt.\n- Die Gemini-App hat laut dem Quartalsbericht Q4 2025 **750 Millionen monatlich aktive Nutzer** erreicht.\n- **Gemini 3** ist nun der Standard für **AI Overviews weltweit**.\n- **Chrome's Auto-Browse-Funktion** nutzt Gemini für Web-Aufgaben wie Formularausfüllung und Datenrecherche.\n- In den letzten 24 Stunden wurden **160 nutzereingereichte Störungsmeldungen** aus Regionen wie Pakistan, USA, Brasilien und Europa verzeichnet.",
+            "urls": [
+              "https://ai.google.dev/gemini-api/docs/changelog",
+              "https://blog.mean.ceo/google-gemini-news-february-2026",
+              "https://statusgator.com/services/google-workspace/gemini",
+              "https://www.youtube.com/watch?v=tPTMHT4O4HQ",
+              "https://status.cloud.google.com/security/incidents/6RQbu9GCPnQiVoJqHBUJ"
+            ]
+          },
+          {
+            "query": "Google new AI model replacing Gemini 2026 announcement",
+            "summary": "- Google hat den Zeitplan für den Ersatz von Google Assistant durch Gemini auf Android-Geräten von Ende 2025 auf 2026 verschoben.\n- Die Umstellung auf Gemini betrifft Android-Phones, Tablets, Wear OS, Google TV und Android Auto.\n- Nach der Umstellung wird die eigenständige Google Assistant App (einschließlich iOS) eingestellt.\n- Gemini 3 ist als Standard für AI Overviews in der Google-Suche im Einsatz.\n- Gemini 3 bietet „Personal Intelligence\" als Opt-in-Integration von Gmail, Photos und weiteren Diensten.\n- Gemini 3 Flash enthält eine Funktion namens „Agentic Vision\" zur verbesserten Bildanalyse.\n- Chrome erhält mit Gemini eine „Auto Browse\"-Funktion für Aufgaben wie Reisebuchungen.\n- Ältere Modelle wie Gemini 2.0 Flash stehen Anfang 2026 vor der Abschaltung ihrer API.",
+            "urls": [
+              "https://9to5google.com/2025/12/19/google-assistant-gemini-2026",
+              "https://blog.google/innovation-and-ai/products/google-ai-updates-january-2026",
+              "https://www.youtube.com/watch?v=g0UZT5n6Uf8",
+              "https://android.gadgethacks.com/news/googles-gemini-strategy-reveals-shocking-ai-future-plans",
+              "https://www.youtube.com/watch?v=xUdn5Lkk0fY"
+            ]
+          },
+          {
+            "query": "Google DeepMind Astra vs Gemini rebrand or replacement 2026",
+            "summary": "- Project Astra ist ein spezialisierter KI-Assistenten-Prototyp von Google DeepMind mit Fokus auf multimodale Echtzeit-Interaktionen.\n- Gemini ist Googles allgemeine KI-Plattform, integriert in Search, Workspace (Docs, Drive, Gmail) und die Gemini-App.\n- Google Assistant auf Android-Geräten soll bis Anfang 2026 durch Gemini ersetzt werden.\n- Project Astra kann Konversationskontext bis zu 10 Minuten pro Sitzung aufrechterhalten.\n- Astra funktioniert geräteübergreifend, darunter Smartphones und Prototyp-Brillen, ohne Kontextverlust.\n- Astra-Funktionen wie Videoverständnis, Bildschirmfreigabe und Gedächtnisfunktion werden in Gemini Live, Google Search und Smart Glasses integriert.\n- Gemini 2.0 wurde im Dezember 2024 angekündigt und bildet die technische Grundlage für die erweiterten Astra-Funktionen.\n- Gemini 2.0 unterstützt Dialog in mehreren Sprachen sowie Tool-Integration mit Google Search und Maps.",
+            "urls": [
+              "https://higoodie.com/blog/googles-ai-search-transformation-deepminds-astra-mariner-and-ai-mode",
+              "https://davidbader.net/post/20250520-techstrong",
+              "https://slashdot.org/software/comparison/Gemini-Google-vs-Project-Astra",
+              "https://blog.google/innovation-and-ai/models-and-research/google-deepmind/gemini-universal-ai-assistant",
+              "https://blog.google/innovation-and-ai/models-and-research/google-deepmind/google-gemini-ai-update-december-2024"
+            ]
+          },
+          {
+            "query": "Google AI product lineup changes early 2026 Gemini future",
+            "summary": "- **Gemini 3** ist Anfang 2026 Googles Flaggschiff-Modellfamilie und treibt die Funktion „Personal Intelligence\" in Apps wie Search, Chrome, Gmail und der Gemini-App an.\n- Die **Personal-Intelligence-Beta** startete als Opt-in in den USA und verbindet Gemini mit Gmail, Photos, YouTube und Search; erweitert auf AI Mode in Search für Pro/Ultra-Abonnenten sowie Gmail-Funktionen wie AI Inbox und Proofread.\n- **Gemini 3 Flash** ist das Standardmodell für AI Overviews in der Google-Suche und bietet eine Funktion namens **Agentic Vision** (aktive Bildexploration zur Reduzierung von Halluzinationen).\n- **Chrome** erhielt Erweiterungen: Auto Browse für mehrstufige Aufgaben, **Nano Banana** Bildbearbeitung und Side-Panel-Multitasking.\n- **Genie 3** (World Model) wurde für Ultra-Abonnenten zur interaktiven Welterstellung geöffnet.\n- Das Modell **Gemini 3 Deep Think** ist für iterative Hypothesenexploration in Mathematik, Wissenschaft und Logik konzipiert und exklusiv für Ultra-Abonnenten verfügbar.\n- **Google AI Ultra**-Abonnenten erhalten priorisierten Zugang zu erweiterten Funktionen wie Veo-Videogenerierung und 1 Million Token Kontextfenster.\n- Spekulationen deuten auf ein mögliches **Gemini 4.0** im späteren Verlauf von 2026 hin, zusammen mit Hardware wie Smart Glasses und neuen Google-Home-Lautsprechern mit integriertem Gemini.",
+            "urls": [
+              "https://blog.google/innovation-and-ai/products/google-ai-updates-january-2026",
+              "https://junaid474.github.io/techblog/blog/gemini-ai-latest-updates.html",
+              "https://9to5google.com/2026/01/02/google-in-2026-what-to-expect-video",
+              "https://gemini.google/release-notes",
+              "https://www.youtube.com/watch?v=UbsnGl8uz3k"
+            ]
+          }
+        ]
+      },
+      {
+        "node": "evaluate",
+        "duration_s": 4.817,
+        "round": 1,
+        "confidence": 10,
+        "gaps": "",
+        "competing_events": "",
+        "stagnation_detected": false,
+        "falsification_triggered": false,
+        "evidence_consistency": 10,
+        "evidence_sufficiency": 10,
+        "utility_score": 0.8,
+        "utility_stop": false,
+        "plateau_stop": false,
+        "context_blocks": 6,
+        "done": true,
+        "reasoning": "STATUS: SUFFICIENT\nCONFIDENCE: 10\nGAPS: Keine\nCONTRADICTIONS: Nein – alle Quellen stimmen konsistent darin überein, dass Gemini Anfang 2026 nicht eingestellt wurde, sondern aktiv weiterentwickelt wird (Gemini 3, geplantes Gemini 4) und dass Project Astra kein Ersatz für Gemini ist, sondern dessen Funktionen in Gemini integriert werden.\nIRRELEVANT: Keine\nCOMPETING_EVENTS: Keine – die Behauptung in der Frage ist faktisch falsch; es gibt kein konkurrierendes Ereignis, das die Einstellung von Gemini oder einen Ersatz durch Astra stützen würde. Die einzige relevante Verwechslungsmöglichkeit ist die Einstellung von Google Assistant zugunsten von Gemini (nicht umgekehrt).\nEVIDENCE_CONSISTENCY: 10\nEVIDENCE_SUFFICIENCY: 10"
+      },
+      {
+        "node": "answer",
+        "duration_s": 44.849,
+        "answer_length": 9663,
+        "citation_count": 39,
+        "rounds": 1,
+        "elapsed_total_s": 82.4,
+        "confidence": 10
+      }
+    ]
+  }
+}

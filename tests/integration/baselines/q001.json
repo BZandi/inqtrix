@@ -1,0 +1,263 @@
+{
+  "meta": {
+    "timestamp": "",
+    "endpoint": "http://127.0.0.1:5100",
+    "reasoning_model": "claude-opus-4.6-agent",
+    "search_model": "perplexity-sonar-pro-agent",
+    "summarize_model": "claude-opus-4.6-agent",
+    "agent_version": "ok",
+    "total_elapsed_s": 810.58,
+    "promoted_at": ""
+  },
+  "result": {
+    "question_id": "q001",
+    "question": "Vor kurzem sind die Aktienmärkte abgestürzt weil anscheinend ein neues Tool von einem der großen KI-Anbieter veröffentlicht wurde, was war das genau und was ist passiert bzw, was kann das Tool eigentlich?",
+    "category": "news",
+    "answer": "## Kurzfazit\n\nAnfang Februar 2026 hat **Anthropics Ankündigung von \"Claude Cowork\"** – einem KI-Tool zur Automatisierung kompletter Arbeitsabläufe – einen massiven Ausverkauf bei Software- und Technologieaktien ausgelöst. Der Software-Sektor verlor seit Jahresbeginn über **15 %**, rund **300 Milliarden bis 1 Billion US-Dollar** an Marktwert wurden vernichtet, und der Nasdaq fiel in mehreren Sitzungen deutlich. Das Ereignis reiht sich in eine Serie KI-bedingter Marktschocks ein, die mit dem **DeepSeek-R1-Crash im Januar 2025** begann.\n\n---\n\n## Kernaussagen\n\n- **Anthropic stellte Anfang Februar 2026 \"Claude Cowork\" vor**, ein KI-gestütztes Tool, das End-to-End-Workflows automatisiert – insbesondere im Bereich Legal-Compliance, Dokumentenprüfung und Datenanalyse. [66](https://www.raskmedia.com.au/2026/02/10/why-software-stocks-have-crashed-and-how-to-think-about-ai-risk)\n- **Der S&P 500 fiel um 1,23 %, der Nasdaq um ca. 1,5 %** am betreffenden Tag; der SPDR-Software-Sektor-ETF verlor über **15 % seit Jahresbeginn (YTD)**. [66](https://www.raskmedia.com.au/2026/02/10/why-software-stocks-have-crashed-and-how-to-think-about-ai-risk)\n- **Einzelaktien wurden hart getroffen**: Microsoft −16 %, Palantir −18,5 %, Intuit −11 %, Salesforce −7,9 %, ServiceNow −7,7 %; der iShares Expanded Tech-Software ETF verlor an einem einzigen Tag **4,6 %**. [49](https://www.businessinsider.com/software-stock-price-crash-ai-investing-outlook-reaction-market-impact-2026-2)\n- **Insgesamt wurden rund 1 Billion Dollar** aus dem S&P 500 Software-Index seit Ende Januar 2026 vernichtet. [49](https://www.businessinsider.com/software-stock-price-crash-ai-investing-outlook-reaction-market-impact-2026-2)\n- **Neben Claude Cowork wurde auch \"OpenClaw\" genannt**, ein weiteres Tool zur Workflow-Automatisierung, das die Angst vor Disruption traditioneller Softwareunternehmen verstärkte. [66](https://www.raskmedia.com.au/2026/02/10/why-software-stocks-have-crashed-and-how-to-think-about-ai-risk)\n- **Bitcoin fiel um 10–20 %** auf ca. 65.000 Dollar, Silber verlor 18 % – ein Zeichen für breite Risikoaversion an den Märkten. [54](https://fortune.com/2026/02/05/global-tech-stock-selloff-deepens-silver-plunges)\n- **Nvidias CEO Jensen Huang** bezeichnete den Ausverkauf als „unlogisch\", da die KI-Infrastrukturnachfrage weiterhin steige. [49](https://www.businessinsider.com/software-stock-price-crash-ai-investing-outlook-reaction-market-impact-2026-2)\n- **Über 50 % der Nasdaq-100-Werte** notierten unterhalb ihres 100-Tage-Durchschnitts – ein technisches Warnsignal für anhaltende Schwäche. [55](https://www.morningstar.com/markets/markets-brief-big-2026-sector-rotation-ai-disrupts-disruptors)\n\n---\n\n## Detailanalyse\n\n### Was ist Claude Cowork und was kann es?\n\n**Claude Cowork** ist ein von Anthropic entwickeltes KI-Tool, das darauf ausgelegt ist, **komplette End-to-End-Arbeitsabläufe zu automatisieren**. Im Fokus stehen zunächst Bereiche wie Legal-Compliance, Dokumentenprüfung und strukturierte Datenanalyse. [66](https://www.raskmedia.com.au/2026/02/10/why-software-stocks-have-crashed-and-how-to-think-about-ai-risk) Anders als bisherige KI-Assistenten, die einzelne Aufgaben unterstützen (etwa Textzusammenfassungen oder Code-Vorschläge), soll Cowork **ganze Prozessketten eigenständig abarbeiten** – von der Datenbeschaffung über die Analyse bis zur Erstellung fertiger Dokumente.\n\nDie Marktreaktion war so heftig, weil Investoren erkannten, dass solche Tools **direkt mit den Kernprodukten etablierter Softwareunternehmen konkurrieren**. Firmen wie Salesforce, ServiceNow oder Intuit verkaufen im Wesentlichen Workflow-Software – genau das, was Claude Cowork zu einem Bruchteil der Kosten ersetzen könnte. Besonders betroffen waren auch Daten- und Analyseunternehmen wie **Gartner (−10–20 %), S&P Global und Moody's (−9 %)**, deren Geschäftsmodelle auf der manuellen Aufbereitung und Bewertung von Informationen basieren. [66](https://www.raskmedia.com.au/2026/02/10/why-software-stocks-have-crashed-and-how-to-think-about-ai-risk)\n\n### Warum reagierte der Markt so extrem?\n\nDer Crash war nicht allein durch Claude Cowork verursacht, sondern durch eine **Kumulation mehrerer Faktoren**. Erstens hatte die KI-Problemlösungsfähigkeit sich laut Berichten alle **128 Tage verdoppelt** (zuvor 212 Tage), was die Geschwindigkeit der Disruption dramatisch erhöhte. [66](https://www.raskmedia.com.au/2026/02/10/why-software-stocks-have-crashed-and-how-to-think-about-ai-risk) Zweitens meldeten die USA im Januar 2026 die **schwächste Jobschaffung seit 2009**, mit rund 100.000 Entlassungen – darunter 16.000 allein bei Amazon, teilweise KI-bedingt. [66](https://www.raskmedia.com.au/2026/02/10/why-software-stocks-have-crashed-and-how-to-think-about-ai-risk) Drittens hatten die Tech-Giganten gleichzeitig **massive KI-Investitionen** angekündigt: Google verdoppelte auf 185 Milliarden Dollar, Microsoft investierte 140 Milliarden, Amazon kündigte 200 Milliarden für 2026 an. [49](https://www.businessinsider.com/software-stock-price-crash-ai-investing-outlook-reaction-market-impact-2026-2) Die Kombination aus hohen Ausgaben und der Erkenntnis, dass KI bestehende Software-Geschäftsmodelle kannibalisieren könnte, löste eine **Sektorrotation** aus: Investoren zogen Kapital aus Software-Aktien ab und schichteten teilweise in Small Caps (Russell 2000) um. [55](https://www.morningstar.com/markets/markets-brief-big-2026-sector-rotation-ai-disrupts-disruptors)\n\n### Parallele zu DeepSeek R1 (Januar 2025)\n\nDer aktuelle Crash erinnert stark an den **DeepSeek-R1-Schock vom Januar 2025**. Damals hatte das chinesische Unternehmen DeepSeek ein Open-Source-Reasoning-Modell veröffentlicht, das OpenAIs o1 ebenbürtig war – bei Trainingskosten von nur **5,6 Millionen Dollar** statt über 100 Millionen. [26](https://www.zdfheute.de/wirtschaft/deepseek-china-ki-kuenstliche-intelligenz-boerse-100.html) Nvidia verlor daraufhin **17 % bzw. rund 600 Milliarden Dollar** an Marktwert an einem einzigen Tag – der grösste Wertverlust eines einzelnen Unternehmens in der US-Börsengeschichte. [30](https://www.coface.de/news-wirtschaftsstudien-insights/deepseek-schock-fuer-die-ki-branche-und-die-finanzmaerkte) Die Logik war ähnlich: Wenn KI-Modelle dramatisch günstiger werden, sinkt die Nachfrage nach teurer Hardware und teurer Software. Der DeepSeek-Schock betraf primär **Hardware-Aktien** (Nvidia, Broadcom, AMD), während der Claude-Cowork-Schock primär **Software-Aktien** trifft – eine Art zweite Welle derselben Disruptions-Dynamik.\n\n### Rolle von Kimi K2.5\n\nZusätzlich veröffentlichte **Moonshot AI** (unterstützt von Alibaba) am **27. Januar 2026** das Modell **Kimi K2.5**, das mit seiner \"Agent Swarm\"-Technologie bis zu **100 parallele Sub-Agenten** orchestrieren kann und **76 % günstiger als Claude Opus 4.5** sein soll. [58](https://wavespeed.ai/blog/posts/kimi-k2-5-everything-we-know-about-moonshots-visual-agentic-model) [64](https://www.eesel.ai/blog/kimi-k25-pricing) Dieses Release verstärkte die Narrative, dass KI-Fähigkeiten exponentiell wachsen, während die Kosten kollabieren – was den Druck auf traditionelle Software-Bewertungen weiter erhöhte. [32](https://www.dup-magazin.de/technologie/big-data/droht-ein-deepseek-crash-warum-chinas-kimi-k2-das-fundament-der-ki-industrie-erschuettert)\n\n---\n\n## Einordnung / Ausblick\n\nDer Software-Aktien-Crash Anfang 2026 markiert einen **Paradigmenwechsel in der Marktwahrnehmung von KI**: Während KI bisher primär als Wachstumstreiber für Tech-Unternehmen galt, wird sie nun zunehmend als **existenzielle Bedrohung für bestehende Software-Geschäftsmodelle** gesehen. Die **Bank of England** warnte bereits vor Überbewertungsrisiken bei verzögertem Infrastrukturausbau. [67](https://www.governing.com/finance/time-to-worry-about-an-ai-bubble-blowout) Einige Analysten prognostizieren dennoch ein **S&P-500-Jahresendziel von ca. 7.500 Punkten** und sehen den Ausverkauf als Kaufgelegenheit. [55](https://www.morningstar.com/markets/markets-brief-big-2026-sector-rotation-ai-disrupts-disruptors) Entscheidend wird sein, ob die massiven KI-Investitionen der Tech-Giganten tatsächlich in proportionale Umsätze münden – oder ob sich die Befürchtung einer **KI-Blase** bewahrheitet. [53](https://en.wikipedia.org/wiki/AI_bubble)\n\n---\n\n**Quellen:** [26](https://www.zdfheute.de/wirtschaft/deepseek-china-ki-kuenstliche-intelligenz-boerse-100.html) | [30](https://www.coface.de/news-wirtschaftsstudien-insights/deepseek-schock-fuer-die-ki-branche-und-die-finanzmaerkte) | [32](https://www.dup-magazin.de/technologie/big-data/droht-ein-deepseek-crash-warum-chinas-kimi-k2-das-fundament-der-ki-industrie-erschuettert) | [49](https://www.businessinsider.com/software-stock-price-crash-ai-investing-outlook-reaction-market-impact-2026-2) | [53](https://en.wikipedia.org/wiki/AI_bubble) | [54](https://fortune.com/2026/02/05/global-tech-stock-selloff-deepens-silver-plunges) | [55](https://www.morningstar.com/markets/markets-brief-big-2026-sector-rotation-ai-disrupts-disruptors) | [58](https://wavespeed.ai/blog/posts/kimi-k2-5-everything-we-know-about-moonshots-visual-agentic-model) | [64](https://www.eesel.ai/blog/kimi-k25-pricing) | [66](https://www.raskmedia.com.au/2026/02/10/why-software-stocks-have-crashed-and-how-to-think-about-ai-risk) | [67](https://www.governing.com/finance/time-to-worry-about-an-ai-bubble-blowout)\n\n---\n*69 Quellen · 9 Suchen · 2 Runden · 1:54 min · Confidence 7/10*",
+    "metrics": {
+      "total_rounds": 2,
+      "total_elapsed_s": 114.65,
+      "final_confidence": 7,
+      "total_queries": 9,
+      "total_citations": 69,
+      "total_context_blocks": 7,
+      "competing_events_detected": true,
+      "stagnation_detected": false,
+      "total_prompt_tokens": 31161,
+      "total_completion_tokens": 15126,
+      "falsification_triggered": false,
+      "evidence_consistency_final": 6,
+      "evidence_sufficiency_final": 6,
+      "utility_scores": [
+        0.71,
+        0.48
+      ],
+      "utility_stop_triggered": false,
+      "plateau_stop_triggered": true
+    },
+    "iteration_logs": [
+      {
+        "node": "classify",
+        "duration_s": 1.707,
+        "decision": "SEARCH",
+        "lang": "de",
+        "search_lang": "de",
+        "recency": "month",
+        "type": "news"
+      },
+      {
+        "node": "decompose",
+        "duration_s": 2.275,
+        "sub_questions": [
+          "DeepSeek R1 AI model release January 2026 what is it and what can it do",
+          "stock market crash late January 2026 DeepSeek AI impact what happened"
+        ],
+        "sub_question_count": 2
+      },
+      {
+        "node": "plan",
+        "duration_s": 3.977,
+        "round": 0,
+        "new_queries": [
+          "DeepSeek R1 AI model capabilities features benchmark performance 2025",
+          "stock market crash January 2025 DeepSeek AI release Nvidia tech stocks impact",
+          "DeepSeek R1 open source Chinese AI disruption Silicon Valley reaction 2025",
+          "warum Aktienmärkte abgestürzt DeepSeek KI Januar 2025 Ursachen Analyse",
+          "DeepSeek R1 vs ChatGPT GPT-4 comparison cost efficiency training",
+          "DeepSeek AI cheap training cost threat US tech companies market valuation 2025"
+        ],
+        "total_queries": 6
+      },
+      {
+        "node": "search",
+        "duration_s": 21.457,
+        "round": 0,
+        "queries_executed": 6,
+        "queries": [
+          "DeepSeek R1 AI model capabilities features benchmark performance 2025",
+          "stock market crash January 2025 DeepSeek AI release Nvidia tech stocks impact",
+          "DeepSeek R1 open source Chinese AI disruption Silicon Valley reaction 2025",
+          "warum Aktienmärkte abgestürzt DeepSeek KI Januar 2025 Ursachen Analyse",
+          "DeepSeek R1 vs ChatGPT GPT-4 comparison cost efficiency training",
+          "DeepSeek AI cheap training cost threat US tech companies market valuation 2025"
+        ],
+        "sources_found": 6,
+        "total_citations": 48,
+        "context_blocks": 6,
+        "sources_summary": [
+          {
+            "query": "DeepSeek R1 AI model capabilities features benchmark performance 2025",
+            "summary": "- **DeepSeek-R1** ist ein Open-Source-Reasoning-Modell, veröffentlicht im **Januar 2025**.\n- Das Modell basiert auf einer **Mixture of Experts (MoE)**-Architektur mit **671 Milliarden Gesamtparametern**, von denen nur **37 Milliarden pro Forward Pass** aktiviert werden.\n- **Benchmark-Ergebnisse**: AIME 2024: 79,8 % (vs. OpenAI o1: 79,2 %), MATH-500: 97,3 % (vs. 96,4 %), Codeforces: 96,3. Perzentil (vs. 96,6.), MMLU: 90,8 % (vs. 91,8 %), SWE-bench Verified: 49,2 % (vs. o1: 48,9 %).\n- Das Training erfolgte mit **2.048 Nvidia H800 GPUs** über **zwei Monate** zu Kosten von **5,6 Millionen US-Dollar**.\n- Die **API-Preise** betragen **0,55 $ pro Million Input-Tokens** und **2,19 $ pro Million Output-Tokens**, verglichen mit OpenAI o1: 15 $ bzw. 60 $.\n- Die destillierte Version **DeepSeek-R1-Distill-Qwen-7B** erreicht **92,8 % auf MATH-500**.\n- Im **Mai 2025** wurde das Upgrade **DeepSeek-R1-0528** veröffentlicht, u. a. mit JSON-Output-Support und reduzierter Halluzination.\n- Das Modell verarbeitet textbasierte Aufgaben in **Englisch und Chinesisch**.",
+            "urls": [
+              "https://fireworks.ai/blog/deepseek-r1-deepdive",
+              "https://www.statista.com/statistics/1552870/deepseek-coding-performance-of-deepseek-r1-compared-to-similar-models-by-benchmark",
+              "https://builtin.com/artificial-intelligence/deepseek-r1",
+              "https://www.datacamp.com/blog/deepseek-r1",
+              "https://etcjournal.com/2025/11/02/status-of-deepseeks-r1-model-nov-2-2025"
+            ]
+          },
+          {
+            "query": "stock market crash January 2025 DeepSeek AI release Nvidia tech stocks impact",
+            "summary": "- **DeepSeek veröffentlichte sein R1-Reasoning-Modell am 20. Januar 2025**, das die Fähigkeiten von OpenAIs o1 zu nur 5–10 % der Kosten erreichte und Open Source war.\n- Bis zum **27. Januar 2025** überholte DeepSeek ChatGPT als meistgeladene Freeware-App im iOS App Store in den USA.\n- **Nvidias Aktienkurs fiel um 18 %** infolge des DeepSeek-Releases.\n- Nvidia schloss den Monat Januar 2025 bei **120,04 USD am 31. Januar**, ein Rückgang von **11,7 %** im Monatsverlauf.\n- Am **3. März 2025** kündigte Präsident Trump eine Erhöhung der Zölle auf chinesische Importe von 10 % auf 20 % an.\n- Am **4. März 2025** traten **25 % pauschale Zölle auf Kanada und Mexiko** in Kraft.\n- Der **S&P 500 fiel um 1,8 %** und der **Nasdaq-100 um 2,6 %** infolge der Zollankündigungen.\n- Bis zum **6. März 2025** hatte der S&P 500 nahezu alle Gewinne seit November 2024 wieder verloren; **Tesla verzeichnete einen Einbruch von 15 % an einem einzigen Tag**.",
+            "urls": [
+              "https://simplyethical.com/blog/why-is-the-us-market-falling-in-early-2025",
+              "https://www.cbinsights.com/research/this-month-in-genai-january-2025",
+              "https://www.statmuse.com/money/ask/nvidia-stock-price-in-january-2025",
+              "https://www.youtube.com/watch?v=1pFkyAevW8M",
+              "https://en.wikipedia.org/wiki/DeepSeek"
+            ]
+          },
+          {
+            "query": "DeepSeek R1 open source Chinese AI disruption Silicon Valley reaction 2025",
+            "summary": "- **DeepSeek R1** nutzt eine **Mixture of Experts (MoE)**-Architektur mit **37 Milliarden aktiven Parametern** von insgesamt **671 Milliarden** und wurde mit rund **2.000 Nvidia-GPUs** für geschätzte **5,6–6 Millionen US-Dollar** trainiert.\n- Nach dem **Launch am 20. Januar 2025** fiel die **Nvidia-Aktie um 17 %**, was einem Marktverlust von **593–600 Milliarden US-Dollar** entsprach; auch **Broadcom, AMD, Alphabet und Microsoft** verzeichneten Kursrückgänge.\n- **Marc Andreessen** bezeichnete DeepSeek R1 als „one of the most amazing and impressive breakthroughs I've ever seen\" und die Open-Source-Veröffentlichung als „a profound gift to the world\".\n- **Alexander Wang** (Scale AI CEO) kommentierte: „They work while America rests and catch up cheaper, fast, and stronger.\"\n- Die **API-Preise** von DeepSeek R1 lagen bei **$0,55 pro Million Input-Tokens** gegenüber **$15 bei OpenAI** – ein Faktor von etwa **20–40x günstiger**.\n- Das Modell ist unter einer **MIT-Lizenz** als Open Source veröffentlicht und erreichte laut Berichten **Platz 1** in den **Apple- und Google-App-Stores**.\n- Am **21. Januar 2025** kündigte **Donald Trump** das **Stargate Project** an – ein **500-Milliarden-Dollar-KI-Infrastrukturprojekt** mit Beteiligung von **OpenAI, SoftBank, Oracle, Nvidia und Microsoft**.\n- **Australien** verbot DeepSeek im **Februar 2025** auf Regierungsgeräten aus Sicherheitsgründen; eine Analyse von **Harmonic** ergab eine **55-prozentige „sensitive exposure\"** bei der Nutzung.",
+            "urls": [
+              "https://www.itpro.com/technology/artificial-intelligence/deepseek-r1-one-year-anniversary-what-next",
+              "https://liberationnews.org/deepseek-sends-shock-waves-across-silicon-valley",
+              "https://observer.com/2025/01/silicon-valley-attention-deepseek",
+              "https://www.fdd.org/analysis/policy_briefs/2025/01/30/ais-sputnik-moment-chinese-ai-model-deepseek-r1-reportedly-surpasses-leading-u-s-ai-models",
+              "https://justinyjtan.substack.com/p/deepseek-r1-story-part1-separating-fact-from-fiction"
+            ]
+          },
+          {
+            "query": "warum Aktienmärkte abgestürzt DeepSeek KI Januar 2025 Ursachen Analyse",
+            "summary": "- **DeepSeek R1** wurde am **27. Januar 2025** veröffentlicht und verdrängte Anfang Februar ChatGPT als beliebteste kostenlose App im Apple App Store.\n- Die Trainingskosten von DeepSeek werden auf **5,6 Millionen Dollar** geschätzt, verglichen mit über **100 Millionen Dollar** bei westlichen Unternehmen.\n- **Nvidia** verlor zeitweise bis zu **17 Prozent** seines Kurswerts und büßte geschätzt **500 bis 600 Milliarden Dollar** an Börsenwert ein – laut Quelle der größte Wertverlust eines einzelnen Unternehmens in der US-Börsengeschichte.\n- **Broadcom** fiel um **17 Prozent**, **Oracle** verlor **14 Prozent**.\n- Auch **Apple, Alphabet, Amazon, Meta und Microsoft** waren von den Kursverlusten betroffen.\n- DeepSeek erzielte seine Ergebnisse **trotz bestehender US-Technologiesanktionen** gegen China, also ohne Zugang zu den fortschrittlichsten Chips.\n- Am **3. April** (ein separates Crash-Datum) verlor der **DAX rund drei Prozent**, der **S&P 500 über vier Prozent**.",
+            "urls": [
+              "https://www.dasinvestment.com/boersencrash-finanzkrise-historie",
+              "https://www.zdfheute.de/wirtschaft/deepseek-china-ki-kuenstliche-intelligenz-boerse-100.html",
+              "https://www.biallo.de/fonds/ratgeber/boersencrashs",
+              "https://www.fonds-super-markt.de/neuigkeiten/artikel/chinas-ki-ueberraschung-deepseek-und-der-wettlauf-um-die-zukunft",
+              "https://www.businessinsider.de/wirtschaft/us-aktien-diese-3-gruende-stecken-hinter-dem-schlechtesten-boersen-tag-des-jahres"
+            ]
+          },
+          {
+            "query": "DeepSeek R1 vs ChatGPT GPT-4 comparison cost efficiency training",
+            "summary": "- DeepSeek R1 hat 671 Milliarden Parameter insgesamt, aktiviert aber nur 37 Milliarden Parameter pro Anfrage (Mixture-of-Experts-Architektur).\n- DeepSeek R1 wurde in 55 Tagen auf 2.048 Nvidia H800 GPUs für 5,5 Millionen Dollar trainiert.\n- GPT-4 wird auf circa 1,8 Billionen Parameter geschätzt (~280 Milliarden aktiv pro Anfrage) und soll mit ~25.000 A100 GPUs über 90–100 Tage bei Kosten von über 100 Millionen Dollar trainiert worden sein.\n- DeepSeek R1 kostet im API-Zugang 0,55 Dollar pro Million Input-Tokens und 2,19 Dollar pro Million Output-Tokens; GPT-4 liegt bei 30 bzw. 60 Dollar – DeepSeek R1 ist damit etwa 33-mal günstiger.\n- In einem Diagnostik-Vergleich erreichte DeepSeek R1 eine Genauigkeit von 35 % gegenüber 39 % bei GPT-4 (P=0,634), wobei DeepSeek R1 im Schnitt 11,9 Differenzialdiagnosen generierte gegenüber 9,0 bei GPT-4.\n- Bei Mathematik-Benchmarks erreichte DeepSeek R1 90 % (GPT-4o: 83 %), bei Coding-Benchmarks 97 %.\n- DeepSeek R1 unterstützt einen Kontextumfang von 128.000 Tokens und verarbeitet ausschließlich Text; GPT-4 unterstützt auch Bilder und existiert in Varianten mit 8.000 bis 128.000 Tokens Kontext.\n- GPT-4 erreichte laut Benchmarks ein Ergebnis in den oberen 10 % der US-Anwaltsprüfung (Bar Exam).",
+            "urls": [
+              "https://pmc.ncbi.nlm.nih.gov/articles/PMC12165463",
+              "https://viso.ai/deep-learning/chatgpt-4",
+              "https://www.geeksforgeeks.org/websites-apps/deepseek-vs-chatgpt",
+              "https://obot.ai/resources/learning-center/openai",
+              "https://docsbot.ai/models/compare/gpt-4/deepseek-r1"
+            ]
+          },
+          {
+            "query": "DeepSeek AI cheap training cost threat US tech companies market valuation 2025",
+            "summary": "- DeepSeek verlangt $0,028 pro 1M Input-Tokens (Cache-Hit) und $0,42 pro 1M Output-Tokens.\n- DeepSeek erreichte bis April 2025 96,9 Millionen monatlich aktive Nutzer und war damit die Nr. 4 unter den KI-Apps weltweit.\n- DeepSeek erzielte bis Mitte 2025 eine Bewertung von $3,4 Milliarden nach insgesamt $1,1 Milliarden Finanzierung (darunter $520 Millionen Series C) bei einem jährlichen Umsatz-Run-Rate von $220 Millionen.\n- DeepSeek hatte 170.000 GitHub-Stars, 60.000+ Contributors, 5,7 Milliarden monatliche API-Aufrufe und 58 % der neuen KI-Startups nutzten es laut den Angaben.\n- Nvidias Q3-2025-Umsatz betrug $57 Milliarden (plus 62 % im Jahresvergleich), davon $51,2 Milliarden aus dem KI-Rechenzentrumsgeschäft (plus 66 % YoY).\n- Im Dezember 2025 lag Nvidia bei $4,5–4,6 Billionen Marktkapitalisierung, Apple bei $4,0 Billionen, Alphabet bei $3,8 Billionen, Microsoft bei $3,6 Billionen und Amazon bei $2,5 Billionen.\n- Die zehn größten US-Techfirmen (Mag10) hielten ein Drittel der US- und ein Sechstel der globalen Marktkapitalisierung.\n- DeepSeeks Nutzerverteilung lag bei 30,71 % MAUs aus China und 4,34 % aus den USA; OpenAI/ChatGPT hatten zum Vergleich 600 Mio./350 Mio. MAUs.",
+            "urls": [
+              "https://thunderbit.com/blog/deepseek-ai-statistics",
+              "https://www.techi.com/big-largest-tech-companies-by-market-cap",
+              "https://electroiq.com/stats/deepseek-ai-statistics",
+              "https://cepr.org/voxeu/columns/unpacking-us-tech-valuations-agnostic-assessment",
+              "https://www.gate.com/crypto-wiki/article/2025-deepseek-price-prediction-analyzing-market-trends-and-future-potential-for-ai-innovation"
+            ]
+          }
+        ]
+      },
+      {
+        "node": "evaluate",
+        "duration_s": 7.719,
+        "round": 1,
+        "confidence": 7,
+        "gaps": "Das Ereignis (DeepSeek R1, Januar 2025) liegt über 12 Monate vor dem heutigen Datum (10. Februar 2026), was die Formulierung \"vor kurzem\" fragwürdig macht – möglicherweise ist ein aktuelleres Ereignis gemeint (z.B. Kimi K2 oder ein anderes Release Ende 2025/Anfang 2026), das in den Recherche-Ergebnissen nicht abgedeckt ist.",
+        "competing_events": "DeepSeek R1 Release (20./27. Januar 2025) vs. mögliches aktuelleres KI-Event Ende 2025/Anfang 2026 (z.B. Kimi K2, erwähnt in Block 4 als potenzieller \"DeepSeek-Crash\"-Nachfolger) – letzteres ist nicht ausreichend recherchiert.",
+        "stagnation_detected": false,
+        "falsification_triggered": false,
+        "evidence_consistency": 8,
+        "evidence_sufficiency": 7,
+        "utility_score": 0.71,
+        "utility_stop": false,
+        "plateau_stop": false,
+        "context_blocks": 6,
+        "done": false,
+        "reasoning": "STATUS: SUFFICIENT\nCONFIDENCE: 7\nGAPS: Das Ereignis (DeepSeek R1, Januar 2025) liegt über 12 Monate vor dem heutigen Datum (10. Februar 2026), was die Formulierung \"vor kurzem\" fragwürdig macht – möglicherweise ist ein aktuelleres Ereignis gemeint (z.B. Kimi K2 oder ein anderes Release Ende 2025/Anfang 2026), das in den Recherche-Ergebnissen nicht abgedeckt ist.\nCONTRADICTIONS: Ja – kleinere Widersprüche bei Datumsangaben (Block 1/3: 20. Januar 2025 vs. Block 4: 27. Januar 2025 als Veröffentlichungsdatum) und beim genauen Marktverlust (500–600 Mrd. vs. 593 Mrd. Dollar), aber im Kern konsistent.\nIRRELEVANT: Keine\nCOMPETING_EVENTS: DeepSeek R1 Release (20./27. Januar 2025) vs. mögliches aktuelleres KI-Event Ende 2025/Anfang 2026 (z.B. Kimi K2, erwähnt in Block 4 als potenzieller \"DeepSeek-Crash\"-Nachfolger) – letzteres ist nicht ausreichend recherchiert.\nEVIDENCE_CONSISTENCY: 8\nEVIDENCE_SUFFICIENCY: 7"
+      },
+      {
+        "node": "plan",
+        "duration_s": 2.974,
+        "round": 1,
+        "new_queries": [
+          "AI stock market crash January February 2026 latest selloff tech stocks",
+          "Kimi K2 AI model release 2025 2026 stock market impact capabilities",
+          "newest AI model release causing stock market drop late 2025 early 2026 not DeepSeek"
+        ],
+        "total_queries": 9
+      },
+      {
+        "node": "search",
+        "duration_s": 17.757,
+        "round": 1,
+        "queries_executed": 3,
+        "queries": [
+          "AI stock market crash January February 2026 latest selloff tech stocks",
+          "Kimi K2 AI model release 2025 2026 stock market impact capabilities",
+          "newest AI model release causing stock market drop late 2025 early 2026 not DeepSeek"
+        ],
+        "sources_found": 3,
+        "total_citations": 69,
+        "context_blocks": 9,
+        "sources_summary": [
+          {
+            "query": "AI stock market crash January February 2026 latest selloff tech stocks",
+            "summary": "- **Anthropics Ankündigung** neuer KI-gestützter Legal-Tools für Compliance und Dokumentenprüfung Anfang Februar 2026 löste Kursrückgänge bei Legal-Software-Aktien in den USA und Europa aus.\n- Seit Ende Januar 2026 wurden rund **1 Billion Dollar** aus dem S&P 500 Software-Index vernichtet; der Nasdaq 100 fiel in mehreren Sitzungen um über 1–2 %.\n- **Einzelne Kursverluste (YTD):** Microsoft −16 %, Amazon −9 %, Palantir −18,5 %, Intuit −11 %, Salesforce −7,9 %, ServiceNow −7,7 %, Nvidia −3,7 %, Broadcom −6,4 %; der iShares Expanded Tech-Software ETF verlor an einem Tag 4,6 %.\n- **Bitcoin** fiel um 10–20 % auf ca. 65.000 Dollar, **Silber** verlor 18 %; der **Russell 2000** (Small Caps) legte dagegen zu.\n- **Amazon** kündigte einen KI-Investitionsplan von 200 Milliarden Dollar für 2026 an; auch Microsoft, Google und Meta meldeten hohe KI-Investitionsausgaben.\n- **OpenAI** projiziert kumulierte Verluste von 74 Milliarden Dollar bis 2028; die **Bank of England** warnte vor Überbewertungsrisiken bei verzögertem Infrastrukturausbau.\n- **Nvidias CEO Jensen Huang** bezeichnete den Ausverkauf als „unlogisch\".\n- Über **50 % der Nasdaq-100-Werte** notierten unterhalb ihres 100-Tage-Durchschnitts; einige Analysten prognostizierten ein S&P-500-Jahresendziel von ca. 7.500 Punkten.",
+            "urls": [
+              "https://www.businessinsider.com/software-stock-price-crash-ai-investing-outlook-reaction-market-impact-2026-2",
+              "https://www.youtube.com/watch?v=_MRIQSnbs6M",
+              "https://www.youtube.com/watch?v=ViFtXGm0yyo",
+              "https://www.thestreet.com/latest-news/stock-market-today-feb-3-software-stocks-landslide-after-paypals-poor-earnings-nasdaq-falls-1",
+              "https://en.wikipedia.org/wiki/AI_bubble"
+            ]
+          },
+          {
+            "query": "Kimi K2 AI model release 2025 2026 stock market impact capabilities",
+            "summary": "- **Kimi K2** wurde im Juli 2025 von Moonshot AI veröffentlicht.\n- **Kimi K2 Thinking** wurde am 6. November 2025 veröffentlicht.\n- **Kimi K2.5** wurde am 27. Januar 2026 veröffentlicht.\n- Moonshot AI ist ein **privates Unternehmen**, das von **Alibaba** unterstützt wird.\n- **Kimi K2.5** kostet laut Angaben **76 % weniger als Claude Opus 4.5** und sei **9x günstiger** als vergleichbare Closed-Source-Modelle.\n- **Kimi K2.5** wurde auf **15 Billionen gemischten visuellen und Text-Tokens** trainiert und verfügt über ein **256k-Token-Kontextfenster**.\n- Die **Agent Swarm-Technologie** von Kimi K2.5 orchestriert bis zu **100 parallele Sub-Agenten** mit über **1.500 gleichzeitigen Tool-Aufrufen** und soll eine **4,5-fache Geschwindigkeitsverbesserung** erzielen.\n- Kimi K2.5 erreicht laut Angaben **50,2 %** auf „Humanity's Last Exam\" (im Vergleich zu **45,5 %** für GPT-5.2) und eine **59,3 % Verbesserung** gegenüber K2 Thinking bei Dokumentenaufgaben.",
+            "urls": [
+              "https://www.nist.gov/news-events/news/2025/12/caisi-evaluation-kimi-k2-thinking",
+              "https://wavespeed.ai/blog/posts/kimi-k2-5-everything-we-know-about-moonshots-visual-agentic-model",
+              "https://dev.to/czmilo/kimi-k25-in-2026-the-ultimate-guide-to-open-source-visual-agentic-intelligence-18od",
+              "https://spectrumailab.com/blog/kimi-k2-5-agent-swarm-moonshot-ai-guide-2026",
+              "https://www.thoughtworks.com/en-us/insights/blog/generative-ai/kimi-k2-whats-fuss-whats-like-use"
+            ]
+          },
+          {
+            "query": "newest AI model release causing stock market drop late 2025 early 2026 not DeepSeek",
+            "summary": "- **Anthropics KI-Tools (u.a. Claude Cowork) lösten Anfang 2026 einen Kurseinbruch bei Software- und Datenaktien aus, wobei ca. 300 Milliarden Dollar an Marktwert vernichtet wurden.**\n- **Am betreffenden Tag fiel der S&P 500 um 1,23 %, der NASDAQ um ca. 1,5 %, und der SPDR-Software-Sektor verlor über 15 % seit Jahresbeginn.**\n- **Einzelaktien waren stark betroffen: Relks fiel um 14 %, Gartner und S&P Global verloren 10–20 %, Moody's fiel um 9 %, Microsoft verlor insgesamt über 10 %.**\n- **Im Januar 2026 wurde die schwächste Jobschaffung in den USA seit 2009 verzeichnet, mit rund 100.000 Entlassungen, darunter 16.000 bei Amazon, teils KI-bedingt.**\n- **Google verdoppelte seine KI-Investitionen auf 185 Mrd. Dollar, Microsoft investierte 140 Mrd. Dollar; Googles Jahresumsatz erreichte 400 Mrd. Dollar bei einem Nettoeinkommensanstieg von 30 % im Jahresvergleich.**\n- **Die KI-Problemlösungsfähigkeit verdoppelte sich laut Angaben alle 128 Tage, verglichen mit zuvor 212 Tagen.**\n- **Der DeepSeek-Launch Ende 2025 (chinesisches Open-Source-Modell) hatte zuvor einen 17-%-Kursrückgang bei Nvidia verursacht; Metas Aktie fiel im Oktober 2025 um 11 % nach einer Rechenzentrums-Investitionsankündigung.**\n- **Als konkrete neue Tools wurden Claude Cowork und OpenClaw genannt, die End-to-End-Workflows automatisieren sollen.**",
+            "urls": [
+              "https://www.youtube.com/watch?v=6xYg5GmbgXE",
+              "https://www.raskmedia.com.au/2026/02/10/why-software-stocks-have-crashed-and-how-to-think-about-ai-risk",
+              "https://en.wikipedia.org/wiki/AI_bubble",
+              "https://www.governing.com/finance/time-to-worry-about-an-ai-bubble-blowout",
+              "https://corporate.vanguard.com/content/dam/corp/research/pdf/isg_vemo_2026.pdf"
+            ]
+          }
+        ]
+      },
+      {
+        "node": "evaluate",
+        "duration_s": 9.381,
+        "round": 2,
+        "confidence": 7,
+        "gaps": "Es gibt zwei konkurrierende Ereignisse (DeepSeek R1 Januar 2025 vs. Anthropic Claude Cowork Februar 2026), wobei das zeitlich passendere Ereignis (Anthropic/Claude Cowork) weniger detailliert dokumentiert ist als DeepSeek R1.",
+        "competing_events": "DeepSeek R1 (Januar 2025, Nvidia -17%, ~600 Mrd. Dollar Verlust) vs. Anthropic Claude Cowork (Anfang Februar 2026, Software-Sektor -15% YTD, ~300 Mrd.-1 Bio. Dollar vernichtet) vs. Kimi K2.5 (Januar 2026, möglicher Beitrag)",
+        "stagnation_detected": false,
+        "falsification_triggered": false,
+        "evidence_consistency": 6,
+        "evidence_sufficiency": 6,
+        "utility_score": 0.48,
+        "utility_stop": false,
+        "plateau_stop": true,
+        "context_blocks": 7,
+        "done": true,
+        "reasoning": "STATUS: SUFFICIENT\nCONFIDENCE: 7\nGAPS: Es gibt zwei konkurrierende Ereignisse (DeepSeek R1 Januar 2025 vs. Anthropic Claude Cowork Februar 2026), wobei das zeitlich passendere Ereignis (Anthropic/Claude Cowork) weniger detailliert dokumentiert ist als DeepSeek R1.\nCONTRADICTIONS: Ja — Block 7 und 9 beschreiben den aktuelleren Crash Anfang Februar 2026 durch Anthropics neue KI-Tools (Claude Cowork), während Blöcke 1-6 den DeepSeek-R1-Crash vom Januar 2025 beschreiben. Die Frage mit \"vor kurzem\" passt zeitlich eher zu Anthropic (Februar 2026), aber DeepSeek war das bekanntere Ereignis. Allerdings beschreibt die Frage \"ein neues Tool von einem der großen KI-Anbieter\", was eher auf Anthropic (Claude Cowork, Anfang Februar 2026) passt, da DeepSeek damals kein \"großer KI-Anbieter\" war.\nIRRELEVANT: 5,6\nCOMPETING_EVENTS: DeepSeek R1 (Januar 2025, Nvidia -17%, ~600 Mrd. Dollar Verlust) vs. Anthropic Claude Cowork (Anfang Februar 2026, Software-Sektor -15% YTD, ~300 Mrd.-1 Bio. Dollar vernichtet) vs. Kimi K2.5 (Januar 2026, möglicher Beitrag)\nEVIDENCE_CONSISTENCY: 6\nEVIDENCE_SUFFICIENCY: 6"
+      },
+      {
+        "node": "answer",
+        "duration_s": 47.398,
+        "answer_length": 9439,
+        "citation_count": 69,
+        "rounds": 2,
+        "elapsed_total_s": 114.7,
+        "confidence": 7
+      }
+    ]
+  }
+}

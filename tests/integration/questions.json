@@ -1,0 +1,77 @@
+{
+    "description": "Kanonische Paritaetsfragen fuer Inqtrix. Diese Datei spiegelt die Referenzfragen des Litellm-Research-Agenten.",
+    "questions": [
+        {
+            "id": "q001",
+            "question": "Vor kurzem sind die Aktienmaerkte abgestuerzt weil anscheinend ein neues Tool von einem der grossen KI-Anbieter veroeffentlicht wurde, was war das genau und was ist passiert bzw, was kann das Tool eigentlich?",
+            "category": "news",
+            "expected_keywords": [
+                "DeepSeek",
+                "R1",
+                "Aktien",
+                "Crash",
+                "China"
+            ],
+            "notes": "Nachrichtenfrage - zeitkritisch, erfordert aktuelle Quellen"
+        },
+        {
+            "id": "q002",
+            "question": "Welches neuste Paper hat DeepSeek rausgebracht ueber Agentensysteme die zeigen wie ChatGPT funktioniert, es hat wohl fuer sehr viel aufsehen erregt und worum ging es dabei?",
+            "category": "academic",
+            "expected_keywords": [
+                "DeepSeek",
+                "Paper",
+                "Agent"
+            ],
+            "notes": "Akademische Frage - erfordert search_mode=academic und aktuelle Informationen"
+        },
+        {
+            "id": "q003",
+            "question": "Welche konkreten rechtlichen Konsequenzen hat der EU AI Act, der seit Februar 2025 schrittweise in Kraft tritt, fuer Open-Source-KI-Modelle wie LLaMA, Mistral und DeepSeek, und haben Unternehmen bereits dagegen geklagt?",
+            "category": "complex",
+            "expected_keywords": [
+                "EU AI Act",
+                "Open-Source",
+                "LLaMA",
+                "Mistral",
+                "Klage",
+                "Regulierung"
+            ],
+            "notes": "Komplexe Frage - erfordert juristische Quellen und multi-query Zerlegung"
+        },
+        {
+            "id": "q004",
+            "question": "Sollen zahnaerztliche Leistungen zukuenftig privatisiert werden? In welche Richtung gehen die Diskussionen?",
+            "category": "news",
+            "expected_keywords": [
+                "Zahnarzt",
+                "Privatisierung",
+                "Krankenkasse",
+                "GKV"
+            ],
+            "notes": "Deutschsprachige Nachrichtenfrage - erfordert deutsche Quellen"
+        },
+        {
+            "id": "q005",
+            "question": "Ich habe gehoert, dass Google Anfang 2026 Gemini komplett eingestellt und durch ein neues Modell namens Astra ersetzt hat - stimmt das und was steckt dahinter?",
+            "category": "negative_evidence",
+            "expected_keywords": [
+                "Google",
+                "Gemini",
+                "Astra"
+            ],
+            "notes": "Negative-Evidenz-Frage - Praemisse ist wahrscheinlich falsch, Agent soll das erkennen"
+        },
+        {
+            "id": "q006",
+            "question": "Welches KI-Unternehmen hat im Januar oder Februar 2026 den groessten Durchbruch bei autonomen Coding-Agenten erzielt, die eigenstaendig ganze Software-Projekte umsetzen koennen?",
+            "category": "factual",
+            "expected_keywords": [
+                "Coding",
+                "Agent",
+                "2026"
+            ],
+            "notes": "Faktenfrage mit Aktualitaetsbedarf - erfordert aktuelle Quellen aus 2026"
+        }
+    ]
+}

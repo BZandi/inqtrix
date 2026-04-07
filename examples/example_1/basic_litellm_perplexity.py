@@ -30,12 +30,9 @@ render Markdown with colours, formatted headers, bullet lists, and
 clickable links (in terminals that support OSC 8 hyperlinks such as
 iTerm2, Windows Terminal, or GNOME Terminal).
 
-Install the extra once::
+``rich`` is a core dependency and always available after::
 
-    uv sync --extra examples
-
-If ``rich`` is not installed the example still works — it falls back
-to plain ``print()`` output.
+    uv sync
 
 Run with::
 
@@ -47,15 +44,9 @@ import os
 from dotenv import load_dotenv
 from inqtrix import AgentConfig, LiteLLM, PerplexitySearch, ResearchAgent
 
-# Optional: rich for pretty Markdown rendering in the terminal.
-# Falls back to plain print() if not installed.
-try:
-    from rich.console import Console
-    from rich.markdown import Markdown
-    from rich.panel import Panel
-    _RICH = True
-except ModuleNotFoundError:
-    _RICH = False
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
 
 
 load_dotenv()
@@ -64,21 +55,16 @@ QUESTION = "Was ist der aktuelle Stand der GKV-Reform?"
 
 
 def _print_result(result) -> None:
-    """Pretty-print a ResearchResult — with rich if available."""
+    """Pretty-print a ResearchResult."""
     metrics_line = (
         f"Confidence: {result.metrics.confidence}/10  |  "
         f"Sources: {result.metrics.total_citations}  |  "
         f"Rounds: {result.metrics.rounds}"
     )
-    if _RICH:
-        console = Console()
-        console.print(Markdown(result.answer))
-        console.print()
-        console.print(Panel(metrics_line, title="Metrics", expand=False))
-    else:
-        print(result.answer)
-        print()
-        print(metrics_line)
+    console = Console()
+    console.print(Markdown(result.answer))
+    console.print()
+    console.print(Panel(metrics_line, title="Metrics", expand=False))
 
 
 # ── Output mode ──────────────────────────────────────────────────────
@@ -207,19 +193,15 @@ def main() -> None:
         for chunk in agent.stream(QUESTION, include_progress=INCLUDE_PROGRESS):
             if not in_answer and chunk == "---\n":
                 in_answer = True
-                if not _RICH:
-                    print(chunk, end="", flush=True)
                 continue
             if in_answer:
                 answer_buf.append(chunk)
-                if not _RICH:
-                    print(chunk, end="", flush=True)
             else:
                 # Progress lines — always printed raw
                 print(chunk, end="", flush=True)
 
         full_answer = "".join(answer_buf)
-        if _RICH and full_answer:
+        if full_answer:
             console = Console()
             print()  # newline after progress block
             console.print(Markdown(full_answer))

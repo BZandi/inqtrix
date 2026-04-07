@@ -10,12 +10,11 @@ Quick start::
 
 Baukasten (building-block) pattern::
 
-    from inqtrix import ResearchAgent, AgentConfig
+    from inqtrix import ResearchAgent, AgentConfig, LiteLLM, PerplexitySearch
 
-    agent = ResearchAgent(AgentConfig(
-        max_rounds=3,
-        confidence_stop=7,
-    ))
+    llm = LiteLLM(api_key="...", default_model="gpt-4o")
+    search = PerplexitySearch(api_key="...", model="sonar-pro")
+    agent = ResearchAgent(AgentConfig(llm=llm, search=search))
 """
 
 __version__ = "0.1.0"
@@ -32,10 +31,18 @@ from inqtrix.result import (
     ClaimMetrics,
 )
 
-# -- Public API (extension points) --
-from inqtrix.providers import LLMProvider, SearchProvider, ProviderContext
+# -- Public API (providers) --
+from inqtrix.providers import (
+    LLMProvider,
+    SearchProvider,
+    ProviderContext,
+    LiteLLM,
+    PerplexitySearch,
+)
 from inqtrix.providers_anthropic import AnthropicLLM
 from inqtrix.providers_brave import BraveSearch
+
+# -- Public API (strategies) --
 from inqtrix.strategies import (
     ClaimConsolidationStrategy,
     ClaimExtractionStrategy,
@@ -57,13 +64,15 @@ __all__ = [
     "Claim",
     "SourceMetrics",
     "ClaimMetrics",
-    # Providers (for custom implementations)
+    # Providers
     "LLMProvider",
     "SearchProvider",
     "ProviderContext",
+    "LiteLLM",
+    "PerplexitySearch",
     "AnthropicLLM",
     "BraveSearch",
-    # Strategies (for custom implementations)
+    # Strategies
     "SourceTieringStrategy",
     "ClaimExtractionStrategy",
     "ClaimConsolidationStrategy",

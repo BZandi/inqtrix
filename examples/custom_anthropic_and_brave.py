@@ -51,10 +51,6 @@ def main() -> None:
         search=BraveSearch(
             api_key=_require_env("BRAVE_API_KEY"),
         ),
-        reasoning_model="claude-3-7-sonnet-latest",
-        classify_model="claude-3-5-haiku-latest",
-        summarize_model="claude-3-5-haiku-latest",
-        evaluate_model="claude-3-5-haiku-latest",
         max_rounds=4,
         confidence_stop=8,
     ))

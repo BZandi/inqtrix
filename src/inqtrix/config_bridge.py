@@ -429,11 +429,12 @@ def create_providers_from_config(
     if search_model_name and resolver.has_model(search_model_name):
         resolved_search = resolver.resolve(search_model_name)
         search: SearchProvider = PerplexitySearch(
-            client=resolved_search.client,
+            api_key="",
             model=resolved_search.model_id,
             cache_maxsize=settings.agent.search_cache_maxsize,
             cache_ttl=settings.agent.search_cache_ttl,
             request_params=resolved_search.params,
+            _client=resolved_search.client,
         )
     else:
         # Fallback: use the first provider defined for search

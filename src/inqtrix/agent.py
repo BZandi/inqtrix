@@ -13,22 +13,22 @@ Minimal (uses environment variables or a local ``.env`` file for configuration):
 
 Custom configuration (Baukasten)::
 
-    from inqtrix import ResearchAgent, AgentConfig
+    from inqtrix import ResearchAgent, AgentConfig, LiteLLM, PerplexitySearch
 
+    llm = LiteLLM(
+        api_key=os.getenv("LITELLM_API_KEY"),
+        base_url="http://localhost:4000/v1",
+        default_model="gpt-4o",
+    )
+    search = PerplexitySearch(
+        api_key=os.getenv("LITELLM_API_KEY"),
+        base_url="http://localhost:4000/v1",
+        model="perplexity-sonar-pro-agent",
+    )
     agent = ResearchAgent(AgentConfig(
+        llm=llm,
+        search=search,
         max_rounds=3,
-        confidence_stop=7,
-    ))
-    result = agent.research("Meine Frage")
-
-Fully custom providers::
-
-    from inqtrix import ResearchAgent, AgentConfig
-    from inqtrix.providers import LiteLLMProvider, PerplexitySearch
-
-    agent = ResearchAgent(AgentConfig(
-        llm=my_custom_llm,
-        search=my_custom_search,
     ))
 """
 
@@ -69,7 +69,8 @@ class AgentConfig(BaseModel):
     enabling the *Baukasten* (building-block) pattern::
 
         AgentConfig(
-            search=BingSearch(api_key="..."),
+            llm=LiteLLM(api_key="...", default_model="gpt-4o"),
+            search=PerplexitySearch(api_key="...", model="sonar-pro"),
             max_rounds=2,
         )
 
@@ -115,17 +116,6 @@ class AgentConfig(BaseModel):
     # -- Search cache --
     search_cache_maxsize: int = 256
     search_cache_ttl: int = 3600
-
-    # -- Models (only used when auto-creating providers) --
-    reasoning_model: str = "claude-opus-4.6-agent"
-    search_model: str = "perplexity-sonar-pro-agent"
-    classify_model: str = ""
-    summarize_model: str = ""
-    evaluate_model: str = ""
-
-    # -- Server connection (only used when auto-creating providers) --
-    litellm_base_url: str = "http://litellm-proxy:4000/v1"
-    litellm_api_key: str = "sk-placeholder"
 
     # -- Testing --
     testing_mode: bool = False
@@ -294,59 +284,47 @@ class ResearchAgent:
         settings = self._build_settings(cfg)
         self._settings = settings
 
-        from inqtrix.settings import Settings, ModelSettings, ServerSettings
-
-        env_settings = Settings()
-        full_settings = Settings(
-            models=ModelSettings(
-                **self._merge_explicit_overrides(
-                    env_settings.models,
-                    cfg,
-                    (
-                        "reasoning_model",
-                        "search_model",
-                        "classify_model",
-                        "summarize_model",
-                        "evaluate_model",
-                    ),
-                ),
-            ),
-            server=ServerSettings(
-                **self._merge_explicit_overrides(
-                    env_settings.server,
-                    cfg,
-                    (
-                        "litellm_base_url",
-                        "litellm_api_key",
-                    ),
-                ),
-            ),
-            agent=settings,
-        )
-
         # -- Providers --
         llm = cfg.llm
         search = cfg.search
         if llm is None or search is None:
             from inqtrix.providers import create_providers
+            from inqtrix.settings import Settings
 
+            env_settings = Settings()
+            full_settings = Settings(
+                models=env_settings.models,
+                server=env_settings.server,
+                agent=settings,
+            )
             auto = create_providers(full_settings)
             llm = llm or auto.llm
             search = search or auto.search
 
+        # Attach model metadata for providers that don't expose it
+        # (e.g. AnthropicLLM, custom LLMProvider implementations).
         if llm is not None and not hasattr(llm, "models"):
             from inqtrix.providers import ConfiguredLLMProvider
+            from inqtrix.settings import ModelSettings
 
-            llm = ConfiguredLLMProvider(llm, full_settings.models)
+            llm = ConfiguredLLMProvider(llm, ModelSettings())
 
         self._providers = ProviderContext(llm=llm, search=search)
 
         # -- Strategies --
         from inqtrix.strategies import create_default_strategies
+
+        # Derive summarize_model from the LLM provider's model configuration
+        # if available, otherwise fall back to the reasoning model.
+        _summarize_model = ""
+        _reasoning_model = ""
+        if hasattr(llm, "models"):
+            _summarize_model = llm.models.effective_summarize_model
+            _reasoning_model = llm.models.reasoning_model
         defaults = create_default_strategies(
             settings,
             llm=llm,
-            summarize_model=cfg.summarize_model or cfg.reasoning_model,
+            summarize_model=_summarize_model or _reasoning_model,
             summarize_timeout=cfg.summarize_timeout,
         )
         self._strategies = StrategyContext(
@@ -361,45 +339,31 @@ class ResearchAgent:
         return self._providers, self._strategies, self._settings
 
     @staticmethod
-    def _merge_explicit_overrides(
-        base: Any,
-        cfg: AgentConfig,
-        field_names: tuple[str, ...],
-    ) -> dict[str, Any]:
-        """Merge explicit ``AgentConfig`` overrides onto a settings model."""
-        data = base.model_dump()
-        explicit_fields = cfg.model_fields_set
-        for field_name in field_names:
-            if field_name in explicit_fields:
-                data[field_name] = getattr(cfg, field_name)
-        return data
-
-    @staticmethod
     def _build_settings(cfg: AgentConfig) -> Any:
         """Build an AgentSettings instance from the flat AgentConfig."""
         from inqtrix.settings import AgentSettings
 
-        return AgentSettings(
-            **ResearchAgent._merge_explicit_overrides(
-                AgentSettings(),
-                cfg,
-                (
-                    "max_rounds",
-                    "confidence_stop",
-                    "max_context",
-                    "first_round_queries",
-                    "answer_prompt_citations_max",
-                    "max_total_seconds",
-                    "max_question_length",
-                    "reasoning_timeout",
-                    "search_timeout",
-                    "summarize_timeout",
-                    "high_risk_score_threshold",
-                    "high_risk_classify_escalate",
-                    "high_risk_evaluate_escalate",
-                    "search_cache_maxsize",
-                    "search_cache_ttl",
-                    "testing_mode",
-                ),
-            )
-        )
+        env_defaults = AgentSettings()
+        data = env_defaults.model_dump()
+        explicit_fields = cfg.model_fields_set
+        for field_name in (
+            "max_rounds",
+            "confidence_stop",
+            "max_context",
+            "first_round_queries",
+            "answer_prompt_citations_max",
+            "max_total_seconds",
+            "max_question_length",
+            "reasoning_timeout",
+            "search_timeout",
+            "summarize_timeout",
+            "high_risk_score_threshold",
+            "high_risk_classify_escalate",
+            "high_risk_evaluate_escalate",
+            "search_cache_maxsize",
+            "search_cache_ttl",
+            "testing_mode",
+        ):
+            if field_name in explicit_fields:
+                data[field_name] = getattr(cfg, field_name)
+        return AgentSettings(**data)

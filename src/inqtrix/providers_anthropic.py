@@ -18,7 +18,46 @@ log = logging.getLogger("inqtrix")
 
 
 class AnthropicLLM(LLMProvider):
-    """Call the Anthropic Messages API directly without LiteLLM."""
+    """Call the Anthropic Messages API directly without LiteLLM.
+
+    Parameters
+    ----------
+    api_key:
+        Anthropic API key.
+    base_url:
+        Messages endpoint URL.
+    anthropic_version:
+        Value of the ``anthropic-version`` header.
+    default_model:
+        Model for reasoning calls (classify, plan, evaluate, answer).
+    summarize_model:
+        Cheaper model for search-result summarisation.
+    default_max_tokens:
+        Output-token budget for reasoning calls.  When *thinking* is
+        set with a ``budget_tokens`` value that exceeds this limit,
+        ``max_tokens`` is automatically raised to
+        ``budget_tokens + 1024``.
+    summarize_max_tokens:
+        Output-token budget for summarisation calls.
+    user_agent:
+        ``User-Agent`` header value.
+    temperature:
+        Sampling temperature (0.0–1.0).  **Mutually exclusive with
+        *thinking*** — the Anthropic API rejects requests that set
+        both.
+    thinking:
+        Extended-thinking configuration dict forwarded verbatim to
+        the API.  Recommended for Claude 4.6 models::
+
+            thinking={"type": "adaptive"}
+
+        Legacy / Claude 3.7 (manual budget)::
+
+            thinking={"type": "enabled", "budget_tokens": 10000}
+
+        Thinking is applied to reasoning calls only, not to
+        ``summarize_parallel``.
+    """
 
     def __init__(
         self,
@@ -26,12 +65,19 @@ class AnthropicLLM(LLMProvider):
         *,
         base_url: str = "https://api.anthropic.com/v1/messages",
         anthropic_version: str = "2023-06-01",
-        default_model: str = "claude-3-7-sonnet-latest",
-        summarize_model: str = "claude-3-5-haiku-latest",
+        default_model: str = "claude-sonnet-4-6",
+        summarize_model: str = "claude-haiku-4-5",
         default_max_tokens: int = 1024,
         summarize_max_tokens: int = 512,
         user_agent: str = "inqtrix/0.1",
+        temperature: float | None = None,
+        thinking: dict[str, Any] | None = None,
     ) -> None:
+        if temperature is not None and thinking is not None:
+            raise ValueError(
+                "temperature and thinking are mutually exclusive — "
+                "the Anthropic API rejects requests that set both."
+            )
         self._api_key = api_key
         self._base_url = base_url
         self._anthropic_version = anthropic_version
@@ -40,6 +86,8 @@ class AnthropicLLM(LLMProvider):
         self._default_max_tokens = default_max_tokens
         self._summarize_max_tokens = summarize_max_tokens
         self._user_agent = user_agent
+        self._temperature = temperature
+        self._thinking = thinking
 
     def _request_json(
         self,
@@ -119,13 +167,27 @@ class AnthropicLLM(LLMProvider):
             _check_deadline(deadline)
 
         use_model = model or self._default_model
+        max_tokens = self._default_max_tokens
+        if self._thinking is not None:
+            budget = self._thinking.get("budget_tokens")
+            if isinstance(budget, int) and budget >= max_tokens:
+                max_tokens = budget + 1024
+                log.debug(
+                    "max_tokens auto-raised to %d (budget_tokens=%d)",
+                    max_tokens,
+                    budget,
+                )
         payload: dict[str, Any] = {
             "model": use_model,
-            "max_tokens": self._default_max_tokens,
+            "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": prompt}],
         }
         if system:
             payload["system"] = system
+        if self._temperature is not None:
+            payload["temperature"] = self._temperature
+        if self._thinking is not None:
+            payload["thinking"] = self._thinking
 
         try:
             raw = self._request_json(
@@ -169,6 +231,8 @@ class AnthropicLLM(LLMProvider):
             "max_tokens": self._summarize_max_tokens,
             "messages": [{"role": "user", "content": f"{SUMMARIZE_PROMPT}{text[:6000]}"}],
         }
+        if self._temperature is not None:
+            payload["temperature"] = self._temperature
 
         try:
             raw = self._request_json(

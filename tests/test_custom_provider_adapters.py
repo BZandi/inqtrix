@@ -94,3 +94,84 @@ def test_anthropic_llm_summarize_uses_summarize_model(monkeypatch):
     summary = llm.summarize_parallel("Langer Text")
 
     assert summary == ("Kurzfassung", 3, 2)
+
+
+def test_anthropic_temperature_in_payload(monkeypatch):
+    llm = AnthropicLLM(api_key="key", temperature=0.3)
+    captured: dict[str, object] = {}
+
+    def fake_request_json(*, payload, timeout):
+        captured["payload"] = payload
+        return {
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    monkeypatch.setattr(llm, "_request_json", fake_request_json)
+    llm.complete("test")
+    assert captured["payload"]["temperature"] == 0.3
+    assert "thinking" not in captured["payload"]
+
+
+def test_anthropic_thinking_in_payload(monkeypatch):
+    thinking_cfg = {"type": "adaptive"}
+    llm = AnthropicLLM(api_key="key", thinking=thinking_cfg)
+    captured: dict[str, object] = {}
+
+    def fake_request_json(*, payload, timeout):
+        captured["payload"] = payload
+        return {
+            "content": [{"type": "thinking", "thinking": "hmm"}, {"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    monkeypatch.setattr(llm, "_request_json", fake_request_json)
+    resp = llm.complete_with_metadata("test")
+    assert captured["payload"]["thinking"] == {"type": "adaptive"}
+    assert "temperature" not in captured["payload"]
+    # _extract_text must skip thinking blocks
+    assert resp.content == "ok"
+
+
+def test_anthropic_temperature_and_thinking_raises():
+    import pytest
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        AnthropicLLM(api_key="key", temperature=0.5, thinking={"type": "adaptive"})
+
+
+def test_anthropic_thinking_not_in_summarize(monkeypatch):
+    llm = AnthropicLLM(api_key="key", thinking={"type": "adaptive"})
+    captured: dict[str, object] = {}
+
+    def fake_request_json(*, payload, timeout):
+        captured["payload"] = payload
+        return {
+            "content": [{"type": "text", "text": "kurz"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    monkeypatch.setattr(llm, "_request_json", fake_request_json)
+    llm.summarize_parallel("Langer Text")
+    assert "thinking" not in captured["payload"]
+
+
+def test_anthropic_thinking_adjusts_max_tokens(monkeypatch):
+    llm = AnthropicLLM(
+        api_key="key",
+        default_max_tokens=1024,
+        thinking={"type": "enabled", "budget_tokens": 8000},
+    )
+    captured: dict[str, object] = {}
+
+    def fake_request_json(*, payload, timeout):
+        captured["payload"] = payload
+        return {
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    monkeypatch.setattr(llm, "_request_json", fake_request_json)
+    llm.complete("test")
+    # budget_tokens (8000) >= default_max_tokens (1024) → auto-raised
+    assert captured["payload"]["max_tokens"] == 8000 + 1024

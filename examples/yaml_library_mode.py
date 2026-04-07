@@ -36,11 +36,6 @@ def main() -> None:
     agent = ResearchAgent(AgentConfig(
         llm=providers.llm,
         search=providers.search,
-        reasoning_model=settings.models.reasoning_model,
-        search_model=settings.models.search_model,
-        classify_model=settings.models.classify_model,
-        summarize_model=settings.models.summarize_model,
-        evaluate_model=settings.models.evaluate_model,
         **settings.agent.model_dump(),
     ))
 

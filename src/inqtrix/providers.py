@@ -1,8 +1,8 @@
 """LLM and search provider abstractions.
 
 Defines abstract base classes (LLMProvider, SearchProvider), concrete
-implementations backed by LiteLLM (LiteLLMProvider, PerplexitySearch),
-response dataclasses, and a factory function to wire everything together.
+implementations (LiteLLM, PerplexitySearch), response dataclasses,
+and a factory function to wire everything together.
 """
 
 from __future__ import annotations
@@ -472,22 +472,60 @@ class ConfiguredLLMProvider(LLMProvider):
 
 
 # =========================================================
-# LiteLLMProvider
+# LiteLLM — user-facing LLM provider for OpenAI-compatible endpoints
 # =========================================================
 
 
-class LiteLLMProvider(LLMProvider):
-    """LLM completions via a LiteLLM-compatible OpenAI client."""
+class LiteLLM(LLMProvider):
+    """LLM completions via any LiteLLM- or OpenAI-compatible endpoint.
+
+    This is the default LLM provider.  Instantiate it directly in your
+    script, analogous to ``AnthropicLLM`` or any other provider::
+
+        from inqtrix import LiteLLM
+
+        llm = LiteLLM(
+            api_key=os.getenv("LITELLM_API_KEY"),
+            base_url="http://localhost:4000/v1",
+            default_model="gpt-4o",
+            summarize_model="gpt-4o-mini",
+        )
+
+    Parameters
+    ----------
+    api_key:
+        API key for the LiteLLM / OpenAI-compatible endpoint.
+    base_url:
+        Base URL of the endpoint (e.g. ``http://localhost:4000/v1``).
+    default_model:
+        Model used for reasoning, planning, and answer synthesis.
+    classify_model:
+        Model for question classification.  Falls back to *default_model*.
+    summarize_model:
+        Model for summarisation and claim extraction.  Falls back to
+        *default_model*.
+    evaluate_model:
+        Model for evidence evaluation.  Falls back to *default_model*.
+    """
 
     def __init__(
         self,
-        client: OpenAI,
-        models: ModelSettings,
-        agent_settings: AgentSettings,
+        api_key: str,
+        *,
+        base_url: str = "http://localhost:4000/v1",
+        default_model: str = "gpt-4o",
+        classify_model: str = "",
+        summarize_model: str = "",
+        evaluate_model: str = "",
     ) -> None:
-        self._client = client
-        self._models = models
-        self._agent_settings = agent_settings
+        self._client = OpenAI(base_url=base_url, api_key=api_key)
+        self._models = ModelSettings(
+            reasoning_model=default_model,
+            search_model="",
+            classify_model=classify_model,
+            summarize_model=summarize_model,
+            evaluate_model=evaluate_model,
+        )
 
     # -- public interface --------------------------------------------------
 
@@ -605,27 +643,139 @@ class LiteLLMProvider(LLMProvider):
         return self._client is not None
 
 
+# Backwards-compatible alias used by config_bridge and internal code.
+LiteLLMProvider = LiteLLM
+
+
 # =========================================================
-# PerplexitySearch
+# PerplexitySearch — user-facing search provider
 # =========================================================
 
 
 class PerplexitySearch(SearchProvider):
-    """Web search via Perplexity Sonar Pro through a LiteLLM proxy."""
+    """Web search via Perplexity Sonar — works with both LiteLLM proxy and the direct Perplexity API.
+
+    .. note::
+
+       This class targets the Perplexity **Sonar API** (chat completions
+       endpoint).  Other Perplexity products — such as Deep Research or
+       the internal Agent API — use different parameters and endpoints
+       and are **not** supported by this provider.
+
+    Via LiteLLM proxy::
+
+        search = PerplexitySearch(
+            api_key=os.getenv("LITELLM_API_KEY"),
+            base_url="http://localhost:4000/v1",
+            model="perplexity-sonar-pro-agent",
+        )
+
+    Direct Perplexity API::
+
+        search = PerplexitySearch(
+            api_key=os.getenv("PERPLEXITY_API_KEY"),
+            base_url="https://api.perplexity.ai",
+            model="sonar-pro",
+        )
+
+    Parameters
+    ----------
+    api_key:
+        API key for the endpoint.
+    base_url:
+        Base URL.  Use ``http://localhost:4000/v1`` for a LiteLLM proxy,
+        or ``https://api.perplexity.ai`` for the direct Perplexity Sonar API
+        (no ``/v1`` suffix — the OpenAI SDK appends ``/chat/completions``).
+    model:
+        Search model identifier.  LiteLLM example:
+        ``perplexity-sonar-pro-agent``.  Direct Perplexity: ``sonar-pro``.
+    cache_maxsize:
+        Maximum number of cached search results.
+    cache_ttl:
+        Cache time-to-live in seconds.
+    request_params:
+        Extra request parameters forwarded to the chat completions call.
+    direct_mode:
+        Controls how search parameters are formatted in ``extra_body``.
+        ``True``: flat top-level keys (direct Perplexity API).
+        ``False``: nested inside ``web_search_options`` (LiteLLM proxy).
+        ``None`` (default): auto-detect from *base_url* — URLs containing
+        ``perplexity.ai`` use direct mode.
+    """
 
     def __init__(
         self,
-        client: OpenAI,
-        model: str,
-        cache_maxsize: int,
-        cache_ttl: int,
+        api_key: str,
+        *,
+        base_url: str = "http://localhost:4000/v1",
+        model: str = "perplexity-sonar-pro-agent",
+        cache_maxsize: int = 256,
+        cache_ttl: int = 3600,
         request_params: dict[str, Any] | None = None,
+        direct_mode: bool | None = None,
+        # Internal: accept a pre-built client (used by create_providers / config_bridge).
+        _client: OpenAI | None = None,
     ) -> None:
-        self._client = client
+        self._client = _client or OpenAI(base_url=base_url, api_key=api_key)
         self._model = model
         self._cache: TTLCache = TTLCache(maxsize=cache_maxsize, ttl=cache_ttl)
         self._cache_lock = threading.Lock()
         self._request_params = dict(request_params or {})
+        self._direct_mode = (
+            direct_mode if direct_mode is not None
+            else "perplexity.ai" in base_url
+        )
+
+    # -- internal helpers --------------------------------------------------
+
+    def _build_extra_body(
+        self,
+        *,
+        search_context_size: str,
+        search_mode: str | None,
+        recency_filter: str | None,
+        language_filter: list[str] | None,
+        domain_filter: list[str] | None,
+        return_related: bool,
+    ) -> dict[str, Any]:
+        """Build ``extra_body`` for the chat completions call.
+
+        Direct Perplexity API: flat top-level keys.
+        LiteLLM proxy: all options nested inside ``web_search_options``.
+        """
+        if self._direct_mode:
+            body: dict[str, Any] = {
+                "search_context_size": search_context_size,
+            }
+            if search_mode:
+                body["search_mode"] = search_mode
+            if recency_filter:
+                body["search_recency_filter"] = recency_filter
+            if language_filter:
+                body["search_language_filter"] = language_filter
+            if domain_filter:
+                body["search_domain_filter"] = domain_filter
+            if return_related:
+                body["return_related_questions"] = True
+            return body
+
+        # LiteLLM proxy path: nest inside web_search_options.
+        # IMPORTANT: web_search_options must be COMPLETE because LiteLLM
+        # REPLACES (not deep-merges) the config defaults.
+        web_opts: dict[str, Any] = {
+            "search_context_size": search_context_size,
+            "search_mode": search_mode or "web",
+            "num_search_results": 20,
+        }
+        if recency_filter:
+            web_opts["search_recency_filter"] = recency_filter
+        if language_filter:
+            web_opts["search_language_filter"] = language_filter
+        if domain_filter:
+            web_opts["search_domain_filter"] = domain_filter
+        if return_related:
+            web_opts["return_related_questions"] = True
+        return {"web_search_options": web_opts}
 
     # -- public interface --------------------------------------------------
 
@@ -668,27 +818,16 @@ class PerplexitySearch(SearchProvider):
             return copy.deepcopy(cached)
 
         # Build Perplexity-specific extra_body.
-        # IMPORTANT: web_search_options must be COMPLETE because LiteLLM
-        # REPLACES (not deep-merges) the config defaults.
-        # ALL Perplexity filters belong INSIDE web_search_options because
-        # LiteLLM uses the OpenAI SDK and top-level params like
-        # search_recency_filter are passed as kwargs to create() -- which
-        # the SDK rejects.
-        web_opts: dict[str, Any] = {
-            "search_context_size": search_context_size,
-            "search_mode": search_mode or "web",
-            "num_search_results": 20,
-        }
-        if recency_filter:
-            web_opts["search_recency_filter"] = recency_filter
-        if language_filter:
-            web_opts["search_language_filter"] = language_filter
-        if domain_filter:
-            web_opts["search_domain_filter"] = domain_filter
-        if return_related:
-            web_opts["return_related_questions"] = True
-
-        extra: dict[str, Any] = {"web_search_options": web_opts}
+        # Format depends on whether we talk to the direct Perplexity API
+        # or go through a LiteLLM proxy.
+        extra = self._build_extra_body(
+            search_context_size=search_context_size,
+            search_mode=search_mode,
+            recency_filter=recency_filter,
+            language_filter=language_filter,
+            domain_filter=domain_filter,
+            return_related=return_related,
+        )
 
         _empty: dict[str, Any] = {
             "answer": "",
@@ -793,27 +932,35 @@ class ProviderContext:
 
 
 def create_providers(settings: Settings) -> ProviderContext:
-    """Create an OpenAI client and both providers from *settings*.
+    """Create both providers from *settings* (env-var / auto-create path).
 
-    This is the single entry point for wiring up provider instances.
-    The OpenAI client is configured once and shared between providers.
+    This is the single entry point for wiring up provider instances
+    when no explicit providers are given.  The OpenAI client is shared
+    between LLM and search providers for connection pooling.
     """
     client = OpenAI(
         base_url=settings.server.litellm_base_url,
         api_key=settings.server.litellm_api_key,
     )
 
-    llm = LiteLLMProvider(
-        client=client,
-        models=settings.models,
-        agent_settings=settings.agent,
+    llm = LiteLLM(
+        api_key=settings.server.litellm_api_key,
+        base_url=settings.server.litellm_base_url,
+        default_model=settings.models.reasoning_model,
+        classify_model=settings.models.classify_model,
+        summarize_model=settings.models.summarize_model,
+        evaluate_model=settings.models.evaluate_model,
     )
+    # Share the same client instance for connection pooling.
+    llm._client = client
 
     search = PerplexitySearch(
-        client=client,
+        api_key=settings.server.litellm_api_key,
+        base_url=settings.server.litellm_base_url,
         model=settings.models.search_model,
         cache_maxsize=settings.agent.search_cache_maxsize,
         cache_ttl=settings.agent.search_cache_ttl,
+        _client=client,
     )
 
     return ProviderContext(llm=llm, search=search)

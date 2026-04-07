@@ -45,10 +45,6 @@ def main() -> None:
             default_model="claude-3-7-sonnet-latest",
             summarize_model="claude-3-5-haiku-latest",
         ),
-        reasoning_model="claude-3-7-sonnet-latest",
-        classify_model="claude-3-5-haiku-latest",
-        summarize_model="claude-3-5-haiku-latest",
-        evaluate_model="claude-3-5-haiku-latest",
     ))
     result = agent.research(QUESTION)
 

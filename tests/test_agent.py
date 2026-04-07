@@ -269,6 +269,7 @@ class TestResearchAgentConstruction:
 
     def test_ensure_initialised_respects_explicit_config_over_env(self, monkeypatch):
         import inqtrix.providers as providers_module
+        from inqtrix.providers import LiteLLM, PerplexitySearch
 
         monkeypatch.setenv("MAX_ROUNDS", "99")
         monkeypatch.setenv("REASONING_MODEL", "env-model")
@@ -283,12 +284,22 @@ class TestResearchAgentConstruction:
 
         monkeypatch.setattr(providers_module, "OpenAI", DummyOpenAI)
 
+        llm = LiteLLM(
+            api_key="custom-key",
+            base_url="http://custom/v1",
+            default_model="custom-model",
+        )
+        search = PerplexitySearch(
+            api_key="custom-key",
+            base_url="http://custom/v1",
+            model="sonar-pro",
+            _client=llm._client,
+        )
         cfg = AgentConfig(
+            llm=llm,
+            search=search,
             max_rounds=2,
             answer_prompt_citations_max=11,
-            reasoning_model="custom-model",
-            litellm_base_url="http://custom/v1",
-            litellm_api_key="custom-key",
         )
         agent = ResearchAgent(cfg)
 
@@ -359,19 +370,17 @@ class TestResearchAgentConstruction:
         cfg = AgentConfig(
             llm=DummyLLM(),
             search=DummySearch(),
-            reasoning_model="anthropic-sonnet",
-            classify_model="anthropic-haiku",
-            summarize_model="anthropic-haiku",
-            evaluate_model="anthropic-haiku",
         )
         agent = ResearchAgent(cfg)
 
         providers, _, _ = agent._ensure_initialised()
 
         assert providers.llm.complete("test") == "ok"
-        assert providers.llm.models.reasoning_model == "anthropic-sonnet"
-        assert providers.llm.models.effective_classify_model == "anthropic-haiku"
-        assert providers.llm.complete_with_metadata("test").model == "anthropic-sonnet"
+        # Custom LLM without .models gets default ModelSettings
+        assert hasattr(providers.llm, "models")
+        from inqtrix.settings import ModelSettings
+        defaults = ModelSettings()
+        assert providers.llm.models.reasoning_model == defaults.reasoning_model
 
     def test_stream_yields_answer_in_word_chunks(self, monkeypatch):
         import inqtrix.graph as graph_module

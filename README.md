@@ -153,9 +153,9 @@ If you prefer not to use `.env`, export the same variables in your shell before 
 
 If `CLASSIFY_MODEL`, `SUMMARIZE_MODEL`, or `EVALUATE_MODEL` are omitted, they fall back to `REASONING_MODEL`.
 
-#### Option B: explicit `AgentConfig`
+#### Option B: explicit providers (Baukasten pattern)
 
-Use this path when you want to define the models directly in Python instead of `.env`. No `.env` file is required here.
+Use this path when you want to define providers and models directly in Python instead of `.env`. No `.env` file is required here.
 
 In practice, the usual best practice is still: keep secrets in `.env` or real process environment variables and keep only the model/behavior choices in Python.
 
@@ -166,7 +166,7 @@ import os
 
 from dotenv import load_dotenv
 
-from inqtrix import ResearchAgent, AgentConfig
+from inqtrix import ResearchAgent, AgentConfig, LiteLLM, PerplexitySearch
 
 
 load_dotenv()
@@ -178,14 +178,24 @@ def _require_env(name: str) -> str:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value
 
-agent = ResearchAgent(AgentConfig(
-    reasoning_model="gpt-4o",
-    search_model="perplexity-sonar-pro-agent",
+llm = LiteLLM(
+    api_key=_require_env("LITELLM_API_KEY"),
+    base_url=os.environ.get("LITELLM_BASE_URL", "http://localhost:4000/v1"),
+    default_model="gpt-4o",
     classify_model="gpt-4o-mini",
     summarize_model="gpt-4o-mini",
     evaluate_model="gpt-4o-mini",
-    litellm_base_url=os.environ.get("LITELLM_BASE_URL", "http://localhost:4000/v1"),
-    litellm_api_key=_require_env("LITELLM_API_KEY"),
+)
+
+search = PerplexitySearch(
+    api_key=_require_env("LITELLM_API_KEY"),
+    base_url=os.environ.get("LITELLM_BASE_URL", "http://localhost:4000/v1"),
+    model="perplexity-sonar-pro-agent",
+)
+
+agent = ResearchAgent(AgentConfig(
+    llm=llm,
+    search=search,
     max_rounds=4,
     confidence_stop=8,
     max_total_seconds=300,
@@ -197,7 +207,7 @@ print(result.answer)
 print(f"Confidence: {result.metrics.confidence}/10")
 ```
 
-This explicit `AgentConfig` path still assumes one LiteLLM- or OpenAI-compatible endpoint that can serve both the reasoning calls and the configured search model.
+All model names live on the provider constructors (`LiteLLM`, `PerplexitySearch`, `AnthropicLLM`), not on `AgentConfig`. This matches the Baukasten principle: each provider is a fully self-contained building block.
 
 Rule of thumb:
 
@@ -220,11 +230,6 @@ providers = create_providers_from_config(config, settings)
 agent = ResearchAgent(AgentConfig(
     llm=providers.llm,
     search=providers.search,
-    reasoning_model=settings.models.reasoning_model,
-    search_model=settings.models.search_model,
-    classify_model=settings.models.classify_model,
-    summarize_model=settings.models.summarize_model,
-    evaluate_model=settings.models.evaluate_model,
     **settings.agent.model_dump(),
 ))
 ```
@@ -465,7 +470,7 @@ There are two different integration layers in Inqtrix:
 
 ### LLM Response Format
 
-If you use the built-in `LiteLLMProvider` or the YAML-based `MultiClientLLMProvider`, Inqtrix reads the response text from one of these OpenAI-compatible shapes:
+If you use the built-in `LiteLLM` provider or the YAML-based `MultiClientLLMProvider`, Inqtrix reads the response text from one of these OpenAI-compatible shapes:
 
 - normal chat completion: `choices[0].message.content`
 - SSE chunk stream encoded as text: `choices[*].delta.content`
@@ -844,14 +849,10 @@ agent = ResearchAgent(AgentConfig(
         default_model="claude-3-7-sonnet-latest",
         summarize_model="claude-3-5-haiku-latest",
     ),
-    reasoning_model="claude-3-7-sonnet-latest",
-    classify_model="claude-3-5-haiku-latest",
-    summarize_model="claude-3-5-haiku-latest",
-    evaluate_model="claude-3-5-haiku-latest",
 ))
 ```
 
-For full end-to-end runs, Inqtrix needs model-routing metadata for `reasoning`, `classify`, `summarize`, and `evaluate`. If your custom LLM provider does not expose a `.models` property itself, `ResearchAgent` now derives that metadata from `AgentConfig` or environment variables and attaches it automatically.
+For full end-to-end runs, Inqtrix needs model-routing metadata for `reasoning`, `classify`, `summarize`, and `evaluate`. If your custom LLM provider does not expose a `.models` property itself, `ResearchAgent` wraps it automatically with default `ModelSettings` from the environment.
 
 That means the Baukasten idea does work with the current algorithm. The only strict requirement is that your provider translates the upstream API into the small internal interface that the nodes and strategies expect.
 
@@ -897,10 +898,6 @@ agent = ResearchAgent(AgentConfig(
     search=BraveSearch(
         api_key=_require_env("BRAVE_API_KEY"),
     ),
-    reasoning_model="claude-3-7-sonnet-latest",
-    classify_model="claude-3-5-haiku-latest",
-    summarize_model="claude-3-5-haiku-latest",
-    evaluate_model="claude-3-5-haiku-latest",
     max_rounds=4,
     confidence_stop=8,
 ))
@@ -1097,17 +1094,19 @@ Do not commit `.env` files, do not put plain-text secrets into YAML, and do not 
 
 ### AgentConfig Fields
 
-`AgentConfig` mirrors the library-relevant agent, model, timeout, cache and
-provider-connection settings above. Server-only deployment settings such as
+`AgentConfig` mirrors the library-relevant agent, timeout, cache and
+provider settings above. Model names live on provider constructors, not on
+`AgentConfig`. Server-only deployment settings such as
 `MAX_CONCURRENT` and `SESSION_*` stay on the HTTP server side.
 
 ```python
+from inqtrix import AgentConfig, LiteLLM
+
 AgentConfig(
-    reasoning_model="gpt-4o",
+    llm=LiteLLM(api_key="...", default_model="gpt-4o"),
     max_rounds=3,
     confidence_stop=7,
     answer_prompt_citations_max=40,
-    litellm_base_url="http://localhost:4000/v1",
 )
 ```
 

@@ -56,6 +56,23 @@ from rich.panel import Panel
 
 load_dotenv()
 
+# ── Logging ──────────────────────────────────────────────────────────
+# File-based logging with automatic secret redaction.  Disabled by
+# default — enable via environment variables to keep terminal clean:
+#
+#   INQTRIX_LOG_ENABLED=true   — write logs to logs/inqtrix_*.log
+#   INQTRIX_LOG_LEVEL=DEBUG    — DEBUG / INFO / WARNING (default: INFO)
+#   INQTRIX_LOG_CONSOLE=true   — also print WARNING+ to stderr
+from inqtrix.logging_config import configure_logging
+
+_log_path = configure_logging(
+    enabled=os.getenv("INQTRIX_LOG_ENABLED", "").lower() == "true",
+    level=os.getenv("INQTRIX_LOG_LEVEL", "INFO"),
+    console=os.getenv("INQTRIX_LOG_CONSOLE", "").lower() == "true",
+)
+if _log_path:
+    print(f"Logging to {_log_path}")
+
 QUESTION = "Was ist der aktuelle Stand der GKV-Reform?"
 
 

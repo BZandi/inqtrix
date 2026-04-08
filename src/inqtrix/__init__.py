@@ -41,6 +41,9 @@ from inqtrix.providers import (
 )
 from inqtrix.providers_anthropic import AnthropicLLM
 from inqtrix.providers_brave import BraveSearch
+from inqtrix.providers_bedrock import BedrockLLM
+from inqtrix.exceptions import BedrockAPIError
+from inqtrix.logging_config import configure_logging
 
 # -- Public API (strategies) --
 from inqtrix.strategies import (
@@ -72,6 +75,10 @@ __all__ = [
     "PerplexitySearch",
     "AnthropicLLM",
     "BraveSearch",
+    "BedrockLLM",
+    "BedrockAPIError",
+    # Logging
+    "configure_logging",
     # Strategies
     "SourceTieringStrategy",
     "ClaimExtractionStrategy",

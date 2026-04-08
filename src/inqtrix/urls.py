@@ -101,4 +101,7 @@ def sanitize_error(error: str | Exception) -> str:
     msg = re.sub(r"https?://[^\s]+", "[URL]", msg)
     msg = re.sub(r"(sk-|pplx-)[a-zA-Z0-9_\-]+", "[KEY]", msg)
     msg = re.sub(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*", "Bearer [REDACTED]", msg)
+    msg = re.sub(r"AKIA[A-Z0-9]{16}", "[AWS_KEY]", msg)
+    msg = re.sub(
+        r"(?i)(aws_secret_access_key|aws_session_token)[=:]\s*\S+", r"\1=[REDACTED]", msg)
     return msg

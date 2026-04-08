@@ -20,7 +20,7 @@ from typing import Any
 from openai import OpenAIError
 
 from inqtrix.domains import LANG_NAMES, LOW_QUALITY_DOMAINS
-from inqtrix.exceptions import AgentRateLimited, AgentTimeout, AnthropicAPIError
+from inqtrix.exceptions import AgentRateLimited, AgentTimeout, AnthropicAPIError, BedrockAPIError
 from inqtrix.json_helpers import parse_json_object, parse_json_string_list
 from inqtrix.prompts import (
     EVALUATE_FORMAT_SUFFIX,
@@ -253,7 +253,7 @@ def classify(
                 emit_progress(s, f"Frage in {len(s['sub_questions'])} Teilfragen zerlegt")
     except AgentRateLimited:
         raise
-    except (OpenAIError, AgentTimeout, AnthropicAPIError):
+    except (OpenAIError, AgentTimeout, AnthropicAPIError, BedrockAPIError):
         # Fail-safe: on classification error do NOT fall back to direct answer.
         # Conservatively continue researching with robust defaults.
         s["done"] = False
@@ -472,7 +472,7 @@ def plan(
         )
     except AgentRateLimited:
         raise
-    except (OpenAIError, AgentTimeout, AnthropicAPIError):
+    except (OpenAIError, AgentTimeout, AnthropicAPIError, BedrockAPIError):
         q = ""
 
     _max_items = settings.first_round_queries if s["round"] == 0 else 3
@@ -1105,7 +1105,7 @@ def evaluate(
 
     except AgentRateLimited:
         raise
-    except (OpenAIError, AgentTimeout, AnthropicAPIError):
+    except (OpenAIError, AgentTimeout, AnthropicAPIError, BedrockAPIError):
         # No fail-open: on evaluate error stay conservative.
         conf = min(max(s.get("final_confidence", 0), 5), settings.confidence_stop - 2)
         if not s.get("gaps"):
@@ -1282,7 +1282,7 @@ def answer(
             )
         else:
             s["answer"] = "Die Anfrage konnte aufgrund eines Zeitlimits nicht bearbeitet werden. Bitte erneut versuchen."
-    except (OpenAIError, AnthropicAPIError) as e:
+    except (OpenAIError, AnthropicAPIError, BedrockAPIError) as e:
         log.error("Finale Antwort fehlgeschlagen: %s", e)
         fallback_model = (
             providers.llm.models.effective_evaluate_model
@@ -1303,7 +1303,7 @@ def answer(
                     model=fallback_model,
                     state=s,
                 )
-            except (OpenAIError, AgentTimeout, AnthropicAPIError) as e2:
+            except (OpenAIError, AgentTimeout, AnthropicAPIError, BedrockAPIError) as e2:
                 log.error("Finale Antwort-Fallback fehlgeschlagen (%s): %s", fallback_model, e2)
                 if ctx:
                     s["answer"] = (

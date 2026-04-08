@@ -63,13 +63,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Env-var mode
             settings = Settings()
 
-    # Configure logging based on testing mode
-    log_level = logging.DEBUG if settings.agent.testing_mode else logging.WARNING
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    # Configure logging — file-based with secret redaction.
+    # Server mode always enables console output (WARNING+) so critical
+    # issues reach stderr even without file logging.
+    from inqtrix.logging_config import configure_logging
+    configure_logging(
+        enabled=settings.agent.testing_mode,
+        level="DEBUG" if settings.agent.testing_mode else "WARNING",
+        console=True,
     )
-    logging.getLogger("inqtrix").setLevel(log_level)
 
     # Wire up providers
     providers: ProviderContext

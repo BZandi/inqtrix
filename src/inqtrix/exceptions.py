@@ -53,3 +53,38 @@ class AnthropicAPIError(RuntimeError):
 
         final_message = message.strip() if message else str(original or "Unbekannter Anthropic-Fehler")
         super().__init__(f"{header}: {final_message}")
+
+
+class BedrockAPIError(RuntimeError):
+    """Raised when a direct Amazon Bedrock API call fails after retries."""
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        error_code: str = "",
+        status_code: int | None = None,
+        message: str = "",
+        request_id: str | None = None,
+        original: Exception | None = None,
+    ) -> None:
+        self.model = model
+        self.error_code = error_code
+        self.status_code = status_code
+        self.request_id = request_id
+        self.original = original
+
+        detail_parts: list[str] = []
+        if status_code is not None:
+            detail_parts.append(f"HTTP {status_code}")
+        if error_code:
+            detail_parts.append(error_code)
+        if request_id:
+            detail_parts.append(f"request-id={request_id}")
+
+        header = f"Bedrock-Aufruf fehlgeschlagen ({model})"
+        if detail_parts:
+            header = f"{header} [{' | '.join(detail_parts)}]"
+
+        final_message = message.strip() if message else str(original or "Unbekannter Bedrock-Fehler")
+        super().__init__(f"{header}: {final_message}")

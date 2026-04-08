@@ -8,6 +8,7 @@ import pytest
 
 from inqtrix.agent import AgentConfig, ResearchAgent
 from inqtrix.providers import LLMProvider, SearchProvider
+from inqtrix.providers_anthropic import AnthropicLLM
 from inqtrix.result import (
     Claim,
     ClaimMetrics,
@@ -239,7 +240,7 @@ class TestResearchAgentConstruction:
         )
 
         class DummyOpenAI:
-            def __init__(self, *, base_url, api_key):
+            def __init__(self, *, base_url, api_key, **_kw):
                 self.base_url = base_url
                 self.api_key = api_key
                 self.chat = SimpleNamespace(completions=SimpleNamespace(create=None))
@@ -277,7 +278,7 @@ class TestResearchAgentConstruction:
         monkeypatch.setenv("LITELLM_API_KEY", "env-key")
 
         class DummyOpenAI:
-            def __init__(self, *, base_url, api_key):
+            def __init__(self, *, base_url, api_key, **_kw):
                 self.base_url = base_url
                 self.api_key = api_key
                 self.chat = SimpleNamespace(completions=SimpleNamespace(create=None))
@@ -381,6 +382,36 @@ class TestResearchAgentConstruction:
         from inqtrix.settings import ModelSettings
         defaults = ModelSettings()
         assert providers.llm.models.reasoning_model == defaults.reasoning_model
+
+    def test_anthropic_llm_keeps_own_model_metadata(self):
+        class DummySearch(SearchProvider):
+            def search(self, *a, **kw):
+                return {
+                    "answer": "",
+                    "citations": [],
+                    "related_questions": [],
+                    "_prompt_tokens": 0,
+                    "_completion_tokens": 0,
+                }
+
+            def is_available(self):
+                return True
+
+        llm = AnthropicLLM(
+            api_key="anthropic-key",
+            default_model="claude-opus-4-6",
+            classify_model="claude-sonnet-4-6",
+            summarize_model="claude-sonnet-4-6",
+            evaluate_model="claude-haiku-4-5",
+        )
+        agent = ResearchAgent(AgentConfig(llm=llm, search=DummySearch()))
+
+        providers, _, _ = agent._ensure_initialised()
+
+        assert providers.llm.models.reasoning_model == "claude-opus-4-6"
+        assert providers.llm.models.effective_classify_model == "claude-sonnet-4-6"
+        assert providers.llm.models.effective_summarize_model == "claude-sonnet-4-6"
+        assert providers.llm.models.effective_evaluate_model == "claude-haiku-4-5"
 
     def test_stream_yields_answer_in_word_chunks(self, monkeypatch):
         import inqtrix.graph as graph_module

@@ -30,6 +30,16 @@ from inqtrix.urls import extract_urls
 log = logging.getLogger("inqtrix")
 
 # =========================================================
+# Retry budget for OpenAI-SDK-based providers
+# =========================================================
+# The OpenAI Python SDK retries 408/409/429/500/502/503/504 with
+# exponential backoff + jitter.  Its default of 2 retries (3 total
+# attempts) is too low for Bedrock / proxy throttling ("Too many
+# connections").  4 retries = 5 total attempts, matching the direct
+# Anthropic provider's _MAX_ANTHROPIC_ATTEMPTS.
+_SDK_MAX_RETRIES = 4
+
+# =========================================================
 # Internal deadline helpers
 # =========================================================
 
@@ -52,6 +62,38 @@ def _bounded_timeout(
     _check_deadline(deadline)
     remaining = deadline - time.monotonic()
     return max(1.0, min(float(default_timeout), remaining))
+
+
+class _NonFatalNoticeMixin:
+    """Thread-local helper for surfacing provider fallback notices."""
+
+    _nonfatal_init_lock = threading.Lock()
+
+    def _notice_state(self) -> threading.local:
+        state = getattr(self, "_nonfatal_notice_state", None)
+        if state is None:
+            with self._nonfatal_init_lock:
+                state = getattr(self, "_nonfatal_notice_state", None)
+                if state is None:
+                    state = threading.local()
+                    self._nonfatal_notice_state = state
+        return state
+
+    def _set_nonfatal_notice(self, message: str) -> None:
+        if message:
+            self._notice_state().message = message
+
+    def _clear_nonfatal_notice(self) -> None:
+        state = self._notice_state()
+        if hasattr(state, "message"):
+            delattr(state, "message")
+
+    def consume_nonfatal_notice(self) -> str | None:
+        state = self._notice_state()
+        message = getattr(state, "message", None)
+        if hasattr(state, "message"):
+            delattr(state, "message")
+        return str(message) if message else None
 
 
 # =========================================================
@@ -470,13 +512,26 @@ class ConfiguredLLMProvider(LLMProvider):
     def is_available(self) -> bool:
         return self._provider.is_available()
 
+    def consume_nonfatal_notice(self) -> str | None:
+        consumer = getattr(self._provider, "consume_nonfatal_notice", None)
+        if callable(consumer):
+            return consumer()
+        return None
+
+    def without_thinking(self):
+        ctx = getattr(self._provider, "without_thinking", None)
+        if callable(ctx):
+            return ctx()
+        from contextlib import nullcontext
+        return nullcontext(self)
+
 
 # =========================================================
 # LiteLLM — user-facing LLM provider for OpenAI-compatible endpoints
 # =========================================================
 
 
-class LiteLLM(LLMProvider):
+class LiteLLM(_NonFatalNoticeMixin, LLMProvider):
     """LLM completions via any LiteLLM- or OpenAI-compatible endpoint.
 
     This is the default LLM provider.  Instantiate it directly in your
@@ -518,7 +573,9 @@ class LiteLLM(LLMProvider):
         summarize_model: str = "",
         evaluate_model: str = "",
     ) -> None:
-        self._client = OpenAI(base_url=base_url, api_key=api_key)
+        self._client = OpenAI(
+            base_url=base_url, api_key=api_key, max_retries=_SDK_MAX_RETRIES,
+        )
         self._models = ModelSettings(
             reasoning_model=default_model,
             search_model="",
@@ -615,6 +672,7 @@ class LiteLLM(LLMProvider):
         """
         if not text.strip():
             return ("", 0, 0)
+        self._clear_nonfatal_notice()
         if deadline is not None:
             _check_deadline(deadline)
 
@@ -637,6 +695,9 @@ class LiteLLM(LLMProvider):
         except AgentRateLimited:
             raise
         except (OpenAIError, AgentTimeout):
+            self._set_nonfatal_notice(
+                f"Zusammenfassung via {summarize_model} fehlgeschlagen; Fallback auf Rohtext."
+            )
             return (text[:800], 0, 0)
 
     def is_available(self) -> bool:
@@ -652,7 +713,7 @@ LiteLLMProvider = LiteLLM
 # =========================================================
 
 
-class PerplexitySearch(SearchProvider):
+class PerplexitySearch(_NonFatalNoticeMixin, SearchProvider):
     """Web search via Perplexity Sonar — works with both LiteLLM proxy and the direct Perplexity API.
 
     .. note::
@@ -716,7 +777,9 @@ class PerplexitySearch(SearchProvider):
         # Internal: accept a pre-built client (used by create_providers / config_bridge).
         _client: OpenAI | None = None,
     ) -> None:
-        self._client = _client or OpenAI(base_url=base_url, api_key=api_key)
+        self._client = _client or OpenAI(
+            base_url=base_url, api_key=api_key, max_retries=_SDK_MAX_RETRIES,
+        )
         self._model = model
         self._cache: TTLCache = TTLCache(maxsize=cache_maxsize, ttl=cache_ttl)
         self._cache_lock = threading.Lock()
@@ -801,6 +864,7 @@ class PerplexitySearch(SearchProvider):
         - search_mode: "academic" for scholarly sources
         - return_related: include related questions in response
         """
+        self._clear_nonfatal_notice()
         # Cache key includes all search parameters
         cache_parts = [
             query,
@@ -867,10 +931,16 @@ class PerplexitySearch(SearchProvider):
             log.error(
                 "Perplexity-Suche fehlgeschlagen fuer '%s': %s", query, e
             )
+            self._set_nonfatal_notice(
+                f"Perplexity-Suche fehlgeschlagen fuer Query '{query[:80]}'; leeres Ergebnis wird weiterverwendet."
+            )
             return _empty
         except OpenAIError as e:
             log.error(
                 "Perplexity-Suche fehlgeschlagen fuer '%s': %s", query, e
+            )
+            self._set_nonfatal_notice(
+                f"Perplexity-Suche fehlgeschlagen fuer Query '{query[:80]}'; leeres Ergebnis wird weiterverwendet."
             )
             return _empty
 
@@ -941,6 +1011,7 @@ def create_providers(settings: Settings) -> ProviderContext:
     client = OpenAI(
         base_url=settings.server.litellm_base_url,
         api_key=settings.server.litellm_api_key,
+        max_retries=_SDK_MAX_RETRIES,
     )
 
     llm = LiteLLM(

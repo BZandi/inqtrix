@@ -101,12 +101,21 @@ def main() -> None:
     # (https://api.anthropic.com/v1/messages) without a proxy.
     #
     # default_model: used for ALL reasoning roles — classify, plan,
-    #   evaluate, and final answer synthesis.  Unlike LiteLLM, there
-    #   are no separate classify_model / evaluate_model overrides.
+    #   evaluate, and final answer synthesis.  This is the right place
+    #   for the stronger model because these steps decide search
+    #   strategy, evidence quality, and the final answer.
+    #
+    # classify_model / evaluate_model: optional per-role overrides for
+    #   classification and evidence evaluation.  Leave them empty to
+    #   keep everything on default_model.  Set them explicitly only if
+    #   you want cheaper/faster models in those roles.
     #
     # summarize_model: the cheaper, faster model used exclusively for
     #   search-result summarization and claim extraction (called in
-    #   parallel threads via summarize_parallel).
+    #   parallel threads via summarize_parallel).  This is usually the
+    #   best place to save cost.  If claim extraction is too weak or
+    #   search snippets are especially noisy, move summarize_model up
+    #   to Sonnet; if cost matters more, move it down to Haiku.
     #
     # Optional tuning (defaults shown):
     #   default_max_tokens=1024    — output budget for reasoning calls
@@ -114,23 +123,40 @@ def main() -> None:
     #
     # Extended thinking (optional) — uncomment ONE of the following:
     #
-    #   Adaptive thinking (recommended for Claude 4.6 models):
+    #   Adaptive thinking (recommended for Claude 4.6 reasoning models):
     #   thinking={"type": "adaptive"},
     #
     #   Manual budget (Claude 3.7 / precise control):
     #   thinking={"type": "enabled", "budget_tokens": 10000},
     #
-    # When thinking is enabled, set default_max_tokens high enough
-    # (e.g. 16000).  If budget_tokens >= default_max_tokens the
-    # provider auto-raises max_tokens to budget_tokens + 1024.
+    # Thinking is forwarded on reasoning calls: default_model and
+    # optional classify_model / evaluate_model overrides. summarize-model
+    # helper work such as search summarization and claim extraction does
+    # not receive it.  There is no client-side capability routing: if
+    # one of those reasoning models does not support thinking, the
+    # Anthropic API will reject the request.
+    #
+    # Transient direct-Anthropic failures such as HTTP 529/500/504 are
+    # retried automatically with bounded backoff before the provider
+    # gives up.
+    #
+    # When thinking is enabled, max_tokens is auto-raised to at
+    # least 16384 so the model has room for both thinking and the
+    # visible answer.  You can override this with a higher
+    # default_max_tokens if needed.
     #
     # temperature (optional, 0.0–1.0) — sampling temperature.
     # NOTE: temperature and thinking are MUTUALLY EXCLUSIVE.
     #   temperature=0.3,
+    # Models:
+    #   claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5
     llm = AnthropicLLM(
         api_key=anthropic_key,
-        default_model="claude-sonnet-4-6",
+        default_model="claude-opus-4-6",
+        # classify_model="claude-sonnet-4-6",
         summarize_model="claude-haiku-4-5",
+        # evaluate_model="claude-sonnet-4-6",
+        thinking={"type": "adaptive"},
     )
 
     # ── Search Provider ─────────────────────────────────────────────
@@ -176,8 +202,10 @@ def main() -> None:
         max_context=12,
         first_round_queries=6,              # number of parallel search queries in first round
         answer_prompt_citations_max=60,     # max citation URLs forwarded to the answer-synthesis prompt
-        # hard wall-clock deadline for the entire run (seconds)
-        max_total_seconds=300,
+        # hard wall-clock deadline for the entire run (seconds).
+        # Opus with thinking needs more time than Sonnet — 600s is a
+        # safe default.  Reduce to 300 for Sonnet-only setups.
+        max_total_seconds=600,
         max_question_length=10_000,         # reject questions longer than this (characters)
 
         # -- Timeouts (per individual LLM/search call, in seconds) --
@@ -191,16 +219,14 @@ def main() -> None:
         # RiskScoringStrategy (regex-based on keywords like "Gesetz",
         # "Steuer", "Medizin", etc.).
         #
-        # With AnthropicLLM the escalation flags below are effectively
-        # no-ops: classify and evaluate already use default_model
-        # (there are no cheaper per-role models to escalate FROM).
-        # They exist for compatibility with LiteLLM, which supports
-        # classify_model / evaluate_model overrides.
-        #
-        # Summarization always uses summarize_model regardless of risk.
+        # With AnthropicLLM these flags matter only if you configured
+        # classify_model and/or evaluate_model above.  In that case,
+        # high-risk questions can escalate those roles back up to the
+        # stronger default_model.  Summarization always uses
+        # summarize_model regardless of risk.
         high_risk_score_threshold=4,        # risk score ≥ this triggers high_risk = True
-        high_risk_classify_escalate=True,   # no-op with AnthropicLLM
-        high_risk_evaluate_escalate=True,   # no-op with AnthropicLLM
+        high_risk_classify_escalate=True,   # if classify_model is set, high-risk uses default_model instead
+        high_risk_evaluate_escalate=True,   # if evaluate_model is set, high-risk uses default_model instead
 
         # -- Search cache --
         search_cache_maxsize=256,           # max cached search results (LRU eviction)

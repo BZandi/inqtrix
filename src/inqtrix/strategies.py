@@ -28,9 +28,9 @@ from inqtrix.domains import (
     SOURCE_TIER_WEIGHTS,
     STAKEHOLDER_SOURCE_DOMAINS,
 )
-from inqtrix.exceptions import AgentRateLimited, AgentTimeout
+from inqtrix.exceptions import AgentRateLimited, AgentTimeout, AnthropicAPIError
 from inqtrix.prompts import CLAIM_EXTRACTION_PROMPT, default_claims_prompt_view
-from inqtrix.providers import LLMProvider, _bounded_timeout, _check_deadline
+from inqtrix.providers import LLMProvider, _NonFatalNoticeMixin, _bounded_timeout, _check_deadline
 from inqtrix.json_helpers import parse_json_object
 from inqtrix.settings import AgentSettings
 from inqtrix.text import (
@@ -138,7 +138,7 @@ class ClaimExtractionStrategy(ABC):
         """Return ``(claims, prompt_tokens, completion_tokens)``."""
 
 
-class LLMClaimExtractor(ClaimExtractionStrategy):
+class LLMClaimExtractor(_NonFatalNoticeMixin, ClaimExtractionStrategy):
     """Reproduce ``_extract_claims_parallel`` using an LLM provider."""
 
     def __init__(
@@ -162,6 +162,7 @@ class LLMClaimExtractor(ClaimExtractionStrategy):
         *,
         deadline: float | None = None,
     ) -> tuple[list[dict[str, Any]], int, int]:
+        self._clear_nonfatal_notice()
         if not text.strip():
             return [], 0, 0
         if self._llm is None:
@@ -180,12 +181,22 @@ class LLMClaimExtractor(ClaimExtractionStrategy):
         )
 
         try:
-            response = self._llm.complete_with_metadata(
-                prompt,
-                model=self._summarize_model,
-                timeout=_bounded_timeout(self._summarize_timeout, deadline),
-                deadline=deadline,
-            )
+            without_thinking = getattr(self._llm, "without_thinking", None)
+            if callable(without_thinking):
+                with without_thinking():
+                    response = self._llm.complete_with_metadata(
+                        prompt,
+                        model=self._summarize_model,
+                        timeout=_bounded_timeout(self._summarize_timeout, deadline),
+                        deadline=deadline,
+                    )
+            else:
+                response = self._llm.complete_with_metadata(
+                    prompt,
+                    model=self._summarize_model,
+                    timeout=_bounded_timeout(self._summarize_timeout, deadline),
+                    deadline=deadline,
+                )
             raw = response.content or ""
             parsed = parse_json_object(raw, fallback={"claims": []})
             raw_claims = parsed.get("claims", [])
@@ -244,7 +255,10 @@ class LLMClaimExtractor(ClaimExtractionStrategy):
 
         except AgentRateLimited:
             raise
-        except (OpenAIError, AgentTimeout):
+        except (OpenAIError, AgentTimeout, AnthropicAPIError):
+            self._set_nonfatal_notice(
+                f"Claim-Extraktion via {self._summarize_model} fehlgeschlagen; Quelle wird ohne Claims weiterverwendet."
+            )
             return [], 0, 0
 
 

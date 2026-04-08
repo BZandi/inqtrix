@@ -11,12 +11,12 @@ from urllib.request import Request, urlopen
 
 from inqtrix.constants import SEARCH_TIMEOUT
 from inqtrix.exceptions import AgentRateLimited, AgentTimeout
-from inqtrix.providers import SearchProvider, _bounded_timeout, _check_deadline
+from inqtrix.providers import SearchProvider, _NonFatalNoticeMixin, _bounded_timeout, _check_deadline
 
 log = logging.getLogger("inqtrix")
 
 
-class BraveSearch(SearchProvider):
+class BraveSearch(_NonFatalNoticeMixin, SearchProvider):
     """Query Brave Search directly without going through LiteLLM."""
 
     def __init__(
@@ -117,6 +117,7 @@ class BraveSearch(SearchProvider):
             "_completion_tokens": 0,
         }
 
+        self._clear_nonfatal_notice()
         if not self._api_key:
             return _empty
         if deadline is not None:
@@ -153,9 +154,15 @@ class BraveSearch(SearchProvider):
             if exc.code == 429:
                 raise AgentRateLimited("brave-search", exc)
             log.error("Brave-Suche fehlgeschlagen fuer '%s': %s", query, exc)
+            self._set_nonfatal_notice(
+                f"Brave-Suche fehlgeschlagen fuer Query '{query[:80]}'; leeres Ergebnis wird weiterverwendet."
+            )
             return _empty
         except (URLError, OSError, ValueError, AgentTimeout) as exc:
             log.error("Brave-Suche fehlgeschlagen fuer '%s': %s", query, exc)
+            self._set_nonfatal_notice(
+                f"Brave-Suche fehlgeschlagen fuer Query '{query[:80]}'; leeres Ergebnis wird weiterverwendet."
+            )
             return _empty
 
         web_results = ((payload.get("web") or {}).get("results") or [])

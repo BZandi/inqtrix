@@ -1,23 +1,95 @@
-"""Direct Anthropic adapter for the LLMProvider interface."""
+"""Direct Anthropic adapter for the LLMProvider interface.
+
+This module calls the Anthropic Messages API via ``urllib`` — no SDK, no
+LiteLLM proxy.  The direct approach gives full control over headers,
+retry behaviour, and extended-thinking configuration, but it also means
+we must handle transient failures, error parsing, and token-budget
+adjustments ourselves.
+
+Key design decisions:
+
+* **Retry with jitter** — Anthropic returns HTTP 529 ("Overloaded")
+  when capacity is tight.  The research agent fires many parallel
+  requests (summarize + claim-extraction for every search result),
+  which can trigger 529 bursts.  A simple fixed-interval retry makes
+  things worse (thundering herd), so we use exponential backoff with
+  random jitter so parallel threads spread their retries over time.
+
+* **Thinking isolation** — Extended thinking (``thinking={"type":
+  "adaptive"}``) is valuable for complex reasoning calls (classify,
+  plan, evaluate, answer), but it wastes tokens on short helper
+  calls like summarise and claim extraction.  A thread-local
+  suppression mechanism (``without_thinking`` context manager) lets
+  callers disable thinking for specific code paths without mutating
+  shared config.
+
+* **Token-budget auto-raise** — Anthropic counts thinking tokens
+  *inside* ``max_tokens``.  With the default 1024 budget the model
+  would spend most tokens thinking and truncate the visible answer.
+  The provider auto-raises ``max_tokens`` to a safe minimum when
+  thinking is enabled.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
+import random
+import threading
+import time
+from contextlib import contextmanager
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from inqtrix.constants import REASONING_TIMEOUT, SUMMARIZE_TIMEOUT
-from inqtrix.exceptions import AgentRateLimited, AgentTimeout
+from inqtrix.exceptions import AgentRateLimited, AgentTimeout, AnthropicAPIError
 from inqtrix.prompts import SUMMARIZE_PROMPT
-from inqtrix.providers import LLMProvider, LLMResponse, _bounded_timeout, _check_deadline
+from inqtrix.providers import LLMProvider, LLMResponse, _NonFatalNoticeMixin, _bounded_timeout, _check_deadline
+from inqtrix.settings import ModelSettings
 from inqtrix.state import track_tokens
 
 log = logging.getLogger("inqtrix")
 
+# ---------------------------------------------------------------------------
+# Retry & backoff constants
+#
+# Anthropic returns 529 ("Overloaded") under sustained load — especially
+# when many parallel summarise/claim-extraction threads hit the API at
+# once.  The following constants control the retry loop in _request_json.
+#
+# _RETRYABLE_HTTP_STATUS: status codes that trigger a retry instead of
+#     an immediate hard failure.  529 is Anthropic-specific; 500/502/503/
+#     504 cover standard transient infrastructure errors.
+#
+# _MAX_ANTHROPIC_ATTEMPTS: total tries (initial + retries).  5 gives
+#     enough room for a sustained 529 burst (~15–20 s total with backoff)
+#     without wasting the global time budget.
+#
+# _BACKOFF_BASE/MAX_SECONDS: exponential backoff — delay doubles each
+#     attempt (1, 2, 4, 8, 8, …) but is capped at MAX.
+#
+# _JITTER_RANGE: uniform random multiplier on each delay.  This is the
+#     key mitigation for the thundering-herd problem: when 6 threads all
+#     hit a 529 simultaneously, fixed-interval retries would create
+#     identical retry bursts.  Jitter spreads them out so the API has
+#     time to recover between requests.
+#
+# _THINKING_MIN_MAX_TOKENS: floor for max_tokens when thinking is
+#     enabled.  Anthropic counts thinking tokens *inside* max_tokens, so
+#     a low budget (e.g. 1024) leaves almost nothing for the visible
+#     answer.  16 384 is safe for all current Claude models and leaves
+#     room for both internal reasoning and a full-length answer.
+# ---------------------------------------------------------------------------
+_RETRYABLE_HTTP_STATUS = frozenset({500, 502, 503, 504, 529})
+_MAX_ANTHROPIC_ATTEMPTS = 5
+_BACKOFF_BASE_SECONDS = 1.0
+_BACKOFF_MAX_SECONDS = 8.0
+_JITTER_RANGE = (0.5, 1.5)
+_THINKING_MIN_MAX_TOKENS = 16_384
 
-class AnthropicLLM(LLMProvider):
+
+class AnthropicLLM(_NonFatalNoticeMixin, LLMProvider):
     """Call the Anthropic Messages API directly without LiteLLM.
 
     Parameters
@@ -30,8 +102,14 @@ class AnthropicLLM(LLMProvider):
         Value of the ``anthropic-version`` header.
     default_model:
         Model for reasoning calls (classify, plan, evaluate, answer).
+    classify_model:
+        Optional override for question classification. Falls back to
+        *default_model*.
     summarize_model:
         Cheaper model for search-result summarisation.
+    evaluate_model:
+        Optional override for evidence evaluation. Falls back to
+        *default_model*.
     default_max_tokens:
         Output-token budget for reasoning calls.  When *thinking* is
         set with a ``budget_tokens`` value that exceeds this limit,
@@ -56,7 +134,8 @@ class AnthropicLLM(LLMProvider):
             thinking={"type": "enabled", "budget_tokens": 10000}
 
         Thinking is applied to reasoning calls only, not to
-        ``summarize_parallel``.
+        summarize-model helper calls such as ``summarize_parallel``
+        and claim extraction.
     """
 
     def __init__(
@@ -66,7 +145,9 @@ class AnthropicLLM(LLMProvider):
         base_url: str = "https://api.anthropic.com/v1/messages",
         anthropic_version: str = "2023-06-01",
         default_model: str = "claude-sonnet-4-6",
+        classify_model: str = "",
         summarize_model: str = "claude-haiku-4-5",
+        evaluate_model: str = "",
         default_max_tokens: int = 1024,
         summarize_max_tokens: int = 512,
         user_agent: str = "inqtrix/0.1",
@@ -88,31 +169,270 @@ class AnthropicLLM(LLMProvider):
         self._user_agent = user_agent
         self._temperature = temperature
         self._thinking = thinking
+        self._thread_state = threading.local()
+        self._models = ModelSettings(
+            reasoning_model=default_model,
+            search_model="",
+            classify_model=classify_model,
+            summarize_model=summarize_model,
+            evaluate_model=evaluate_model,
+        )
+
+    @property
+    def models(self) -> ModelSettings:
+        return self._models
+
+    # ------------------------------------------------------------------ #
+    # Thinking suppression
+    #
+    # Extended thinking is only useful for complex reasoning calls
+    # (classify, plan, evaluate, answer).  For cheap helper calls —
+    # summarise_parallel and claim extraction — it wastes tokens and
+    # slows down the parallel pipeline.
+    #
+    # The ``without_thinking`` context manager increments a thread-local
+    # depth counter.  While depth > 0, ``_thinking_enabled()`` returns
+    # False, so ``complete_with_metadata`` omits the ``thinking`` key
+    # from the API payload.  This is re-entrant and thread-safe:
+    # parallel summarise threads each have their own counter.
+    # ------------------------------------------------------------------ #
+
+    @contextmanager
+    def without_thinking(self):
+        depth = int(getattr(self._thread_state, "suppress_thinking_depth", 0))
+        self._thread_state.suppress_thinking_depth = depth + 1
+        try:
+            yield self
+        finally:
+            if depth:
+                self._thread_state.suppress_thinking_depth = depth
+            else:
+                try:
+                    delattr(self._thread_state, "suppress_thinking_depth")
+                except AttributeError:
+                    pass
+
+    def _thinking_enabled(self) -> bool:
+        return self._thinking is not None and int(
+            getattr(self._thread_state, "suppress_thinking_depth", 0)
+        ) == 0
+
+    # ------------------------------------------------------------------ #
+    # Retry helpers
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _is_retryable_http_status(status_code: int) -> bool:
+        return status_code in _RETRYABLE_HTTP_STATUS
+
+    @staticmethod
+    def _retry_delay_seconds(attempt: int, retry_after: str | None = None) -> float:
+        """Compute retry delay with exponential backoff and jitter.
+
+        If the server sent a ``Retry-After`` header, honour it.
+        Otherwise use exponential backoff (base * 2^attempt, capped)
+        multiplied by a random jitter factor to desynchronise parallel
+        threads.
+        """
+        if retry_after:
+            try:
+                parsed = float(retry_after)
+            except ValueError:
+                parsed = 0.0
+            if parsed > 0:
+                return parsed
+        base = min(_BACKOFF_BASE_SECONDS * (2 ** attempt), _BACKOFF_MAX_SECONDS)
+        return base * random.uniform(*_JITTER_RANGE)
+
+    @staticmethod
+    def _sleep_before_retry(delay: float, deadline: float | None = None) -> None:
+        if delay <= 0:
+            return
+        if deadline is not None:
+            _check_deadline(deadline)
+            delay = min(delay, max(0.0, deadline - time.monotonic()))
+        if delay > 0:
+            time.sleep(delay)
+
+    @staticmethod
+    def _extract_http_error_details(exc: HTTPError) -> dict[str, str | int | None]:
+        """Parse structured error information from an Anthropic HTTP error.
+
+        Anthropic returns errors as JSON with request-id in headers and
+        an ``{"error": {"type": ..., "message": ...}}`` body.  This
+        method extracts all available details so that ``AnthropicAPIError``
+        can surface them for debugging — including the request-id which
+        is essential for support tickets.
+        """
+        headers = getattr(exc, "headers", None) or getattr(exc, "hdrs", None)
+        request_id = None
+        retry_after = None
+        if headers is not None:
+            request_id = headers.get("request-id") or headers.get("anthropic-request-id")
+            retry_after = headers.get("retry-after")
+
+        raw_body = ""
+        try:
+            raw_bytes = exc.read()
+        except Exception:
+            raw_bytes = b""
+        if raw_bytes:
+            raw_body = raw_bytes.decode("utf-8", errors="replace")
+
+        error_type = ""
+        message = ""
+        if raw_body:
+            try:
+                payload = json.loads(raw_body)
+            except json.JSONDecodeError:
+                message = raw_body.strip()
+            else:
+                if isinstance(payload, dict):
+                    body_request_id = payload.get("request_id")
+                    if isinstance(body_request_id, str) and body_request_id.strip():
+                        request_id = request_id or body_request_id.strip()
+                    error = payload.get("error")
+                    if isinstance(error, dict):
+                        raw_type = error.get("type")
+                        raw_message = error.get("message")
+                        if isinstance(raw_type, str):
+                            error_type = raw_type.strip()
+                        if isinstance(raw_message, str):
+                            message = raw_message.strip()
+                    if not message:
+                        top_level_message = payload.get("message")
+                        if isinstance(top_level_message, str):
+                            message = top_level_message.strip()
+
+        return {
+            "status_code": exc.code,
+            "request_id": request_id,
+            "retry_after": retry_after,
+            "error_type": error_type,
+            "message": message,
+        }
+
+    @staticmethod
+    def _build_api_error(
+        *,
+        model: str,
+        details: dict[str, str | int | None] | None = None,
+        message: str = "",
+        original: Exception,
+    ) -> AnthropicAPIError:
+        details = details or {}
+        sc = details.get("status_code")
+        return AnthropicAPIError(
+            model=model,
+            status_code=sc if isinstance(sc, int) else None,
+            error_type=str(details.get("error_type") or "").strip(),
+            message=message.strip() or str(details.get("message") or "").strip() or str(original),
+            request_id=str(details.get("request_id") or "").strip() or None,
+            retry_after=str(details.get("retry_after") or "").strip() or None,
+            original=original,
+        )
 
     def _request_json(
         self,
         *,
         payload: dict[str, Any],
         timeout: float,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
-        request = Request(
-            self._base_url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": self._user_agent,
-                "x-api-key": self._api_key,
-                "anthropic-version": self._anthropic_version,
-            },
-            method="POST",
+        """Send a POST to the Anthropic Messages API with retry.
+
+        This is the central HTTP method shared by ``complete_with_metadata``
+        and ``summarize_parallel``.  It implements:
+
+        1. Deadline enforcement — abort early if the agent time budget
+           has been exceeded.
+        2. Retry with jittered backoff for transient server errors
+           (500/502/503/504/529).  HTTP 429 (rate-limit) is *not*
+           retried but escalated as ``AgentRateLimited`` so the graph
+           can abort the entire run.
+        3. Structured error extraction for non-retryable failures,
+           surfacing request-id and error details in the exception.
+        """
+        use_model = str(payload.get("model") or self._default_model)
+
+        for attempt in range(_MAX_ANTHROPIC_ATTEMPTS):
+            if deadline is not None:
+                _check_deadline(deadline)
+
+            request = Request(
+                self._base_url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": self._user_agent,
+                    "x-api-key": self._api_key,
+                    "anthropic-version": self._anthropic_version,
+                },
+                method="POST",
+            )
+
+            try:
+                with urlopen(request, timeout=_bounded_timeout(timeout, deadline)) as response:
+                    raw = response.read().decode("utf-8")
+                data = json.loads(raw)
+                return data if isinstance(data, dict) else {}
+            except HTTPError as exc:
+                details = self._extract_http_error_details(exc)
+                if exc.code == 429:
+                    raise AgentRateLimited(use_model, exc)
+
+                api_error = self._build_api_error(
+                    model=use_model, details=details, original=exc)
+                if self._is_retryable_http_status(exc.code) and attempt < (_MAX_ANTHROPIC_ATTEMPTS - 1):
+                    delay = self._retry_delay_seconds(attempt, details.get("retry_after"))
+                    log.warning(
+                        "Anthropic transient HTTP error (%s, status=%s, type=%s, request-id=%s, attempt=%d/%d). Retrying in %.2fs.",
+                        use_model,
+                        exc.code,
+                        details.get("error_type") or "unknown",
+                        details.get("request_id") or "-",
+                        attempt + 1,
+                        _MAX_ANTHROPIC_ATTEMPTS,
+                        delay,
+                    )
+                    self._sleep_before_retry(delay, deadline)
+                    continue
+                raise api_error from exc
+            except (URLError, OSError) as exc:
+                api_error = self._build_api_error(model=use_model, original=exc)
+                if attempt < (_MAX_ANTHROPIC_ATTEMPTS - 1):
+                    delay = self._retry_delay_seconds(attempt)
+                    log.warning(
+                        "Anthropic transport error (%s, attempt=%d/%d). Retrying in %.2fs: %s",
+                        use_model,
+                        attempt + 1,
+                        _MAX_ANTHROPIC_ATTEMPTS,
+                        delay,
+                        exc,
+                    )
+                    self._sleep_before_retry(delay, deadline)
+                    continue
+                raise api_error from exc
+            except ValueError as exc:
+                raise self._build_api_error(model=use_model, original=exc) from exc
+
+        # Unreachable: every iteration ends with return, raise, or continue
+        # (continue only when attempt < MAX - 1). Keep as defensive safeguard.
+        raise self._build_api_error(  # pragma: no cover
+            model=use_model,
+            message="Anthropic request exhausted retries without a final response.",
+            original=RuntimeError("retries exhausted"),
         )
-        with urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8")
-        data = json.loads(raw)
-        return data if isinstance(data, dict) else {}
 
     @staticmethod
     def _extract_text(payload: dict[str, Any]) -> str:
+        """Extract visible text from an Anthropic response.
+
+        The Messages API returns a ``content`` array with typed blocks.
+        We only collect ``{"type": "text"}`` blocks — thinking blocks
+        (``{"type": "thinking"}``) are intentionally skipped so they
+        never leak into the user-visible output.
+        """
         parts: list[str] = []
         for block in payload.get("content", []) or []:
             if not isinstance(block, dict):
@@ -168,15 +488,27 @@ class AnthropicLLM(LLMProvider):
 
         use_model = model or self._default_model
         max_tokens = self._default_max_tokens
-        if self._thinking is not None:
+        use_thinking = self._thinking_enabled()
+        if use_thinking:
+            # Anthropic counts thinking tokens *inside* max_tokens.
+            # Two adjustments ensure the answer isn't truncated:
+            #
+            # 1. Explicit budget: if the caller set budget_tokens and
+            #    it exceeds max_tokens, raise to budget + 1024 so there
+            #    is room for the visible answer.
+            # 2. Floor: even for adaptive thinking (no explicit budget),
+            #    enforce _THINKING_MIN_MAX_TOKENS so the model has
+            #    enough room for both reasoning and output.
             budget = self._thinking.get("budget_tokens")
             if isinstance(budget, int) and budget >= max_tokens:
                 max_tokens = budget + 1024
+            if max_tokens < _THINKING_MIN_MAX_TOKENS:
                 log.debug(
-                    "max_tokens auto-raised to %d (budget_tokens=%d)",
+                    "max_tokens auto-raised from %d to %d (thinking enabled)",
                     max_tokens,
-                    budget,
+                    _THINKING_MIN_MAX_TOKENS,
                 )
+                max_tokens = _THINKING_MIN_MAX_TOKENS
         payload: dict[str, Any] = {
             "model": use_model,
             "max_tokens": max_tokens,
@@ -186,24 +518,14 @@ class AnthropicLLM(LLMProvider):
             payload["system"] = system
         if self._temperature is not None:
             payload["temperature"] = self._temperature
-        if self._thinking is not None:
+        if use_thinking:
             payload["thinking"] = self._thinking
 
-        try:
-            raw = self._request_json(
-                payload=payload,
-                timeout=_bounded_timeout(timeout, deadline),
-            )
-        except HTTPError as exc:
-            if exc.code == 429:
-                raise AgentRateLimited(use_model, exc)
-            raise RuntimeError(
-                f"Anthropic-Aufruf fehlgeschlagen ({use_model}): {exc}"
-            ) from exc
-        except (URLError, OSError, ValueError) as exc:
-            raise RuntimeError(
-                f"Anthropic-Aufruf fehlgeschlagen ({use_model}): {exc}"
-            ) from exc
+        raw = self._request_json(
+            payload=payload,
+            timeout=timeout,
+            deadline=deadline,
+        )
 
         prompt_tokens, completion_tokens = self._extract_usage(raw)
         response = LLMResponse(
@@ -221,8 +543,19 @@ class AnthropicLLM(LLMProvider):
         text: str,
         deadline: float | None = None,
     ) -> tuple[str, int, int]:
+        """Thread-safe fact extraction from a search result.
+
+        Called from multiple threads in the search node.  On failure
+        (transient or hard), falls back to the first 800 chars of raw
+        text and sets a nonfatal notice so the search node can report
+        the degradation to the user.
+
+        Thinking is NOT used here — callers (LLMClaimExtractor) wrap
+        this in ``without_thinking()`` to avoid wasting tokens.
+        """
         if not text.strip():
             return ("", 0, 0)
+        self._clear_nonfatal_notice()
         if deadline is not None:
             _check_deadline(deadline)
 
@@ -237,16 +570,15 @@ class AnthropicLLM(LLMProvider):
         try:
             raw = self._request_json(
                 payload=payload,
-                timeout=_bounded_timeout(SUMMARIZE_TIMEOUT, deadline),
+                timeout=SUMMARIZE_TIMEOUT,
+                deadline=deadline,
             )
         except AgentRateLimited:
             raise
-        except HTTPError as exc:
-            if exc.code == 429:
-                raise AgentRateLimited(self._summarize_model, exc)
-            log.error("Anthropic-Summarize fehlgeschlagen (%s): %s", self._summarize_model, exc)
-            return (text[:800], 0, 0)
-        except (URLError, OSError, ValueError, AgentTimeout) as exc:
+        except (AnthropicAPIError, AgentTimeout) as exc:
+            self._set_nonfatal_notice(
+                f"Anthropic-Summarize fehlgeschlagen ({self._summarize_model}); Fallback auf Rohtext."
+            )
             log.error("Anthropic-Summarize fehlgeschlagen (%s): %s", self._summarize_model, exc)
             return (text[:800], 0, 0)
 

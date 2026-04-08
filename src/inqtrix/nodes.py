@@ -20,7 +20,7 @@ from typing import Any
 from openai import OpenAIError
 
 from inqtrix.domains import LANG_NAMES, LOW_QUALITY_DOMAINS
-from inqtrix.exceptions import AgentRateLimited, AgentTimeout
+from inqtrix.exceptions import AgentRateLimited, AgentTimeout, AnthropicAPIError
 from inqtrix.json_helpers import parse_json_object, parse_json_string_list
 from inqtrix.prompts import (
     EVALUATE_FORMAT_SUFFIX,
@@ -253,7 +253,7 @@ def classify(
                 emit_progress(s, f"Frage in {len(s['sub_questions'])} Teilfragen zerlegt")
     except AgentRateLimited:
         raise
-    except (OpenAIError, AgentTimeout):
+    except (OpenAIError, AgentTimeout, AnthropicAPIError):
         # Fail-safe: on classification error do NOT fall back to direct answer.
         # Conservatively continue researching with robust defaults.
         s["done"] = False
@@ -472,7 +472,7 @@ def plan(
         )
     except AgentRateLimited:
         raise
-    except (OpenAIError, AgentTimeout):
+    except (OpenAIError, AgentTimeout, AnthropicAPIError):
         q = ""
 
     _max_items = settings.first_round_queries if s["round"] == 0 else 3
@@ -633,6 +633,12 @@ def search(
     # Perplexity domain filter as an allow-list for that domain.
     _base_domain_filter = LOW_QUALITY_DOMAINS
 
+    def _consume_nonfatal_notice(obj: object) -> str | None:
+        consumer = getattr(obj, "consume_nonfatal_notice", None)
+        if callable(consumer):
+            return consumer()
+        return None
+
     def _domain_filter_for_query(q: str) -> list[str] | None:
         ql = (q or "").lower()
         m = re.search(r"(?:^|\s)site:([^\s]+)", ql)
@@ -652,12 +658,25 @@ def search(
 
     # Parallel search
     def _search_one(q: str) -> dict[str, Any]:
-        return providers.search.search(q, domain_filter=_domain_filter_for_query(q), **search_kwargs)
+        result = providers.search.search(
+            q, domain_filter=_domain_filter_for_query(q), **search_kwargs)
+        warning = _consume_nonfatal_notice(providers.search)
+        if warning:
+            result = dict(result)
+            result["_nonfatal_notice"] = warning
+        return result
 
     _n_workers = min(len(new_q), settings.first_round_queries)
 
     with ThreadPoolExecutor(max_workers=_n_workers) as ex:
         results = list(ex.map(_search_one, new_q))
+
+    _search_fallbacks = sum(1 for r in results if r.get("_nonfatal_notice"))
+    if _search_fallbacks:
+        emit_progress(
+            s,
+            f"{_search_fallbacks} Suchanfragen liefen mit Provider-Fallback weiter.",
+        )
 
     # Aggregate token usage from Sonar searches
     _search_prompt_tokens = 0
@@ -673,14 +692,24 @@ def search(
             _summarize_inputs.append((_qi, r["answer"]))
 
     _summarize_results: dict[int, tuple[str, int, int]] = {}
+    _summarize_fallbacks = 0
     if _summarize_inputs:
-        def _do_summarize(item: tuple[int, str]) -> tuple[int, tuple[str, int, int]]:
+        def _do_summarize(item: tuple[int, str]) -> tuple[int, tuple[str, int, int], str | None]:
             idx, text = item
-            return (idx, providers.llm.summarize_parallel(text, deadline=s["deadline"]))
+            result_tuple = providers.llm.summarize_parallel(text, deadline=s["deadline"])
+            return (idx, result_tuple, _consume_nonfatal_notice(providers.llm))
 
         with ThreadPoolExecutor(max_workers=min(len(_summarize_inputs), _n_workers)) as ex:
-            for idx, result_tuple in ex.map(_do_summarize, _summarize_inputs):
+            for idx, result_tuple, warning in ex.map(_do_summarize, _summarize_inputs):
                 _summarize_results[idx] = result_tuple
+                if warning:
+                    _summarize_fallbacks += 1
+
+    if _summarize_fallbacks:
+        emit_progress(
+            s,
+            f"{_summarize_fallbacks} Quellen-Zusammenfassungen liefen im Fallback-Modus.",
+        )
 
     # Aggregate summarize tokens
     _sum_prompt_tokens = 0
@@ -696,16 +725,31 @@ def search(
             _claim_inputs.append((_qi, r["answer"], r.get("citations", [])))
 
     _claim_results: dict[int, tuple[list[dict[str, Any]], int, int]] = {}
+    _claim_fallbacks = 0
     if _claim_inputs:
         def _do_claim_extract(
             item: tuple[int, str, list[str]],
-        ) -> tuple[int, tuple[list[dict[str, Any]], int, int]]:
+        ) -> tuple[int, tuple[list[dict[str, Any]], int, int], str | None]:
             idx, text, citations = item
-            return (idx, strategies.claim_extraction.extract(text, citations, s.get("question", ""), deadline=s["deadline"]))
+            result_tuple = strategies.claim_extraction.extract(
+                text,
+                citations,
+                s.get("question", ""),
+                deadline=s["deadline"],
+            )
+            return (idx, result_tuple, _consume_nonfatal_notice(strategies.claim_extraction))
 
         with ThreadPoolExecutor(max_workers=min(len(_claim_inputs), _n_workers)) as ex:
-            for idx, result_tuple in ex.map(_do_claim_extract, _claim_inputs):
+            for idx, result_tuple, warning in ex.map(_do_claim_extract, _claim_inputs):
                 _claim_results[idx] = result_tuple
+                if warning:
+                    _claim_fallbacks += 1
+
+    if _claim_fallbacks:
+        emit_progress(
+            s,
+            f"Bei {_claim_fallbacks} Quellen konnte keine Claim-Extraktion durchgefuehrt werden.",
+        )
 
     _claim_prompt_tokens = 0
     _claim_completion_tokens = 0
@@ -1061,7 +1105,7 @@ def evaluate(
 
     except AgentRateLimited:
         raise
-    except (OpenAIError, AgentTimeout):
+    except (OpenAIError, AgentTimeout, AnthropicAPIError):
         # No fail-open: on evaluate error stay conservative.
         conf = min(max(s.get("final_confidence", 0), 5), settings.confidence_stop - 2)
         if not s.get("gaps"):
@@ -1238,7 +1282,7 @@ def answer(
             )
         else:
             s["answer"] = "Die Anfrage konnte aufgrund eines Zeitlimits nicht bearbeitet werden. Bitte erneut versuchen."
-    except OpenAIError as e:
+    except (OpenAIError, AnthropicAPIError) as e:
         log.error("Finale Antwort fehlgeschlagen: %s", e)
         fallback_model = (
             providers.llm.models.effective_evaluate_model
@@ -1259,7 +1303,7 @@ def answer(
                     model=fallback_model,
                     state=s,
                 )
-            except (OpenAIError, AgentTimeout) as e2:
+            except (OpenAIError, AgentTimeout, AnthropicAPIError) as e2:
                 log.error("Finale Antwort-Fallback fehlgeschlagen (%s): %s", fallback_model, e2)
                 if ctx:
                     s["answer"] = (

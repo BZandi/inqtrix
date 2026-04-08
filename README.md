@@ -846,11 +846,25 @@ def _require_env(name: str) -> str:
 agent = ResearchAgent(AgentConfig(
     llm=AnthropicLLM(
         api_key=_require_env("ANTHROPIC_API_KEY"),
-        default_model="claude-3-7-sonnet-latest",
-        summarize_model="claude-3-5-haiku-latest",
+        default_model="claude-sonnet-4-6",
+        classify_model="claude-haiku-4-5",   # optional
+        summarize_model="claude-haiku-4-5",
+        evaluate_model="claude-sonnet-4-6",  # optional
+        # thinking={"type": "adaptive"},
     ),
 ))
 ```
+
+`default_model` covers the core reasoning path: classify fallback, plan,
+answer synthesis, and evaluate fallback. `summarize_model` is usually the
+best cost lever because it runs over many search snippets in parallel.
+`classify_model` and `evaluate_model` are optional per-role overrides; if
+omitted, both fall back to `default_model`.
+
+`thinking` is forwarded on reasoning calls, including `classify_model` and
+`evaluate_model` overrides if you set them. It is not used for
+`summarize_model`. If one of those reasoning models does not support
+thinking, the Anthropic API rejects the request.
 
 For full end-to-end runs, Inqtrix needs model-routing metadata for `reasoning`, `classify`, `summarize`, and `evaluate`. If your custom LLM provider does not expose a `.models` property itself, `ResearchAgent` wraps it automatically with default `ModelSettings` from the environment.
 
@@ -892,8 +906,11 @@ def _require_env(name: str) -> str:
 agent = ResearchAgent(AgentConfig(
     llm=AnthropicLLM(
         api_key=_require_env("ANTHROPIC_API_KEY"),
-        default_model="claude-3-7-sonnet-latest",
-        summarize_model="claude-3-5-haiku-latest",
+        default_model="claude-sonnet-4-6",
+        classify_model="claude-haiku-4-5",   # optional
+        summarize_model="claude-haiku-4-5",
+        evaluate_model="claude-sonnet-4-6",  # optional
+        # thinking={"type": "adaptive"},
     ),
     search=BraveSearch(
         api_key=_require_env("BRAVE_API_KEY"),

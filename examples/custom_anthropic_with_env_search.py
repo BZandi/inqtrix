@@ -42,8 +42,14 @@ def main() -> None:
     agent = ResearchAgent(AgentConfig(
         llm=AnthropicLLM(
             api_key=_require_env("ANTHROPIC_API_KEY"),
-            default_model="claude-3-7-sonnet-latest",
-            summarize_model="claude-3-5-haiku-latest",
+            # Strong model for reasoning, planning, and final answer.
+            default_model="claude-sonnet-4-6",
+            # Optional per-role overrides; leave unset to fall back to
+            # default_model.
+            # classify_model="claude-haiku-4-5",
+            summarize_model="claude-haiku-4-5",
+            # evaluate_model="claude-sonnet-4-6",
+            # thinking={"type": "adaptive"},
         ),
     ))
     result = agent.research(QUESTION)

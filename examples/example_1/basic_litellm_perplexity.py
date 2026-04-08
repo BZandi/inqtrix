@@ -94,12 +94,24 @@ def main() -> None:
     # ── LLM Provider ────────────────────────────────────────────────
     #
     # default_model: the primary model used for reasoning, query
-    #   planning, and final answer synthesis.
+    #   planning, and final answer synthesis.  This is where the
+    #   strongest model usually belongs.
     #
     # classify_model / summarize_model / evaluate_model: optional
     #   per-role overrides.  If left empty (""), each falls back to
-    #   default_model.  Use smaller/cheaper models here to reduce cost
-    #   while keeping the strong model for the core reasoning steps.
+    #   default_model.
+    #
+    #   classify_model: good place for a smaller model if the question
+    #   decomposition is straightforward and you mainly want to save
+    #   cost on the first routing step.
+    #
+    #   summarize_model: usually the best place to save money because
+    #   it runs in parallel on many search results.  If claim
+    #   extraction gets too shallow or noisy, move this role up.
+    #
+    #   evaluate_model: useful for a slightly cheaper model than
+    #   default_model, but keep it strong enough for evidence weighing
+    #   and stop decisions.
     llm = LiteLLM(
         api_key=api_key,
         base_url=base_url,
@@ -135,8 +147,10 @@ def main() -> None:
         max_context=12,
         first_round_queries=6,              # number of parallel search queries in first round
         answer_prompt_citations_max=60,     # max citation URLs forwarded to the answer-synthesis prompt
-        # hard wall-clock deadline for the entire run (seconds)
-        max_total_seconds=300,
+        # hard wall-clock deadline for the entire run (seconds).
+        # Opus through a proxy needs more time than Sonnet — 600s is a
+        # safe default.  Reduce to 300 for Sonnet-only setups.
+        max_total_seconds=600,
         max_question_length=10_000,         # reject questions longer than this (characters)
 
         # -- Timeouts (per individual LLM/search call, in seconds) --

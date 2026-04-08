@@ -27,7 +27,7 @@ from inqtrix.exceptions import AgentRateLimited
 from inqtrix.providers import ProviderContext
 from inqtrix.result import ResearchResult, ResearchResultExportOptions
 from inqtrix.settings import AgentSettings
-from inqtrix.state import AgentState, initial_state
+from inqtrix.state import AgentState, emit_progress, initial_state
 from inqtrix.strategies import StrategyContext
 
 log = logging.getLogger("inqtrix")
@@ -205,6 +205,7 @@ def run(
     try:
         result = agent.invoke(state)
     except AgentRateLimited as exc:
+        emit_progress(state, f"Recherche abgebrochen: {exc}")
         log.error("ABBRUCH: %s", exc)
         return {
             "answer": (
@@ -217,6 +218,9 @@ def run(
             },
             "result_state": state,
         }
+    except Exception as exc:
+        emit_progress(state, f"Recherche fehlgeschlagen: {exc}")
+        raise
 
     elapsed = time.monotonic() - t0
     log.info("Agent finished in %.1fs", elapsed)

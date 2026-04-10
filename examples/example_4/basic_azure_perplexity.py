@@ -1,53 +1,85 @@
-"""Direct Anthropic + Perplexity example (no LiteLLM proxy).
+"""Azure OpenAI v1 + Perplexity Sonar example (no LiteLLM proxy).
 
 Architecture
 ------------
+This example combines two independent components directly:
+
+1. **Sprachmodell / Reasoning** -- via ``AzureOpenAILLM``
+2. **Websuche / Grounding** -- via ``PerplexitySearch``
+
+Recommended validation order
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Before using this combined example, validate the Azure reasoning path first:
+
+- ``examples/example_4/basic_test_component_azure_llm.py``
+
+Related combined examples:
+
+- ``examples/example_4/basic_azure_bing.py`` uses
+    ``AzureOpenAILLM`` + ``AzureFoundryBingSearch``.
+- ``examples/example_4/basic_azure_web.py`` uses
+    ``AzureOpenAILLM`` + ``AzureFoundryWebSearch``.
+
+Why no dedicated Perplexity smoke test here?
+
+- ``PerplexitySearch`` is already a thin direct API wrapper with a single key.
+- The Azure side is usually the more failure-prone setup, so
+    ``basic_test_component_azure_llm.py`` gives the highest-value isolated smoke test.
+- This file is therefore the main full-stack example for the
+    ``AzureOpenAILLM`` + ``PerplexitySearch`` combination.
+
+This combined script itself uses:
+``AzureOpenAILLM`` + ``PerplexitySearch``.
+
 This example calls two independent APIs directly:
 
-1. **Anthropic Messages API** — via ``AnthropicLLM``, using a native
-   ``urllib`` adapter.  Claude models are called at
-   ``https://api.anthropic.com/v1/messages`` without any proxy or SDK
-   in between.
+1. **Azure OpenAI v1 Chat Completions API** — via ``AzureOpenAILLM``,
+     using the official ``openai`` SDK's generic ``OpenAI`` client
+     against the Azure ``/openai/v1/`` endpoint.
 
 2. **Perplexity Sonar API** — via ``PerplexitySearch``, using the
-   OpenAI Python SDK pointed at ``https://api.perplexity.ai``.
-   Perplexity's Sonar endpoint is fully OpenAI Chat Completions
-   compatible, so the SDK works out of the box.
+     OpenAI Python SDK pointed at ``https://api.perplexity.ai``.
 
-Each provider has its own API key and base URL — there is no shared
-proxy.  Compare this with the sibling ``basic_litellm_perplexity.py``
-where a single LiteLLM proxy routes both LLM and search traffic.
+Authentication for Azure OpenAI supports three common modes:
+
+* **API key** (default below) — the simplest path.  Get a key from
+    the Azure Portal under your resource's "Keys and Endpoint".
+* **Service Principal (Entra ID)** — for CI/CD, automation, and
+    environments without interactive login.  Requires the
+    ``azure-identity`` package (included in core dependencies).
+* **DefaultAzureCredential** — for local development with ``az login``,
+    Managed Identity, or VS Code Azure sign-in.
 
 Use this example when:
-- you have direct API keys for both Anthropic and Perplexity
+- you have an Azure OpenAI resource with a model deployment
+- you have a direct Perplexity API key
 - you do NOT want to run a LiteLLM proxy
-- you want the simplest possible two-provider setup
+- you want to use GPT models hosted on Azure (e.g. EU region)
 
 Required environment variables (in .env or process env):
-- ANTHROPIC_API_KEY
 - PERPLEXITY_API_KEY
+- AZURE_OPENAI_API_KEY          (for API-key auth)
+- AZURE_OPENAI_ENDPOINT         (e.g. https://mein-openai.openai.azure.com/)
+- AZURE_OPENAI_DEPLOYMENT_NAME  (the deployment name, NOT the model name)
 
-Terminal rendering
-------------------
-The agent returns Markdown, which looks good in a chat UI but is hard
-to read as raw text in a terminal.  This example uses ``rich`` to
-render Markdown with colours, formatted headers, bullet lists, and
-clickable links (in terminals that support OSC 8 hyperlinks such as
-iTerm2, Windows Terminal, or GNOME Terminal).
+Optional:
+- AZURE_OPENAI_SUMMARIZE_DEPLOYMENT_NAME  (cheaper deployment for summarisation)
+- HTTPS_PROXY                             (for corporate proxy environments)
 
-``rich`` is a core dependency and always available after::
-
-    uv sync
+For Service Principal auth (instead of API key):
+- AZURE_TENANT_ID
+- AZURE_CLIENT_ID
+- AZURE_CLIENT_SECRET
 
 Run with::
 
-    uv run python examples/example_1/basic_anthropic_perplexity.py
+        uv run python examples/example_4/basic_azure_perplexity.py
 """
 
 from __future__ import annotations
 import os
 from dotenv import load_dotenv
-from inqtrix import AgentConfig, AnthropicLLM, PerplexitySearch, ResearchAgent
+from inqtrix import AgentConfig, AzureOpenAILLM, PerplexitySearch, ResearchAgent
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -109,76 +141,138 @@ def _require_env(name: str) -> str:
 
 
 def main() -> None:
-    anthropic_key = _require_env("ANTHROPIC_API_KEY")
     perplexity_key = _require_env("PERPLEXITY_API_KEY")
+    azure_endpoint = _require_env("AZURE_OPENAI_ENDPOINT")
+    azure_deployment = _require_env("AZURE_OPENAI_DEPLOYMENT_NAME")
+
+    # Optional: separate cheaper deployment for summarisation
+    azure_summarize_deployment = os.environ.get(
+        "AZURE_OPENAI_SUMMARIZE_DEPLOYMENT_NAME", ""
+    ).strip()
 
     # ── LLM Provider ────────────────────────────────────────────────
     #
-    # AnthropicLLM calls the Anthropic Messages API directly
-    # (https://api.anthropic.com/v1/messages) without a proxy.
+    # AzureOpenAILLM calls the Azure OpenAI v1 Chat Completions API via
+    # the official openai SDK's generic OpenAI client.
     #
-    # default_model: used for ALL reasoning roles — classify, plan,
-    #   evaluate, and final answer synthesis.  This is the right place
-    #   for the stronger model because these steps decide search
-    #   strategy, evidence quality, and the final answer.
+    # Internally, the provider converts the resource endpoint
     #
-    # classify_model / evaluate_model: optional per-role overrides for
-    #   classification and evidence evaluation.  Leave them empty to
-    #   keep everything on default_model.  Set them explicitly only if
-    #   you want cheaper/faster models in those roles.
+    #   https://<resource>.openai.azure.com/
     #
-    # summarize_model: the cheaper, faster model used exclusively for
-    #   search-result summarization and claim extraction (called in
-    #   parallel threads via summarize_parallel).  This is usually the
-    #   best place to save cost.  If claim extraction is too weak or
-    #   search snippets are especially noisy, move summarize_model up
-    #   to Sonnet; if cost matters more, move it down to Haiku.
+    # into the v1 base URL
     #
-    # Optional tuning (defaults shown):
-    #   default_max_tokens=1024    — output budget for reasoning calls
-    #   summarize_max_tokens=512   — output budget for summarization
+    #   https://<resource>.openai.azure.com/openai/v1/
     #
-    # Extended thinking (optional) — uncomment ONE of the following:
+    # so you do NOT need to manage date-based api-version strings.
     #
-    #   Adaptive thinking (recommended for Claude 4.6 reasoning models):
-    #   thinking={"type": "adaptive"},
+    # ⚠️  IMPORTANT: The "model" parameter is the DEPLOYMENT NAME you
+    # created in the Azure Portal under "Model Deployments", NOT the
+    # underlying model name (e.g. "gpt-4o").  If your deployment is
+    # called "my-gpt4o-deployment", use that string here.
     #
-    #   Manual budget (Claude 3.7 / precise control):
-    #   thinking={"type": "enabled", "budget_tokens": 10000},
+    # Authentication — choose ONE of the three options below:
     #
-    # Thinking is forwarded on reasoning calls: default_model and
-    # optional classify_model / evaluate_model overrides. summarize-model
-    # helper work such as search summarization and claim extraction does
-    # not receive it.  There is no client-side capability routing: if
-    # one of those reasoning models does not support thinking, the
-    # Anthropic API will reject the request.
+    # ── Option A: API Key (default, uncommented) ────────────────────
     #
-    # Transient direct-Anthropic failures such as HTTP 529/500/504 are
-    # retried automatically with bounded backoff before the provider
-    # gives up.
+    # The simplest path.  Get your key from the Azure Portal:
+    # Resource → "Keys and Endpoint" → KEY1 or KEY2.
     #
-    # When thinking is enabled, max_tokens is auto-raised to at
-    # least 16384 so the model has room for both thinking and the
-    # visible answer.  You can override this with a higher
-    # default_max_tokens if needed.
-    #
-    # temperature (optional, 0.0–1.0) — sampling temperature.
-    # NOTE: temperature and thinking are MUTUALLY EXCLUSIVE.
-    #   temperature=0.3,
-    # Models:
-    #   claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5
-    llm = AnthropicLLM(
-        api_key=anthropic_key,
-        default_model="claude-opus-4-6",
-        # classify_model="claude-sonnet-4-6",
-        summarize_model="claude-haiku-4-5",
-        # evaluate_model="claude-sonnet-4-6",
-        thinking={"type": "adaptive"},
+    azure_api_key = _require_env("AZURE_OPENAI_API_KEY")
+
+    llm = AzureOpenAILLM(
+        azure_endpoint=azure_endpoint,
+        api_key=azure_api_key,
+        default_model=azure_deployment,
+        # classify_model="my-gpt4o-mini-deployment",
+        summarize_model=azure_summarize_deployment,
+        # evaluate_model="my-gpt4o-mini-deployment",
+        # token_budget_parameter="max_tokens",  # only if a deployment requires the older field
+        # temperature=0.7,
     )
+
+    # ── Option B: Service Principal (Entra ID) ──────────────────────
+    #
+    # For CI/CD, automation, or environments without interactive login.
+    # Requires: uv sync
+    #
+    # Uncomment the block below and comment out Option A above.
+    #
+    # from azure.identity import ClientSecretCredential, get_bearer_token_provider
+    #
+    # credential = ClientSecretCredential(
+    #     tenant_id=os.environ["AZURE_TENANT_ID"],
+    #     client_id=os.environ["AZURE_CLIENT_ID"],
+    #     client_secret=os.environ["AZURE_CLIENT_SECRET"],
+    # )
+    # token_provider = get_bearer_token_provider(
+    #     credential,
+    #     "https://ai.azure.com/.default",
+    # )
+    #
+    # llm = AzureOpenAILLM(
+    #     azure_endpoint=azure_endpoint,
+    #     azure_ad_token_provider=token_provider,
+    #     default_model=azure_deployment,
+    #     summarize_model=azure_summarize_deployment,
+    # )
+
+    # ── Option D: Existing token provider ──────────────────────────
+    #
+    # If your application already centralizes Azure auth, you can pass
+    # a prebuilt bearer-token provider directly.
+    #
+    # llm = AzureOpenAILLM(
+    #     azure_endpoint=azure_endpoint,
+    #     azure_ad_token_provider=existing_token_provider,
+    #     default_model=azure_deployment,
+    #     summarize_model=azure_summarize_deployment,
+    # )
+
+    # ── Option C: DefaultAzureCredential (local dev) ────────────────
+    #
+    # Uses your ``az login`` session, VS Code credentials, Managed
+    # Identity, etc.  Simplest for local development.
+    #
+    # from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+    #
+    # token_provider = get_bearer_token_provider(
+    #     DefaultAzureCredential(),
+    #     "https://ai.azure.com/.default",
+    # )
+    #
+    # llm = AzureOpenAILLM(
+    #     azure_endpoint=azure_endpoint,
+    #     azure_ad_token_provider=token_provider,
+    #     default_model=azure_deployment,
+    #     summarize_model=azure_summarize_deployment,
+    # )
+
+    # ── Proxy (optional) ────────────────────────────────────────────
+    #
+    # For corporate environments that route HTTPS traffic through a
+    # proxy.  Uncomment and add proxy_url to the AzureOpenAILLM
+    # constructor above:
+    #
+    #   proxy_url=os.environ.get("HTTPS_PROXY"),
+    #
+    # The provider will create an httpx client with that proxy.
+    # Alternatively, set the HTTPS_PROXY environment variable — the
+    # openai SDK's httpx transport picks it up automatically.
 
     # ── Search Provider ─────────────────────────────────────────────
     #
-    # PerplexitySearch pointed directly at the Perplexity Sonar API.
+    # PerplexitySearch is the direct web-search component used by THIS file.
+    #
+    # Compared with the Azure search backends, Perplexity supports more of the
+    # standard SearchProvider parameters natively inside the API request:
+    #
+    # - recency_filter      → native API field
+    # - language_filter     → native API field
+    # - domain_filter       → native API field
+    # - search_mode         → native API field (e.g. academic)
+    # - return_related      → native API field
+    # - search_context_size → native API field
+    #
     # This provider is designed specifically for the Sonar API — other
     # Perplexity products (Deep Research, Agent API) use different
     # parameters and endpoints.
@@ -194,11 +288,20 @@ def main() -> None:
     #
     # Model names are Perplexity-native here (sonar-pro, sonar),
     # not LiteLLM aliases (perplexity-sonar-pro-agent).
+    #
+    # Option A: higher-quality default model
     search = PerplexitySearch(
         api_key=perplexity_key,
         base_url="https://api.perplexity.ai",
         model="sonar-pro",
     )
+
+    # Option B: cheaper / faster model
+    # search = PerplexitySearch(
+    #     api_key=perplexity_key,
+    #     base_url="https://api.perplexity.ai",
+    #     model="sonar",
+    # )
 
     # ── AgentConfig — all available options ──────────────────────────
     #
@@ -220,9 +323,9 @@ def main() -> None:
         first_round_queries=6,              # number of parallel search queries in first round
         answer_prompt_citations_max=60,     # max citation URLs forwarded to the answer-synthesis prompt
         # hard wall-clock deadline for the entire run (seconds).
-        # Opus with thinking needs more time than Sonnet — 600s is a
-        # safe default.  Reduce to 300 for Sonnet-only setups.
-        max_total_seconds=600,
+        # GPT-4o is typically faster than Opus — 300s is usually enough.
+        # Increase to 600 for very complex questions.
+        max_total_seconds=300,
         max_question_length=10_000,         # reject questions longer than this (characters)
 
         # -- Timeouts (per individual LLM/search call, in seconds) --
@@ -236,7 +339,7 @@ def main() -> None:
         # RiskScoringStrategy (regex-based on keywords like "Gesetz",
         # "Steuer", "Medizin", etc.).
         #
-        # With AnthropicLLM these flags matter only if you configured
+        # With AzureOpenAILLM these flags matter only if you configured
         # classify_model and/or evaluate_model above.  In that case,
         # high-risk questions can escalate those roles back up to the
         # stronger default_model.  Summarization always uses

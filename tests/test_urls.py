@@ -1,6 +1,6 @@
 """ Tests for inqtrix.urls — URL normalization and extraction."""
 
-from inqtrix.urls import normalize_url, extract_urls
+from inqtrix.urls import normalize_url, extract_urls, count_allowed_links
 
 
 class TestNormalizeUrl:
@@ -77,3 +77,25 @@ class TestExtractUrls:
         result = extract_urls(text)
         assert len(result) == 1
         assert "example.com/page" in result[0]
+
+
+class TestCountAllowedLinks:
+
+    def test_counts_unique_urls(self):
+        allowed = {"https://example.com/a", "https://example.com/b"}
+        answer = "[1](https://example.com/a) foo [2](https://example.com/a) bar [3](https://example.com/b)"
+        assert count_allowed_links(answer, allowed) == 2
+
+    def test_ignores_non_allowed(self):
+        allowed = {"https://example.com/a"}
+        answer = "[1](https://example.com/a) [2](https://other.com/b)"
+        assert count_allowed_links(answer, allowed) == 1
+
+    def test_empty_answer(self):
+        assert count_allowed_links("", {"https://example.com"}) == 0
+
+    def test_empty_allowed(self):
+        assert count_allowed_links("[1](https://example.com)", set()) == 0
+
+    def test_no_links(self):
+        assert count_allowed_links("plain text", {"https://example.com"}) == 0

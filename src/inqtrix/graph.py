@@ -26,6 +26,7 @@ from langgraph.graph import END, StateGraph
 from inqtrix.exceptions import AgentRateLimited
 from inqtrix.providers import ProviderContext
 from inqtrix.result import ResearchResult, ResearchResultExportOptions
+from inqtrix.runtime_logging import log_run_start
 from inqtrix.settings import AgentSettings
 from inqtrix.state import AgentState, emit_progress, initial_state
 from inqtrix.strategies import StrategyContext
@@ -200,6 +201,14 @@ def run(
         prev_session,
         max_total_seconds=settings.max_total_seconds,
     )
+    log_run_start(
+        question=question,
+        history=history,
+        prev_session=prev_session,
+        providers=providers,
+        settings=settings,
+        run_mode="run",
+    )
 
     t0 = time.monotonic()
     try:
@@ -342,6 +351,14 @@ def run_test(
     state = initial_state(
         question,
         max_total_seconds=settings.max_total_seconds,
+    )
+    log_run_start(
+        question=question,
+        history="",
+        prev_session=None,
+        providers=providers,
+        settings=settings,
+        run_mode="run_test",
     )
 
     t0 = time.monotonic()

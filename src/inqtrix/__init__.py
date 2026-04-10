@@ -43,8 +43,9 @@ from inqtrix.providers_anthropic import AnthropicLLM
 from inqtrix.providers_azure import AzureOpenAILLM
 from inqtrix.providers_brave import BraveSearch
 from inqtrix.providers_azure_bing import AzureFoundryBingSearch
+from inqtrix.providers_azure_web_search import AzureFoundryWebSearch
 from inqtrix.providers_bedrock import BedrockLLM
-from inqtrix.exceptions import AzureOpenAIAPIError, AzureFoundryBingAPIError, BedrockAPIError
+from inqtrix.exceptions import AzureOpenAIAPIError, AzureFoundryBingAPIError, AzureFoundryWebSearchAPIError, BedrockAPIError
 from inqtrix.logging_config import configure_logging
 
 # -- Public API (strategies) --
@@ -80,6 +81,8 @@ __all__ = [
     "AzureOpenAIAPIError",
     "AzureFoundryBingSearch",
     "AzureFoundryBingAPIError",
+    "AzureFoundryWebSearch",
+    "AzureFoundryWebSearchAPIError",
     "BraveSearch",
     "BedrockLLM",
     "BedrockAPIError",

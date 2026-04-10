@@ -43,3 +43,9 @@ inqtrix-parity = "inqtrix.parity:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/inqtrix"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+]

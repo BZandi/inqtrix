@@ -296,7 +296,7 @@ class AzureFoundryBingSearch(_NonFatalNoticeMixin, SearchProvider):
             )
             self._set_nonfatal_notice(
                 f"Azure-Foundry-Bing-Suche fehlgeschlagen fuer Query "
-                f"'{query[:80]}'; leeres Ergebnis wird weiterverwendet."
+                f"'{query[:80]}': {exc}; leeres Ergebnis wird weiterverwendet."
             )
             return dict(_EMPTY_RESULT)
 

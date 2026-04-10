@@ -272,6 +272,8 @@ def classify(
         "timestamp": time.time(),
         "duration_s": round(time.monotonic() - _t0, 3),
         "decision": "DIRECT" if s["done"] else "SEARCH",
+        "question_length": len(s.get("question", "")),
+        "history_length": len(s.get("history", "")),
         "lang": s["language"],
         "search_lang": s["search_language"],
         "recency": s["recency"] or "NONE",
@@ -280,6 +282,7 @@ def classify(
         "sub_question_count": len(s["sub_questions"]),
         "risk_score": s["risk_score"],
         "high_risk": s["high_risk"],
+        "followup_seeded": bool(s.get("_is_followup")),
         "model": classify_model,
         "required_aspects": s.get("required_aspects", []),
     }, testing_mode=settings.testing_mode)
@@ -538,6 +541,9 @@ def plan(
         "duration_s": round(time.monotonic() - _t0, 3),
         "round": s["round"],
         "new_queries": new_q,
+        "new_query_count": len(new_q),
+        "added_queries": added,
+        "done_no_new_queries": added == 0,
         "quality_site_queries": [q for q in new_q if (q or "").lower().startswith("site:")],
         "total_queries": len(s["queries"]),
         "required_aspects": s.get("required_aspects", []),
@@ -632,6 +638,7 @@ def search(
     # When the query contains an explicit `site:...`, we use the
     # Perplexity domain filter as an allow-list for that domain.
     _base_domain_filter = LOW_QUALITY_DOMAINS
+    _collect_query_details = settings.testing_mode or log.isEnabledFor(logging.DEBUG)
 
     def _consume_nonfatal_notice(obj: object) -> str | None:
         consumer = getattr(obj, "consume_nonfatal_notice", None)
@@ -656,10 +663,13 @@ def search(
     if s["round"] == 0:
         search_kwargs["return_related"] = True
 
+    _query_domain_filters = [_domain_filter_for_query(q) for q in new_q]
+
     # Parallel search
-    def _search_one(q: str) -> dict[str, Any]:
+    def _search_one(item: tuple[str, list[str] | None]) -> dict[str, Any]:
+        q, domain_filter = item
         result = providers.search.search(
-            q, domain_filter=_domain_filter_for_query(q), **search_kwargs)
+            q, domain_filter=domain_filter, **search_kwargs)
         warning = _consume_nonfatal_notice(providers.search)
         if warning:
             result = dict(result)
@@ -669,7 +679,25 @@ def search(
     _n_workers = min(len(new_q), settings.first_round_queries)
 
     with ThreadPoolExecutor(max_workers=_n_workers) as ex:
-        results = list(ex.map(_search_one, new_q))
+        results = list(ex.map(_search_one, zip(new_q, _query_domain_filters)))
+
+    _query_details: list[dict[str, Any]] = []
+    if _collect_query_details:
+        for _qi, q in enumerate(new_q):
+            r = results[_qi]
+            _detail: dict[str, Any] = {
+                "query": q,
+                "domain_filter": _query_domain_filters[_qi] or [],
+                "provider_notice": r.get("_nonfatal_notice") or "",
+                "answer_length": len(r.get("answer", "") or ""),
+                "citation_count": len(r.get("citations", []) or []),
+                "related_question_count": len(r.get("related_questions", []) or []),
+                "prompt_tokens": r.get("_prompt_tokens", 0),
+                "completion_tokens": r.get("_completion_tokens", 0),
+            }
+            if r.get("citations"):
+                _detail["urls"] = [normalize_url(u) for u in r.get("citations", [])[:5]]
+            _query_details.append(_detail)
 
     _search_fallbacks = sum(1 for r in results if r.get("_nonfatal_notice"))
     if _search_fallbacks:
@@ -693,6 +721,7 @@ def search(
 
     _summarize_results: dict[int, tuple[str, int, int]] = {}
     _summarize_fallbacks = 0
+    _summarize_warnings: dict[int, str] = {}
     if _summarize_inputs:
         def _do_summarize(item: tuple[int, str]) -> tuple[int, tuple[str, int, int], str | None]:
             idx, text = item
@@ -704,6 +733,7 @@ def search(
                 _summarize_results[idx] = result_tuple
                 if warning:
                     _summarize_fallbacks += 1
+                    _summarize_warnings[idx] = warning
 
     if _summarize_fallbacks:
         emit_progress(
@@ -726,6 +756,7 @@ def search(
 
     _claim_results: dict[int, tuple[list[dict[str, Any]], int, int]] = {}
     _claim_fallbacks = 0
+    _claim_warnings: dict[int, str] = {}
     if _claim_inputs:
         def _do_claim_extract(
             item: tuple[int, str, list[str]],
@@ -744,6 +775,7 @@ def search(
                 _claim_results[idx] = result_tuple
                 if warning:
                     _claim_fallbacks += 1
+                    _claim_warnings[idx] = warning
 
     if _claim_fallbacks:
         emit_progress(
@@ -761,7 +793,7 @@ def search(
     focus_stems = strategies.claim_consolidation.focus_stems_from_question(
         s.get("question", ""))
     sources_found = 0
-    _sources_summary: list[dict[str, Any]] = []   # for iteration log
+    _sources_summary: list[dict[str, Any]] = []
     for _qi, r in enumerate(results):
         if not r["answer"]:
             continue
@@ -815,16 +847,17 @@ def search(
         if len(s["claim_ledger"]) > 400:
             s["claim_ledger"] = s["claim_ledger"][-400:]
 
-        # Collect summary for iteration log (testing mode)
-        if settings.testing_mode:
-            _entry: dict[str, Any] = {
+        if _collect_query_details:
+            _entry = dict(_query_details[_qi]) if _qi < len(_query_details) else {
                 "query": new_q[_qi] if _qi < len(new_q) else "?",
-                "summary": facts,
-                "claims_extracted": len(extracted_claims),
-                "claims_kept": kept_claims,
             }
-            if r["citations"]:
-                _entry["urls"] = [normalize_url(u) for u in r["citations"][:5]]
+            _entry["summary"] = facts
+            _entry["claims_extracted"] = len(extracted_claims)
+            _entry["claims_kept"] = kept_claims
+            if _qi in _summarize_warnings:
+                _entry["summarize_notice"] = _summarize_warnings[_qi]
+            if _qi in _claim_warnings:
+                _entry["claim_notice"] = _claim_warnings[_qi]
             if extracted_claims:
                 _entry["claims_sample"] = [
                     str(c.get("claim_text", "")).strip()
@@ -898,8 +931,19 @@ def search(
         "timestamp": time.time(),
         "duration_s": round(time.monotonic() - _t0, 3),
         "round": s["round"] - 1,
+        "worker_count": _n_workers,
         "queries_executed": len(new_q),
         "queries": new_q,
+        "search_parameters": {
+            "search_context_size": search_kwargs.get("search_context_size", "high"),
+            "recency_filter": search_kwargs.get("recency_filter") or "",
+            "language_filter": search_kwargs.get("language_filter", []),
+            "search_mode": search_kwargs.get("search_mode") or "",
+            "return_related": bool(search_kwargs.get("return_related")),
+        },
+        "search_fallbacks": _search_fallbacks,
+        "summarize_fallbacks": _summarize_fallbacks,
+        "claim_fallbacks": _claim_fallbacks,
         "sources_found": sources_found,
         "total_citations": len(s["all_citations"]),
         "context_blocks": len(s["context"]),
@@ -1183,12 +1227,16 @@ def evaluate(
         "duration_s": round(time.monotonic() - _t0, 3),
         "round": s["round"],
         "confidence": conf,
+        "confidence_stop_target": settings.confidence_stop,
         "gaps": s.get("gaps", ""),
         "competing_events": s.get("competing_events", ""),
         "stagnation_detected": _stagnation_detected,
         "falsification_triggered": s.get("falsification_triggered", False),
         "evidence_consistency": s.get("evidence_consistency", 0),
         "evidence_sufficiency": s.get("evidence_sufficiency", 0),
+        "verified_claims": verified_claims,
+        "contested_claims": contested_claims,
+        "unverified_claims": unverified_claims,
         "source_tier_counts": s.get("source_tier_counts", {}),
         "source_quality_score": s.get("source_quality_score", 0.0),
         "claim_status_counts": s.get("claim_status_counts", {}),
@@ -1203,6 +1251,9 @@ def evaluate(
         "utility_stop": _utility_stop,
         "plateau_stop": _plateau_stop,
         "context_blocks": len(s["context"]),
+        "stop_by_confidence": conf >= settings.confidence_stop,
+        "stop_by_round_limit": s["round"] >= settings.max_rounds,
+        "stop_by_existing_done": bool(s.get("done")),
         "done": s["done"],
     }
     if settings.testing_mode and _eval_raw:
@@ -1242,9 +1293,11 @@ def answer(
         citations,
         max_items=settings.answer_prompt_citations_max,
     )
+    prompt_citations_used_fallback = False
     if not prompt_citations and citations:
         fallback_n = min(25, settings.answer_prompt_citations_max)
         prompt_citations = citations[:fallback_n]
+        prompt_citations_used_fallback = True
 
     # Assemble state_data dict for build_answer_system_prompt
     state_data: dict[str, Any] = {
@@ -1269,6 +1322,16 @@ def answer(
         "_prev_answer": s.get("_prev_answer", ""),
     }
     system = build_answer_system_prompt(state_data)
+    fallback_model = (
+        providers.llm.models.effective_evaluate_model
+        if (
+            providers.llm.models.effective_evaluate_model
+            and providers.llm.models.effective_evaluate_model != providers.llm.models.reasoning_model
+        )
+        else None
+    )
+    fallback_attempted = False
+    fallback_succeeded = False
 
     try:
         s["answer"] = providers.llm.complete(
@@ -1284,16 +1347,9 @@ def answer(
             s["answer"] = "Die Anfrage konnte aufgrund eines Zeitlimits nicht bearbeitet werden. Bitte erneut versuchen."
     except (OpenAIError, AnthropicAPIError, BedrockAPIError) as e:
         log.error("Finale Antwort fehlgeschlagen: %s", e)
-        fallback_model = (
-            providers.llm.models.effective_evaluate_model
-            if (
-                providers.llm.models.effective_evaluate_model
-                and providers.llm.models.effective_evaluate_model != providers.llm.models.reasoning_model
-            )
-            else None
-        )
         if fallback_model:
             try:
+                fallback_attempted = True
                 emit_progress(
                     s, f"Finale Antwort fehlgeschlagen — Fallback-Modell {fallback_model}")
                 s["answer"] = providers.llm.complete(
@@ -1303,6 +1359,7 @@ def answer(
                     model=fallback_model,
                     state=s,
                 )
+                fallback_succeeded = True
             except (OpenAIError, AgentTimeout, AnthropicAPIError, BedrockAPIError) as e2:
                 log.error("Finale Antwort-Fallback fehlgeschlagen (%s): %s", fallback_model, e2)
                 if ctx:
@@ -1323,18 +1380,22 @@ def answer(
     # Quick citation guardrail: remove non-allowed links.
     removed_link_count = 0
     allowed_citation_urls = set(prompt_citations)
+    appended_sources_footer = False
+    allowed_link_count = 0
     if allowed_citation_urls and s.get("answer"):
         s["answer"], removed_link_count = sanitize_answer_links(
             s["answer"], allowed_citation_urls)
         if removed_link_count:
             log.info("TRACE answer: removed %d non-allowed links", removed_link_count)
             emit_progress(s, f"{removed_link_count} nicht-zugelassene Links entfernt")
-        if count_allowed_links(s["answer"], allowed_citation_urls) == 0:
+        allowed_link_count = count_allowed_links(s["answer"], allowed_citation_urls)
+        if allowed_link_count == 0:
             fallback_bar = " | ".join(
                 f"[{i}]({url})" for i, url in enumerate(prompt_citations[:5], 1)
             )
             if fallback_bar:
                 s["answer"] += f"\n\n**Quellen:** {fallback_bar}"
+                appended_sources_footer = True
 
     # Append stats footer
     elapsed = time.monotonic() - s.get("start_time", time.monotonic())
@@ -1348,7 +1409,10 @@ def answer(
 
     stats_parts = []
     if n_sources:
-        stats_parts.append(f"{n_sources} Quellen")
+        if 0 < allowed_link_count < n_sources:
+            stats_parts.append(f"{n_sources} Quellen ({allowed_link_count} verlinkt)")
+        else:
+            stats_parts.append(f"{n_sources} Quellen")
     if n_queries:
         stats_parts.append(f"{n_queries} Suchen")
     if n_rounds:
@@ -1361,9 +1425,11 @@ def answer(
     s["answer"] += f"\n\n---\n*{stats_line}*"
 
     log.info(
-        "TRACE answer: length=%d citations=%d rounds=%d elapsed=%.1fs confidence=%d",
-        len(s["answer"]), n_sources, n_rounds, elapsed, conf,
+        "TRACE answer: length=%d citations=%d prompt_citations=%d linked=%d rounds=%d elapsed=%.1fs confidence=%d",
+        len(s["answer"]), n_sources, len(
+            prompt_citations), allowed_link_count, n_rounds, elapsed, conf,
     )
+    log.debug("ANSWER text:\n%s", s["answer"])
 
     append_iteration_log(s, {
         "node": "answer",
@@ -1372,7 +1438,15 @@ def answer(
         "answer_length": len(s["answer"]),
         "citation_count": n_sources,
         "prompt_citation_count": len(prompt_citations),
+        "prompt_citations": prompt_citations[:10],
+        "prompt_citations_used_fallback": prompt_citations_used_fallback,
         "removed_non_allowed_links": removed_link_count,
+        "allowed_link_count": allowed_link_count,
+        "appended_sources_footer": appended_sources_footer,
+        "fallback_model": fallback_model or "",
+        "fallback_attempted": fallback_attempted,
+        "fallback_succeeded": fallback_succeeded,
+        "stats_line": stats_line,
         "rounds": n_rounds,
         "elapsed_total_s": round(elapsed, 1),
         "confidence": conf,

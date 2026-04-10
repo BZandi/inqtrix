@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import copy
-import logging
 import time
 from queue import Queue
 from typing import Any, TypedDict
 
 from inqtrix.constants import MAX_TOTAL_SECONDS
-
-log = logging.getLogger("inqtrix")
+from inqtrix.runtime_logging import log_iteration_entry
 
 
 class AgentState(TypedDict):
@@ -186,9 +184,11 @@ def emit_progress(s: dict, message: str) -> None:
 
 
 def append_iteration_log(s: dict, entry: dict[str, Any], *, testing_mode: bool = False) -> None:
-    """Add an iteration log entry (only in testing mode)."""
+    """Add an iteration log entry and mirror it into debug logs."""
+    materialized_entry = copy.deepcopy(entry)
     if testing_mode:
-        s["iteration_logs"].append(entry)
+        s["iteration_logs"].append(materialized_entry)
+    log_iteration_entry(materialized_entry)
 
 
 def track_tokens(s: dict, response: Any) -> None:

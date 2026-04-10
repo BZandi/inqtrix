@@ -63,14 +63,15 @@ def sanitize_answer_links(answer: str, allowed_urls: set[str]) -> tuple[str, int
 
 
 def count_allowed_links(answer: str, allowed_urls: set[str]) -> int:
-    """Count allowed markdown links in the answer."""
+    """Count unique allowed markdown links in the answer."""
     if not answer or not allowed_urls:
         return 0
-    count = 0
+    seen: set[str] = set()
     for m in _MARKDOWN_LINK_RE.finditer(answer):
-        if normalize_url(m.group(2)) in allowed_urls:
-            count += 1
-    return count
+        normalized = normalize_url(m.group(2))
+        if normalized in allowed_urls:
+            seen.add(normalized)
+    return len(seen)
 
 
 def domain_from_url(url: str) -> str:

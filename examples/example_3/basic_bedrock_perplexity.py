@@ -33,7 +33,7 @@ Prerequisites:
 
 Run with::
 
-    uv run python examples/example_1/basic_bedrock_perplexity.py
+    uv run python examples/example_3/basic_bedrock_perplexity.py
 """
 
 from __future__ import annotations

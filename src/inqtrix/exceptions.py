@@ -160,3 +160,39 @@ class AzureFoundryBingAPIError(RuntimeError):
         final_message = message.strip() if message else str(
             original or "Unbekannter Azure-Foundry-Bing-Fehler")
         super().__init__(f"{header}: {final_message}")
+
+
+class AzureFoundryWebSearchAPIError(RuntimeError):
+    """Raised when an Azure Foundry Web Search (Responses API) call fails."""
+
+    def __init__(
+        self,
+        *,
+        agent_name: str,
+        status_code: int | None = None,
+        error_code: str = "",
+        message: str = "",
+        request_id: str | None = None,
+        original: Exception | None = None,
+    ) -> None:
+        self.agent_name = agent_name
+        self.status_code = status_code
+        self.error_code = error_code
+        self.request_id = request_id
+        self.original = original
+
+        detail_parts: list[str] = []
+        if status_code is not None:
+            detail_parts.append(f"HTTP {status_code}")
+        if error_code:
+            detail_parts.append(error_code)
+        if request_id:
+            detail_parts.append(f"request-id={request_id}")
+
+        header = f"Azure-Foundry-WebSearch-Aufruf fehlgeschlagen (agent={agent_name})"
+        if detail_parts:
+            header = f"{header} [{' | '.join(detail_parts)}]"
+
+        final_message = message.strip() if message else str(
+            original or "Unbekannter Azure-Foundry-WebSearch-Fehler")
+        super().__init__(f"{header}: {final_message}")

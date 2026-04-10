@@ -2,6 +2,36 @@
 
 Architecture
 ------------
+This example combines two independent Azure components directly:
+
+1. **Sprachmodell / Reasoning** -- via ``AzureOpenAILLM``
+2. **Websuche / Grounding** -- via ``AzureFoundryBingSearch``
+
+Recommended validation order
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Before using this combined example, validate both components separately:
+
+- ``examples/example_4/basic_test_component_azure_llm.py``
+- ``examples/example_4/basic_test_component_azure_bing_search.py``
+- ``examples/example_4/basic_test_component_azure_web_search.py``
+
+Related combined example:
+
+- ``examples/example_4/basic_azure_web.py`` shows the same full stack,
+  but with ``AzureFoundryWebSearch`` instead of ``AzureFoundryBingSearch``.
+
+Why three smoke tests?
+
+- ``basic_test_component_azure_llm.py`` validates the Azure OpenAI reasoning path.
+- ``basic_test_component_azure_bing_search.py`` validates the classic Bing Grounding
+    search-agent path used by THIS file.
+- ``basic_test_component_azure_web_search.py`` validates the newer Foundry Web Search
+    tool path (Responses API).  It is useful for comparison, but it is
+    NOT the search provider used by this file.
+
+This combined script itself uses the first two components only:
+``AzureOpenAILLM`` + ``AzureFoundryBingSearch``.
+
 This example calls two independent Azure services directly:
 
 1. **Azure OpenAI v1 Chat Completions API** -- via ``AzureOpenAILLM``,
@@ -87,18 +117,18 @@ Required environment variables (in .env or process env):
 - AZURE_OPENAI_API_KEY          (for LLM -- API-key auth)
 - AZURE_OPENAI_ENDPOINT         (e.g. https://mein-openai.openai.azure.com/)
 - AZURE_OPENAI_DEPLOYMENT_NAME  (the deployment name, NOT the model name)
-- AZURE_AI_PROJECT_ENDPOINT     (e.g. https://mein-projekt.services.ai.azure.com/api)
+- AZURE_AI_PROJECT_ENDPOINT     (e.g. https://mein-projekt.services.ai.azure.com/api/projects/mein-projekt)
 - BING_AGENT_ID                 (agent ID from step 4 above)
 
 Optional:
 - AZURE_OPENAI_SUMMARIZE_DEPLOYMENT_NAME  (cheaper deployment for summarisation)
-- AZURE_TENANT_ID, AZURE_CLIENT_ID_DEV, AZURE_CLIENT_SECRET_DEV  (Service Principal)
+- AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET  (Service Principal)
 - BING_PROJECT_CONNECTION_ID    (only needed for create_agent() path)
 
 Run with::
 
     uv sync
-    uv run python examples/example_1/basic_azure_bing.py
+    uv run python examples/example_4/basic_azure_bing.py
 """
 
 from __future__ import annotations
@@ -169,8 +199,9 @@ def main() -> None:
 
     # -- LLM Provider ---------------------------------------------------------
     #
-    # AzureOpenAILLM -- identical to basic_azure_perplexity.py.
-    # See that example for detailed auth documentation.
+    # AzureOpenAILLM is the same component that is smoke-tested in:
+    #   examples/example_4/basic_test_component_azure_llm.py
+    # Test that file first if the combined setup fails.
     #
     # Option A: API Key (default)
     azure_api_key = _require_env("AZURE_OPENAI_API_KEY")
@@ -188,8 +219,8 @@ def main() -> None:
     #
     # credential = ClientSecretCredential(
     #     tenant_id=os.environ["AZURE_TENANT_ID"],
-    #     client_id=os.environ["AZURE_CLIENT_ID_DEV"],
-    #     client_secret=os.environ["AZURE_CLIENT_SECRET_DEV"],
+    #     client_id=os.environ["AZURE_CLIENT_ID"],
+    #     client_secret=os.environ["AZURE_CLIENT_SECRET"],
     # )
     # token_provider = get_bearer_token_provider(
     #     credential,
@@ -203,10 +234,30 @@ def main() -> None:
     #     summarize_model=azure_summarize_deployment,
     # )
 
+    # -- Option C: Existing token provider -------------------------------------
+    #
+    # If you already created a bearer-token provider elsewhere in your code,
+    # pass it directly to the constructor.  This is useful in larger
+    # Baukasten setups where auth is centralised.
+    #
+    # llm = AzureOpenAILLM(
+    #     azure_endpoint=azure_endpoint,
+    #     azure_ad_token_provider=existing_token_provider,
+    #     default_model=azure_deployment,
+    #     summarize_model=azure_summarize_deployment,
+    # )
+
     # -- Search Provider -------------------------------------------------------
     #
-    # AzureFoundryBingSearch replaces PerplexitySearch from the
-    # basic_azure_perplexity.py example.  Key differences:
+    # AzureFoundryBingSearch is the same component that is smoke-tested in:
+    #   examples/example_4/basic_test_component_azure_bing_search.py
+    # Test that file first if the combined setup fails.
+    #
+    # This file intentionally uses the classic Bing Grounding agent path,
+    # not the newer Responses-API web-search path from:
+    #   examples/example_4/basic_test_component_azure_web_search.py
+    #
+    # Compared with PerplexitySearch, key differences are:
     #
     # - PerplexitySearch: one API call per search, all parameters per call.
     # - AzureFoundryBingSearch: reuses a pre-created Azure Foundry Agent
@@ -234,8 +285,10 @@ def main() -> None:
         agent_id=bing_agent_id,
         # For Service Principal auth, pass credential or individual fields:
         # tenant_id=os.environ["AZURE_TENANT_ID"],
-        # client_id=os.environ["AZURE_CLIENT_ID_DEV"],
-        # client_secret=os.environ["AZURE_CLIENT_SECRET_DEV"],
+        # client_id=os.environ["AZURE_CLIENT_ID"],
+        # client_secret=os.environ["AZURE_CLIENT_SECRET"],
+        # Or pass a prebuilt credential object in larger Baukasten setups:
+        # credential=existing_credential,
     )
 
     # -- Option B: Create the agent on the fly (one-time setup) ----------------

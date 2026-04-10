@@ -88,3 +88,75 @@ class BedrockAPIError(RuntimeError):
 
         final_message = message.strip() if message else str(original or "Unbekannter Bedrock-Fehler")
         super().__init__(f"{header}: {final_message}")
+
+
+class AzureOpenAIAPIError(RuntimeError):
+    """Raised when an Azure OpenAI API call fails."""
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        status_code: int | None = None,
+        error_code: str = "",
+        message: str = "",
+        request_id: str | None = None,
+        original: Exception | None = None,
+    ) -> None:
+        self.model = model
+        self.status_code = status_code
+        self.error_code = error_code
+        self.request_id = request_id
+        self.original = original
+
+        detail_parts: list[str] = []
+        if status_code is not None:
+            detail_parts.append(f"HTTP {status_code}")
+        if error_code:
+            detail_parts.append(error_code)
+        if request_id:
+            detail_parts.append(f"request-id={request_id}")
+
+        header = f"Azure-OpenAI-Aufruf fehlgeschlagen ({model})"
+        if detail_parts:
+            header = f"{header} [{' | '.join(detail_parts)}]"
+
+        final_message = message.strip() if message else str(
+            original or "Unbekannter Azure-OpenAI-Fehler")
+        super().__init__(f"{header}: {final_message}")
+
+
+class AzureFoundryBingAPIError(RuntimeError):
+    """Raised when an Azure Foundry Bing Search agent call fails."""
+
+    def __init__(
+        self,
+        *,
+        agent_id: str,
+        status_code: int | None = None,
+        error_code: str = "",
+        message: str = "",
+        request_id: str | None = None,
+        original: Exception | None = None,
+    ) -> None:
+        self.agent_id = agent_id
+        self.status_code = status_code
+        self.error_code = error_code
+        self.request_id = request_id
+        self.original = original
+
+        detail_parts: list[str] = []
+        if status_code is not None:
+            detail_parts.append(f"HTTP {status_code}")
+        if error_code:
+            detail_parts.append(error_code)
+        if request_id:
+            detail_parts.append(f"request-id={request_id}")
+
+        header = f"Azure-Foundry-Bing-Aufruf fehlgeschlagen (agent={agent_id})"
+        if detail_parts:
+            header = f"{header} [{' | '.join(detail_parts)}]"
+
+        final_message = message.strip() if message else str(
+            original or "Unbekannter Azure-Foundry-Bing-Fehler")
+        super().__init__(f"{header}: {final_message}")

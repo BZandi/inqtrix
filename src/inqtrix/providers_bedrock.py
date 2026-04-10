@@ -28,9 +28,9 @@ Key design decisions mirror :mod:`providers_anthropic`:
   thinking tokens inside ``maxTokens``.  The provider auto-raises
   the budget to a safe minimum when thinking is enabled.
 
-Requires ``boto3`` (optional dependency)::
+Requires ``boto3``::
 
-    uv sync --extra bedrock
+    uv sync
 """
 
 from __future__ import annotations
@@ -49,16 +49,10 @@ from inqtrix.providers import LLMProvider, LLMResponse, _NonFatalNoticeMixin, _c
 from inqtrix.settings import ModelSettings
 from inqtrix.state import track_tokens
 
-try:
-    import boto3  # type: ignore[import-untyped]
-    from botocore.config import Config as BotoConfig  # type: ignore[import-untyped]
-    from botocore.exceptions import ClientError  # type: ignore[import-untyped]
-    # type: ignore[import-untyped]
-    from botocore.exceptions import ConnectionError as BotoConnectionError
-
-    _HAS_BOTO3 = True
-except ImportError:
-    _HAS_BOTO3 = False
+import boto3  # type: ignore[import-untyped]
+from botocore.config import Config as BotoConfig  # type: ignore[import-untyped]
+from botocore.exceptions import ClientError  # type: ignore[import-untyped]
+from botocore.exceptions import ConnectionError as BotoConnectionError  # type: ignore[import-untyped]
 
 log = logging.getLogger("inqtrix")
 
@@ -140,11 +134,6 @@ class BedrockLLM(_NonFatalNoticeMixin, LLMProvider):
         temperature: float | None = None,
         thinking: dict[str, Any] | None = None,
     ) -> None:
-        if not _HAS_BOTO3:
-            raise ImportError(
-                "boto3 is required for BedrockLLM.  "
-                "Install it with: uv sync --extra bedrock"
-            )
         if temperature is not None and thinking is not None:
             raise ValueError(
                 "temperature and thinking are mutually exclusive — "

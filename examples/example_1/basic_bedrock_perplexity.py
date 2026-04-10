@@ -27,7 +27,7 @@ Required environment variables (in .env or process env):
 - AWS_REGION           (optional — defaults to eu-central-1)
 
 Prerequisites:
-- ``boto3`` must be installed: ``uv sync --extra bedrock``
+- ``boto3`` must be installed: ``uv sync``
 - The AWS profile must have ``bedrock:InvokeModel`` permission
 - The requested models must be enabled in the target region
 

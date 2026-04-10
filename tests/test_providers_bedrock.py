@@ -69,8 +69,7 @@ def mock_boto3():
     mock_session.client.return_value = mock_client
 
     with patch("inqtrix.providers_bedrock.boto3") as mock_boto3_mod, \
-            patch("inqtrix.providers_bedrock.BotoConfig"), \
-            patch("inqtrix.providers_bedrock._HAS_BOTO3", True):
+            patch("inqtrix.providers_bedrock.BotoConfig"):
         mock_boto3_mod.Session.return_value = mock_session
         from inqtrix.providers_bedrock import BedrockLLM
         yield BedrockLLM, mock_client

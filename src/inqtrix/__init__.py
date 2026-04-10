@@ -40,9 +40,11 @@ from inqtrix.providers import (
     PerplexitySearch,
 )
 from inqtrix.providers_anthropic import AnthropicLLM
+from inqtrix.providers_azure import AzureOpenAILLM
 from inqtrix.providers_brave import BraveSearch
+from inqtrix.providers_azure_bing import AzureFoundryBingSearch
 from inqtrix.providers_bedrock import BedrockLLM
-from inqtrix.exceptions import BedrockAPIError
+from inqtrix.exceptions import AzureOpenAIAPIError, AzureFoundryBingAPIError, BedrockAPIError
 from inqtrix.logging_config import configure_logging
 
 # -- Public API (strategies) --
@@ -74,6 +76,10 @@ __all__ = [
     "LiteLLM",
     "PerplexitySearch",
     "AnthropicLLM",
+    "AzureOpenAILLM",
+    "AzureOpenAIAPIError",
+    "AzureFoundryBingSearch",
+    "AzureFoundryBingAPIError",
     "BraveSearch",
     "BedrockLLM",
     "BedrockAPIError",

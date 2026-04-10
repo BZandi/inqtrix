@@ -1,0 +1,330 @@
+"""Azure OpenAI v1 + Perplexity Sonar example (no LiteLLM proxy).
+
+Architecture
+------------
+This example calls two independent APIs directly:
+
+1. **Azure OpenAI v1 Chat Completions API** — via ``AzureOpenAILLM``,
+   using the official ``openai`` SDK's generic ``OpenAI`` client
+   against the Azure ``/openai/v1/`` endpoint.
+
+2. **Perplexity Sonar API** — via ``PerplexitySearch``, using the
+   OpenAI Python SDK pointed at ``https://api.perplexity.ai``.
+
+Authentication for Azure OpenAI supports three common modes:
+
+* **API key** (default below) — the simplest path.  Get a key from
+  the Azure Portal under your resource's "Keys and Endpoint".
+* **Service Principal (Entra ID)** — for CI/CD, automation, and
+  environments without interactive login.  Requires the
+  ``azure-identity`` package (included in core dependencies).
+
+Use this example when:
+- you have an Azure OpenAI resource with a model deployment
+- you have a direct Perplexity API key
+- you do NOT want to run a LiteLLM proxy
+- you want to use GPT models hosted on Azure (e.g. EU region)
+
+Required environment variables (in .env or process env):
+- PERPLEXITY_API_KEY
+- AZURE_OPENAI_API_KEY          (for API-key auth)
+- AZURE_OPENAI_ENDPOINT         (e.g. https://mein-openai.openai.azure.com/)
+- AZURE_OPENAI_DEPLOYMENT_NAME  (the deployment name, NOT the model name)
+
+Optional:
+- AZURE_OPENAI_SUMMARIZE_DEPLOYMENT_NAME  (cheaper deployment for summarisation)
+- HTTPS_PROXY                             (for corporate proxy environments)
+
+For Service Principal auth (instead of API key):
+- AZURE_TENANT_ID
+- AZURE_CLIENT_ID_DEV
+- AZURE_CLIENT_SECRET_DEV
+
+Run with::
+
+    uv run python examples/example_1/basic_azure_perplexity.py
+"""
+
+from __future__ import annotations
+import os
+from dotenv import load_dotenv
+from inqtrix import AgentConfig, AzureOpenAILLM, PerplexitySearch, ResearchAgent
+
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+
+
+load_dotenv()
+
+# ── Logging ──────────────────────────────────────────────────────────
+# File-based logging with automatic secret redaction.  Disabled by
+# default — enable via environment variables to keep terminal clean:
+#
+#   INQTRIX_LOG_ENABLED=true   — write logs to logs/inqtrix_*.log
+#   INQTRIX_LOG_LEVEL=DEBUG    — DEBUG / INFO / WARNING (default: INFO)
+#   INQTRIX_LOG_CONSOLE=true   — also print WARNING+ to stderr
+from inqtrix.logging_config import configure_logging
+
+_log_path = configure_logging(
+    enabled=os.getenv("INQTRIX_LOG_ENABLED", "").lower() == "true",
+    level=os.getenv("INQTRIX_LOG_LEVEL", "INFO"),
+    console=os.getenv("INQTRIX_LOG_CONSOLE", "").lower() == "true",
+)
+if _log_path:
+    print(f"Logging to {_log_path}")
+
+QUESTION = "Was ist der aktuelle Stand der GKV-Reform?"
+
+
+def _print_result(result) -> None:
+    """Pretty-print a ResearchResult."""
+    metrics_line = (
+        f"Confidence: {result.metrics.confidence}/10  |  "
+        f"Sources: {result.metrics.total_citations}  |  "
+        f"Rounds: {result.metrics.rounds}"
+    )
+    console = Console()
+    console.print(Markdown(result.answer))
+    console.print()
+    console.print(Panel(metrics_line, title="Metrics", expand=False))
+
+
+# ── Output mode ──────────────────────────────────────────────────────
+# True  → streaming (live progress messages + word-by-word answer)
+# False → blocking  (waits for the full result, then prints at once)
+USE_STREAMING = True
+
+# Only relevant when USE_STREAMING is True:
+# True  → show intermediate progress messages before the answer
+#          e.g. "Analysiere Frage…", "Plane Suchanfragen (Runde 1/4)…"
+# False → stream only the final answer text, no status updates
+INCLUDE_PROGRESS = True
+
+
+def _require_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
+def main() -> None:
+    perplexity_key = _require_env("PERPLEXITY_API_KEY")
+    azure_endpoint = _require_env("AZURE_OPENAI_ENDPOINT")
+    azure_deployment = _require_env("AZURE_OPENAI_DEPLOYMENT_NAME")
+
+    # Optional: separate cheaper deployment for summarisation
+    azure_summarize_deployment = os.environ.get(
+        "AZURE_OPENAI_SUMMARIZE_DEPLOYMENT_NAME", ""
+    ).strip()
+
+    # ── LLM Provider ────────────────────────────────────────────────
+    #
+    # AzureOpenAILLM calls the Azure OpenAI v1 Chat Completions API via
+    # the official openai SDK's generic OpenAI client.
+    #
+    # Internally, the provider converts the resource endpoint
+    #
+    #   https://<resource>.openai.azure.com/
+    #
+    # into the v1 base URL
+    #
+    #   https://<resource>.openai.azure.com/openai/v1/
+    #
+    # so you do NOT need to manage date-based api-version strings.
+    #
+    # ⚠️  IMPORTANT: The "model" parameter is the DEPLOYMENT NAME you
+    # created in the Azure Portal under "Model Deployments", NOT the
+    # underlying model name (e.g. "gpt-4o").  If your deployment is
+    # called "my-gpt4o-deployment", use that string here.
+    #
+    # Authentication — choose ONE of the two options below:
+    #
+    # ── Option A: API Key (default, uncommented) ────────────────────
+    #
+    # The simplest path.  Get your key from the Azure Portal:
+    # Resource → "Keys and Endpoint" → KEY1 or KEY2.
+    #
+    azure_api_key = _require_env("AZURE_OPENAI_API_KEY")
+
+    llm = AzureOpenAILLM(
+        azure_endpoint=azure_endpoint,
+        api_key=azure_api_key,
+        default_model=azure_deployment,
+        # classify_model="my-gpt4o-mini-deployment",
+        summarize_model=azure_summarize_deployment,
+        # evaluate_model="my-gpt4o-mini-deployment",
+        # token_budget_parameter="max_tokens",  # only if a deployment requires the older field
+        # temperature=0.7,
+    )
+
+    # ── Option B: Service Principal (Entra ID) ──────────────────────
+    #
+    # For CI/CD, automation, or environments without interactive login.
+    # Requires: uv sync
+    #
+    # Uncomment the block below and comment out Option A above.
+    #
+    # from azure.identity import ClientSecretCredential, get_bearer_token_provider
+    #
+    # credential = ClientSecretCredential(
+    #     tenant_id=os.environ["AZURE_TENANT_ID"],
+    #     client_id=os.environ["AZURE_CLIENT_ID_DEV"],
+    #     client_secret=os.environ["AZURE_CLIENT_SECRET_DEV"],
+    # )
+    # token_provider = get_bearer_token_provider(
+    #     credential,
+    #     "https://ai.azure.com/.default",
+    # )
+    #
+    # llm = AzureOpenAILLM(
+    #     azure_endpoint=azure_endpoint,
+    #     azure_ad_token_provider=token_provider,
+    #     default_model=azure_deployment,
+    #     summarize_model=azure_summarize_deployment,
+    # )
+
+    # ── Option C: DefaultAzureCredential (local dev) ────────────────
+    #
+    # Uses your ``az login`` session, VS Code credentials, Managed
+    # Identity, etc.  Simplest for local development.
+    #
+    # from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+    #
+    # token_provider = get_bearer_token_provider(
+    #     DefaultAzureCredential(),
+    #     "https://ai.azure.com/.default",
+    # )
+    #
+    # llm = AzureOpenAILLM(
+    #     azure_endpoint=azure_endpoint,
+    #     azure_ad_token_provider=token_provider,
+    #     default_model=azure_deployment,
+    #     summarize_model=azure_summarize_deployment,
+    # )
+
+    # ── Proxy (optional) ────────────────────────────────────────────
+    #
+    # For corporate environments that route HTTPS traffic through a
+    # proxy.  Uncomment and add proxy_url to the AzureOpenAILLM
+    # constructor above:
+    #
+    #   proxy_url=os.environ.get("HTTPS_PROXY"),
+    #
+    # The provider will create an httpx client with that proxy.
+    # Alternatively, set the HTTPS_PROXY environment variable — the
+    # openai SDK's httpx transport picks it up automatically.
+
+    # ── Search Provider ─────────────────────────────────────────────
+    #
+    # PerplexitySearch pointed directly at the Perplexity Sonar API.
+    # This provider is designed specifically for the Sonar API — other
+    # Perplexity products (Deep Research, Agent API) use different
+    # parameters and endpoints.
+    #
+    # base_url is "https://api.perplexity.ai" (no /v1 suffix — the
+    # OpenAI SDK appends /chat/completions internally).
+    #
+    # The provider auto-detects direct mode from the URL and formats
+    # search parameters (recency, language, domain filters, etc.) as
+    # flat top-level extra_body keys — which is what the Perplexity
+    # API expects.  Through a LiteLLM proxy these would be nested
+    # inside web_search_options instead.
+    #
+    # Model names are Perplexity-native here (sonar-pro, sonar),
+    # not LiteLLM aliases (perplexity-sonar-pro-agent).
+    search = PerplexitySearch(
+        api_key=perplexity_key,
+        base_url="https://api.perplexity.ai",
+        model="sonar-pro",
+    )
+
+    # ── AgentConfig — all available options ──────────────────────────
+    #
+    # Only llm + search are required for explicit setup.  Every other
+    # field has a sensible default.  Uncomment and change only what you
+    # need.  If llm or search are omitted (None), they are auto-created
+    # from environment variables / .env.
+    agent = ResearchAgent(AgentConfig(
+        # -- Providers (None = auto-create from env) --
+        llm=llm,
+        search=search,
+
+        # -- Behaviour --
+        max_rounds=4,                       # max research-loop iterations before forced stop
+        # confidence threshold (1-10) — stop early when reached
+        confidence_stop=8,
+        # max context blocks retained across rounds (older ones pruned)
+        max_context=12,
+        first_round_queries=6,              # number of parallel search queries in first round
+        answer_prompt_citations_max=60,     # max citation URLs forwarded to the answer-synthesis prompt
+        # hard wall-clock deadline for the entire run (seconds).
+        # GPT-4o is typically faster than Opus — 300s is usually enough.
+        # Increase to 600 for very complex questions.
+        max_total_seconds=300,
+        max_question_length=10_000,         # reject questions longer than this (characters)
+
+        # -- Timeouts (per individual LLM/search call, in seconds) --
+        reasoning_timeout=120,              # timeout for reasoning / planning / answer calls
+        search_timeout=60,                  # timeout for each web-search call
+        summarize_timeout=60,               # timeout for each summarise / claim-extraction call
+
+        # -- Risk escalation ──────────────────────────────────────────
+        #
+        # The risk score (0-10) is ALWAYS computed automatically by the
+        # RiskScoringStrategy (regex-based on keywords like "Gesetz",
+        # "Steuer", "Medizin", etc.).
+        #
+        # With AzureOpenAILLM these flags matter only if you configured
+        # classify_model and/or evaluate_model above.  In that case,
+        # high-risk questions can escalate those roles back up to the
+        # stronger default_model.  Summarization always uses
+        # summarize_model regardless of risk.
+        high_risk_score_threshold=4,        # risk score ≥ this triggers high_risk = True
+        high_risk_classify_escalate=True,   # if classify_model is set, high-risk uses default_model instead
+        high_risk_evaluate_escalate=True,   # if evaluate_model is set, high-risk uses default_model instead
+
+        # -- Search cache --
+        search_cache_maxsize=256,           # max cached search results (LRU eviction)
+        search_cache_ttl=3600,              # cache time-to-live in seconds
+
+        # -- Strategies (None = use built-in defaults) ────────────────
+        # Each strategy is a pluggable ABC.  Pass your own implementation
+        # to override the default algorithm for that concern.
+        # source_tiering=None,              # URL → quality-tier mapping
+        # claim_extraction=None,            # extract structured claims from search results
+        # claim_consolidation=None,         # deduplicate and verify claims across rounds
+        # context_pruning=None,             # drop low-relevance context blocks
+        # risk_scoring=None,                # score question risk (0-10)
+        # stop_criteria=None,               # multi-signal heuristic: keep researching or stop?
+    ))
+
+    # ── Run ──────────────────────────────────────────────────────────
+    if USE_STREAMING:
+        # Collect chunks: progress lines go to stdout immediately,
+        # answer text is buffered for a final rich render pass.
+        answer_buf: list[str] = []
+        in_answer = False
+        for chunk in agent.stream(QUESTION, include_progress=INCLUDE_PROGRESS):
+            if not in_answer and chunk == "---\n":
+                in_answer = True
+                continue
+            if in_answer:
+                answer_buf.append(chunk)
+            else:
+                # Progress lines — always printed raw
+                print(chunk, end="", flush=True)
+
+        full_answer = "".join(answer_buf)
+        if full_answer:
+            console = Console()
+            print()  # newline after progress block
+            console.print(Markdown(full_answer))
+    else:
+        result = agent.research(QUESTION)
+        _print_result(result)
+
+
+if __name__ == "__main__":
+    main()

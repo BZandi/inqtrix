@@ -658,24 +658,21 @@ inqtrix/
 ├── result.py            # ResearchResult, Source, Claim, Metrics (Pydantic)
 ├── graph.py             # LangGraph state machine orchestration
 ├── nodes.py             # 5 pipeline nodes (classify, plan, search, evaluate, answer)
-├── providers.py         # LLM + Search provider ABCs and implementations
-├── strategies.py        # 6 pluggable strategy ABCs and defaults
 ├── settings.py          # Pydantic Settings (env-var configuration)
 ├── config.py            # YAML configuration schema and loader
 ├── config_bridge.py     # Bridge: YAML config -> Settings + Providers
-├── state.py             # AgentState TypedDict (48 fields)
+├── state.py             # AgentState TypedDict and session seeding helpers
 ├── prompts.py           # German-language prompt templates
-├── session.py           # In-memory session store for follow-ups
-├── streaming.py         # SSE streaming utilities
-├── routes.py            # FastAPI HTTP endpoints
-├── app.py               # FastAPI application factory
 ├── domains.py           # Domain whitelists for source tiering
 ├── text.py              # Tokenisation, stopwords, normalisation
 ├── urls.py              # URL normalisation, extraction, sanitisation
 ├── json_helpers.py      # Robust JSON parsing from LLM output
 ├── constants.py         # Default timeouts and thresholds
-├── parity.py            # Baseline regression testing utilities
-└── exceptions.py        # AgentTimeout, AgentRateLimited
+├── exceptions.py        # AgentTimeout, AgentRateLimited
+├── providers/           # Provider package (base contracts + concrete adapters)
+├── strategies/          # Strategy package (ABCs + default implementations)
+├── server/              # HTTP server package (app, routes, sessions, streaming)
+└── parity/              # Parity CLI and reporting package
 ```
 
 See [Agent-Architecture.md](Agent-Architecture.md) for the full technical reference.
@@ -684,22 +681,22 @@ See [Agent-Architecture.md](Agent-Architecture.md) for the full technical refere
 
 | Goal | Files to Touch | Architecture Reference |
 |------|---------------|----------------------|
-| Add a new search backend | `providers.py` (implement `SearchProvider` ABC) | [Section 5 — Provider Abstractions](Agent-Architecture.md#5-provider-abstractions) |
-| Add a new LLM backend | `providers.py` (implement `LLMProvider` ABC) | [Section 5](Agent-Architecture.md#5-provider-abstractions) |
-| Change source quality tiers | `strategies.py` (implement `SourceTieringStrategy`), `domains.py` (domain lists) | [Section 13 — Source Tiering](Agent-Architecture.md#13-source-tiering) |
-| Customise claim extraction | `strategies.py` (implement `ClaimExtractionStrategy`) | [Section 14 — Claims](Agent-Architecture.md#14-claim-extraction-and-consolidation) |
-| Customise claim dedup/consolidation | `strategies.py` (implement `ClaimConsolidationStrategy`) | [Section 14](Agent-Architecture.md#14-claim-extraction-and-consolidation) |
-| Change context pruning logic | `strategies.py` (implement `ContextPruningStrategy`) | [Section 6 — Strategies](Agent-Architecture.md#6-strategy-abstractions) |
-| Change risk scoring | `strategies.py` (implement `RiskScoringStrategy`) | [Section 8 — Classify](Agent-Architecture.md#8-node-1-classify) |
-| Change stop/continue heuristics | `strategies.py` (implement `StopCriteriaStrategy`, 10 methods) | [Section 16 — Stop Logic](Agent-Architecture.md#16-evaluation-and-stop-logic) |
+| Add a new search backend | `providers/` (implement `SearchProvider` ABC) | [Section 5 — Provider Abstractions](Agent-Architecture.md#5-provider-abstractions) |
+| Add a new LLM backend | `providers/` (implement `LLMProvider` ABC) | [Section 5](Agent-Architecture.md#5-provider-abstractions) |
+| Change source quality tiers | `strategies/_source_tiering.py`, `domains.py` | [Section 13 — Source Tiering](Agent-Architecture.md#13-source-tiering) |
+| Customise claim extraction | `strategies/_claim_extraction.py` | [Section 14 — Claims](Agent-Architecture.md#14-claim-extraction-and-consolidation) |
+| Customise claim dedup/consolidation | `strategies/_claim_consolidation.py` | [Section 14](Agent-Architecture.md#14-claim-extraction-and-consolidation) |
+| Change context pruning logic | `strategies/_context_pruning.py` | [Section 6 — Strategies](Agent-Architecture.md#6-strategy-abstractions) |
+| Change risk scoring | `strategies/_risk_scoring.py` | [Section 8 — Classify](Agent-Architecture.md#8-node-1-classify) |
+| Change stop/continue heuristics | `strategies/_stop_criteria.py`, `nodes.py` | [Section 16 — Stop Logic](Agent-Architecture.md#16-evaluation-and-stop-logic) |
 | Add/rewire a graph node | `nodes.py` (node function), `graph.py` (wiring) | [Section 7 — State Machine](Agent-Architecture.md#7-state-machine-and-agent-state) |
 | Change prompt templates | `prompts.py` | [Section 12 — Answer](Agent-Architecture.md#12-node-5-answer) |
 | Add new state fields | `state.py` (add to `AgentState` TypedDict) | [Section 7](Agent-Architecture.md#7-state-machine-and-agent-state) |
-| Add a new HTTP endpoint | `routes.py`, `app.py` | [Section 19 — HTTP Server](Agent-Architecture.md#19-http-server-layer) |
+| Add a new HTTP endpoint | `server/routes.py`, `server/app.py` | [Section 19 — HTTP Server](Agent-Architecture.md#19-http-server-layer) |
 | Change timeouts/thresholds | `constants.py` (defaults), `settings.py` (env-var config), `config.py` (YAML schema) | [Section 4 — Configuration](Agent-Architecture.md#4-configuration-system), [Section 17 — Timeouts](Agent-Architecture.md#17-timeout-and-error-architecture) |
-| Change session/follow-up behaviour | `session.py` | [Section 18 — Sessions](Agent-Architecture.md#18-follow-ups-and-session-reuse) |
+| Change session/follow-up behaviour | `server/session.py`, `state.py` | [Section 18 — Sessions](Agent-Architecture.md#18-follow-ups-and-session-reuse) |
 | Add domain allow/blocklists | `domains.py` | [Section 10 — Search](Agent-Architecture.md#10-node-3-search) |
-| Add regression baselines | `parity.py`, `tests/integration/` | [Agent-Architecture.md](Agent-Architecture.md) |
+| Add regression baselines | `parity/`, `tests/integration/` | [Agent-Architecture.md](Agent-Architecture.md) |
 
 All strategy and provider customisations are passed via `AgentConfig` — no subclassing of `ResearchAgent` required. See the examples below.
 

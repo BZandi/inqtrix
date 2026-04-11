@@ -87,7 +87,7 @@ def test_health_reports_provider_aware_status():
     payload = response.json()
     assert payload["status"] == "degraded"
     assert payload["llm"]["provider"] == "_DummyLLM"
-    assert payload["llm"]["status"] == "connected"
+    assert payload["llm"]["status"] == "ready"
     assert payload["search"]["provider"] == "_DummySearch"
     assert payload["search"]["status"] == "unavailable"
 

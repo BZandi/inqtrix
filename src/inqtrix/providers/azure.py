@@ -60,62 +60,30 @@ log = logging.getLogger("inqtrix")
 class AzureOpenAILLM(_NonFatalNoticeMixin, LLMProvider):
     """Call the Azure OpenAI v1 Chat Completions API via the official SDK.
 
-    Parameters
-    ----------
-    azure_endpoint:
-        Azure OpenAI resource endpoint URL, e.g.
-        ``https://mein-openai.openai.azure.com/``.  The provider
-        appends ``/openai/v1/`` automatically.
-    base_url:
-        Full Azure OpenAI v1 base URL, e.g.
-        ``https://mein-openai.openai.azure.com/openai/v1/``.  Provide
-        exactly one of *azure_endpoint* or *base_url*.
-    api_key:
-        Azure OpenAI API key.  **Mutually exclusive** with
-        *azure_ad_token_provider*.
-    azure_ad_token_provider:
-        Callable that returns a bearer token string, obtained from
-        ``azure.identity.get_bearer_token_provider(credential, scope)``.
-        This is passed to the OpenAI client as the ``api_key`` value,
-        which is the recommended Azure OpenAI v1 pattern.
-    default_model:
-        Deployment name for reasoning calls (classify, plan, evaluate,
-        answer).  This is the **deployment name** you created in the
-        Azure Portal — not the underlying model name.
-    classify_model:
-        Optional deployment override for question classification.
-        Falls back to *default_model*.
-    summarize_model:
-        Cheaper deployment for search-result summarisation and claim
-        extraction (called in parallel threads).
-    evaluate_model:
-        Optional deployment override for evidence evaluation.
-        Falls back to *default_model*.
-    default_max_tokens:
-        Output-token budget for reasoning calls.
-    summarize_max_tokens:
-        Output-token budget for summarisation calls.
-    temperature:
-        Sampling temperature (0.0–2.0).
-    token_budget_parameter:
-        Which request field to use for output-token budgeting.
-        ``"max_completion_tokens"`` is the current default because it
-        matches newer Azure/OpenAI semantics and is compatible with
-        reasoning-capable models.  Set ``"max_tokens"`` only if a
-        deployment explicitly requires the older field.
-    proxy_url:
-        Optional HTTPS proxy URL.  When set, creates an ``httpx``
-        client with that proxy and injects it into the
-        client constructor.
-    timeout:
-        Default client-level timeout in seconds.
-    default_headers:
-        Optional headers forwarded on every request.  Useful for
-        preview feature headers when Azure introduces them.
-    request_params:
-        Optional extra parameters merged into reasoning calls.
-    summarize_request_params:
-        Optional extra parameters merged into summarisation calls.
+    Use this provider when your reasoning models are deployed on Azure
+    OpenAI and you want the current v1 endpoint shape instead of the
+    legacy date-based API-version flow. It is a good fit for Azure-native
+    deployments that still want the same OpenAI SDK ergonomics as
+    LiteLLM-backed providers.
+
+    Attributes:
+        _default_model (str): Primary deployment name for reasoning calls.
+        _summarize_model (str): Deployment used for summarize-model helper
+            calls.
+        _default_max_tokens (int): Output-token budget for reasoning
+            requests.
+        _summarize_max_tokens (int): Output-token budget for helper
+            summarization requests.
+        _temperature (float | None): Optional sampling temperature.
+        _token_budget_parameter (Literal["max_completion_tokens", "max_tokens"]):
+            Request field used for output-token budgeting.
+        _request_params (dict[str, Any]): Extra request parameters merged
+            into reasoning calls.
+        _summarize_request_params (dict[str, Any]): Extra request
+            parameters merged into summarize-model calls.
+        _models (ModelSettings): Effective role-to-model mapping exposed
+            to the runtime.
+        _client (OpenAI): Shared SDK client for Azure OpenAI requests.
     """
 
     def __init__(
@@ -140,6 +108,77 @@ class AzureOpenAILLM(_NonFatalNoticeMixin, LLMProvider):
         request_params: Mapping[str, Any] | None = None,
         summarize_request_params: Mapping[str, Any] | None = None,
     ) -> None:
+        """Initialize the Azure OpenAI provider.
+
+        Use the constructor when the reasoning path should run against an
+        Azure OpenAI deployment name rather than a raw model name. Exactly
+        one endpoint input and exactly one authentication path must be
+        supplied. Role-specific deployments and extra request parameters
+        let you optimize cost or compatibility without changing graph code.
+
+        Args:
+            azure_endpoint: Azure OpenAI resource endpoint such as
+                ``"https://my-resource.openai.azure.com/"``. When this is
+                provided, ``base_url`` must be omitted.
+            base_url: Full Azure OpenAI v1 base URL such as
+                ``"https://my-resource.openai.azure.com/openai/v1/"``.
+                When this is provided, ``azure_endpoint`` must be omitted.
+            api_key: Azure OpenAI API key. Do not use this together with
+                ``azure_ad_token_provider``.
+            azure_ad_token_provider: Bearer-token provider from
+                ``azure.identity.get_bearer_token_provider(...)``. Use this
+                for Service Principal, Managed Identity, or other Entra ID
+                flows instead of ``api_key``.
+            default_model: Primary deployment name for classify, plan,
+                evaluate fallback, and answer calls. This must be the Azure
+                deployment name, not the base model name.
+            classify_model: Optional deployment override for question
+                classification. When omitted, classification falls back to
+                ``default_model``.
+            summarize_model: Optional cheaper deployment for parallel
+                summarization and claim extraction. When omitted, helper
+                calls use ``default_model``.
+            evaluate_model: Optional deployment override for evidence
+                evaluation. When omitted, evaluation falls back to
+                ``default_model``.
+            default_max_tokens: Output-token budget for reasoning calls.
+                The default is ``1024``.
+            summarize_max_tokens: Output-token budget for summarize-model
+                helper calls. The default is ``512``.
+            temperature: Optional sampling temperature. The default is
+                ``None``.
+            token_budget_parameter: Which request field to use for output
+                budgets. Keep the default ``"max_completion_tokens"`` for
+                newer deployments and use ``"max_tokens"`` only when a
+                specific deployment still requires the older field.
+            proxy_url: Optional HTTPS proxy URL. When omitted, the default
+                HTTP transport is used.
+            timeout: Default client-level timeout in seconds. The default
+                is ``60.0``.
+            default_headers: Optional headers forwarded on every request,
+                for example preview feature headers.
+            request_params: Optional extra parameters merged into reasoning
+                calls after reserved SDK keys are filtered out.
+            summarize_request_params: Optional extra parameters merged into
+                summarize-model helper calls after reserved SDK keys are
+                filtered out.
+
+        Raises:
+            ValueError: If neither or both of ``azure_endpoint`` and
+                ``base_url`` are provided, if both auth modes are provided,
+                if no auth mode is provided, or if
+                ``token_budget_parameter`` is invalid.
+
+        Example:
+            >>> from inqtrix import AzureOpenAILLM
+            >>> llm = AzureOpenAILLM(
+            ...     azure_endpoint="https://example.openai.azure.com/",
+            ...     api_key="test-key",
+            ...     default_model="my-gpt4o-deployment",
+            ... )
+            >>> llm.models.reasoning_model
+            'my-gpt4o-deployment'
+        """
         if bool(azure_endpoint) == bool(base_url):
             raise ValueError(
                 "Provide exactly one of azure_endpoint or base_url."
@@ -274,6 +313,11 @@ class AzureOpenAILLM(_NonFatalNoticeMixin, LLMProvider):
 
     @property
     def models(self) -> ModelSettings:
+        """Return the effective role-to-model mapping for the runtime.
+
+        Returns:
+            ModelSettings: Resolved deployment names used by graph nodes.
+        """
         return self._models
 
     # -- thinking compatibility --------------------------------------------
@@ -282,6 +326,17 @@ class AzureOpenAILLM(_NonFatalNoticeMixin, LLMProvider):
     # ``provider.without_thinking()`` work without special-casing.
 
     def without_thinking(self):
+        """Return a no-op context manager for graph compatibility.
+
+        Azure OpenAI GPT deployments do not support Anthropic-style
+        extended thinking. This method exists so graph code can call
+        ``provider.without_thinking()`` uniformly across providers without
+        branching on provider type.
+
+        Returns:
+            ContextManager[AzureOpenAILLM]: A ``nullcontext`` wrapping this
+            provider.
+        """
         return nullcontext(self)
 
     # -- LLMProvider interface ---------------------------------------------
@@ -296,6 +351,27 @@ class AzureOpenAILLM(_NonFatalNoticeMixin, LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
     ) -> str:
+        """Generate text through Azure OpenAI and discard token metadata.
+
+        Args:
+            prompt: User-facing input text.
+            system: Optional system instruction.
+            model: Optional deployment override. When omitted, the
+                provider uses ``self._default_model``.
+            timeout: Per-call timeout budget in seconds.
+            state: Optional mutable agent state for token tracking.
+            deadline: Optional absolute monotonic deadline for the full
+                run.
+
+        Returns:
+            str: Visible assistant text for the completion.
+
+        Raises:
+            AgentTimeout: If the full run deadline has elapsed.
+            AgentRateLimited: If Azure returns a fatal rate-limit error.
+            AzureOpenAIAPIError: If the SDK reports a non-rate-limit
+                backend failure.
+        """
         return self.complete_with_metadata(
             prompt,
             system=system,
@@ -315,6 +391,37 @@ class AzureOpenAILLM(_NonFatalNoticeMixin, LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
     ) -> LLMResponse:
+        """Generate text and metadata through Azure OpenAI.
+
+        Use this method for reasoning calls when the runtime wants token
+        accounting in addition to visible content. The method clamps the
+        timeout against the remaining deadline, injects the configured
+        token-budget field, merges optional request parameters, and lets
+        the OpenAI SDK handle retry behavior.
+
+        Args:
+            prompt: User-facing input text.
+            system: Optional system instruction. The default is ``None``.
+            model: Optional deployment override. When omitted, the
+                provider uses ``self._default_model``.
+            timeout: Per-call timeout budget in seconds before deadline
+                clamping. The default is ``REASONING_TIMEOUT``.
+            state: Optional mutable agent state that receives token counts
+                through ``track_tokens()`` when provided.
+            deadline: Optional absolute monotonic deadline for the full
+                run.
+
+        Returns:
+            LLMResponse: Structured response containing visible content,
+            token counts, and the effective deployment label.
+
+        Raises:
+            AgentTimeout: If the full run deadline has already elapsed.
+            AgentRateLimited: If Azure returns HTTP 429 or the SDK raises
+                ``RateLimitError``.
+            AzureOpenAIAPIError: If Azure responds with a non-rate-limit
+                API error or another SDK-level failure occurs.
+        """
         if deadline is not None:
             _check_deadline(deadline)
 
@@ -385,9 +492,27 @@ class AzureOpenAILLM(_NonFatalNoticeMixin, LLMProvider):
         text: str,
         deadline: float | None = None,
     ) -> tuple[str, int, int]:
-        """Thread-safe fact extraction from a search result.
+        """Summarize search text in a thread-safe helper path.
 
-        Falls back to raw text on failure and sets a nonfatal notice.
+        Helper summarization uses the configured summarize deployment and
+        the same token-budget field as reasoning calls. On non-rate-limit
+        failure the method degrades locally to truncated raw text and
+        stores a nonfatal notice for the search node.
+
+        Args:
+            text: Raw search-result text to condense. Blank input returns
+                an empty summary payload immediately.
+            deadline: Optional absolute monotonic deadline for the full
+                run.
+
+        Returns:
+            tuple[str, int, int]: ``(facts_text, prompt_tokens,
+            completion_tokens)``. On fallback, the text becomes the first
+            800 characters of the raw input and both token counts are ``0``.
+
+        Raises:
+            AgentTimeout: If the global deadline has already elapsed.
+            AgentRateLimited: If Azure returns a fatal helper rate limit.
         """
         if not text.strip():
             return ("", 0, 0)
@@ -442,4 +567,9 @@ class AzureOpenAILLM(_NonFatalNoticeMixin, LLMProvider):
             return (text[:800], 0, 0)
 
     def is_available(self) -> bool:
+        """Report whether the provider is configured to attempt requests.
+
+        Returns:
+            bool: ``True`` when the SDK client exists, otherwise ``False``.
+        """
         return self._client is not None

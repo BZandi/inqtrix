@@ -277,7 +277,16 @@ class MultiClientLLMProvider(_NonFatalNoticeMixin, LLMProvider):
             return (text[:800], 0, 0)
 
     def is_available(self) -> bool:
-        return True
+        required_models = {
+            self._models.reasoning_model,
+            self._models.effective_classify_model,
+            self._models.effective_summarize_model,
+            self._models.effective_evaluate_model,
+        }
+        required_models.discard("")
+        return bool(required_models) and all(
+            self._resolver.has_model(model_name) for model_name in required_models
+        )
 
 
 # ------------------------------------------------------------------ #

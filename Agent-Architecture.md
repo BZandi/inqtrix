@@ -45,9 +45,9 @@ flowchart LR
     Agent["ResearchAgent<br/>(agent.py)"]
     Graph["LangGraph<br/>State Machine<br/>(graph.py)"]
     Nodes["5 Nodes<br/>(nodes.py)"]
-    LLM["LLM Provider<br/>(providers.py)"]
-    Search["Search Provider<br/>(providers.py)"]
-    Strat["6 Strategies<br/>(strategies.py)"]
+    LLM["LLM Provider<br/>(providers/)"]
+    Search["Search Provider<br/>(providers/)"]
+    Strat["6 Strategies<br/>(strategies/)"]
 
     User -->|".research(question)"| Agent
     Agent -->|"run()"| Graph
@@ -71,7 +71,7 @@ flowchart LR
 | **Declarative graph** | `GraphConfig` dataclass describes topology; `build_graph()` compiles it |
 | **Typed results** | Pydantic `ResearchResult` with nested metrics |
 | **Lazy initialisation** | `ResearchAgent` creates providers/strategies on first use |
-| **Backwards-compatible** | FastAPI server (`app.py`) still works alongside library API |
+| **Backwards-compatible** | FastAPI server (`server/app.py`) still works alongside library API |
 
 ---
 
@@ -93,11 +93,11 @@ flowchart TD
     end
 
     subgraph "Providers"
-        providers["providers.py"]
+        providers["providers/"]
     end
 
     subgraph "Strategies"
-        strategies["strategies.py"]
+        strategies["strategies/"]
     end
 
     subgraph "Configuration"
@@ -107,10 +107,10 @@ flowchart TD
     end
 
     subgraph "HTTP Layer"
-        app["app.py"]
-        routes["routes.py"]
-        streaming["streaming.py"]
-        session["session.py"]
+        app["server/app.py"]
+        routes["server/routes.py"]
+        streaming["server/streaming.py"]
+        session["server/session.py"]
     end
 
     subgraph "Utilities"
@@ -244,10 +244,10 @@ flowchart TD
     A{"Using ResearchAgent<br/>directly?"}
     A -->|Yes| B{"Custom llm/search objects<br/>passed in AgentConfig?"}
     B -->|Yes| C["Use explicit provider objects"]
-    B -->|No| D["Library env mode:<br/>settings.py reads process env + local .env<br/>providers.py auto-creates"]
+    B -->|No| D["Library env mode:<br/>settings.py reads process env + local .env<br/>providers package auto-creates"]
     A -->|No, using python -m inqtrix| E{"YAML file found<br/>or INQTRIX_CONFIG set?"}
     E -->|Yes, has providers| F["Server YAML mode:<br/>config.py loads YAML + .env<br/>config_bridge.py creates providers"]
-    E -->|No| G["Server env mode:<br/>settings.py reads process env + local .env<br/>providers.py auto-creates"]
+    E -->|No| G["Server env mode:<br/>settings.py reads process env + local .env<br/>providers package auto-creates"]
 ```
 
 Practical implications:
@@ -326,7 +326,7 @@ The `config_bridge.py` module contains `ModelResolver` (per-model client pooling
 
 ## 5. Provider Abstractions
 
-> File: `providers.py`
+> Package: `providers/`
 
 ### LLMProvider ABC
 
@@ -372,7 +372,7 @@ Passed to every node via dependency injection (see [Section 7](#7-state-machine-
 
 ## 6. Strategy Abstractions
 
-> File: `strategies.py`
+> Package: `strategies/`
 
 Six pluggable strategies, each encapsulating a single algorithmic concern:
 
@@ -718,7 +718,7 @@ Length target: 600-1200 words. Markdown links must reference collected citations
 
 ## 13. Source Tiering
 
-> Files: `strategies.py` (`DefaultSourceTiering`), `domains.py`
+> Files: `strategies/_source_tiering.py` (`DefaultSourceTiering`), `domains.py`
 
 ### Tier Classification
 
@@ -742,7 +742,7 @@ Range: 0.1 (all low) to 1.0 (all primary).
 
 ## 14. Claim Extraction and Consolidation
 
-> Files: `strategies.py` (`LLMClaimExtractor`, `DefaultClaimConsolidator`)
+> Files: `strategies/_claim_extraction.py` (`LLMClaimExtractor`), `strategies/_claim_consolidation.py` (`DefaultClaimConsolidator`)
 
 ### Claim Lifecycle
 
@@ -805,7 +805,7 @@ q_claim = (|verified| + 0.5 * |contested|) / |total|
 
 ## 15. Aspect Derivation and Coverage
 
-> File: `strategies.py` (`KeywordRiskScorer`)
+> File: `strategies/_risk_scoring.py` (`KeywordRiskScorer`)
 
 ### Aspect Generation
 
@@ -845,7 +845,7 @@ After each search round, `estimate_aspect_coverage()` re-evaluates coverage usin
 
 ## 16. Evaluation and Stop Logic
 
-> Files: `strategies.py` (`MultiSignalStopCriteria`), `nodes.py` (`evaluate()`)
+> Files: `strategies/_stop_criteria.py` (`MultiSignalStopCriteria`), `nodes.py` (`evaluate()`)
 
 ### Heuristic Cascade
 
@@ -937,7 +937,7 @@ This ensures policy-critical questions are not prematurely abandoned due to low 
 
 ## 17. Timeout and Error Architecture
 
-> Files: `providers.py`, `exceptions.py`
+> Files: `providers/base.py`, `providers/*`, `exceptions.py`
 
 ### Deadline Model
 
@@ -972,11 +972,11 @@ Per-call: min(default_timeout, remaining_until_deadline)
 
 ## 18. Follow-Ups and Session Reuse
 
-> Files: `session.py`, `state.py`
+> Files: `server/session.py`, `state.py`
 
 ```mermaid
 flowchart TD
-    A["User sends messages<br/>with prior assistant responses"] --> B["derive_session_id()<br/>SHA-256 of assistant parts[:200]"]
+    A["User sends messages<br/>with prior assistant responses"] --> B["derive_session_id()<br/>SHA-256 of role-tagged history parts[:200]"]
     B --> C{"Session found?"}
     C -->|Yes| D["Seed state with<br/>20 carry-over fields"]
     D --> E["Set _is_followup=True"]
@@ -998,10 +998,10 @@ flowchart TD
 ### Session ID
 
 ```python
-SHA-256("|".join(assistant_content[:200] for each assistant message))[:16]
+SHA-256("|".join(f"{role}:{content[:200]}" for each user/assistant message))[:24]
 ```
 
-The hash is truncated to **16 hex characters** (64 bits of entropy). Multiple assistant messages are joined with a `|` separator before hashing.
+The hash is truncated to **24 hex characters**. Role-tagged user and assistant messages are joined with a `|` separator before hashing, and the current question is excluded when deriving the lookup ID for a follow-up turn.
 
 The `prospective_session_id()` function computes the ID *including* the current answer, enabling save-before-response-complete.
 
@@ -1009,7 +1009,7 @@ The `prospective_session_id()` function computes the ID *including* the current 
 
 ## 19. HTTP Server Layer
 
-> Files: `app.py`, `routes.py`, `streaming.py`
+> Files: `server/app.py`, `server/routes.py`, `server/streaming.py`
 
 The HTTP server is an **optional layer** on top of the library core. It provides an OpenAI-compatible API.
 

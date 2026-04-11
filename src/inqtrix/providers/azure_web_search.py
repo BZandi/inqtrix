@@ -71,21 +71,24 @@ _EMPTY_RESULT: dict[str, Any] = {
 
 
 class AzureFoundryWebSearch(_NonFatalNoticeMixin, SearchProvider):
-    """Query the web via the Azure Foundry Responses API (Web Search Tool).
+    """Query the web via the Azure Foundry Responses API and Web Search tool.
 
-    The agent must already exist.  Pass its ``agent_name`` (and optionally
-    ``agent_version``) to the constructor.
+    Use this provider when search should run through a pre-created Azure
+    Foundry agent referenced by name and optional version. It is the newer
+    Azure search path compared with ``AzureFoundryBingSearch`` and works
+    through the project-scoped Responses API instead of the older
+    Thread/Run agent service path.
 
-    Authentication (checked in order of priority):
-
-    * **api_key** — a static API key string from the Azure Foundry portal
-      (Project Settings → Keys & Endpoint).  Simplest option.
-    * **credential** — any ``azure-identity`` credential object you built
-      yourself (e.g. ``ManagedIdentityCredential``).
-    * **tenant_id + client_id + client_secret** — builds a
-      ``ClientSecretCredential`` (Service Principal) automatically.
-    * **None of the above** — falls back to ``DefaultAzureCredential``
-      which tries ``az login``, Managed Identity, VS Code sign-in, etc.
+    Attributes:
+        _project_endpoint (str): Azure AI Foundry project endpoint.
+        _agent_name (str): Agent name referenced in the Responses API.
+        _agent_version (str): Optional agent version override.
+        _timeout (float): Per-call timeout budget used before deadline
+            clamping.
+        _credential (Any | None): Resolved Azure credential when the
+            provider authenticates via Entra ID instead of static API key.
+        _client (OpenAI): OpenAI SDK client pointing at the project-scoped
+            Foundry ``/openai/v1/`` endpoint.
     """
 
     def __init__(
@@ -101,6 +104,42 @@ class AzureFoundryWebSearch(_NonFatalNoticeMixin, SearchProvider):
         client_secret: str | None = None,
         timeout: float = 60.0,
     ) -> None:
+        """Initialize the Azure Foundry Web Search provider.
+
+        Use the constructor when a Web Search-capable Foundry agent
+        already exists and should be addressed by name through the
+        Responses API. Authentication is resolved in this order: static
+        ``api_key``, explicit ``credential``, Service Principal fields,
+        then ``DefaultAzureCredential``.
+
+        Args:
+            project_endpoint: Azure AI Foundry project endpoint.
+            agent_name: Name of the existing Web Search agent.
+            agent_version: Optional version override. Leave empty to let
+                Foundry resolve the default or latest version.
+            api_key: Optional static Foundry project API key.
+            credential: Optional prebuilt Azure credential object.
+            tenant_id: Optional Entra tenant ID for automatic Service
+                Principal auth.
+            client_id: Optional Entra client ID for automatic Service
+                Principal auth.
+            client_secret: Optional Entra client secret for automatic
+                Service Principal auth.
+            timeout: Default timeout budget in seconds for one search call.
+
+        Raises:
+            ValueError: If ``project_endpoint`` or ``agent_name`` is empty.
+
+        Example:
+            >>> from inqtrix import AzureFoundryWebSearch
+            >>> search = AzureFoundryWebSearch(
+            ...     project_endpoint="https://example.services.ai.azure.com/api/projects/demo",
+            ...     agent_name="web-search-agent",
+            ...     api_key="test-key",
+            ... )
+            >>> search.is_available()
+            True
+        """
         if not project_endpoint:
             raise ValueError("project_endpoint ist erforderlich")
         if not agent_name:
@@ -199,7 +238,45 @@ class AzureFoundryWebSearch(_NonFatalNoticeMixin, SearchProvider):
         return_related: bool = False,
         deadline: float | None = None,
     ) -> dict[str, Any]:
-        """Execute a web search via Azure Foundry Web Search (Responses API)."""
+        """Execute a search through the Foundry Responses API.
+
+        Use this method when the runtime should query a Web Search agent
+        by agent reference instead of by opaque agent ID. Several generic
+        Inqtrix search hints are only best-effort for this backend because
+        the Responses API does not expose first-class fields for them.
+
+        Args:
+            query: User-facing search query text.
+            search_context_size: Unsupported at runtime for this backend.
+                The agent's own configuration decides how much web context
+                it uses, so this value is ignored.
+            recency_filter: Optional recency hint. The provider turns it
+                into best-effort prompt guidance rather than a guaranteed
+                backend filter.
+            language_filter: Optional language hint list. The provider uses
+                it only for best-effort prompt guidance.
+            domain_filter: Optional domain include/exclude list. The
+                provider injects ``site:`` and ``-site:`` operators into the
+                query string because the Responses API does not offer a
+                dedicated domain-filter field here.
+            search_mode: Unsupported for this backend. Passing a value has
+                no effect.
+            return_related: Unsupported for this backend. Passing ``True``
+                does not populate ``related_questions``.
+            deadline: Optional absolute monotonic deadline for the full
+                agent run.
+
+        Returns:
+            dict[str, Any]: Normalized result with ``answer`` from the
+            Responses API output text, ``citations`` from URL-citation
+            annotations or URL fallback extraction, ``related_questions``
+            as an empty list, and usage counts copied into
+            ``_prompt_tokens`` and ``_completion_tokens`` when available.
+
+        Raises:
+            AgentTimeout: If the global deadline has already elapsed.
+            AgentRateLimited: If the backend surfaces a fatal rate limit.
+        """
         self._clear_nonfatal_notice()
 
         if deadline is not None:
@@ -325,5 +402,10 @@ class AzureFoundryWebSearch(_NonFatalNoticeMixin, SearchProvider):
     # ------------------------------------------------------------------
 
     def is_available(self) -> bool:
-        """Return True when the provider is ready to serve requests."""
+        """Report whether the provider is configured to attempt requests.
+
+        Returns:
+            bool: ``True`` when both the agent name and project endpoint
+            are present, otherwise ``False``.
+        """
         return bool(self._agent_name and self._project_endpoint)

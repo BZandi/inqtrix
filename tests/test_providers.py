@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from unittest.mock import MagicMock
+import time
 
 from inqtrix.providers.litellm import LiteLLM
 from inqtrix.providers.perplexity import PerplexitySearch
+from inqtrix.providers.base import _bounded_timeout
 
 
 def test_litellm_provider_handles_sse_string_response() -> None:
@@ -159,3 +161,10 @@ def test_direct_mode_omits_optional_params_when_not_set() -> None:
     assert "search_domain_filter" not in extra
     assert "search_mode" not in extra
     assert "return_related_questions" not in extra
+
+
+def test_bounded_timeout_respects_small_remaining_deadline() -> None:
+    deadline = time.monotonic() + 0.2
+    bounded = _bounded_timeout(120, deadline)
+
+    assert 0 < bounded <= 0.2

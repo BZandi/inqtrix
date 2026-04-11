@@ -59,7 +59,8 @@ from inqtrix.state import track_tokens
 import boto3  # type: ignore[import-untyped]
 from botocore.config import Config as BotoConfig  # type: ignore[import-untyped]
 from botocore.exceptions import ClientError  # type: ignore[import-untyped]
-from botocore.exceptions import ConnectionError as BotoConnectionError  # type: ignore[import-untyped]
+# type: ignore[import-untyped]
+from botocore.exceptions import ConnectionError as BotoConnectionError
 
 log = logging.getLogger("inqtrix")
 
@@ -85,42 +86,32 @@ _MAX_BEDROCK_ATTEMPTS = 5
 
 
 class BedrockLLM(ThinkingSuppressionMixin, _NonFatalNoticeMixin, LLMProvider):
-    """Call Amazon Bedrock Converse API directly via boto3.
+    """Call Amazon Bedrock Converse directly via boto3.
 
-    Parameters
-    ----------
-    profile_name:
-        AWS named profile from ``~/.aws/config``.  ``None`` uses the
-        default credential chain (env vars, instance role, etc.).
-    region_name:
-        AWS region for the Bedrock endpoint.
-    default_model:
-        Bedrock model ID for reasoning calls (classify, plan, evaluate,
-        answer).
-    classify_model:
-        Optional override for question classification.  Falls back to
-        *default_model*.
-    summarize_model:
-        Cheaper model for search-result summarisation.
-    evaluate_model:
-        Optional override for evidence evaluation.  Falls back to
-        *default_model*.
-    default_max_tokens:
-        Output-token budget for reasoning calls.  When *thinking* is
-        set with a ``budget_tokens`` value that exceeds this limit,
-        ``maxTokens`` is automatically raised to
-        ``budget_tokens + 1024``.
-    summarize_max_tokens:
-        Output-token budget for summarisation calls.
-    temperature:
-        Sampling temperature.  **Mutually exclusive with *thinking***
-        — the Bedrock API (for Claude models) rejects requests that
-        set both.
-    thinking:
-        Extended-thinking configuration dict forwarded via
-        ``additionalModelRequestFields``.  Recommended::
+    Use this provider when Claude or other supported models should run on
+    Amazon Bedrock rather than on direct Anthropic or LiteLLM-backed
+    infrastructure. It is the right choice when AWS regions, named
+    profiles, or Bedrock-specific access controls are operational
+    requirements.
 
-            thinking={"type": "adaptive"}
+    Attributes:
+        _default_model (str): Primary Bedrock model ID for reasoning
+            calls.
+        _summarize_model (str): Bedrock model ID used for summarize-model
+            helper calls.
+        _default_max_tokens (int): Output-token budget for reasoning
+            requests before thinking-related auto-raise.
+        _summarize_max_tokens (int): Output-token budget for helper
+            summarization requests.
+        _temperature (float | None): Optional sampling temperature.
+        _thinking (dict[str, Any] | None): Extended-thinking config used
+            on reasoning calls when not suppressed.
+        _thread_state (threading.local): Thread-local storage for
+            thinking suppression depth.
+        _models (ModelSettings): Effective role-to-model mapping exposed
+            to the runtime.
+        _client (Any): boto3 Bedrock Runtime client configured without
+            built-in retries.
     """
 
     def __init__(
@@ -137,6 +128,52 @@ class BedrockLLM(ThinkingSuppressionMixin, _NonFatalNoticeMixin, LLMProvider):
         temperature: float | None = None,
         thinking: dict[str, Any] | None = None,
     ) -> None:
+        """Initialize the Bedrock provider.
+
+        Use the constructor when Bedrock should handle reasoning calls via
+        the Converse API. The provider disables boto3 retries and runs its
+        own deadline-aware retry loop, so constructor-level choices mainly
+        decide credentials, region, model roles, and token budgets.
+
+        Args:
+            profile_name: Optional AWS named profile from
+                ``~/.aws/config`` or ``~/.aws/credentials``. When omitted,
+                boto3 falls back to the default AWS credential chain.
+            region_name: AWS region for the Bedrock endpoint. The default
+                is ``"eu-central-1"``.
+            default_model: Primary Bedrock model ID for classify, plan,
+                evaluate fallback, and answer calls.
+            classify_model: Optional cheaper override for classification.
+                When omitted, classification falls back to
+                ``default_model``.
+            summarize_model: Bedrock model ID used for parallel
+                summarization and claim extraction.
+            evaluate_model: Optional override for evidence evaluation.
+                When omitted, evaluation falls back to ``default_model``.
+            default_max_tokens: Output-token budget for reasoning calls
+                before any thinking-related auto-raise. The default is
+                ``1024``.
+            summarize_max_tokens: Output-token budget for summarize-model
+                helper calls. The default is ``512``.
+            temperature: Optional sampling temperature. Do not set this
+                together with ``thinking`` because Bedrock Claude models
+                reject that combination.
+            thinking: Optional Bedrock thinking configuration forwarded via
+                ``additionalModelRequestFields``.
+
+        Raises:
+            ValueError: If both ``temperature`` and ``thinking`` are set.
+
+        Example:
+            >>> from inqtrix import BedrockLLM
+            >>> llm = BedrockLLM(
+            ...     profile_name="default",
+            ...     region_name="eu-central-1",
+            ...     default_model="eu.anthropic.claude-sonnet-4-6",
+            ... )
+            >>> llm.models.reasoning_model
+            'eu.anthropic.claude-sonnet-4-6'
+        """
         if temperature is not None and thinking is not None:
             raise ValueError(
                 "temperature and thinking are mutually exclusive — "
@@ -173,6 +210,11 @@ class BedrockLLM(ThinkingSuppressionMixin, _NonFatalNoticeMixin, LLMProvider):
 
     @property
     def models(self) -> ModelSettings:
+        """Return the effective role-to-model mapping for the runtime.
+
+        Returns:
+            ModelSettings: Resolved Bedrock model IDs used by graph nodes.
+        """
         return self._models
 
     # ------------------------------------------------------------------ #
@@ -330,6 +372,27 @@ class BedrockLLM(ThinkingSuppressionMixin, _NonFatalNoticeMixin, LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
     ) -> str:
+        """Generate text through Bedrock and discard token metadata.
+
+        Args:
+            prompt: User-facing input text.
+            system: Optional system instruction.
+            model: Optional per-call Bedrock model override. When omitted,
+                the provider uses ``self._default_model``.
+            timeout: Per-call timeout budget in seconds.
+            state: Optional mutable agent state for token tracking.
+            deadline: Optional absolute monotonic deadline for the full
+                run.
+
+        Returns:
+            str: Visible assistant text extracted from the Converse
+            response.
+
+        Raises:
+            AgentTimeout: If the full run deadline has elapsed.
+            AgentRateLimited: If Bedrock throttles the request fatally.
+            BedrockAPIError: If a non-retryable Bedrock error occurs.
+        """
         return self.complete_with_metadata(
             prompt,
             system=system,
@@ -349,6 +412,39 @@ class BedrockLLM(ThinkingSuppressionMixin, _NonFatalNoticeMixin, LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
     ) -> LLMResponse:
+        """Generate text and token metadata through Bedrock Converse.
+
+        Use this method for reasoning calls when the runtime wants both
+        visible content and token usage. When thinking is enabled, the
+        method raises ``maxTokens`` so hidden reasoning does not crowd out
+        the visible answer. Request execution itself is delegated to
+        ``_converse_with_retry()``, which owns deadline-aware retry logic
+        for throttling and transient Bedrock failures.
+
+        Args:
+            prompt: User-facing input text.
+            system: Optional system instruction.
+            model: Optional per-call model override. When omitted, the
+                provider uses ``self._default_model``.
+            timeout: Per-call timeout budget in seconds. Bedrock uses the
+                provider's retry loop instead of a dedicated per-request
+                timeout field.
+            state: Optional mutable agent state that receives token counts
+                through ``track_tokens()`` when provided.
+            deadline: Optional absolute monotonic deadline for the full
+                run.
+
+        Returns:
+            LLMResponse: Structured response containing visible content,
+            token counts, and the effective model label.
+
+        Raises:
+            AgentTimeout: If the full run deadline has already elapsed.
+            AgentRateLimited: If Bedrock throttles the request after retry
+                exhaustion.
+            BedrockAPIError: If a non-retryable Bedrock or transport error
+                occurs.
+        """
         if deadline is not None:
             _check_deadline(deadline)
 
@@ -400,9 +496,28 @@ class BedrockLLM(ThinkingSuppressionMixin, _NonFatalNoticeMixin, LLMProvider):
         text: str,
         deadline: float | None = None,
     ) -> tuple[str, int, int]:
-        """Thread-safe fact extraction from a search result.
+        """Summarize search text in a thread-safe helper path.
 
-        Falls back to raw text on failure and sets a nonfatal notice.
+        Helper summarization uses the configured summarize model and the
+        same retry loop as reasoning calls. On non-rate-limit failure the
+        method degrades locally to truncated raw text and stores a
+        nonfatal notice for the search node.
+
+        Args:
+            text: Raw search-result text to condense. Blank input returns
+                an empty summary payload immediately.
+            deadline: Optional absolute monotonic deadline for the full
+                run.
+
+        Returns:
+            tuple[str, int, int]: ``(facts_text, prompt_tokens,
+            completion_tokens)``. On fallback, the text becomes the first
+            800 characters of the raw input and both token counts are ``0``.
+
+        Raises:
+            AgentTimeout: If the global deadline has already elapsed.
+            AgentRateLimited: If Bedrock throttles helper summarization
+                fatally.
         """
         if not text.strip():
             return ("", 0, 0)
@@ -440,4 +555,10 @@ class BedrockLLM(ThinkingSuppressionMixin, _NonFatalNoticeMixin, LLMProvider):
         )
 
     def is_available(self) -> bool:
-        return True
+        """Report whether the provider is configured to attempt requests.
+
+        Returns:
+            bool: ``True`` when the Bedrock Runtime client exists,
+            otherwise ``False``.
+        """
+        return self._client is not None

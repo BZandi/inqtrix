@@ -86,7 +86,7 @@ def register_routes(
             return type(wrapped).__name__
         return type(provider).__name__
 
-    def _provider_available(provider: object, *, label: str) -> bool:
+    def _provider_ready(provider: object, *, label: str) -> bool:
         try:
             checker = getattr(provider, "is_available", None)
             return bool(checker()) if callable(checker) else False
@@ -101,18 +101,18 @@ def register_routes(
     def health():
         llm_label = _provider_label(providers.llm)
         search_label = _provider_label(providers.search)
-        llm_available = _provider_available(providers.llm, label=llm_label)
-        search_available = _provider_available(providers.search, label=search_label)
-        status_code = 200 if llm_available and search_available else 503
+        llm_ready = _provider_ready(providers.llm, label=llm_label)
+        search_ready = _provider_ready(providers.search, label=search_label)
+        status_code = 200 if llm_ready and search_ready else 503
         payload = {
             "status": "ok" if status_code == 200 else "degraded",
             "llm": {
                 "provider": llm_label,
-                "status": "connected" if llm_available else "unavailable",
+                "status": "ready" if llm_ready else "unavailable",
             },
             "search": {
                 "provider": search_label,
-                "status": "connected" if search_available else "unavailable",
+                "status": "ready" if search_ready else "unavailable",
             },
             "testing_mode": settings.agent.testing_mode,
             "reasoning_model": settings.models.reasoning_model,

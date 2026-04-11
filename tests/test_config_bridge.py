@@ -298,6 +298,24 @@ class TestMultiClientLLMProvider:
         provider, _ = self._make_provider()
         assert provider.is_available() is True
 
+    def test_is_available_false_when_required_model_is_missing(self):
+        config = _make_config()
+        resolver = ModelResolver(config)
+        settings = config_to_settings(config)
+        provider = MultiClientLLMProvider(
+            resolver=resolver,
+            models=ModelSettings(
+                reasoning_model="gpt-4o",
+                search_model="sonar-pro",
+                classify_model="missing-model",
+                summarize_model="gpt-4o-mini",
+                evaluate_model="gpt-4o-mini",
+            ),
+            agent_settings=settings.agent,
+        )
+
+        assert provider.is_available() is False
+
     def test_summarize_parallel_empty_text(self):
         provider, _ = self._make_provider()
         facts, pt, ct = provider.summarize_parallel("")

@@ -20,9 +20,12 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from inqtrix.exceptions import AgentTimeout
+
+if TYPE_CHECKING:
+    from inqtrix.settings import ModelSettings
 
 log = logging.getLogger("inqtrix")
 
@@ -73,7 +76,12 @@ def _bounded_timeout(
         return float(default_timeout)
     _check_deadline(deadline)
     remaining = deadline - time.monotonic()
-    return max(1.0, min(float(default_timeout), remaining))
+    if remaining <= 0:
+        raise AgentTimeout(
+            "Agent-Zeitlimit ueberschritten. "
+            "Antwort wird mit bisherigem Kontext generiert."
+        )
+    return min(float(default_timeout), remaining)
 
 
 class _NonFatalNoticeMixin:
@@ -477,7 +485,14 @@ def _build_recency_language_hints(
 
 
 class LLMProvider(ABC):
-    """Abstract interface for LLM completions and summarization."""
+    """Define the contract for LLM completions and helper summarization.
+
+    Use this abstract base class when implementing a custom language
+    model backend for Inqtrix. Concrete providers are expected to offer
+    a reasoning call path for graph nodes such as classify, plan,
+    evaluate, and answer, plus a thread-safe summarization path for the
+    search node's parallel helper work.
+    """
 
     @abstractmethod
     def complete(
@@ -490,27 +505,46 @@ class LLMProvider(ABC):
         state: dict | None = None,
         deadline: float | None = None,
     ) -> str:
-        """Send a prompt and return the completion text.
+        """Generate a completion and return only the visible text.
 
-        Parameters
-        ----------
-        prompt:
-            The user message content.
-        system:
-            Optional system message.
-        model:
-            Override the default reasoning model for this call.
-        timeout:
-            Per-call timeout in seconds (may be shortened by deadline).
-        state:
-            Optional agent state dict for token tracking.
-        deadline:
-            Absolute monotonic deadline; triggers AgentTimeout if exceeded.
+        Call this method for standard reasoning work when the caller only
+        needs the model's text output and does not care about explicit
+        token accounting. Implementations typically route ``model=None``
+        to the provider's default reasoning model and may internally call
+        :meth:`complete_with_metadata` before discarding token metadata.
 
-        Returns
-        -------
-        str
-            The assistant message content (empty string on empty response).
+        Args:
+            prompt: User-facing input text to send to the model.
+            system: Optional system instruction. Omit this when the
+                provider or backend does not need a separate system role.
+                The default is ``None``.
+            model: Optional per-call model override. When omitted, the
+                provider should use its default reasoning model or the
+                role-specific fallback selected by the runtime.
+            timeout: Per-call timeout budget in seconds. Providers may
+                shorten this further when ``deadline`` leaves less time.
+                The default is ``120.0`` seconds.
+            state: Optional mutable agent state used for token tracking
+                in non-parallel code paths. Omit this in helper threads or
+                whenever shared state would be unsafe to mutate.
+            deadline: Optional absolute monotonic deadline for the whole
+                agent run. When present, providers should clamp the call
+                timeout to the remaining budget and raise ``AgentTimeout``
+                once the budget is exhausted.
+
+        Returns:
+            str: The visible assistant text. Providers should return an
+            empty string when the backend responded without user-visible
+            content rather than fabricating placeholder output.
+
+        Raises:
+            AgentTimeout: If the provider detects that the absolute agent
+                deadline has been reached before or during the request.
+            AgentRateLimited: If the backend explicitly rate-limits the
+                request and the provider chooses to surface that as a
+                fatal graph-level error.
+            Exception: Backend-specific errors may propagate when the
+                provider cannot degrade safely.
         """
 
     def complete_with_metadata(
@@ -523,10 +557,39 @@ class LLMProvider(ABC):
         state: dict | None = None,
         deadline: float | None = None,
     ) -> LLMResponse:
-        """Return completion text plus optional token metadata.
+        """Generate a completion together with token metadata.
 
-        Custom providers only need to implement :meth:`complete`.
-        Providers that can surface token counts may override this method.
+        Override this method when the backend can report token counts,
+        model identity, or other response metadata that the runtime wants
+        to preserve for logging, diagnostics, and cost tracking. Custom
+        providers may implement only :meth:`complete`; in that case the
+        default implementation wraps the returned text in ``LLMResponse``
+        without token counts.
+
+        Args:
+            prompt: User-facing input text to send to the model.
+            system: Optional system instruction. The default is ``None``.
+            model: Optional per-call model override. The default is
+                ``None``, which signals the provider to use its default
+                reasoning model.
+            timeout: Per-call timeout budget in seconds before deadline
+                clamping. The default is ``120.0`` seconds.
+            state: Optional mutable agent state for token aggregation in
+                non-parallel code paths. Omit it when no shared token
+                accounting is needed.
+            deadline: Optional absolute monotonic deadline for the whole
+                run. Providers should treat it as the hard ceiling for all
+                retries and request backoff.
+
+        Returns:
+            LLMResponse: Structured response containing visible content,
+            token counts when available, and the effective model label.
+
+        Raises:
+            AgentTimeout: If the absolute run deadline is exceeded.
+            AgentRateLimited: If the backend returns a fatal rate-limit
+                condition that should abort the run.
+            Exception: Backend-specific provider errors may propagate.
         """
         return LLMResponse(
             content=self.complete(
@@ -544,21 +607,59 @@ class LLMProvider(ABC):
     def summarize_parallel(
         self, text: str, deadline: float | None = None
     ) -> tuple[str, int, int]:
-        """Thread-safe fact extraction without state access.
+        """Summarize a search result in a thread-safe helper path.
 
-        Returns
-        -------
-        tuple[str, int, int]
-            (facts, prompt_tokens, completion_tokens)
+        The search node calls this method from worker threads to turn raw
+        search snippets into compact factual text before claim extraction.
+        Implementations must not rely on shared mutable state here; that
+        is why the contract does not include a ``state`` parameter.
+
+        Args:
+            text: Raw search-result text to condense. Providers should
+                typically return an empty summary immediately when ``text``
+                is blank.
+            deadline: Optional absolute monotonic deadline for the agent
+                run. Providers should clamp any backend timeout to the
+                remaining budget and stop retrying once the deadline has
+                passed.
+
+        Returns:
+            tuple[str, int, int]: A tuple of ``(facts_text,
+            prompt_tokens, completion_tokens)``. Providers that must
+            degrade to raw text should still return zero token counts.
+
+        Raises:
+            AgentTimeout: If the global run deadline is already exceeded.
+            AgentRateLimited: If a provider chooses to escalate a helper
+                rate-limit instead of degrading locally.
+            Exception: Provider-specific fatal errors may propagate when no
+                safe fallback exists.
         """
 
     @abstractmethod
     def is_available(self) -> bool:
-        """Return True when the provider is ready to serve requests."""
+        """Report whether the provider is configured to attempt requests.
+
+        Use this method for readiness checks such as health endpoints or
+        auto-create diagnostics. ``True`` means the provider has enough
+        configuration to make a request; it does not guarantee that the
+        remote backend is reachable or healthy at this exact moment.
+
+        Returns:
+            bool: ``True`` when the provider is configured and ready to
+            attempt requests, otherwise ``False``.
+        """
 
 
 class SearchProvider(ABC):
-    """Abstract interface for web search."""
+    """Define the contract for structured web-search providers.
+
+    Use this abstract base class when connecting a search backend such as
+    Perplexity, Brave, or Azure Foundry to the research graph. Concrete
+    providers are responsible for translating Inqtrix search hints into
+    backend-specific request parameters and normalizing the result into a
+    stable dictionary shape.
+    """
 
     @abstractmethod
     def search(
@@ -573,35 +674,94 @@ class SearchProvider(ABC):
         return_related: bool = False,
         deadline: float | None = None,
     ) -> dict[str, Any]:
-        """Execute a web search and return structured results.
+        """Execute a search request and normalize the backend response.
 
-        Returns
-        -------
-        dict[str, Any]
-            Keys: answer, citations, related_questions,
-                  _prompt_tokens, _completion_tokens
+        Concrete implementations should map the generic Inqtrix search
+        hints onto whatever the backend supports natively, best-effort, or
+        not at all. The returned dictionary must keep the same shape across
+        providers so later graph nodes can consume results without special
+        cases.
+
+        Args:
+            query: User-facing search query text.
+            search_context_size: Backend-independent hint for how much web
+                context to request. Common values are ``"low"``,
+                ``"medium"``, and ``"high"``. Providers may map this to
+                result counts, search depth, or ignore it when unsupported.
+            recency_filter: Optional freshness hint such as ``"day"``,
+                ``"week"``, ``"month"``, or ``"year"``. Providers may map
+                it natively or approximate it through prompt hints.
+            language_filter: Optional language hints, usually ISO 639-1
+                codes such as ``["de"]``. Most providers use only the
+                first value when the backend accepts a single language.
+            domain_filter: Optional allow/deny list of domains. Entries
+                starting with ``"-"`` mean exclusion. Providers may pass
+                this natively or inject ``site:`` operators into the query.
+            search_mode: Optional backend-specific mode such as
+                ``"academic"``. Omit it when the backend does not expose a
+                matching concept.
+            return_related: Whether the caller wants related questions or
+                query suggestions when the backend supports them. The
+                default is ``False``.
+            deadline: Optional absolute monotonic deadline for the whole
+                run. Providers should clamp their timeout budget and stop
+                retrying once it is exceeded.
+
+        Returns:
+            dict[str, Any]: Normalized result with the keys ``answer``,
+            ``citations``, ``related_questions``, ``_prompt_tokens``, and
+            ``_completion_tokens``. Providers that do not receive token
+            usage from the backend should return ``0`` for the token keys.
+
+        Raises:
+            AgentTimeout: If the global run deadline has already been
+                exhausted.
+            AgentRateLimited: If the backend signals a fatal rate-limit
+                condition that should abort the run.
+            Exception: Provider-specific fatal errors may propagate when no
+                safe empty-result fallback exists.
         """
 
     @abstractmethod
     def is_available(self) -> bool:
-        """Return True when the provider is ready to serve requests."""
+        """Report whether the search provider is configured to run.
+
+        Returns:
+            bool: ``True`` when the provider has enough local
+            configuration to attempt a request, otherwise ``False``.
+        """
 
 
 class ConfiguredLLMProvider(LLMProvider):
-    """Adapter that attaches model metadata to a custom LLM provider.
+    """Attach explicit model metadata to a custom LLM provider.
 
-    The graph nodes select classify/evaluate/fallback models through
-    ``providers.llm.models``. Wrapping custom providers here preserves the
-    lightweight Baukasten contract while still giving the runtime access to
-    the effective model names from configuration.
+    Use this adapter when a custom provider implements the runtime call
+    methods but does not expose a ``models`` property with the effective
+    reasoning, classify, summarize, and evaluate model names. Wrapping
+    the provider here preserves the lightweight custom-provider contract
+    while still giving the graph stable role-to-model metadata.
+
+    Attributes:
+        _provider (LLMProvider): Wrapped provider that performs the real
+            backend calls.
+        _models (ModelSettings): Effective role-to-model mapping exposed to
+            the runtime.
     """
 
-    def __init__(self, provider: LLMProvider, models: "ModelSettings") -> None:
+    def __init__(self, provider: LLMProvider, models: ModelSettings) -> None:
+        """Initialize the adapter with a provider and explicit models.
+
+        Args:
+            provider: Wrapped provider that already implements the
+                ``LLMProvider`` call methods.
+            models: Effective model settings to expose through the
+                adapter's ``models`` property.
+        """
         self._provider = provider
         self._models = models
 
     @property
-    def models(self) -> "ModelSettings":
+    def models(self) -> ModelSettings:
         return self._models
 
     def complete(
@@ -675,7 +835,14 @@ class ConfiguredLLMProvider(LLMProvider):
 
 @dataclass(frozen=True, slots=True)
 class ProviderContext:
-    """Container holding the active LLM and search providers."""
+    """Group the active LLM and search providers for runtime injection.
+
+    Attributes:
+        llm (LLMProvider): Active language-model provider used by the
+            graph's reasoning and summarization paths.
+        search (SearchProvider): Active search provider used by the
+            graph's search node.
+    """
 
     llm: LLMProvider
     search: SearchProvider

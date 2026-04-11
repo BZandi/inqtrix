@@ -36,8 +36,8 @@ from __future__ import annotations
 
 import logging
 import time
-from queue import Queue
-from typing import Iterator
+from queue import Empty, Queue
+from typing import Any, Iterator
 
 from pydantic import BaseModel, ConfigDict
 
@@ -233,8 +233,11 @@ class ResearchAgent:
                     kind, msg = progress_queue.get(timeout=0.3)
                     if kind == "progress" and msg != "done":
                         yield f"> {msg}\n"
-                except Exception:
+                except Empty:
                     continue
+                except Exception as exc:
+                    log.warning("Progress-Queue deaktiviert nach unerwartetem Fehler: %s", exc)
+                    break
 
             # Drain remaining progress
             while include_progress and progress_queue is not None and not progress_queue.empty():
@@ -242,7 +245,11 @@ class ResearchAgent:
                     kind, msg = progress_queue.get_nowait()
                     if kind == "progress" and msg != "done":
                         yield f"> {msg}\n"
-                except Exception:
+                except Empty:
+                    break
+                except Exception as exc:
+                    log.warning(
+                        "Restliche Progress-Meldungen konnten nicht gelesen werden: %s", exc)
                     break
 
             raw = future.result()

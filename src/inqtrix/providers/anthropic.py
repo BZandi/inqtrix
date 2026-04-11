@@ -82,52 +82,35 @@ _MAX_ANTHROPIC_ATTEMPTS = 5
 
 
 class AnthropicLLM(ThinkingSuppressionMixin, _NonFatalNoticeMixin, LLMProvider):
-    """Call the Anthropic Messages API directly without LiteLLM.
+    """Call the Anthropic Messages API directly without a proxy.
 
-    Parameters
-    ----------
-    api_key:
-        Anthropic API key.
-    base_url:
-        Messages endpoint URL.
-    anthropic_version:
-        Value of the ``anthropic-version`` header.
-    default_model:
-        Model for reasoning calls (classify, plan, evaluate, answer).
-    classify_model:
-        Optional override for question classification. Falls back to
-        *default_model*.
-    summarize_model:
-        Cheaper model for search-result summarisation.
-    evaluate_model:
-        Optional override for evidence evaluation. Falls back to
-        *default_model*.
-    default_max_tokens:
-        Output-token budget for reasoning calls.  When *thinking* is
-        set with a ``budget_tokens`` value that exceeds this limit,
-        ``max_tokens`` is automatically raised to
-        ``budget_tokens + 1024``.
-    summarize_max_tokens:
-        Output-token budget for summarisation calls.
-    user_agent:
-        ``User-Agent`` header value.
-    temperature:
-        Sampling temperature (0.0–1.0).  **Mutually exclusive with
-        *thinking*** — the Anthropic API rejects requests that set
-        both.
-    thinking:
-        Extended-thinking configuration dict forwarded verbatim to
-        the API.  Recommended for Claude 4.6 models::
+    Use this provider when you want native Anthropic behavior, direct
+    access to the Messages API, and explicit control over headers,
+    retries, and extended thinking. It is the right choice when the
+    deployment should not depend on LiteLLM and when reasoning quality or
+    Anthropic-specific diagnostics matter more than sharing one generic
+    gateway.
 
-            thinking={"type": "adaptive"}
-
-        Legacy / Claude 3.7 (manual budget)::
-
-            thinking={"type": "enabled", "budget_tokens": 10000}
-
-        Thinking is applied to reasoning calls only, not to
-        summarize-model helper calls such as ``summarize_parallel``
-        and claim extraction.
+    Attributes:
+        _api_key (str): API key used for direct Anthropic requests.
+        _base_url (str): Messages endpoint URL.
+        _anthropic_version (str): Version header forwarded on every
+            request.
+        _default_model (str): Primary reasoning model for classify, plan,
+            evaluate fallback, and answer calls.
+        _summarize_model (str): Helper model for parallel summarization.
+        _default_max_tokens (int): Default token budget for reasoning
+            calls before thinking-related auto-raise.
+        _summarize_max_tokens (int): Token budget for summarize-model
+            helper calls.
+        _user_agent (str): User-Agent header for direct HTTP requests.
+        _temperature (float | None): Optional sampling temperature.
+        _thinking (dict[str, Any] | None): Extended-thinking config used
+            on reasoning calls when not suppressed.
+        _thread_state (threading.local): Thread-local storage for
+            thinking suppression depth.
+        _models (ModelSettings): Effective role-to-model mapping exposed
+            to the runtime.
     """
 
     def __init__(
@@ -146,6 +129,58 @@ class AnthropicLLM(ThinkingSuppressionMixin, _NonFatalNoticeMixin, LLMProvider):
         temperature: float | None = None,
         thinking: dict[str, Any] | None = None,
     ) -> None:
+        """Initialize the direct Anthropic provider.
+
+        Use the constructor when you have a native Anthropic API key and
+        want direct control over retry behavior, error reporting, and
+        thinking configuration. The role-specific model arguments let you
+        keep strong reasoning on Claude Sonnet or Opus while delegating
+        high-volume helper work to Haiku or another cheaper model.
+
+        Args:
+            api_key: Anthropic API key for the direct Messages API.
+            base_url: Messages endpoint URL. The default is
+                ``"https://api.anthropic.com/v1/messages"``.
+            anthropic_version: Value for the ``anthropic-version`` header.
+                The default is ``"2023-06-01"``.
+            default_model: Primary model for classify, plan, evaluate
+                fallback, and answer calls. The default is
+                ``"claude-sonnet-4-6"``.
+            classify_model: Optional cheaper override for classification.
+                When omitted, classification falls back to
+                ``default_model``.
+            summarize_model: Helper model used for parallel summarization
+                and claim extraction. The default is
+                ``"claude-haiku-4-5"``.
+            evaluate_model: Optional override for evidence evaluation.
+                When omitted, evaluation falls back to ``default_model``.
+            default_max_tokens: Output-token budget for reasoning calls
+                before any thinking-related auto-raise. The default is
+                ``1024``.
+            summarize_max_tokens: Output-token budget for summarize-model
+                calls. The default is ``512``.
+            user_agent: User-Agent header value. The default is
+                ``"inqtrix/0.1"``.
+            temperature: Optional sampling temperature. Do not set this
+                together with ``thinking`` because the Anthropic API rejects
+                that combination.
+            thinking: Optional Anthropic thinking configuration, for
+                example ``{"type": "adaptive"}``. This is applied only to
+                reasoning calls and is suppressed in summarize helper work.
+
+        Raises:
+            ValueError: If both ``temperature`` and ``thinking`` are set.
+
+        Example:
+            >>> from inqtrix import AnthropicLLM
+            >>> llm = AnthropicLLM(
+            ...     api_key="test-key",
+            ...     default_model="claude-sonnet-4-6",
+            ...     summarize_model="claude-haiku-4-5",
+            ... )
+            >>> llm.models.effective_summarize_model
+            'claude-haiku-4-5'
+        """
         if temperature is not None and thinking is not None:
             raise ValueError(
                 "temperature and thinking are mutually exclusive — "
@@ -172,6 +207,11 @@ class AnthropicLLM(ThinkingSuppressionMixin, _NonFatalNoticeMixin, LLMProvider):
 
     @property
     def models(self) -> ModelSettings:
+        """Return the effective role-to-model mapping for the runtime.
+
+        Returns:
+            ModelSettings: Resolved model aliases used by graph nodes.
+        """
         return self._models
 
     # ------------------------------------------------------------------ #
@@ -396,6 +436,28 @@ class AnthropicLLM(ThinkingSuppressionMixin, _NonFatalNoticeMixin, LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
     ) -> str:
+        """Generate text through the direct Anthropic provider.
+
+        Args:
+            prompt: User-facing input text.
+            system: Optional system instruction for the Messages API.
+            model: Optional per-call model override. When omitted, the
+                provider uses ``self._default_model``.
+            timeout: Per-call timeout budget in seconds.
+            state: Optional mutable agent state for token tracking.
+            deadline: Optional absolute monotonic deadline for the full
+                run.
+
+        Returns:
+            str: Visible assistant text extracted from the Anthropic
+            response payload.
+
+        Raises:
+            AgentTimeout: If the full run deadline has elapsed.
+            AgentRateLimited: If Anthropic returns HTTP 429.
+            AnthropicAPIError: If a non-retryable direct API failure
+                occurs.
+        """
         return self.complete_with_metadata(
             prompt,
             system=system,
@@ -415,6 +477,39 @@ class AnthropicLLM(ThinkingSuppressionMixin, _NonFatalNoticeMixin, LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
     ) -> LLMResponse:
+        """Generate text and token metadata through the Messages API.
+
+        Use this method for reasoning calls when the runtime wants both
+        visible output and token usage. It applies Anthropic-specific
+        thinking behavior: when thinking is enabled, the method raises
+        ``max_tokens`` to accommodate both hidden reasoning and the final
+        visible answer. Request execution itself is delegated to
+        ``_request_json()``, which owns deadline-aware retries for 5xx and
+        HTTP 529 overload responses.
+
+        Args:
+            prompt: User-facing input text.
+            system: Optional system prompt forwarded as the Anthropic
+                ``system`` field.
+            model: Optional per-call model override. When omitted, the
+                provider uses ``self._default_model``.
+            timeout: Per-call timeout budget in seconds before retry and
+                deadline clamping. The default is ``REASONING_TIMEOUT``.
+            state: Optional mutable agent state that receives token counts
+                through ``track_tokens()`` when provided.
+            deadline: Optional absolute monotonic deadline for the full
+                agent run.
+
+        Returns:
+            LLMResponse: Structured response containing visible content,
+            token counts, and the effective model label.
+
+        Raises:
+            AgentTimeout: If the full run deadline has already elapsed.
+            AgentRateLimited: If Anthropic returns HTTP 429.
+            AnthropicAPIError: If the direct API call fails after retrying
+                or the response cannot be normalized.
+        """
         if deadline is not None:
             _check_deadline(deadline)
 
@@ -475,15 +570,32 @@ class AnthropicLLM(ThinkingSuppressionMixin, _NonFatalNoticeMixin, LLMProvider):
         text: str,
         deadline: float | None = None,
     ) -> tuple[str, int, int]:
-        """Thread-safe fact extraction from a search result.
+        """Summarize search text without using extended thinking.
 
-        Called from multiple threads in the search node.  On failure
-        (transient or hard), falls back to the first 800 chars of raw
-        text and sets a nonfatal notice so the search node can report
-        the degradation to the user.
+        The search node calls this method from worker threads, so it must
+        stay thread-safe and avoid mutating shared state. Helper work does
+        not benefit enough from Anthropic thinking to justify its token
+        cost; callers therefore use ``without_thinking()`` around these
+        code paths. On non-rate-limit failure the method degrades locally
+        to truncated raw text and stores a nonfatal notice for the search
+        node.
 
-        Thinking is NOT used here — callers (LLMClaimExtractor) wrap
-        this in ``without_thinking()`` to avoid wasting tokens.
+        Args:
+            text: Raw search-result text to condense. Blank input returns
+                an empty summary payload immediately.
+            deadline: Optional absolute monotonic deadline for the full
+                agent run.
+
+        Returns:
+            tuple[str, int, int]: ``(facts_text, prompt_tokens,
+            completion_tokens)``. On local fallback, the text becomes the
+            first 800 characters of the raw input and both token counts are
+            ``0``.
+
+        Raises:
+            AgentTimeout: If the global deadline has already elapsed.
+            AgentRateLimited: If Anthropic returns a fatal HTTP 429 during
+                helper summarization.
         """
         if not text.strip():
             return ("", 0, 0)
@@ -522,4 +634,9 @@ class AnthropicLLM(ThinkingSuppressionMixin, _NonFatalNoticeMixin, LLMProvider):
         )
 
     def is_available(self) -> bool:
+        """Report whether the provider has enough config to run.
+
+        Returns:
+            bool: ``True`` when an API key is present, otherwise ``False``.
+        """
         return bool(self._api_key)

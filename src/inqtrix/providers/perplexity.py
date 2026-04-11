@@ -31,54 +31,24 @@ log = logging.getLogger("inqtrix")
 
 
 class PerplexitySearch(_NonFatalNoticeMixin, SearchProvider):
-    """Web search via Perplexity Sonar — works with both LiteLLM proxy and the direct Perplexity API.
+    """Query Perplexity Sonar through either direct or proxy-backed APIs.
 
-    .. note::
+    Use this provider when web search should come from the Perplexity
+    Sonar API. It supports both direct calls to ``api.perplexity.ai`` and
+    indirect calls through a LiteLLM or other OpenAI-compatible proxy.
+    This provider is specific to Sonar-style chat-completions search; it
+    does not target Perplexity Deep Research or other product surfaces.
 
-       This class targets the Perplexity **Sonar API** (chat completions
-       endpoint).  Other Perplexity products — such as Deep Research or
-       the internal Agent API — use different parameters and endpoints
-       and are **not** supported by this provider.
-
-    Via LiteLLM proxy::
-
-        search = PerplexitySearch(
-            api_key=os.getenv("LITELLM_API_KEY"),
-            base_url="http://localhost:4000/v1",
-            model="perplexity-sonar-pro-agent",
-        )
-
-    Direct Perplexity API::
-
-        search = PerplexitySearch(
-            api_key=os.getenv("PERPLEXITY_API_KEY"),
-            base_url="https://api.perplexity.ai",
-            model="sonar-pro",
-        )
-
-    Parameters
-    ----------
-    api_key:
-        API key for the endpoint.
-    base_url:
-        Base URL.  Use ``http://localhost:4000/v1`` for a LiteLLM proxy,
-        or ``https://api.perplexity.ai`` for the direct Perplexity Sonar API
-        (no ``/v1`` suffix — the OpenAI SDK appends ``/chat/completions``).
-    model:
-        Search model identifier.  LiteLLM example:
-        ``perplexity-sonar-pro-agent``.  Direct Perplexity: ``sonar-pro``.
-    cache_maxsize:
-        Maximum number of cached search results.
-    cache_ttl:
-        Cache time-to-live in seconds.
-    request_params:
-        Extra request parameters forwarded to the chat completions call.
-    direct_mode:
-        Controls how search parameters are formatted in ``extra_body``.
-        ``True``: flat top-level keys (direct Perplexity API).
-        ``False``: nested inside ``web_search_options`` (LiteLLM proxy).
-        ``None`` (default): auto-detect from *base_url* — URLs containing
-        ``perplexity.ai`` use direct mode.
+    Attributes:
+        _client (OpenAI): Shared SDK client used for Sonar requests.
+        _model (str): Effective Perplexity or proxy model identifier.
+        _cache (TTLCache): In-memory cache of normalized search results.
+        _cache_lock (threading.Lock): Lock guarding cache access for
+            multi-threaded search runs.
+        _request_params (dict[str, Any]): Extra request parameters merged
+            into the SDK call after reserved keys are filtered out.
+        _direct_mode (bool): Whether request options are formatted for the
+            direct Perplexity API rather than a LiteLLM-style proxy.
     """
 
     def __init__(
@@ -94,6 +64,46 @@ class PerplexitySearch(_NonFatalNoticeMixin, SearchProvider):
         # Internal: accept a pre-built client (used by create_providers / config_bridge).
         _client: OpenAI | None = None,
     ) -> None:
+        """Initialize the Perplexity Sonar provider.
+
+        Use the constructor when search should be backed by Perplexity
+        Sonar. The provider can talk to Perplexity directly or through a
+        proxy, with ``direct_mode`` controlling how search options are
+        encoded in ``extra_body``.
+
+        Args:
+            api_key: API key for the direct Perplexity endpoint or for the
+                proxy that fronts it.
+            base_url: Endpoint base URL. Use ``"http://localhost:4000/v1"``
+                for a LiteLLM proxy or ``"https://api.perplexity.ai"`` for
+                direct Perplexity access.
+            model: Search model identifier. Typical values are
+                ``"perplexity-sonar-pro-agent"`` through LiteLLM and
+                ``"sonar-pro"`` for direct access.
+            cache_maxsize: Maximum number of normalized search responses
+                kept in the in-memory cache. The default is ``256``.
+            cache_ttl: Cache time-to-live in seconds. The default is
+                ``3600``.
+            request_params: Optional extra SDK parameters merged into each
+                request after reserved keys are filtered out.
+            direct_mode: Optional explicit override for request formatting.
+                Use ``True`` for the direct Perplexity API, ``False`` for a
+                LiteLLM-style proxy, or omit it to auto-detect from
+                ``base_url``.
+            _client: Optional prebuilt SDK client used internally by the
+                provider factory and config bridge.
+
+        Example:
+            >>> from inqtrix import PerplexitySearch
+            >>> search = PerplexitySearch(
+            ...     api_key="test-key",
+            ...     base_url="https://api.perplexity.ai",
+            ...     model="sonar-pro",
+            ...     direct_mode=True,
+            ... )
+            >>> search.is_available()
+            True
+        """
         self._client = _client or OpenAI(
             base_url=base_url, api_key=api_key, max_retries=_SDK_MAX_RETRIES,
         )
@@ -171,15 +181,43 @@ class PerplexitySearch(_NonFatalNoticeMixin, SearchProvider):
         return_related: bool = False,
         deadline: float | None = None,
     ) -> dict[str, Any]:
-        """Execute a Perplexity Sonar search via LiteLLM.
+        """Execute a Perplexity Sonar search and normalize the response.
 
-        Uses Perplexity-specific parameters for higher quality:
-        - search_context_size: "low"/"medium"/"high" (web search depth)
-        - recency_filter: "day"/"week"/"month"/"year"
-        - language_filter: ISO 639-1 codes e.g. ["en","de"]
-        - domain_filter: domains to include/exclude (max 20)
-        - search_mode: "academic" for scholarly sources
-        - return_related: include related questions in response
+        Use this method when the graph wants Perplexity-backed web search.
+        Unlike the Azure search providers, Perplexity supports most
+        Inqtrix search hints natively, so this backend is usually the best
+        fit when you want strong per-call control over recency, domain,
+        language, and academic search behavior.
+
+        Args:
+            query: User-facing search query text.
+            search_context_size: Perplexity search-depth hint. Supported
+                values are typically ``"low"``, ``"medium"``, and
+                ``"high"``. The default is ``"high"``.
+            recency_filter: Optional freshness filter such as ``"day"``,
+                ``"week"``, ``"month"``, or ``"year"``.
+            language_filter: Optional ISO 639-1 language codes such as
+                ``["de"]``. Perplexity accepts the list directly.
+            domain_filter: Optional domain include/exclude list. Direct
+                Perplexity mode forwards this natively; proxy mode nests it
+                inside ``web_search_options``.
+            search_mode: Optional Perplexity mode such as ``"academic"``.
+                Omit this when standard web search is sufficient.
+            return_related: Whether related questions should be requested
+                when the backend supports them. The default is ``False``.
+            deadline: Optional absolute monotonic deadline for the full
+                agent run.
+
+        Returns:
+            dict[str, Any]: Normalized result with ``answer`` from the
+            Sonar response, ``citations`` as full URLs, optional
+            ``related_questions``, and token counts from the API when the
+            backend reports them. Cached results are returned in the same
+            shape as fresh responses.
+
+        Raises:
+            AgentRateLimited: If the backend returns HTTP 429 or the SDK
+                raises ``RateLimitError``.
         """
         self._clear_nonfatal_notice()
         # Cache key includes all search parameters
@@ -293,4 +331,9 @@ class PerplexitySearch(_NonFatalNoticeMixin, SearchProvider):
         return data
 
     def is_available(self) -> bool:
+        """Report whether the provider is configured to attempt requests.
+
+        Returns:
+            bool: ``True`` when the SDK client exists, otherwise ``False``.
+        """
         return self._client is not None

@@ -7,6 +7,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 from inqtrix.parity._types import (
@@ -259,7 +260,13 @@ def _http_json(
     payload: dict[str, Any] | None = None,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
-    """Perform a JSON HTTP request using the standard library only."""
+    """Perform a JSON HTTP request using the standard library only.
+
+    Raises:
+        urllib.error.HTTPError: The remote endpoint returned an HTTP error.
+        urllib.error.URLError: The remote endpoint could not be reached.
+        json.JSONDecodeError: The response body was not valid JSON.
+    """
     request_data = None
     headers = {"Accept": "application/json"}
     if payload is not None:
@@ -280,10 +287,12 @@ def run_questions_via_http(
 ) -> dict[str, Any]:
     """Execute canonical questions against the local HTTP test endpoint."""
     health: dict[str, Any] = {}
+    health_probe_error = ""
     try:
         health = _http_json(f"{endpoint}{HEALTH_ENDPOINT}", timeout=15)
-    except Exception:
+    except (urllib_error.HTTPError, urllib_error.URLError, json.JSONDecodeError, OSError, ValueError) as exc:
         health = {}
+        health_probe_error = str(exc)
 
     results: list[dict[str, Any]] = []
     for question in questions:
@@ -295,7 +304,7 @@ def run_questions_via_http(
         )
         results.append(normalize_test_result(question, raw))
 
-    return {
+    meta = {
         "meta": {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "endpoint": endpoint,
@@ -309,3 +318,6 @@ def run_questions_via_http(
         },
         "results": results,
     }
+    if health_probe_error:
+        meta["meta"]["health_probe_error"] = health_probe_error
+    return meta

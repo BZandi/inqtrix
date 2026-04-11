@@ -111,7 +111,11 @@ async def stream_response(
                 yield make_chunk(chat_id, f"> `{msg_content}`\n>\n")
         except Empty:
             continue
-        except Exception:
+        except Exception as exc:
+            log.warning(
+                "Progress-Streaming deaktiviert nach unerwartetem Fehler: %s",
+                sanitize_error(exc),
+            )
             break
 
     # Agent finished -- drain remaining queue messages
@@ -121,6 +125,12 @@ async def stream_response(
             if msg_type == "progress" and msg_content != "done":
                 yield make_chunk(chat_id, f"> `{msg_content}`\n>\n")
         except Empty:
+            break
+        except Exception as exc:
+            log.warning(
+                "Restliche Progress-Meldungen konnten nicht serialisiert werden: %s",
+                sanitize_error(exc),
+            )
             break
 
     # Get the result

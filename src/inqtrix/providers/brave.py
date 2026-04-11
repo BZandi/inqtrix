@@ -30,18 +30,18 @@ log = logging.getLogger("inqtrix")
 class BraveSearch(_NonFatalNoticeMixin, SearchProvider):
     """Query the Brave Web Search API directly without LiteLLM.
 
-    Parameters
-    ----------
-    api_key:
-        Brave Search API subscription token.
-    base_url:
-        Brave Web Search endpoint URL.
-    result_count:
-        Maximum number of results to request per query.
-    extra_params:
-        Additional query parameters forwarded to every request.
-    user_agent:
-        ``User-Agent`` header value.
+    Use this provider when you want a simple direct-search backend with no
+    extra SDK dependency and no LLM-generated search summary at the search
+    stage itself. Unlike Perplexity, Brave returns raw result snippets,
+    which Inqtrix later summarizes through the active LLM provider.
+
+    Attributes:
+        _api_key (str): Brave Search API subscription token.
+        _base_url (str): Brave Web Search endpoint URL.
+        _result_count (int): Maximum number of results requested per query.
+        _extra_params (dict[str, Any]): Extra query parameters merged into
+            every request.
+        _user_agent (str): User-Agent header for direct Brave requests.
     """
 
     def __init__(
@@ -53,6 +53,30 @@ class BraveSearch(_NonFatalNoticeMixin, SearchProvider):
         extra_params: dict[str, Any] | None = None,
         user_agent: str = "inqtrix/0.1",
     ) -> None:
+        """Initialize the Brave Search provider.
+
+        Use the constructor when a lightweight direct REST search backend
+        is sufficient and you are comfortable with Inqtrix performing the
+        later summarization step itself.
+
+        Args:
+            api_key: Brave Search API subscription token.
+            base_url: Brave web-search endpoint URL. The default is
+                ``"https://api.search.brave.com/res/v1/web/search"``.
+            result_count: Maximum number of results requested per query.
+                The default is ``10`` and values smaller than ``1`` are
+                clamped up internally.
+            extra_params: Optional additional query parameters forwarded to
+                every request.
+            user_agent: User-Agent header value. The default is
+                ``"inqtrix/0.1"``.
+
+        Example:
+            >>> from inqtrix import BraveSearch
+            >>> search = BraveSearch(api_key="test-key", result_count=8)
+            >>> search.is_available()
+            True
+        """
         self._api_key = api_key
         self._base_url = base_url.rstrip("?")
         self._result_count = max(1, int(result_count))
@@ -112,7 +136,44 @@ class BraveSearch(_NonFatalNoticeMixin, SearchProvider):
         return_related: bool = False,
         deadline: float | None = None,
     ) -> dict[str, Any]:
-        """Execute a Brave Search request and map it to the search contract."""
+        """Execute a Brave search request and normalize the response.
+
+        Use this method when you want direct web results rather than an
+        API-generated answer. Brave supports only part of the generic
+        Inqtrix search contract, so unsupported hints are intentionally
+        ignored instead of blocking the run.
+
+        Args:
+            query: User-facing search query text.
+            search_context_size: Inqtrix hint for how much web context to
+                request. Brave maps this to a result count of roughly 5, 8,
+                or 10 results for ``low``, ``medium``, and ``high``.
+            recency_filter: Optional freshness hint such as ``day``,
+                ``week``, ``month``, or ``year``. Brave maps this to its
+                ``freshness`` query parameter.
+            language_filter: Optional language hint list. Brave uses the
+                first entry as ``search_lang`` when present.
+            domain_filter: Optional domain include/exclude list. Brave does
+                not support this natively, so the provider injects
+                ``site:`` and ``-site:`` operators into the query string.
+            search_mode: Unsupported by Brave. Passing a value has no
+                effect and should generally be avoided.
+            return_related: Unsupported by Brave. Passing ``True`` does not
+                populate ``related_questions``.
+            deadline: Optional absolute monotonic deadline for the full
+                agent run.
+
+        Returns:
+            dict[str, Any]: Normalized result with ``answer`` containing
+            concatenated Brave title/description/snippet text,
+            ``citations`` as full result URLs, ``related_questions`` as an
+            empty list, and zero token counts because Brave does not report
+            LLM usage.
+
+        Raises:
+            AgentTimeout: If the full run deadline has already elapsed.
+            AgentRateLimited: If Brave responds with HTTP 429.
+        """
         _empty: dict[str, Any] = {
             "answer": "",
             "citations": [],
@@ -205,4 +266,10 @@ class BraveSearch(_NonFatalNoticeMixin, SearchProvider):
         }
 
     def is_available(self) -> bool:
+        """Report whether the provider has enough config to run.
+
+        Returns:
+            bool: ``True`` when a Brave API key is present, otherwise
+            ``False``.
+        """
         return bool(self._api_key)

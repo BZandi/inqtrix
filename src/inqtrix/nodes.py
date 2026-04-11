@@ -79,6 +79,7 @@ def classify(
     """
     emit_progress(s, "Analysiere Frage...")
     _t0 = time.monotonic()
+    _followup_seeded = bool(s.get("_is_followup"))
     s["risk_score"] = strategies.risk_scoring.score(s["question"])
     s["high_risk"] = s["risk_score"] >= settings.high_risk_score_threshold
     classify_model = (
@@ -300,7 +301,7 @@ def classify(
         "sub_question_count": len(s["sub_questions"]),
         "risk_score": s["risk_score"],
         "high_risk": s["high_risk"],
-        "followup_seeded": bool(s.get("_is_followup")),
+        "followup_seeded": _followup_seeded,
         "model": classify_model,
         "required_aspects": s.get("required_aspects", []),
     }, testing_mode=settings.testing_mode)

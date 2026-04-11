@@ -30,35 +30,19 @@ log = logging.getLogger("inqtrix")
 
 
 class LiteLLM(_NonFatalNoticeMixin, LLMProvider):
-    """LLM completions via any LiteLLM- or OpenAI-compatible endpoint.
+    """Route LLM calls through a LiteLLM or OpenAI-compatible endpoint.
 
-    This is the default LLM provider.  Instantiate it directly in your
-    script, analogous to ``AnthropicLLM`` or any other provider::
+    Use this provider when your reasoning models are exposed behind a
+    LiteLLM proxy or any other endpoint that implements the OpenAI chat
+    completions protocol. It is the default provider for the env-based
+    auto-create path and is usually the simplest option when one gateway
+    should front multiple upstream models.
 
-        from inqtrix import LiteLLM
-
-        llm = LiteLLM(
-            api_key=os.getenv("LITELLM_API_KEY"),
-            base_url="http://localhost:4000/v1",
-            default_model="gpt-4o",
-            summarize_model="gpt-4o-mini",
-        )
-
-    Parameters
-    ----------
-    api_key:
-        API key for the LiteLLM / OpenAI-compatible endpoint.
-    base_url:
-        Base URL of the endpoint (e.g. ``http://localhost:4000/v1``).
-    default_model:
-        Model used for reasoning, planning, and answer synthesis.
-    classify_model:
-        Model for question classification.  Falls back to *default_model*.
-    summarize_model:
-        Model for summarisation and claim extraction.  Falls back to
-        *default_model*.
-    evaluate_model:
-        Model for evidence evaluation.  Falls back to *default_model*.
+    Attributes:
+        _client (OpenAI): Shared SDK client used for reasoning and
+            summarize-model requests.
+        _models (ModelSettings): Effective model mapping for reasoning,
+            classify, summarize, and evaluate roles.
     """
 
     def __init__(
@@ -71,6 +55,43 @@ class LiteLLM(_NonFatalNoticeMixin, LLMProvider):
         summarize_model: str = "",
         evaluate_model: str = "",
     ) -> None:
+        """Initialize the LiteLLM-backed provider.
+
+        Use the constructor when your models are reachable through a
+        single OpenAI-compatible base URL such as LiteLLM, OpenRouter,
+        vLLM, or Ollama. The role-specific model arguments let you keep a
+        strong default reasoning model while moving classification,
+        summarization, or evaluation to cheaper deployments.
+
+        Args:
+            api_key: API key for the LiteLLM or OpenAI-compatible
+                endpoint. This argument is required.
+            base_url: Base URL of the endpoint. The default is
+                ``"http://localhost:4000/v1"``. Use a different value
+                when the proxy is hosted elsewhere.
+            default_model: Primary model for reasoning, planning,
+                evaluation fallback, and final answer synthesis. The
+                default is ``"gpt-4o"``.
+            classify_model: Optional cheaper override for question
+                classification. When omitted, classification falls back
+                to ``default_model``.
+            summarize_model: Optional cheaper override for parallel
+                summarization and claim extraction. When omitted, helper
+                threads also use ``default_model``.
+            evaluate_model: Optional override for evidence evaluation.
+                When omitted, evaluation falls back to ``default_model``.
+
+        Example:
+            >>> from inqtrix import LiteLLM
+            >>> llm = LiteLLM(
+            ...     api_key="test-key",
+            ...     base_url="http://localhost:4000/v1",
+            ...     default_model="gpt-4o",
+            ...     summarize_model="gpt-4o-mini",
+            ... )
+            >>> llm.models.reasoning_model
+            'gpt-4o'
+        """
         self._client = OpenAI(
             base_url=base_url, api_key=api_key, max_retries=_SDK_MAX_RETRIES,
         )
@@ -86,7 +107,12 @@ class LiteLLM(_NonFatalNoticeMixin, LLMProvider):
 
     @property
     def models(self) -> ModelSettings:
-        """Expose model configuration for node access."""
+        """Return the effective role-to-model mapping for the runtime.
+
+        Returns:
+            ModelSettings: Resolved model names that graph nodes use when
+            selecting classify, summarize, evaluate, or reasoning calls.
+        """
         return self._models
 
     def complete(
@@ -99,7 +125,36 @@ class LiteLLM(_NonFatalNoticeMixin, LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
     ) -> str:
-        """Call an LLM via LiteLLM and return the response text."""
+        """Generate text via LiteLLM and discard token metadata.
+
+        Use this convenience wrapper when the caller only needs visible
+        response text. It delegates to ``complete_with_metadata()`` so the
+        provider keeps one code path for error handling and token
+        tracking.
+
+        Args:
+            prompt: User-facing input text.
+            system: Optional system message. The default is ``None``.
+            model: Optional per-call model override. When omitted, the
+                provider uses its default reasoning model.
+            timeout: Per-call timeout budget in seconds. The default is
+                ``REASONING_TIMEOUT``.
+            state: Optional mutable agent state for token tracking. Omit
+                this in helper threads or when no token aggregation is
+                needed.
+            deadline: Optional absolute monotonic deadline for the full
+                agent run.
+
+        Returns:
+            str: Visible assistant text for the completion.
+
+        Raises:
+            AgentTimeout: If the remaining agent budget is exhausted.
+            AgentRateLimited: If the endpoint returns a fatal rate-limit
+                error.
+            OpenAIError: If the SDK surfaces a non-rate-limit backend
+                failure.
+        """
         return self.complete_with_metadata(
             prompt,
             system=system,
@@ -119,7 +174,41 @@ class LiteLLM(_NonFatalNoticeMixin, LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
     ) -> LLMResponse:
-        """Call an LLM via LiteLLM. Handles timeout and error cases."""
+        """Generate text and token metadata through the shared SDK client.
+
+        Use this method for normal reasoning calls when the caller wants
+        both the visible content and token accounting. The OpenAI SDK owns
+        the retry loop here via ``max_retries=_SDK_MAX_RETRIES``; this
+        method mainly assembles the request, clamps the timeout against the
+        remaining deadline, and maps fatal rate limits into
+        ``AgentRateLimited``.
+
+        Args:
+            prompt: User-facing input text.
+            system: Optional system instruction. The default is ``None``.
+            model: Optional per-call model override. If omitted, the
+                provider uses ``self._models.reasoning_model``.
+            timeout: Per-call timeout budget in seconds before deadline
+                clamping. The default is ``REASONING_TIMEOUT``.
+            state: Optional mutable agent state that receives token
+                accounting through ``track_tokens()`` when provided.
+            deadline: Optional absolute monotonic deadline for the full
+                run. When present, the request timeout is reduced to the
+                smaller of ``timeout`` and the remaining run budget.
+
+        Returns:
+            LLMResponse: Structured response containing visible content,
+            token counts, and the effective model label.
+
+        Raises:
+            AgentTimeout: If the full run deadline has already elapsed.
+            AgentRateLimited: If the backend returns HTTP 429 or the SDK
+                raises ``RateLimitError``.
+            APIStatusError: If the backend responds with a non-429 HTTP
+                error.
+            OpenAIError: If the SDK raises any other client or transport
+                error.
+        """
         if deadline is not None:
             _check_deadline(deadline)
 
@@ -162,11 +251,27 @@ class LiteLLM(_NonFatalNoticeMixin, LLMProvider):
     def summarize_parallel(
         self, text: str, deadline: float | None = None
     ) -> tuple[str, int, int]:
-        """Thread-safe fact extraction without state access.
+        """Summarize search text in a thread-safe helper path.
 
-        Returns (facts, prompt_tokens, completion_tokens).
-        No *state* parameter so there are no race conditions when called
-        from multiple threads.
+        The search node calls this method from worker threads, so it does
+        not accept a shared ``state`` object. On provider failure it
+        degrades locally to truncated raw text and stores a nonfatal notice
+        that the search node can surface to the user.
+
+        Args:
+            text: Raw search-result text to condense. Blank input returns
+                an empty tuple payload immediately.
+            deadline: Optional absolute monotonic deadline for the full
+                run. The request timeout is clamped to the remaining time.
+
+        Returns:
+            tuple[str, int, int]: ``(facts_text, prompt_tokens,
+            completion_tokens)``. On fallback, the text becomes the first
+            800 characters of the raw input and both token counts are ``0``.
+
+        Raises:
+            AgentTimeout: If the global run deadline has already elapsed
+                before the request starts.
         """
         if not text.strip():
             return ("", 0, 0)
@@ -197,6 +302,12 @@ class LiteLLM(_NonFatalNoticeMixin, LLMProvider):
             return (text[:800], 0, 0)
 
     def is_available(self) -> bool:
+        """Report whether the provider is configured to attempt requests.
+
+        Returns:
+            bool: ``True`` when the shared SDK client exists, otherwise
+            ``False``.
+        """
         return self._client is not None
 
 

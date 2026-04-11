@@ -111,7 +111,7 @@ class TestSessionIdDerivation:
         ]
         sid = derive_session_id(msgs)
         assert sid is not None
-        assert len(sid) == 16
+        assert len(sid) == 24
 
     def test_prospective_matches_derive(self):
         msgs_turn1 = [
@@ -128,3 +128,17 @@ class TestSessionIdDerivation:
         ]
         did = derive_session_id(msgs_turn2)
         assert pid == did
+
+    def test_same_assistant_answer_different_user_history_yields_different_ids(self):
+        conv_a = [
+            {"role": "user", "content": "Frage A"},
+            {"role": "assistant", "content": "Gleiche Antwort"},
+            {"role": "user", "content": "Follow-up A"},
+        ]
+        conv_b = [
+            {"role": "user", "content": "Frage B"},
+            {"role": "assistant", "content": "Gleiche Antwort"},
+            {"role": "user", "content": "Follow-up B"},
+        ]
+
+        assert derive_session_id(conv_a) != derive_session_id(conv_b)

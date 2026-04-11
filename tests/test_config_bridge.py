@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from openai import OpenAIError
 
 from inqtrix.config import (
     AgentBehaviorConfig,
@@ -309,6 +310,17 @@ class TestMultiClientLLMProvider:
         provider.summarize_parallel("Some text")
         call_kwargs = mock.chat.completions.create.call_args
         assert call_kwargs.kwargs["temperature"] == 0.0
+
+    def test_summarize_parallel_sets_nonfatal_notice_on_fallback(self):
+        provider, mock = self._make_provider()
+        mock.chat.completions.create.side_effect = OpenAIError("service error")
+
+        facts, pt, ct = provider.summarize_parallel("Some text")
+
+        assert facts == "Some text"
+        assert pt == 0
+        assert ct == 0
+        assert provider.consume_nonfatal_notice() is not None
 
 
 # ------------------------------------------------------------------ #

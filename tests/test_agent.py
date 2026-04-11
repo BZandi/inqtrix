@@ -347,7 +347,11 @@ class TestResearchAgentConstruction:
 
     def test_custom_llm_without_models_gets_configured_model_metadata(self):
         class DummyLLM(LLMProvider):
+            def __init__(self):
+                self.models_seen: list[str | None] = []
+
             def complete(self, *a, **kw):
+                self.models_seen.append(kw.get("model"))
                 return "ok"
 
             def summarize_parallel(self, *a, **kw):
@@ -369,8 +373,9 @@ class TestResearchAgentConstruction:
             def is_available(self):
                 return True
 
+        llm = DummyLLM()
         cfg = AgentConfig(
-            llm=DummyLLM(),
+            llm=llm,
             search=DummySearch(),
         )
         agent = ResearchAgent(cfg)
@@ -378,11 +383,10 @@ class TestResearchAgentConstruction:
         providers, _, _ = agent._ensure_initialised()
 
         assert providers.llm.complete("test") == "ok"
-        # Custom LLM without .models gets default ModelSettings
+        assert llm.models_seen == [None]
+        # Custom LLM without .models keeps provider-native model defaults
         assert hasattr(providers.llm, "models")
-        from inqtrix.settings import ModelSettings
-        defaults = ModelSettings()
-        assert providers.llm.models.reasoning_model == defaults.reasoning_model
+        assert providers.llm.models.reasoning_model == ""
 
     def test_anthropic_llm_keeps_own_model_metadata(self):
         class DummySearch(SearchProvider):

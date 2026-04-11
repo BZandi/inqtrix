@@ -28,6 +28,7 @@ from inqtrix.providers.base import (
     LLMResponse,
     ProviderContext,
     SearchProvider,
+    _NonFatalNoticeMixin,
     _bounded_timeout,
     _check_deadline,
     _normalize_completion_response,
@@ -109,7 +110,7 @@ class ModelResolver:
 # ------------------------------------------------------------------ #
 
 
-class MultiClientLLMProvider(LLMProvider):
+class MultiClientLLMProvider(_NonFatalNoticeMixin, LLMProvider):
     """LLM provider that routes each call to the correct API client.
 
     When reasoning runs on OpenAI and classify on Anthropic via LiteLLM,
@@ -240,6 +241,7 @@ class MultiClientLLMProvider(LLMProvider):
     ) -> tuple[str, int, int]:
         if not text.strip():
             return ("", 0, 0)
+        self._clear_nonfatal_notice()
         if deadline is not None:
             _check_deadline(deadline)
 
@@ -269,6 +271,9 @@ class MultiClientLLMProvider(LLMProvider):
         except AgentRateLimited:
             raise
         except (OpenAIError, AgentTimeout):
+            self._set_nonfatal_notice(
+                f"Zusammenfassung via {summarize_model} fehlgeschlagen; Fallback auf Rohtext."
+            )
             return (text[:800], 0, 0)
 
     def is_available(self) -> bool:

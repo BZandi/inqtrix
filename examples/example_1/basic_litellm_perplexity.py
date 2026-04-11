@@ -52,17 +52,17 @@ from rich.panel import Panel
 load_dotenv()
 
 # ── Logging ──────────────────────────────────────────────────────────
-# File-based logging with automatic secret redaction.  Disabled by
-# default — enable via environment variables to keep terminal clean:
+# File-based logging with automatic secret redaction.  Controlled via
+# environment variables so the example stays quiet unless requested:
 #
 #   INQTRIX_LOG_ENABLED=true   — write logs to logs/inqtrix_*.log
 #   INQTRIX_LOG_LEVEL=DEBUG    — DEBUG / INFO / WARNING (default: INFO)
 #   INQTRIX_LOG_CONSOLE=true   — also print WARNING+ to stderr
 from inqtrix.logging_config import configure_logging
 
-LOG_ENABLED = True
-LOG_LEVEL = "INFO"
-LOG_TO_CONSOLE = False
+LOG_ENABLED = os.getenv("INQTRIX_LOG_ENABLED", "").lower() == "true"
+LOG_LEVEL = os.getenv("INQTRIX_LOG_LEVEL", "INFO")
+LOG_TO_CONSOLE = os.getenv("INQTRIX_LOG_CONSOLE", "").lower() == "true"
 
 _log_path = configure_logging(
     enabled=LOG_ENABLED,
@@ -109,8 +109,9 @@ def _require_env(name: str) -> str:
 
 def main() -> None:
     api_key = _require_env("LITELLM_API_KEY")
-    # other option: os.environ.get("LITELLM_BASE_URL", "http://localhost:4000/v1").strip()
-    base_url = "http://127.0.0.1:4000/v1"
+    base_url = os.environ.get(
+        "LITELLM_BASE_URL", "http://localhost:4000/v1"
+    ).strip()
 
     # ── LLM Provider ────────────────────────────────────────────────
     #

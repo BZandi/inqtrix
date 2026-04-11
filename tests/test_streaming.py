@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import time
 
 import pytest
 
@@ -118,3 +119,42 @@ async def test_guarded_stream_passes_include_progress(monkeypatch):
 
     assert captured["include_progress"] is False
     assert chunks == ["data: [DONE]\n\n"]
+
+
+@pytest.mark.asyncio
+async def test_stream_response_returns_timeout_chunk(monkeypatch):
+    import inqtrix.streaming as streaming_module
+
+    def fake_run(
+        question,
+        *,
+        history,
+        progress_queue,
+        prev_session,
+        providers,
+        strategies,
+        settings,
+    ):
+        time.sleep(1.2)
+        return {"answer": "Zu spaet", "result_state": {}}
+
+    monkeypatch.setattr(streaming_module, "agent_run", fake_run)
+
+    settings = AgentSettings()
+    settings.max_total_seconds = -29
+
+    chunks = [
+        chunk
+        async for chunk in stream_response(
+            "Meine Frage",
+            "",
+            None,
+            providers=None,
+            strategies=None,
+            settings=settings,
+            session_store=SimpleNamespace(save=lambda *a, **kw: None),
+        )
+    ]
+
+    assert any("Request-Timeout erreicht" in chunk for chunk in chunks)
+    assert chunks[-1] == "data: [DONE]\n\n"

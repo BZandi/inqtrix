@@ -1,8 +1,8 @@
 """ In-memory session store for follow-up question support.
 
 Holds :class:`SessionSnapshot` instances keyed by a stable hash derived
-from the assistant responses in the conversation history.  Sessions expire
-after a configurable TTL and are capped at a maximum count (LRU eviction).
+from the user/assistant conversation history. Sessions expire after a
+configurable TTL and are capped at a maximum count (LRU eviction).
 """
 
 from __future__ import annotations
@@ -183,40 +183,49 @@ class SessionStore:
 # ------------------------------------------------------------------ #
 
 
-def _extract_assistant_parts(messages: list[dict]) -> list[str]:
-    """Extract truncated assistant message texts from a message list."""
+def _message_text(msg: dict[str, Any]) -> str:
+    """Normalize a chat message into a single text string."""
+    content = msg.get("content", "")
+    if isinstance(content, list):
+        content = " ".join(
+            p.get("text", "") for p in content
+            if isinstance(p, dict) and p.get("type") == "text"
+        )
+    return str(content or "").strip()
+
+
+def _extract_session_parts(messages: list[dict]) -> list[str]:
+    """Extract truncated role-tagged message texts for session hashing."""
     parts: list[str] = []
     for msg in messages:
-        if msg.get("role") == "assistant":
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                content = " ".join(
-                    p.get("text", "") for p in content
-                    if isinstance(p, dict) and p.get("type") == "text"
-                )
-            if content:
-                parts.append(content[:200])
+        role = str(msg.get("role", "")).strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = _message_text(msg)
+        if content:
+            parts.append(f"{role}:{content[:200]}")
     return parts
 
 
 def _hash_parts(parts: list[str]) -> str:
-    """Compute a session ID from assistant text parts."""
+    """Compute a session ID from role-tagged conversation parts."""
     raw = "|".join(parts)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
 def derive_session_id(messages: list[dict]) -> str | None:
     """Derive a stable session ID from the conversation history.
 
-    Hashes assistant responses (first 200 chars each) which uniquely
-    identify each agent turn and distinguish parallel conversations.
+    Hashes the role-tagged conversation history (excluding the current
+    question) so follow-up detection distinguishes conversations that
+    happen to share the same assistant wording.
     Returns None when no history is available (first turn).
     """
     if len(messages) <= 1:
         return None
     history_msgs = messages[:-1]  # Exclude current question
-    parts = _extract_assistant_parts(history_msgs)
-    if not parts:
+    parts = _extract_session_parts(history_msgs)
+    if not any(part.startswith("assistant:") for part in parts):
         return None
     return _hash_parts(parts)
 
@@ -227,7 +236,7 @@ def prospective_session_id(messages: list[dict], answer_text: str) -> str:
     Called after turn N to store the session under the ID that turn N+1
     will compute via derive_session_id() (includes current answer in hash).
     """
-    parts = _extract_assistant_parts(messages)
+    parts = _extract_session_parts(messages)
     if answer_text:
-        parts.append(answer_text[:200])
+        parts.append(f"assistant:{answer_text[:200]}")
     return _hash_parts(parts)

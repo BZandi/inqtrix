@@ -270,16 +270,86 @@ class ClaimConsolidationStrategy(ABC):
     """Consolidate, filter, and format claim ledgers."""
 
     @abstractmethod
-    def focus_stems_from_question(self, question: str) -> set[str]: ...
+    def focus_stems_from_question(self, question: str) -> set[str]:
+        """Build normalized focus stems from the user question.
+
+        Args:
+            question: Original user question.
+
+        Returns:
+            A set of normalized stems used to keep claims on-topic.
+
+        Raises:
+            NotImplementedError: Implementations must provide the logic.
+
+        Example:
+            >>> strategy.focus_stems_from_question("Was kostet die GKV-Reform?")
+            {"gkv", "reform", ...}
+        """
+        ...
 
     @abstractmethod
-    def claim_matches_focus_stems(self, claim_text: str, focus_stems: set[str]) -> bool: ...
+    def claim_matches_focus_stems(
+        self,
+        claim_text: str,
+        focus_stems: set[str],
+    ) -> bool:
+        """Decide whether a claim is relevant to the question focus.
+
+        Args:
+            claim_text: Candidate claim text.
+            focus_stems: Normalized stems produced from the question.
+
+        Returns:
+            ``True`` when the claim should remain in scope.
+
+        Raises:
+            NotImplementedError: Implementations must provide the logic.
+
+        Example:
+            >>> strategy.claim_matches_focus_stems("Die Reform kostet mehr", {"reform"})
+            True
+        """
+        ...
 
     @abstractmethod
-    def claim_signature(self, text: str) -> str: ...
+    def claim_signature(self, text: str) -> str:
+        """Create a stable signature for deduplicating claim text.
+
+        Args:
+            text: Raw claim text.
+
+        Returns:
+            A normalized signature used for grouping semantically similar
+            claims.
+
+        Raises:
+            NotImplementedError: Implementations must provide the logic.
+
+        Example:
+            >>> strategy.claim_signature("Der Beitrag steigt um 5 Prozent")
+            'beitrag steigt 5 prozent'
+        """
+        ...
 
     @abstractmethod
-    def consolidate(self, claim_ledger: list[dict[str, Any]]) -> list[dict[str, Any]]: ...
+    def consolidate(self, claim_ledger: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Merge a raw claim ledger into consolidated claim groups.
+
+        Args:
+            claim_ledger: Raw claim entries gathered across rounds.
+
+        Returns:
+            Consolidated claim records with support/contradiction counts.
+
+        Raises:
+            NotImplementedError: Implementations must provide the logic.
+
+        Example:
+            >>> strategy.consolidate([{"claim_text": "..."}])
+            [{"claim_text": "...", "support_count": 1, ...}]
+        """
+        ...
 
     @abstractmethod
     def materialize(
@@ -288,20 +358,72 @@ class ClaimConsolidationStrategy(ABC):
         *,
         max_total: int = 24,
         max_unverified: int = 8,
-    ) -> list[dict[str, Any]]: ...
+    ) -> list[dict[str, Any]]:
+        """Select the answer-facing subset of consolidated claims.
+
+        Args:
+            consolidated: Consolidated claim groups.
+            max_total: Maximum number of claims to keep.
+            max_unverified: Maximum number of unverified claims to keep.
+
+        Returns:
+            Materialized claims ready for prompts and exports.
+
+        Raises:
+            NotImplementedError: Implementations must provide the logic.
+
+        Example:
+            >>> strategy.materialize(consolidated_claims, max_total=10)
+            [{"claim_text": "..."}, ...]
+        """
+        ...
 
     @abstractmethod
     def quality_metrics(
         self,
         consolidated: list[dict[str, Any]],
-    ) -> tuple[dict[str, int], float, int, int]: ...
+    ) -> tuple[dict[str, int], float, int, int]:
+        """Summarize quality metrics for consolidated claims.
+
+        Args:
+            consolidated: Consolidated claim groups.
+
+        Returns:
+            Tuple of ``(status_counts, quality_score,
+            needs_primary_total, needs_primary_verified)``.
+
+        Raises:
+            NotImplementedError: Implementations must provide the logic.
+
+        Example:
+            >>> strategy.quality_metrics(consolidated_claims)
+            ({"verified": 2}, 0.8, 1, 1)
+        """
+        ...
 
     @abstractmethod
     def claims_prompt_view(
         self,
         consolidated: list[dict[str, Any]],
         max_items: int = 16,
-    ) -> str: ...
+    ) -> str:
+        """Render consolidated claims into prompt-friendly text.
+
+        Args:
+            consolidated: Consolidated claim groups.
+            max_items: Maximum number of claims to render.
+
+        Returns:
+            A textual summary that can be embedded into prompts.
+
+        Raises:
+            NotImplementedError: Implementations must provide the logic.
+
+        Example:
+            >>> strategy.claims_prompt_view(consolidated_claims, max_items=5)
+            '- Claim 1\n- Claim 2'
+        """
+        ...
 
     @abstractmethod
     def select_answer_citations(
@@ -310,7 +432,25 @@ class ClaimConsolidationStrategy(ABC):
         all_citations: list[str],
         *,
         max_items: int,
-    ) -> list[str]: ...
+    ) -> list[str]:
+        """Choose the citations that should be forwarded to answer synthesis.
+
+        Args:
+            consolidated: Consolidated claim groups.
+            all_citations: Full citation list collected during research.
+            max_items: Hard cap for citations included in the answer prompt.
+
+        Returns:
+            Citation URLs ordered for answer synthesis.
+
+        Raises:
+            NotImplementedError: Implementations must provide the logic.
+
+        Example:
+            >>> strategy.select_answer_citations(consolidated_claims, citations, max_items=8)
+            ['https://example.com/report']
+        """
+        ...
 
 
 class DefaultClaimConsolidator(ClaimConsolidationStrategy):

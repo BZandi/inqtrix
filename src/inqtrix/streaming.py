@@ -60,6 +60,7 @@ async def stream_response(
 ) -> AsyncIterator[str]:
     """Execute the agent and yield progress updates + answer as SSE chunks."""
     chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    request_deadline = time.monotonic() + settings.max_total_seconds + 30
 
     # OpenAI-compatible first chunk: role announcement
     role_chunk = {
@@ -94,6 +95,14 @@ async def stream_response(
 
     # Read progress updates and stream them as SSE chunks
     while include_progress and progress_queue is not None and not agent_future.done():
+        if time.monotonic() >= request_deadline:
+            yield make_chunk(
+                chat_id,
+                "\n---\n\n⚠️ **Fehler bei der Recherche:** Request-Timeout erreicht",
+            )
+            yield make_chunk(chat_id, "", finish_reason="stop")
+            yield "data: [DONE]\n\n"
+            return
         try:
             msg_type, msg_content = await loop.run_in_executor(
                 None, partial(progress_queue.get, True, 0.3),
@@ -116,8 +125,19 @@ async def stream_response(
 
     # Get the result
     try:
-        result = await agent_future
+        remaining = max(0.0, request_deadline - time.monotonic())
+        if remaining <= 0.0:
+            raise asyncio.TimeoutError
+        result = await asyncio.wait_for(agent_future, timeout=remaining)
         answer_text = result["answer"]
+    except asyncio.TimeoutError:
+        yield make_chunk(
+            chat_id,
+            "\n---\n\n⚠️ **Fehler bei der Recherche:** Request-Timeout erreicht",
+        )
+        yield make_chunk(chat_id, "", finish_reason="stop")
+        yield "data: [DONE]\n\n"
+        return
     except Exception as e:
         log.error("Agent-Fehler: %s", e)
         yield make_chunk(

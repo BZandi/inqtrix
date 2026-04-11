@@ -288,15 +288,6 @@ class PerplexitySearch(_NonFatalNoticeMixin, SearchProvider):
             "_completion_tokens": normalized.completion_tokens,
         }
 
-        # Token usage from the API response
-        if hasattr(r, "usage") and r.usage:
-            data["_prompt_tokens"] = (
-                getattr(r.usage, "prompt_tokens", 0) or 0
-            )
-            data["_completion_tokens"] = (
-                getattr(r.usage, "completion_tokens", 0) or 0
-            )
-
         with self._cache_lock:
             self._cache[key] = data
         return data

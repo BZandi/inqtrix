@@ -37,12 +37,13 @@ from __future__ import annotations
 import logging
 import time
 from queue import Queue
-from typing import Any, Iterator
+from typing import Iterator
 
 from pydantic import BaseModel, ConfigDict
 
 from inqtrix.providers.base import LLMProvider, SearchProvider, ProviderContext
 from inqtrix.result import ResearchResult
+from inqtrix.settings import AgentSettings, ModelSettings
 from inqtrix.strategies import (
     ClaimConsolidationStrategy,
     ClaimExtractionStrategy,
@@ -146,7 +147,7 @@ class ResearchAgent:
         self._config = config or AgentConfig()
         self._providers: ProviderContext | None = None
         self._strategies: StrategyContext | None = None
-        self._settings: Any = None  # AgentSettings, lazily built
+        self._settings: AgentSettings | None = None
 
     # -- Public API ------------------------------------------------ #
 
@@ -273,7 +274,9 @@ class ResearchAgent:
 
     # -- Internals ------------------------------------------------- #
 
-    def _ensure_initialised(self) -> tuple[ProviderContext, StrategyContext, Any]:
+    def _ensure_initialised(
+        self,
+    ) -> tuple[ProviderContext, StrategyContext, AgentSettings]:
         """Lazily create providers, strategies, and settings from config."""
         if self._providers is not None:
             assert self._strategies is not None
@@ -305,9 +308,16 @@ class ResearchAgent:
         # (e.g. AnthropicLLM, custom LLMProvider implementations).
         if llm is not None and not hasattr(llm, "models"):
             from inqtrix.providers.base import ConfiguredLLMProvider
-            from inqtrix.settings import ModelSettings
 
-            llm = ConfiguredLLMProvider(llm, ModelSettings())
+            llm = ConfiguredLLMProvider(
+                llm,
+                ModelSettings(
+                    reasoning_model="",
+                    classify_model="",
+                    summarize_model="",
+                    evaluate_model="",
+                ),
+            )
 
         self._providers = ProviderContext(llm=llm, search=search)
 
@@ -339,10 +349,8 @@ class ResearchAgent:
         return self._providers, self._strategies, self._settings
 
     @staticmethod
-    def _build_settings(cfg: AgentConfig) -> Any:
+    def _build_settings(cfg: AgentConfig) -> AgentSettings:
         """Build an AgentSettings instance from the flat AgentConfig."""
-        from inqtrix.settings import AgentSettings
-
         env_defaults = AgentSettings()
         data = env_defaults.model_dump()
         explicit_fields = cfg.model_fields_set

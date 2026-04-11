@@ -535,14 +535,16 @@ class ConfiguredLLMProvider(LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
     ) -> str:
-        return self._provider.complete(
-            prompt,
-            system=system,
-            model=model or self._models.reasoning_model,
-            timeout=timeout,
-            state=state,
-            deadline=deadline,
-        )
+        call_kwargs: dict[str, object] = {
+            "system": system,
+            "timeout": timeout,
+            "state": state,
+            "deadline": deadline,
+        }
+        effective_model = model or self._models.reasoning_model
+        if effective_model:
+            call_kwargs["model"] = effective_model
+        return self._provider.complete(prompt, **call_kwargs)
 
     def complete_with_metadata(
         self,
@@ -554,14 +556,16 @@ class ConfiguredLLMProvider(LLMProvider):
         state: dict | None = None,
         deadline: float | None = None,
     ) -> LLMResponse:
-        return self._provider.complete_with_metadata(
-            prompt,
-            system=system,
-            model=model or self._models.reasoning_model,
-            timeout=timeout,
-            state=state,
-            deadline=deadline,
-        )
+        call_kwargs: dict[str, object] = {
+            "system": system,
+            "timeout": timeout,
+            "state": state,
+            "deadline": deadline,
+        }
+        effective_model = model or self._models.reasoning_model
+        if effective_model:
+            call_kwargs["model"] = effective_model
+        return self._provider.complete_with_metadata(prompt, **call_kwargs)
 
     def summarize_parallel(
         self, text: str, deadline: float | None = None

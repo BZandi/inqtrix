@@ -80,33 +80,55 @@ def register_routes(
 
     # -- /health -------------------------------------------------------
 
+    def _provider_label(provider: object) -> str:
+        wrapped = getattr(provider, "_provider", None)
+        if wrapped is not None:
+            return type(wrapped).__name__
+        return type(provider).__name__
+
+    def _provider_available(provider: object, *, label: str) -> bool:
+        try:
+            checker = getattr(provider, "is_available", None)
+            return bool(checker()) if callable(checker) else False
+        except Exception as exc:
+            log.warning("Health-Check fuer %s fehlgeschlagen: %s", label, sanitize_error(exc))
+            return False
+
+    def _request_timeout_seconds() -> int:
+        return settings.agent.max_total_seconds + 30
+
     @_router.get("/health")
     def health():
-        try:
-            from openai import OpenAI
-            c = OpenAI(
-                base_url=settings.server.litellm_base_url,
-                api_key=settings.server.litellm_api_key,
-            )
-            c.models.list()
+        llm_label = _provider_label(providers.llm)
+        search_label = _provider_label(providers.search)
+        llm_available = _provider_available(providers.llm, label=llm_label)
+        search_available = _provider_available(providers.search, label=search_label)
+        status_code = 200 if llm_available and search_available else 503
+        payload = {
+            "status": "ok" if status_code == 200 else "degraded",
+            "llm": {
+                "provider": llm_label,
+                "status": "connected" if llm_available else "unavailable",
+            },
+            "search": {
+                "provider": search_label,
+                "status": "connected" if search_available else "unavailable",
+            },
+            "testing_mode": settings.agent.testing_mode,
+            "reasoning_model": settings.models.reasoning_model,
+            "search_model": settings.models.search_model,
+            "classify_model": settings.models.effective_classify_model,
+            "summarize_model": settings.models.effective_summarize_model,
+            "evaluate_model": settings.models.effective_evaluate_model,
+            "high_risk_score_threshold": settings.agent.high_risk_score_threshold,
+            "high_risk_classify_escalate": settings.agent.high_risk_classify_escalate,
+            "high_risk_evaluate_escalate": settings.agent.high_risk_evaluate_escalate,
+        }
+        if status_code == 200:
             return {
-                "status": "ok",
-                "litellm": "connected",
-                "testing_mode": settings.agent.testing_mode,
-                "reasoning_model": settings.models.reasoning_model,
-                "search_model": settings.models.search_model,
-                "classify_model": settings.models.effective_classify_model,
-                "summarize_model": settings.models.effective_summarize_model,
-                "evaluate_model": settings.models.effective_evaluate_model,
-                "high_risk_score_threshold": settings.agent.high_risk_score_threshold,
-                "high_risk_classify_escalate": settings.agent.high_risk_classify_escalate,
-                "high_risk_evaluate_escalate": settings.agent.high_risk_evaluate_escalate,
+                **payload,
             }
-        except Exception:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "degraded", "litellm": "unreachable"},
-            )
+        return JSONResponse(status_code=status_code, content=payload)
 
     # -- /v1/models ----------------------------------------------------
 
@@ -184,7 +206,7 @@ def register_routes(
                         settings=settings.agent,
                     ),
                 ),
-                timeout=settings.agent.max_total_seconds + 30,
+                timeout=_request_timeout_seconds(),
             )
         except asyncio.TimeoutError:
             return JSONResponse(
@@ -316,17 +338,28 @@ def register_routes(
         async with sem:
             loop = asyncio.get_running_loop()
             try:
-                result = await loop.run_in_executor(
-                    None,
-                    partial(
-                        agent_run,
-                        question,
-                        history=history,
-                        prev_session=prev_session,
-                        providers=providers,
-                        strategies=strategies,
-                        settings=settings.agent,
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None,
+                        partial(
+                            agent_run,
+                            question,
+                            history=history,
+                            prev_session=prev_session,
+                            providers=providers,
+                            strategies=strategies,
+                            settings=settings.agent,
+                        ),
                     ),
+                    timeout=_request_timeout_seconds(),
+                )
+            except asyncio.TimeoutError:
+                return JSONResponse(
+                    status_code=504,
+                    content={"error": {
+                        "message": "Recherche-Request Timeout",
+                        "type": "timeout_error",
+                    }},
                 )
             except Exception as e:
                 log.error("Agent-Fehler: %s", e)

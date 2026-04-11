@@ -54,10 +54,28 @@ def classify(
     strategies: StrategyContext,
     settings: AgentSettings,
 ) -> dict:
-    """Analyse question: web search needed?  Language, recency, type, sub-questions.
+    """Analyse the incoming question and seed the initial research state.
 
-    Combines classification and decomposition in a single LLM call to
-    save one round-trip (~2 s).
+    Args:
+        s: Mutable AgentState-compatible dict. Reads the question,
+            follow-up markers, and deadline; writes language, query type,
+            risk flags, aspect hints, and reset markers for new topics.
+        providers: Active LLM and search providers.
+        strategies: Runtime strategies for risk scoring and downstream
+            claim/context handling.
+        settings: Agent behavior settings used for risk escalation and
+            timeout handling.
+
+    Returns:
+        The mutated state dict with classification results.
+
+    Raises:
+        AgentRateLimited: Propagated when the upstream classification
+            model hard-fails on rate limiting.
+
+    Example:
+        >>> classify(state, providers=providers, strategies=strategies, settings=settings)
+        {'query_type': 'general', 'language': 'de', ...}
     """
     emit_progress(s, "Analysiere Frage...")
     _t0 = time.monotonic()
@@ -301,7 +319,29 @@ def plan(
     strategies: StrategyContext,
     settings: AgentSettings,
 ) -> dict:
-    """Generate search queries for the next round."""
+    """Generate the next batch of research queries.
+
+    Args:
+        s: Mutable AgentState-compatible dict. Reads the current round,
+            required aspects, gaps, and related questions; writes new
+            planned queries and related planning metadata.
+        providers: Active LLM and search providers.
+        strategies: Runtime strategies used to derive quality terms and
+            other planning hints.
+        settings: Agent behavior settings controlling round limits and
+            first-round breadth.
+
+    Returns:
+        The mutated state dict with updated query planning.
+
+    Raises:
+        AgentRateLimited: Propagated when the planning model hard-fails
+            on upstream rate limiting.
+
+    Example:
+        >>> plan(state, providers=providers, strategies=strategies, settings=settings)
+        {'queries': ['gkv reform 2026', ...], ...}
+    """
     emit_progress(s, f"Plane Suchanfragen (Runde {s['round'] + 1}/{settings.max_rounds})...")
     _t0 = time.monotonic()
     try:
@@ -564,7 +604,30 @@ def search(
     strategies: StrategyContext,
     settings: AgentSettings,
 ) -> dict:
-    """Execute parallel web search with Perplexity-specific filters."""
+    """Execute the current query batch and merge search evidence into state.
+
+    Args:
+        s: Mutable AgentState-compatible dict. Reads queued queries,
+            offsets, and deadline; writes context blocks, citations,
+            token counters, claims, and round progress.
+        providers: Active LLM and search providers.
+        strategies: Runtime strategies for claim extraction,
+            consolidation, and pruning.
+        settings: Agent behavior settings controlling batch width,
+            timeouts, and logging/test instrumentation.
+
+    Returns:
+        The mutated state dict after search, summarization, and claim
+        extraction complete or short-circuit.
+
+    Raises:
+        AgentRateLimited: Propagated when a provider surfaces a fatal
+            rate limit that must abort the run.
+
+    Example:
+        >>> search(state, providers=providers, strategies=strategies, settings=settings)
+        {'all_citations': ['https://...'], 'context': ['...'], ...}
+    """
     _t0 = time.monotonic()
     # Dynamic batch size: broader first round for better coverage
     _batch = settings.first_round_queries if s["round"] == 0 else 3
@@ -974,7 +1037,30 @@ def evaluate(
     strategies: StrategyContext,
     settings: AgentSettings,
 ) -> dict:
-    """Evaluate whether enough information is available and identify gaps."""
+    """Evaluate evidence quality, stop criteria, and remaining gaps.
+
+    Args:
+        s: Mutable AgentState-compatible dict. Reads accumulated
+            evidence, claims, and prior confidence; writes quality
+            metrics, stop decisions, and follow-up gap information.
+        providers: Active LLM and search providers.
+        strategies: Runtime strategies for source quality, claim
+            consolidation, risk coverage, and stop criteria.
+        settings: Agent behavior settings controlling escalation and
+            stopping thresholds.
+
+    Returns:
+        The mutated state dict with refreshed quality metrics and stop
+        status.
+
+    Raises:
+        AgentRateLimited: Propagated when the evaluation model hard-fails
+            on upstream rate limiting.
+
+    Example:
+        >>> evaluate(state, providers=providers, strategies=strategies, settings=settings)
+        {'final_confidence': 8, 'done': True, ...}
+    """
     emit_progress(
         s,
         f"Bewerte Informationsqualitaet (nach Runde {s['round']}/{settings.max_rounds})...",
@@ -1274,7 +1360,29 @@ def answer(
     strategies: StrategyContext,
     settings: AgentSettings,
 ) -> dict:
-    """Formulate the final answer with source citations."""
+    """Formulate the final user-facing answer from the collected evidence.
+
+    Args:
+        s: Mutable AgentState-compatible dict. Reads context, claim
+            metrics, language, citations, and deadline; writes the final
+            answer text and answer-node runtime metadata.
+        providers: Active LLM and search providers.
+        strategies: Runtime strategies for answer citation selection and
+            claim formatting.
+        settings: Agent behavior settings controlling citation limits and
+            fallback behavior.
+
+    Returns:
+        The mutated state dict with the final answer text populated.
+
+    Raises:
+        AgentRateLimited: Propagated when final answer generation hits a
+            fatal upstream rate limit.
+
+    Example:
+        >>> answer(state, providers=providers, strategies=strategies, settings=settings)
+        {'answer': 'Aktueller Stand ...', ...}
+    """
     n_rounds = s.get("round", 0)
     round_label = "Runde" if n_rounds == 1 else "Runden"
     emit_progress(s, f"Formuliere Antwort (nach {n_rounds} {round_label})...")

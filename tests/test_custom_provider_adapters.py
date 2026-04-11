@@ -227,6 +227,7 @@ def test_anthropic_thinking_adjusts_max_tokens(monkeypatch):
 
 def test_anthropic_retries_transient_http_error_before_success(monkeypatch):
     import inqtrix.providers.anthropic as anthropic_module
+    import inqtrix.providers.base as base_module
 
     llm = AnthropicLLM(api_key="key")
     calls = {"count": 0}
@@ -256,7 +257,7 @@ def test_anthropic_retries_transient_http_error_before_success(monkeypatch):
 
     monkeypatch.setattr(anthropic_module, "urlopen", fake_urlopen)
     monkeypatch.setattr(anthropic_module.time, "sleep", lambda _: None)
-    monkeypatch.setattr(anthropic_module.random, "uniform", lambda a, b: 1.0)
+    monkeypatch.setattr(base_module.random, "uniform", lambda a, b: 1.0)
 
     assert llm.complete("test") == "ok"
     assert calls["count"] == 4
@@ -265,6 +266,7 @@ def test_anthropic_retries_transient_http_error_before_success(monkeypatch):
 def test_anthropic_error_includes_request_id_and_body_details(monkeypatch):
     import pytest
     import inqtrix.providers.anthropic as anthropic_module
+    import inqtrix.providers.base as base_module
 
     llm = AnthropicLLM(api_key="key")
 
@@ -277,7 +279,7 @@ def test_anthropic_error_includes_request_id_and_body_details(monkeypatch):
 
     monkeypatch.setattr(anthropic_module, "urlopen", fake_urlopen)
     monkeypatch.setattr(anthropic_module.time, "sleep", lambda _: None)
-    monkeypatch.setattr(anthropic_module.random, "uniform", lambda a, b: 1.0)
+    monkeypatch.setattr(base_module.random, "uniform", lambda a, b: 1.0)
 
     with pytest.raises(AnthropicAPIError) as exc_info:
         llm.complete("test")
@@ -292,6 +294,7 @@ def test_anthropic_error_includes_request_id_and_body_details(monkeypatch):
 
 def test_anthropic_summarize_retries_then_falls_back(monkeypatch):
     import inqtrix.providers.anthropic as anthropic_module
+    import inqtrix.providers.base as base_module
 
     llm = AnthropicLLM(api_key="key")
     calls = {"count": 0}
@@ -306,7 +309,7 @@ def test_anthropic_summarize_retries_then_falls_back(monkeypatch):
 
     monkeypatch.setattr(anthropic_module, "urlopen", fake_urlopen)
     monkeypatch.setattr(anthropic_module.time, "sleep", lambda _: None)
-    monkeypatch.setattr(anthropic_module.random, "uniform", lambda a, b: 1.0)
+    monkeypatch.setattr(base_module.random, "uniform", lambda a, b: 1.0)
 
     summary = llm.summarize_parallel("Langer Testtext")
 

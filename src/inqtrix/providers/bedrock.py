@@ -36,10 +36,8 @@ Requires ``boto3``::
 from __future__ import annotations
 
 import logging
-import random
 import threading
 import time
-from contextlib import contextmanager
 from typing import Any
 
 from inqtrix.constants import REASONING_TIMEOUT, SUMMARIZE_TIMEOUT
@@ -48,12 +46,12 @@ from inqtrix.prompts import SUMMARIZE_PROMPT
 from inqtrix.providers.base import (
     LLMProvider,
     LLMResponse,
+    ThinkingSuppressionMixin,
     _NonFatalNoticeMixin,
-    _BACKOFF_BASE_SECONDS,
-    _BACKOFF_MAX_SECONDS,
-    _JITTER_RANGE,
     _THINKING_MIN_MAX_TOKENS,
     _check_deadline,
+    _retry_delay_seconds,
+    _sleep_before_retry,
 )
 from inqtrix.settings import ModelSettings
 from inqtrix.state import track_tokens
@@ -86,7 +84,7 @@ _RETRYABLE_BEDROCK_ERRORS = frozenset({
 _MAX_BEDROCK_ATTEMPTS = 5
 
 
-class BedrockLLM(_NonFatalNoticeMixin, LLMProvider):
+class BedrockLLM(ThinkingSuppressionMixin, _NonFatalNoticeMixin, LLMProvider):
     """Call Amazon Bedrock Converse API directly via boto3.
 
     Parameters
@@ -178,47 +176,8 @@ class BedrockLLM(_NonFatalNoticeMixin, LLMProvider):
         return self._models
 
     # ------------------------------------------------------------------ #
-    # Thinking suppression
+    # Thinking suppression — provided by ThinkingSuppressionMixin
     # ------------------------------------------------------------------ #
-
-    @contextmanager
-    def without_thinking(self):
-        depth = int(getattr(self._thread_state, "suppress_thinking_depth", 0))
-        self._thread_state.suppress_thinking_depth = depth + 1
-        try:
-            yield self
-        finally:
-            if depth:
-                self._thread_state.suppress_thinking_depth = depth
-            else:
-                try:
-                    delattr(self._thread_state, "suppress_thinking_depth")
-                except AttributeError:
-                    pass
-
-    def _thinking_enabled(self) -> bool:
-        return self._thinking is not None and int(
-            getattr(self._thread_state, "suppress_thinking_depth", 0)
-        ) == 0
-
-    # ------------------------------------------------------------------ #
-    # Retry helpers
-    # ------------------------------------------------------------------ #
-
-    @staticmethod
-    def _retry_delay_seconds(attempt: int) -> float:
-        base = min(_BACKOFF_BASE_SECONDS * (2 ** attempt), _BACKOFF_MAX_SECONDS)
-        return base * random.uniform(*_JITTER_RANGE)
-
-    @staticmethod
-    def _sleep_before_retry(delay: float, deadline: float | None = None) -> None:
-        if delay <= 0:
-            return
-        if deadline is not None:
-            _check_deadline(deadline)
-            delay = min(delay, max(0.0, deadline - time.monotonic()))
-        if delay > 0:
-            time.sleep(delay)
 
     @staticmethod
     def _extract_error_details(exc: ClientError) -> dict[str, Any]:
@@ -288,7 +247,7 @@ class BedrockLLM(_NonFatalNoticeMixin, LLMProvider):
                     model=use_model, details=details, original=exc)
 
                 if error_code in _RETRYABLE_BEDROCK_ERRORS and attempt < (_MAX_BEDROCK_ATTEMPTS - 1):
-                    delay = self._retry_delay_seconds(attempt)
+                    delay = _retry_delay_seconds(attempt)
                     log.warning(
                         "Bedrock transient error (%s, code=%s, request-id=%s, attempt=%d/%d). Retrying in %.2fs.",
                         use_model,
@@ -298,14 +257,14 @@ class BedrockLLM(_NonFatalNoticeMixin, LLMProvider):
                         _MAX_BEDROCK_ATTEMPTS,
                         delay,
                     )
-                    self._sleep_before_retry(delay, deadline)
+                    _sleep_before_retry(delay, deadline)
                     continue
 
                 raise api_error from exc
             except BotoConnectionError as exc:
                 api_error = self._build_api_error(model=use_model, original=exc)
                 if attempt < (_MAX_BEDROCK_ATTEMPTS - 1):
-                    delay = self._retry_delay_seconds(attempt)
+                    delay = _retry_delay_seconds(attempt)
                     log.warning(
                         "Bedrock transport error (%s, attempt=%d/%d). Retrying in %.2fs: %s",
                         use_model,
@@ -314,7 +273,7 @@ class BedrockLLM(_NonFatalNoticeMixin, LLMProvider):
                         delay,
                         exc,
                     )
-                    self._sleep_before_retry(delay, deadline)
+                    _sleep_before_retry(delay, deadline)
                     continue
                 raise api_error from exc
 

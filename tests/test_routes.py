@@ -9,9 +9,9 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import inqtrix.routes as routes_module
-from inqtrix.routes import create_router, register_routes
-from inqtrix.session import SessionStore
+import inqtrix.server.routes as routes_module
+from inqtrix.server.routes import create_router, register_routes
+from inqtrix.server.session import SessionStore
 from inqtrix.settings import AgentSettings, ModelSettings, ServerSettings, Settings
 
 

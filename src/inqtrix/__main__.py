@@ -2,7 +2,7 @@
 
 import uvicorn
 
-from inqtrix.app import create_app
+from inqtrix.server import create_app
 
 app = create_app()
 

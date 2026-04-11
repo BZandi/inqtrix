@@ -16,8 +16,60 @@ class AgentRateLimited(Exception):
         super().__init__(f"Rate-Limit erreicht fuer Modell '{model}': {original}")
 
 
-class AnthropicAPIError(RuntimeError):
+class _ProviderAPIError(RuntimeError):
+    """Base class for provider-specific API errors.
+
+    Subclasses provide a German header template and may customize the
+    set of accepted keyword arguments.  The shared ``__init__`` builds
+    ``detail_parts`` from common fields and formats the final message.
+    """
+
+    _header_template: str = "API-Aufruf fehlgeschlagen ({identifier})"
+
+    def __init__(
+        self,
+        *,
+        _identifier: str,
+        status_code: int | None = None,
+        error_code: str = "",
+        error_type: str = "",
+        message: str = "",
+        request_id: str | None = None,
+        retry_after: str | None = None,
+        original: Exception | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.error_code = error_code
+        self.error_type = error_type
+        self.request_id = request_id
+        self.retry_after = retry_after
+        self.original = original
+
+        detail_parts: list[str] = []
+        if status_code is not None:
+            detail_parts.append(f"HTTP {status_code}")
+        if error_code:
+            detail_parts.append(error_code)
+        if error_type:
+            detail_parts.append(error_type)
+        if request_id:
+            detail_parts.append(f"request-id={request_id}")
+        if retry_after:
+            detail_parts.append(f"retry-after={retry_after}")
+
+        header = self._header_template.format(identifier=_identifier)
+        if detail_parts:
+            header = f"{header} [{' | '.join(detail_parts)}]"
+
+        default_error = f"Unbekannter {self.__class__.__name__}"
+        final_message = message.strip() if message else str(original or default_error)
+        super().__init__(f"{header}: {final_message}")
+
+
+class AnthropicAPIError(_ProviderAPIError):
     """Raised when a direct Anthropic API call fails after retries."""
+
+    _header_template = "Anthropic-Aufruf fehlgeschlagen ({identifier})"
 
     def __init__(
         self,
@@ -31,33 +83,22 @@ class AnthropicAPIError(RuntimeError):
         original: Exception | None = None,
     ) -> None:
         self.model = model
-        self.status_code = status_code
-        self.error_type = error_type
-        self.request_id = request_id
-        self.retry_after = retry_after
-        self.original = original
-
-        detail_parts: list[str] = []
-        if status_code is not None:
-            detail_parts.append(f"HTTP {status_code}")
-        if error_type:
-            detail_parts.append(error_type)
-        if request_id:
-            detail_parts.append(f"request-id={request_id}")
-        if retry_after:
-            detail_parts.append(f"retry-after={retry_after}")
-
-        header = f"Anthropic-Aufruf fehlgeschlagen ({model})"
-        if detail_parts:
-            header = f"{header} [{' | '.join(detail_parts)}]"
-
-        final_message = message.strip() if message else str(original or "Unbekannter Anthropic-Fehler")
-        super().__init__(f"{header}: {final_message}")
+        super().__init__(
+            _identifier=model,
+            status_code=status_code,
+            error_type=error_type,
+            message=message,
+            request_id=request_id,
+            retry_after=retry_after,
+            original=original,
+        )
 
 
-class BedrockAPIError(RuntimeError):
+class BedrockAPIError(_ProviderAPIError):
     """Raised when a direct Amazon Bedrock API call fails after retries."""
 
+    _header_template = "Bedrock-Aufruf fehlgeschlagen ({identifier})"
+
     def __init__(
         self,
         *,
@@ -69,30 +110,21 @@ class BedrockAPIError(RuntimeError):
         original: Exception | None = None,
     ) -> None:
         self.model = model
-        self.error_code = error_code
-        self.status_code = status_code
-        self.request_id = request_id
-        self.original = original
-
-        detail_parts: list[str] = []
-        if status_code is not None:
-            detail_parts.append(f"HTTP {status_code}")
-        if error_code:
-            detail_parts.append(error_code)
-        if request_id:
-            detail_parts.append(f"request-id={request_id}")
-
-        header = f"Bedrock-Aufruf fehlgeschlagen ({model})"
-        if detail_parts:
-            header = f"{header} [{' | '.join(detail_parts)}]"
-
-        final_message = message.strip() if message else str(original or "Unbekannter Bedrock-Fehler")
-        super().__init__(f"{header}: {final_message}")
+        super().__init__(
+            _identifier=model,
+            status_code=status_code,
+            error_code=error_code,
+            message=message,
+            request_id=request_id,
+            original=original,
+        )
 
 
-class AzureOpenAIAPIError(RuntimeError):
+class AzureOpenAIAPIError(_ProviderAPIError):
     """Raised when an Azure OpenAI API call fails."""
 
+    _header_template = "Azure-OpenAI-Aufruf fehlgeschlagen ({identifier})"
+
     def __init__(
         self,
         *,
@@ -104,30 +136,20 @@ class AzureOpenAIAPIError(RuntimeError):
         original: Exception | None = None,
     ) -> None:
         self.model = model
-        self.status_code = status_code
-        self.error_code = error_code
-        self.request_id = request_id
-        self.original = original
-
-        detail_parts: list[str] = []
-        if status_code is not None:
-            detail_parts.append(f"HTTP {status_code}")
-        if error_code:
-            detail_parts.append(error_code)
-        if request_id:
-            detail_parts.append(f"request-id={request_id}")
-
-        header = f"Azure-OpenAI-Aufruf fehlgeschlagen ({model})"
-        if detail_parts:
-            header = f"{header} [{' | '.join(detail_parts)}]"
-
-        final_message = message.strip() if message else str(
-            original or "Unbekannter Azure-OpenAI-Fehler")
-        super().__init__(f"{header}: {final_message}")
+        super().__init__(
+            _identifier=model,
+            status_code=status_code,
+            error_code=error_code,
+            message=message,
+            request_id=request_id,
+            original=original,
+        )
 
 
-class AzureFoundryBingAPIError(RuntimeError):
+class AzureFoundryBingAPIError(_ProviderAPIError):
     """Raised when an Azure Foundry Bing Search agent call fails."""
+
+    _header_template = "Azure-Foundry-Bing-Aufruf fehlgeschlagen (agent={identifier})"
 
     def __init__(
         self,
@@ -140,30 +162,20 @@ class AzureFoundryBingAPIError(RuntimeError):
         original: Exception | None = None,
     ) -> None:
         self.agent_id = agent_id
-        self.status_code = status_code
-        self.error_code = error_code
-        self.request_id = request_id
-        self.original = original
-
-        detail_parts: list[str] = []
-        if status_code is not None:
-            detail_parts.append(f"HTTP {status_code}")
-        if error_code:
-            detail_parts.append(error_code)
-        if request_id:
-            detail_parts.append(f"request-id={request_id}")
-
-        header = f"Azure-Foundry-Bing-Aufruf fehlgeschlagen (agent={agent_id})"
-        if detail_parts:
-            header = f"{header} [{' | '.join(detail_parts)}]"
-
-        final_message = message.strip() if message else str(
-            original or "Unbekannter Azure-Foundry-Bing-Fehler")
-        super().__init__(f"{header}: {final_message}")
+        super().__init__(
+            _identifier=agent_id,
+            status_code=status_code,
+            error_code=error_code,
+            message=message,
+            request_id=request_id,
+            original=original,
+        )
 
 
-class AzureFoundryWebSearchAPIError(RuntimeError):
+class AzureFoundryWebSearchAPIError(_ProviderAPIError):
     """Raised when an Azure Foundry Web Search (Responses API) call fails."""
+
+    _header_template = "Azure-Foundry-WebSearch-Aufruf fehlgeschlagen (agent={identifier})"
 
     def __init__(
         self,
@@ -176,23 +188,11 @@ class AzureFoundryWebSearchAPIError(RuntimeError):
         original: Exception | None = None,
     ) -> None:
         self.agent_name = agent_name
-        self.status_code = status_code
-        self.error_code = error_code
-        self.request_id = request_id
-        self.original = original
-
-        detail_parts: list[str] = []
-        if status_code is not None:
-            detail_parts.append(f"HTTP {status_code}")
-        if error_code:
-            detail_parts.append(error_code)
-        if request_id:
-            detail_parts.append(f"request-id={request_id}")
-
-        header = f"Azure-Foundry-WebSearch-Aufruf fehlgeschlagen (agent={agent_name})"
-        if detail_parts:
-            header = f"{header} [{' | '.join(detail_parts)}]"
-
-        final_message = message.strip() if message else str(
-            original or "Unbekannter Azure-Foundry-WebSearch-Fehler")
-        super().__init__(f"{header}: {final_message}")
+        super().__init__(
+            _identifier=agent_name,
+            status_code=status_code,
+            error_code=error_code,
+            message=message,
+            request_id=request_id,
+            original=original,
+        )

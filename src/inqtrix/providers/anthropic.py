@@ -34,10 +34,8 @@ from __future__ import annotations
 
 import json
 import logging
-import random
 import threading
 import time
-from contextlib import contextmanager
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -48,13 +46,13 @@ from inqtrix.prompts import SUMMARIZE_PROMPT
 from inqtrix.providers.base import (
     LLMProvider,
     LLMResponse,
+    ThinkingSuppressionMixin,
     _NonFatalNoticeMixin,
-    _BACKOFF_BASE_SECONDS,
-    _BACKOFF_MAX_SECONDS,
-    _JITTER_RANGE,
     _THINKING_MIN_MAX_TOKENS,
     _bounded_timeout,
     _check_deadline,
+    _retry_delay_seconds,
+    _sleep_before_retry,
 )
 from inqtrix.settings import ModelSettings
 from inqtrix.state import track_tokens
@@ -83,7 +81,7 @@ _RETRYABLE_HTTP_STATUS = frozenset({500, 502, 503, 504, 529})
 _MAX_ANTHROPIC_ATTEMPTS = 5
 
 
-class AnthropicLLM(_NonFatalNoticeMixin, LLMProvider):
+class AnthropicLLM(ThinkingSuppressionMixin, _NonFatalNoticeMixin, LLMProvider):
     """Call the Anthropic Messages API directly without LiteLLM.
 
     Parameters
@@ -177,39 +175,8 @@ class AnthropicLLM(_NonFatalNoticeMixin, LLMProvider):
         return self._models
 
     # ------------------------------------------------------------------ #
-    # Thinking suppression
-    #
-    # Extended thinking is only useful for complex reasoning calls
-    # (classify, plan, evaluate, answer).  For cheap helper calls —
-    # summarise_parallel and claim extraction — it wastes tokens and
-    # slows down the parallel pipeline.
-    #
-    # The ``without_thinking`` context manager increments a thread-local
-    # depth counter.  While depth > 0, ``_thinking_enabled()`` returns
-    # False, so ``complete_with_metadata`` omits the ``thinking`` key
-    # from the API payload.  This is re-entrant and thread-safe:
-    # parallel summarise threads each have their own counter.
+    # Thinking suppression — provided by ThinkingSuppressionMixin
     # ------------------------------------------------------------------ #
-
-    @contextmanager
-    def without_thinking(self):
-        depth = int(getattr(self._thread_state, "suppress_thinking_depth", 0))
-        self._thread_state.suppress_thinking_depth = depth + 1
-        try:
-            yield self
-        finally:
-            if depth:
-                self._thread_state.suppress_thinking_depth = depth
-            else:
-                try:
-                    delattr(self._thread_state, "suppress_thinking_depth")
-                except AttributeError:
-                    pass
-
-    def _thinking_enabled(self) -> bool:
-        return self._thinking is not None and int(
-            getattr(self._thread_state, "suppress_thinking_depth", 0)
-        ) == 0
 
     # ------------------------------------------------------------------ #
     # Retry helpers
@@ -218,35 +185,6 @@ class AnthropicLLM(_NonFatalNoticeMixin, LLMProvider):
     @staticmethod
     def _is_retryable_http_status(status_code: int) -> bool:
         return status_code in _RETRYABLE_HTTP_STATUS
-
-    @staticmethod
-    def _retry_delay_seconds(attempt: int, retry_after: str | None = None) -> float:
-        """Compute retry delay with exponential backoff and jitter.
-
-        If the server sent a ``Retry-After`` header, honour it.
-        Otherwise use exponential backoff (base * 2^attempt, capped)
-        multiplied by a random jitter factor to desynchronise parallel
-        threads.
-        """
-        if retry_after:
-            try:
-                parsed = float(retry_after)
-            except ValueError:
-                parsed = 0.0
-            if parsed > 0:
-                return parsed
-        base = min(_BACKOFF_BASE_SECONDS * (2 ** attempt), _BACKOFF_MAX_SECONDS)
-        return base * random.uniform(*_JITTER_RANGE)
-
-    @staticmethod
-    def _sleep_before_retry(delay: float, deadline: float | None = None) -> None:
-        if delay <= 0:
-            return
-        if deadline is not None:
-            _check_deadline(deadline)
-            delay = min(delay, max(0.0, deadline - time.monotonic()))
-        if delay > 0:
-            time.sleep(delay)
 
     @staticmethod
     def _extract_http_error_details(exc: HTTPError) -> dict[str, str | int | None]:
@@ -378,7 +316,7 @@ class AnthropicLLM(_NonFatalNoticeMixin, LLMProvider):
                 api_error = self._build_api_error(
                     model=use_model, details=details, original=exc)
                 if self._is_retryable_http_status(exc.code) and attempt < (_MAX_ANTHROPIC_ATTEMPTS - 1):
-                    delay = self._retry_delay_seconds(attempt, details.get("retry_after"))
+                    delay = _retry_delay_seconds(attempt, details.get("retry_after"))
                     log.warning(
                         "Anthropic transient HTTP error (%s, status=%s, type=%s, request-id=%s, attempt=%d/%d). Retrying in %.2fs.",
                         use_model,
@@ -389,13 +327,13 @@ class AnthropicLLM(_NonFatalNoticeMixin, LLMProvider):
                         _MAX_ANTHROPIC_ATTEMPTS,
                         delay,
                     )
-                    self._sleep_before_retry(delay, deadline)
+                    _sleep_before_retry(delay, deadline)
                     continue
                 raise api_error from exc
             except (URLError, OSError) as exc:
                 api_error = self._build_api_error(model=use_model, original=exc)
                 if attempt < (_MAX_ANTHROPIC_ATTEMPTS - 1):
-                    delay = self._retry_delay_seconds(attempt)
+                    delay = _retry_delay_seconds(attempt)
                     log.warning(
                         "Anthropic transport error (%s, attempt=%d/%d). Retrying in %.2fs: %s",
                         use_model,
@@ -404,7 +342,7 @@ class AnthropicLLM(_NonFatalNoticeMixin, LLMProvider):
                         delay,
                         exc,
                     )
-                    self._sleep_before_retry(delay, deadline)
+                    _sleep_before_retry(delay, deadline)
                     continue
                 raise api_error from exc
             except ValueError as exc:

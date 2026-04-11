@@ -8,12 +8,12 @@ import time
 import pytest
 
 from inqtrix.settings import AgentSettings
-from inqtrix.streaming import guarded_stream, stream_response
+from inqtrix.server.streaming import guarded_stream, stream_response
 
 
 @pytest.mark.asyncio
 async def test_stream_response_includes_progress_by_default(monkeypatch):
-    import inqtrix.streaming as streaming_module
+    import inqtrix.server.streaming as streaming_module
 
     def fake_run(
         question,
@@ -52,7 +52,7 @@ async def test_stream_response_includes_progress_by_default(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stream_response_can_omit_progress(monkeypatch):
-    import inqtrix.streaming as streaming_module
+    import inqtrix.server.streaming as streaming_module
 
     def fake_run(
         question,
@@ -92,7 +92,7 @@ async def test_stream_response_can_omit_progress(monkeypatch):
 @pytest.mark.asyncio
 async def test_guarded_stream_passes_include_progress(monkeypatch):
     import asyncio
-    import inqtrix.streaming as streaming_module
+    import inqtrix.server.streaming as streaming_module
 
     captured: dict[str, object] = {}
 
@@ -123,7 +123,7 @@ async def test_guarded_stream_passes_include_progress(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stream_response_returns_timeout_chunk(monkeypatch):
-    import inqtrix.streaming as streaming_module
+    import inqtrix.server.streaming as streaming_module
 
     def fake_run(
         question,

@@ -2,12 +2,12 @@
 
 import time
 
-from inqtrix.session import (
+from inqtrix.server.session import (
     SessionStore,
     derive_session_id,
     prospective_session_id,
 )
-from inqtrix.routes import _format_history
+from inqtrix.server.routes import _format_history
 
 
 class TestFormatHistory:

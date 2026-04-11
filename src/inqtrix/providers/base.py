@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import threading
 import time
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -108,6 +110,83 @@ class _NonFatalNoticeMixin:
         if hasattr(state, "message"):
             delattr(state, "message")
         return str(message) if message else None
+
+
+class ThinkingSuppressionMixin:
+    """Re-entrant, thread-safe suppression of extended thinking.
+
+    Subclasses must set ``self._thinking`` (the thinking config dict or
+    ``None``) and ``self._thread_state`` (a ``threading.local()``) in
+    their ``__init__``.
+
+    The ``without_thinking`` context manager increments a thread-local
+    depth counter.  While depth > 0, ``_thinking_enabled()`` returns
+    ``False``, so the provider omits the ``thinking`` key from API
+    payloads.  This is re-entrant and thread-safe: parallel summarise
+    threads each have their own counter.
+    """
+
+    _thinking: dict | None
+    _thread_state: threading.local
+
+    @contextmanager
+    def without_thinking(self):
+        depth = int(getattr(self._thread_state, "suppress_thinking_depth", 0))
+        self._thread_state.suppress_thinking_depth = depth + 1
+        try:
+            yield self
+        finally:
+            if depth:
+                self._thread_state.suppress_thinking_depth = depth
+            else:
+                try:
+                    delattr(self._thread_state, "suppress_thinking_depth")
+                except AttributeError:
+                    pass
+
+    def _thinking_enabled(self) -> bool:
+        return self._thinking is not None and int(
+            getattr(self._thread_state, "suppress_thinking_depth", 0)
+        ) == 0
+
+
+# =========================================================
+# Shared retry helpers (Anthropic & Bedrock)
+# =========================================================
+
+
+def _retry_delay_seconds(
+    attempt: int, retry_after: str | None = None
+) -> float:
+    """Compute retry delay with exponential backoff and jitter.
+
+    If the server sent a ``Retry-After`` header, honour it.
+    Otherwise use exponential backoff (base * 2^attempt, capped)
+    multiplied by a random jitter factor to desynchronise parallel
+    threads.
+    """
+    if retry_after:
+        try:
+            parsed = float(retry_after)
+        except ValueError:
+            parsed = 0.0
+        if parsed > 0:
+            return parsed
+    base = min(_BACKOFF_BASE_SECONDS * (2 ** attempt), _BACKOFF_MAX_SECONDS)
+    return base * random.uniform(*_JITTER_RANGE)
+
+
+def _sleep_before_retry(
+    delay: float, deadline: float | None = None
+) -> None:
+    """Sleep for *delay* seconds, clamped to the remaining deadline."""
+    if delay <= 0:
+        return
+    if deadline is not None:
+        _check_deadline(deadline)
+        delay = min(delay, max(0.0, deadline - time.monotonic()))
+    if delay > 0:
+        time.sleep(delay)
 
 
 # =========================================================

@@ -11,8 +11,8 @@ from inqtrix.config import InqtrixConfig, load_config
 from inqtrix.config_bridge import config_to_settings, create_providers_from_config
 from inqtrix.providers import create_providers
 from inqtrix.providers.base import ProviderContext
-from inqtrix.routes import create_router, register_routes
-from inqtrix.session import SessionStore
+from inqtrix.server.routes import create_router, register_routes
+from inqtrix.server.session import SessionStore
 from inqtrix.settings import Settings
 from inqtrix.strategies import create_default_strategies
 

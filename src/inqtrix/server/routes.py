@@ -15,10 +15,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from inqtrix.graph import run as agent_run, run_test as agent_run_test
 from inqtrix.providers.base import ProviderContext
-from inqtrix.session import SessionStore, derive_session_id, prospective_session_id
+from inqtrix.server.session import SessionStore, derive_session_id, prospective_session_id
 from inqtrix.settings import AgentSettings, ServerSettings, Settings
 from inqtrix.strategies import StrategyContext
-from inqtrix.streaming import guarded_stream, MODEL_NAME
+from inqtrix.server.streaming import guarded_stream, MODEL_NAME
 from inqtrix.urls import sanitize_error
 
 log = logging.getLogger("inqtrix")

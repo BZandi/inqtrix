@@ -17,23 +17,33 @@ class RiskScoringStrategy(ABC):
     """Score risk, infer query type, derive aspects, inject quality queries."""
 
     @abstractmethod
-    def score(self, question: str) -> int: ...
+    def score(self, question: str) -> int:
+        """Return a bounded deterministic risk score for *question*."""
+        ...
 
     @abstractmethod
-    def infer_query_type(self, question: str) -> str: ...
+    def infer_query_type(self, question: str) -> str:
+        """Infer the coarse query type such as ``general``, ``news``, or ``academic``."""
+        ...
 
     @abstractmethod
-    def derive_required_aspects(self, question: str, query_type: str) -> list[str]: ...
+    def derive_required_aspects(self, question: str, query_type: str) -> list[str]:
+        """Derive the aspect checklist the loop should eventually cover."""
+        ...
 
     @abstractmethod
     def estimate_aspect_coverage(
         self,
         aspects: list[str],
         context_blocks: list[str],
-    ) -> tuple[list[str], float]: ...
+    ) -> tuple[list[str], float]:
+        """Estimate uncovered aspects and the aggregate coverage ratio."""
+        ...
 
     @abstractmethod
-    def quality_terms_for_question(self, question: str, query_type: str) -> list[str]: ...
+    def quality_terms_for_question(self, question: str, query_type: str) -> list[str]:
+        """Return search terms suitable for quality-site query injection."""
+        ...
 
     @abstractmethod
     def inject_quality_site_queries(
@@ -46,11 +56,18 @@ class RiskScoringStrategy(ABC):
         need_primary: bool,
         need_mainstream: bool,
         max_items: int,
-    ) -> list[str]: ...
+    ) -> list[str]:
+        """Prepend site-scoped quality queries while preserving uniqueness and caps."""
+        ...
 
 
 class KeywordRiskScorer(RiskScoringStrategy):
-    """Reproduce ``_compute_risk_score`` and related helpers."""
+    """Deterministic heuristics for risk, aspects, and quality-query injection.
+
+    The scorer deliberately avoids LLM calls. It uses regex families and token
+    matching so classify, plan, and search can share stable heuristics that are
+    cheap to evaluate and easy to regression-test.
+    """
 
     # ------------------------------------------------------------------ #
     # score
@@ -168,15 +185,31 @@ class KeywordRiskScorer(RiskScoringStrategy):
     # quality_terms_for_question
     # ------------------------------------------------------------------ #
     def quality_terms_for_question(self, question: str, query_type: str) -> list[str]:
+        """Extract domain terms that sharpen quality-site queries.
+
+        The helper keeps question-specific tokens, removes generic filler, and
+        injects a few domain synonyms for the German health-policy use cases
+        that the default quality-site lists are tuned for.
+        """
         q = (question or "").strip()
         ql = q.lower()
         terms: list[str] = []
+        is_health_topic = bool(
+            re.search(
+                r"\b(gkv|krankenkass\w*|krankenversicher\w*|gesundheits\w*|zahn\w*)\b",
+                ql,
+            )
+        )
 
         if re.search(r"\bzahn", ql):
             terms.extend(["zahnbehandlung", "zahnleistungen"])
         if re.search(r"privatis", ql):
             terms.append("privatisierung")
-        if query_type in ("news", "general") and not re.search(r"\bgkv\b|krankenkass", ql):
+        if (
+            query_type in ("news", "general")
+            and is_health_topic
+            and not re.search(r"\bgkv\b|krankenkass", ql)
+        ):
             terms.append("gkv")
 
         for tok in tokenize(q):
@@ -207,6 +240,12 @@ class KeywordRiskScorer(RiskScoringStrategy):
         need_mainstream: bool,
         max_items: int,
     ) -> list[str]:
+        """Inject site-filtered German quality queries ahead of generic queries.
+
+        The method is intentionally conservative: it only activates for German
+        search, respects ``max_items``, preserves uniqueness, and leaves the
+        original query list untouched for non-German searches.
+        """
         if (search_lang or "").lower() != "de":
             return queries[:max_items]
         if max_items <= 0:

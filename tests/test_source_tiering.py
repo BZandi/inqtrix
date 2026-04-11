@@ -49,3 +49,26 @@ class TestRiskScoring:
         uncovered, coverage = risk_scorer.estimate_aspect_coverage(aspects, context)
         assert uncovered == []
         assert coverage == 1.0
+
+    def test_quality_terms_keep_gkv_scope_health_specific(self, risk_scorer):
+        terms = risk_scorer.quality_terms_for_question(
+            "Soll ein Tempolimit eingefuehrt werden?",
+            "news",
+        )
+
+        assert "gkv" not in terms
+
+    def test_quality_site_queries_do_not_pollute_unrelated_policy_topics(self, risk_scorer):
+        queries = risk_scorer.inject_quality_site_queries(
+            ["Tempolimit Deutschland aktuelle Debatte"],
+            search_lang="de",
+            question="Soll ein Tempolimit eingefuehrt werden?",
+            query_type="news",
+            need_primary=True,
+            need_mainstream=True,
+            max_items=5,
+        )
+
+        site_queries = [query for query in queries if query.startswith("site:")]
+        assert site_queries
+        assert all("gkv" not in query.lower() for query in site_queries)

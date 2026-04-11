@@ -108,6 +108,25 @@ class TestClaimLedger:
         assert np_total == 1
         assert np_verified == 1
 
+    def test_negated_only_evidence_does_not_verify_claim(self, consolidator):
+        ledger = [
+            {
+                "signature": "privatisierung",
+                "claim_text": "Die Bundesregierung plant keine Privatisierung von Zahnleistungen.",
+                "claim_type": "fact",
+                "polarity": "negated",
+                "needs_primary": False,
+                "source_urls": ["https://www.bundesregierung.de/breg-de/aktuelles/x"],
+            },
+        ]
+
+        consolidated = consolidator.consolidate(ledger)
+
+        assert len(consolidated) == 1
+        assert consolidated[0]["support_count"] == 0
+        assert consolidated[0]["contradict_count"] == 1
+        assert consolidated[0]["status"] == "unverified"
+
 
 class TestClaimRelevance:
 

@@ -47,3 +47,30 @@ class TestPruneContext:
         )
         assert len(result) == 2
         assert "machine learning" in result[0]
+
+    def test_punctuation_is_normalized_for_overlap_scoring(self, pruning):
+        ctx = [
+            "Alter irrelevanter Block ohne Bezug",
+            "Relevanter Block mit Reform,",
+            "Neuester Block",
+        ]
+
+        result = pruning.prune(ctx, "Reform?", [], max_blocks=2, n_new=1)
+
+        assert len(result) == 2
+        assert "Relevanter Block mit Reform," in result
+        assert "Alter irrelevanter Block ohne Bezug" not in result
+
+    def test_equal_relevance_prefers_more_recent_old_block(self, pruning):
+        ctx = [
+            "Alte Quelle: Frage zur Reform.",
+            "Neuere Quelle: Frage zur Reform.",
+            "Neuester Block",
+        ]
+
+        result = pruning.prune(ctx, "Frage zur Reform?", [], max_blocks=2, n_new=1)
+
+        assert len(result) == 2
+        assert "Neuere Quelle: Frage zur Reform." in result
+        assert "Alte Quelle: Frage zur Reform." not in result
+        assert result[-1] == "Neuester Block"

@@ -22,7 +22,7 @@ When deployed, it runs a bounded multi-round research loop: it decomposes questi
 ## Features
 
 - **Iterative research loop** with configurable confidence thresholds and max rounds
-- **Parallel web search** with LLM-based summarisation and structured claim extraction
+- **Parallel web search** with LLM-based summarisation and structured claim extraction, including non-fatal per-source extraction fallback
 - **Claim verification** — claims are consolidated, deduplicated, and classified as *verified*, *contested*, or *unverified*
 - **Source tiering** — URLs are classified into quality tiers (primary, mainstream, stakeholder, unknown, low)
 - **Aspect coverage tracking** — ensures all facets of a question are researched
@@ -686,8 +686,8 @@ See [Agent-Architecture.md](Agent-Architecture.md) for the full technical refere
 | Change source quality tiers | `strategies/_source_tiering.py`, `domains.py` | [Section 13 — Source Tiering](Agent-Architecture.md#13-source-tiering) |
 | Customise claim extraction | `strategies/_claim_extraction.py` | [Section 14 — Claims](Agent-Architecture.md#14-claim-extraction-and-consolidation) |
 | Customise claim dedup/consolidation | `strategies/_claim_consolidation.py` | [Section 14](Agent-Architecture.md#14-claim-extraction-and-consolidation) |
-| Change context pruning logic | `strategies/_context_pruning.py` | [Section 6 — Strategies](Agent-Architecture.md#6-strategy-abstractions) |
-| Change risk scoring | `strategies/_risk_scoring.py` | [Section 8 — Classify](Agent-Architecture.md#8-node-1-classify) |
+| Change context pruning logic | `strategies/_context_pruning.py` | [Section 10 — Search](Agent-Architecture.md#10-node-3-search) |
+| Change risk scoring | `strategies/_risk_scoring.py` | [Section 8 — Classify](Agent-Architecture.md#8-node-1-classify), [Section 9 — Plan](Agent-Architecture.md#9-node-2-plan), [Section 15 — Aspect Derivation and Coverage](Agent-Architecture.md#15-aspect-derivation-and-coverage) |
 | Change stop/continue heuristics | `strategies/_stop_criteria.py`, `nodes.py` | [Section 16 — Stop Logic](Agent-Architecture.md#16-evaluation-and-stop-logic) |
 | Add/rewire a graph node | `nodes.py` (node function), `graph.py` (wiring) | [Section 7 — State Machine](Agent-Architecture.md#7-state-machine-and-agent-state) |
 | Change prompt templates | `prompts.py` | [Section 12 — Answer](Agent-Architecture.md#12-node-5-answer) |
@@ -989,10 +989,10 @@ Available strategy ABCs:
 | ABC | Concern | Default Implementation |
 |-----|---------|----------------------|
 | `SourceTieringStrategy` | Classify URLs into quality tiers | `DefaultSourceTiering` |
-| `ClaimExtractionStrategy` | Extract structured claims from search results | `LLMClaimExtractor` |
+| `ClaimExtractionStrategy` | Extract and normalize structured claims from search results | `LLMClaimExtractor` |
 | `ClaimConsolidationStrategy` | Deduplicate and verify claims | `DefaultClaimConsolidator` |
-| `ContextPruningStrategy` | Prune context blocks by relevance | `RelevanceBasedPruning` |
-| `RiskScoringStrategy` | Score question risk, derive aspects | `KeywordRiskScorer` |
+| `ContextPruningStrategy` | Prune context blocks by normalized relevance while protecting newest evidence | `RelevanceBasedPruning` |
+| `RiskScoringStrategy` | Score question risk, derive aspects, and inject quality-site queries | `KeywordRiskScorer` |
 | `StopCriteriaStrategy` | Decide when to stop researching | `MultiSignalStopCriteria` |
 
 ### Custom Graph Topology

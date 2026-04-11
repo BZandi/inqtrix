@@ -204,7 +204,14 @@ class ClaimConsolidationStrategy(ABC):
 
 
 class DefaultClaimConsolidator(ClaimConsolidationStrategy):
-    """Reproduce the original claim consolidation logic."""
+    """Group claims by signature and derive answer-facing claim quality.
+
+    The consolidator is the bridge between raw extracted claims and the
+    smaller, quality-scored claim set used in evaluate and answer. It keeps
+    polarity-aware support counts, classifies each group as verified,
+    contested, or unverified, and then materializes a bounded subset for
+    prompts and exports.
+    """
 
     def __init__(self, source_tiering: SourceTieringStrategy) -> None:
         self._tiering = source_tiering
@@ -267,6 +274,14 @@ class DefaultClaimConsolidator(ClaimConsolidationStrategy):
     # consolidate
     # ------------------------------------------------------------------ #
     def consolidate(self, claim_ledger: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Collapse ledger entries with the same normalized claim signature.
+
+        Claims are first bucketed by signature, then merged into a single
+        representative record with source-tier metadata and a derived status.
+        Verification intentionally depends on affirmative support counts;
+        purely negated evidence is kept visible via ``contradict_count`` but
+        does not mark the claim as verified.
+        """
         groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for claim in claim_ledger:
             sig = (
@@ -298,7 +313,6 @@ class DefaultClaimConsolidator(ClaimConsolidationStrategy):
             has_primary = tier_counts.get("primary", 0) > 0
             has_mainstream = tier_counts.get("mainstream", 0) > 0
             has_stakeholder = tier_counts.get("stakeholder", 0) > 0
-            support_like = max(support_count, contradict_count)
 
             if support_count > 0 and contradict_count > 0:
                 status = "contested"
@@ -306,10 +320,10 @@ class DefaultClaimConsolidator(ClaimConsolidationStrategy):
             elif needs_primary and not has_primary:
                 status = "unverified"
                 reason = "primaerbeleg fehlt"
-            elif support_like >= 2 and (has_primary or has_mainstream or has_stakeholder):
+            elif support_count >= 2 and (has_primary or has_mainstream or has_stakeholder):
                 status = "verified"
                 reason = "mehrfach belegt"
-            elif support_like >= 1 and (has_primary or has_mainstream):
+            elif support_count >= 1 and (has_primary or has_mainstream):
                 status = "verified"
                 reason = "belegt durch hochwertige Quelle"
             else:
@@ -354,6 +368,12 @@ class DefaultClaimConsolidator(ClaimConsolidationStrategy):
         max_total: int = 24,
         max_unverified: int = 8,
     ) -> list[dict[str, Any]]:
+        """Select the bounded claim subset forwarded to later nodes.
+
+        Verified and contested claims are always preferred. Unverified claims
+        are only kept up to ``max_unverified`` and are biased toward groups
+        that already have at least some quality-source backing.
+        """
         if not consolidated:
             return []
         max_total = int(max_total or 0)
@@ -401,6 +421,11 @@ class DefaultClaimConsolidator(ClaimConsolidationStrategy):
         self,
         consolidated: list[dict[str, Any]],
     ) -> tuple[dict[str, int], float, int, int]:
+        """Compute claim-status counts and the aggregate claim quality score.
+
+        The score follows the architecture contract:
+        ``(verified + 0.5 * contested) / total``.
+        """
         counts: dict[str, int] = {"verified": 0, "contested": 0, "unverified": 0}
         needs_primary_total = 0
         needs_primary_verified = 0
@@ -440,6 +465,13 @@ class DefaultClaimConsolidator(ClaimConsolidationStrategy):
         *,
         max_items: int,
     ) -> list[str]:
+        """Pick citation URLs for final answer synthesis.
+
+        The selection order mirrors the claim ordering: first verified and
+        contested claims, then higher-quality unverified claims, and finally a
+        fallback over the global citation list so answer synthesis still sees
+        enough evidence when claim extraction was sparse.
+        """
         max_items = max(0, int(max_items or 0))
         if max_items == 0:
             return []

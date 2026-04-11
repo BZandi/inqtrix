@@ -16,19 +16,29 @@ class StopCriteriaStrategy(ABC):
     """Evaluate whether the research loop should stop."""
 
     @abstractmethod
-    def check_contradictions(self, s: dict, eval_text: str, conf: int) -> int: ...
+    def check_contradictions(self, s: dict, eval_text: str, conf: int) -> int:
+        """Cap confidence when the evaluator reported source contradictions."""
+        ...
 
     @abstractmethod
-    def filter_irrelevant_blocks(self, s: dict, eval_text: str) -> None: ...
+    def filter_irrelevant_blocks(self, s: dict, eval_text: str) -> None:
+        """Drop context blocks that the evaluator marked as irrelevant."""
+        ...
 
     @abstractmethod
-    def extract_competing_events(self, s: dict, eval_text: str, conf: int) -> int: ...
+    def extract_competing_events(self, s: dict, eval_text: str, conf: int) -> int:
+        """Persist competing-event signals and apply any confidence cap."""
+        ...
 
     @abstractmethod
-    def extract_evidence_scores(self, s: dict, eval_text: str, conf: int) -> int: ...
+    def extract_evidence_scores(self, s: dict, eval_text: str, conf: int) -> int:
+        """Parse evidence sufficiency and consistency ratings from evaluator output."""
+        ...
 
     @abstractmethod
-    def check_falsification(self, s: dict, conf: int, prev_conf: int) -> bool: ...
+    def check_falsification(self, s: dict, conf: int, prev_conf: int) -> bool:
+        """Return whether the loop should switch into falsification mode."""
+        ...
 
     @abstractmethod
     def check_stagnation(
@@ -38,23 +48,33 @@ class StopCriteriaStrategy(ABC):
         prev_conf: int,
         n_citations: int,
         falsification_just_triggered: bool,
-    ) -> tuple[int, bool]: ...
+    ) -> tuple[int, bool]:
+        """Detect low-confidence stagnation after sufficiently broad search."""
+        ...
 
     @abstractmethod
-    def should_suppress_utility_stop(self, s: dict) -> bool: ...
+    def should_suppress_utility_stop(self, s: dict) -> bool:
+        """Return whether low-utility stopping should be suppressed for this state."""
+        ...
 
     @abstractmethod
     def compute_utility(
         self, s: dict, conf: int, prev_conf: int, n_citations: int,
-    ) -> tuple[float, bool]: ...
+    ) -> tuple[float, bool]:
+        """Compute per-round utility and whether it should stop the loop."""
+        ...
 
     @abstractmethod
     def check_plateau(
         self, s: dict, conf: int, prev_conf: int, stagnation_detected: bool,
-    ) -> bool: ...
+    ) -> bool:
+        """Detect stable-confidence plateaus that justify stopping."""
+        ...
 
     @abstractmethod
-    def should_stop(self, state: dict) -> tuple[bool, str]: ...
+    def should_stop(self, state: dict) -> tuple[bool, str]:
+        """Provide a coarse convenience stop decision and reason tag."""
+        ...
 
 
 def _emit_progress(s: dict, message: str) -> None:
@@ -65,7 +85,13 @@ def _emit_progress(s: dict, message: str) -> None:
 
 
 class MultiSignalStopCriteria(StopCriteriaStrategy):
-    """Reproduce the ``_check_*`` / ``_compute_*`` family from the original agent."""
+    """Three-phase stop heuristic for the iterative research loop.
+
+    The evaluate node first threads confidence through LLM-parsed signals,
+    then applies deterministic guardrail caps, and finally evaluates broader
+    stop conditions such as falsification, stagnation, utility decay, and
+    plateau behavior.
+    """
 
     def __init__(self, settings: AgentSettings) -> None:
         self._settings = settings
@@ -124,6 +150,11 @@ class MultiSignalStopCriteria(StopCriteriaStrategy):
     # extract_competing_events
     # ------------------------------------------------------------------ #
     def extract_competing_events(self, s: dict, eval_text: str, conf: int) -> int:
+        """Record competing explanations and cap confidence for new ambiguity.
+
+        Repeated competing-event text is treated more leniently from round 3
+        onward so the agent does not thrash forever on the same ambiguity.
+        """
         m = re.search(r"COMPETING_EVENTS:\s*(.+?)(?:\n|$)", eval_text)
         if not m:
             return conf
@@ -215,6 +246,12 @@ class MultiSignalStopCriteria(StopCriteriaStrategy):
         n_citations: int,
         falsification_just_triggered: bool,
     ) -> tuple[int, bool]:
+        """Force a stop when broad search repeatedly fails to raise confidence.
+
+        This is the negative-evidence branch described in the architecture:
+        after multiple low-confidence rounds and enough citation breadth, the
+        loop treats the lack of supporting evidence as informative.
+        """
         if (
             s["round"] >= 2
             and prev_conf > 0
@@ -241,6 +278,7 @@ class MultiSignalStopCriteria(StopCriteriaStrategy):
     # should_suppress_utility_stop
     # ------------------------------------------------------------------ #
     def should_suppress_utility_stop(self, s: dict) -> bool:
+        """Keep searching when utility is low but policy evidence is still weak."""
         if int(s.get("round", 0) or 0) >= self._max_rounds:
             return False
         if str(s.get("query_type", "general")) == "academic":
@@ -290,6 +328,13 @@ class MultiSignalStopCriteria(StopCriteriaStrategy):
         prev_conf: int,
         n_citations: int,
     ) -> tuple[float, bool]:
+        """Compute marginal research utility from confidence, citations, and sufficiency.
+
+        Returns:
+            Tuple of ``(utility, should_stop)``. The stop signal is emitted
+            only when two consecutive low-utility rounds occur and the policy
+            suppression rules do not keep the loop alive.
+        """
         _delta_conf = (conf - prev_conf) / 10.0 if prev_conf > 0 else 0.5
         _new_cit = n_citations - s.get("prev_citation_count", 0)
         _delta_cit_norm = min(1.0, _new_cit / 10.0)
@@ -342,6 +387,11 @@ class MultiSignalStopCriteria(StopCriteriaStrategy):
         prev_conf: int,
         stagnation_detected: bool,
     ) -> bool:
+        """Stop when confidence stays stable at a sufficiently high level.
+
+        Plateau stopping is suppressed while competing events are still moving,
+        unless that ambiguity has effectively stabilized across repeated rounds.
+        """
         _prev_comp_for_plateau = s.get("prev_competing_events", "")
         _current_competing = s.get("competing_events", "")
         _competing_active_and_changing = (

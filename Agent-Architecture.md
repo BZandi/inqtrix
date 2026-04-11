@@ -587,7 +587,7 @@ For German policy questions (detected via regex: `privatis*|gkv|krankenkass*|ges
 - **Primary sources:** `bundesgesundheitsministerium.de`, `bundesregierung.de`, `bundestag.de`, `gkv-spitzenverband.de`, `gesetze-im-internet.de` — injected if `round == 0` OR no primary sources found yet OR claims needing primary verification remain unverified
 - **Mainstream sources:** `aerzteblatt.de`, `deutschlandfunk.de`, `zdfheute.de`, `spiegel.de`, `handelsblatt.com`, `tagesschau.de` — injected if `round == 0` OR no mainstream sources found yet OR `claim_quality_score < 0.35`
 
-Query terms are extracted via `quality_terms_for_question()`, which filters out generic terms (`soll`, `werden`, `aktuell`, `diskussion`, ...) and keeps up to 7 domain-specific tokens. Special domain terms are injected for dental (`zahnbehandlung`), privatisation (`privatisierung`), and GKV topics.
+Query terms are extracted via `quality_terms_for_question()`, which filters out generic terms (`soll`, `werden`, `aktuell`, `diskussion`, ...) and keeps up to 7 domain-specific tokens. Special domain terms are injected for dental (`zahnbehandlung`) and privatisation (`privatisierung`) topics; the `gkv` shorthand is only injected for health-policy questions instead of unrelated German policy topics.
 
 ---
 
@@ -965,6 +965,7 @@ Per-call: min(default_timeout, remaining_until_deadline)
 - **classify fails:** fallback to heuristic type inference, use question as single sub-question
 - **plan fails:** fallback to `[question]` as single query
 - **search fails:** skip failed queries, continue with others
+- **claim extraction fails for a source:** keep the search result and summary, but continue without structured claims for that source
 - **evaluate fails:** keep previous confidence, conservative gaps
 - **answer fails:** return raw context without synthesis
 
@@ -1166,6 +1167,8 @@ Illustrative parsed queries:
    - validates each claim against allowed types (`fact`, `actor_claim`, `forecast`) and polarity (`affirmed`, `negated`)
    - applies actor-verb regex to reclassify `"fact"` -> `"actor_claim"` if speech verbs found
    - applies primary-hint regex as fallback for `needs_primary` detection
+    - normalizes and allow-lists `source_urls` against the citations already attached to that search result
+    - degrades non-fatally on provider errors and keeps the source in the loop even when no structured claims are produced
    - keeps at most 8 claims per result
 
 **Phase 3 — Sequential assembly:**
@@ -1181,7 +1184,7 @@ Illustrative parsed queries:
 9. `strategies.claim_consolidation.consolidate(claim_ledger)` — group raw claims by signature, assign verified/contested/unverified status
 10. `strategies.claim_consolidation.materialize(consolidated)` — prune noise: cap unverified claims
 11. `strategies.claim_consolidation.quality_metrics(consolidated_claims)` — compute counts + aggregate score
-12. `strategies.context_pruning.prune(context, question, sub_questions, MAX_CONTEXT)` — relevance-based pruning: protect newest blocks, score older blocks by word overlap
+12. `strategies.context_pruning.prune(context, question, sub_questions, MAX_CONTEXT, n_new)` — relevance-based pruning: protect newest blocks, score older blocks by normalized token overlap, and prefer newer old blocks on ties
 13. `strategies.risk_scoring.estimate_aspect_coverage(required_aspects, context)` — re-calculate coverage after new blocks
 14. Claim ledger cap: if `len(claim_ledger) > 400`, keep only last 400 entries
 15. `append_iteration_log(s, {...})` — record metrics

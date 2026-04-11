@@ -15,24 +15,46 @@ from inqtrix.urls import domain_from_url, domain_matches
 
 
 class SourceTieringStrategy(ABC):
-    """Classify URLs into quality tiers."""
+    """Classify citation URLs into source-quality tiers."""
 
     @abstractmethod
     def tier_for_url(self, url: str) -> str:
-        """Return tier name for *url*: primary/mainstream/stakeholder/unknown/low."""
+        """Return the quality tier for a single URL.
+
+        Args:
+            url: Citation URL to classify.
+
+        Returns:
+            One of ``primary``, ``mainstream``, ``stakeholder``, ``unknown``,
+            or ``low``.
+        """
 
     @abstractmethod
     def quality_from_urls(self, urls: list[str]) -> tuple[dict[str, int], float]:
-        """Return ``(tier_counts, quality_score)`` for a list of URLs."""
+        """Aggregate tier counts and a weighted quality score for URLs.
+
+        Args:
+            urls: Citation URLs to score.
+
+        Returns:
+            Tuple of ``(tier_counts, quality_score)`` where the score is the
+            average of the configured tier weights.
+        """
 
 
 class DefaultSourceTiering(SourceTieringStrategy):
-    """Reproduce ``_source_tier_for_url`` / ``_source_quality_from_urls``."""
+    """Default domain-based implementation of source-quality classification.
+
+    The strategy maps normalized domains onto the tier tables from
+    :mod:`inqtrix.domains` and computes the weighted average source-quality
+    score used by search, evaluate, and answer.
+    """
 
     # -------------------------------------------------------------- #
     # tier_for_url
     # -------------------------------------------------------------- #
     def tier_for_url(self, url: str) -> str:
+        """Classify *url* by matching its domain against configured allow-lists."""
         domain = domain_from_url(url)
         if not domain:
             return "unknown"
@@ -52,6 +74,7 @@ class DefaultSourceTiering(SourceTieringStrategy):
     # quality_from_urls
     # -------------------------------------------------------------- #
     def quality_from_urls(self, urls: list[str]) -> tuple[dict[str, int], float]:
+        """Count URL tiers and compute the mean weighted source-quality score."""
         counts: dict[str, int] = {
             "primary": 0, "mainstream": 0, "stakeholder": 0, "unknown": 0, "low": 0,
         }

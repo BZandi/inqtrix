@@ -10,7 +10,7 @@ from typing import Any
 
 from openai import OpenAIError
 
-from inqtrix.exceptions import AgentRateLimited, AgentTimeout, AnthropicAPIError
+from inqtrix.exceptions import AgentRateLimited, AgentTimeout, AnthropicAPIError, BedrockAPIError
 from inqtrix.json_helpers import parse_json_object
 from inqtrix.prompts import CLAIM_EXTRACTION_PROMPT
 from inqtrix.providers.base import LLMProvider, _NonFatalNoticeMixin, _bounded_timeout, _check_deadline
@@ -47,11 +47,28 @@ class ClaimExtractionStrategy(ABC):
         *,
         deadline: float | None = None,
     ) -> tuple[list[dict[str, Any]], int, int]:
-        """Return ``(claims, prompt_tokens, completion_tokens)``."""
+        """Extract normalized claims from a search result.
+
+        Args:
+            text: Raw search-result text to analyze.
+            citations: Citation URLs that are allowed to appear in the
+                extracted claim payload.
+            question: Original user question used to focus extraction.
+            deadline: Optional absolute deadline for the extraction call.
+
+        Returns:
+            Tuple of ``(claims, prompt_tokens, completion_tokens)``.
+        """
 
 
 class LLMClaimExtractor(_NonFatalNoticeMixin, ClaimExtractionStrategy):
-    """Reproduce ``_extract_claims_parallel`` using an LLM provider."""
+    """LLM-backed claim extractor used during the search node.
+
+    The extractor converts free-form result text into a bounded list of
+    structured claims, normalizes schema fields, restricts source URLs to the
+    citations already known for that result, and degrades non-fatally when the
+    summarize model fails.
+    """
 
     def __init__(
         self,
@@ -74,6 +91,22 @@ class LLMClaimExtractor(_NonFatalNoticeMixin, ClaimExtractionStrategy):
         *,
         deadline: float | None = None,
     ) -> tuple[list[dict[str, Any]], int, int]:
+        """Run claim extraction for one search result.
+
+        The method validates claim types and polarity, downgrades obvious
+        speaker attributions from ``fact`` to ``actor_claim``, infers
+        ``needs_primary`` when the model omitted it, and keeps only URLs from
+        the provided citation allow-list.
+
+        Returns:
+            Tuple of ``(claims, prompt_tokens, completion_tokens)``.
+
+        Raises:
+            AgentRateLimited: Propagated so the agent can abort consistently on
+                hard rate-limit conditions.
+            AgentTimeout: Raised before the call when the absolute deadline is
+                already exhausted.
+        """
         self._clear_nonfatal_notice()
         if not text.strip():
             return [], 0, 0
@@ -167,7 +200,7 @@ class LLMClaimExtractor(_NonFatalNoticeMixin, ClaimExtractionStrategy):
 
         except AgentRateLimited:
             raise
-        except (OpenAIError, AgentTimeout, AnthropicAPIError):
+        except (OpenAIError, AgentTimeout, AnthropicAPIError, BedrockAPIError):
             self._set_nonfatal_notice(
                 f"Claim-Extraktion via {self._summarize_model} fehlgeschlagen; Quelle wird ohne Claims weiterverwendet."
             )

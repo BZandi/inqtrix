@@ -25,7 +25,26 @@ if TYPE_CHECKING:
 
 @dataclass
 class StrategyContext:
-    """Bundle of all pluggable strategies available to nodes."""
+    """Bundle of all pluggable strategies available to runtime nodes.
+
+    The graph injects a single :class:`StrategyContext` into every node so
+    orchestration code can stay agnostic to the concrete implementation of
+    source tiering, claim extraction, consolidation, pruning, risk scoring,
+    and stopping heuristics.
+
+    Attributes:
+        source_tiering: URL-to-quality classification and aggregate source
+            scoring.
+        claim_extraction: Structured claim extraction from raw search text.
+        claim_consolidation: Signature grouping, status derivation, and
+            answer-facing claim selection.
+        context_pruning: Context-window reduction that preserves the newest
+            evidence blocks.
+        risk_scoring: Deterministic risk and aspect heuristics used across
+            classify, plan, and search.
+        stop_criteria: Multi-signal sufficiency and stop heuristics for the
+            evaluate node.
+    """
 
     source_tiering: SourceTieringStrategy
     claim_extraction: ClaimExtractionStrategy
@@ -42,19 +61,24 @@ def create_default_strategies(
     summarize_model: str = "",
     summarize_timeout: int = 60,
 ) -> StrategyContext:
-    """Create a :class:`StrategyContext` with all default implementations.
+    """Create the default strategy bundle used by :class:`ResearchAgent`.
 
-    Parameters
-    ----------
-    settings:
-        Agent-level configuration (thresholds, timeouts, etc.).
-    llm:
-        LLM provider used for default claim extraction. Custom providers
-        can participate without exposing any private client internals.
-    summarize_model:
-        Model identifier used for claim extraction.
-    summarize_timeout:
-        Per-call timeout for the summarize model.
+    Args:
+        settings: Agent-level thresholds and loop settings used by the stop
+            criteria strategy.
+        llm: Optional LLM provider used by the default claim extractor.
+            Passing ``None`` keeps claim extraction available but inert.
+        summarize_model: Model identifier used for claim extraction calls.
+        summarize_timeout: Per-call timeout in seconds for claim extraction.
+
+    Returns:
+        A fully wired :class:`StrategyContext` with the default strategy
+        implementations.
+
+    Notes:
+        A single :class:`DefaultSourceTiering` instance is shared between
+        ``source_tiering`` and ``claim_consolidation`` so both layers classify
+        source quality with the same domain rules.
     """
     tiering = DefaultSourceTiering()
     return StrategyContext(

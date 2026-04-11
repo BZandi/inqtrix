@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from inqtrix.exceptions import AgentRateLimited, AnthropicAPIError
 from inqtrix.graph import default_graph_config, run, run_test
 from inqtrix.nodes import answer, evaluate, search
-from inqtrix.providers import ProviderContext
+from inqtrix.providers.base import ProviderContext
 from inqtrix.settings import AgentSettings
 from inqtrix.state import initial_state
 from inqtrix.strategies import StrategyContext, create_default_strategies

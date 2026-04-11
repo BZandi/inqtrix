@@ -12,7 +12,7 @@ import pytest
 from inqtrix.graph import run
 from inqtrix.logging_config import configure_logging
 from inqtrix.nodes import search
-from inqtrix.providers import ProviderContext
+from inqtrix.providers.base import ProviderContext
 from inqtrix.runtime_logging import describe_search_provider
 from inqtrix.settings import AgentSettings
 from inqtrix.state import append_iteration_log, initial_state

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from inqtrix.providers import ProviderContext
+from inqtrix.providers.base import ProviderContext
 from inqtrix.settings import Settings
 from inqtrix.strategies import (
     DefaultClaimConsolidator,

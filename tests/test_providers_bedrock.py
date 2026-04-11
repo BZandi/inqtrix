@@ -68,10 +68,10 @@ def mock_boto3():
     mock_session = MagicMock()
     mock_session.client.return_value = mock_client
 
-    with patch("inqtrix.providers_bedrock.boto3") as mock_boto3_mod, \
-            patch("inqtrix.providers_bedrock.BotoConfig"):
+    with patch("inqtrix.providers.bedrock.boto3") as mock_boto3_mod, \
+            patch("inqtrix.providers.bedrock.BotoConfig"):
         mock_boto3_mod.Session.return_value = mock_session
-        from inqtrix.providers_bedrock import BedrockLLM
+        from inqtrix.providers.bedrock import BedrockLLM
         yield BedrockLLM, mock_client
 
 
@@ -205,7 +205,7 @@ def test_thinking_auto_raises_max_tokens(mock_boto3):
     BedrockLLM, mock_client = mock_boto3
     mock_client.converse.return_value = _converse_response("ok")
 
-    from inqtrix.providers_bedrock import _THINKING_MIN_MAX_TOKENS
+    from inqtrix.providers.bedrock import _THINKING_MIN_MAX_TOKENS
 
     llm = BedrockLLM(
         default_max_tokens=1024,
@@ -254,7 +254,7 @@ def test_retries_transient_error_then_succeeds(mock_boto3):
 
     llm = BedrockLLM()
     # Patch sleep to avoid real delays
-    with patch("inqtrix.providers_bedrock.time") as mock_time:
+    with patch("inqtrix.providers.bedrock.time") as mock_time:
         mock_time.monotonic.return_value = time.monotonic() + 1000
         mock_time.sleep = MagicMock()
         result = llm.complete("test")
@@ -270,7 +270,7 @@ def test_throttling_retries_then_raises_rate_limited(mock_boto3):
     mock_client.converse.side_effect = [throttle] * 5
 
     llm = BedrockLLM()
-    with patch("inqtrix.providers_bedrock.time") as mock_time:
+    with patch("inqtrix.providers.bedrock.time") as mock_time:
         mock_time.monotonic.return_value = time.monotonic() + 1000
         mock_time.sleep = MagicMock()
         with pytest.raises(AgentRateLimited):
@@ -304,7 +304,7 @@ def test_summarize_falls_back_on_error(mock_boto3):
     mock_client.converse.side_effect = error
 
     llm = BedrockLLM()
-    with patch("inqtrix.providers_bedrock.time") as mock_time:
+    with patch("inqtrix.providers.bedrock.time") as mock_time:
         mock_time.monotonic.return_value = time.monotonic() + 1000
         mock_time.sleep = MagicMock()
         text, p_tok, c_tok = llm.summarize_parallel("Langer Testtext " * 100)
@@ -324,7 +324,7 @@ def test_summarize_reraises_rate_limited(mock_boto3):
     mock_client.converse.side_effect = [throttle] * 5
 
     llm = BedrockLLM()
-    with patch("inqtrix.providers_bedrock.time") as mock_time:
+    with patch("inqtrix.providers.bedrock.time") as mock_time:
         mock_time.monotonic.return_value = time.monotonic() + 1000
         mock_time.sleep = MagicMock()
         with pytest.raises(AgentRateLimited):

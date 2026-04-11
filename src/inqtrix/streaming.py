@@ -12,7 +12,7 @@ from queue import Empty, Queue
 from typing import Any, AsyncIterator
 
 from inqtrix.graph import run as agent_run
-from inqtrix.providers import ProviderContext
+from inqtrix.providers.base import ProviderContext
 from inqtrix.session import SessionStore, prospective_session_id
 from inqtrix.settings import AgentSettings
 from inqtrix.strategies import StrategyContext

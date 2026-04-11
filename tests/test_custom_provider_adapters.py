@@ -7,8 +7,8 @@ from io import BytesIO
 from urllib.error import HTTPError
 
 from inqtrix.exceptions import AnthropicAPIError
-from inqtrix.providers_anthropic import AnthropicLLM
-from inqtrix.providers_brave import BraveSearch
+from inqtrix.providers.anthropic import AnthropicLLM
+from inqtrix.providers.brave import BraveSearch
 from inqtrix.strategies import LLMClaimExtractor
 
 
@@ -221,12 +221,12 @@ def test_anthropic_thinking_adjusts_max_tokens(monkeypatch):
     llm.complete("test")
     # budget_tokens (8000) >= default_max_tokens (1024) → raised to 9024,
     # then clamped up to _THINKING_MIN_MAX_TOKENS (16384) by the floor check.
-    from inqtrix.providers_anthropic import _THINKING_MIN_MAX_TOKENS
+    from inqtrix.providers.anthropic import _THINKING_MIN_MAX_TOKENS
     assert captured["payload"]["max_tokens"] == _THINKING_MIN_MAX_TOKENS
 
 
 def test_anthropic_retries_transient_http_error_before_success(monkeypatch):
-    import inqtrix.providers_anthropic as anthropic_module
+    import inqtrix.providers.anthropic as anthropic_module
 
     llm = AnthropicLLM(api_key="key")
     calls = {"count": 0}
@@ -264,7 +264,7 @@ def test_anthropic_retries_transient_http_error_before_success(monkeypatch):
 
 def test_anthropic_error_includes_request_id_and_body_details(monkeypatch):
     import pytest
-    import inqtrix.providers_anthropic as anthropic_module
+    import inqtrix.providers.anthropic as anthropic_module
 
     llm = AnthropicLLM(api_key="key")
 
@@ -291,7 +291,7 @@ def test_anthropic_error_includes_request_id_and_body_details(monkeypatch):
 
 
 def test_anthropic_summarize_retries_then_falls_back(monkeypatch):
-    import inqtrix.providers_anthropic as anthropic_module
+    import inqtrix.providers.anthropic as anthropic_module
 
     llm = AnthropicLLM(api_key="key")
     calls = {"count": 0}
@@ -346,7 +346,7 @@ def test_anthropic_claim_extraction_suppresses_thinking(monkeypatch):
 
 
 def test_configured_llm_provider_delegates_without_thinking(monkeypatch):
-    from inqtrix.providers import ConfiguredLLMProvider
+    from inqtrix.providers.base import ConfiguredLLMProvider
     from inqtrix.settings import ModelSettings
 
     llm = AnthropicLLM(
@@ -399,7 +399,7 @@ def test_anthropic_adaptive_thinking_auto_raises_max_tokens(monkeypatch):
     llm.complete("test")
     # adaptive thinking (no budget_tokens) with low default_max_tokens
     # → auto-raised to _THINKING_MIN_MAX_TOKENS
-    from inqtrix.providers_anthropic import _THINKING_MIN_MAX_TOKENS
+    from inqtrix.providers.anthropic import _THINKING_MIN_MAX_TOKENS
     assert captured["payload"]["max_tokens"] == _THINKING_MIN_MAX_TOKENS
 
 

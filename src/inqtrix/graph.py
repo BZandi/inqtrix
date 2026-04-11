@@ -24,7 +24,7 @@ from typing import Any, Callable
 from langgraph.graph import END, StateGraph
 
 from inqtrix.exceptions import AgentRateLimited
-from inqtrix.providers import ProviderContext
+from inqtrix.providers.base import ProviderContext
 from inqtrix.result import ResearchResult, ResearchResultExportOptions
 from inqtrix.runtime_logging import log_run_start
 from inqtrix.settings import AgentSettings

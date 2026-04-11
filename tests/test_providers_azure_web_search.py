@@ -75,12 +75,12 @@ def mock_foundry_web():
 
     # azure.identity is now imported lazily inside _resolve_credential,
     # so we patch it on the actual azure.identity module.
-    with patch("inqtrix.providers_azure_web_search.OpenAI") as mock_openai_cls, \
+    with patch("inqtrix.providers.azure_web_search.OpenAI") as mock_openai_cls, \
             patch("azure.identity.DefaultAzureCredential") as mock_cred:
         mock_openai_cls.return_value = mock_openai_client
         mock_cred.return_value = mock_cred_instance
 
-        from inqtrix.providers_azure_web_search import AzureFoundryWebSearch
+        from inqtrix.providers.azure_web_search import AzureFoundryWebSearch
         yield AzureFoundryWebSearch, mock_openai_client
 
 
@@ -144,9 +144,9 @@ def test_construction_with_explicit_credential(mock_foundry_web):
 
 def test_construction_with_api_key():
     """api_key path does not need azure-identity at all."""
-    with patch("inqtrix.providers_azure_web_search.OpenAI") as mock_openai:
+    with patch("inqtrix.providers.azure_web_search.OpenAI") as mock_openai:
         mock_openai.return_value = MagicMock()
-        from inqtrix.providers_azure_web_search import AzureFoundryWebSearch
+        from inqtrix.providers.azure_web_search import AzureFoundryWebSearch
         provider = AzureFoundryWebSearch(
             project_endpoint="https://test.ai.azure.com/api",
             agent_name="web-search-agent",
@@ -160,9 +160,9 @@ def test_construction_with_api_key():
 
 def test_api_key_takes_priority_over_sp():
     """When api_key is set, tenant/client/secret are ignored."""
-    with patch("inqtrix.providers_azure_web_search.OpenAI") as mock_openai:
+    with patch("inqtrix.providers.azure_web_search.OpenAI") as mock_openai:
         mock_openai.return_value = MagicMock()
-        from inqtrix.providers_azure_web_search import AzureFoundryWebSearch
+        from inqtrix.providers.azure_web_search import AzureFoundryWebSearch
         provider = AzureFoundryWebSearch(
             project_endpoint="https://test.ai.azure.com/api",
             agent_name="web-search-agent",
@@ -178,7 +178,7 @@ def test_api_key_takes_priority_over_sp():
 
 def test_openai_client_base_url(mock_foundry_web):
     Cls, _ = mock_foundry_web
-    with patch("inqtrix.providers_azure_web_search.OpenAI") as mock_openai:
+    with patch("inqtrix.providers.azure_web_search.OpenAI") as mock_openai:
         mock_openai.return_value = MagicMock()
         Cls(
             project_endpoint="https://test.ai.azure.com/api",
@@ -190,7 +190,7 @@ def test_openai_client_base_url(mock_foundry_web):
 
 def test_trailing_slash_stripped_from_endpoint(mock_foundry_web):
     Cls, _ = mock_foundry_web
-    with patch("inqtrix.providers_azure_web_search.OpenAI") as mock_openai:
+    with patch("inqtrix.providers.azure_web_search.OpenAI") as mock_openai:
         mock_openai.return_value = MagicMock()
         Cls(
             project_endpoint="https://test.ai.azure.com/api/",
@@ -505,42 +505,42 @@ def test_generic_exception_wrapped_in_api_error(mock_foundry_web):
 
 
 def test_apply_domain_filters_inclusion():
-    from inqtrix.providers_azure_web_search import AzureFoundryWebSearch
-    result = AzureFoundryWebSearch._apply_domain_filters(
+    from inqtrix.providers.base import _apply_domain_filters
+    result = _apply_domain_filters(
         "query", ["example.com", "test.de"]
     )
     assert result == "query site:example.com site:test.de"
 
 
 def test_apply_domain_filters_exclusion():
-    from inqtrix.providers_azure_web_search import AzureFoundryWebSearch
-    result = AzureFoundryWebSearch._apply_domain_filters(
+    from inqtrix.providers.base import _apply_domain_filters
+    result = _apply_domain_filters(
         "query", ["-spam.com"]
     )
     assert result == "query -site:spam.com"
 
 
 def test_apply_domain_filters_empty():
-    from inqtrix.providers_azure_web_search import AzureFoundryWebSearch
-    assert AzureFoundryWebSearch._apply_domain_filters("query", None) == "query"
-    assert AzureFoundryWebSearch._apply_domain_filters("query", []) == "query"
+    from inqtrix.providers.base import _apply_domain_filters
+    assert _apply_domain_filters("query", None) == "query"
+    assert _apply_domain_filters("query", []) == "query"
 
 
 def test_build_instructions_recency():
-    from inqtrix.providers_azure_web_search import AzureFoundryWebSearch
-    result = AzureFoundryWebSearch._build_instructions("week", None)
+    from inqtrix.providers.base import _build_recency_language_hints
+    result = _build_recency_language_hints("week", None)
     assert "Woche" in result
 
 
 def test_build_instructions_language():
-    from inqtrix.providers_azure_web_search import AzureFoundryWebSearch
-    result = AzureFoundryWebSearch._build_instructions(None, ["de"])
+    from inqtrix.providers.base import _build_recency_language_hints
+    result = _build_recency_language_hints(None, ["de"])
     assert "de" in result
 
 
 def test_build_instructions_none_when_no_hints():
-    from inqtrix.providers_azure_web_search import AzureFoundryWebSearch
-    assert AzureFoundryWebSearch._build_instructions(None, None) is None
+    from inqtrix.providers.base import _build_recency_language_hints
+    assert _build_recency_language_hints(None, None) is None
 
 
 # ---------------------------------------------------------------------------
@@ -573,7 +573,7 @@ def test_api_error_minimal():
 
 
 def test_parse_response_no_output():
-    from inqtrix.providers_azure_web_search import AzureFoundryWebSearch
+    from inqtrix.providers.azure_web_search import AzureFoundryWebSearch
     resp = SimpleNamespace(output_text="", output=[], usage=None)
     result = AzureFoundryWebSearch._parse_response(resp)
     assert result["answer"] == ""
@@ -583,7 +583,7 @@ def test_parse_response_no_output():
 
 
 def test_parse_response_non_message_items_skipped():
-    from inqtrix.providers_azure_web_search import AzureFoundryWebSearch
+    from inqtrix.providers.azure_web_search import AzureFoundryWebSearch
     resp = SimpleNamespace(
         output_text="answer",
         output=[

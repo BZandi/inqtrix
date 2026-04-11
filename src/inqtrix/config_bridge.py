@@ -23,16 +23,16 @@ from typing import Any
 from openai import OpenAI
 
 from inqtrix.config import AgentConfig, InqtrixConfig
-from inqtrix.providers import (
+from inqtrix.providers.base import (
     LLMProvider,
     LLMResponse,
-    PerplexitySearch,
     ProviderContext,
     SearchProvider,
     _bounded_timeout,
     _check_deadline,
     _normalize_completion_response,
 )
+from inqtrix.providers.perplexity import PerplexitySearch
 from inqtrix.constants import REASONING_TIMEOUT
 from inqtrix.exceptions import AgentRateLimited, AgentTimeout
 from inqtrix.prompts import SUMMARIZE_PROMPT

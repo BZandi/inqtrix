@@ -41,7 +41,7 @@ from typing import Any, Iterator
 
 from pydantic import BaseModel, ConfigDict
 
-from inqtrix.providers import LLMProvider, SearchProvider, ProviderContext
+from inqtrix.providers.base import LLMProvider, SearchProvider, ProviderContext
 from inqtrix.result import ResearchResult
 from inqtrix.strategies import (
     ClaimConsolidationStrategy,
@@ -304,7 +304,7 @@ class ResearchAgent:
         # Attach model metadata for providers that don't expose it
         # (e.g. AnthropicLLM, custom LLMProvider implementations).
         if llm is not None and not hasattr(llm, "models"):
-            from inqtrix.providers import ConfiguredLLMProvider
+            from inqtrix.providers.base import ConfiguredLLMProvider
             from inqtrix.settings import ModelSettings
 
             llm = ConfiguredLLMProvider(llm, ModelSettings())

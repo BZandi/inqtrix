@@ -32,19 +32,15 @@ from inqtrix.result import (
 )
 
 # -- Public API (providers) --
-from inqtrix.providers import (
-    LLMProvider,
-    SearchProvider,
-    ProviderContext,
-    LiteLLM,
-    PerplexitySearch,
-)
-from inqtrix.providers_anthropic import AnthropicLLM
-from inqtrix.providers_azure import AzureOpenAILLM
-from inqtrix.providers_brave import BraveSearch
-from inqtrix.providers_azure_bing import AzureFoundryBingSearch
-from inqtrix.providers_azure_web_search import AzureFoundryWebSearch
-from inqtrix.providers_bedrock import BedrockLLM
+from inqtrix.providers.base import LLMProvider, SearchProvider, ProviderContext
+from inqtrix.providers.litellm import LiteLLM
+from inqtrix.providers.perplexity import PerplexitySearch
+from inqtrix.providers.anthropic import AnthropicLLM
+from inqtrix.providers.azure import AzureOpenAILLM
+from inqtrix.providers.brave import BraveSearch
+from inqtrix.providers.azure_bing import AzureFoundryBingSearch
+from inqtrix.providers.azure_web_search import AzureFoundryWebSearch
+from inqtrix.providers.bedrock import BedrockLLM
 from inqtrix.exceptions import AzureOpenAIAPIError, AzureFoundryBingAPIError, AzureFoundryWebSearchAPIError, BedrockAPIError
 from inqtrix.logging_config import configure_logging
 

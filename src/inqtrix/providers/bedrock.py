@@ -11,7 +11,7 @@ in ``~/.aws/config`` / ``~/.aws/credentials``).  Pass the profile
 name to the constructor or let boto3 resolve credentials from the
 standard AWS credential chain (env vars, instance role, etc.).
 
-Key design decisions mirror :mod:`providers_anthropic`:
+Key design decisions mirror :mod:`inqtrix.providers.anthropic`:
 
 * **Retry with jitter** — Bedrock returns ``ThrottlingException``
   under sustained load.  The provider wraps boto3 calls in its own
@@ -45,7 +45,16 @@ from typing import Any
 from inqtrix.constants import REASONING_TIMEOUT, SUMMARIZE_TIMEOUT
 from inqtrix.exceptions import AgentRateLimited, AgentTimeout, BedrockAPIError
 from inqtrix.prompts import SUMMARIZE_PROMPT
-from inqtrix.providers import LLMProvider, LLMResponse, _NonFatalNoticeMixin, _check_deadline
+from inqtrix.providers.base import (
+    LLMProvider,
+    LLMResponse,
+    _NonFatalNoticeMixin,
+    _BACKOFF_BASE_SECONDS,
+    _BACKOFF_MAX_SECONDS,
+    _JITTER_RANGE,
+    _THINKING_MIN_MAX_TOKENS,
+    _check_deadline,
+)
 from inqtrix.settings import ModelSettings
 from inqtrix.state import track_tokens
 
@@ -64,8 +73,8 @@ log = logging.getLogger("inqtrix")
 # once.  The following constants control the retry loop in
 # _converse_with_retry.
 #
-# Values are identical to providers_anthropic for consistency.
-# See that module's docstring for the rationale behind each constant.
+# Shared backoff constants (_BACKOFF_BASE_SECONDS, _BACKOFF_MAX_SECONDS,
+# _JITTER_RANGE, _THINKING_MIN_MAX_TOKENS) are imported from base.py.
 # ---------------------------------------------------------------------------
 _RETRYABLE_BEDROCK_ERRORS = frozenset({
     "ThrottlingException",
@@ -75,10 +84,6 @@ _RETRYABLE_BEDROCK_ERRORS = frozenset({
     "ModelNotReadyException",
 })
 _MAX_BEDROCK_ATTEMPTS = 5
-_BACKOFF_BASE_SECONDS = 1.0
-_BACKOFF_MAX_SECONDS = 8.0
-_JITTER_RANGE = (0.5, 1.5)
-_THINKING_MIN_MAX_TOKENS = 16_384
 
 
 class BedrockLLM(_NonFatalNoticeMixin, LLMProvider):

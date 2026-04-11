@@ -26,7 +26,7 @@ from inqtrix.prompts import (
     EVALUATE_FORMAT_SUFFIX,
     build_answer_system_prompt,
 )
-from inqtrix.providers import ProviderContext, _check_deadline
+from inqtrix.providers.base import ProviderContext, _check_deadline
 from inqtrix.settings import AgentSettings
 from inqtrix.state import append_iteration_log, emit_progress, track_tokens
 from inqtrix.strategies import StrategyContext

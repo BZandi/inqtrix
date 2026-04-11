@@ -47,16 +47,16 @@ def mock_azure_client():
     """Patch OpenAI so AzureOpenAILLM can be instantiated without real credentials."""
     mock_client = MagicMock()
 
-    with patch("inqtrix.providers_azure.OpenAI") as mock_cls:
+    with patch("inqtrix.providers.azure.OpenAI") as mock_cls:
         mock_cls.return_value = mock_client
-        from inqtrix.providers_azure import AzureOpenAILLM
+        from inqtrix.providers.azure import AzureOpenAILLM
         yield AzureOpenAILLM, mock_client
 
 
 def test_client_uses_v1_base_url_from_endpoint(mock_azure_client):
     AzureOpenAILLM, _ = mock_azure_client
 
-    with patch("inqtrix.providers_azure.OpenAI") as mock_cls:
+    with patch("inqtrix.providers.azure.OpenAI") as mock_cls:
         mock_cls.return_value = MagicMock()
         AzureOpenAILLM(
             azure_endpoint="https://test.openai.azure.com/",
@@ -71,7 +71,7 @@ def test_client_uses_v1_base_url_from_endpoint(mock_azure_client):
 def test_client_accepts_explicit_base_url(mock_azure_client):
     AzureOpenAILLM, _ = mock_azure_client
 
-    with patch("inqtrix.providers_azure.OpenAI") as mock_cls:
+    with patch("inqtrix.providers.azure.OpenAI") as mock_cls:
         mock_cls.return_value = MagicMock()
         AzureOpenAILLM(
             base_url="https://test.openai.azure.com/openai/v1/",
@@ -518,8 +518,8 @@ def test_token_provider_auth(mock_azure_client):
 def test_proxy_creates_http_client(mock_azure_client):
     AzureOpenAILLM, _ = mock_azure_client
 
-    with patch("inqtrix.providers_azure.DefaultHttpxClient") as mock_httpx_cls, \
-            patch("inqtrix.providers_azure.OpenAI") as mock_openai_cls:
+    with patch("inqtrix.providers.azure.DefaultHttpxClient") as mock_httpx_cls, \
+            patch("inqtrix.providers.azure.OpenAI") as mock_openai_cls:
         mock_httpx_cls.return_value = MagicMock()
         mock_openai_cls.return_value = MagicMock()
 

@@ -42,7 +42,7 @@ from openai import DefaultHttpxClient, OpenAI, OpenAIError, RateLimitError, APIS
 from inqtrix.constants import REASONING_TIMEOUT, SUMMARIZE_TIMEOUT
 from inqtrix.exceptions import AgentRateLimited, AgentTimeout, AzureOpenAIAPIError
 from inqtrix.prompts import SUMMARIZE_PROMPT
-from inqtrix.providers import (
+from inqtrix.providers.base import (
     LLMProvider,
     LLMResponse,
     _NonFatalNoticeMixin,
@@ -431,8 +431,6 @@ class AzureOpenAILLM(_NonFatalNoticeMixin, LLMProvider):
                 e,
             )
             return (text[:800], 0, 0)
-        except AgentRateLimited:
-            raise
         except (OpenAIError, AgentTimeout):
             self._set_nonfatal_notice(
                 f"Azure-OpenAI-Zusammenfassung via {summarize_model} fehlgeschlagen; Fallback auf Rohtext."

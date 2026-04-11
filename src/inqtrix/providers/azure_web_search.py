@@ -37,11 +37,13 @@ from inqtrix.exceptions import (
     AgentTimeout,
     AzureFoundryWebSearchAPIError,
 )
-from inqtrix.providers import (
+from inqtrix.providers.base import (
     SearchProvider,
     _NonFatalNoticeMixin,
     _SDK_MAX_RETRIES,
+    _apply_domain_filters,
     _bounded_timeout,
+    _build_recency_language_hints,
     _check_deadline,
 )
 from inqtrix.urls import extract_urls
@@ -181,57 +183,6 @@ class AzureFoundryWebSearch(_NonFatalNoticeMixin, SearchProvider):
     # Query helpers (reuse BraveSearch / BingSearch patterns)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _apply_domain_filters(query: str, domain_filter: list[str] | None) -> str:
-        """Inject ``site:`` / ``-site:`` operators into the query string."""
-        if not domain_filter:
-            return query
-
-        suffix_parts: list[str] = []
-        for raw_domain in domain_filter[:10]:
-            domain = str(raw_domain or "").strip()
-            if not domain:
-                continue
-            is_exclusion = domain.startswith("-")
-            if is_exclusion:
-                domain = domain[1:].strip()
-            if not domain:
-                continue
-            token = f"site:{domain}"
-            if is_exclusion:
-                token = f"-site:{domain}"
-            suffix_parts.append(token)
-
-        if not suffix_parts:
-            return query
-        return f"{query} {' '.join(suffix_parts)}"
-
-    @staticmethod
-    def _build_instructions(
-        recency_filter: str | None,
-        language_filter: list[str] | None,
-    ) -> str | None:
-        """Build best-effort hints prepended to the user input."""
-        parts: list[str] = []
-
-        recency = (recency_filter or "").strip().lower()
-        if recency == "day":
-            parts.append("Fokussiere dich auf Ergebnisse der letzten 24 Stunden.")
-        elif recency == "week":
-            parts.append("Fokussiere dich auf Ergebnisse der letzten Woche.")
-        elif recency == "month":
-            parts.append("Fokussiere dich auf Ergebnisse des letzten Monats.")
-        elif recency == "year":
-            parts.append("Fokussiere dich auf Ergebnisse des letzten Jahres.")
-
-        if language_filter:
-            lang = language_filter[0]
-            parts.append(
-                f"Antworte auf {lang} und bevorzuge Quellen in dieser Sprache."
-            )
-
-        return " ".join(parts) if parts else None
-
     # ------------------------------------------------------------------
     # SearchProvider interface
     # ------------------------------------------------------------------
@@ -259,8 +210,8 @@ class AzureFoundryWebSearch(_NonFatalNoticeMixin, SearchProvider):
         _ = search_mode
         _ = return_related
 
-        effective_query = self._apply_domain_filters(query, domain_filter)
-        hint = self._build_instructions(recency_filter, language_filter)
+        effective_query = _apply_domain_filters(query, domain_filter)
+        hint = _build_recency_language_hints(recency_filter, language_filter)
 
         timeout = _bounded_timeout(self._timeout, deadline)
 

@@ -1,4 +1,15 @@
-"""Direct Brave Search adapter for the SearchProvider interface."""
+"""Direct Brave Search adapter for the SearchProvider interface.
+
+Calls the Brave Web Search API (``/res/v1/web/search``) via ``urllib``
+— no SDK dependency.  Results are mapped to the :class:`SearchProvider`
+contract (``answer``, ``citations``, ``related_questions``, token
+counts).
+
+Unlike :class:`PerplexitySearch`, Brave returns raw web results (title +
+description + extra snippets) rather than an LLM-generated summary.  The
+provider concatenates all snippet blocks into a single ``answer`` string,
+which the graph's ``search`` node then passes through the LLM summariser.
+"""
 
 from __future__ import annotations
 
@@ -11,13 +22,27 @@ from urllib.request import Request, urlopen
 
 from inqtrix.constants import SEARCH_TIMEOUT
 from inqtrix.exceptions import AgentRateLimited, AgentTimeout
-from inqtrix.providers import SearchProvider, _NonFatalNoticeMixin, _bounded_timeout, _check_deadline
+from inqtrix.providers.base import SearchProvider, _NonFatalNoticeMixin, _apply_domain_filters, _bounded_timeout, _check_deadline
 
 log = logging.getLogger("inqtrix")
 
 
 class BraveSearch(_NonFatalNoticeMixin, SearchProvider):
-    """Query Brave Search directly without going through LiteLLM."""
+    """Query the Brave Web Search API directly without LiteLLM.
+
+    Parameters
+    ----------
+    api_key:
+        Brave Search API subscription token.
+    base_url:
+        Brave Web Search endpoint URL.
+    result_count:
+        Maximum number of results to request per query.
+    extra_params:
+        Additional query parameters forwarded to every request.
+    user_agent:
+        ``User-Agent`` header value.
+    """
 
     def __init__(
         self,
@@ -36,6 +61,7 @@ class BraveSearch(_NonFatalNoticeMixin, SearchProvider):
 
     @staticmethod
     def _map_freshness(recency_filter: str | None) -> str | None:
+        """Map an Inqtrix recency hint to the Brave ``freshness`` parameter."""
         return {
             "day": "pd",
             "week": "pw",
@@ -45,35 +71,12 @@ class BraveSearch(_NonFatalNoticeMixin, SearchProvider):
 
     @staticmethod
     def _result_count_for_context(search_context_size: str) -> int:
+        """Map ``search_context_size`` to a Brave result count."""
         return {
             "low": 5,
             "medium": 8,
             "high": 10,
         }.get((search_context_size or "high").strip().lower(), 10)
-
-    @staticmethod
-    def _apply_domain_filters(query: str, domain_filter: list[str] | None) -> str:
-        if not domain_filter:
-            return query
-
-        suffix_parts: list[str] = []
-        for raw_domain in domain_filter[:10]:
-            domain = str(raw_domain or "").strip()
-            if not domain:
-                continue
-            is_exclusion = domain.startswith("-")
-            if is_exclusion:
-                domain = domain[1:].strip()
-            if not domain:
-                continue
-            token = f"site:{domain}"
-            if is_exclusion:
-                token = f"-site:{domain}"
-            suffix_parts.append(token)
-
-        if not suffix_parts:
-            return query
-        return f"{query} {' '.join(suffix_parts)}"
 
     def _request_json(
         self,
@@ -81,6 +84,7 @@ class BraveSearch(_NonFatalNoticeMixin, SearchProvider):
         params: dict[str, Any],
         timeout: float,
     ) -> dict[str, Any]:
+        """Send a GET request to the Brave Search API and return JSON."""
         url = f"{self._base_url}?{urlencode(params, doseq=True)}"
         request = Request(
             url,
@@ -123,7 +127,7 @@ class BraveSearch(_NonFatalNoticeMixin, SearchProvider):
         if deadline is not None:
             _check_deadline(deadline)
 
-        effective_query = self._apply_domain_filters(query, domain_filter)
+        effective_query = _apply_domain_filters(query, domain_filter)
         params: dict[str, Any] = {
             "q": effective_query,
             "count": min(

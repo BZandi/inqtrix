@@ -45,7 +45,17 @@ from urllib.request import Request, urlopen
 from inqtrix.constants import REASONING_TIMEOUT, SUMMARIZE_TIMEOUT
 from inqtrix.exceptions import AgentRateLimited, AgentTimeout, AnthropicAPIError
 from inqtrix.prompts import SUMMARIZE_PROMPT
-from inqtrix.providers import LLMProvider, LLMResponse, _NonFatalNoticeMixin, _bounded_timeout, _check_deadline
+from inqtrix.providers.base import (
+    LLMProvider,
+    LLMResponse,
+    _NonFatalNoticeMixin,
+    _BACKOFF_BASE_SECONDS,
+    _BACKOFF_MAX_SECONDS,
+    _JITTER_RANGE,
+    _THINKING_MIN_MAX_TOKENS,
+    _bounded_timeout,
+    _check_deadline,
+)
 from inqtrix.settings import ModelSettings
 from inqtrix.state import track_tokens
 
@@ -58,6 +68,9 @@ log = logging.getLogger("inqtrix")
 # when many parallel summarise/claim-extraction threads hit the API at
 # once.  The following constants control the retry loop in _request_json.
 #
+# Shared backoff constants (_BACKOFF_BASE_SECONDS, _BACKOFF_MAX_SECONDS,
+# _JITTER_RANGE, _THINKING_MIN_MAX_TOKENS) are imported from base.py.
+#
 # _RETRYABLE_HTTP_STATUS: status codes that trigger a retry instead of
 #     an immediate hard failure.  529 is Anthropic-specific; 500/502/503/
 #     504 cover standard transient infrastructure errors.
@@ -65,28 +78,9 @@ log = logging.getLogger("inqtrix")
 # _MAX_ANTHROPIC_ATTEMPTS: total tries (initial + retries).  5 gives
 #     enough room for a sustained 529 burst (~15–20 s total with backoff)
 #     without wasting the global time budget.
-#
-# _BACKOFF_BASE/MAX_SECONDS: exponential backoff — delay doubles each
-#     attempt (1, 2, 4, 8, 8, …) but is capped at MAX.
-#
-# _JITTER_RANGE: uniform random multiplier on each delay.  This is the
-#     key mitigation for the thundering-herd problem: when 6 threads all
-#     hit a 529 simultaneously, fixed-interval retries would create
-#     identical retry bursts.  Jitter spreads them out so the API has
-#     time to recover between requests.
-#
-# _THINKING_MIN_MAX_TOKENS: floor for max_tokens when thinking is
-#     enabled.  Anthropic counts thinking tokens *inside* max_tokens, so
-#     a low budget (e.g. 1024) leaves almost nothing for the visible
-#     answer.  16 384 is safe for all current Claude models and leaves
-#     room for both internal reasoning and a full-length answer.
 # ---------------------------------------------------------------------------
 _RETRYABLE_HTTP_STATUS = frozenset({500, 502, 503, 504, 529})
 _MAX_ANTHROPIC_ATTEMPTS = 5
-_BACKOFF_BASE_SECONDS = 1.0
-_BACKOFF_MAX_SECONDS = 8.0
-_JITTER_RANGE = (0.5, 1.5)
-_THINKING_MIN_MAX_TOKENS = 16_384
 
 
 class AnthropicLLM(_NonFatalNoticeMixin, LLMProvider):

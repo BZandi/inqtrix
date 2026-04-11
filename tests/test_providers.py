@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from inqtrix.providers import LiteLLM, PerplexitySearch
+from inqtrix.providers.litellm import LiteLLM
+from inqtrix.providers.perplexity import PerplexitySearch
 
 
 def test_litellm_provider_handles_sse_string_response() -> None:

@@ -333,7 +333,7 @@ class TestCreateProvidersFromConfig:
         config = _make_config()
         ctx = create_providers_from_config(config)
         # The search provider should exist and be a PerplexitySearch
-        from inqtrix.providers import PerplexitySearch
+        from inqtrix.providers.perplexity import PerplexitySearch
         assert isinstance(ctx.search, PerplexitySearch)
 
     def test_search_receives_model_params(self):

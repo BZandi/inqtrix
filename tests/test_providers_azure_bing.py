@@ -77,12 +77,12 @@ def mock_foundry():
         ),
     ]
 
-    with patch("inqtrix.providers_azure_bing.AIProjectClient") as mock_cls, \
-         patch("inqtrix.providers_azure_bing.DefaultAzureCredential") as mock_cred:
+    with patch("inqtrix.providers.azure_bing.AIProjectClient") as mock_cls, \
+         patch("inqtrix.providers.azure_bing.DefaultAzureCredential") as mock_cred:
         mock_cls.return_value = mock_client
         mock_cred.return_value = MagicMock()
 
-        from inqtrix.providers_azure_bing import AzureFoundryBingSearch
+        from inqtrix.providers.azure_bing import AzureFoundryBingSearch
         yield AzureFoundryBingSearch, mock_client
 
 
@@ -114,7 +114,7 @@ def test_is_available_when_configured(mock_foundry):
 
 def test_construction_with_service_principal(mock_foundry):
     Cls, _ = mock_foundry
-    with patch("inqtrix.providers_azure_bing.ClientSecretCredential") as mock_sp:
+    with patch("inqtrix.providers.azure_bing.ClientSecretCredential") as mock_sp:
         mock_sp.return_value = MagicMock()
         provider = Cls(
             project_endpoint="https://test.ai.azure.com/api",
@@ -362,50 +362,50 @@ def test_deadline_exceeded_raises_agent_timeout(mock_foundry):
 
 
 def test_apply_domain_filters_inclusion():
-    from inqtrix.providers_azure_bing import AzureFoundryBingSearch
-    result = AzureFoundryBingSearch._apply_domain_filters(
+    from inqtrix.providers.base import _apply_domain_filters
+    result = _apply_domain_filters(
         "query", ["example.com", "test.de"]
     )
     assert result == "query site:example.com site:test.de"
 
 
 def test_apply_domain_filters_exclusion():
-    from inqtrix.providers_azure_bing import AzureFoundryBingSearch
-    result = AzureFoundryBingSearch._apply_domain_filters(
+    from inqtrix.providers.base import _apply_domain_filters
+    result = _apply_domain_filters(
         "query", ["-spam.com"]
     )
     assert result == "query -site:spam.com"
 
 
 def test_apply_domain_filters_empty():
-    from inqtrix.providers_azure_bing import AzureFoundryBingSearch
-    assert AzureFoundryBingSearch._apply_domain_filters("query", None) == "query"
-    assert AzureFoundryBingSearch._apply_domain_filters("query", []) == "query"
+    from inqtrix.providers.base import _apply_domain_filters
+    assert _apply_domain_filters("query", None) == "query"
+    assert _apply_domain_filters("query", []) == "query"
 
 
 def test_build_additional_instructions_recency():
-    from inqtrix.providers_azure_bing import AzureFoundryBingSearch
-    result = AzureFoundryBingSearch._build_additional_instructions("week", None)
+    from inqtrix.providers.base import _build_recency_language_hints
+    result = _build_recency_language_hints("week", None)
     assert "Woche" in result
 
 
 def test_build_additional_instructions_language():
-    from inqtrix.providers_azure_bing import AzureFoundryBingSearch
-    result = AzureFoundryBingSearch._build_additional_instructions(None, ["de"])
+    from inqtrix.providers.base import _build_recency_language_hints
+    result = _build_recency_language_hints(None, ["de"])
     assert "de" in result
 
 
 def test_build_additional_instructions_combined():
-    from inqtrix.providers_azure_bing import AzureFoundryBingSearch
-    result = AzureFoundryBingSearch._build_additional_instructions("month", ["en"])
+    from inqtrix.providers.base import _build_recency_language_hints
+    result = _build_recency_language_hints("month", ["en"])
     assert "Monats" in result
     assert "en" in result
 
 
 def test_build_additional_instructions_none():
-    from inqtrix.providers_azure_bing import AzureFoundryBingSearch
-    assert AzureFoundryBingSearch._build_additional_instructions(None, None) is None
-    assert AzureFoundryBingSearch._build_additional_instructions("", []) is None
+    from inqtrix.providers.base import _build_recency_language_hints
+    assert _build_recency_language_hints(None, None) is None
+    assert _build_recency_language_hints("", []) is None
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +420,7 @@ def test_create_agent_returns_provider(mock_foundry):
     created_agent = SimpleNamespace(id="agent-new-123")
     mock_client.agents.create_agent.return_value = created_agent
 
-    with patch("inqtrix.providers_azure_bing.BingGroundingTool") as mock_tool:
+    with patch("inqtrix.providers.azure_bing.BingGroundingTool") as mock_tool:
         mock_tool.return_value = MagicMock(definitions=[{"type": "bing_grounding"}])
 
         provider = Cls.create_agent(

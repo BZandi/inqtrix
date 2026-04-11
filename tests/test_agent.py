@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from inqtrix.agent import AgentConfig, ResearchAgent
-from inqtrix.providers import LLMProvider, SearchProvider
-from inqtrix.providers_anthropic import AnthropicLLM
+from inqtrix.providers.base import LLMProvider, SearchProvider
+from inqtrix.providers.anthropic import AnthropicLLM
 from inqtrix.result import (
     Claim,
     ClaimMetrics,
@@ -270,7 +270,8 @@ class TestResearchAgentConstruction:
 
     def test_ensure_initialised_respects_explicit_config_over_env(self, monkeypatch):
         import inqtrix.providers as providers_module
-        from inqtrix.providers import LiteLLM, PerplexitySearch
+        from inqtrix.providers.litellm import LiteLLM
+        from inqtrix.providers.perplexity import PerplexitySearch
 
         monkeypatch.setenv("MAX_ROUNDS", "99")
         monkeypatch.setenv("REASONING_MODEL", "env-model")
@@ -309,7 +310,7 @@ class TestResearchAgentConstruction:
         assert settings.max_rounds == 2
         assert settings.answer_prompt_citations_max == 11
         assert providers.llm.models.reasoning_model == "custom-model"
-        assert providers.llm._client.base_url == "http://custom/v1"
+        assert str(providers.llm._client.base_url).rstrip("/") == "http://custom/v1"
         assert providers.llm._client.api_key == "custom-key"
 
     def test_default_claim_extraction_uses_provider_interface(self):

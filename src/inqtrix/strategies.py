@@ -30,7 +30,7 @@ from inqtrix.domains import (
 )
 from inqtrix.exceptions import AgentRateLimited, AgentTimeout, AnthropicAPIError
 from inqtrix.prompts import CLAIM_EXTRACTION_PROMPT, default_claims_prompt_view
-from inqtrix.providers import LLMProvider, _NonFatalNoticeMixin, _bounded_timeout, _check_deadline
+from inqtrix.providers.base import LLMProvider, _NonFatalNoticeMixin, _bounded_timeout, _check_deadline
 from inqtrix.json_helpers import parse_json_object
 from inqtrix.settings import AgentSettings
 from inqtrix.text import (

@@ -75,12 +75,34 @@ uv run pytest tests/ -v
 
 The repository includes runnable example scripts under `examples/`. Each file starts with a short explanation of when to use it, which environment variables it expects, and how to run it.
 
+**Quickstart** — minimal entry points for getting started:
+
 - `examples/quickstart/basic_env.py`: blocking library usage with the normal env-based provider setup
 - `examples/quickstart/streaming.py`: streaming library usage with optional progress messages
 - `examples/quickstart/yaml_config.py`: library usage with YAML provider/model routing instead of the HTTP server
+
+**Custom providers** — swap a single provider while keeping the other on env-based auto-creation:
+
 - `examples/custom_providers/brave_search.py`: direct Brave Search plus env-based LLM setup
 - `examples/custom_providers/anthropic_with_env_search.py`: direct Anthropic LLM plus env-based search setup
 - `examples/custom_providers/anthropic_and_brave.py`: full custom setup without LiteLLM
+
+**Provider stacks** — configurations for specific provider combinations are available. Each file contains detailed inline documentation (setup, env vars, auth options, AgentConfig reference).
+
+| Example | LLM | Search | Highlights |
+|---------|-----|--------|------------|
+| [`anthropic_perplexity.py`](examples/provider_stacks/anthropic_perplexity.py) | AnthropicLLM | PerplexitySearch | Full AgentConfig reference, extended thinking, rich terminal rendering |
+| [`litellm_perplexity.py`](examples/provider_stacks/litellm_perplexity.py) | LiteLLM | PerplexitySearch | Shared LiteLLM proxy for LLM + search |
+| [`azure_openai_perplexity.py`](examples/provider_stacks/azure_openai_perplexity.py) | AzureOpenAILLM | PerplexitySearch | Three Azure auth options (API key, Service Principal, DefaultAzureCredential) |
+| [`azure_openai_bing.py`](examples/provider_stacks/azure_openai_bing.py) | AzureOpenAILLM | AzureFoundryBingSearch | Full Azure stack, Bing grounding agent |
+| [`azure_openai_web_search.py`](examples/provider_stacks/azure_openai_web_search.py) | AzureOpenAILLM | AzureFoundryWebSearch | Full Azure stack, Responses API |
+| [`bedrock_perplexity.py`](examples/provider_stacks/bedrock_perplexity.py) | BedrockLLM | PerplexitySearch | AWS Bedrock, EU cross-region inference profiles |
+
+**Azure smoke tests** — isolated component tests under `examples/provider_stacks/azure_smoke_tests/`. Run these first to validate a single Azure component before trying the combined stacks:
+
+- `test_llm.py` — Azure OpenAI endpoint + deployment validation
+- `test_bing_search.py` — Azure Foundry Bing grounding agent validation
+- `test_web_search.py` — Azure Foundry Web Search agent validation
 
 Run any example like this:
 
@@ -463,9 +485,11 @@ Library streaming yields plain text chunks. HTTP streaming yields SSE chunks in 
 
 ## Provider Interfaces
 
-There are two different integration layers in Inqtrix:
+Inqtrix ships with built-in adapters for several LLM and search backends:
 
-- The built-in OpenAI-/LiteLLM-compatible providers expect an OpenAI-style chat completions wire format.
+- The OpenAI-/LiteLLM-compatible providers (`LiteLLM`, `AzureOpenAILLM`) expect an OpenAI-style chat completions wire format.
+- `AnthropicLLM` and `BedrockLLM` use their respective native APIs (Anthropic Messages, Bedrock Converse).
+- `PerplexitySearch`, `BraveSearch`, `AzureFoundryBingSearch`, and `AzureFoundryWebSearch` are built-in search adapters.
 - Custom `LLMProvider` and `SearchProvider` implementations only need to satisfy the Python method interface. Inside your adapter, the upstream API can look completely different.
 
 ### LLM Response Format
@@ -598,14 +622,16 @@ Then the runtime may add recency, language, domain, and related-question flags d
 
 In YAML mode, `models.<name>.params` for the search model are forwarded as extra request kwargs. One important caveat: `extra_body` is only shallow-merged. If you override `extra_body.web_search_options`, provide the full nested object rather than only one nested key.
 
-### What This Means for Brave, Azure Foundry, or Other Grounded Search APIs
+### Built-in Search Adapters and Custom Backends
 
-This is the important distinction:
+Built-in search adapters now cover Brave (`BraveSearch`), Azure Foundry Bing Grounding (`AzureFoundryBingSearch`), and Azure Foundry Web Search (`AzureFoundryWebSearch`) in addition to `PerplexitySearch`. See the [provider stacks examples](#runnable-examples) for complete setup.
+
+For other backends not yet covered, the important distinction is:
 
 - If the backend is genuinely OpenAI chat-completions compatible and its extra search knobs can be expressed as normal kwargs or `extra_body`, you may be able to adapt it with model params.
 - If the backend uses different request fields, different grounding configuration, tool-calling, or returns citations in another shape, simply swapping `search_model` is usually not enough.
 
-For Brave Search, Bing-grounded Azure Foundry, or similar backends, the safe path is usually a dedicated `SearchProvider` adapter that translates the upstream API into Inqtrix's expected internal search shape:
+For such backends, implement a dedicated `SearchProvider` adapter that translates the upstream API into Inqtrix's expected internal search shape:
 
 ```python
 {
@@ -616,8 +642,6 @@ For Brave Search, Bing-grounded Azure Foundry, or similar backends, the safe pat
         "_completion_tokens": 0,
 }
 ```
-
-That advice is not speculation; it follows from the current code path. The built-in search adapter is explicitly Perplexity-shaped today.
 
 ## Result Structure
 
@@ -670,33 +694,45 @@ inqtrix/
 ├── constants.py         # Default timeouts and thresholds
 ├── exceptions.py        # AgentTimeout, AgentRateLimited
 ├── providers/           # Provider package (base contracts + concrete adapters)
+│   ├── base.py          # LLMProvider / SearchProvider ABCs, ProviderContext
+│   ├── litellm.py       # LiteLLM (OpenAI-compatible)
+│   ├── anthropic.py     # AnthropicLLM (Anthropic Messages API)
+│   ├── azure.py         # AzureOpenAILLM (Azure OpenAI)
+│   ├── bedrock.py       # BedrockLLM (Amazon Bedrock Converse)
+│   ├── perplexity.py    # PerplexitySearch (Sonar API)
+│   ├── brave.py         # BraveSearch (Brave Web Search)
+│   ├── azure_bing.py    # AzureFoundryBingSearch (Bing Grounding)
+│   └── azure_web_search.py  # AzureFoundryWebSearch (Responses API)
 ├── strategies/          # Strategy package (ABCs + default implementations)
 ├── server/              # HTTP server package (app, routes, sessions, streaming)
 └── parity/              # Parity CLI and reporting package
 ```
 
-See [Agent-Architecture.md](Agent-Architecture.md) for the full technical reference.
+See [Agent-Architecture.md](docs/Agent-Architecture.md) for the full technical reference.
 
 ### Where to Change What
 
 | Goal | Files to Touch | Architecture Reference |
 |------|---------------|----------------------|
-| Add a new search backend | `providers/` (implement `SearchProvider` ABC) | [Section 5 — Provider Abstractions](Agent-Architecture.md#5-provider-abstractions) |
-| Add a new LLM backend | `providers/` (implement `LLMProvider` ABC) | [Section 5](Agent-Architecture.md#5-provider-abstractions) |
-| Change source quality tiers | `strategies/_source_tiering.py`, `domains.py` | [Section 13 — Source Tiering](Agent-Architecture.md#13-source-tiering) |
-| Customise claim extraction | `strategies/_claim_extraction.py` | [Section 14 — Claims](Agent-Architecture.md#14-claim-extraction-and-consolidation) |
-| Customise claim dedup/consolidation | `strategies/_claim_consolidation.py` | [Section 14](Agent-Architecture.md#14-claim-extraction-and-consolidation) |
-| Change context pruning logic | `strategies/_context_pruning.py` | [Section 10 — Search](Agent-Architecture.md#10-node-3-search) |
-| Change risk scoring | `strategies/_risk_scoring.py` | [Section 8 — Classify](Agent-Architecture.md#8-node-1-classify), [Section 9 — Plan](Agent-Architecture.md#9-node-2-plan), [Section 15 — Aspect Derivation and Coverage](Agent-Architecture.md#15-aspect-derivation-and-coverage) |
-| Change stop/continue heuristics | `strategies/_stop_criteria.py`, `nodes.py` | [Section 16 — Stop Logic](Agent-Architecture.md#16-evaluation-and-stop-logic) |
-| Add/rewire a graph node | `nodes.py` (node function), `graph.py` (wiring) | [Section 7 — State Machine](Agent-Architecture.md#7-state-machine-and-agent-state) |
-| Change prompt templates | `prompts.py` | [Section 12 — Answer](Agent-Architecture.md#12-node-5-answer) |
-| Add new state fields | `state.py` (add to `AgentState` TypedDict) | [Section 7](Agent-Architecture.md#7-state-machine-and-agent-state) |
-| Add a new HTTP endpoint | `server/routes.py`, `server/app.py` | [Section 19 — HTTP Server](Agent-Architecture.md#19-http-server-layer) |
-| Change timeouts/thresholds | `constants.py` (defaults), `settings.py` (env-var config), `config.py` (YAML schema) | [Section 4 — Configuration](Agent-Architecture.md#4-configuration-system), [Section 17 — Timeouts](Agent-Architecture.md#17-timeout-and-error-architecture) |
-| Change session/follow-up behaviour | `server/session.py`, `state.py` | [Section 18 — Sessions](Agent-Architecture.md#18-follow-ups-and-session-reuse) |
-| Add domain allow/blocklists | `domains.py` | [Section 10 — Search](Agent-Architecture.md#10-node-3-search) |
-| Add regression baselines | `parity/`, `tests/integration/` | [Agent-Architecture.md](Agent-Architecture.md) |
+| Add a new search backend | `providers/` (implement `SearchProvider` ABC) | [Section 5 — Provider Abstractions](docs/Agent-Architecture.md#5-provider-abstractions) |
+| Add a new LLM backend | `providers/` (implement `LLMProvider` ABC) | [Section 5](docs/Agent-Architecture.md#5-provider-abstractions) |
+| Use Azure OpenAI as the LLM | `providers/azure.py`, see [`examples/provider_stacks/azure_openai_*.py`](examples/provider_stacks/) | [Section 5](docs/Agent-Architecture.md#5-provider-abstractions) |
+| Use Amazon Bedrock as the LLM | `providers/bedrock.py`, see [`examples/provider_stacks/bedrock_perplexity.py`](examples/provider_stacks/bedrock_perplexity.py) | [Section 5](docs/Agent-Architecture.md#5-provider-abstractions) |
+| Use Azure Foundry search | `providers/azure_bing.py` or `azure_web_search.py`, see [`examples/provider_stacks/azure_openai_bing.py`](examples/provider_stacks/azure_openai_bing.py) | [Section 5](docs/Agent-Architecture.md#5-provider-abstractions) |
+| Change source quality tiers | `strategies/_source_tiering.py`, `domains.py` | [Section 13 — Source Tiering](docs/Agent-Architecture.md#13-source-tiering) |
+| Customise claim extraction | `strategies/_claim_extraction.py` | [Section 14 — Claims](docs/Agent-Architecture.md#14-claim-extraction-and-consolidation) |
+| Customise claim dedup/consolidation | `strategies/_claim_consolidation.py` | [Section 14](docs/Agent-Architecture.md#14-claim-extraction-and-consolidation) |
+| Change context pruning logic | `strategies/_context_pruning.py` | [Section 10 — Search](docs/Agent-Architecture.md#10-node-3-search) |
+| Change risk scoring | `strategies/_risk_scoring.py` | [Section 8 — Classify](docs/Agent-Architecture.md#8-node-1-classify), [Section 9 — Plan](docs/Agent-Architecture.md#9-node-2-plan), [Section 15 — Aspect Derivation and Coverage](docs/Agent-Architecture.md#15-aspect-derivation-and-coverage) |
+| Change stop/continue heuristics | `strategies/_stop_criteria.py`, `nodes.py` | [Section 16 — Stop Logic](docs/Agent-Architecture.md#16-evaluation-and-stop-logic) |
+| Add/rewire a graph node | `nodes.py` (node function), `graph.py` (wiring) | [Section 7 — State Machine](docs/Agent-Architecture.md#7-state-machine-and-agent-state) |
+| Change prompt templates | `prompts.py` | [Section 12 — Answer](docs/Agent-Architecture.md#12-node-5-answer) |
+| Add new state fields | `state.py` (add to `AgentState` TypedDict) | [Section 7](docs/Agent-Architecture.md#7-state-machine-and-agent-state) |
+| Add a new HTTP endpoint | `server/routes.py`, `server/app.py` | [Section 19 — HTTP Server](docs/Agent-Architecture.md#19-http-server-layer) |
+| Change timeouts/thresholds | `constants.py` (defaults), `settings.py` (env-var config), `config.py` (YAML schema) | [Section 4 — Configuration](docs/Agent-Architecture.md#4-configuration-system), [Section 17 — Timeouts](docs/Agent-Architecture.md#17-timeout-and-error-architecture) |
+| Change session/follow-up behaviour | `server/session.py`, `state.py` | [Section 18 — Sessions](docs/Agent-Architecture.md#18-follow-ups-and-session-reuse) |
+| Add domain allow/blocklists | `domains.py` | [Section 10 — Search](docs/Agent-Architecture.md#10-node-3-search) |
+| Add regression baselines | `parity/`, `tests/integration/` | [Agent-Architecture.md](docs/Agent-Architecture.md) |
 
 All strategy and provider customisations are passed via `AgentConfig` — no subclassing of `ResearchAgent` required. See the examples below.
 
@@ -704,7 +740,7 @@ All strategy and provider customisations are passed via `AgentConfig` — no sub
 
 ### Custom Search Provider
 
-Implement the `SearchProvider` ABC to integrate any search engine. This is the recommended path for Brave Search, Bing-grounded Azure Foundry, or any other backend whose request or response format is not Perplexity-like:
+Implement the `SearchProvider` ABC to integrate any search engine not already covered by the built-in adapters (`PerplexitySearch`, `BraveSearch`, `AzureFoundryBingSearch`, `AzureFoundryWebSearch`). This is the recommended path for any backend whose request or response format differs from those already supported:
 
 ```python
 from inqtrix import ResearchAgent, AgentConfig, SearchProvider
@@ -863,6 +899,38 @@ omitted, both fall back to `default_model`.
 `summarize_model`. If one of those reasoning models does not support
 thinking, the Anthropic API rejects the request.
 
+Concrete example: Azure OpenAI adapter:
+
+```python
+from inqtrix import AgentConfig, AzureOpenAILLM, ResearchAgent
+
+agent = ResearchAgent(AgentConfig(
+    llm=AzureOpenAILLM(
+        api_key=_require_env("AZURE_OPENAI_API_KEY"),
+        azure_endpoint="https://YOUR-RESOURCE.openai.azure.com/",
+        default_model="gpt-4o",              # deployment name
+        summarize_model="gpt-4o-mini",        # optional cheaper deployment
+    ),
+))
+```
+
+Concrete example: Amazon Bedrock adapter:
+
+```python
+from inqtrix import AgentConfig, BedrockLLM, ResearchAgent
+
+agent = ResearchAgent(AgentConfig(
+    llm=BedrockLLM(
+        default_model="eu.anthropic.claude-sonnet-4-6",
+        summarize_model="eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        profile_name="my-profile",            # optional AWS profile
+        region_name="eu-central-1",           # optional, default
+    ),
+))
+```
+
+For full configuration with all auth options and parameters, see the [provider stacks examples](#runnable-examples).
+
 For full end-to-end runs, Inqtrix needs model-routing metadata for `reasoning`, `classify`, `summarize`, and `evaluate`. If your custom LLM provider does not expose a `.models` property itself, `ResearchAgent` wraps it automatically with default `ModelSettings` from the environment.
 
 That means the Baukasten idea does work with the current algorithm. The only strict requirement is that your provider translates the upstream API into the small internal interface that the nodes and strategies expect.
@@ -982,7 +1050,7 @@ agent = ResearchAgent(AgentConfig(
 ))
 ```
 
-> **Note:** Some ABCs like `StopCriteriaStrategy` have many abstract methods (10 methods covering the full heuristic cascade). See [Agent-Architecture.md](Agent-Architecture.md) Section 16 for the full method list. Simpler ABCs like `SourceTieringStrategy` (2 methods) or `ContextPruningStrategy` (1 method) are easier starting points.
+> **Note:** Some ABCs like `StopCriteriaStrategy` have many abstract methods (10 methods covering the full heuristic cascade). See [Agent-Architecture.md](docs/Agent-Architecture.md) Section 16 for the full method list. Simpler ABCs like `SourceTieringStrategy` (2 methods) or `ContextPruningStrategy` (1 method) are easier starting points.
 
 Available strategy ABCs:
 
@@ -1152,6 +1220,9 @@ For local work, the practical order is:
 3. Start the local server in testing mode if you want a structured end-to-end check.
 4. Run `inqtrix-parity run --endpoint http://127.0.0.1:5100` for a local HTTP-based parity run.
 5. Run `uv run python main.py` or one of the example scripts when you want a direct manual live smoke test against your actual provider setup.
+6. For Azure-specific provider stacks, run the isolated smoke tests first to validate each component independently:
+   `uv run python examples/provider_stacks/azure_smoke_tests/test_llm.py` (Azure OpenAI),
+   `test_bing_search.py` (Bing Grounding), or `test_web_search.py` (Web Search).
 
 Minimal setup for a local HTTP parity run:
 

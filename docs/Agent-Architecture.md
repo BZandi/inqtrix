@@ -338,7 +338,16 @@ class LLMProvider(ABC):
     def is_available(self) -> bool: ...
 ```
 
-**Default:** `LiteLLMProvider` — uses any OpenAI-compatible endpoint via the `openai` Python SDK.
+**Default:** `LiteLLM` — uses any OpenAI-compatible endpoint via the `openai` Python SDK.
+
+**Built-in LLM providers:**
+
+| Class | Module | Backend |
+|-------|--------|---------|
+| `LiteLLM` | `providers/litellm.py` | Any OpenAI-compatible endpoint |
+| `AnthropicLLM` | `providers/anthropic.py` | Anthropic Messages API |
+| `AzureOpenAILLM` | `providers/azure.py` | Azure OpenAI Chat Completions |
+| `BedrockLLM` | `providers/bedrock.py` | Amazon Bedrock Converse API |
 
 ### SearchProvider ABC
 
@@ -354,6 +363,17 @@ class SearchProvider(ABC):
 **Return dict keys:** `answer`, `citations`, `related_questions`, `_prompt_tokens`, `_completion_tokens`.
 
 **Default:** `PerplexitySearch` — calls Perplexity Sonar Pro with TTL-based LRU cache (SHA-256 cache key, default 256 entries, 1h TTL).
+
+**Built-in search providers:**
+
+| Class | Module | Backend |
+|-------|--------|---------|
+| `PerplexitySearch` | `providers/perplexity.py` | Perplexity Sonar API |
+| `BraveSearch` | `providers/brave.py` | Brave Web Search API |
+| `AzureFoundryBingSearch` | `providers/azure_bing.py` | Azure Foundry Bing Grounding agent |
+| `AzureFoundryWebSearch` | `providers/azure_web_search.py` | Azure Foundry Web Search (Responses API) |
+
+Each provider raises a dedicated error type (e.g. `AzureOpenAIAPIError`, `BedrockAPIError`) exported from the top-level package.
 
 ### ProviderContext
 
@@ -1371,7 +1391,7 @@ Each row maps a published work to the specific Inqtrix component it influenced.
 
 ### 21.3 What Is Distinctive in This Implementation
 
-The distinctive part of Inqtrix is not a single novel building block. It is the implementation-level combination of:
+Inqtrix is a combination of:
 
 - A **claim ledger** with explicit consolidation status (verified / contested / unverified) and signature-based deduplication
 - **Domain-based source tiering** with weighted quality scores (5 tiers, Germany-focused domain lists)
@@ -1380,7 +1400,6 @@ The distinctive part of Inqtrix is not a single novel building block. It is the 
 - A **falsification mode** that fundamentally changes the search strategy when evidence consistently fails to materialise
 - **Multiple stopping signals** (9-step heuristic cascade) rather than a single confidence threshold, including utility suppression for policy-critical questions
 
-That combination gives the agent a practical, engineerable notion of *research completeness* instead of treating retrieval as a single opaque step.
 
 ### 21.4 References
 

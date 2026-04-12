@@ -14,7 +14,7 @@ Required files:
 - optional `.env` with the secrets referenced by `${...}` in the YAML file
 
 Run with:
-    uv run python examples/yaml_library_mode.py
+    uv run python examples/quickstart/yaml_config.py
 """
 
 from __future__ import annotations

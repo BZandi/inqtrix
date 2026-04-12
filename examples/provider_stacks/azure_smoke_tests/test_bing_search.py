@@ -26,7 +26,7 @@ Notes:
 
 Run with::
 
-    uv run python examples/example_4/basic_test_component_azure_bing_search.py
+    uv run python examples/provider_stacks/azure_smoke_tests/test_bing_search.py
 """
 
 from __future__ import annotations

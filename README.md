@@ -75,17 +75,17 @@ uv run pytest tests/ -v
 
 The repository includes runnable example scripts under `examples/`. Each file starts with a short explanation of when to use it, which environment variables it expects, and how to run it.
 
-- `examples/library_basic_env.py`: blocking library usage with the normal env-based provider setup
-- `examples/library_streaming.py`: streaming library usage with optional progress messages
-- `examples/yaml_library_mode.py`: library usage with YAML provider/model routing instead of the HTTP server
-- `examples/custom_brave_search.py`: direct Brave Search plus env-based LLM setup
-- `examples/custom_anthropic_with_env_search.py`: direct Anthropic LLM plus env-based search setup
-- `examples/custom_anthropic_and_brave.py`: full custom setup without LiteLLM
+- `examples/quickstart/basic_env.py`: blocking library usage with the normal env-based provider setup
+- `examples/quickstart/streaming.py`: streaming library usage with optional progress messages
+- `examples/quickstart/yaml_config.py`: library usage with YAML provider/model routing instead of the HTTP server
+- `examples/custom_providers/brave_search.py`: direct Brave Search plus env-based LLM setup
+- `examples/custom_providers/anthropic_with_env_search.py`: direct Anthropic LLM plus env-based search setup
+- `examples/custom_providers/anthropic_and_brave.py`: full custom setup without LiteLLM
 
 Run any example like this:
 
 ```bash
-uv run python examples/library_basic_env.py
+uv run python examples/quickstart/basic_env.py
 ```
 
 Running an example script or your own `main.py` is **not** part of the automated test suite. If valid providers are configured, that is a real agent run against the configured backends.

@@ -11,20 +11,20 @@ Recommended validation order
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Before using this combined example, validate the Azure reasoning path first:
 
-- ``examples/example_4/basic_test_component_azure_llm.py``
+- ``examples/provider_stacks/azure_smoke_tests/test_llm.py``
 
 Related combined examples:
 
-- ``examples/example_4/basic_azure_bing.py`` uses
+- ``examples/provider_stacks/azure_openai_bing.py`` uses
     ``AzureOpenAILLM`` + ``AzureFoundryBingSearch``.
-- ``examples/example_4/basic_azure_web.py`` uses
+- ``examples/provider_stacks/azure_openai_web_search.py`` uses
     ``AzureOpenAILLM`` + ``AzureFoundryWebSearch``.
 
 Why no dedicated Perplexity smoke test here?
 
 - ``PerplexitySearch`` is already a thin direct API wrapper with a single key.
 - The Azure side is usually the more failure-prone setup, so
-    ``basic_test_component_azure_llm.py`` gives the highest-value isolated smoke test.
+    ``azure_smoke_tests/test_llm.py`` gives the highest-value isolated smoke test.
 - This file is therefore the main full-stack example for the
     ``AzureOpenAILLM`` + ``PerplexitySearch`` combination.
 
@@ -71,9 +71,21 @@ For Service Principal auth (instead of API key):
 - AZURE_CLIENT_ID
 - AZURE_CLIENT_SECRET
 
+Terminal rendering
+------------------
+The agent returns Markdown, which looks good in a chat UI but is hard
+to read as raw text in a terminal.  This example uses ``rich`` to
+render Markdown with colours, formatted headers, bullet lists, and
+clickable links (in terminals that support OSC 8 hyperlinks such as
+iTerm2, Windows Terminal, or GNOME Terminal).
+
+``rich`` is a core dependency and always available after::
+
+    uv sync
+
 Run with::
 
-        uv run python examples/example_4/basic_azure_perplexity.py
+        uv run python examples/provider_stacks/azure_openai_perplexity.py
 """
 
 from __future__ import annotations

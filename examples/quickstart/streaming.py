@@ -7,7 +7,7 @@ Use this example when:
 Set INCLUDE_PROGRESS to False if another program should consume only answer chunks.
 
 Run with:
-    uv run python examples/library_streaming.py
+    uv run python examples/quickstart/streaming.py
 """
 
 from __future__ import annotations

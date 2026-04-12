@@ -1,26 +1,31 @@
-"""Explicit LiteLLM + PerplexitySearch example.
+"""Direct Anthropic + Perplexity example (no LiteLLM proxy).
 
 Architecture
 ------------
-In this setup, a single LiteLLM proxy serves as the gateway for BOTH
-the language models (e.g. Claude) AND the Perplexity Sonar search API.
-That is why ``LiteLLM`` and ``PerplexitySearch`` share the same
-``base_url`` and ``api_key`` — every request goes through the LiteLLM
-endpoint, which routes it to the correct upstream provider based on the
-model name.
+This example calls two independent APIs directly:
 
-This is different from calling the Perplexity API directly.  If you
-want direct Perplexity access without a proxy, you would set a separate
-``base_url`` (e.g. ``https://api.perplexity.ai``) and a dedicated
-Perplexity API key on the ``PerplexitySearch`` provider instead.
+1. **Anthropic Messages API** — via ``AnthropicLLM``, using a native
+   ``urllib`` adapter.  Claude models are called at
+   ``https://api.anthropic.com/v1/messages`` without any proxy or SDK
+   in between.
+
+2. **Perplexity Sonar API** — via ``PerplexitySearch``, using the
+   OpenAI Python SDK pointed at ``https://api.perplexity.ai``.
+   Perplexity's Sonar endpoint is fully OpenAI Chat Completions
+   compatible, so the SDK works out of the box.
+
+Each provider has its own API key and base URL — there is no shared
+proxy.  Compare this with the sibling ``litellm_perplexity.py``
+where a single LiteLLM proxy routes both LLM and search traffic.
 
 Use this example when:
-- reasoning and search models are reachable through one LiteLLM- or OpenAI-compatible endpoint
-- you want to see how providers are configured explicitly (Baukasten pattern)
+- you have direct API keys for both Anthropic and Perplexity
+- you do NOT want to run a LiteLLM proxy
+- you want the simplest possible two-provider setup
 
 Required environment variables (in .env or process env):
-- LITELLM_API_KEY
-- optionally LITELLM_BASE_URL (defaults to http://localhost:4000/v1)
+- ANTHROPIC_API_KEY
+- PERPLEXITY_API_KEY
 
 Terminal rendering
 ------------------
@@ -36,13 +41,13 @@ iTerm2, Windows Terminal, or GNOME Terminal).
 
 Run with::
 
-    uv run python examples/example_1/basic_litellm_perplexity.py
+    uv run python examples/provider_stacks/anthropic_perplexity.py
 """
 
 from __future__ import annotations
 import os
 from dotenv import load_dotenv
-from inqtrix import AgentConfig, LiteLLM, PerplexitySearch, ResearchAgent
+from inqtrix import AgentConfig, AnthropicLLM, PerplexitySearch, ResearchAgent
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -52,22 +57,18 @@ from rich.panel import Panel
 load_dotenv()
 
 # ── Logging ──────────────────────────────────────────────────────────
-# File-based logging with automatic secret redaction.  Controlled via
-# environment variables so the example stays quiet unless requested:
+# File-based logging with automatic secret redaction.  Disabled by
+# default — enable via environment variables to keep terminal clean:
 #
 #   INQTRIX_LOG_ENABLED=true   — write logs to logs/inqtrix_*.log
 #   INQTRIX_LOG_LEVEL=DEBUG    — DEBUG / INFO / WARNING (default: INFO)
 #   INQTRIX_LOG_CONSOLE=true   — also print WARNING+ to stderr
 from inqtrix.logging_config import configure_logging
 
-LOG_ENABLED = os.getenv("INQTRIX_LOG_ENABLED", "").lower() == "true"
-LOG_LEVEL = os.getenv("INQTRIX_LOG_LEVEL", "INFO")
-LOG_TO_CONSOLE = os.getenv("INQTRIX_LOG_CONSOLE", "").lower() == "true"
-
 _log_path = configure_logging(
-    enabled=LOG_ENABLED,
-    level=LOG_LEVEL,
-    console=LOG_TO_CONSOLE,
+    enabled=os.getenv("INQTRIX_LOG_ENABLED", "").lower() == "true",
+    level=os.getenv("INQTRIX_LOG_LEVEL", "INFO"),
+    console=os.getenv("INQTRIX_LOG_CONSOLE", "").lower() == "true",
 )
 if _log_path:
     print(f"Logging to {_log_path}")
@@ -108,46 +109,95 @@ def _require_env(name: str) -> str:
 
 
 def main() -> None:
-    api_key = _require_env("LITELLM_API_KEY")
-    base_url = os.environ.get(
-        "LITELLM_BASE_URL", "http://localhost:4000/v1"
-    ).strip()
+    anthropic_key = _require_env("ANTHROPIC_API_KEY")
+    perplexity_key = _require_env("PERPLEXITY_API_KEY")
 
     # ── LLM Provider ────────────────────────────────────────────────
     #
-    # default_model: the primary model used for reasoning, query
-    #   planning, and final answer synthesis.  This is where the
-    #   strongest model usually belongs.
+    # AnthropicLLM calls the Anthropic Messages API directly
+    # (https://api.anthropic.com/v1/messages) without a proxy.
     #
-    # classify_model / summarize_model / evaluate_model: optional
-    #   per-role overrides.  If left empty (""), each falls back to
-    #   default_model.
+    # default_model: used for ALL reasoning roles — classify, plan,
+    #   evaluate, and final answer synthesis.  This is the right place
+    #   for the stronger model because these steps decide search
+    #   strategy, evidence quality, and the final answer.
     #
-    #   classify_model: good place for a smaller model if the question
-    #   decomposition is straightforward and you mainly want to save
-    #   cost on the first routing step.
+    # classify_model / evaluate_model: optional per-role overrides for
+    #   classification and evidence evaluation.  Leave them empty to
+    #   keep everything on default_model.  Set them explicitly only if
+    #   you want cheaper/faster models in those roles.
     #
-    #   summarize_model: usually the best place to save money because
-    #   it runs in parallel on many search results.  If claim
-    #   extraction gets too shallow or noisy, move this role up.
+    # summarize_model: the cheaper, faster model used exclusively for
+    #   search-result summarization and claim extraction (called in
+    #   parallel threads via summarize_parallel).  This is usually the
+    #   best place to save cost.  If claim extraction is too weak or
+    #   search snippets are especially noisy, move summarize_model up
+    #   to Sonnet; if cost matters more, move it down to Haiku.
     #
-    #   evaluate_model: useful for a slightly cheaper model than
-    #   default_model, but keep it strong enough for evidence weighing
-    #   and stop decisions.
-    llm = LiteLLM(
-        api_key=api_key,
-        base_url=base_url,
-        default_model="claude-opus-4.6-agent",
-        classify_model="claude-sonnet-4.6",
-        summarize_model="claude-sonnet-4.6",
-        evaluate_model="claude-sonnet-4.6",
+    # Optional tuning (defaults shown):
+    #   default_max_tokens=1024    — output budget for reasoning calls
+    #   summarize_max_tokens=512   — output budget for summarization
+    #
+    # Extended thinking (optional) — uncomment ONE of the following:
+    #
+    #   Adaptive thinking (recommended for Claude 4.6 reasoning models):
+    #   thinking={"type": "adaptive"},
+    #
+    #   Manual budget (Claude 3.7 / precise control):
+    #   thinking={"type": "enabled", "budget_tokens": 10000},
+    #
+    # Thinking is forwarded on reasoning calls: default_model and
+    # optional classify_model / evaluate_model overrides. summarize-model
+    # helper work such as search summarization and claim extraction does
+    # not receive it.  There is no client-side capability routing: if
+    # one of those reasoning models does not support thinking, the
+    # Anthropic API will reject the request.
+    #
+    # Transient direct-Anthropic failures such as HTTP 529/500/504 are
+    # retried automatically with bounded backoff before the provider
+    # gives up.
+    #
+    # When thinking is enabled, max_tokens is auto-raised to at
+    # least 16384 so the model has room for both thinking and the
+    # visible answer.  You can override this with a higher
+    # default_max_tokens if needed.
+    #
+    # temperature (optional, 0.0–1.0) — sampling temperature.
+    # NOTE: temperature and thinking are MUTUALLY EXCLUSIVE.
+    #   temperature=0.3,
+    # Models:
+    #   claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5
+    llm = AnthropicLLM(
+        api_key=anthropic_key,
+        default_model="claude-opus-4-6",
+        # classify_model="claude-sonnet-4-6",
+        summarize_model="claude-haiku-4-5",
+        # evaluate_model="claude-sonnet-4-6",
+        thinking={"type": "adaptive"},
     )
 
     # ── Search Provider ─────────────────────────────────────────────
+    #
+    # PerplexitySearch pointed directly at the Perplexity Sonar API.
+    # This provider is designed specifically for the Sonar API — other
+    # Perplexity products (Deep Research, Agent API) use different
+    # parameters and endpoints.
+    #
+    # base_url is "https://api.perplexity.ai" (no /v1 suffix — the
+    # OpenAI SDK appends /chat/completions internally).
+    #
+    # The provider auto-detects direct mode from the URL and formats
+    # search parameters (recency, language, domain filters, etc.) as
+    # flat top-level extra_body keys — which is what the Perplexity
+    # API expects.  Through a LiteLLM proxy these would be nested
+    # inside web_search_options instead.
+    #
+    # Model names are Perplexity-native here (sonar-pro, sonar),
+    # not LiteLLM aliases (perplexity-sonar-pro-agent).
     search = PerplexitySearch(
-        api_key=api_key,
-        base_url=base_url,
-        model="perplexity-sonar-pro-agent",
+        api_key=perplexity_key,
+        base_url="https://api.perplexity.ai",
+        model="sonar-pro",
     )
 
     # ── AgentConfig — all available options ──────────────────────────
@@ -170,7 +220,7 @@ def main() -> None:
         first_round_queries=6,              # number of parallel search queries in first round
         answer_prompt_citations_max=60,     # max citation URLs forwarded to the answer-synthesis prompt
         # hard wall-clock deadline for the entire run (seconds).
-        # Opus through a proxy needs more time than Sonnet — 600s is a
+        # Opus with thinking needs more time than Sonnet — 600s is a
         # safe default.  Reduce to 300 for Sonnet-only setups.
         max_total_seconds=600,
         max_question_length=10_000,         # reject questions longer than this (characters)
@@ -186,24 +236,14 @@ def main() -> None:
         # RiskScoringStrategy (regex-based on keywords like "Gesetz",
         # "Steuer", "Medizin", etc.).
         #
-        # high_risk_score_threshold decides WHEN a question counts as
-        # high-risk.  The two boolean flags below then decide WHETHER
-        # model escalation actually happens for those high-risk cases.
-        #
-        # Example with the defaults below:
-        #   - Question gets risk_score = 6 → high_risk = True (≥ 4)
-        #   - high_risk_classify_escalate = True
-        #     → classify node uses the strong default_model instead of
-        #       the cheaper classify_model
-        #   - high_risk_evaluate_escalate = True
-        #     → evaluate node uses the strong default_model instead of
-        #       the cheaper evaluate_model
-        #
-        # Set either flag to False to save cost: the smaller model is
-        # then used even for high-risk questions in that role.
+        # With AnthropicLLM these flags matter only if you configured
+        # classify_model and/or evaluate_model above.  In that case,
+        # high-risk questions can escalate those roles back up to the
+        # stronger default_model.  Summarization always uses
+        # summarize_model regardless of risk.
         high_risk_score_threshold=4,        # risk score ≥ this triggers high_risk = True
-        high_risk_classify_escalate=True,   # escalate classify to default_model on high-risk
-        high_risk_evaluate_escalate=True,   # escalate evaluate to default_model on high-risk
+        high_risk_classify_escalate=True,   # if classify_model is set, high-risk uses default_model instead
+        high_risk_evaluate_escalate=True,   # if evaluate_model is set, high-risk uses default_model instead
 
         # -- Search cache --
         search_cache_maxsize=256,           # max cached search results (LRU eviction)

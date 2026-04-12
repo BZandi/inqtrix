@@ -5,7 +5,7 @@ the search path via ``AzureFoundryWebSearch`` (Responses API).
 
 For the full stack (``AzureOpenAILLM`` + ``AzureFoundryWebSearch``), see:
 
-- ``examples/example_4/basic_azure_web.py``
+- ``examples/provider_stacks/azure_openai_web_search.py``
 
 What this checks:
 - Azure AI Foundry project endpoint is correct
@@ -59,7 +59,7 @@ Notes:
 
 Run with::
 
-    uv run python examples/example_4/basic_test_component_azure_web_search.py
+    uv run python examples/provider_stacks/azure_smoke_tests/test_web_search.py
 """
 
 from __future__ import annotations

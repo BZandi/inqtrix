@@ -11,16 +11,16 @@ Recommended validation order
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Before using this combined example, validate both components separately:
 
-- ``examples/example_4/basic_test_component_azure_llm.py``
-- ``examples/example_4/basic_test_component_azure_web_search.py``
-- ``examples/example_4/basic_test_component_azure_bing_search.py``
+- ``examples/provider_stacks/azure_smoke_tests/test_llm.py``
+- ``examples/provider_stacks/azure_smoke_tests/test_web_search.py``
+- ``examples/provider_stacks/azure_smoke_tests/test_bing_search.py``
 
 Why these smoke tests?
 
-- ``basic_test_component_azure_llm.py`` validates the Azure OpenAI reasoning path.
-- ``basic_test_component_azure_web_search.py`` validates the newer Foundry Web Search
+- ``azure_smoke_tests/test_llm.py`` validates the Azure OpenAI reasoning path.
+- ``azure_smoke_tests/test_web_search.py`` validates the newer Foundry Web Search
   tool path (Responses API) used by THIS file.
-- ``basic_test_component_azure_bing_search.py`` validates the classic Bing Grounding
+- ``azure_smoke_tests/test_bing_search.py`` validates the classic Bing Grounding
   search-agent path.  It is useful for comparison, but it is NOT the
   search provider used by this file.
 
@@ -107,10 +107,22 @@ Optional:
 - AZURE_OPENAI_SUMMARIZE_DEPLOYMENT_NAME  (cheaper deployment for summarisation)
 - AZURE_WEB_STACK_QUESTION      (override the default demo question)
 
+Terminal rendering
+------------------
+The agent returns Markdown, which looks good in a chat UI but is hard
+to read as raw text in a terminal.  This example uses ``rich`` to
+render Markdown with colours, formatted headers, bullet lists, and
+clickable links (in terminals that support OSC 8 hyperlinks such as
+iTerm2, Windows Terminal, or GNOME Terminal).
+
+``rich`` is a core dependency and always available after::
+
+    uv sync
+
 Run with::
 
     uv sync
-    uv run python examples/example_4/basic_azure_web.py
+    uv run python examples/provider_stacks/azure_openai_web_search.py
 """
 
 from __future__ import annotations
@@ -132,7 +144,13 @@ from inqtrix import (
 
 load_dotenv()
 
-# -- Logging ------------------------------------------------------------------
+# ── Logging ──────────────────────────────────────────────────────────
+# File-based logging with automatic secret redaction.  Disabled by
+# default — enable via environment variables to keep terminal clean:
+#
+#   INQTRIX_LOG_ENABLED=true   — write logs to logs/inqtrix_*.log
+#   INQTRIX_LOG_LEVEL=DEBUG    — DEBUG / INFO / WARNING (default: INFO)
+#   INQTRIX_LOG_CONSOLE=true   — also print WARNING+ to stderr
 from inqtrix.logging_config import configure_logging
 
 _log_path = configure_logging(
@@ -159,8 +177,15 @@ def _print_result(result) -> None:
     console.print(Panel(metrics_line, title="Metrics", expand=False))
 
 
-# -- Output mode --------------------------------------------------------------
+# ── Output mode ──────────────────────────────────────────────────────
+# True  → streaming (live progress messages + word-by-word answer)
+# False → blocking  (waits for the full result, then prints at once)
 USE_STREAMING = True
+
+# Only relevant when USE_STREAMING is True:
+# True  → show intermediate progress messages before the answer
+#          e.g. "Analysiere Frage…", "Plane Suchanfragen (Runde 1/4)…"
+# False → stream only the final answer text, no status updates
 INCLUDE_PROGRESS = True
 
 
@@ -188,7 +213,7 @@ def main() -> None:
     # -- LLM Provider ---------------------------------------------------------
     #
     # AzureOpenAILLM is the same component that is smoke-tested in:
-    #   examples/example_4/basic_test_component_azure_llm.py
+    #   examples/provider_stacks/azure_smoke_tests/test_llm.py
     # Test that file first if the combined setup fails.
     #
     # Option A: API Key (default)
@@ -236,7 +261,7 @@ def main() -> None:
     # -- Search Provider -------------------------------------------------------
     #
     # AzureFoundryWebSearch is the same component that is smoke-tested in:
-    #   examples/example_4/basic_test_component_azure_web_search.py
+    #   examples/provider_stacks/azure_smoke_tests/test_web_search.py
     # Test that file first if the combined setup fails.
     #
     # This provider uses the Foundry Responses API with agent_reference.
@@ -304,17 +329,70 @@ def main() -> None:
     #     agent_version=agent_version,
     # )
 
-    # -- Agent -----------------------------------------------------------------
+    # ── AgentConfig — all available options ──────────────────────────
+    #
+    # Only llm + search are required for explicit setup.  Every other
+    # field has a sensible default.  Uncomment and change only what you
+    # need.  If llm or search are omitted (None), they are auto-created
+    # from environment variables / .env.
     agent = ResearchAgent(AgentConfig(
+        # -- Providers (None = auto-create from env) --
         llm=llm,
         search=search,
-        max_rounds=4,
+
+        # -- Behaviour --
+        max_rounds=4,                       # max research-loop iterations before forced stop
+        # confidence threshold (1-10) — stop early when reached
+        confidence_stop=9,
+        # max context blocks retained across rounds (older ones pruned)
+        max_context=12,
+        first_round_queries=6,              # number of parallel search queries in first round
+        answer_prompt_citations_max=60,     # max citation URLs forwarded to the answer-synthesis prompt
+        # hard wall-clock deadline for the entire run (seconds).
+        # GPT-4o through Azure is typically fast — 300s is usually enough.
+        # Increase to 600 for very complex questions or slower deployments.
         max_total_seconds=300,
-        confidence_stop=9
+        max_question_length=10_000,         # reject questions longer than this (characters)
+
+        # -- Timeouts (per individual LLM/search call, in seconds) --
+        reasoning_timeout=120,              # timeout for reasoning / planning / answer calls
+        search_timeout=60,                  # timeout for each web-search call
+        summarize_timeout=60,               # timeout for each summarise / claim-extraction call
+
+        # -- Risk escalation ──────────────────────────────────────────
+        #
+        # The risk score (0-10) is ALWAYS computed automatically by the
+        # RiskScoringStrategy (regex-based on keywords like "Gesetz",
+        # "Steuer", "Medizin", etc.).
+        #
+        # With AzureOpenAILLM these flags matter only if you configured
+        # classify_model and/or evaluate_model above.  In that case,
+        # high-risk questions can escalate those roles back up to the
+        # stronger default_model.  Summarization always uses
+        # summarize_model regardless of risk.
+        high_risk_score_threshold=4,        # risk score ≥ this triggers high_risk = True
+        high_risk_classify_escalate=True,   # if classify_model is set, high-risk uses default_model instead
+        high_risk_evaluate_escalate=True,   # if evaluate_model is set, high-risk uses default_model instead
+
+        # -- Search cache --
+        search_cache_maxsize=256,           # max cached search results (LRU eviction)
+        search_cache_ttl=3600,              # cache time-to-live in seconds
+
+        # -- Strategies (None = use built-in defaults) ────────────────
+        # Each strategy is a pluggable ABC.  Pass your own implementation
+        # to override the default algorithm for that concern.
+        # source_tiering=None,              # URL → quality-tier mapping
+        # claim_extraction=None,            # extract structured claims from search results
+        # claim_consolidation=None,         # deduplicate and verify claims across rounds
+        # context_pruning=None,             # drop low-relevance context blocks
+        # risk_scoring=None,                # score question risk (0-10)
+        # stop_criteria=None,               # multi-signal heuristic: keep researching or stop?
     ))
 
-    # -- Run -------------------------------------------------------------------
+    # ── Run ──────────────────────────────────────────────────────────
     if USE_STREAMING:
+        # Collect chunks: progress lines go to stdout immediately,
+        # answer text is buffered for a final rich render pass.
         answer_buf: list[str] = []
         in_answer = False
         for chunk in agent.stream(QUESTION, include_progress=INCLUDE_PROGRESS):
@@ -324,12 +402,13 @@ def main() -> None:
             if in_answer:
                 answer_buf.append(chunk)
             else:
+                # Progress lines — always printed raw
                 print(chunk, end="", flush=True)
 
         full_answer = "".join(answer_buf)
         if full_answer:
             console = Console()
-            print()
+            print()  # newline after progress block
             console.print(Markdown(full_answer))
     else:
         result = agent.research(QUESTION)

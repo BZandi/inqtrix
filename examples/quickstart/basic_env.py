@@ -9,7 +9,7 @@ Typical setup:
 - optionally configure CLASSIFY_MODEL, SUMMARIZE_MODEL, EVALUATE_MODEL
 
 Run with:
-    uv run python examples/library_basic_env.py
+    uv run python examples/quickstart/basic_env.py
 """
 
 from __future__ import annotations

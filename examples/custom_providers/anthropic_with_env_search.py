@@ -31,11 +31,8 @@ Run with::
 """
 
 from __future__ import annotations
-
 import os
-
 from dotenv import load_dotenv
-
 from inqtrix import AgentConfig, AnthropicLLM, ResearchAgent
 
 

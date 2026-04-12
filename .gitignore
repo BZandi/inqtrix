@@ -231,5 +231,12 @@ inqtrix.yml
 .ruff_cache/
 tests/integration/runs/
 tests/integration/reports/
-main.py
+
+# Claude
+.claude/
+*.claude
 CLAUDE.md
+
+# Local testing
+main.py
+

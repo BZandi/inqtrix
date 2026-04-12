@@ -57,10 +57,13 @@ cover/
 
 # Django stuff:
 *.log
-logs/
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
+
+# Logs
+logs/*
+!logs/.keep
 
 # Flask stuff:
 instance/

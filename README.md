@@ -1,3 +1,8 @@
+<div align="center">
+  <img src="inqtrix-logo.svg" width="100%">
+</div>
+<p></p>
+
 > [!WARNING]
 > **Experimental Software / Reference and Integration Foundation**
 > This repository is an experimental codebase and integration foundation for self-hosted or locally operated deployments. It does **not** provide a complete production-ready security configuration, hardened deployment profile, or any assurance that it is suitable for direct use in internet-facing, multi-user, regulated, or otherwise high-risk environments.

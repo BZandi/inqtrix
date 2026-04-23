@@ -1,0 +1,31 @@
+# Hand-crafted 400 InvalidAgentReference — Foundry rejects the
+# agent_reference (e.g. malformed name+version).  The provider catches
+# the error and degrades to the empty-result + nonfatal-notice contract.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: https://test.services.ai.azure.com/api/projects/demo/openai/v1/responses
+    response:
+      body:
+        string: |
+          {
+            "error": {
+              "code": "InvalidAgentReference",
+              "message": "agent_reference 'foundry-bing-agent' (version=999) was not found"
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        apim-request-id:
+          - "req-afbing-replay-400-1"
+      status:
+        code: 400
+        message: Bad Request
+version: 1

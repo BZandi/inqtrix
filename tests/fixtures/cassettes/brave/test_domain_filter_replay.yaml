@@ -1,0 +1,35 @@
+# Hand-crafted Brave response for a domain-filtered query.  Verifies
+# that _apply_domain_filters injects "site:" operators into the query
+# string. The cassette URI is recorded with the operator already in
+# place so we can match-on path+query.
+interactions:
+  - request:
+      body: null
+      headers:
+        Accept:
+          - application/json
+        User-Agent:
+          - inqtrix/0.1
+      method: GET
+      uri: https://api.search.brave.com/res/v1/web/search?q=Inqtrix+site%3Aexample.com+-site%3Apinterest.com&count=8
+    response:
+      body:
+        string: |
+          {
+            "web": {
+              "results": [
+                {
+                  "url": "https://example.com/inqtrix-domain",
+                  "title": "Inqtrix Domain Filter",
+                  "description": "Site-Operator-injection bei Brave."
+                }
+              ]
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+      status:
+        code: 200
+        message: OK
+version: 1

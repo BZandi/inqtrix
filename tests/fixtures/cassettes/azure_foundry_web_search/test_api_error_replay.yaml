@@ -1,0 +1,30 @@
+# Hand-crafted 404 AgentNotFound — typical Foundry error when the
+# referenced agent_name does not exist in the project.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: https://test.services.ai.azure.com/api/projects/demo/openai/v1/responses
+    response:
+      body:
+        string: |
+          {
+            "error": {
+              "code": "AgentNotFound",
+              "message": "Agent 'web-search-agent' was not found in project 'demo'"
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        apim-request-id:
+          - "req-afws-replay-404-1"
+      status:
+        code: 404
+        message: Not Found
+version: 1

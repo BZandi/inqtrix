@@ -1,0 +1,59 @@
+# Hand-crafted Foundry-Bing success — SP-auth variant.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: https://test.services.ai.azure.com/api/projects/demo/openai/v1/responses
+    response:
+      body:
+        string: |
+          {
+            "id": "resp_replay_afbing_sp_001",
+            "object": "response",
+            "created_at": 1745004100,
+            "model": "foundry-bing-agent",
+            "status": "completed",
+            "output": [
+              {
+                "type": "message",
+                "id": "msg_afbing_sp_001",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "Service-Principal-Auth fuer Foundry-Bing erlaubt deterministisches Bearer-minting im Constructor.",
+                    "annotations": [
+                      {
+                        "type": "url_citation",
+                        "url": "https://example.com/bing-foundry-sp-1",
+                        "title": "Bing-Foundry SP",
+                        "start_index": 0,
+                        "end_index": 95
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "output_text": "Service-Principal-Auth fuer Foundry-Bing erlaubt deterministisches Bearer-minting im Constructor.",
+            "usage": {
+              "input_tokens": 12,
+              "output_tokens": 17,
+              "total_tokens": 29
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        apim-request-id:
+          - "req-afbing-replay-sp-1"
+      status:
+        code: 200
+        message: OK
+version: 1

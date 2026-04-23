@@ -1,0 +1,31 @@
+# Hand-crafted 429 from Brave Search.  The provider must escalate
+# this as AgentRateLimited (no retry; no nonfatal-degrade).
+interactions:
+  - request:
+      body: null
+      headers:
+        Accept:
+          - application/json
+        User-Agent:
+          - inqtrix/0.1
+      method: GET
+      uri: https://api.search.brave.com/res/v1/web/search?q=triggert+rate-limit&count=10
+    response:
+      body:
+        string: |
+          {
+            "type": "ErrorResponse",
+            "error": {
+              "id": "BSE_429",
+              "status": 429,
+              "code": "RATE_LIMITED",
+              "detail": "Per-second quota exceeded"
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+      status:
+        code: 429
+        message: Too Many Requests
+version: 1

@@ -1,0 +1,38 @@
+# Hand-crafted empty Foundry response.  Provider must surface notice
+# and return _EMPTY_RESULT.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: https://test.services.ai.azure.com/api/projects/demo/openai/v1/responses
+    response:
+      body:
+        string: |
+          {
+            "id": "resp_replay_afws_empty_001",
+            "object": "response",
+            "created_at": 1745003200,
+            "model": "foundry-web-search-agent",
+            "status": "completed",
+            "output": [],
+            "output_text": "",
+            "usage": {
+              "input_tokens": 5,
+              "output_tokens": 0,
+              "total_tokens": 5
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        apim-request-id:
+          - "req-afws-replay-empty-1"
+      status:
+        code: 200
+        message: OK
+version: 1

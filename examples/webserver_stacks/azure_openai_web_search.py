@@ -1,0 +1,248 @@
+"""Webserver-Spiegel zu provider_stacks/azure_openai_web_search.py.
+
+Mounts the OpenAI-compatible Inqtrix server on top of an
+``AzureOpenAILLM`` + ``AzureOpenAIWebSearch`` stack (Variante C —
+native Azure OpenAI Responses-API ``web_search`` tool, no Foundry
+agent needed). Provider construction is **1:1 identical** to the
+library example, including all four Azure auth modes (Options A–E
+ready to uncomment for Service Principal / Managed Identity).
+
+Required environment variables
+------------------------------
+- ``AZURE_OPENAI_API_KEY``           (Option A — default)
+- ``AZURE_OPENAI_ENDPOINT``
+- ``AZURE_OPENAI_DEPLOYMENT_NAME``   (must support the web_search tool)
+
+Optional (parity with provider_stacks):
+- ``AZURE_OPENAI_SUMMARIZE_DEPLOYMENT_NAME``
+- ``AZURE_OPENAI_WEB_SEARCH_USER_COUNTRY`` (default ``DE``)
+- ``AZURE_TENANT_ID`` / ``AZURE_CLIENT_ID`` / ``AZURE_CLIENT_SECRET`` (Option B/C)
+
+Optional logging / server / security: see other webserver examples.
+
+Run with::
+
+    uv sync
+    uv run python examples/webserver_stacks/azure_openai_web_search.py
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+import uvicorn
+from dotenv import load_dotenv
+from fastapi import FastAPI
+
+from inqtrix import (
+    AgentConfig,
+    AzureOpenAILLM,
+    AzureOpenAIWebSearch,
+    ReportProfile,
+    ResearchAgent,
+)
+from inqtrix.logging_config import build_uvicorn_log_config, configure_logging
+from inqtrix.providers.base import ProviderContext
+from inqtrix.server import create_app
+from inqtrix.server.security import resolve_tls_paths
+from inqtrix.settings import (
+    AgentSettings,
+    ModelSettings,
+    ServerSettings,
+    Settings,
+)
+
+
+load_dotenv()
+
+_INQTRIX_LOG_PATH = configure_logging(
+    enabled=os.getenv("INQTRIX_LOG_ENABLED", "").lower() == "true",
+    level=os.getenv("INQTRIX_LOG_LEVEL", "INFO"),
+    console=os.getenv("INQTRIX_LOG_CONSOLE", "").lower() == "true",
+)
+
+
+def _require_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
+def _build_providers() -> ProviderContext:
+    """Build AzureOpenAILLM + AzureOpenAIWebSearch — identical to the library example."""
+    azure_endpoint = _require_env("AZURE_OPENAI_ENDPOINT")
+    azure_deployment = _require_env("AZURE_OPENAI_DEPLOYMENT_NAME")
+    azure_api_key = _require_env("AZURE_OPENAI_API_KEY")
+
+    azure_summarize_deployment = os.environ.get(
+        "AZURE_OPENAI_SUMMARIZE_DEPLOYMENT_NAME", ""
+    ).strip()
+
+    user_country = os.getenv("AZURE_OPENAI_WEB_SEARCH_USER_COUNTRY", "DE").strip()
+    user_location = (
+        {"type": "approximate", "country": user_country} if user_country else None
+    )
+
+    # -- LLM Provider ---------------------------------------------------------
+    #
+    # Option A: API Key (default)
+    llm = AzureOpenAILLM(
+        azure_endpoint=azure_endpoint,
+        api_key=azure_api_key,
+        default_model=azure_deployment,
+        summarize_model=azure_summarize_deployment,
+        default_max_tokens=16384,
+        summarize_max_tokens=16384,
+    )
+
+    # -- Option B: Service Principal — direct constructor args ----------------
+    # llm = AzureOpenAILLM(
+    #     azure_endpoint=azure_endpoint,
+    #     tenant_id=os.environ["AZURE_TENANT_ID"],
+    #     client_id=os.environ["AZURE_CLIENT_ID"],
+    #     client_secret=os.environ["AZURE_CLIENT_SECRET"],
+    #     default_model=azure_deployment,
+    #     summarize_model=azure_summarize_deployment,
+    # )
+
+    # -- Option C: Service Principal — manual token provider ------------------
+    # from azure.identity import ClientSecretCredential, get_bearer_token_provider
+    # credential = ClientSecretCredential(
+    #     tenant_id=os.environ["AZURE_TENANT_ID"],
+    #     client_id=os.environ["AZURE_CLIENT_ID"],
+    #     client_secret=os.environ["AZURE_CLIENT_SECRET"],
+    # )
+    # token_provider = get_bearer_token_provider(
+    #     credential, "https://cognitiveservices.azure.com/.default",
+    # )
+    # llm = AzureOpenAILLM(
+    #     azure_endpoint=azure_endpoint,
+    #     azure_ad_token_provider=token_provider,
+    #     default_model=azure_deployment,
+    #     summarize_model=azure_summarize_deployment,
+    # )
+
+    # -- Option D: Existing token provider ------------------------------------
+    # llm = AzureOpenAILLM(
+    #     azure_endpoint=azure_endpoint,
+    #     azure_ad_token_provider=existing_token_provider,
+    #     default_model=azure_deployment,
+    #     summarize_model=azure_summarize_deployment,
+    # )
+
+    # -- Option E: DefaultAzureCredential (local dev / Managed Identity) ------
+    # from azure.identity import DefaultAzureCredential
+    # llm = AzureOpenAILLM(
+    #     azure_endpoint=azure_endpoint,
+    #     credential=DefaultAzureCredential(),
+    #     default_model=azure_deployment,
+    #     summarize_model=azure_summarize_deployment,
+    # )
+
+    # -- Search Provider ------------------------------------------------------
+    #
+    # Option A: API Key (same key as the LLM above)
+    search = AzureOpenAIWebSearch(
+        azure_endpoint=azure_endpoint,
+        api_key=azure_api_key,
+        default_model=azure_deployment,
+        user_location=user_location,
+    )
+
+    # -- Option B: Service Principal — direct constructor args ----------------
+    # search = AzureOpenAIWebSearch(
+    #     azure_endpoint=azure_endpoint,
+    #     tenant_id=os.environ["AZURE_TENANT_ID"],
+    #     client_id=os.environ["AZURE_CLIENT_ID"],
+    #     client_secret=os.environ["AZURE_CLIENT_SECRET"],
+    #     default_model=azure_deployment,
+    #     user_location=user_location,
+    # )
+
+    # -- Option C: Service Principal — manual token provider ------------------
+    # search = AzureOpenAIWebSearch(
+    #     azure_endpoint=azure_endpoint,
+    #     azure_ad_token_provider=token_provider,
+    #     default_model=azure_deployment,
+    #     user_location=user_location,
+    # )
+
+    # -- Option D: DefaultAzureCredential -------------------------------------
+    # from azure.identity import DefaultAzureCredential
+    # search = AzureOpenAIWebSearch(
+    #     azure_endpoint=azure_endpoint,
+    #     credential=DefaultAzureCredential(),
+    #     default_model=azure_deployment,
+    #     user_location=user_location,
+    # )
+
+    # -- Option E: Hardcoded API key ------------------------------------------
+    # search = AzureOpenAIWebSearch(
+    #     azure_endpoint=azure_endpoint,
+    #     api_key="your-api-key-from-azure-portal",
+    #     default_model=azure_deployment,
+    #     user_location=user_location,
+    # )
+
+    return ProviderContext(llm=llm, search=search)
+
+
+def _build_settings() -> Settings:
+    agent = AgentSettings(
+        report_profile=ReportProfile.DEEP,
+        max_rounds=4,
+        confidence_stop=9,
+        max_context=12,
+        first_round_queries=6,
+        answer_prompt_citations_max=60,
+        max_total_seconds=300,
+        max_question_length=10_000,
+        reasoning_timeout=120,
+        search_timeout=60,
+        summarize_timeout=60,
+        high_risk_score_threshold=4,
+        high_risk_classify_escalate=True,
+        high_risk_evaluate_escalate=True,
+        search_cache_maxsize=256,
+        search_cache_ttl=3600,
+    )
+    return Settings(
+        models=ModelSettings(),
+        agent=agent,
+        server=ServerSettings(),
+    )
+
+
+def build_app() -> FastAPI:
+    providers = _build_providers()
+    settings = _build_settings()
+    return create_app(settings=settings, providers=providers)
+
+
+def main() -> None:
+    app = build_app()
+    settings = _build_settings()
+    tls = resolve_tls_paths(settings.server)
+    uvicorn_kwargs: dict[str, Any] = dict(
+        host=os.getenv("INQTRIX_SERVER_HOST", "0.0.0.0"),
+        port=int(os.getenv("INQTRIX_SERVER_PORT", "5100")),
+        workers=1,
+        timeout_keep_alive=300,
+    )
+    if tls is not None:
+        uvicorn_kwargs["ssl_keyfile"], uvicorn_kwargs["ssl_certfile"] = tls
+    if os.getenv("INQTRIX_LOG_INCLUDE_WEB", "true").lower() != "false":
+        uvicorn_kwargs["log_config"] = build_uvicorn_log_config(
+            _INQTRIX_LOG_PATH,
+            web_level=os.getenv("INQTRIX_LOG_WEB_LEVEL", "INFO"),
+        )
+    uvicorn.run(app, **uvicorn_kwargs)
+
+
+_ = (AgentConfig, ResearchAgent)
+
+
+if __name__ == "__main__":
+    main()

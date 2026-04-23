@@ -1,0 +1,31 @@
+# Hand-crafted 429 from Foundry Responses API.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: https://test.services.ai.azure.com/api/projects/demo/openai/v1/responses
+    response:
+      body:
+        string: |
+          {
+            "error": {
+              "code": "RateLimitReached",
+              "message": "Foundry agent invocation rate limit exceeded"
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        apim-request-id:
+          - "req-afws-replay-rl-1"
+        retry-after:
+          - "20"
+      status:
+        code: 429
+        message: Too Many Requests
+version: 1

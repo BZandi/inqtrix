@@ -1,0 +1,61 @@
+# Hand-crafted Azure OpenAI Responses-API success — Service-Principal
+# auth variant.  Identical wire shape to the api-key cassette, but with
+# a different request-id so the cassettes are unambiguously distinct.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: https://test-resource.openai.azure.com/openai/v1/responses
+    response:
+      body:
+        string: |
+          {
+            "id": "resp_replay_aows_sp_001",
+            "object": "response",
+            "created_at": 1745002100,
+            "model": "sp-gpt41-search-deployment",
+            "status": "completed",
+            "output": [
+              {
+                "type": "message",
+                "id": "msg_replay_sp_001",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "Service-Principal-Auth fuer das WebSearch-Tool funktioniert identisch zur api-key-Variante.",
+                    "annotations": [
+                      {
+                        "type": "url_citation",
+                        "url": "https://example.com/azure-websearch-sp",
+                        "title": "Azure WebSearch SP-Auth",
+                        "start_index": 0,
+                        "end_index": 95
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "output_text": "Service-Principal-Auth fuer das WebSearch-Tool funktioniert identisch zur api-key-Variante.",
+            "usage": {
+              "input_tokens": 14,
+              "output_tokens": 19,
+              "total_tokens": 33
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        apim-request-id:
+          - "req-aows-replay-sp-1"
+      status:
+        code: 200
+        message: OK
+version: 1

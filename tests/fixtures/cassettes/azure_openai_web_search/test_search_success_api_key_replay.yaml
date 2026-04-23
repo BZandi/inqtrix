@@ -1,0 +1,75 @@
+# Hand-crafted Azure OpenAI Responses-API success.  The /openai/v1/responses
+# endpoint returns an output[] array with a "message" block (the answer +
+# citation annotations) and a "web_search_call" block (action.sources).
+# Both are folded into the SearchProvider contract by _parse_response.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: https://test-resource.openai.azure.com/openai/v1/responses
+    response:
+      body:
+        string: |
+          {
+            "id": "resp_replay_aows_001",
+            "object": "response",
+            "created_at": 1745002000,
+            "model": "my-gpt41-search-deployment",
+            "status": "completed",
+            "output": [
+              {
+                "type": "web_search_call",
+                "id": "ws_replay_001",
+                "status": "completed",
+                "action": {
+                  "type": "search",
+                  "query": "Inqtrix Azure OpenAI WebSearch",
+                  "sources": [
+                    {"type": "url", "url": "https://example.com/azure-websearch-1"},
+                    {"type": "url", "url": "https://example.com/azure-websearch-2"}
+                  ]
+                }
+              },
+              {
+                "type": "message",
+                "id": "msg_replay_001",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "Azure OpenAI WebSearch nutzt das eingebaute web_search-Tool ohne separaten Foundry-Agenten.",
+                    "annotations": [
+                      {
+                        "type": "url_citation",
+                        "url": "https://example.com/azure-websearch-1",
+                        "title": "Azure WebSearch Tool",
+                        "start_index": 0,
+                        "end_index": 86
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "output_text": "Azure OpenAI WebSearch nutzt das eingebaute web_search-Tool ohne separaten Foundry-Agenten.",
+            "usage": {
+              "input_tokens": 12,
+              "output_tokens": 21,
+              "total_tokens": 33
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        apim-request-id:
+          - "req-aows-replay-success-1"
+      status:
+        code: 200
+        message: OK
+version: 1

@@ -1,0 +1,44 @@
+# Hand-crafted summarize-grade Azure response (e.g. gpt-4o-mini deployment).
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: https://test-resource.openai.azure.com/openai/v1/chat/completions
+    response:
+      body:
+        string: |
+          {
+            "id": "chatcmpl-azure-replay-summ-001",
+            "object": "chat.completion",
+            "created": 1745001200,
+            "model": "summary-deployment",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Kerninhalt: Azure OpenAI deployment-name routing erfordert Constructor-First-Konfiguration."
+                },
+                "finish_reason": "stop"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 16,
+              "completion_tokens": 18,
+              "total_tokens": 34
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        apim-request-id:
+          - "req-azure-replay-summ-1"
+      status:
+        code: 200
+        message: OK
+version: 1

@@ -1,0 +1,51 @@
+# Hand-crafted Perplexity Sonar response routed via a LiteLLM proxy.
+# Citations come from a top-level array (Sonar's documented schema).
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: http://localhost:4000/v1/chat/completions
+    response:
+      body:
+        string: |
+          {
+            "id": "pplx-replay-success-001",
+            "object": "chat.completion",
+            "created": 1745000100,
+            "model": "perplexity-sonar-pro-agent",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Inqtrix wurde 2026 in einem Audit ueber 14 Phasen stabilisiert und unterstuetzt heute mehrere LLM- und Search-Provider parallel."
+                },
+                "finish_reason": "stop"
+              }
+            ],
+            "citations": [
+              "https://example.com/inqtrix-audit",
+              "https://example.com/inqtrix-providers"
+            ],
+            "related_questions": [
+              "Wie funktioniert die LangGraph-Integration?",
+              "Welche Stop-Kriterien nutzt Inqtrix?"
+            ],
+            "usage": {
+              "prompt_tokens": 14,
+              "completion_tokens": 28,
+              "total_tokens": 42
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+      status:
+        code: 200
+        message: OK
+version: 1

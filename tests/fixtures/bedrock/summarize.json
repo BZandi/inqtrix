@@ -1,0 +1,21 @@
+{
+  "output": {
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "text": "Kerninhalt: Bedrock disabled boto3 retries und nutzt eigenen jittered backoff loop."
+        }
+      ]
+    }
+  },
+  "usage": {
+    "inputTokens": 18,
+    "outputTokens": 17,
+    "totalTokens": 35
+  },
+  "metrics": {
+    "latencyMs": 730
+  },
+  "stopReason": "end_turn"
+}

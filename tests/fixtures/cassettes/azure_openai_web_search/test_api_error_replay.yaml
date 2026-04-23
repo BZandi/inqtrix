@@ -1,0 +1,31 @@
+# Hand-crafted 400 invalid_tool_choice — Responses-API specific.  Tests
+# that the provider folds the body into AzureOpenAIWebSearchAPIError
+# with structured details (status_code/error_code/request_id).
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: https://test-resource.openai.azure.com/openai/v1/responses
+    response:
+      body:
+        string: |
+          {
+            "error": {
+              "code": "InvalidToolChoice",
+              "message": "tool_choice 'web_search' is not supported on this deployment"
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        apim-request-id:
+          - "req-aows-replay-400-1"
+      status:
+        code: 400
+        message: Bad Request
+version: 1

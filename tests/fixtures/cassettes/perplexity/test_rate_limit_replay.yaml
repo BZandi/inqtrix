@@ -1,0 +1,31 @@
+# Hand-crafted 429 from Perplexity. Single interaction; test sets
+# max_retries=0 to keep the cassette focused on the AgentRateLimited
+# translation path.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: http://localhost:4000/v1/chat/completions
+    response:
+      body:
+        string: |
+          {
+            "error": {
+              "type": "rate_limit_error",
+              "message": "Perplexity API rate limit exceeded"
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        retry-after:
+          - "10"
+      status:
+        code: 429
+        message: Too Many Requests
+version: 1

@@ -1,0 +1,37 @@
+# Hand-crafted empty Foundry-Bing response — agent returned no message.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: https://test.services.ai.azure.com/api/projects/demo/openai/v1/responses
+    response:
+      body:
+        string: |
+          {
+            "id": "resp_replay_afbing_empty_001",
+            "object": "response",
+            "created_at": 1745004200,
+            "model": "foundry-bing-agent",
+            "status": "completed",
+            "output": [],
+            "output_text": "",
+            "usage": {
+              "input_tokens": 4,
+              "output_tokens": 0,
+              "total_tokens": 4
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        apim-request-id:
+          - "req-afbing-replay-empty-1"
+      status:
+        code: 200
+        message: OK
+version: 1

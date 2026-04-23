@@ -1,0 +1,39 @@
+# Hand-crafted Haiku-grade summarize response. Note: no thinking block
+# (helper paths run with thinking suppressed via without_thinking).
+interactions:
+  - request:
+      body: null
+      headers:
+        Content-Type:
+          - application/json
+        User-Agent:
+          - inqtrix/0.1
+      method: POST
+      uri: https://api.anthropic.com/v1/messages
+    response:
+      body:
+        string: |
+          {
+            "id": "msg_replay_summarize_001",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-4-5",
+            "content": [
+              {
+                "type": "text",
+                "text": "Kerninhalt: Inqtrix orchestriert Provider und konsolidiert Claims iterativ."
+              }
+            ],
+            "stop_reason": "end_turn",
+            "usage": {
+              "input_tokens": 21,
+              "output_tokens": 13
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+      status:
+        code: 200
+        message: OK
+version: 1

@@ -1,0 +1,27 @@
+# Streamlit runtime configuration
+# Docs: https://docs.streamlit.io/develop/api-reference/configuration/config.toml
+
+[server]
+# Bind only to the loopback interface — the server is not reachable from the LAN.
+address = "localhost"
+
+# Do not open a browser automatically and skip the first-run e-mail prompt.
+headless = true
+
+# Keep default cross-origin and CSRF protections enabled.
+enableCORS = true
+enableXsrfProtection = true
+
+# Disable static file serving from the app root (no accidental exposure).
+enableStaticServing = false
+
+[browser]
+# Disable Streamlit's anonymous usage telemetry (no pings to streamlit.io).
+gatherUsageStats = false
+
+# The URL the client uses to talk back to the server — keep it on localhost.
+serverAddress = "localhost"
+
+[global]
+# Suppress the "running as a script" warning noise.
+showWarningOnDirectExecution = false

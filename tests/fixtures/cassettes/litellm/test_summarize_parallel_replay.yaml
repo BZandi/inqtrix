@@ -1,0 +1,44 @@
+# Hand-crafted summarize response — short, factual, German. Mirrors
+# what a summarize-grade model (e.g. gpt-4o-mini) returns when the
+# search node hands it a raw search snippet.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: http://localhost:4000/v1/chat/completions
+    response:
+      body:
+        string: |
+          {
+            "id": "chatcmpl-replay-summarize-001",
+            "object": "chat.completion",
+            "created": 1745000050,
+            "model": "gpt-4o-mini",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Kernaussage: Inqtrix orchestriert mehrere Suchanbieter parallel und konsolidiert Claims pro Iterationsrunde."
+                },
+                "finish_reason": "stop"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 18,
+              "completion_tokens": 19,
+              "total_tokens": 37
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+      status:
+        code: 200
+        message: OK
+version: 1

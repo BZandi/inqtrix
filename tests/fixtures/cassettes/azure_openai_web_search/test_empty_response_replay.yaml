@@ -1,0 +1,39 @@
+# Hand-crafted empty Responses-API response.  The model decided not to
+# call the web_search tool and returned no message text either; the
+# provider should surface a nonfatal notice and return _EMPTY_RESULT.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: https://test-resource.openai.azure.com/openai/v1/responses
+    response:
+      body:
+        string: |
+          {
+            "id": "resp_replay_aows_empty_001",
+            "object": "response",
+            "created_at": 1745002200,
+            "model": "my-gpt41-search-deployment",
+            "status": "completed",
+            "output": [],
+            "output_text": "",
+            "usage": {
+              "input_tokens": 6,
+              "output_tokens": 0,
+              "total_tokens": 6
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        apim-request-id:
+          - "req-aows-replay-empty-1"
+      status:
+        code: 200
+        message: OK
+version: 1

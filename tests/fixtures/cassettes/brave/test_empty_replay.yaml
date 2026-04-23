@@ -1,0 +1,27 @@
+# Hand-crafted empty Brave response. The provider must surface a
+# nonfatal notice and return the structured empty-result dict.
+interactions:
+  - request:
+      body: null
+      headers:
+        Accept:
+          - application/json
+        User-Agent:
+          - inqtrix/0.1
+      method: GET
+      uri: https://api.search.brave.com/res/v1/web/search?q=ganz+seltsame+Frage&count=10
+    response:
+      body:
+        string: |
+          {
+            "web": {
+              "results": []
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+      status:
+        code: 200
+        message: OK
+version: 1

@@ -1,0 +1,60 @@
+# Hand-crafted Foundry-WebSearch success — SP-auth variant.  Distinct
+# request-id keeps the cassette unique vs. the api-key variant.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: https://test.services.ai.azure.com/api/projects/demo/openai/v1/responses
+    response:
+      body:
+        string: |
+          {
+            "id": "resp_replay_afws_sp_001",
+            "object": "response",
+            "created_at": 1745003100,
+            "model": "foundry-web-search-agent",
+            "status": "completed",
+            "output": [
+              {
+                "type": "message",
+                "id": "msg_afws_sp_001",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "Service-Principal-Auth fuer Foundry-WebSearch funktioniert ueber ein per get_token gemintes Bearer-Token.",
+                    "annotations": [
+                      {
+                        "type": "url_citation",
+                        "url": "https://example.com/foundry-sp-1",
+                        "title": "Foundry SP-Auth",
+                        "start_index": 0,
+                        "end_index": 102
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "output_text": "Service-Principal-Auth fuer Foundry-WebSearch funktioniert ueber ein per get_token gemintes Bearer-Token.",
+            "usage": {
+              "input_tokens": 16,
+              "output_tokens": 19,
+              "total_tokens": 35
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        apim-request-id:
+          - "req-afws-replay-sp-1"
+      status:
+        code: 200
+        message: OK
+version: 1

@@ -1,0 +1,48 @@
+# Hand-crafted direct-Perplexity-API response (api.perplexity.ai). The
+# cassette URI matches the direct endpoint so the test can verify the
+# direct-mode code path produces the same normalized result as the
+# proxy mode.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: https://api.perplexity.ai/chat/completions
+    response:
+      body:
+        string: |
+          {
+            "id": "pplx-replay-direct-001",
+            "object": "chat.completion",
+            "created": 1745000200,
+            "model": "sonar-pro",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Direkter Perplexity-Pfad liefert identische Antwortstruktur, nur ohne web_search_options-Wrapping."
+                },
+                "finish_reason": "stop"
+              }
+            ],
+            "citations": [
+              "https://example.com/perplexity-direct"
+            ],
+            "usage": {
+              "prompt_tokens": 9,
+              "completion_tokens": 17,
+              "total_tokens": 26
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+      status:
+        code: 200
+        message: OK
+version: 1

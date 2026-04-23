@@ -1,0 +1,32 @@
+# Hand-crafted 500 from Brave.  The provider degrades to the empty
+# result and stores a nonfatal notice — non-429 HTTPErrors should
+# never abort the run.
+interactions:
+  - request:
+      body: null
+      headers:
+        Accept:
+          - application/json
+        User-Agent:
+          - inqtrix/0.1
+      method: GET
+      uri: https://api.search.brave.com/res/v1/web/search?q=triggert+500er&count=10
+    response:
+      body:
+        string: |
+          {
+            "type": "ErrorResponse",
+            "error": {
+              "id": "BSE_500",
+              "status": 500,
+              "code": "UPSTREAM_FAILURE",
+              "detail": "Internal index dispatch failed"
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+      status:
+        code: 500
+        message: Internal Server Error
+version: 1

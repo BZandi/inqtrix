@@ -1,0 +1,68 @@
+# Hand-crafted Azure Foundry Web Search Responses-API success.  The
+# project endpoint resolves to /openai/v1/responses; the agent_reference
+# is sent inside extra_body, so it does not show up in the URL.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: https://test.services.ai.azure.com/api/projects/demo/openai/v1/responses
+    response:
+      body:
+        string: |
+          {
+            "id": "resp_replay_afws_001",
+            "object": "response",
+            "created_at": 1745003000,
+            "model": "foundry-web-search-agent",
+            "status": "completed",
+            "output": [
+              {
+                "type": "message",
+                "id": "msg_afws_replay_001",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "Foundry-WebSearch nutzt eine pre-existing Agent-Referenz statt eines deployment-internen Tools.",
+                    "annotations": [
+                      {
+                        "type": "url_citation",
+                        "url": "https://example.com/foundry-web-search-1",
+                        "title": "Foundry WebSearch",
+                        "start_index": 0,
+                        "end_index": 96
+                      },
+                      {
+                        "type": "url_citation",
+                        "url": "https://example.com/foundry-web-search-2",
+                        "title": "Foundry Agent",
+                        "start_index": 0,
+                        "end_index": 50
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "output_text": "Foundry-WebSearch nutzt eine pre-existing Agent-Referenz statt eines deployment-internen Tools.",
+            "usage": {
+              "input_tokens": 14,
+              "output_tokens": 22,
+              "total_tokens": 36
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        apim-request-id:
+          - "req-afws-replay-success-1"
+      status:
+        code: 200
+        message: OK
+version: 1

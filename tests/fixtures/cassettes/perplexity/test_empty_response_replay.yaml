@@ -1,0 +1,45 @@
+# Hand-crafted "empty answer" — Sonar sometimes returns a valid 200
+# with an empty content string (no relevant sources). The provider
+# must surface this via the nonfatal-notice channel.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: http://localhost:4000/v1/chat/completions
+    response:
+      body:
+        string: |
+          {
+            "id": "pplx-replay-empty-001",
+            "object": "chat.completion",
+            "created": 1745000300,
+            "model": "perplexity-sonar-pro-agent",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": ""
+                },
+                "finish_reason": "stop"
+              }
+            ],
+            "citations": [],
+            "usage": {
+              "prompt_tokens": 8,
+              "completion_tokens": 0,
+              "total_tokens": 8
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+      status:
+        code: 200
+        message: OK
+version: 1

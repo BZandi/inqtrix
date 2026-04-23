@@ -1,0 +1,44 @@
+# Hand-crafted Brave Web Search response.  Brave returns raw web hits
+# (title + description + extra_snippets) which the provider concatenates
+# into a single answer string for downstream LLM summarisation.
+interactions:
+  - request:
+      body: null
+      headers:
+        Accept:
+          - application/json
+        User-Agent:
+          - inqtrix/0.1
+      method: GET
+      uri: https://api.search.brave.com/res/v1/web/search?q=Inqtrix+Architektur&count=10
+    response:
+      body:
+        string: |
+          {
+            "web": {
+              "results": [
+                {
+                  "url": "https://example.com/inqtrix-architektur",
+                  "title": "Inqtrix Architektur",
+                  "description": "LangGraph-basierter Recherche-Agent mit fuenf Nodes.",
+                  "extra_snippets": [
+                    "classify -> plan -> search -> evaluate -> answer",
+                    "Provider als Plug-ins"
+                  ]
+                },
+                {
+                  "url": "https://example.com/inqtrix-providers",
+                  "title": "Inqtrix Providers",
+                  "description": "LLM- und Search-Provider via Constructor-First Pattern.",
+                  "extra_snippets": []
+                }
+              ]
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+      status:
+        code: 200
+        message: OK
+version: 1

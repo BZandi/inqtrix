@@ -1,0 +1,69 @@
+# Hand-crafted Foundry-Bing Responses-API success.  Same wire shape as
+# AzureFoundryWebSearch (responses.create + agent_reference); the
+# semantic difference is that the agent has Bing Grounding attached, so
+# the model returns Bing-style citations.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: https://test.services.ai.azure.com/api/projects/demo/openai/v1/responses
+    response:
+      body:
+        string: |
+          {
+            "id": "resp_replay_afbing_001",
+            "object": "response",
+            "created_at": 1745004000,
+            "model": "foundry-bing-agent",
+            "status": "completed",
+            "output": [
+              {
+                "type": "message",
+                "id": "msg_afbing_replay_001",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "Foundry-Bing-Agent liefert Suchresultate ueber das Bing Grounding-Tool des pre-existing Foundry-Agenten.",
+                    "annotations": [
+                      {
+                        "type": "url_citation",
+                        "url": "https://example.com/bing-foundry-1",
+                        "title": "Bing-Foundry Quelle 1",
+                        "start_index": 0,
+                        "end_index": 102
+                      },
+                      {
+                        "type": "url_citation",
+                        "url": "https://example.com/bing-foundry-2",
+                        "title": "Bing-Foundry Quelle 2",
+                        "start_index": 0,
+                        "end_index": 50
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "output_text": "Foundry-Bing-Agent liefert Suchresultate ueber das Bing Grounding-Tool des pre-existing Foundry-Agenten.",
+            "usage": {
+              "input_tokens": 18,
+              "output_tokens": 25,
+              "total_tokens": 43
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        apim-request-id:
+          - "req-afbing-replay-success-1"
+      status:
+        code: 200
+        message: OK
+version: 1

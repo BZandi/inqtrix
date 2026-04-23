@@ -1,0 +1,31 @@
+# Hand-crafted 429 from Azure OpenAI Responses API.
+interactions:
+  - request:
+      body: null
+      headers:
+        accept:
+          - application/json
+        content-type:
+          - application/json
+      method: POST
+      uri: https://test-resource.openai.azure.com/openai/v1/responses
+    response:
+      body:
+        string: |
+          {
+            "error": {
+              "code": "RateLimitReached",
+              "message": "Per-minute rate limit on the deployment exceeded"
+            }
+          }
+      headers:
+        content-type:
+          - application/json
+        apim-request-id:
+          - "req-aows-replay-rl-1"
+        retry-after:
+          - "30"
+      status:
+        code: 429
+        message: Too Many Requests
+version: 1

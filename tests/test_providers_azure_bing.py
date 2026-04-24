@@ -294,6 +294,127 @@ def test_legacy_agent_id_is_resolved_to_agent_reference(mock_foundry_bing):
     }
 
 
+def test_responses_404_falls_back_to_legacy_thread_run(mock_foundry_bing):
+    Cls, project_client, openai_client, _, _, _ = mock_foundry_bing
+    response404 = MagicMock()
+    response404.status_code = 404
+    response404.headers = {}
+    err404 = APIStatusError(
+        "not found",
+        response=response404,
+        body={"error": {"code": "not_found", "message": "Agent not found"}},
+    )
+    openai_client.responses.create.side_effect = [err404, err404]
+    provider = Cls(
+        project_endpoint="https://test.ai.azure.com/api",
+        agent_id="agent-1",
+    )
+
+    result = provider.search("Test query")
+
+    assert openai_client.responses.create.call_count == 2
+    project_client.agents.create_thread_and_process_run.assert_called_once()
+    assert "GKV-Reform" in result["answer"]
+
+
+def test_responses_404_retries_without_auto_resolved_version(mock_foundry_bing):
+    Cls, project_client, openai_client, _, _, _ = mock_foundry_bing
+    response404 = MagicMock()
+    response404.status_code = 404
+    response404.headers = {}
+    err404 = APIStatusError(
+        "not found",
+        response=response404,
+        body={"error": {"code": "not_found", "message": "version not found"}},
+    )
+    openai_client.responses.create.side_effect = [
+        err404,
+        _response(
+            text="Die GKV-Reform bringt folgende Aenderungen...",
+            annotations=[
+                _url_citation("https://example.com/reform", "Reform"),
+            ],
+        ),
+    ]
+    provider = Cls(
+        project_endpoint="https://test.ai.azure.com/api",
+        agent_id="agent-1",
+    )
+
+    result = provider.search("Test query")
+
+    assert openai_client.responses.create.call_count == 2
+    second = openai_client.responses.create.call_args_list[1].kwargs
+    assert second["extra_body"]["agent_reference"] == {
+        "name": "bing-agent",
+        "type": "agent_reference",
+    }
+    project_client.agents.create_thread_and_process_run.assert_not_called()
+    assert "GKV-Reform" in result["answer"]
+
+
+def test_execution_mode_legacy_skips_get_agent(mock_foundry_bing):
+    Cls, project_client, openai_client, _, _, _ = mock_foundry_bing
+    openai_client.responses.create.reset_mock()
+    provider = Cls(
+        project_endpoint="https://test.ai.azure.com/api",
+        agent_id="agent-1",
+        execution_mode="legacy",
+    )
+
+    result = provider.search("Test query")
+
+    project_client.agents.get_agent.assert_not_called()
+    openai_client.responses.create.assert_not_called()
+    project_client.agents.create_thread_and_process_run.assert_called_once()
+    assert "GKV-Reform" in result["answer"]
+
+
+def test_execution_mode_responses_does_not_fallback_on_404(mock_foundry_bing):
+    Cls, project_client, openai_client, _, _, _ = mock_foundry_bing
+    response404 = MagicMock()
+    response404.status_code = 404
+    response404.headers = {}
+    openai_client.responses.create.side_effect = APIStatusError(
+        "not found",
+        response=response404,
+        body={"error": {"code": "not_found", "message": "Agent not found"}},
+    )
+    provider = Cls(
+        project_endpoint="https://test.ai.azure.com/api",
+        agent_id="agent-1",
+        execution_mode="responses",
+    )
+
+    result = provider.search("Test query")
+
+    openai_client.responses.create.assert_called_once()
+    project_client.agents.create_thread_and_process_run.assert_not_called()
+    assert result["answer"] == ""
+    assert provider.consume_nonfatal_notice() is not None
+
+
+def test_execution_mode_legacy_requires_agent_id(mock_foundry_bing):
+    Cls, *_ = mock_foundry_bing
+    with pytest.raises(ValueError, match="execution_mode='legacy' requires agent_id"):
+        Cls(
+            project_endpoint="https://test.ai.azure.com/api",
+            agent_name="bing-agent",
+            execution_mode="legacy",
+        )
+
+
+def test_execution_mode_legacy_rejects_api_key_only(mock_foundry_bing):
+    Cls, *_ = mock_foundry_bing
+    with pytest.raises(ValueError, match="execution_mode='legacy' requires credential"):
+        Cls(
+            project_endpoint="https://test.ai.azure.com/api",
+            agent_id="agent-1",
+            api_key="project-key",
+            execution_mode="legacy",
+        )
+
+
 def test_unresolvable_agent_id_falls_back_to_legacy_thread_run(mock_foundry_bing):
     Cls, project_client, openai_client, _, _, _ = mock_foundry_bing
     project_client.agents.get_agent.side_effect = RuntimeError("not found")

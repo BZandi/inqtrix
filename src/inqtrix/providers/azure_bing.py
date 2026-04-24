@@ -8,8 +8,13 @@ runtime path references the agent by name and optional version through
 For backwards compatibility the provider still accepts a legacy
 ``agent_id``. When credential-based auth is available it resolves that
 ID to an agent name through ``AIProjectClient.agents.get_agent()`` and
-then uses the modern Responses API path. Only when that resolution is
-not possible does it fall back to the older Thread/Run execution path.
+then uses the modern Responses API path. When ``execution_mode`` is
+``"auto"`` (default), a Responses ``HTTP 404`` for ``agent_reference``
+falls back to the older Thread/Run path if an ``agent_id`` is known,
+and a second Responses attempt omits ``version`` when that version was
+only auto-filled from ``get_agent()`` (not explicitly set by the
+caller). Only when resolution is not possible does the provider use
+Thread/Run immediately (no ``agent_name``).
 
 Search parameters like freshness, market, and count are still fixed at
 agent creation time. The provider bridges the gap to the SearchProvider
@@ -25,7 +30,7 @@ Install the required SDKs::
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from openai import APIStatusError, OpenAI, OpenAIError, RateLimitError
 
@@ -117,6 +122,7 @@ class AzureFoundryBingSearch(_NonFatalNoticeMixin, SearchProvider):
         client_secret: str | None = None,
         timeout: float = 60.0,
         tool_choice: str | None = "required",
+        execution_mode: Literal["auto", "responses", "legacy"] = "auto",
     ) -> None:
         """Initialize the Azure Foundry Bing search provider.
 
@@ -144,6 +150,13 @@ class AzureFoundryBingSearch(_NonFatalNoticeMixin, SearchProvider):
             tool_choice: Optional Responses API ``tool_choice`` setting.
                 Defaults to ``"required"`` so the search agent uses its
                 Bing tool deterministically.
+            execution_mode: ``"auto"`` (default) tries the Responses API
+                when an ``agent_name`` is available and on ``HTTP 404``
+                may retry without an auto-resolved ``agent_version`` or
+                fall back to Thread/Run when ``agent_id`` is set.
+                ``"responses"`` disables those fallbacks. ``"legacy"``
+                forces Thread/Run and requires ``agent_id`` plus
+                credential-based auth (no API-key-only mode).
 
         Raises:
             ValueError: If ``project_endpoint`` is empty, if neither
@@ -157,11 +170,24 @@ class AzureFoundryBingSearch(_NonFatalNoticeMixin, SearchProvider):
             raise ValueError("agent_name oder agent_id ist erforderlich")
         if tool_choice not in {None, "auto", "required", "none"}:
             raise ValueError("tool_choice must be one of auto, required, none, or None.")
+        if execution_mode not in {"auto", "responses", "legacy"}:
+            raise ValueError(
+                "execution_mode must be one of auto, responses, legacy."
+            )
+        if execution_mode == "legacy" and not str(agent_id or "").strip():
+            raise ValueError("execution_mode='legacy' requires agent_id")
+        if execution_mode == "legacy" and api_key:
+            raise ValueError(
+                "execution_mode='legacy' requires credential-based auth; "
+                "Thread/Run is not available with api_key-only mode."
+            )
 
         self._project_endpoint = project_endpoint.rstrip("/")
         self._agent_name = agent_name.strip()
         self._agent_version = str(agent_version or "").strip()
         self._agent_id = agent_id.strip()
+        self._agent_version_explicit = bool(str(agent_version or "").strip())
+        self._execution_mode = execution_mode
         self._timeout = timeout
         self._tool_choice = tool_choice
         self._project_client: AIProjectClient | None = None
@@ -200,7 +226,8 @@ class AzureFoundryBingSearch(_NonFatalNoticeMixin, SearchProvider):
                 timeout=timeout,
                 max_retries=_SDK_MAX_RETRIES,
             )
-            self._resolve_agent_reference_from_id()
+            if self._execution_mode != "legacy":
+                self._resolve_agent_reference_from_id()
 
     @staticmethod
     def _resolve_credential(
@@ -352,6 +379,7 @@ class AzureFoundryBingSearch(_NonFatalNoticeMixin, SearchProvider):
                     credential=resolved_credential,
                     timeout=timeout,
                     tool_choice=tool_choice,
+                    execution_mode="auto",
                 )
             except ImportError:
                 log.info(
@@ -385,6 +413,7 @@ class AzureFoundryBingSearch(_NonFatalNoticeMixin, SearchProvider):
             credential=resolved_credential,
             timeout=timeout,
             tool_choice=tool_choice,
+            execution_mode="auto",
         )
 
     def search(
@@ -504,30 +533,87 @@ class AzureFoundryBingSearch(_NonFatalNoticeMixin, SearchProvider):
         timeout: float,
     ) -> dict[str, Any]:
         """Execute via Responses API, falling back to legacy Thread/Run."""
+        if self._execution_mode == "legacy":
+            if self._agent_id and self._project_client is not None:
+                log.info(
+                    "Azure-Foundry-Bing nutzt legacy Thread/Run (execution_mode=legacy) "
+                    "fuer agent_id '%s'",
+                    self._agent_id,
+                )
+                return self._execute_legacy_search(
+                    query,
+                    additional_instructions,
+                    timeout,
+                )
+            raise AzureFoundryBingAPIError(
+                agent_id=self._agent_identifier(),
+                message="execution_mode='legacy' benoetigt agent_id und AIProjectClient.",
+            )
+
         self._resolve_agent_reference_from_id()
 
-        if self._agent_name:
+        if not self._agent_name:
+            if self._agent_id and self._project_client is not None:
+                log.info(
+                    "Azure-Foundry-Bing nutzt legacy Thread/Run-Fallback fuer agent_id '%s'",
+                    self._agent_id,
+                )
+                return self._execute_legacy_search(
+                    query,
+                    additional_instructions,
+                    timeout,
+                )
+
+            raise AzureFoundryBingAPIError(
+                agent_id=self._agent_identifier(),
+                message="Keine verwendbare Agent-Referenz fuer Azure Foundry Bing konfiguriert.",
+            )
+
+        if self._execution_mode == "responses":
             return self._execute_responses_search(
                 query,
                 additional_instructions,
                 timeout,
             )
 
-        if self._agent_id and self._project_client is not None:
-            log.info(
-                "Azure-Foundry-Bing nutzt legacy Thread/Run-Fallback fuer agent_id '%s'",
-                self._agent_id,
-            )
-            return self._execute_legacy_search(
+        try:
+            return self._execute_responses_search(
                 query,
                 additional_instructions,
                 timeout,
             )
+        except AzureFoundryBingAPIError as first_exc:
+            if first_exc.status_code != 404:
+                raise
 
-        raise AzureFoundryBingAPIError(
-            agent_id=self._agent_identifier(),
-            message="Keine verwendbare Agent-Referenz fuer Azure Foundry Bing konfiguriert.",
-        )
+            if not self._agent_version_explicit and self._agent_version:
+                saved_version = self._agent_version
+                self._agent_version = ""
+                try:
+                    return self._execute_responses_search(
+                        query,
+                        additional_instructions,
+                        timeout,
+                    )
+                except AzureFoundryBingAPIError as second_exc:
+                    if second_exc.status_code != 404:
+                        raise
+                finally:
+                    self._agent_version = saved_version
+
+            if self._agent_id and self._project_client is not None:
+                log.info(
+                    "Azure-Foundry-Bing: Responses HTTP 404 fuer agent_reference, "
+                    "nutze legacy Thread/Run fuer agent_id '%s'",
+                    self._agent_id,
+                )
+                return self._execute_legacy_search(
+                    query,
+                    additional_instructions,
+                    timeout,
+                )
+
+            raise
 
     def _execute_responses_search(
         self,

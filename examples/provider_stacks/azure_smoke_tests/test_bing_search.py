@@ -21,7 +21,7 @@ Optional:
 - BING_AGENT_VERSION
 - AZURE_AI_PROJECT_API_KEY (mutually exclusive with Service Principal below)
 - AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET (when not using project API key)
-- BING_EXECUTION_MODE: ``auto`` (default), ``responses``, or ``legacy`` (see provider docs)
+- BING_EXECUTION_MODE: ``auto`` (default) or ``responses`` (see provider docs)
 - BING_SMOKE_CREATE_AGENT: ``true`` to create agent first (requires SP + connection id)
 - BING_PROJECT_CONNECTION_ID (required when ``BING_SMOKE_CREATE_AGENT=true``)
 - BING_CREATE_AGENT_MODEL (default ``gpt-4o`` — must be deployed in the Foundry project)
@@ -179,7 +179,7 @@ def main() -> None:
             search_kwargs["client_secret"] = client_secret
 
         exec_mode = _optional_env("BING_EXECUTION_MODE").lower()
-        if exec_mode in {"auto", "responses", "legacy"}:
+        if exec_mode in {"auto", "responses"}:
             search_kwargs["execution_mode"] = exec_mode  # type: ignore[assignment]
 
         search = AzureFoundryBingSearch(**search_kwargs)

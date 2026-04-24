@@ -50,6 +50,8 @@ Full technical reference: [docs/architecture/overview.md](docs/architecture/over
 
 ## Quick start
 
+Option A — with [`uv`](https://github.com/astral-sh/uv) (recommended):
+
 ```bash
 git clone https://github.com/BZandi/inqtrix.git
 cd inqtrix
@@ -58,6 +60,20 @@ source .venv/bin/activate
 cp .env.example .env
 # edit .env with your provider credentials
 ```
+
+Option B — with `pip` (standard library `venv`):
+
+```bash
+git clone https://github.com/BZandi/inqtrix.git
+cd inqtrix
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env
+# edit .env with your provider credentials
+```
+
+> The project uses a `src/` layout, so an editable install (`-e`) is required for `import inqtrix` to work. See [Installation](docs/getting-started/installation.md) for details.
 
 ```python
 # main.py
@@ -73,13 +89,19 @@ print(f"Confidence: {result.metrics.confidence}/10  "
 ```
 
 ```bash
+# uv
 uv run python main.py
+# pip (with .venv activated)
+python main.py
 ```
 
 Offline regression check (no API calls):
 
 ```bash
+# uv
 uv run pytest tests/ -v
+# pip (with .venv activated)
+pytest tests/ -v
 ```
 
 More entry paths (explicit providers, YAML routing, streaming, HTTP): [Library mode](docs/deployment/library-mode.md), [Web server mode](docs/deployment/webserver-mode.md).

@@ -1,26 +1,27 @@
 """Azure Foundry Bing Search adapter for the SearchProvider interface.
 
 Uses the project-scoped OpenAI Responses API to invoke a pre-created
-Azure AI Foundry agent that has Bing Grounding attached. The modern
-runtime path references the agent by name and optional version through
+Azure AI Foundry agent that has Bing Grounding attached. The agent is
+referenced by name and optional version through
 ``extra_body={"agent_reference": ...}``.
 
 For backwards compatibility the provider still accepts a legacy
 ``agent_id``. When credential-based auth is available it resolves that
-ID to an agent name through ``AIProjectClient.agents.get_agent()`` and
-then uses the modern Responses API path. When ``execution_mode`` is
-``"auto"`` (default), a Responses ``HTTP 404`` for ``agent_reference``
-falls back to the older Thread/Run path if an ``agent_id`` is known,
-and a second Responses attempt omits ``version`` when that version was
-only auto-filled from ``get_agent()`` (not explicitly set by the
-caller). Only when resolution is not possible does the provider use
-Thread/Run immediately (no ``agent_name``).
+ID to an agent name through ``AIProjectClient.agents.get_agent()`` (when
+that method exists in the installed SDK) and then uses the Responses
+API path. When ``execution_mode`` is ``"auto"`` (default), a Responses
+``HTTP 404`` triggers a second attempt that omits ``version`` if that
+version was only auto-filled from ``get_agent()`` (not explicitly set
+by the caller).
 
 Search parameters like freshness, market, and count are still fixed at
 agent creation time. The provider bridges the gap to the SearchProvider
 interface by injecting ``site:`` operators into the query text for
 domain filtering and passing recency/language as best-effort prompt
 hints.
+
+This provider targets azure-ai-projects 2.x; the legacy Thread/Run
+execution path was removed along with the Agents API in that release.
 
 Install the required SDKs::
 
@@ -53,12 +54,6 @@ log = logging.getLogger("inqtrix")
 # Guarded SDK imports
 # ---------------------------------------------------------------------------
 from azure.ai.projects import AIProjectClient
-from azure.ai.agents.models import (
-    AgentThreadCreationOptions,
-    BingGroundingTool,
-    MessageRole,
-    ThreadMessageOptions,
-)
 from azure.identity import ClientSecretCredential, DefaultAzureCredential
 
 # ---------------------------------------------------------------------------
@@ -151,18 +146,17 @@ class AzureFoundryBingSearch(_NonFatalNoticeMixin, SearchProvider):
                 Defaults to ``"required"`` so the search agent uses its
                 Bing tool deterministically.
             execution_mode: ``"auto"`` (default) tries the Responses API
-                when an ``agent_name`` is available and on ``HTTP 404``
-                may retry without an auto-resolved ``agent_version`` or
-                fall back to Thread/Run when ``agent_id`` is set.
-                ``"responses"`` disables those fallbacks. ``"legacy"``
-                forces Thread/Run and requires ``agent_id`` plus
-                credential-based auth (no API-key-only mode).
+                and on ``HTTP 404`` may retry without an auto-resolved
+                ``agent_version``. ``"responses"`` disables the retry.
+                ``"legacy"`` is no longer supported (Thread/Run-API was
+                removed in azure-ai-projects 2.x) and raises ``ValueError``.
 
         Raises:
             ValueError: If ``project_endpoint`` is empty, if neither
                 ``agent_name`` nor ``agent_id`` is supplied, if
-                ``agent_id``-only setup is combined with API-key auth, or
-                if ``tool_choice`` is invalid.
+                ``agent_id``-only setup is combined with API-key auth, if
+                ``tool_choice`` is invalid, or if ``execution_mode='legacy'``
+                is passed.
         """
         if not project_endpoint:
             raise ValueError("project_endpoint ist erforderlich")
@@ -174,12 +168,11 @@ class AzureFoundryBingSearch(_NonFatalNoticeMixin, SearchProvider):
             raise ValueError(
                 "execution_mode must be one of auto, responses, legacy."
             )
-        if execution_mode == "legacy" and not str(agent_id or "").strip():
-            raise ValueError("execution_mode='legacy' requires agent_id")
-        if execution_mode == "legacy" and api_key:
+        if execution_mode == "legacy":
             raise ValueError(
-                "execution_mode='legacy' requires credential-based auth; "
-                "Thread/Run is not available with api_key-only mode."
+                "execution_mode='legacy' wird ab azure-ai-projects 2.x nicht mehr "
+                "unterstuetzt (Thread/Run-API entfernt); bitte 'auto' oder "
+                "'responses' verwenden."
             )
 
         self._project_endpoint = project_endpoint.rstrip("/")
@@ -226,8 +219,7 @@ class AzureFoundryBingSearch(_NonFatalNoticeMixin, SearchProvider):
                 timeout=timeout,
                 max_retries=_SDK_MAX_RETRIES,
             )
-            if self._execution_mode != "legacy":
-                self._resolve_agent_reference_from_id()
+            self._resolve_agent_reference_from_id()
 
     @staticmethod
     def _resolve_credential(
@@ -267,8 +259,19 @@ class AzureFoundryBingSearch(_NonFatalNoticeMixin, SearchProvider):
         if self._agent_name or not self._agent_id or self._project_client is None:
             return
 
+        get_agent = getattr(self._project_client.agents, "get_agent", None)
+        if get_agent is None:
+            log.warning(
+                "AIProjectClient.agents.get_agent ist in der installierten "
+                "azure-ai-projects-Version nicht verfuegbar; agent_id '%s' "
+                "kann nicht zu agent_name aufgeloest werden. Bitte agent_name "
+                "direkt konfigurieren.",
+                self._agent_id,
+            )
+            return
+
         try:
-            agent = self._project_client.agents.get_agent(self._agent_id)
+            agent = get_agent(self._agent_id)
         except Exception as exc:
             log.warning(
                 "Konnte Azure-Foundry-Bing agent_id '%s' nicht zu agent_name aufloesen: %s",
@@ -307,11 +310,7 @@ class AzureFoundryBingSearch(_NonFatalNoticeMixin, SearchProvider):
     ) -> "AzureFoundryBingSearch":
         """Create a Bing Grounding agent and return an initialized provider.
 
-        The helper prefers the newer versioned agent-creation API when it
-        is available in the installed SDK. On older SDK versions it falls
-        back to the classic ``create_agent`` method but still returns a
-        provider configured for the newer runtime path whenever an agent
-        name is available.
+        Uses the versioned agent-creation API from azure-ai-projects 2.x.
         """
         if api_key:
             raise ValueError(
@@ -331,80 +330,45 @@ class AzureFoundryBingSearch(_NonFatalNoticeMixin, SearchProvider):
             credential=resolved_credential,
         )
 
-        if hasattr(client.agents, "create_version"):
-            try:
-                from azure.ai.projects.models import PromptAgentDefinition
-                from azure.ai.agents.models import (
-                    BingGroundingSearchConfiguration,
-                    BingGroundingSearchToolParameters,
-                )
-
-                configuration_kwargs: dict[str, Any] = {
-                    "project_connection_id": bing_connection_id,
-                }
-                if market:
-                    configuration_kwargs["market"] = market
-                if set_lang:
-                    configuration_kwargs["set_lang"] = set_lang
-                if freshness:
-                    configuration_kwargs["freshness"] = freshness
-                if count:
-                    configuration_kwargs["count"] = count
-
-                bing_tool = BingGroundingTool(
-                    bing_grounding=BingGroundingSearchToolParameters(
-                        search_configurations=[
-                            BingGroundingSearchConfiguration(**configuration_kwargs)
-                        ]
-                    )
-                )
-                agent = client.agents.create_version(
-                    agent_name=agent_name,
-                    definition=PromptAgentDefinition(
-                        model=model,
-                        instructions=instructions,
-                        tools=[bing_tool],
-                    ),
-                )
-                log.info(
-                    "Azure Foundry Bing Agent-Version erstellt: %s v%s",
-                    getattr(agent, "name", agent_name),
-                    getattr(agent, "version", ""),
-                )
-                return cls(
-                    project_endpoint=project_endpoint,
-                    agent_name=str(getattr(agent, "name", agent_name) or agent_name),
-                    agent_version=str(getattr(agent, "version", "") or ""),
-                    agent_id=str(getattr(agent, "id", "") or ""),
-                    credential=resolved_credential,
-                    timeout=timeout,
-                    tool_choice=tool_choice,
-                    execution_mode="auto",
-                )
-            except ImportError:
-                log.info(
-                    "azure-ai-projects ohne PromptAgentDefinition erkannt; "
-                    "falle auf legacy create_agent() zurueck."
-                )
-
-        bing_kwargs: dict[str, Any] = {"connection_id": bing_connection_id, "count": count}
-        if market:
-            bing_kwargs["market"] = market
-        if set_lang:
-            bing_kwargs["set_lang"] = set_lang
-        if freshness:
-            bing_kwargs["freshness"] = freshness
-
-        bing_tool = BingGroundingTool(**bing_kwargs)
-        agent = client.agents.create_agent(
-            model=model,
-            name=agent_name,
-            instructions=instructions,
-            tools=bing_tool.definitions,
-            description="Inqtrix Bing-Grounding Search Agent",
+        from azure.ai.projects.models import (
+            BingGroundingSearchConfiguration,
+            BingGroundingSearchToolParameters,
+            BingGroundingTool,
+            PromptAgentDefinition,
         )
-        log.info("Azure Foundry Bing Agent erstellt: %s", getattr(agent, "id", ""))
 
+        configuration_kwargs: dict[str, Any] = {
+            "project_connection_id": bing_connection_id,
+        }
+        if market:
+            configuration_kwargs["market"] = market
+        if set_lang:
+            configuration_kwargs["set_lang"] = set_lang
+        if freshness:
+            configuration_kwargs["freshness"] = freshness
+        if count:
+            configuration_kwargs["count"] = count
+
+        bing_tool = BingGroundingTool(
+            bing_grounding=BingGroundingSearchToolParameters(
+                search_configurations=[
+                    BingGroundingSearchConfiguration(**configuration_kwargs)
+                ]
+            )
+        )
+        agent = client.agents.create_version(
+            agent_name=agent_name,
+            definition=PromptAgentDefinition(
+                model=model,
+                instructions=instructions,
+                tools=[bing_tool],
+            ),
+        )
+        log.info(
+            "Azure Foundry Bing Agent-Version erstellt: %s v%s",
+            getattr(agent, "name", agent_name),
+            getattr(agent, "version", ""),
+        )
         return cls(
             project_endpoint=project_endpoint,
             agent_name=str(getattr(agent, "name", agent_name) or agent_name),
@@ -532,38 +496,10 @@ class AzureFoundryBingSearch(_NonFatalNoticeMixin, SearchProvider):
         additional_instructions: str | None,
         timeout: float,
     ) -> dict[str, Any]:
-        """Execute via Responses API, falling back to legacy Thread/Run."""
-        if self._execution_mode == "legacy":
-            if self._agent_id and self._project_client is not None:
-                log.info(
-                    "Azure-Foundry-Bing nutzt legacy Thread/Run (execution_mode=legacy) "
-                    "fuer agent_id '%s'",
-                    self._agent_id,
-                )
-                return self._execute_legacy_search(
-                    query,
-                    additional_instructions,
-                    timeout,
-                )
-            raise AzureFoundryBingAPIError(
-                agent_id=self._agent_identifier(),
-                message="execution_mode='legacy' benoetigt agent_id und AIProjectClient.",
-            )
-
+        """Execute via the Responses API with optional version retry."""
         self._resolve_agent_reference_from_id()
 
         if not self._agent_name:
-            if self._agent_id and self._project_client is not None:
-                log.info(
-                    "Azure-Foundry-Bing nutzt legacy Thread/Run-Fallback fuer agent_id '%s'",
-                    self._agent_id,
-                )
-                return self._execute_legacy_search(
-                    query,
-                    additional_instructions,
-                    timeout,
-                )
-
             raise AzureFoundryBingAPIError(
                 agent_id=self._agent_identifier(),
                 message="Keine verwendbare Agent-Referenz fuer Azure Foundry Bing konfiguriert.",
@@ -595,23 +531,8 @@ class AzureFoundryBingSearch(_NonFatalNoticeMixin, SearchProvider):
                         additional_instructions,
                         timeout,
                     )
-                except AzureFoundryBingAPIError as second_exc:
-                    if second_exc.status_code != 404:
-                        raise
                 finally:
                     self._agent_version = saved_version
-
-            if self._agent_id and self._project_client is not None:
-                log.info(
-                    "Azure-Foundry-Bing: Responses HTTP 404 fuer agent_reference, "
-                    "nutze legacy Thread/Run fuer agent_id '%s'",
-                    self._agent_id,
-                )
-                return self._execute_legacy_search(
-                    query,
-                    additional_instructions,
-                    timeout,
-                )
 
             raise
 
@@ -672,44 +593,6 @@ class AzureFoundryBingSearch(_NonFatalNoticeMixin, SearchProvider):
 
         return self._parse_response(response)
 
-    def _execute_legacy_search(
-        self,
-        query: str,
-        additional_instructions: str | None,
-        timeout: float,
-    ) -> dict[str, Any]:
-        """Run the legacy Thread/Run flow for agent_id-only compatibility."""
-        del timeout
-
-        if self._project_client is None:
-            raise AzureFoundryBingAPIError(
-                agent_id=self._agent_identifier(),
-                message="Legacy-Fallback benoetigt einen AIProjectClient.",
-            )
-
-        thread = AgentThreadCreationOptions(
-            messages=[ThreadMessageOptions(role="user", content=query)]
-        )
-
-        run_kwargs: dict[str, Any] = {
-            "agent_id": self._agent_id,
-            "thread": thread,
-        }
-        if additional_instructions:
-            run_kwargs["instructions"] = additional_instructions
-
-        run = self._project_client.agents.create_thread_and_process_run(**run_kwargs)
-
-        if run.status != "completed":
-            error_msg = getattr(run, "last_error", None) or run.status
-            raise AzureFoundryBingAPIError(
-                agent_id=self._agent_identifier(),
-                message=f"Run nicht erfolgreich: {error_msg}",
-            )
-
-        messages = self._project_client.agents.messages.list(thread_id=run.thread_id)
-        return self._parse_agent_response(messages)
-
     @staticmethod
     def _parse_response(response: Any) -> dict[str, Any]:
         """Extract answer text and citations from a Responses API reply."""
@@ -744,39 +627,6 @@ class AzureFoundryBingSearch(_NonFatalNoticeMixin, SearchProvider):
             "related_questions": [],
             "_prompt_tokens": input_tokens or 0,
             "_completion_tokens": output_tokens or 0,
-        }
-
-    def _parse_agent_response(self, messages: Any) -> dict[str, Any]:
-        """Extract answer text and citation URLs from the legacy agent response."""
-        answer_parts: list[str] = []
-        citations: list[str] = []
-        seen_urls: set[str] = set()
-
-        for msg in messages:
-            if msg.role != MessageRole.AGENT:
-                continue
-            for item in msg.content:
-                if not hasattr(item, "text"):
-                    continue
-                answer_parts.append(item.text.value)
-
-                for ann in getattr(item.text, "annotations", None) or []:
-                    url = getattr(ann, "url", None)
-                    if url and url not in seen_urls:
-                        seen_urls.add(url)
-                        citations.append(url)
-
-        answer = "\n\n".join(answer_parts)
-
-        if not citations and answer:
-            citations = extract_urls(answer)
-
-        return {
-            "answer": answer,
-            "citations": citations,
-            "related_questions": [],
-            "_prompt_tokens": 0,
-            "_completion_tokens": 0,
         }
 
     def is_available(self) -> bool:

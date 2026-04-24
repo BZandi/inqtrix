@@ -15,8 +15,6 @@ from inqtrix.exceptions import (
     AzureFoundryBingAPIError,
 )
 
-from azure.ai.agents.models import MessageRole as _MR
-
 
 def _url_citation(url: str, title: str = ""):
     return SimpleNamespace(type="url_citation", url=url, title=title)
@@ -50,29 +48,6 @@ def _response(
     return SimpleNamespace(output=output, usage=usage, output_text=text)
 
 
-def _legacy_text_content(text: str, annotations: list | None = None):
-    item = SimpleNamespace()
-    item.text = SimpleNamespace()
-    item.text.value = text
-    item.text.annotations = annotations or []
-    return item
-
-
-def _legacy_url_annotation(url: str):
-    return SimpleNamespace(url=url)
-
-
-def _legacy_agent_message(text: str, annotations: list | None = None):
-    return SimpleNamespace(
-        role=_MR.AGENT,
-        content=[_legacy_text_content(text, annotations)],
-    )
-
-
-def _completed_run(thread_id: str = "thread-test-123"):
-    return SimpleNamespace(status="completed", last_error=None, thread_id=thread_id)
-
-
 @pytest.fixture()
 def mock_foundry_bing():
     project_client = MagicMock()
@@ -91,20 +66,6 @@ def mock_foundry_bing():
             name="bing-agent",
             version="2",
         )),
-        create_agent=MagicMock(return_value=SimpleNamespace(
-            id="agent-new-123",
-            name="bing-agent",
-        )),
-        create_thread_and_process_run=MagicMock(return_value=_completed_run()),
-        messages=SimpleNamespace(list=MagicMock(return_value=[
-            _legacy_agent_message(
-                "Die GKV-Reform bringt folgende Aenderungen...",
-                annotations=[
-                    _legacy_url_annotation("https://example.com/reform"),
-                    _legacy_url_annotation("https://example.com/details"),
-                ],
-            )
-        ])),
     )
 
     openai_client.responses.create.return_value = _response(
@@ -294,31 +255,8 @@ def test_legacy_agent_id_is_resolved_to_agent_reference(mock_foundry_bing):
     }
 
 
-def test_responses_404_falls_back_to_legacy_thread_run(mock_foundry_bing):
-    Cls, project_client, openai_client, _, _, _ = mock_foundry_bing
-    response404 = MagicMock()
-    response404.status_code = 404
-    response404.headers = {}
-    err404 = APIStatusError(
-        "not found",
-        response=response404,
-        body={"error": {"code": "not_found", "message": "Agent not found"}},
-    )
-    openai_client.responses.create.side_effect = [err404, err404]
-    provider = Cls(
-        project_endpoint="https://test.ai.azure.com/api",
-        agent_id="agent-1",
-    )
-
-    result = provider.search("Test query")
-
-    assert openai_client.responses.create.call_count == 2
-    project_client.agents.create_thread_and_process_run.assert_called_once()
-    assert "GKV-Reform" in result["answer"]
-
-
 def test_responses_404_retries_without_auto_resolved_version(mock_foundry_bing):
-    Cls, project_client, openai_client, _, _, _ = mock_foundry_bing
+    Cls, _, openai_client, _, _, _ = mock_foundry_bing
     response404 = MagicMock()
     response404.status_code = 404
     response404.headers = {}
@@ -349,29 +287,11 @@ def test_responses_404_retries_without_auto_resolved_version(mock_foundry_bing):
         "name": "bing-agent",
         "type": "agent_reference",
     }
-    project_client.agents.create_thread_and_process_run.assert_not_called()
     assert "GKV-Reform" in result["answer"]
 
 
-def test_execution_mode_legacy_skips_get_agent(mock_foundry_bing):
-    Cls, project_client, openai_client, _, _, _ = mock_foundry_bing
-    openai_client.responses.create.reset_mock()
-    provider = Cls(
-        project_endpoint="https://test.ai.azure.com/api",
-        agent_id="agent-1",
-        execution_mode="legacy",
-    )
-
-    result = provider.search("Test query")
-
-    project_client.agents.get_agent.assert_not_called()
-    openai_client.responses.create.assert_not_called()
-    project_client.agents.create_thread_and_process_run.assert_called_once()
-    assert "GKV-Reform" in result["answer"]
-
-
-def test_execution_mode_responses_does_not_fallback_on_404(mock_foundry_bing):
-    Cls, project_client, openai_client, _, _, _ = mock_foundry_bing
+def test_execution_mode_responses_does_not_retry_on_404(mock_foundry_bing):
+    Cls, _, openai_client, _, _, _ = mock_foundry_bing
     response404 = MagicMock()
     response404.status_code = 404
     response404.headers = {}
@@ -389,33 +309,21 @@ def test_execution_mode_responses_does_not_fallback_on_404(mock_foundry_bing):
     result = provider.search("Test query")
 
     openai_client.responses.create.assert_called_once()
-    project_client.agents.create_thread_and_process_run.assert_not_called()
     assert result["answer"] == ""
     assert provider.consume_nonfatal_notice() is not None
 
 
-def test_execution_mode_legacy_requires_agent_id(mock_foundry_bing):
+def test_execution_mode_legacy_is_rejected(mock_foundry_bing):
     Cls, *_ = mock_foundry_bing
-    with pytest.raises(ValueError, match="execution_mode='legacy' requires agent_id"):
-        Cls(
-            project_endpoint="https://test.ai.azure.com/api",
-            agent_name="bing-agent",
-            execution_mode="legacy",
-        )
-
-
-def test_execution_mode_legacy_rejects_api_key_only(mock_foundry_bing):
-    Cls, *_ = mock_foundry_bing
-    with pytest.raises(ValueError, match="execution_mode='legacy' requires credential"):
+    with pytest.raises(ValueError, match="execution_mode='legacy'"):
         Cls(
             project_endpoint="https://test.ai.azure.com/api",
             agent_id="agent-1",
-            api_key="project-key",
             execution_mode="legacy",
         )
 
 
-def test_unresolvable_agent_id_falls_back_to_legacy_thread_run(mock_foundry_bing):
+def test_unresolvable_agent_id_without_agent_name_returns_empty(mock_foundry_bing):
     Cls, project_client, openai_client, _, _, _ = mock_foundry_bing
     project_client.agents.get_agent.side_effect = RuntimeError("not found")
     openai_client.responses.create.reset_mock()
@@ -427,8 +335,11 @@ def test_unresolvable_agent_id_falls_back_to_legacy_thread_run(mock_foundry_bing
     result = provider.search("Test query")
 
     openai_client.responses.create.assert_not_called()
-    project_client.agents.create_thread_and_process_run.assert_called_once()
-    assert "GKV-Reform" in result["answer"]
+    assert result["answer"] == ""
+    assert result["citations"] == []
+    notice = provider.consume_nonfatal_notice()
+    assert notice is not None
+    assert "fehlgeschlagen" in notice
 
 
 def test_search_empty_response(mock_foundry_bing):
@@ -649,18 +560,19 @@ def test_create_agent_rejects_api_key(mock_foundry_bing):
         )
 
 
-def test_create_agent_returns_provider_from_legacy_sdk(mock_foundry_bing):
+def test_create_agent_uses_create_version(mock_foundry_bing):
     Cls, project_client, _, _, _, _ = mock_foundry_bing
-    project_client.agents = SimpleNamespace(
-        create_agent=MagicMock(return_value=SimpleNamespace(
-            id="agent-new-123",
-            name="bing-agent",
-        )),
+
+    fake_models_module = SimpleNamespace(
+        BingGroundingSearchConfiguration=MagicMock(),
+        BingGroundingSearchToolParameters=MagicMock(),
+        BingGroundingTool=MagicMock(),
+        PromptAgentDefinition=MagicMock(),
     )
 
-    with patch("inqtrix.providers.azure_bing.BingGroundingTool") as mock_tool:
-        mock_tool.return_value = MagicMock(definitions=[{"type": "bing_grounding"}])
-
+    with patch.dict(
+        "sys.modules", {"azure.ai.projects.models": fake_models_module}
+    ):
         provider = Cls.create_agent(
             project_endpoint="https://test.ai.azure.com/api",
             bing_connection_id="/subscriptions/.../connections/bing",
@@ -672,4 +584,6 @@ def test_create_agent_returns_provider_from_legacy_sdk(mock_foundry_bing):
     assert provider._agent_name == "bing-agent"
     assert provider._agent_id == "agent-new-123"
     assert provider.is_available()
-    project_client.agents.create_agent.assert_called_once()
+    project_client.agents.create_version.assert_called_once()
+    call_kwargs = project_client.agents.create_version.call_args.kwargs
+    assert call_kwargs["agent_name"] == "inqtrix-bing-search"

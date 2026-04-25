@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="inqtrix-logo.svg" width="100%">
+  <img src="assets/inqtrix-logo.svg" width="100%">
 </div>
 <p></p>
 
@@ -12,6 +12,8 @@
 > Secure configuration, hardening, deployment architecture, access control, secret handling, logging, monitoring, compliance, and day-to-day operation remain the sole responsibility of the operator. The current test suite covers substantial internal logic, interface behavior, and regression scenarios, but it is **not** evidence of production readiness or fully validated live integrations. Perform your own technical and security review before using this project in integration, staging, test, or production environments.
 
 # Inqtrix
+
+![Demo](./assets/Demo-1.gif)
 
 [License: Apache 2.0](LICENSE) [Python: 3.12+](https://www.python.org/)
 

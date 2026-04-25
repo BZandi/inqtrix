@@ -120,6 +120,8 @@ See [Web server mode](docs/deployment/webserver-mode.md) for TLS, API keys, and 
 
 ### Streamlit UI (`webapp.py`)
 
+![Demo2](./assets/Demo-2.gif)
+
 The bundled [`webapp.py`](webapp.py) is a production-shaped Streamlit
 frontend for the HTTP server. It discovers the available stacks via
 `GET /v1/stacks`, streams answers plus progress events over SSE, and

@@ -83,6 +83,16 @@ st.markdown("""
         background: transparent !important;
         height: auto !important;
         z-index: 999 !important;
+        /* The header otherwise blankets the top of the page and swallows
+           clicks meant for EN / Neu / Löschen. Make it click-through and
+           re-enable pointer events only on the hamburger inside it. */
+        pointer-events: none !important;
+    }
+
+    [data-testid="stExpandSidebarButton"],
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="stSidebarCollapseButton"] button {
+        pointer-events: auto !important;
     }
 
     [data-testid="stToolbarActions"],

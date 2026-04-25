@@ -64,23 +64,35 @@ from __future__ import annotations
 import io
 import os
 import re
+import sys
 import time
 from collections import deque
 
-# Importing readline activates GNU readline line editing for every
-# subsequent input() call in this process (and therefore also for
-# rich's console.input(), which delegates to input()). Effects:
-#   - left/right arrows move the cursor inside the prompt
-#   - up/down arrows recall earlier turns from this session
-#   - Ctrl+A / Ctrl+E / Ctrl+W / Ctrl+U work as in any readline shell
-# Linux and macOS ship readline in stdlib; on Windows the import
-# fails silently and the prompt falls back to the default behaviour.
-# pyreadline3 is the usual Windows substitute if the equivalent
-# experience is wanted there.
+# Activate line editing for input() — arrow keys, in-session history,
+# Ctrl+A/E/W/U. GNU readline ships in the stdlib on Linux/macOS; on
+# Windows we fall back to pyreadline3, a pure-Python reimplementation
+# that monkey-patches input() and is API-compatible with GNU readline
+# (the import name stays "readline" once pyreadline3 has been imported,
+# but we keep the explicit name here for clarity). The flag below is
+# read by main() to choose between an ANSI prompt for input() (with
+# the bash-style \001/\002 markers wrapping the colour codes so that
+# readline does not miscount the prompt width) and rich's console.input
+# fallback for environments where no readline is available.
+_HAS_READLINE = False
 try:
     import readline  # noqa: F401 — imported for its side effects only
+    _HAS_READLINE = True
 except ImportError:
-    pass
+    try:
+        import pyreadline3  # noqa: F401 — Windows readline replacement
+        _HAS_READLINE = True
+    except ImportError:
+        pass
+
+# Windows uses Ctrl+Z + Enter as the EOF combo; Unix-likes use Ctrl+D.
+# Used by the help panel so the displayed shortcut matches the host
+# platform without further configuration.
+EOF_HINT = "Ctrl+Z, Enter" if sys.platform == "win32" else "Ctrl+D"
 
 from dotenv import load_dotenv
 
@@ -146,15 +158,16 @@ PROGRESS_VIEWPORT_LINES = 14
 ANSWER_TYPEWRITER_BATCH = 5
 ANSWER_TYPEWRITER_DELAY = 0.012
 
-# Bold-cyan prompt string for input(). ANSI escape sequences in
-# interactive prompts confuse readline's cursor-width tracking — readline
-# would count every byte of the escape (e.g. ``\033[1;36m``) as visible
-# and then redraw subsequent input over the prompt, making the ``>>> ``
-# disappear at the first keystroke. Wrapping the escape bytes with
-# ``\001`` / ``\002`` markers tells readline "these don't take screen
-# space" — the same bash-style trick used in ``PS1``. Passing this
-# string directly to ``input()`` (instead of pre-printing via rich's
-# ``console.input``) keeps readline's prompt-width model correct.
+# Bold-cyan prompt string for input() when readline / pyreadline3 is
+# active. The ``\001`` / ``\002`` markers tell readline "these bytes do
+# not take screen space" so the cursor-width tracking stays correct;
+# without them readline would count every byte of the escape codes as
+# visible and redraw subsequent input over the prompt, making ``>>> ``
+# disappear at the first keystroke. Same bash-style trick used in
+# ``PS1``. Only consumed when ``_HAS_READLINE`` is ``True``; the
+# no-readline path uses rich's styled ``console.input`` instead, which
+# does not need the markers because no cursor-width tracking is
+# happening.
 PROMPT = "\n\001\033[1;36m\002>>> \001\033[0m\002"
 
 # Slash command vocabulary. Comparisons are case-insensitive.
@@ -277,7 +290,7 @@ def _command_summary() -> str:
         "  [cyan]/clear[/cyan]       Reset conversation history\n"
         "  [cyan]/exit[/cyan], [cyan]/bye[/cyan], [cyan]/quit[/cyan]   Leave the chat\n"
         "  [cyan]Ctrl+C[/cyan]       Cancel current turn, or exit at empty prompt\n"
-        "  [cyan]Ctrl+D[/cyan]       Exit"
+        f"  [cyan]{EOF_HINT}[/cyan]       Exit"
     )
 
 
@@ -560,7 +573,14 @@ def main() -> None:
 
     while True:
         try:
-            raw = input(PROMPT).strip()
+            if _HAS_READLINE:
+                raw = input(PROMPT).strip()
+            else:
+                # No readline / pyreadline3 → no cursor-width tracking,
+                # so rich's styled console.input works correctly here
+                # and the \001/\002-wrapped PROMPT would print its
+                # markers as literal control bytes.
+                raw = console.input("\n[bold cyan]>>> [/]").strip()
         except (EOFError, KeyboardInterrupt):
             console.print()
             console.print("Bye.")

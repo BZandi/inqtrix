@@ -29,6 +29,12 @@ dependencies = [
     "boto3>=1.35",
     "azure-identity>=1.18",
     "azure-ai-projects>=2.0,<3.0",
+    # Pure-Python readline replacement that ships line editing (arrow-key
+    # cursor movement, history, Ctrl+A/E/W/U) for input() on Windows. GNU
+    # readline is part of the stdlib on Linux/macOS; the marker below
+    # makes this dependency a no-op on those platforms. Used by the
+    # interactive examples under examples/provider_stacks/*_chat.py.
+    "pyreadline3>=3.4 ; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

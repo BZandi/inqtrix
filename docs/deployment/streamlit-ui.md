@@ -1,6 +1,6 @@
 # Streamlit UI
 
-> Files: `webapp.py`, `inqtrix_webapp/client.py`, `webapp_translations.py`
+> Files: `webapp.py`, `inqtrix_webapp/client.py`, `inqtrix_webapp/translations.py`
 
 ## Scope
 

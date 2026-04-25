@@ -19,7 +19,7 @@ from inqtrix_webapp.client import (
     get_base_url,
     stream_chat,
 )
-from webapp_translations import TRANSLATIONS
+from inqtrix_webapp.translations import TRANSLATIONS
 
 
 def t(key: str, **fmt) -> str:
@@ -1241,7 +1241,7 @@ STACK_AVATARS = {
 # report_profile is the primary "Recherche-Modus" lever on the agent.
 # Profile defaults fan out across other settings via
 # AgentSettings.with_report_profile_defaults (see src/inqtrix/settings.py).
-# Display labels live in webapp_translations.py under "profile_<key>".
+# Display labels live in inqtrix_webapp/translations.py under "profile_<key>".
 REPORT_PROFILES = ["compact", "deep"]
 
 # Effort levels map the UI label onto (max_rounds, min_rounds) pairs from

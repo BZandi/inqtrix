@@ -1,10 +1,10 @@
 """Streamlit webapp helpers for talking to the Inqtrix HTTP server.
 
 This package lives next to ``webapp.py`` at the repository root and
-provides a thin, synchronous HTTP client for the OpenAI-compatible
-Inqtrix server (``src/inqtrix/server``). It intentionally has no
-dependency on the ``inqtrix`` package itself so the UI stays a pure
-HTTP consumer.
+provides a thin, synchronous HTTP client plus UI-local helpers for the
+OpenAI-compatible Inqtrix server (``src/inqtrix/server``). It
+intentionally has no dependency on the ``inqtrix`` package itself so
+the UI stays a pure HTTP consumer.
 """
 
 from inqtrix_webapp.client import (

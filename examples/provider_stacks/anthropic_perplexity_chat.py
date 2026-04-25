@@ -61,6 +61,7 @@ Run with::
 """
 
 from __future__ import annotations
+import io
 import os
 import re
 import time
@@ -144,6 +145,17 @@ PROGRESS_VIEWPORT_LINES = 14
 # answer reveals in about 1.2 seconds.
 ANSWER_TYPEWRITER_BATCH = 5
 ANSWER_TYPEWRITER_DELAY = 0.012
+
+# Bold-cyan prompt string for input(). ANSI escape sequences in
+# interactive prompts confuse readline's cursor-width tracking — readline
+# would count every byte of the escape (e.g. ``\033[1;36m``) as visible
+# and then redraw subsequent input over the prompt, making the ``>>> ``
+# disappear at the first keystroke. Wrapping the escape bytes with
+# ``\001`` / ``\002`` markers tells readline "these don't take screen
+# space" — the same bash-style trick used in ``PS1``. Passing this
+# string directly to ``input()`` (instead of pre-printing via rich's
+# ``console.input``) keeps readline's prompt-width model correct.
+PROMPT = "\n\001\033[1;36m\002>>> \001\033[0m\002"
 
 # Slash command vocabulary. Comparisons are case-insensitive.
 EXIT_COMMANDS = {"/exit", "/bye", "/quit"}
@@ -386,6 +398,25 @@ def _extract_summary(progress_log: list[str], elapsed_s: float) -> str:
     return " · ".join(parts)
 
 
+def _measure_markdown_height(console: Console, markdown_text: str) -> int:
+    """Return how many terminal rows :func:`Markdown` will occupy.
+
+    Renders the Markdown once into a discard buffer at the user's
+    current terminal width and counts the resulting newlines. Source-
+    text newline counting would underestimate by a wide margin —
+    header underlines, code-block padding, table borders, and line
+    wraps each add rows that are only visible after rendering.
+    """
+    measure_buf = io.StringIO()
+    Console(
+        file=measure_buf,
+        force_terminal=True,
+        color_system=None,
+        width=console.size.width,
+    ).print(Markdown(markdown_text))
+    return measure_buf.getvalue().count("\n")
+
+
 def _typewriter_render(console: Console, markdown_text: str) -> None:
     """Render Markdown progressively for a typewriter feel.
 
@@ -396,14 +427,34 @@ def _typewriter_render(console: Console, markdown_text: str) -> None:
     :class:`rich.markdown.Markdown` of the growing buffer. Once the
     animation finishes (or is interrupted with Ctrl+C), the live
     region is cleared and the complete Markdown is rendered as a
-    static block — this way the final on-screen state is always the
-    full answer, regardless of terminal height.
+    static block.
+
+    Skip path for tall answers: when the rendered Markdown would be
+    taller than the terminal viewport, the typewriter is bypassed and
+    the answer is printed statically right away. Reason: rich's
+    transient :class:`Live` cleanup only clears the *visible* portion
+    of its rendered region. As soon as content has scrolled past the
+    top of the terminal during the animation, those scrolled-off
+    rows stay in the terminal scrollback. The post-animation static
+    print then duplicates them — the user would see the early
+    sections of the answer twice. The cosmetic animation is not
+    worth the duplication risk for long answers.
+
+    Pressing Ctrl+C during the animation skips the rest of it; the
+    full answer is still rendered as a static block afterwards.
 
     Tuning: see :data:`ANSWER_TYPEWRITER_BATCH` and
     :data:`ANSWER_TYPEWRITER_DELAY` for speed knobs.
     """
     tokens = re.findall(r"\S+\s*", markdown_text)
     if not tokens:
+        console.print(Markdown(markdown_text))
+        return
+
+    # Leave a couple of rows for the next prompt and visual breathing
+    # space. If the answer wouldn't fit, render statically only.
+    rendered_lines = _measure_markdown_height(console, markdown_text)
+    if rendered_lines >= console.size.height - 2:
         console.print(Markdown(markdown_text))
         return
 
@@ -509,7 +560,7 @@ def main() -> None:
 
     while True:
         try:
-            raw = console.input("\n[bold cyan]>>> [/]").strip()
+            raw = input(PROMPT).strip()
         except (EOFError, KeyboardInterrupt):
             console.print()
             console.print("Bye.")

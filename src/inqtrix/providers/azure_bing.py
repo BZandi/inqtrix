@@ -1,5 +1,15 @@
 """Azure Foundry Bing Search adapter for the SearchProvider interface.
 
+Compliance note: The Microsoft "Grounding with Bing" terms of use
+permit Output only inside "Approved Microsoft Applications" and only
+in "internet search experiences" with a visible search indication;
+caching or persisting Output is prohibited and citations are
+mandatory. Operators must validate their own Inqtrix use case against
+these restrictions, particularly when Inqtrix responses are delivered
+as synthesized research reports rather than as classic result
+listings. See
+https://www.microsoft.com/en-us/bing/apis/grounding-legal.
+
 Uses the project-scoped OpenAI Responses API to invoke a pre-created
 Azure AI Foundry agent that has Bing Grounding attached. The agent is
 referenced by name and optional version through

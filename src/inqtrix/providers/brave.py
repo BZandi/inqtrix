@@ -1,5 +1,13 @@
 """Direct Brave Search adapter for the SearchProvider interface.
 
+Compliance note: The Brave Search API terms of service (effective
+2026-02-11) explicitly prohibit, on the standard/free tier, using
+Search Results to improve AI models or services and caching or
+redistributing results. Brave offers a separate "Data for AI" plan
+for LLM- and agent-style use cases. Operators must ensure the chosen
+plan tier covers the intended Inqtrix use case. See
+https://api-dashboard.search.brave.com/terms-of-service.
+
 Calls the Brave Web Search API (``/res/v1/web/search``) via ``urllib``
 — no SDK dependency.  Results are mapped to the :class:`SearchProvider`
 contract (``answer``, ``citations``, ``related_questions``, token

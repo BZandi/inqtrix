@@ -131,6 +131,14 @@ When the server has the Bearer gate enabled
 token. No other configuration is read by the UI — it is a pure HTTP
 consumer and deliberately does not import the `inqtrix` package.
 
+> **Note on third-party terms of service:** Inqtrix is provider-neutral.
+> You bring your own API keys and choose which search and LLM providers
+> to wire in. Whether each provider's terms of service permit your
+> specific Inqtrix use case is your responsibility to verify. In
+> particular, Brave Search and Microsoft Bing Grounding impose
+> specific restrictions on AI- and agent-style use cases; please
+> review their terms before any deployment.
+
 ## Provider matrix
 
 

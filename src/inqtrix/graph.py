@@ -26,6 +26,7 @@ from langgraph.graph import END, StateGraph
 import threading
 
 from inqtrix.exceptions import AgentCancelled, AgentRateLimited
+from inqtrix.i18n import t
 from inqtrix.providers.base import ProviderContext
 from inqtrix.result import ResearchResult, ResearchResultExportOptions
 from inqtrix.runtime_logging import log_run_start
@@ -229,7 +230,7 @@ def _run_direct_chat(
             "result_state": state,
         }
     except AgentRateLimited as exc:
-        emit_progress(state, f"Recherche abgebrochen: {exc}")
+        emit_progress(state, t(state, "run_aborted", exc=exc))
         log.error("ABBRUCH (chat-only): %s", exc)
         return {
             "answer": (
@@ -243,7 +244,7 @@ def _run_direct_chat(
             "result_state": state,
         }
     except Exception as exc:
-        emit_progress(state, f"Chat-Modus fehlgeschlagen: {exc}")
+        emit_progress(state, t(state, "chat_mode_failed", exc=exc))
         raise
 
     answer_text = getattr(llm_response, "text", None) or str(llm_response)
@@ -361,7 +362,7 @@ def run(
             "result_state": state,
         }
     except AgentRateLimited as exc:
-        emit_progress(state, f"Recherche abgebrochen: {exc}")
+        emit_progress(state, t(state, "run_aborted", exc=exc))
         log.error("ABBRUCH: %s", exc)
         return {
             "answer": (
@@ -375,7 +376,7 @@ def run(
             "result_state": state,
         }
     except Exception as exc:
-        emit_progress(state, f"Recherche fehlgeschlagen: {exc}")
+        emit_progress(state, t(state, "run_failed", exc=exc))
         raise
 
     elapsed = time.monotonic() - t0

@@ -10,6 +10,7 @@ from typing import Any, NotRequired, TypedDict
 
 from inqtrix.constants import MAX_TOTAL_SECONDS
 from inqtrix.exceptions import AgentCancelled
+from inqtrix.i18n import detect_ui_language
 from inqtrix.runtime_logging import log_iteration_entry
 
 
@@ -135,10 +136,14 @@ def initial_state(
     when the HTTP server detects the SSE client has disconnected.
     """
     deadline = time.monotonic() + max_total_seconds
+    # Provisorische UI-Sprache aus der Frage, damit das erste Progress-Event
+    # bereits in der richtigen Sprache erscheint. classify() überschreibt
+    # später mit dem präziseren LLM-Ergebnis.
+    initial_language = detect_ui_language(question)
     state: dict[str, Any] = {
         "question": question,
         "history": history,
-        "language": "",
+        "language": initial_language,
         "search_language": "",
         "recency": "",
         "query_type": "general",

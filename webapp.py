@@ -19,6 +19,15 @@ from inqtrix_webapp.client import (
     get_base_url,
     stream_chat,
 )
+from webapp_translations import TRANSLATIONS
+
+
+def t(key: str, **fmt) -> str:
+    """Return UI-localized string. Falls back to DE then to the key itself."""
+    lang = st.session_state.get("ui_language", "de")
+    entry = TRANSLATIONS.get(key, {})
+    text = entry.get(lang) or entry.get("de") or key
+    return text.format(**fmt) if fmt else text
 
 # ---------------------------------------------------------------------------
 # Page config & custom CSS
@@ -66,9 +75,97 @@ st.markdown("""
         color: var(--text) !important;
     }
 
-    [data-testid="stHeader"],
     footer {
         display: none !important;
+    }
+
+    [data-testid="stHeader"] {
+        background: transparent !important;
+        height: auto !important;
+        z-index: 999 !important;
+    }
+
+    [data-testid="stToolbarActions"],
+    [data-testid="stMainMenu"],
+    [data-testid="stAppDeployButton"],
+    [data-testid="stStatusWidget"] {
+        display: none !important;
+    }
+
+    /* Streamlit hides the in-sidebar collapse control until hover; keep it
+       always visible so the close affordance matches the open hamburger. */
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="stSidebarCollapseButton"] button {
+        visibility: visible !important;
+    }
+
+    /* stExpandSidebarButton IS the button element; stSidebarCollapseButton
+       wraps an inner button. Style both to look like the EN / Neu / Löschen pills. */
+    [data-testid="stExpandSidebarButton"],
+    [data-testid="stSidebarCollapseButton"] button {
+        background: var(--pill) !important;
+        border: 1px solid var(--line) !important;
+        border-radius: 999px !important;
+        color: var(--text) !important;
+        width: 2.25rem !important;
+        height: 2.25rem !important;
+        min-height: 2.25rem !important;
+        padding: 0 !important;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+        transition: border-color .15s ease, background .15s ease;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+    }
+
+    [data-testid="stExpandSidebarButton"]:hover,
+    [data-testid="stSidebarCollapseButton"] button:hover {
+        background: var(--pill-hover) !important;
+        border-color: rgba(217, 119, 87, 0.38) !important;
+    }
+
+    /* Pin the collapsed-state toggle to the top-right corner. The action row
+       (EN / Neu / Löschen) reserves matching right padding so all four pills
+       sit on a single line. position:fixed keeps the math viewport-anchored
+       regardless of the surrounding header geometry. */
+    [data-testid="stExpandSidebarButton"] {
+        position: fixed !important;
+        top: 0.875rem !important;
+        right: 1rem !important;
+        z-index: 1000 !important;
+    }
+
+    /* Reserve space at the right edge of the action row so EN / Neu / Löschen
+       end before the fixed hamburger toggle and never visually collide. */
+    .st-key-header_actions {
+        padding-right: 2.75rem !important;
+    }
+
+    /* Replace the chevron with a CSS-drawn hamburger so the button reads as
+       a menu toggle rather than a directional control. */
+    [data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"],
+    [data-testid="stSidebarCollapseButton"] [data-testid="stIconMaterial"] {
+        font-size: 0 !important;
+        color: transparent !important;
+        width: 16px;
+        height: 12px;
+        position: relative;
+        display: inline-block;
+    }
+
+    [data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"]::before,
+    [data-testid="stSidebarCollapseButton"] [data-testid="stIconMaterial"]::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 2px;
+        background: var(--accent);
+        border-radius: 2px;
+        box-shadow:
+            0 5px 0 var(--accent),
+            0 10px 0 var(--accent);
     }
 
     .block-container {
@@ -1134,17 +1231,15 @@ STACK_AVATARS = {
 # report_profile is the primary "Recherche-Modus" lever on the agent.
 # Profile defaults fan out across other settings via
 # AgentSettings.with_report_profile_defaults (see src/inqtrix/settings.py).
+# Display labels live in webapp_translations.py under "profile_<key>".
 REPORT_PROFILES = ["compact", "deep"]
-REPORT_PROFILE_LABELS = {
-    "compact": "Kompakt",
-    "deep": "Deep Research",
-}
 
 # Effort levels map the UI label onto (max_rounds, min_rounds) pairs from
 # the per-request overrides whitelist (src/inqtrix/server/overrides.py).
 # "Auto" is the only level that omits both fields — the server then
 # applies the AgentSettings defaults (which themselves fan out from
-# report_profile).
+# report_profile). The German strings are stable session-state values;
+# display labels are localized via EFFORT_DISPLAY_KEYS / effort_display().
 EFFORT_LEVELS = ["Auto", "Niedrig", "Mittel", "Hoch", "Max"]
 EFFORT_ROUNDS: dict[str, tuple[int, int] | None] = {
     "Auto": None,
@@ -1153,20 +1248,20 @@ EFFORT_ROUNDS: dict[str, tuple[int, int] | None] = {
     "Hoch": (4, 2),
     "Max": (6, 3),
 }
-EFFORT_HELP = (
-    "Steuert den Recherche-Aufwand des Agenten über `max_rounds` (obere "
-    "Schleifen-Schranke) und `min_rounds` (untere Schranke).\n\n"
-    "• **Auto** — Server-Default (ergibt sich aus dem Profil).\n"
-    "• **Niedrig** — max=1, min=1 (einziger Durchlauf, schnellste Antwort).\n"
-    "• **Mittel** — max=2, min=1.\n"
-    "• **Hoch** — max=4, min=2 (solide Standardwahl für Deep).\n"
-    "• **Max** — max=6, min=3 (maximal tief, langsamste Antwort)."
-)
 
 SUGGESTIONS = {
     "Suche aktuelle KI-Nachrichten": "Suche nach den aktuellsten Entwicklungen im Bereich künstliche Intelligenz diese Woche.",
     "Erkläre RAG": "Erkläre mir Retrieval Augmented Generation einfach und verständlich. Was sind die Vorteile gegenüber Fine-Tuning?",
     "Vergleiche Claude vs GPT-4": "Vergleiche Claude 3.5 Sonnet mit GPT-4o. Wo liegen die Stärken und Schwächen?",
+}
+
+# Maps SUGGESTION dict keys (German display labels) to translation keys.
+# The dict values (prompt texts sent to the agent) stay German on purpose —
+# UI-only scope, agent backend remains German.
+SUGGESTION_DISPLAY_KEYS: dict[str, str] = {
+    "Suche aktuelle KI-Nachrichten": "suggestion_ai_news",
+    "Erkläre RAG": "suggestion_explain_rag",
+    "Vergleiche Claude vs GPT-4": "suggestion_compare_llms",
 }
 
 
@@ -1228,7 +1323,10 @@ def format_stack_option(stack_name: str, stacks: dict[str, dict]) -> str:
 
 def get_mode_display(profile_value: str) -> str:
     """Returns a compact label for the active report profile."""
-    return REPORT_PROFILE_LABELS.get(profile_value, profile_value.title())
+    key = f"profile_{profile_value}"
+    if key in TRANSLATIONS:
+        return t(key)
+    return profile_value.title()
 
 
 def shorten_label(label: str, max_length: int = 24) -> str:
@@ -1291,38 +1389,43 @@ def render_settings_detail_popover() -> None:
     policy_on = bool(st.session_state.get("de_policy_bias_enabled", True))
     streaming_on = bool(st.session_state.streaming_enabled)
     include_progress = bool(st.session_state.include_progress)
+    on_label = t("settings_value_on")
+    off_label = t("settings_value_off")
 
-    _row("Stack", stack, is_default=False)
-    _row("Profil", profile, is_default=st.session_state.report_profile == "compact")
-    _row("Aufwand", effort, is_default=(effort == "Auto"))
+    _row(t("row_label_stack"), stack, is_default=False)
+    _row(t("row_label_profile"), profile, is_default=st.session_state.report_profile == "compact")
+    _row(t("row_label_effort"), effort_display(effort), is_default=(effort == "Auto"))
     _row(
-        "Websuche",
-        "an" if web_on else "aus",
+        t("row_label_websearch"),
+        on_label if web_on else off_label,
         is_default=web_on,
         state="on" if web_on else "off",
     )
     _row(
-        "DE-Policy",
-        "an" if policy_on else "aus",
+        t("row_label_de_policy"),
+        on_label if policy_on else off_label,
         is_default=policy_on,
         state="on" if policy_on else "off",
     )
     _row(
-        "Streaming",
-        "an" if streaming_on else "aus",
+        t("row_label_streaming"),
+        on_label if streaming_on else off_label,
         is_default=streaming_on,
         state="on" if streaming_on else "off",
     )
     _row(
-        "Progress-Events",
-        "an" if include_progress else "aus",
+        t("row_label_progress"),
+        on_label if include_progress else off_label,
         is_default=include_progress,
         state="on" if include_progress else "off",
     )
     st.caption(
-        f"Feintuning: confidence_stop = {int(st.session_state.confidence_stop)} · "
-        f"max_total_seconds = {int(st.session_state.max_total_seconds)} · "
-        f"first_round_queries = {int(st.session_state.first_round_queries)}"
+        t(
+            "settings_finetuning_caption",
+            confidence=int(st.session_state.confidence_stop),
+            max_seconds=int(st.session_state.max_total_seconds),
+            first_round=int(st.session_state.first_round_queries),
+        )
     )
 
 
@@ -1412,9 +1515,10 @@ def render_message(message: dict) -> None:
 
     with st.chat_message(message["role"], avatar=avatar_icon):
         copy_payload = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        copy_label = escape(t("btn_copy"))
         st.markdown(
             f'<button type="button" class="copy-btn" data-copy-b64="{copy_payload}" '
-            f'aria-label="Kopieren" title="Kopieren">'
+            f'aria-label="{copy_label}" title="{copy_label}">'
             f'<svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" '
             f'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
             f'<rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>'
@@ -1431,7 +1535,7 @@ def render_message(message: dict) -> None:
         progress_lines = message.get("progress") or []
         if progress_lines:
             with st.expander(
-                f"Rechercheverlauf · {len(progress_lines)} Schritt(e)",
+                t("status_progress_label", count=len(progress_lines)),
                 expanded=False,
                 icon=":material/manage_search:",
             ):
@@ -1448,9 +1552,24 @@ def effort_summary(effort: str) -> str:
     """Compact human-readable summary of an Aufwand level."""
     value = EFFORT_ROUNDS.get(effort)
     if value is None:
-        return "Server-Default (richtet sich nach Profil)"
+        return t("effort_server_default")
     max_r, min_r = value
     return f"max_rounds = {max_r} · min_rounds = {min_r}"
+
+
+# Maps German EFFORT_LEVELS values (used as session-state keys) to translation keys.
+EFFORT_DISPLAY_KEYS: dict[str, str] = {
+    "Auto": "effort_auto",
+    "Niedrig": "effort_low",
+    "Mittel": "effort_medium",
+    "Hoch": "effort_high",
+    "Max": "effort_max",
+}
+
+
+def effort_display(level: str) -> str:
+    """Display label for an EFFORT_LEVELS value (German key → localized label)."""
+    return t(EFFORT_DISPLAY_KEYS.get(level, level))
 
 
 # ---------------------------------------------------------------------------
@@ -1503,44 +1622,36 @@ if "pending_response" not in st.session_state:
 if "cancel_requested" not in st.session_state:
     st.session_state.cancel_requested = False
 
+if "ui_language" not in st.session_state:
+    st.session_state.ui_language = "de"
+
 
 # ---------------------------------------------------------------------------
 # Sidebar (Minimalist)
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
-    st.markdown("### Verlauf")
-
-    st.caption("Heute")
-    st.markdown("Vergleich LLM-Architekturen")
-    st.markdown("Azure Bing Grounding Setup")
-
-    st.caption("Gestern")
-    st.markdown("Perplexity Sonar Integration")
-
-    st.divider()
-
-    st.markdown("### Server")
+    st.markdown(t("sidebar_server"))
     health = load_health(SERVER_BASE_URL)
     health_status = health.get("status", "unreachable")
     health_indicator = {
-        "ok": ("🟢", "bereit"),
-        "degraded": ("🟠", "degradiert"),
-        "unreachable": ("⚪", "nicht erreichbar"),
+        "ok": ("🟢", t("health_ok")),
+        "degraded": ("🟠", t("health_degraded")),
+        "unreachable": ("⚪", t("health_unreachable")),
     }.get(health_status, ("⚪", health_status))
     st.caption(f"{health_indicator[0]} {health_indicator[1]}")
     st.caption(f"URL: `{SERVER_BASE_URL}`")
-    st.caption("Auth: Bearer gesetzt" if API_KEY else "Auth: keine")
-    if st.button("Aktualisieren", key="refresh_discovery", icon=":material/refresh:"):
+    st.caption(t("auth_set") if API_KEY else t("auth_none"))
+    if st.button(t("btn_refresh"), key="refresh_discovery", icon=":material/refresh:"):
         load_stacks.clear()
         load_health.clear()
         st.rerun()
 
     st.divider()
 
-    st.markdown("### Einstellungen")
-    st.toggle("Streaming", key="streaming_enabled")
-    st.toggle("Progress-Events", key="include_progress")
+    st.markdown(t("sidebar_settings"))
+    st.toggle(t("toggle_streaming"), key="streaming_enabled")
+    st.toggle(t("toggle_progress"), key="include_progress")
 
 
 with st.container(key="page_shell"):
@@ -1548,7 +1659,7 @@ with st.container(key="page_shell"):
     # Header
     # -----------------------------------------------------------------------
     with st.container(key="app_header"):
-        brand_col, actions_col = st.columns([6, 3], vertical_alignment="center")
+        brand_col, actions_col = st.columns([5, 4], vertical_alignment="center")
         with brand_col:
             st.markdown(
                 '<div class="brand-kicker">Conversational Research Agent</div>'
@@ -1556,22 +1667,30 @@ with st.container(key="page_shell"):
                 unsafe_allow_html=True,
             )
         with actions_col:
-            with st.container(horizontal=True, gap="small", vertical_alignment="center", horizontal_alignment="right"):
+            with st.container(key="header_actions", horizontal=True, gap="small", vertical_alignment="center", horizontal_alignment="right"):
+                _target_lang = "en" if st.session_state.ui_language == "de" else "de"
                 if st.button(
-                    "Neu",
+                    _target_lang.upper(),
+                    key="lang_toggle",
+                    help=t("lang_toggle_to_en") if _target_lang == "en" else t("lang_toggle_to_de"),
+                ):
+                    st.session_state.ui_language = _target_lang
+                    st.rerun()
+                if st.button(
+                    t("btn_new"),
                     key="new_chat",
                     icon=":material/edit_note:",
-                    help="Neuen Chat starten",
+                    help=t("btn_new_help"),
                 ):
                     st.session_state.messages = []
                     st.session_state.trigger_prompt = None
                     st.session_state.pending_response = None
                     st.rerun()
                 if st.button(
-                    "Löschen",
+                    t("btn_delete"),
                     key="delete_chat",
                     icon=":material/delete:",
-                    help="Alle Nachrichten löschen",
+                    help=t("btn_delete_help"),
                     disabled=len(st.session_state.messages) == 0,
                 ):
                     st.session_state.messages = []
@@ -1589,26 +1708,15 @@ with st.container(key="page_shell"):
     with conversation_shell:
         if not has_history:
             with st.container(key="empty_state_shell"):
-                st.markdown(
-                    '<div class="welcome-wrap">'
-                    '<div class="prototype-notice">Hinweis: Hierbei handelt sich um einen Prototypen</div>'
-                    '<div class="welcome-meta">'
-                    'GitHub: <a href="https://github.com/BZandi/inqtrix" target="_blank" rel="noopener">github.com/BZandi/inqtrix</a>'
-                    '<span class="sep">·</span>'
-                    'Lizenz: Apache 2.0'
-                    '</div>'
-                    '<div class="welcome-title">Guten Tag.</div>'
-                    '<div class="welcome-sub">Wie kann inqtrix Ihnen heute helfen?</div>'
-                    '</div>',
-                    unsafe_allow_html=True,
-                )
+                st.markdown(t("welcome_html"), unsafe_allow_html=True)
 
                 with st.container(key="suggestion_shell"):
                     c1, c2, c3 = st.columns([1.15, 3.7, 1.15])
                     with c2:
                         sel_suggestion = st.pills(
-                            "Vorschlaege:",
+                            t("pills_label"),
                             options=list(SUGGESTIONS.keys()),
+                            format_func=lambda k: t(SUGGESTION_DISPLAY_KEYS.get(k, k)),
                             label_visibility="collapsed"
                         )
                         if sel_suggestion:
@@ -1710,7 +1818,7 @@ with st.container(key="page_shell"):
             if has_history:
                 st.markdown(
                     '<div class="composer-meta">'
-                    '<span class="composer-prototype-pill">Hinweis: Prototyp</span>'
+                    f'<span class="composer-prototype-pill">{escape(t("composer_prototype_pill"))}</span>'
                     '</div>',
                     unsafe_allow_html=True,
                 )
@@ -1722,7 +1830,7 @@ with st.container(key="page_shell"):
 
         with st.container(key="composer_input"):
             chat_input_val = st.chat_input(
-                "Wie kann ich helfen?",
+                t("composer_placeholder"),
                 key="composer_input_field",
                 accept_file="multiple",
                 file_type=["pdf", "png", "jpg", "txt", "csv"],
@@ -1731,87 +1839,54 @@ with st.container(key="page_shell"):
         with st.container(key="composer_footer"):
             with st.container(horizontal=True, gap="small", vertical_alignment="center"):
                 with st.popover(
-                    ":material/list_alt: Profil",
-                    help="Report-Profil, Antworttiefe und DE-Policy-Heuristik.",
+                    f":material/list_alt: {t('popover_profile')}",
+                    help=t("popover_profile_help"),
                     key="composer_profile_popover",
                     width="content",
                 ):
-                    st.caption("Profil")
-                    st.markdown(
-                        '<div class="popover-explainer">'
-                        'Bestimmt <strong>Tiefe und Länge</strong> der Antwort. '
-                        '<strong>Kompakt</strong> liefert eine schnelle, knappe '
-                        'Synthese mit kleinerem Kontextfenster und wenigen Zitaten. '
-                        '<strong>Deep Research</strong> fächert Suchanfragen '
-                        'breiter auf, sammelt deutlich mehr Quellen und erzeugt '
-                        'eine ausführlichere, gegliederte Synthese — dauert aber '
-                        'entsprechend länger.'
-                        '</div>',
-                        unsafe_allow_html=True,
-                    )
+                    st.caption(t("label_profile"))
+                    st.markdown(t("profile_explainer_html"), unsafe_allow_html=True)
                     st.radio(
-                        "Recherchemodus",
+                        t("label_research_mode"),
                         REPORT_PROFILES,
                         key="report_profile",
                         format_func=get_mode_display,
                         label_visibility="collapsed",
                     )
 
-                    st.caption("DE-Policy-Heuristik")
-                    st.markdown(
-                        '<div class="popover-explainer">'
-                        'Aktiviert die <strong>deutsche Gesundheits- und '
-                        'Sozialpolitik-Kalibrierung</strong> des Agenten: '
-                        'Quality-Site-Injection für DE-Policy-Domänen, '
-                        'Utility-Stop-Unterdrückung bei politischen Themen '
-                        'und einen <strong>Risiko-Bonus (+2)</strong> für '
-                        'einschlägige Keywords. <strong>Ausschalten</strong> '
-                        'für allgemeine oder nicht-deutsche Einsätze, um den '
-                        'DE-spezifischen Bias zu entfernen.'
-                        '</div>',
-                        unsafe_allow_html=True,
-                    )
+                    st.caption(t("label_de_policy"))
+                    st.markdown(t("de_policy_explainer_html"), unsafe_allow_html=True)
                     st.toggle(
-                        "DE-Policy-Bias aktiv",
+                        t("toggle_de_policy"),
                         key="de_policy_bias_enabled",
-                        help=(
-                            "Serverseitiges Flag `enable_de_policy_bias`. "
-                            "Wirkt auf `KeywordRiskScorer` und die Stop-"
-                            "Kriterien. Default: an."
-                        ),
+                        help=t("toggle_de_policy_help"),
                     )
                 with st.popover(
-                    ":material/memory: Modell",
-                    help="Aktiver Stack und Provider-Verfügbarkeit.",
+                    f":material/memory: {t('popover_model')}",
+                    help=t("popover_model_help"),
                     key="composer_stack_popover",
                     width="content",
                 ):
-                    st.caption("Stack")
+                    st.caption(t("label_stack"))
                     if AVAILABLE_STACKS:
                         st.selectbox(
-                            "Stack",
+                            t("label_stack"),
                             options=list(AVAILABLE_STACKS.keys()),
                             key="active_stack",
                             format_func=lambda value: format_stack_option(value, AVAILABLE_STACKS),
                             label_visibility="collapsed",
-                            help=(
-                                "**●** — Provider-Readiness-Check war erfolgreich.\n\n"
-                                "**○** — Provider antwortet aktuell nicht.\n\n"
-                                "Die Liste stammt aus `GET /v1/stacks` und wird "
-                                "bei jedem Seitenaufbau serverseitig (5 s Cache) "
-                                "über den ADR-WS-12-Readiness-Probe erneuert."
-                            ),
+                            help=t("stack_select_help"),
                         )
                         active_entry = AVAILABLE_STACKS.get(st.session_state.active_stack, {})
                         ready_count = sum(1 for s in AVAILABLE_STACKS.values() if s.get("ready"))
                         status_class = "ready" if active_entry.get("ready") else "down"
-                        status_label = "bereit" if active_entry.get("ready") else "nicht erreichbar"
+                        status_label = t("health_ok") if active_entry.get("ready") else t("health_unreachable")
                         st.markdown(
                             f'<div class="stack-health-row">'
                             f'<span class="stack-health-dot {status_class}"></span>'
                             f'<span class="stack-health-name">{escape(status_label)}</span>'
                             f'<span class="stack-health-label">'
-                            f'· {ready_count} / {len(AVAILABLE_STACKS)} verfügbar'
+                            f'· {ready_count} / {len(AVAILABLE_STACKS)} {t("stack_count_available")}'
                             f'</span>'
                             f'</div>',
                             unsafe_allow_html=True,
@@ -1827,75 +1902,63 @@ with st.container(key="page_shell"):
                         if models.get("reasoning_model"):
                             chip_parts.append(f"Reasoning: `{models['reasoning_model']}`")
                         if models.get("search_model"):
-                            chip_parts.append(f"Search-Modell: `{models['search_model']}`")
+                            chip_parts.append(f"{t('stack_chip_search_model')}: `{models['search_model']}`")
                         if chip_parts:
                             st.caption(" · ".join(chip_parts))
                     else:
-                        st.warning("Kein Stack verfügbar — Server nicht erreichbar?")
+                        st.warning(t("warn_no_stack"))
                 with st.popover(
-                    ":material/tune: Aufwand",
-                    help="Recherche-Tiefe und Feintuning-Schranken.",
+                    f":material/tune: {t('popover_effort')}",
+                    help=t("popover_effort_help"),
                     key="composer_effort_popover",
                     width="content",
                 ):
-                    st.caption("Aufwand")
-                    st.markdown(
-                        '<div class="popover-explainer">'
-                        'Steuert, wie viele Recherche-Runden der Agent höchstens '
-                        'und mindestens ausführt. Jede Runde verfeinert Suchanfragen '
-                        'und sammelt weitere Quellen. <strong>Mehr Runden</strong> '
-                        '= tiefere Recherche, aber längere Laufzeit.'
-                        '</div>',
-                        unsafe_allow_html=True,
-                    )
+                    st.caption(t("label_effort"))
+                    st.markdown(t("effort_explainer_html"), unsafe_allow_html=True)
                     st.radio(
-                        "Aufwand",
+                        t("label_effort"),
                         EFFORT_LEVELS,
                         key="reasoning_effort",
                         label_visibility="collapsed",
-                        help=EFFORT_HELP,
+                        help=t("effort_help"),
+                        format_func=effort_display,
                     )
-                    st.caption(f"Aktuell: {effort_summary(st.session_state.reasoning_effort)}")
+                    st.caption(
+                        f"{t('label_current')}: {effort_summary(st.session_state.reasoning_effort)}"
+                    )
 
-                    st.caption("Feintuning")
+                    st.caption(t("label_finetuning"))
                     st.slider(
-                        "Confidence Stop",
+                        t("slider_confidence_stop"),
                         1, 10,
                         key="confidence_stop",
-                        help="Evaluator-Confidence (1-10), ab der die Stop-Kaskade 'done' setzen darf.",
+                        help=t("slider_confidence_stop_help"),
                     )
                     st.slider(
-                        "Max Total Seconds",
+                        t("slider_max_seconds"),
                         30, 1800,
                         key="max_total_seconds",
                         step=30,
-                        help="Hartes Wall-Clock-Limit pro Durchlauf (Sekunden).",
+                        help=t("slider_max_seconds_help"),
                     )
                     st.slider(
-                        "First Round Queries",
+                        t("slider_first_round"),
                         1, 20,
                         key="first_round_queries",
-                        help="Anzahl der breiten Suchanfragen in Runde 0.",
+                        help=t("slider_first_round_help"),
                     )
                 st.toggle(
-                    "Websuche",
+                    t("toggle_web_search"),
                     key="web_search_enabled",
-                    help=(
-                        "**An** (Standard): Der Agent führt Websuche, "
-                        "Quellensynthese und Claim-Verifikation durch.\n\n"
-                        "**Aus**: Reiner Chat — der Server ruft nur den "
-                        "LLM-Provider direkt mit Frage + Historie, ohne "
-                        "Recherche. Ideal für Definitions- oder "
-                        "Konzeptfragen, die keine aktuellen Quellen brauchen."
-                    ),
+                    help=t("toggle_web_search_help"),
                 )
                 with st.popover(
                     ":material/fact_check:",
-                    help="Alle aktiven Einstellungen anzeigen",
+                    help=t("popover_settings_help"),
                     key="composer_settings_detail_popover",
                     width="content",
                 ):
-                    st.caption("Aktive Einstellungen")
+                    st.caption(t("settings_active"))
                     render_settings_detail_popover()
 
     actual_prompt, uploaded_files = normalize_prompt_input(
@@ -1929,7 +1992,7 @@ with st.container(key="page_shell"):
         st.session_state.cancel_requested = False
         st.session_state.messages.append({
             "role": "assistant",
-            "content": "_Recherche abgebrochen._",
+            "content": t("research_cancelled"),
             "stack": st.session_state.active_stack,
         })
         st.session_state.scroll_to_last_user = True
@@ -1967,15 +2030,10 @@ with st.container(key="page_shell"):
                 # widget, so the user can find it without hunting.
                 with st.container(key="stopp_row"):
                     st.button(
-                        "Recherche stoppen",
+                        t("btn_stop"),
                         key="stop_stream_button",
                         icon=":material/stop_circle:",
-                        help=(
-                            "Bricht den laufenden Recherche-Request ab. "
-                            "Der Server erkennt den Disconnect und cancelt "
-                            "den Agent-Run innerhalb weniger hundert "
-                            "Millisekunden."
-                        ),
+                        help=t("btn_stop_help"),
                         on_click=_on_stop_click,
                         type="secondary",
                         use_container_width=True,
@@ -1987,7 +2045,7 @@ with st.container(key="page_shell"):
 
                 if stream_requested:
                     status_ctx = (
-                        st.status("Recherche läuft...", expanded=True)
+                        st.status(t("status_researching"), expanded=True)
                         if include_progress
                         else None
                     )
@@ -2020,7 +2078,7 @@ with st.container(key="page_shell"):
                     try:
                         streamed = st.write_stream(_stream_generator())
                     except Exception as exc:  # noqa: BLE001
-                        error_state["message"] = f"Streaming-Fehler: {exc}"
+                        error_state["message"] = t("error_streaming", error=str(exc))
                         streamed = ""
 
                     if isinstance(streamed, list):
@@ -2031,7 +2089,7 @@ with st.container(key="page_shell"):
                     if status_ctx is not None:
                         if error_state.get("message"):
                             status_ctx.update(
-                                label=f"Fehler: {error_state['message']}",
+                                label=t("status_error_label", message=error_state["message"]),
                                 state="error",
                                 expanded=True,
                             )
@@ -2041,12 +2099,12 @@ with st.container(key="page_shell"):
                             # time. After the rerun the dropdown is re-rendered
                             # from ``message["progress"]`` via render_message.
                             status_ctx.update(
-                                label=f"Rechercheverlauf · {len(progress_log)} Schritt(e)",
+                                label=t("status_progress_label", count=len(progress_log)),
                                 state="complete",
                                 expanded=False,
                             )
                 else:
-                    with st.spinner("Recherche läuft..."):
+                    with st.spinner(t("status_researching")):
                         response = call_chat(
                             wire_messages,
                             stack=stack_name,
@@ -2056,7 +2114,7 @@ with st.container(key="page_shell"):
                         )
                     if "error" in response:
                         error_state["message"] = response["error"].get(
-                            "message", "Unbekannter Fehler"
+                            "message", t("error_unknown")
                         )
                     else:
                         choices = response.get("choices") or []
@@ -2065,7 +2123,7 @@ with st.container(key="page_shell"):
                                 choices[0].get("message", {}).get("content", "")
                             )
                         else:
-                            error_state["message"] = "Antwort enthielt keine 'choices'"
+                            error_state["message"] = t("error_no_choices")
 
                     if full_response:
                         st.markdown(full_response)
@@ -2074,7 +2132,7 @@ with st.container(key="page_shell"):
                 if error_message and not full_response:
                     st.error(error_message)
                 elif error_message and full_response:
-                    st.warning(f"Vorzeitig beendet: {error_message}")
+                    st.warning(t("warn_partial", message=error_message))
 
         if not error_message or full_response:
             st.session_state.messages.append({

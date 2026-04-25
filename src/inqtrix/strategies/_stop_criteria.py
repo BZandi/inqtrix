@@ -7,7 +7,9 @@ import re
 from abc import ABC, abstractmethod
 
 from inqtrix.domains import is_de_policy_question
+from inqtrix.i18n import t
 from inqtrix.settings import AgentSettings
+from inqtrix.state import emit_progress
 from inqtrix.text import is_none_value
 
 log = logging.getLogger("inqtrix")
@@ -28,8 +30,8 @@ class StopCriteriaStrategy(ABC):
       via documented keys (``s["context"]``, ``s["competing_events_*"]``,
       ``s["falsification_active"]``, etc.). Every mutation should be
       mirrored in :data:`~inqtrix.state.AgentState`.
-    - Progress updates flow through :func:`_emit_progress`; never
-      block the queue.
+    - Progress updates flow through :func:`inqtrix.state.emit_progress`;
+      never block the queue.
 
     Implementations may replace the cascade entirely (build their own
     :meth:`should_stop`) or override individual hooks while inheriting
@@ -42,7 +44,7 @@ class StopCriteriaStrategy(ABC):
 
         Args:
             s: Agent state dict. May emit progress messages via
-                :func:`_emit_progress` to surface contradiction hits.
+                :func:`inqtrix.state.emit_progress` to surface contradiction hits.
                 No persistent fields are mutated by the default
                 implementation.
             eval_text: Raw evaluator-model output. Implementations
@@ -249,20 +251,6 @@ class StopCriteriaStrategy(ABC):
         ...
 
 
-def _emit_progress(s: dict, message: str) -> None:
-    """Send a progress update to the stream non-blockingly.
-
-    Args:
-        s: Agent state dict that may contain a ``"progress"`` queue
-            (set by the streaming entry point). Plain library-mode
-            runs leave it ``None`` and the helper short-circuits.
-        message: User-facing German progress string.
-    """
-    q = s.get("progress")
-    if q is not None:
-        q.put(("progress", message))
-
-
 class MultiSignalStopCriteria(StopCriteriaStrategy):
     """Three-phase stop heuristic for the iterative research loop.
 
@@ -338,9 +326,9 @@ class MultiSignalStopCriteria(StopCriteriaStrategy):
             "voellig", "falsch", "inkorrekt", "gegensaetzlich",
         )
         if any(kw in contradiction_text for kw in severe_keywords):
-            _emit_progress(s, "Schwere Widersprueche erkannt \u2014 Confidence stark begrenzt")
+            emit_progress(s, t(s, "contradictions_severe"))
             return min(conf, self._confidence_stop - 2)
-        _emit_progress(s, "Leichte Widersprueche erkannt (z.B. Datumsabweichungen)")
+        emit_progress(s, t(s, "contradictions_light"))
         return min(conf, self._confidence_stop - 1)
 
     # ------------------------------------------------------------------ #
@@ -381,7 +369,7 @@ class MultiSignalStopCriteria(StopCriteriaStrategy):
                 dropped = len(s["context"]) - len(filtered)
                 s["context"] = filtered
                 if dropped:
-                    _emit_progress(s, f"{dropped} irrelevante Quellen gefiltert")
+                    emit_progress(s, t(s, "irrelevant_filtered", n=dropped))
         except (ValueError, TypeError):
             pass
 
@@ -408,7 +396,7 @@ class MultiSignalStopCriteria(StopCriteriaStrategy):
 
         s["competing_events"] = comp_text
         log.info("TRACE evaluate: competing_events='%s'", comp_text[:200])
-        _emit_progress(s, "Mehrere moegliche Erklaerungen erkannt")
+        emit_progress(s, t(s, "multiple_explanations"))
 
         _prev_comp = s.get("prev_competing_events", "")
         _comp_is_new = (not _prev_comp) or (comp_text != _prev_comp)
@@ -539,10 +527,7 @@ class MultiSignalStopCriteria(StopCriteriaStrategy):
                 "(conf=%d >= confidence_stop-2=%d, round=%d)",
                 conf, self._confidence_stop - 2, s["round"],
             )
-            _emit_progress(
-                s,
-                "Confidence wieder hoch \u2014 Falsifikations-Modus deaktiviert",
-            )
+            emit_progress(s, t(s, "falsification_released"))
 
         if (
             s["round"] >= 2
@@ -556,7 +541,7 @@ class MultiSignalStopCriteria(StopCriteriaStrategy):
                 "TRACE evaluate: falsification triggered (prev=%d, curr=%d, round=%d)",
                 prev_conf, conf, s["round"],
             )
-            _emit_progress(s, "Niedrige Evidenz \u2014 starte Falsifikations-Recherche")
+            emit_progress(s, t(s, "falsification_started"))
             return True
         return False
 
@@ -591,11 +576,7 @@ class MultiSignalStopCriteria(StopCriteriaStrategy):
                 "(prev=%d, curr=%d, citations=%d, falsified=%s) -> forcing stop",
                 prev_conf, conf, n_citations, s.get("falsification_triggered", False),
             )
-            _emit_progress(
-                s,
-                "Umfangreiche Recherche abgeschlossen \u2014 "
-                "Praemisse der Frage wahrscheinlich falsch",
-            )
+            emit_progress(s, t(s, "stagnation_premise_false"))
             return self._confidence_stop, True
         return conf, False
 
@@ -681,11 +662,7 @@ class MultiSignalStopCriteria(StopCriteriaStrategy):
                         "(evidence still weak) scores=%s",
                         [round(u, 3) for u in s["utility_scores"][-2:]],
                     )
-                    _emit_progress(
-                        s,
-                        "Informationsgewinn stagniert, aber Evidenzlage "
-                        "noch zu schwach \u2014 suche weiter",
-                    )
+                    emit_progress(s, t(s, "utility_weak_continue"))
                 else:
                     utility_stop = True
                     s["done"] = True
@@ -693,7 +670,7 @@ class MultiSignalStopCriteria(StopCriteriaStrategy):
                         "TRACE evaluate: utility stop triggered (scores=%s)",
                         [round(u, 3) for u in s["utility_scores"][-2:]],
                     )
-                    _emit_progress(s, "Informationsgewinn stagniert \u2014 beende Recherche")
+                    emit_progress(s, t(s, "utility_stop"))
         return utility, utility_stop
 
     # ------------------------------------------------------------------ #
@@ -750,7 +727,7 @@ class MultiSignalStopCriteria(StopCriteriaStrategy):
                 "(conf=%d stable for 2 rounds, round=%d)",
                 conf, s["round"],
             )
-            _emit_progress(s, f"Confidence {conf}/10 stabil \u2014 Recherche abgeschlossen")
+            emit_progress(s, t(s, "plateau_stop", conf=conf))
         elif _competing_active_and_changing and not s["done"]:
             log.info(
                 "TRACE evaluate: plateau stop SUPPRESSED "

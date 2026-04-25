@@ -15,6 +15,7 @@ from typing import Any, AsyncIterator
 from fastapi import Request
 
 from inqtrix.graph import run as agent_run
+from inqtrix.i18n import detect_ui_language, t
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server.session import SessionStore, prospective_session_id
 from inqtrix.settings import AgentSettings
@@ -141,6 +142,15 @@ async def stream_response(
     if cancel_event is None:
         cancel_event = threading.Event()
 
+    # The agent runs in a worker thread, so its mutated state["language"] is
+    # not visible from this generator. Pre-compute a UI-language pseudo-state
+    # for SSE error chunks emitted from this side: prefer a carry-over from
+    # the previous session (follow-up), otherwise fall back to the same
+    # heuristic state.initial_state uses for the first progress event.
+    _prev_lang = (prev_session or {}).get("language")
+    _ui_lang = "de" if _prev_lang == "de" else detect_ui_language(question)
+    ui_state: dict[str, Any] = {"language": _ui_lang}
+
     # OpenAI-compatible first chunk: role announcement
     role_chunk = {
         "id": chat_id,
@@ -195,10 +205,7 @@ async def stream_response(
     while include_progress and progress_queue is not None and not agent_future.done():
         if time.monotonic() >= request_deadline:
             await _shutdown_watcher()
-            yield make_chunk(
-                chat_id,
-                "\n---\n\n⚠️ **Fehler bei der Recherche:** Request-Timeout erreicht",
-            )
+            yield make_chunk(chat_id, t(ui_state, "sse_request_timeout"))
             yield make_chunk(chat_id, "", finish_reason="stop")
             yield "data: [DONE]\n\n"
             return
@@ -244,10 +251,7 @@ async def stream_response(
         answer_text = result["answer"]
     except asyncio.TimeoutError:
         await _shutdown_watcher()
-        yield make_chunk(
-            chat_id,
-            "\n---\n\n⚠️ **Fehler bei der Recherche:** Request-Timeout erreicht",
-        )
+        yield make_chunk(chat_id, t(ui_state, "sse_request_timeout"))
         yield make_chunk(chat_id, "", finish_reason="stop")
         yield "data: [DONE]\n\n"
         return
@@ -256,7 +260,7 @@ async def stream_response(
         log.error("Agent-Fehler: %s", e)
         yield make_chunk(
             chat_id,
-            f"\n---\n\n⚠️ **Fehler bei der Recherche:** {sanitize_error(e)}",
+            t(ui_state, "sse_agent_error", err=sanitize_error(e)),
         )
         yield make_chunk(chat_id, "", finish_reason="stop")
         yield "data: [DONE]\n\n"

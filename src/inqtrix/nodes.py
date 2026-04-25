@@ -20,6 +20,7 @@ from openai import OpenAIError
 
 from inqtrix.domains import LANG_NAMES, LOW_QUALITY_DOMAINS, is_de_policy_question
 from inqtrix.exceptions import AgentRateLimited, AgentTimeout, AnthropicAPIError, BedrockAPIError
+from inqtrix.i18n import MESSAGES, t
 from inqtrix.json_helpers import parse_json_object, parse_json_string_list
 from inqtrix.prompts import (
     EVALUATE_FORMAT_SUFFIX,
@@ -335,9 +336,14 @@ def _compose_answer_sections(
         if limit_hit:
             emit_progress(
                 s,
-                f"Warnung: Abschnitt '{section_spec.heading}' hat Token-Limit "
-                f"erreicht (finish_reason={finish_reason}, request_max_tokens={section_request_max_tokens}, "
-                f"completion_tokens={section_completion_tokens})",
+                t(
+                    s,
+                    "compose_section_token_limit",
+                    heading=section_spec.heading,
+                    finish_reason=finish_reason,
+                    request_max=section_request_max_tokens,
+                    completion=section_completion_tokens,
+                ),
             )
             log.warning(
                 "TRACE section %d/%d '%s': token limit hit "
@@ -355,8 +361,12 @@ def _compose_answer_sections(
         if section_reasons:
             emit_progress(
                 s,
-                f"Warnung: Abschnitt '{section_spec.heading}' zeigt "
-                f"Trunkierungsanzeichen: {', '.join(section_reasons)}",
+                t(
+                    s,
+                    "compose_section_truncation",
+                    heading=section_spec.heading,
+                    reasons=", ".join(section_reasons),
+                ),
             )
             log.warning(
                 "TRACE section %d/%d '%s': truncation signals detected "
@@ -378,8 +388,12 @@ def _compose_answer_sections(
                 consecutive_empty_at_break = consecutive_empty
                 emit_progress(
                     s,
-                    f"Antwort-Synthese abgebrochen: {consecutive_empty} aufeinanderfolgende leere "
-                    f"Sections (zuletzt '{section_spec.heading}')",
+                    t(
+                        s,
+                        "compose_aborted",
+                        n=consecutive_empty,
+                        heading=section_spec.heading,
+                    ),
                 )
                 log.warning(
                     "TRACE compose: aborting after %d consecutive empty sections "
@@ -705,7 +719,7 @@ def classify(
         {'query_type': 'general', 'language': 'de', ...}
     """
     check_cancel_event(s)
-    emit_progress(s, "Analysiere Frage...")
+    emit_progress(s, t(s, "classify_start"))
     _t0 = time.monotonic()
     _followup_seeded = bool(s.get("_is_followup"))
     _classify_fallback: dict[str, Any] = {}
@@ -719,7 +733,7 @@ def classify(
     )
     if callable(_effort_warnings_consumer):
         for _warning in _effort_warnings_consumer() or []:
-            emit_progress(s, f"Hinweis: {_warning}")
+            emit_progress(s, t(s, "classify_warning_hint", warning=_warning))
             log.warning("CONFIG: %s", _warning)
     s["risk_score"] = strategies.risk_scoring.score(s["question"])
     s["high_risk"] = s["risk_score"] >= settings.high_risk_score_threshold
@@ -790,9 +804,13 @@ def classify(
         )
         s["done"] = bool(re.search(r"DECISION:\s*DIRECT", d, re.IGNORECASE))
 
-        # Extract language
+        # Extract language — keep the heuristic seed from initial_state when
+        # the LLM omits the LANGUAGE field, instead of hard-defaulting to "de".
         m_lang = re.search(r"LANGUAGE:\s*(\w+)", d)
-        s["language"] = m_lang.group(1).strip().lower()[:2] if m_lang else "de"
+        if m_lang:
+            s["language"] = m_lang.group(1).strip().lower()[:2]
+        else:
+            s["language"] = s.get("language") or "de"
 
         m_search_lang = re.search(r"SEARCH_LANGUAGE:\s*(\w+)", d)
         s["search_language"] = m_search_lang.group(
@@ -844,7 +862,7 @@ def classify(
 
         if followup_resolution.mode == "deepening":
             log.info("TRACE classify: follow-up detected, keeping seeded research data")
-            emit_progress(s, "Vertiefungsfrage erkannt — nutze bisherige Recherche")
+            emit_progress(s, t(s, "classify_followup_detected"))
             existing = set(s.get("required_aspects", []))
             for asp in new_aspects:
                 if asp not in existing:
@@ -856,7 +874,7 @@ def classify(
         else:
             if followup_resolution.reset_citations:
                 log.info("TRACE classify: new topic detected, clearing seeded data")
-                emit_progress(s, "Neues Thema erkannt — starte frische Recherche")
+                emit_progress(s, t(s, "classify_new_topic"))
                 _reset_seeded_research(s)
             s["required_aspects"] = list(new_aspects)
             s["uncovered_aspects"] = list(new_aspects)
@@ -875,26 +893,24 @@ def classify(
         )
 
         if s["done"]:
-            emit_progress(s, "Direktantwort ohne Websuche")
+            emit_progress(s, t(s, "classify_direct_answer"))
         else:
             hints: list[str] = []
             if s["search_language"] != s["language"]:
-                hints.append(
-                    f"Suche auf {LANG_NAMES.get(s['search_language'], s['search_language'])}")
+                sl = s["search_language"]
+                lang_key = f"lang_name_{sl}"
+                lang_name = t(s, lang_key) if lang_key in MESSAGES else sl
+                hints.append(t(s, "search_in_lang", lang_name=lang_name))
             if s["recency"]:
-                recency_labels = {
-                    "hour": "letzte Stunde",
-                    "day": "heute",
-                    "week": "diese Woche",
-                    "month": "diesen Monat",
-                }
-                hints.append(f"Aktualitaet: {recency_labels.get(s['recency'], s['recency'])}")
+                recency_key = f"recency_{s['recency']}"
+                label = t(s, recency_key) if recency_key in MESSAGES else s["recency"]
+                hints.append(t(s, "recency_label", label=label))
             if s["query_type"] != "general":
-                type_labels = {"academic": "Akademisch", "news": "Nachrichten"}
-                hints.append(type_labels.get(s["query_type"], s["query_type"]))
+                type_key = f"type_{s['query_type']}"
+                hints.append(t(s, type_key) if type_key in MESSAGES else s["query_type"])
 
             hint_str = f" ({', '.join(hints)})" if hints else ""
-            emit_progress(s, f"Websuche erforderlich{hint_str}")
+            emit_progress(s, t(s, "classify_search_required", hints=hint_str))
 
             if len(s["sub_questions"]) > 1:
                 sub_q_display = ", ".join(
@@ -902,8 +918,12 @@ def classify(
                 )
                 emit_progress(
                     s,
-                    f"Frage in {len(s['sub_questions'])} Teilfragen zerlegt: "
-                    f"{sub_q_display}",
+                    t(
+                        s,
+                        "classify_subquestions",
+                        n=len(s["sub_questions"]),
+                        subs=sub_q_display,
+                    ),
                 )
     except AgentRateLimited:
         raise
@@ -916,10 +936,7 @@ def classify(
             "Classify-Fallback aktiviert (%s): %s — nutze deterministische Defaults",
             _exc_label, exc,
         )
-        emit_progress(
-            s,
-            f"Klassifikation fehlgeschlagen ({_exc_label}) — nutze konservative Defaults",
-        )
+        emit_progress(s, t(s, "classify_failed", label=_exc_label))
         s["done"] = False
         s["language"] = s.get("language") or "de"
         s["search_language"] = s.get("search_language") or s["language"]
@@ -998,7 +1015,10 @@ def plan(
         {'queries': ['gkv reform 2026', ...], ...}
     """
     check_cancel_event(s)
-    emit_progress(s, f"Plane Suchanfragen (Runde {s['round'] + 1}/{settings.max_rounds})...")
+    emit_progress(
+        s,
+        t(s, "plan_start", round=s["round"] + 1, max_rounds=settings.max_rounds),
+    )
     _t0 = time.monotonic()
     _plan_fallback: dict[str, Any] = {}
     try:
@@ -1206,10 +1226,7 @@ def plan(
             "Plan-Fallback aktiviert (%s, round=%d): %s — keine LLM-Queries verfuegbar",
             _exc_label, s["round"], exc,
         )
-        emit_progress(
-            s,
-            f"Planung fehlgeschlagen ({_exc_label}) — verwende Original-Frage als Fallback-Query",
-        )
+        emit_progress(s, t(s, "plan_failed", label=_exc_label))
         q = ""
         _plan_fallback = {
             "fallback": "plan_default",
@@ -1279,7 +1296,10 @@ def plan(
         if reformulation_instruction:
             strategies_active.append("Reformulierung")
         strategy_hint = f" ({', '.join(strategies_active)})" if strategies_active else ""
-        emit_progress(s, f"{added} neue Suchanfragen generiert{strategy_hint}")
+        emit_progress(
+            s,
+            t(s, "plan_new_queries", added=added, strategy_hint=strategy_hint),
+        )
 
     log.info(
         "TRACE plan: round=%d new_queries=%s total=%d",
@@ -1288,7 +1308,7 @@ def plan(
 
     # If no new queries: answer directly (prevents infinite loop)
     if added == 0:
-        emit_progress(s, "Keine neuen Suchanfragen moeglich \u2014 beende Recherche")
+        emit_progress(s, t(s, "plan_no_more_queries"))
         log.info("Keine neuen Suchqueries generiert, beende Recherche")
         s["done"] = True
 
@@ -1355,7 +1375,13 @@ def search(
     s["search_offset"] = offset + len(new_q)
     emit_progress(
         s,
-        f"Durchsuche {len(new_q)} Quellen (Runde {s['round'] + 1}/{settings.max_rounds})...",
+        t(
+            s,
+            "search_start",
+            n=len(new_q),
+            round=s["round"] + 1,
+            max_rounds=settings.max_rounds,
+        ),
     )
 
     if not new_q:
@@ -1499,14 +1525,22 @@ def search(
     if _search_fallbacks:
         emit_progress(
             s,
-            f"{_search_fallbacks} von {len(new_q)} Suchanfragen fehlgeschlagen "
-            f"(leere Ergebnisse zurueckgegeben)",
+            t(
+                s,
+                "search_failed_n_of_m",
+                failed=_search_fallbacks,
+                total=len(new_q),
+            ),
         )
     if _empty_without_notice:
         emit_progress(
             s,
-            f"{_empty_without_notice} von {len(new_q)} Suchanfragen lieferten "
-            f"keine Ergebnisse",
+            t(
+                s,
+                "search_empty_n_of_m",
+                empty=_empty_without_notice,
+                total=len(new_q),
+            ),
         )
 
     # Aggregate token usage from Sonar searches
@@ -1555,8 +1589,12 @@ def search(
     if _summarize_fallbacks:
         emit_progress(
             s,
-            f"{_summarize_fallbacks} von {len(_summarize_inputs)} Zusammenfassungen "
-            f"fehlgeschlagen (Rohtext verwendet)",
+            t(
+                s,
+                "summarize_failed",
+                failed=_summarize_fallbacks,
+                total=len(_summarize_inputs),
+            ),
         )
 
     # Aggregate summarize tokens
@@ -1602,8 +1640,12 @@ def search(
     if _claim_fallbacks:
         emit_progress(
             s,
-            f"{_claim_fallbacks} von {len(_claim_inputs)} Claim-Extraktionen fehlgeschlagen "
-            f"(uebersprungen)",
+            t(
+                s,
+                "claim_extract_failed",
+                failed=_claim_fallbacks,
+                total=len(_claim_inputs),
+            ),
         )
 
     _claim_prompt_tokens = 0
@@ -1701,12 +1743,19 @@ def search(
                 s["related_questions"].append(rq)
 
     emit_progress(
-        s, f"{sources_found} Quellen verarbeitet, {len(s['all_citations'])} Referenzen gesammelt")
+        s,
+        t(
+            s,
+            "search_sources_processed",
+            n=sources_found,
+            citations=len(s["all_citations"]),
+        ),
+    )
 
     if s["round"] == 0 and s["related_questions"]:
         emit_progress(
             s,
-            f"{len(s['related_questions'])} verwandte Fragen aus Suchergebnissen erkannt",
+            t(s, "search_related_questions", n=len(s["related_questions"])),
         )
 
     # Update source quality and aspect coverage
@@ -1759,8 +1808,13 @@ def search(
 
     emit_progress(
         s,
-        f"Quellenqualitaet {quality_score:.2f}, Claim-Qualitaet {claim_quality:.2f}, "
-        f"Aspektabdeckung {int(coverage * 100)}%",
+        t(
+            s,
+            "search_quality_summary",
+            quality=quality_score,
+            claim_quality=claim_quality,
+            coverage=int(coverage * 100),
+        ),
     )
 
     # Aggregate token usage from Sonar + Summarize + Claim extraction
@@ -1948,7 +2002,7 @@ def evaluate(
     check_cancel_event(s)
     emit_progress(
         s,
-        f"Bewerte Informationsqualitaet (nach Runde {s['round']}/{settings.max_rounds})...",
+        t(s, "evaluate_start", round=s["round"], max_rounds=settings.max_rounds),
     )
     _t0 = time.monotonic()
     _stagnation_detected = False
@@ -2112,10 +2166,7 @@ def evaluate(
                 "(round=%d, model=%s) -> Default 5",
                 s["round"], evaluate_model,
             )
-            emit_progress(
-                s,
-                "Bewertung unvollstaendig (CONFIDENCE-Feld fehlt) — nutze Default 5",
-            )
+            emit_progress(s, t(s, "evaluate_confidence_missing"))
 
         m_gaps = re.search(r"GAPS:\s*(.+?)(?:\n|$)", a)
         gaps = m_gaps.group(1).strip() if m_gaps else ""
@@ -2136,10 +2187,7 @@ def evaluate(
             "Evaluate-Fallback aktiviert (%s, round=%d, model=%s): %s",
             _exc_label, s["round"], evaluate_model, exc,
         )
-        emit_progress(
-            s,
-            f"Qualitaetsbewertung fehlgeschlagen ({_exc_label}) — konservative Confidence-Begrenzung",
-        )
+        emit_progress(s, t(s, "evaluate_failed", label=_exc_label))
         conf = min(max(s.get("final_confidence", 0), 5), settings.confidence_stop - 2)
         _confidence_parsed = False
         if not s.get("gaps"):
@@ -2212,9 +2260,11 @@ def evaluate(
     if s["done"] or conf >= settings.confidence_stop or s["round"] >= settings.max_rounds:
         s["done"] = True
         emit_progress(
-            s, f"Recherche abgeschlossen (Confidence: {conf}/10, Runden: {s['round']})")
+            s,
+            t(s, "research_finished", conf=conf, round=s["round"]),
+        )
     else:
-        emit_progress(s, f"Confidence {conf}/10 — weitere Recherche noetig")
+        emit_progress(s, t(s, "confidence_continue", conf=conf))
 
     # min_rounds enforcement: if any earlier stop heuristic flipped done=True
     # but the configured min_rounds floor is not reached yet AND we are still
@@ -2235,8 +2285,12 @@ def evaluate(
         )
         emit_progress(
             s,
-            f"min_rounds={_min_rounds} noch nicht erreicht (aktuell {s['round']}); "
-            f"setze Recherche fort",
+            t(
+                s,
+                "min_rounds_continue",
+                min_rounds=_min_rounds,
+                round=s["round"],
+            ),
         )
         s["done"] = False
 
@@ -2323,8 +2377,14 @@ def answer(
     """
     check_cancel_event(s)
     n_rounds = s.get("round", 0)
-    round_label = "Runde" if n_rounds == 1 else "Runden"
-    emit_progress(s, f"Formuliere Antwort (nach {n_rounds} {round_label})...")
+    round_label = t(
+        s,
+        "answer_round_singular" if n_rounds == 1 else "answer_round_plural",
+    )
+    emit_progress(
+        s,
+        t(s, "answer_start", n=n_rounds, round_label=round_label),
+    )
     _t0 = time.monotonic()
     tuning = settings.report_tuning
     ctx = "\n\n---\n\n".join(s["context"]) if s["context"] else ""
@@ -2433,7 +2493,9 @@ def answer(
             try:
                 fallback_attempted = True
                 emit_progress(
-                    s, f"Finale Antwort fehlgeschlagen — Fallback-Modell {fallback_model}")
+                    s,
+                    t(s, "answer_fallback_model", model=fallback_model),
+                )
                 composition_result = _compose_answer_sections(
                     s,
                     providers=providers,
@@ -2471,7 +2533,7 @@ def answer(
     s["answer_incomplete"] = bool(incomplete_reasons)
     s["answer_incomplete_reasons"] = list(incomplete_reasons)
     if incomplete_reasons:
-        emit_progress(s, "Finale Antwort als unvollstaendig erkannt")
+        emit_progress(s, t(s, "answer_incomplete_detected"))
         log.warning(
             "TRACE answer: incomplete answer detected (finish_reason=%s, reasons=%s)",
             finish_reason or "unknown",
@@ -2492,7 +2554,7 @@ def answer(
             s["answer"], allowed_citation_urls)
         if removed_link_count:
             log.info("TRACE answer: removed %d non-allowed links", removed_link_count)
-            emit_progress(s, f"{removed_link_count} nicht-zugelassene Links entfernt")
+            emit_progress(s, t(s, "answer_links_removed", n=removed_link_count))
         allowed_link_count = count_allowed_links(s["answer"], allowed_citation_urls)
 
     if incomplete_reasons:

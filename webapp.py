@@ -1635,6 +1635,20 @@ if "cancel_requested" not in st.session_state:
 if "ui_language" not in st.session_state:
     st.session_state.ui_language = "de"
 
+# Bearer token for the inqtrix server. Pre-filled from INQTRIX_WEBAPP_API_KEY
+# (.env / shell), but always editable in the UI when the server reports
+# auth_required=True. Empty string = no token sent.
+#
+# Two keys on purpose: ``api_token`` is the persistent value that survives
+# popover close / rerun, while ``api_token_input`` is the widget key. The
+# st.text_input in the Modell popover writes through to ``api_token`` via
+# its on_change callback so the value isn't dropped when the widget
+# unmounts (Streamlit clears widget state when the widget is no longer
+# rendered, which would otherwise wipe the token every time the popover
+# closes).
+if "api_token" not in st.session_state:
+    st.session_state.api_token = API_KEY or ""
+
 
 # ---------------------------------------------------------------------------
 # Sidebar (Minimalist)
@@ -1651,7 +1665,14 @@ with st.sidebar:
     }.get(health_status, ("⚪", health_status))
     st.caption(f"{health_indicator[0]} {health_indicator[1]}")
     st.caption(f"URL: `{SERVER_BASE_URL}`")
-    st.caption(t("auth_set") if API_KEY else t("auth_none"))
+    auth_required = bool(health.get("auth_required"))
+    has_token = bool(st.session_state.get("api_token"))
+    if auth_required and not has_token:
+        st.caption(t("auth_required_missing"))
+    elif has_token:
+        st.caption(t("auth_set"))
+    else:
+        st.caption(t("auth_none"))
     if st.button(t("btn_refresh"), key="refresh_discovery", icon=":material/refresh:"):
         load_stacks.clear()
         load_health.clear()
@@ -1917,6 +1938,32 @@ with st.container(key="page_shell"):
                             st.caption(" · ".join(chip_parts))
                     else:
                         st.warning(t("warn_no_stack"))
+                    # Bearer-token field appears only when the server actively
+                    # gates requests behind an API key (signaled by /health's
+                    # auth_required flag). Pre-filled from INQTRIX_WEBAPP_API_KEY
+                    # when the env var was set at startup; otherwise empty and
+                    # the user pastes it in here.
+                    if health.get("auth_required"):
+                        st.divider()
+                        st.caption(t("label_token"))
+                        # Keyless text_input: Streamlit garbage-collects widget
+                        # state when the widget is no longer rendered (e.g. on
+                        # popover close). By passing ``value=`` and capturing
+                        # the return into our own persistent key we avoid that
+                        # gotcha entirely.
+                        _typed_token = st.text_input(
+                            t("label_token"),
+                            value=st.session_state.api_token,
+                            type="password",
+                            placeholder=t("token_placeholder"),
+                            help=t("token_help"),
+                            label_visibility="collapsed",
+                        )
+                        if _typed_token != st.session_state.api_token:
+                            st.session_state.api_token = _typed_token
+                            st.rerun()
+                        if not st.session_state.api_token:
+                            st.warning(t("token_missing_warning"), icon=":material/key:")
                 with st.popover(
                     f":material/tune: {t('popover_effort')}",
                     help=t("popover_effort_help"),
@@ -2070,7 +2117,7 @@ with st.container(key="page_shell"):
                             stack=stack_name,
                             agent_overrides=overrides,
                             include_progress=include_progress,
-                            api_key=API_KEY,
+                            api_key=(st.session_state.get("api_token") or None),
                             base_url=SERVER_BASE_URL,
                         ):
                             if kind == "progress":
@@ -2119,7 +2166,7 @@ with st.container(key="page_shell"):
                             wire_messages,
                             stack=stack_name,
                             agent_overrides=overrides,
-                            api_key=API_KEY,
+                            api_key=(st.session_state.get("api_token") or None),
                             base_url=SERVER_BASE_URL,
                         )
                     if "error" in response:

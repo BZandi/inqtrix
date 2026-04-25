@@ -242,6 +242,7 @@ def register_routes(
             "high_risk_score_threshold": settings.agent.high_risk_score_threshold,
             "high_risk_classify_escalate": settings.agent.high_risk_classify_escalate,
             "high_risk_evaluate_escalate": settings.agent.high_risk_evaluate_escalate,
+            "auth_required": api_key_dependency is not None,
         }
         if status_code == 200:
             return {

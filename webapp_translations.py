@@ -23,7 +23,33 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
     "health_unreachable": {"de": "nicht erreichbar", "en": "unreachable"},
     "auth_set":           {"de": "Auth: Bearer gesetzt", "en": "Auth: Bearer set"},
     "auth_none":          {"de": "Auth: keine",     "en": "Auth: none"},
+    "auth_required_missing": {
+        "de": "Auth: Token erforderlich (im Modell-Popover eintragen)",
+        "en": "Auth: token required (set it in the model popover)",
+    },
     "btn_refresh":        {"de": "Aktualisieren",   "en": "Refresh"},
+
+    # --- API token field (visible inside the Modell popover when the
+    # server reports auth_required=true on /health) ---
+    "label_token":        {"de": "API-Token",       "en": "API token"},
+    "token_placeholder":  {"de": "Bearer-Token einfügen…", "en": "Paste bearer token…"},
+    "token_help": {
+        "de": (
+            "Wird als `Authorization: Bearer …` an den Server gesendet. "
+            "Vorbelegt aus `INQTRIX_WEBAPP_API_KEY`, sofern gesetzt — "
+            "ansonsten hier manuell eintragen. Nur in der Browser-Sitzung "
+            "gespeichert."
+        ),
+        "en": (
+            "Sent as `Authorization: Bearer …` to the server. Pre-filled "
+            "from `INQTRIX_WEBAPP_API_KEY` when that env var is set, "
+            "otherwise paste it here. Stored only in the browser session."
+        ),
+    },
+    "token_missing_warning": {
+        "de": "Server verlangt Authentifizierung — bitte Token eintragen.",
+        "en": "Server requires authentication — please enter a token.",
+    },
 
     # --- Sidebar: Einstellungen ---
     "sidebar_settings":   {"de": "### Einstellungen", "en": "### Settings"},

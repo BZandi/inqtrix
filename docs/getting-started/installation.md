@@ -50,7 +50,7 @@ This is the fastest offline regression check after cloning. It runs the local `p
 uv run pytest tests/ -v
 ```
 
-You should see 800+ tests pass.
+Use `uv run pytest tests/ --collect-only -q` when you need the exact current count; the suite grows as provider and server coverage expands.
 
 ## Consumer-style install (non-editable)
 

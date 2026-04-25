@@ -51,7 +51,7 @@ The invariant across all of them: a partial result is always returned to the cal
 Two provider clients implement their own retry loops on top of the deadline model:
 
 - `AnthropicLLM` — up to 5 attempts with exponential backoff and jitter on 5xx and 529 (overloaded). Rate-limit responses raise `AgentRateLimited` directly.
-- `BedrockLLM` — up to 5 attempts on `ThrottlingException`; after the last attempt the error is translated to `AgentRateLimited` (see Gotcha #10 in the internal notes).
+- `BedrockLLM` — up to 5 attempts on `ThrottlingException`; after the last attempt the error is translated to `AgentRateLimited`.
 
 The OpenAI SDK drives retries for `LiteLLM`, `AzureOpenAILLM`, `AzureOpenAIWebSearch`, `AzureFoundryWebSearch`, and `AzureFoundryBingSearch`. Replay tests disable the retry loop to keep cassettes compact; production callers leave the default intact.
 

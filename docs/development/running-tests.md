@@ -10,7 +10,7 @@ Testing in this repository has four layers. They serve different purposes and sh
 
 | Layer | Command | Real provider calls | What it covers | Prerequisites |
 |-------|---------|---------------------|----------------|---------------|
-| Automated local test suite | `uv run pytest tests/ -v` | No | Unit tests, replay tests, streaming, config, session, provider normalisation. Currently 800+ tests. | Editable install with dev extras. |
+| Automated local test suite | `uv run pytest tests/ -v` | No | Unit tests, replay tests, streaming, config, session, provider normalisation. Use collect-only for the current count. | Editable install with dev extras. |
 | Replay-only | `uv run pytest tests/replay/ -v` | No | Provider replay with VCR cassettes and `botocore.Stubber`. Offline. | Editable install with dev extras. |
 | Parity asset validation | `inqtrix-parity contract` | No | Canonical question set and local parity asset structure under `tests/integration/`. | Editable install. |
 | Local parity run against the HTTP test endpoint | `inqtrix-parity run --endpoint http://127.0.0.1:5100` | Yes | Runs canonical questions against a running server via `/v1/test/run`. | Running server, valid provider config, `TESTING_MODE=true`. |
@@ -33,8 +33,8 @@ uv run pytest tests/test_claims.py -k "test_name" -v
 # Replay tests only
 uv run pytest tests/replay/ -v
 
-# Skip slow integration smoke tests
-uv run pytest tests/ -m "not integration" -v
+# Current test count without running the suite
+uv run pytest tests/ --collect-only -q
 ```
 
 ## Recording a replay cassette
@@ -86,9 +86,9 @@ Running an example script is not part of the automated suite; it performs real e
 
 The suite does **not** guarantee that every documented provider combination has been exercised against the real external service. That gap is exactly why the repo is marked experimental in the root `README.md`.
 
-## Known test-order pollution
+## Test count
 
-Two caplog-based tests (`test_..._effort_config_warnings_emitted_for_haiku_role`) fail when the full suite runs because logger-configuration tests mutate global state. Running those two tests in isolation shows them green. See [Troubleshooting](../reference/troubleshooting.md) and Gotcha #1 in the internal notes.
+Avoid pinning docs to a stale exact count. At the time of the 2026-04-25 docs refresh, `uv run pytest tests/ --collect-only -q` collected 951 tests. Treat the command output as authoritative for the current checkout.
 
 ## Related docs
 

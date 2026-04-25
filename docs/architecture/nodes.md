@@ -171,6 +171,8 @@ flowchart TD
 | `search_mode` | `"academic"` if applicable | For scholarly sources |
 | `return_related` | `True` on round 0 | Seeds future queries |
 
+Before dispatch, the search node filters these hints through the active provider's capability metadata. Providers may expose either `supported_search_parameters` or `search_capabilities`; unsupported hints are omitted instead of being sent to a backend that cannot express them. The iteration log records the resolved `supported_parameters` list for each run.
+
 ### Domain filter logic
 
 - Query contains `site:domain` → allowlist only that domain.

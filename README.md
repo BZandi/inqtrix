@@ -46,7 +46,7 @@ flowchart LR
 
 
 
-Full technical reference: [docs/architecture/overview.md](docs/architecture/overview.md) and [docs/architecture/graph-topology.md](docs/architecture/graph-topology.md).
+Start with the [documentation hub](docs/README.md) for task-oriented navigation. Full technical reference: [docs/architecture/overview.md](docs/architecture/overview.md) and [docs/architecture/graph-topology.md](docs/architecture/graph-topology.md).
 
 ## Quick start
 
@@ -106,7 +106,7 @@ pytest tests/ -v
 
 More entry paths (explicit providers, YAML routing, streaming, HTTP): [Library mode](docs/deployment/library-mode.md), [Web server mode](docs/deployment/webserver-mode.md).
 
-Ready-made examples (no `main.py` required): [examples/quickstart/basic_env.py](examples/quickstart/basic_env.py), [examples/quickstart/yaml_config.py](examples/quickstart/yaml_config.py), [examples/quickstart/streaming.py](examples/quickstart/streaming.py).
+Ready-made examples (no `main.py` required): [examples/README.md](examples/README.md).
 
 **HTTP server (OpenAI-compatible API)** — after `.env` is configured, start the default FastAPI app (port **5100** by default, override with `INQTRIX_SERVER_PORT`):
 
@@ -122,9 +122,11 @@ The bundled [`webapp.py`](webapp.py) is a production-shaped Streamlit
 frontend for the HTTP server. It discovers the available stacks via
 `GET /v1/stacks`, streams answers plus progress events over SSE, and
 exposes the whitelisted per-request `agent_overrides` (`report_profile`,
-`max_rounds`/`min_rounds` via the "Aufwand"-Radio, `confidence_stop`,
-`max_total_seconds`, `first_round_queries`) through the composer menus
-underneath the chat input.
+`max_rounds`/`min_rounds` via the effort selector, `confidence_stop`,
+`max_total_seconds`, `first_round_queries`, `enable_de_policy_bias`, and
+`skip_search` when web search is disabled) through the composer menus
+underneath the chat input. See [Streamlit UI](docs/deployment/streamlit-ui.md)
+for the full mapping.
 
 ```bash
 # Terminal 1 — multi-stack HTTP server (single-stack examples work too)
@@ -161,79 +163,24 @@ consumer and deliberately does not import the `inqtrix` package.
 | AzureOpenAILLM             | AzureOpenAIWebSearch   | [examples/provider_stacks/azure_openai_web_search.py](examples/provider_stacks/azure_openai_web_search.py) / [examples/webserver_stacks/azure_openai_web_search.py](examples/webserver_stacks/azure_openai_web_search.py)     |
 | AzureOpenAILLM             | AzureFoundryBingSearch | [examples/provider_stacks/azure_openai_bing.py](examples/provider_stacks/azure_openai_bing.py) / [examples/webserver_stacks/azure_openai_bing.py](examples/webserver_stacks/azure_openai_bing.py)                             |
 | AzureOpenAILLM             | AzureFoundryWebSearch  | [examples/provider_stacks/azure_foundry_web_search.py](examples/provider_stacks/azure_foundry_web_search.py) / [examples/webserver_stacks/azure_foundry_web_search.py](examples/webserver_stacks/azure_foundry_web_search.py) |
+| Any LLM                    | BraveSearch            | [examples/custom_providers/brave_search.py](examples/custom_providers/brave_search.py), [examples/custom_providers/anthropic_and_brave.py](examples/custom_providers/anthropic_and_brave.py)                                  |
 | Multi-stack in one process | —                      | [examples/webserver_stacks/multi_stack.py](examples/webserver_stacks/multi_stack.py)                                                                                                                                            |
 
 
-All stacks share the same provider construction byte-for-byte between `provider_stacks/` and `webserver_stacks/` — library vs HTTP is the only difference.
+The provider-stack examples share the same provider construction byte-for-byte between `provider_stacks/` and `webserver_stacks/` — library vs HTTP is the only difference. Custom-provider examples show the same constructor-first pattern for ad-hoc combinations.
 
 ## Documentation
 
-### Onboarding (first-time setup)
+The full navigation lives in the [documentation hub](docs/README.md). Common entry points:
 
-- [docs/getting-started/overview.md](docs/getting-started/overview.md)
-- [docs/getting-started/installation.md](docs/getting-started/installation.md)
-- [docs/getting-started/first-research-run.md](docs/getting-started/first-research-run.md)
-
-### Architecture (understanding the agent loop)
-
-- [docs/architecture/overview.md](docs/architecture/overview.md)
-- [docs/architecture/nodes.md](docs/architecture/nodes.md)
-- [docs/architecture/state-and-iteration.md](docs/architecture/state-and-iteration.md)
-- [docs/architecture/strategies.md](docs/architecture/strategies.md)
-
-### Providers (picking a backend, custom adapter)
-
-- [docs/providers/overview.md](docs/providers/overview.md) (index to per-provider guides—one page per integrated backend, with multiple pages where Azure has distinct integrations)
-
-### Configuration (env, YAML, report profiles)
-
-- [docs/configuration/agent-config.md](docs/configuration/agent-config.md)
-- [docs/configuration/settings-and-env.md](docs/configuration/settings-and-env.md)
-- [docs/configuration/inqtrix-yaml.md](docs/configuration/inqtrix-yaml.md)
-- [docs/configuration/report-profiles.md](docs/configuration/report-profiles.md)
-
-### Scoring and stopping (why runs stop)
-
-- [docs/scoring-and-stopping/stop-criteria.md](docs/scoring-and-stopping/stop-criteria.md)
-- [docs/scoring-and-stopping/source-tiering.md](docs/scoring-and-stopping/source-tiering.md)
-- [docs/scoring-and-stopping/claims.md](docs/scoring-and-stopping/claims.md)
-- [docs/scoring-and-stopping/aspect-coverage.md](docs/scoring-and-stopping/aspect-coverage.md)
-- [docs/scoring-and-stopping/confidence.md](docs/scoring-and-stopping/confidence.md)
-- [docs/scoring-and-stopping/falsification.md](docs/scoring-and-stopping/falsification.md)
-
-### Observability (logs, cancel, debugging)
-
-- [docs/observability/logging.md](docs/observability/logging.md)
-- [docs/observability/progress-events.md](docs/observability/progress-events.md)
-- [docs/observability/iteration-log.md](docs/observability/iteration-log.md)
-- [docs/observability/timeouts-and-errors.md](docs/observability/timeouts-and-errors.md)
-- [docs/observability/debugging-runs.md](docs/observability/debugging-runs.md)
-
-### Deployment (prod, Azure auth, TLS, API key, CORS)
-
-- [docs/deployment/library-mode.md](docs/deployment/library-mode.md)
-- [docs/deployment/webserver-mode.md](docs/deployment/webserver-mode.md)
-- [docs/deployment/enterprise-azure.md](docs/deployment/enterprise-azure.md)
-- [docs/deployment/security-hardening.md](docs/deployment/security-hardening.md)
-
-### Development (contributing, tests, release)
-
-- [docs/development/contributing.md](docs/development/contributing.md)
-- [docs/development/coding-standards.md](docs/development/coding-standards.md)
-- [docs/development/testing-strategy.md](docs/development/testing-strategy.md)
-- [docs/development/running-tests.md](docs/development/running-tests.md)
-- [docs/development/parity-tooling.md](docs/development/parity-tooling.md)
-- [docs/development/docs-maintenance.md](docs/development/docs-maintenance.md)
-- [docs/development/release-process.md](docs/development/release-process.md)
-
-### Reference (terminology, FAQ, worked example, related work)
-
-- [docs/reference/glossary.md](docs/reference/glossary.md)
-- [docs/reference/faq.md](docs/reference/faq.md)
-- [docs/reference/troubleshooting.md](docs/reference/troubleshooting.md)
-- [docs/reference/worked-example.md](docs/reference/worked-example.md)
-- [docs/reference/research-foundations.md](docs/reference/research-foundations.md)
-- [docs/reference/changelog.md](docs/reference/changelog.md)
+| Need | Start here |
+|------|------------|
+| First setup and first live run | [Installation](docs/getting-started/installation.md), [First research run](docs/getting-started/first-research-run.md) |
+| Runnable examples | [Examples index](examples/README.md) |
+| Library integration | [Library mode](docs/deployment/library-mode.md), [Agent config](docs/configuration/agent-config.md) |
+| HTTP server and Streamlit UI | [Web server mode](docs/deployment/webserver-mode.md), [Streamlit UI](docs/deployment/streamlit-ui.md) |
+| Provider selection and custom adapters | [Providers overview](docs/providers/overview.md), [Writing a custom provider](docs/providers/writing-a-custom-provider.md) |
+| Logs, debugging, and test workflows | [Debugging runs](docs/observability/debugging-runs.md), [Troubleshooting](docs/reference/troubleshooting.md), [Running tests](docs/development/running-tests.md) |
 
 ## Where to go next
 

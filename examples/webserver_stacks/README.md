@@ -278,6 +278,8 @@ The JSON body of `/v1/chat/completions` accepts an optional
 | `max_total_seconds` | 30–1800 | Wall-clock deadline per run |
 | `first_round_queries` | 1–20 | Round-0 query breadth |
 | `max_context` | 1–50 | Max context blocks retained between rounds |
+| `skip_search` | boolean | Direct-chat mode: bypass plan/search/evaluate, return an uncited LLM answer with `round=0`. |
+| `enable_de_policy_bias` | boolean | Toggle German health- and social-policy heuristics for this request. |
 
 Adding a new field is a one-line change to `AgentOverridesRequest`
 (`src/inqtrix/server/overrides.py`) plus a single test. The full
@@ -328,7 +330,7 @@ Scaling notes:
 - **Foundry token caveat**: `AzureFoundryBingSearch` and `AzureFoundryWebSearch` mint their bearer in the constructor (~60–75 min lifetime, auto-refresh through `azure.identity`). Edge case: within the last 10 s before expiry the cache may hand out a stale token and the next call sees a transient 401 — restart the process to mitigate. Multi-key rotation and a refresh endpoint are explicitly out of scope.
 - **Graceful shutdown**: The ASGI `lifespan` handler emits an `Inqtrix server stopping` log line on stop. Uvicorn drains in-flight streams on `SIGTERM`; `--timeout-graceful-shutdown` controls how long uvicorn waits for in-flight responses.
 - **Health probe**: `GET /health` calls `is_available()` on both providers and returns `200` (all ready) or `503` (degraded). Suitable for a Kubernetes liveness probe; splitting liveness from readiness is a follow-up task.
-- **Multi-stack discovery cache**: `GET /v1/stacks` caches its rendered payload for ~5 seconds before re-probing each stack's `is_available()`. A Streamlit poll loop calling the endpoint every second therefore triggers at most one provider-readiness probe per 5 s — see ADR-MS-3.
+- **Multi-stack discovery cache**: `GET /v1/stacks` caches its rendered payload for ~5 seconds before re-probing each stack's `is_available()`. A Streamlit poll loop calling the endpoint every second therefore triggers at most one provider-readiness probe per 5 s.
 - **Per-stack strategy defaults**: When a `StackBundle` is registered without an explicit `strategies=...`, `create_multi_stack_app` derives them from `bundle.providers.llm` via `create_default_strategies(...)`. Per-stack `agent_settings` (when supplied) override the global `settings.agent` for requests routed to that stack, but per-request `agent_overrides` always win on top.
 - **Cancel on disconnect**: Both factories install the SSE-disconnect probe described in [Cancel on disconnect](#cancel-on-disconnect). Token spend is bounded by the in-flight provider call when the client goes away.
 
@@ -482,10 +484,9 @@ streaming run when the client disconnects (browser tab closed,
 Streamlit "Stop" pressed and SSE connection torn down). Detection
 runs in a dedicated background watcher task that blocks on
 `await request.receive()` and acts on the first `http.disconnect`
-ASGI message — see ADR-WS-11 for why polling
-`request.is_disconnected()` was insufficient (live test 2026-04-19
-showed a 138s deep run completing despite a 3s `curl --max-time`
-abort under the polling implementation).
+ASGI message. Polling `request.is_disconnected()` was insufficient:
+a live test in 2026-04 showed a deep run completing despite a short
+`curl --max-time` abort under the polling implementation.
 
 The cancel takes effect at LangGraph node boundaries — a probe at
 the entry of `classify`, `plan`, `search`, `evaluate` and `answer`
@@ -506,7 +507,7 @@ What this means in practice:
 
 If you need true sub-second cancellation (interrupt provider calls
 mid-flight, expose an explicit `/v1/runs/<id>/cancel` endpoint),
-that is a separate follow-up task with its own ADR.
+that is a separate follow-up task.
 
 ## Search engine identifier in /health and /v1/stacks
 
@@ -529,7 +530,7 @@ property makes this identifier provider-controlled instead of
 heuristic-guessed; previously the multi-stack discovery showed the
 global `Settings.models.search_model` LiteLLM default
 (`perplexity-sonar-pro-agent`) on Azure-only stacks, which was
-operator-feindlich misleading. See ADR-WS-12.
+misleading for operators.
 
 ## Test coverage
 
@@ -539,8 +540,8 @@ The test-suite block for this family:
 - [`tests/test_server_overrides.py`](../../tests/test_server_overrides.py) — 16 tests for the per-request override logic.
 - [`tests/test_server_security.py`](../../tests/test_server_security.py) — 17 tests for the TLS resolver, API-key dependency and CORS middleware.
 - [`tests/test_server_multi_stack.py`](../../tests/test_server_multi_stack.py) — 12 tests for `StackBundle`, `create_multi_stack_app`, discovery and per-stack routing.
-- [`tests/test_server_cancel_on_disconnect.py`](../../tests/test_server_cancel_on_disconnect.py) — 13 tests for `AgentCancelled`, node-boundary probes, the SSE disconnect watcher task (ADR-WS-11) and its cleanup on normal completion.
-- [`tests/test_search_provider_metadata.py`](../../tests/test_search_provider_metadata.py) — 9 tests pinning the `SearchProvider.search_model` property for every in-tree provider (ADR-WS-12).
+- [`tests/test_server_cancel_on_disconnect.py`](../../tests/test_server_cancel_on_disconnect.py) — 13 tests for `AgentCancelled`, node-boundary probes, the SSE disconnect watcher task and its cleanup on normal completion.
+- [`tests/test_search_provider_metadata.py`](../../tests/test_search_provider_metadata.py) — 9 tests pinning the `SearchProvider.search_model` property for every in-tree provider.
 - Extended [`tests/test_routes.py`](../../tests/test_routes.py) — 2 additional tests covering provider injection and lifespan logging.
 - Extended [`tests/test_session.py`](../../tests/test_session.py) — 2 additional tests for the stack-aware session-id hash.
 

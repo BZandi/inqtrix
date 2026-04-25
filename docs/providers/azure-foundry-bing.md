@@ -76,7 +76,7 @@ Returns `f"foundry-bing:{name_or_id}@{version_or_latest}"` so operators see the 
 
 ## Token lifetime
 
-Foundry bearer tokens have a cached lifetime of approximately 60–75 minutes. Long-running servers will see occasional transient 401s when a nearly expired token is handed out for a long request (see Gotcha #17 in the internal notes); the simplest mitigation is to accept the transient failure and rely on the next request to refresh. See [Enterprise Azure](../deployment/enterprise-azure.md) for container-restart guidance.
+Foundry bearer tokens have a cached lifetime of approximately 60–75 minutes. Long-running servers will see occasional transient 401s when a nearly expired token is handed out for a long request; the simplest mitigation is to accept the transient failure and rely on the next request to refresh. See [Enterprise Azure](../deployment/enterprise-azure.md) for container-restart guidance.
 
 ## Response shape
 

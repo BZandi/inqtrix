@@ -31,7 +31,7 @@ Optional server bind:
 - ``INQTRIX_SERVER_HOST`` (default ``0.0.0.0``)
 - ``INQTRIX_SERVER_PORT`` (default ``5100``)
 
-Optional security (off-by-default, ADR-WS-7):
+Optional security (off-by-default):
 - ``INQTRIX_SERVER_TLS_KEYFILE`` + ``INQTRIX_SERVER_TLS_CERTFILE``  — HTTPS via uvicorn
 - ``INQTRIX_SERVER_API_KEY``          — Bearer-API-key gate on /v1/chat/completions
 - ``INQTRIX_SERVER_CORS_ORIGINS``     — comma-separated CORS whitelist

@@ -49,7 +49,7 @@ class StrategyContext:
     stop_criteria: StopCriteriaStrategy
 ```
 
-Created via `create_default_strategies(llm, settings)` or composed manually and passed into `AgentConfig`. The default factory uses `resolve_summarize_model(llm, fallback=...)` to read the summarize model constructor-first (see ADR-WS-8).
+Created via `create_default_strategies(llm, settings)` or composed manually and passed into `AgentConfig`. The default factory uses `resolve_summarize_model(llm, fallback=...)` to read the summarize model constructor-first instead of falling back to global `Settings` model defaults.
 
 ## Writing a custom strategy
 

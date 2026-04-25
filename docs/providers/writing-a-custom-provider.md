@@ -51,6 +51,32 @@ agent = ResearchAgent(AgentConfig(search=BingSearch(api_key="...")))
 
 Inqtrix passes the hints as keyword arguments but does not require every backend to honour them. `query` is the only required input; `recency_filter`, `language_filter`, `domain_filter`, `search_mode`, `return_related` are best-effort. The return shape above is **mandatory** — the downstream code breaks if a key is missing.
 
+If your backend rejects unsupported parameters, declare the accepted subset. The search node will filter every other hint before calling your provider:
+
+```python
+class BingSearch(SearchProvider):
+    supported_search_parameters = frozenset({
+        "search_context_size",
+        "recency_filter",
+        "language_filter",
+        "return_related",
+    })
+```
+
+Use `search_capabilities` when the set is dynamic:
+
+```python
+from inqtrix.providers.base import SearchProviderCapabilities
+
+
+class MySearch(SearchProvider):
+    @property
+    def search_capabilities(self) -> SearchProviderCapabilities:
+        return SearchProviderCapabilities(
+            supported_parameters=frozenset({"domain_filter"})
+        )
+```
+
 ### Add a `search_model` property
 
 `SearchProvider.search_model` has a loud default (`"<ClassName>(unknown)"`) so `/health` and `/v1/stacks` stay useful even for external subclasses. Override it to name the backend (see the built-in providers in [Providers overview](overview.md)):

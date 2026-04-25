@@ -34,12 +34,12 @@ For the HTTP server, the example webserver scripts additionally mirror uvicorn o
 
 The marker `_claim_extraction_fallback` with `model=<name>` means the extractor called the summarize model and the backend rejected it. Two common root causes:
 
-- **Model name leakage from `ModelSettings()` defaults.** The strategies layer previously read `settings.models.effective_summarize_model` (LiteLLM defaults), which failed on Anthropic/Bedrock/Azure stacks. Current code uses `resolve_summarize_model(llm, fallback=...)` (see ADR-WS-8). If you wrote a custom strategy, make sure you use the same helper.
+- **Model name leakage from `ModelSettings()` defaults.** The strategies layer previously read `settings.models.effective_summarize_model` (LiteLLM defaults), which failed on Anthropic/Bedrock/Azure stacks. Current code uses `resolve_summarize_model(llm, fallback=...)`. If you wrote a custom strategy, make sure you use the same helper.
 - **Deployment misconfiguration on Azure.** Check that the deployment name in `AzureOpenAILLM(default_model=...)` or `summarize_model=...` exists in the target resource.
 
 ## Symptom: "Cancel does not stop the run"
 
-The cancel-on-disconnect mechanism is best-effort at node boundaries (see Gotcha #25/ADR-WS-11). A currently running provider call will complete before the cancel takes effect; typical latency is 5–60 seconds depending on the active call. If you need guaranteed sub-second cancel:
+The cancel-on-disconnect mechanism is best-effort at node boundaries. A currently running provider call will complete before the cancel takes effect; typical latency is 5-60 seconds depending on the active call. If you need guaranteed sub-second cancel:
 
 - Reduce `REASONING_TIMEOUT` so the in-flight call finishes sooner.
 - Force an explicit cancel through your reverse proxy (client-side).
@@ -47,15 +47,15 @@ The cancel-on-disconnect mechanism is best-effort at node boundaries (see Gotcha
 
 ## Symptom: "HTTP 429 from the server with slots free"
 
-Check `MAX_CONCURRENT` (default 3) and compare to the number of active research runs visible in the access log. If the number of active runs equals `MAX_CONCURRENT`, increase the setting. If not, the semaphore leaked — the normal cause is an exception escaping outside the `stream_response` context manager; see Gotcha #14 and the cancel-watcher tests.
+Check `MAX_CONCURRENT` (default 3) and compare to the number of active research runs visible in the access log. If the number of active runs equals `MAX_CONCURRENT`, increase the setting. If not, the semaphore may have leaked — the normal cause would be an exception escaping outside the `stream_response` context manager. Run the cancel-on-disconnect tests and inspect the unified uvicorn/Inqtrix log.
 
 ## Symptom: "Answer contains German text the UI does not render"
 
-The default answer prompt is German. To switch to English answers, override the LLM-facing prompt templates in `src/inqtrix/prompts.py` or pass `AgentConfig(system_prompt_overrides=...)` if your custom strategy respects that. The progress-message strings are independent and remain German unless you change the source strings (see [Progress events](progress-events.md)).
+The default answer prompt is German. There is no public `AgentConfig` field for prompt dictionaries today. To switch to English answers, fork or edit the LLM-facing prompt templates in `src/inqtrix/prompts.py`, or wrap the relevant provider/strategy in your own application code. The progress-message strings are independent and remain German unless you change the source strings (see [Progress events](progress-events.md)).
 
 ## Symptom: "HTTP `/health` shows wrong model name"
 
-Prior to ADR-WS-8/ADR-WS-12, `/health` read `settings.models.*`. It now reads the provider constructor-first; if you see an odd model string, check whether the response matches `<ClassName>(unknown)` — that means a custom `SearchProvider` subclass has not implemented the `search_model` property yet (see [Providers overview](../providers/overview.md)).
+`/health` reads model identities from the active providers. If you see an odd search model string, check whether the response matches `<ClassName>(unknown)` — that means a custom `SearchProvider` subclass has not implemented the `search_model` property yet (see [Providers overview](../providers/overview.md)).
 
 ## Related docs
 

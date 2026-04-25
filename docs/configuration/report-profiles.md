@@ -56,7 +56,7 @@ On the HTTP `/v1/chat/completions` endpoint, callers can flip the profile per re
 
 ## Profile-switch semantics
 
-`apply_overrides()` treats the profile as an explicit field: when a request or an operator sets `report_profile`, the derived budgets are **not** overwritten with the profile's default. This keeps surgical overrides (e.g. `max_rounds=2` together with `report_profile=deep`) working the way the operator expects. See [ADR-WS-6] in the internal notes and `tests/test_server_overrides.py` for the pinned scenarios (A, B, C).
+`apply_overrides()` treats the profile as an explicit field: when a request or an operator sets `report_profile`, the derived budgets are **not** overwritten with the profile's default. This keeps surgical overrides (e.g. `max_rounds=2` together with `report_profile=deep`) working the way the operator expects. The pinned scenarios live in `tests/test_server_overrides.py`.
 
 ## Writing a custom profile
 

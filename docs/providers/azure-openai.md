@@ -4,7 +4,7 @@
 
 ## Scope
 
-`AzureOpenAILLM` is the adapter for the Azure OpenAI Chat Completions surface (`.openai.azure.com/openai/v1/...`). It carries the reference docstring quality (ADR-A); this page summarises the deployment-relevant choices.
+`AzureOpenAILLM` is the adapter for the Azure OpenAI Chat Completions surface (`.openai.azure.com/openai/v1/...`). This page summarises the deployment-relevant choices.
 
 ## When to use it
 

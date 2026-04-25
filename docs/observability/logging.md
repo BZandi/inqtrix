@@ -8,14 +8,48 @@ How Inqtrix configures the `inqtrix` logger, which environment variables control
 
 ## Logger topology
 
-The library writes to `logging.getLogger("inqtrix")`. `configure_logging(...)` builds a dedicated handler pipeline that does **not** propagate to the root logger (see Gotcha #14 in the internal notes). Tests that want to capture Inqtrix logs must attach `caplog.handler` directly to the `inqtrix` logger.
+The library writes to `logging.getLogger("inqtrix")`. `configure_logging(...)` builds a dedicated handler pipeline that does **not** propagate to the root logger. Tests that want to capture Inqtrix logs must attach `caplog.handler` directly to the `inqtrix` logger.
 
 ## Configuration helpers
 
 Two public helpers live in `inqtrix.logging_config`:
 
-- `configure_logging(*, enabled, level, console, file_path=None, force=True) -> bool` — configures the `inqtrix` logger: optional file handler (rotating), optional stderr console handler, secret-redaction filter. Returns `True` if a new configuration was applied. Pass `force=False` to skip reconfiguration when another caller already set up handlers (see ADR-WS-9).
-- `build_uvicorn_log_config(log_file: Path, web_level: str = "INFO") -> dict` — produces a `logging.config.dictConfig`-compatible dict that mirrors uvicorn's default stderr setup and additionally writes `uvicorn.error` and `uvicorn.access` into the same `log_file` as Inqtrix (see ADR-WS-10). Pass this to `uvicorn.run(app, log_config=...)`.
+- `configure_logging(*, enabled, level, console, file_path=None, force=True) -> bool` — configures the `inqtrix` logger: optional file handler (rotating), optional stderr console handler, secret-redaction filter. Returns `True` if a new configuration was applied. Pass `force=False` to skip reconfiguration when another caller already set up handlers.
+- `build_uvicorn_log_config(log_file: Path, web_level: str = "INFO") -> dict` — produces a `logging.config.dictConfig`-compatible dict that mirrors uvicorn's default stderr setup and additionally writes `uvicorn.error` and `uvicorn.access` into the same `log_file` as Inqtrix. Pass this to `uvicorn.run(app, log_config=...)`.
+
+Minimal library setup:
+
+```python
+from pathlib import Path
+from inqtrix import configure_logging
+
+configure_logging(
+    enabled=True,
+    level="INFO",
+    console=False,
+    file_path=Path("logs/inqtrix.log"),
+)
+```
+
+Server bootstrap with uvicorn mirroring:
+
+```python
+from pathlib import Path
+import uvicorn
+
+from inqtrix.logging_config import build_uvicorn_log_config, configure_logging
+from inqtrix.server.app import create_app
+
+log_file = Path("logs/inqtrix.log")
+configure_logging(enabled=True, level="INFO", console=False, file_path=log_file)
+
+uvicorn.run(
+    create_app(),
+    host="0.0.0.0",
+    port=5100,
+    log_config=build_uvicorn_log_config(log_file),
+)
+```
 
 ## Environment variables
 
@@ -53,7 +87,7 @@ See [Iteration log](iteration-log.md) for the structured marker view and [Debugg
 
 ## The `force=False` rule for the server
 
-`create_app(...)` and `create_multi_stack_app(...)` call `configure_logging(..., force=False)`. This preserves the example-script configuration when a user starts uvicorn from a script that already set `INQTRIX_LOG_FILE`. If you build your own bootstrap path, preserve that invariant — see Gotcha #22 in the internal notes and [ADR-WS-9].
+`create_app(...)` and `create_multi_stack_app(...)` call `configure_logging(..., force=False)`. This preserves the example-script configuration when a user starts uvicorn from a script that already set `INQTRIX_LOG_FILE`. If you build your own bootstrap path, preserve that invariant so your file handler is not replaced by a later server default.
 
 ## Related docs
 

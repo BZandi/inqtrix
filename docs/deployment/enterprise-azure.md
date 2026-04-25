@@ -36,7 +36,7 @@ Foundry agents are reached through the Responses API with an AAD bearer token. `
 - **Transient 401 at the end of a cache window.** If a request starts with a nearly expired token, the first tool call can fail before the cache refreshes. Inqtrix does not re-issue tokens mid-run; the next run gets a fresh token automatically.
 - **Container-restart cadence.** For long-lived servers, restart the container periodically (for example every 50 minutes) to force a fresh token on the next boot. Kubernetes can do this with a rolling restart cron. A dedicated `/admin/refresh-providers` endpoint is an open follow-up; the container-restart strategy is the recommended workaround today.
 
-See Gotcha #17 in the internal notes.
+The simplest mitigation is to treat the occasional 401 as transient and rely on the next request or process restart to refresh the token.
 
 ## CORS and TLS
 

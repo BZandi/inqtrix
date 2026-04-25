@@ -2,7 +2,7 @@
 
 ## Why do I see Anthropic 404 errors with a model name like `claude-opus-4.6-agent`?
 
-That model name is the default on `ModelSettings()`; it is a LiteLLM alias, not a real Anthropic model id. Before ADR-WS-8, code paths that read `settings.models.effective_summarize_model` leaked that default into the claim-extraction strategy and the Anthropic backend rejected it. Current code reads constructor-first via `resolve_summarize_model(llm, fallback=...)`. If you wrote a custom strategy, make sure you use the same helper.
+That model name is the default on `ModelSettings()`; it is a LiteLLM alias, not a real Anthropic model id. Older code paths that read `settings.models.effective_summarize_model` could leak that default into the claim-extraction strategy and the Anthropic backend rejected it. Current code reads constructor-first via `resolve_summarize_model(llm, fallback=...)`. If you wrote a custom strategy, make sure you use the same helper.
 
 See [Debugging runs](../observability/debugging-runs.md) for the log-marker walkthrough.
 
@@ -33,11 +33,11 @@ See [Result schema](../architecture/result-schema.md) and [Parity tooling](../de
 
 ## Why are the prompt templates in German?
 
-The default user base is German-speaking. Prompt strings in `src/inqtrix/prompts.py` are the single exception to the English-only convention (the other exceptions are UI-facing HTTP error strings and demo questions in `examples/`). To switch to English, fork the prompt templates; all node code reads them by key, so a custom prompt dictionary plugs in cleanly.
+The default user base is German-speaking. Prompt strings in `src/inqtrix/prompts.py` are the single exception to the English-only convention (the other exceptions are UI-facing HTTP error strings and demo questions in `examples/`). There is no public prompt-dictionary field on `AgentConfig` today; to switch to English, fork or edit the prompt templates, or wrap the relevant provider/strategy in your application.
 
 ## Is there a Streamlit UI?
 
-Yes, `webapp.py` at the repository root is a Streamlit chat interface that talks to the HTTP server. It is intentionally minimal and not part of the supported surface. Start it with `streamlit run webapp.py` after the server is running. See [Library mode](../deployment/library-mode.md) for the reference to it.
+Yes, `webapp.py` at the repository root is a Streamlit chat interface that talks to the HTTP server. It is a useful prototype frontend, not a hardened multi-user product surface. Start it with `streamlit run webapp.py` after the server is running. See [Streamlit UI](../deployment/streamlit-ui.md).
 
 ## Can I ship Inqtrix as a service to end-users?
 
@@ -69,7 +69,7 @@ Every retry consults the run deadline so retries cannot push past `MAX_TOTAL_SEC
 
 Three levels, cheapest first:
 
-1. `uv run pytest tests/ -v` — fully offline regression suite (~800 tests).
+1. `uv run pytest tests/ -v` — fully offline regression suite. Use `uv run pytest tests/ --collect-only -q` for the current count.
 2. `uv run python examples/provider_stacks/azure_smoke_tests/test_llm.py` — isolated Azure OpenAI validation, one call.
 3. A single research call via the example scripts or parity CLI — real end-to-end.
 

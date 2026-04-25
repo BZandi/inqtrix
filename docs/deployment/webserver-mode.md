@@ -27,7 +27,7 @@ from inqtrix.server.app import create_app
 from inqtrix.server.stacks import StackBundle, create_multi_stack_app
 ```
 
-`create_app(*, settings=None, providers=None, strategies=None)` is the single-stack factory (see [ADR-WS-1] in the internal notes). `create_multi_stack_app(*, settings, stacks, default_stack)` is the multi-stack variant (see [ADR-MS-1]).
+`create_app(*, settings=None, providers=None, strategies=None)` is the single-stack factory. `create_multi_stack_app(*, settings, stacks, default_stack)` is the multi-stack variant. Both keep provider construction outside the route layer so explicit Baukasten stacks and env/YAML-driven stacks share the same runtime path.
 
 ### Lifespan logging
 
@@ -35,7 +35,7 @@ Both factories wire an ASGI `lifespan` context manager that logs on startup and 
 
 ### uvicorn log mirroring
 
-The example scripts pass `log_config=build_uvicorn_log_config(log_file, web_level=...)` to `uvicorn.run(...)` so that `uvicorn.error`, `uvicorn.access`, and the `inqtrix` logger all write to the same file (see [ADR-WS-10]). Attaching a mirror handler to `uvicorn.*` at runtime does **not** work because uvicorn's internal `logging.config.dictConfig` replaces the handlers on boot.
+The example scripts pass `log_config=build_uvicorn_log_config(log_file, web_level=...)` to `uvicorn.run(...)` so that `uvicorn.error`, `uvicorn.access`, and the `inqtrix` logger all write to the same file. Attaching a mirror handler to `uvicorn.*` at runtime does **not** work because uvicorn's internal `logging.config.dictConfig` replaces the handlers on boot.
 
 ## Per-request overrides
 
@@ -48,12 +48,15 @@ Clients can override a whitelisted subset of agent fields per request:
   "agent_overrides": {
     "max_rounds": 3,
     "confidence_stop": 7,
-    "report_profile": "deep"
+    "report_profile": "deep",
+    "enable_de_policy_bias": false
   }
 }
 ```
 
-The whitelist is: `max_rounds`, `min_rounds`, `confidence_stop`, `report_profile`, `max_total_seconds`, `first_round_queries`, `max_context`. Unknown keys return HTTP 400. Provider-, model-, and session-level fields are intentionally not overridable — those are operator concerns. See [Agent config](../configuration/agent-config.md) and the recipe in `src/inqtrix/server/overrides.py` for how to extend the whitelist safely.
+The whitelist is: `max_rounds`, `min_rounds`, `confidence_stop`, `report_profile`, `max_total_seconds`, `first_round_queries`, `max_context`, `skip_search`, and `enable_de_policy_bias`. Unknown keys return HTTP 400. Provider-, model-, and session-level fields are intentionally not overridable — those are operator concerns. See [Agent config](../configuration/agent-config.md) and the recipe in `src/inqtrix/server/overrides.py` for how to extend the whitelist safely.
+
+`skip_search=true` is the direct-chat path used by the Streamlit UI when web search is disabled. It bypasses plan/search/evaluate, calls the LLM provider directly with the question plus conversation history, returns no citations, and leaves `round=0`.
 
 ## Streaming (SSE)
 
@@ -81,7 +84,7 @@ An async semaphore (`MAX_CONCURRENT`, default 3) caps parallel research runs. Wh
 
 ## Cancel on disconnect
 
-Every streaming response spawns a watcher task that calls `await request.receive()` blocking on `http.disconnect`. On disconnect it sets `cancel_event`, and the next node boundary raises `AgentCancelled`. Latency from disconnect to actual stop equals the remaining duration of the currently running provider call — typically 5–60 seconds (see Gotcha #18 in the internal notes and [ADR-WS-11]).
+Every streaming response spawns a watcher task that calls `await request.receive()` blocking on `http.disconnect`. On disconnect it sets `cancel_event`, and the next node boundary raises `AgentCancelled`. Latency from disconnect to actual stop equals the remaining duration of the currently running provider call — typically 5-60 seconds. Polling `request.is_disconnected()` was avoided because it can miss disconnects during active SSE writes.
 
 There is no explicit `/v1/runs/{id}/cancel` endpoint today. The disconnect-based path covers Streamlit Stop, browser close, and `curl --max-time`. Hard cancel through in-flight provider calls is an open follow-up.
 
@@ -109,15 +112,15 @@ flowchart TD
 - Per-session caps: 8 context blocks, 50 claim-ledger entries (`SESSION_MAX_CONTEXT_BLOCKS`, `SESSION_MAX_CLAIM_LEDGER`).
 - Session ID: `SHA-256("|".join(f"{role}:{content[:200]}" for user/assistant messages))[:24]`. The current question is excluded when deriving the lookup id; `prospective_session_id()` includes it and is used for save-before-response-complete.
 
-Multi-stack apps mix the stack name into the hash input (`stack:<name>`), so session state does not leak across stacks (see [ADR-MS-4]).
+Multi-stack apps mix the stack name into the hash input (`stack:<name>`), so session state does not leak across stacks.
 
 ## Multi-stack serving
 
-`create_multi_stack_app(...)` mounts several provider stacks in one process. Each stack is a `StackBundle(providers, strategies, agent_settings, description)` keyed by a lowercase-alphanumeric name. The request picks a stack via `body["stack"]`; absent or unknown values fall back to `default_stack` (known) or raise HTTP 400 (unknown). The dedicated example is `examples/webserver_stacks/multi_stack.py`; each `StackBundle` is opt-in through environment-variable gating.
+`create_multi_stack_app(...)` mounts several provider stacks in one process. Each stack is a `StackBundle(providers, strategies, agent_settings, description)` keyed by a lowercase-alphanumeric name. The request picks a stack via `body["stack"]`; absent values use `default_stack`, while unknown names return HTTP 400 with an `available_stacks` hint. The dedicated example is `examples/webserver_stacks/multi_stack.py`; each `StackBundle` is opt-in through environment-variable gating.
 
 ## Health payload
 
-`/health` returns the report profile, the active security layers, per-role model identities (constructor-first; see ADR-WS-8), and search-model identities via the `SearchProvider.search_model` property (ADR-WS-12). Operators should read these values to confirm the deployment is wired as intended. `/v1/stacks` exposes the same information per stack for multi-stack deployments.
+`/health` returns the report profile, the active security layers, per-role model identities resolved from provider constructors, and search-model identities via the `SearchProvider.search_model` property. Operators should read these values to confirm the deployment is wired as intended. `/v1/stacks` exposes the same information per stack for multi-stack deployments.
 
 ## Related docs
 
@@ -125,3 +128,4 @@ Multi-stack apps mix the stack name into the hash input (`stack:<name>`), so ses
 - [Enterprise Azure](enterprise-azure.md) — Managed Identity, SP, Foundry token lifetime.
 - [Security hardening](security-hardening.md) — TLS, Bearer, CORS.
 - [Agent config](../configuration/agent-config.md) — per-request overrides.
+- [Streamlit UI](streamlit-ui.md) — bundled HTTP frontend and override mapping.

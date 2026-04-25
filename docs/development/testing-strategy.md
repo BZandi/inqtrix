@@ -143,9 +143,11 @@ Default CI invocation:
 uv run pytest tests/ -v
 ```
 
-Runs the full suite (599 baseline + 75 replay tests as of the Aufgabe
-3 implementation = 674 tests). All replay cassettes / stubs are
-committed and offline; no env vars or network access are required.
+Runs the full offline suite. All replay cassettes / stubs are committed and offline; no env vars or network access are required. Use collect-only when you need the current count for a release note:
+
+```bash
+uv run pytest tests/ --collect-only -q
+```
 
 Suggested GitHub Actions workflow snippet (not committed because the
 repo's CI configuration is maintainer-owned):

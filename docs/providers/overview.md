@@ -45,7 +45,7 @@ provider.models.effective_evaluate_model    # falls back to reasoning
 provider.models.reasoning_model
 ```
 
-The `resolve_summarize_model(llm, fallback)` helper in `inqtrix.strategies` is the canonical way to read the summarize model; it emits a warning marker if neither constructor path nor reasoning fallback yields a value (see ADR-WS-8 in the internal notes).
+The `resolve_summarize_model(llm, fallback)` helper in `inqtrix.strategies` is the canonical way to read the summarize model; it emits a warning marker if neither constructor path nor reasoning fallback yields a value. Use that helper when you write custom strategy wiring so provider-specific model names do not leak back to global `Settings` defaults.
 
 ## `SearchProvider` ABC
 
@@ -74,7 +74,7 @@ The optional hints (`recency_filter`, `language_filter`, `domain_filter`, `searc
 
 ### The `search_model` property
 
-Every search provider exposes a `search_model: str` property so `/health` and `/v1/stacks` can show a meaningful identifier (see ADR-WS-12). The default on the ABC returns `"<ClassName>(unknown)"` — that loud string makes a missing override immediately visible. Overrides used by the built-ins:
+Every search provider exposes a `search_model: str` property so `/health` and `/v1/stacks` can show a meaningful identifier. The default on the ABC returns `"<ClassName>(unknown)"` — that loud string makes a missing override immediately visible. Overrides used by the built-ins:
 
 | Class | `search_model` |
 |-------|----------------|
@@ -83,6 +83,22 @@ Every search provider exposes a `search_model: str` property so `/health` and `/
 | `AzureOpenAIWebSearch` | `f"{default_model}+web_search_tool"` |
 | `AzureFoundryWebSearch` | `f"foundry-web:{name}@{version_or_latest}"` |
 | `AzureFoundryBingSearch` | `f"foundry-bing:{name_or_id}@{version_or_latest}"` |
+
+### Search capabilities
+
+Search backends do not all support the same generic hints. A provider can declare the subset it accepts so the search node filters unsupported arguments before calling `search(...)`:
+
+```python
+class MySearch(SearchProvider):
+    supported_search_parameters = frozenset({
+        "search_context_size",
+        "recency_filter",
+        "language_filter",
+        "return_related",
+    })
+```
+
+For dynamic metadata, expose a `search_capabilities` property returning `SearchProviderCapabilities`. If neither field exists, Inqtrix assumes all hints are supported for backwards compatibility with older custom adapters.
 
 ## `ProviderContext`
 

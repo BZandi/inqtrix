@@ -21,8 +21,9 @@ Every page under `docs/**`:
 1. Pick the closest existing subdirectory (`architecture/`, `providers/`, `configuration/`, `deployment/`, `observability/`, `scoring-and-stopping/`, `development/`, `getting-started/`, `reference/`).
 2. Write the page following the conventions above.
 3. Add the new page to the `Related docs` blocks of the pages that should link to it.
-4. Update the README's docs-navigation table when the page is a top-level addition.
-5. Run a local link check (see below).
+4. Update [`../README.md`](../README.md) when the page is a top-level task entry.
+5. Update the root [`../../README.md`](../../README.md) when the page changes a major entry path.
+6. Run a local link check (see below).
 
 ## Link check
 
@@ -81,7 +82,21 @@ Whenever a code change alters public behaviour, update the matching `docs/**` pa
 | `src/inqtrix/agent.py` public API | `docs/architecture/public-api.md`, `docs/architecture/overview.md` |
 | `src/inqtrix/nodes.py` | `docs/architecture/nodes.md` |
 
-The internal notes (`.cursor/memory/audit-history.md`, `.cursor/memory/architecture-decisions.md`) are not a substitute for the public docs. ADRs describe the *decision*; `docs/**` describes the *behaviour* a user relies on.
+Maintainer notes are not a substitute for the public docs. Private decision logs describe why a change was made; `docs/**` describes the behaviour a user relies on.
+
+Public docs must stand on their own. Do not reference private memory paths, internal decision ids, or internal issue numbers from user-facing pages; rewrite the behaviour directly or link to another public `docs/**` page.
+
+## Legacy docs migration
+
+When a long-form legacy document is split into the current tree, keep a small migration matrix in [`../README.md`](../README.md) with these columns:
+
+| Legacy section | Current home | Status |
+|----------------|--------------|--------|
+| `Quick Start / explicit providers` | `deployment/library-mode.md` | Updated to current imports and constructor signatures. |
+| `HTTP Streaming` | `deployment/webserver-mode.md` | Updated to current SSE body and overrides. |
+| `Custom Search Provider` | `providers/writing-a-custom-provider.md` | Updated with `search_model` and capability metadata. |
+
+Before copying a legacy snippet, check imports, constructor signatures, enum names, env vars, and whether the feature still exists in code. Code wins over old prose.
 
 ## Related docs
 

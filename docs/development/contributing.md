@@ -52,7 +52,7 @@ See [Installation](../getting-started/installation.md) for the full bootstrap.
 - Commit subject line in English, imperative mood, ≤ 72 characters.
 - Body paragraph when the diff is non-trivial — explain motivation, not mechanics.
 - One focused change per PR; do not bundle refactors with feature additions unless the refactor is required by the feature.
-- Link the relevant ADR entry in the internal notes (`.cursor/memory/architecture-decisions.md`) if the change touches an architectural contract.
+- If the change touches an architectural contract, document the public behaviour in `docs/**` and keep the maintainer memory in sync locally.
 
 ## Security and legal
 

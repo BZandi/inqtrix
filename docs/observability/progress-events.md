@@ -49,7 +49,7 @@ Include the flag `"include_progress": false` in the body to get only answer chun
 
 ## Cancel interaction
 
-The streaming generator on the server side races `progress_queue.get(timeout=0.3)` against a watcher task that calls `await request.receive()`. When the client disconnects, the watcher sets `cancel_event`, the generator exits cleanly, and the next node boundary raises `AgentCancelled`. Result: progress messages stop arriving within roughly one second of disconnect; the active provider call continues until its natural completion (see Gotcha #18 in the internal notes and [Web server mode](../deployment/webserver-mode.md)).
+The streaming generator on the server side races `progress_queue.get(timeout=0.3)` against a watcher task that calls `await request.receive()`. When the client disconnects, the watcher sets `cancel_event`, the generator exits cleanly, and the next node boundary raises `AgentCancelled`. Result: progress messages stop arriving within roughly one second of disconnect; the active provider call continues until its natural completion (see [Web server mode](../deployment/webserver-mode.md)).
 
 ## Extending progress messages
 

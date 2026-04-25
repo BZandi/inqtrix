@@ -71,13 +71,13 @@ The two strings are **word-for-word identical**. Do not summarise, translate, or
 ## Linter / formatter
 
 - `ruff` (rules in `pyproject.toml`) is the primary lint gate.
-- Ruff's `D` (pydocstyle-equivalent) selectors are **recommended** but not globally enforced today (see ADR-E in the internal notes). Enabling them globally would flag many out-of-scope modules (`state.py`, `server/**`, `parity/**`); a dedicated clean-up task owns that transition.
+- Ruff's `D` (pydocstyle-equivalent) selectors are **recommended** but not globally enforced today. Enabling them globally would flag many out-of-scope modules (`state.py`, `server/**`, `parity/**`); a dedicated clean-up task owns that transition.
 - Do not commit code that fails the currently enabled ruff rules.
 
 ## Backwards compatibility
 
 - Never remove or rename a public constructor signature, a Settings field, or a `ResearchAgent` method without a deprecation cycle.
-- Additive changes are always preferred. New fields on `AgentState` must be `NotRequired[...]` and underscore-prefixed when internal (see ADR-MS-6).
+- Additive changes are always preferred. New fields on `AgentState` must be `NotRequired[...]` and underscore-prefixed when internal.
 - Providers must honour the Constructor-First convention: no direct environment-variable reads inside provider modules.
 
 ## Git hygiene

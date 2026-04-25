@@ -25,6 +25,25 @@ When the same variable exists in both process env and `.env`, the process enviro
 
 Do not commit `.env`, do not put plaintext secrets in YAML, and do not rely on checked-in config files for production credentials.
 
+Minimal env-only LiteLLM setup:
+
+```dotenv
+LITELLM_BASE_URL=http://localhost:4000/v1
+LITELLM_API_KEY=sk-...
+REASONING_MODEL=gpt-4o
+SEARCH_MODEL=perplexity-sonar-pro-agent
+REPORT_PROFILE=compact
+```
+
+Direct-chat mode without web search:
+
+```dotenv
+SKIP_SEARCH=true
+ENABLE_DE_POLICY_BIAS=false
+```
+
+`SKIP_SEARCH=true` is usually set per request by the Streamlit UI rather than globally; a global setting turns every auto-created run into direct LLM chat without citations.
+
 ## Models
 
 | Variable | Default | Description |
@@ -35,7 +54,7 @@ Do not commit `.env`, do not put plaintext secrets in YAML, and do not rely on c
 | `SUMMARIZE_MODEL` | *(reasoning)* | Optional dedicated summarise model. |
 | `EVALUATE_MODEL` | *(reasoning)* | Optional dedicated evaluate model. |
 
-> **Note.** The `ModelSettings()` default of `claude-opus-4.6-agent` is a LiteLLM alias, not a real Anthropic model id. Code paths that read `settings.models.*` on non-LiteLLM stacks would leak this string into the backend (producing 400/404 errors). Since ADR-WS-8, all runtime code reads model names constructor-first via `provider.models.effective_*_model` and `resolve_summarize_model(llm, fallback)`. If you write a new endpoint or strategy, follow that rule.
+> **Note.** The `ModelSettings()` default of `claude-opus-4.6-agent` is a LiteLLM alias, not a real Anthropic model id. Code paths that read `settings.models.*` on non-LiteLLM stacks would leak this string into the backend (producing 400/404 errors). Current runtime code reads model names constructor-first via `provider.models.effective_*_model` and `resolve_summarize_model(llm, fallback)`. If you write a new endpoint or strategy, follow that rule.
 
 ## Server connection (env-only LiteLLM mode)
 
@@ -59,6 +78,7 @@ These are only relevant for the default `LiteLLM` auto-creation path. Provider-s
 | `ANSWER_PROMPT_CITATIONS_MAX` | `60` | Max citations in the answer prompt. |
 | `MAX_QUESTION_LENGTH` | `10000` | Max input question length (characters). |
 | `TESTING_MODE` | `false` | Enable `/v1/test/run` and iteration-log export. |
+| `SKIP_SEARCH` | `false` | Bypass plan/search/evaluate and answer directly with the LLM. No citations, `round=0`. |
 
 ## Timeouts
 
@@ -134,3 +154,4 @@ See [Logging](../observability/logging.md).
 - [inqtrix.yaml](inqtrix-yaml.md)
 - [Report profiles](report-profiles.md)
 - [Security hardening](../deployment/security-hardening.md)
+- [Streamlit UI](../deployment/streamlit-ui.md)

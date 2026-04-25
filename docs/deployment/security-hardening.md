@@ -24,7 +24,7 @@ Set `INQTRIX_SERVER_API_KEY` to a random string. The HTTP server then enforces a
 Authorization: Bearer <key>
 ```
 
-Comparison uses `hmac.compare_digest` (timing-safe). `/health` and `/v1/models` remain open for liveness and discovery. `/v1/stacks` (multi-stack apps) also stays open because UIs need it before prompting for credentials (see ADR-MS-3 in the internal notes).
+Comparison uses `hmac.compare_digest` (timing-safe). `/health` and `/v1/models` remain open for liveness and discovery. `/v1/stacks` (multi-stack apps) also stays open because UIs need it before prompting for credentials.
 
 ### CORS allow-list
 
@@ -34,7 +34,7 @@ Set `INQTRIX_SERVER_CORS_ORIGINS` to a comma-separated list of origins:
 INQTRIX_SERVER_CORS_ORIGINS=https://ui.example.com,https://admin.example.com
 ```
 
-- `*` is accepted but WARNs on startup, because browsers reject `Access-Control-Allow-Origin: *` together with `allow_credentials=True` (see Gotcha #15 in the internal notes).
+- `*` is accepted but WARNs on startup, because browsers reject `Access-Control-Allow-Origin: *` together with `allow_credentials=True`.
 - The built-in policy allows `Authorization` and `Content-Type` headers so Bearer tokens pass through correctly.
 
 ## What is not covered

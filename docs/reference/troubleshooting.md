@@ -11,6 +11,14 @@ Symptom → cause → fix matrix. For deeper mechanism descriptions, each row li
 | Server starts but `/health` shows wrong `search_model` | Custom `SearchProvider` subclass without an override for the `search_model` property (shows `"<ClassName>(unknown)"`) | Implement the property on the subclass. See [Providers overview](../providers/overview.md). |
 | Server starts but `/health` shows LiteLLM default models on a non-LiteLLM stack | Legacy code reading `settings.models.*` instead of the provider | Upgrade; current `/health` reads constructor-first. If writing a new endpoint, use `resolve_summarize_model(llm, fallback)`. See [Debugging runs](../observability/debugging-runs.md). |
 
+Quick log setup:
+
+```bash
+export INQTRIX_LOG_ENABLED=true
+export INQTRIX_LOG_LEVEL=INFO
+export INQTRIX_LOG_FILE=./logs/inqtrix.log
+```
+
 ## Azure-specific
 
 | Symptom | Likely cause | Fix |
@@ -38,13 +46,22 @@ Symptom → cause → fix matrix. For deeper mechanism descriptions, each row li
 | SSE stream ends abruptly | Client closed the connection; watcher task detected disconnect and set `cancel_event` | Reconnect on the client side or disable progress streaming with `"include_progress": false`. |
 | CORS request blocked in browser with credentials | `INQTRIX_SERVER_CORS_ORIGINS=*` with credentials enabled — browsers reject wildcard + credentials | List explicit origins. See [Security hardening](../deployment/security-hardening.md). |
 
+Minimal HTTP smoke:
+
+```bash
+curl http://localhost:5100/health
+curl -N http://localhost:5100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"research-agent","messages":[{"role":"user","content":"hi"}],"stream":true}'
+```
+
 ## Tests and local development
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | `uv run pytest` fails immediately with import errors | Not installed in editable mode | `uv sync --extra dev` or `pip install -e ".[dev]"`. See [Installation](../getting-started/installation.md). |
 | Replay tests require API keys | Mis-set `INQTRIX_RECORD_MODE` | Unset it; default is `none` (offline replay). See [Testing strategy](../development/testing-strategy.md). |
-| Two logger tests fail when the full suite runs but pass in isolation | Known test-order pollution from logger-configuration tests | Run the affected test with `-k` in isolation; the underlying code is correct. |
+| Full suite count differs from a number in older docs | The suite grows as provider and server coverage expands | Trust `uv run pytest tests/ --collect-only -q` for the current count. |
 
 ## Related docs
 

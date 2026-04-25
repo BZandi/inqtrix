@@ -23,6 +23,17 @@ All of the following must be true:
 
 The strategy records the new state by setting `falsification_triggered = True`. The flag is never cleared for the duration of the run; the mode is strictly one-shot to avoid oscillation.
 
+Minimal state transition:
+
+```json
+{
+  "round": 2,
+  "prev_conf": 4,
+  "confidence": 3,
+  "falsification_triggered": true
+}
+```
+
 ## Effect on the plan node
 
 When `falsification_triggered` is true, the plan node generates queries in a different distribution:
@@ -31,6 +42,17 @@ When `falsification_triggered` is true, the plan node generates queries in a dif
 - 1/3 of new queries are **nearest-explanation** — they search for the actual fact that has been confused with the user's premise.
 
 The LLM prompt for plan acknowledges the switch explicitly, so that a reasoning model does not silently revert to confirmation-seeking queries.
+
+Example query distribution after the trigger:
+
+```text
+2 debunk-style queries:
+- "<claim> counter evidence retraction"
+- "<claim> no evidence official source"
+
+1 nearest-explanation query:
+- "<confused term> actual policy status official source"
+```
 
 ## Interaction with stagnation
 

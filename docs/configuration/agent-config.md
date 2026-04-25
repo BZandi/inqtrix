@@ -136,8 +136,26 @@ Server callers can override a whitelisted subset of fields per request via `body
 - `max_total_seconds`
 - `first_round_queries`
 - `max_context`
+- `skip_search`
+- `enable_de_policy_bias`
 
 Unknown keys return HTTP 400. Provider-, model-, and session-level fields are intentionally **not** overridable per request. See [Web server mode](../deployment/webserver-mode.md).
+
+Example:
+
+```json
+{
+  "model": "research-agent",
+  "messages": [{"role": "user", "content": "Explain Retrieval Augmented Generation"}],
+  "agent_overrides": {
+    "report_profile": "compact",
+    "skip_search": true,
+    "enable_de_policy_bias": false
+  }
+}
+```
+
+`skip_search=true` bypasses the plan/search/evaluate loop for that request and produces an uncited direct LLM answer. `enable_de_policy_bias=false` disables the German health- and social-policy heuristics for that request.
 
 ## Related docs
 

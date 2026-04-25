@@ -40,12 +40,36 @@ After each search round, `estimate_aspect_coverage()` re-evaluates coverage by m
 
 The matching is deliberately fuzzy so that obvious paraphrases qualify without needing an LLM; the trade-off is that an aspect can appear "covered" while the actual statement is shallow. That trade-off is accepted because the answer node still operates on the full claim ledger and citations.
 
+Example iteration-log shape:
+
+```json
+{
+  "node": "evaluate",
+  "round": 1,
+  "required_aspects": [
+    "Status quo with date",
+    "Actor positions",
+    "Discussion direction"
+  ],
+  "uncovered_aspects": ["Actor positions"],
+  "aspect_coverage": 0.667,
+  "cap_reason": "uncovered_aspects",
+  "final_confidence": 8
+}
+```
+
 ## Consequences of uncovered aspects
 
 Uncovered aspects have two direct effects on the control loop:
 
 - **Confidence cap at 8.** The evaluate node guardrails final confidence to a maximum of 8 while any aspect remains uncovered. See [Stop criteria](stop-criteria.md) for the full cascade.
 - **Targeted queries in subsequent plan rounds.** The plan node injects at least one query per uncovered aspect, using the same synonym list above when the aspect has a domain-specific keyword.
+
+Typical targeted follow-up query:
+
+```text
+site:bundesgesundheitsministerium.de GKV Reform Positionen Krankenkassen Verbaende aktueller Stand
+```
 
 ## Interaction with stop criteria
 

@@ -179,7 +179,14 @@ if __name__ == "__main__":
 
 ## Optional: Streamlit UI (`webapp.py`)
 
-`webapp.py` at the repo root is a Streamlit chat interface that talks to a running HTTP server. It is intentionally minimal and not part of the supported surface; start it with `streamlit run webapp.py` after the server is up. It is documented here because `.env.example` references it — new users sometimes discover it before the docs.
+`webapp.py` at the repo root is a Streamlit chat interface for the HTTP server, not for direct library mode. Start a server first, then run:
+
+```bash
+INQTRIX_WEBAPP_BASE_URL=http://localhost:5100 \
+  uv run streamlit run webapp.py
+```
+
+The UI is documented in [Streamlit UI](streamlit-ui.md). It sends `agent_overrides` such as `report_profile`, `max_rounds`, `confidence_stop`, `enable_de_policy_bias`, and `skip_search` over HTTP; it does not import the `inqtrix` package or read provider credentials.
 
 ## Related docs
 
@@ -187,3 +194,4 @@ if __name__ == "__main__":
 - [Writing a custom provider](../providers/writing-a-custom-provider.md)
 - [Agent config](../configuration/agent-config.md)
 - [Web server mode](webserver-mode.md)
+- [Streamlit UI](streamlit-ui.md)

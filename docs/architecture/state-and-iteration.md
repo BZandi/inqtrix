@@ -56,7 +56,7 @@ def classify(s: dict, *, providers: ProviderContext,
 | Tokens | `total_prompt_tokens`, `total_completion_tokens` | Usage tracking |
 | Internals | `deadline`, `_cancel_event` (`NotRequired`) | Runtime control |
 
-See [`src/inqtrix/state.py`](../../src/inqtrix/state.py) for the authoritative list. Additive extensions follow ADR-MS-6: new fields must be `NotRequired[...]` and prefixed with `_` when they are internal.
+See [`src/inqtrix/state.py`](../../src/inqtrix/state.py) for the authoritative list. Additive extensions should be backwards compatible: use `NotRequired[...]` and prefix internal runtime-only fields with `_`.
 
 ### Per-node read/write summary
 
@@ -74,7 +74,7 @@ A subset of fields is preserved across follow-up questions via the session syste
 
 ## Cancel and deadline
 
-Every node reads `_cancel_event` via `check_cancel_event(state)`; if the event is set, an `AgentCancelled` exception terminates the run at the next node boundary (see ADR-MS-5, ADR-WS-11). `deadline` is a monotonic timestamp used to shrink per-call timeouts; see [Timeouts and errors](../observability/timeouts-and-errors.md).
+Every node reads `_cancel_event` via `check_cancel_event(state)`; if the event is set, an `AgentCancelled` exception terminates the run at the next node boundary. `deadline` is a monotonic timestamp used to shrink per-call timeouts; see [Timeouts and errors](../observability/timeouts-and-errors.md).
 
 ## Iteration log
 

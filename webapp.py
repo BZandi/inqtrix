@@ -1,0 +1,2479 @@
+"""
+inqtrix Chat Interface
+======================================================
+Start with: streamlit run webapp.py
+Requires:   pip install streamlit
+"""
+
+import base64
+from html import escape
+
+import streamlit as st
+
+from inqtrix_webapp.client import (
+    call_chat,
+    fetch_health,
+    fetch_models_fallback,
+    fetch_stacks,
+    get_api_key,
+    get_base_url,
+    stream_chat,
+)
+from inqtrix_webapp.translations import TRANSLATIONS
+
+
+def t(key: str, **fmt) -> str:
+    """Return UI-localized string. Falls back to DE then to the key itself."""
+    lang = st.session_state.get("ui_language", "de")
+    entry = TRANSLATIONS.get(key, {})
+    text = entry.get(lang) or entry.get("de") or key
+    return text.format(**fmt) if fmt else text
+
+# ---------------------------------------------------------------------------
+# Page config & custom CSS
+# ---------------------------------------------------------------------------
+
+st.set_page_config(
+    page_title="inqtrix",
+    page_icon="✦",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# Custom CSS injection
+st.markdown("""
+<style>
+    :root {
+        --bg: #1f1d1b;
+        --panel: rgba(49, 45, 42, 0.88);
+        --panel-soft: rgba(49, 45, 42, 0.72);
+        --panel-strong: rgba(39, 36, 34, 0.96);
+        --popover-panel: rgba(43, 40, 37, 0.985);
+        --line: rgba(244, 236, 225, 0.08);
+        --line-strong: rgba(244, 236, 225, 0.14);
+        --text: #ece6db;
+        --muted: #a59f94;
+        --accent: #d97757;
+        --accent-soft: rgba(217, 119, 87, 0.16);
+        --pill: rgba(42, 39, 36, 0.94);
+        --pill-hover: rgba(58, 53, 49, 0.98);
+    }
+
+    html, body,
+    [data-testid="stAppViewContainer"],
+    [data-testid="stMain"] {
+        height: 100vh !important;
+        max-height: 100vh !important;
+        overflow: hidden !important;
+    }
+
+    .stApp {
+        background:
+            radial-gradient(circle at top left, rgba(217, 119, 87, 0.14), transparent 28%),
+            radial-gradient(circle at top right, rgba(239, 226, 195, 0.08), transparent 24%),
+            linear-gradient(180deg, #262320 0%, #1f1d1b 42%, #1a1918 100%) !important;
+        color: var(--text) !important;
+    }
+
+    footer {
+        display: none !important;
+    }
+
+    [data-testid="stHeader"] {
+        background: transparent !important;
+        height: auto !important;
+        z-index: 999 !important;
+        /* The header otherwise blankets the top of the page and swallows
+           clicks meant for EN / Neu / Löschen. Make it click-through and
+           re-enable pointer events only on the hamburger inside it. */
+        pointer-events: none !important;
+    }
+
+    [data-testid="stExpandSidebarButton"],
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="stSidebarCollapseButton"] button {
+        pointer-events: auto !important;
+    }
+
+    [data-testid="stToolbarActions"],
+    [data-testid="stMainMenu"],
+    [data-testid="stAppDeployButton"],
+    [data-testid="stStatusWidget"] {
+        display: none !important;
+    }
+
+    /* Streamlit hides the in-sidebar collapse control until hover; keep it
+       always visible so the close affordance matches the open hamburger. */
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="stSidebarCollapseButton"] button {
+        visibility: visible !important;
+    }
+
+    /* stExpandSidebarButton IS the button element; stSidebarCollapseButton
+       wraps an inner button. Style both to look like the EN / Neu / Löschen pills. */
+    [data-testid="stExpandSidebarButton"],
+    [data-testid="stSidebarCollapseButton"] button {
+        background: var(--pill) !important;
+        border: 1px solid var(--line) !important;
+        border-radius: 999px !important;
+        color: var(--text) !important;
+        width: 2.25rem !important;
+        height: 2.25rem !important;
+        min-height: 2.25rem !important;
+        padding: 0 !important;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+        transition: border-color .15s ease, background .15s ease;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+    }
+
+    [data-testid="stExpandSidebarButton"]:hover,
+    [data-testid="stSidebarCollapseButton"] button:hover {
+        background: var(--pill-hover) !important;
+        border-color: rgba(217, 119, 87, 0.38) !important;
+    }
+
+    /* Pin the collapsed-state toggle to the top-right corner. The action row
+       (EN / Neu / Löschen) reserves matching right padding so all four pills
+       sit on a single line. position:fixed keeps the math viewport-anchored
+       regardless of the surrounding header geometry. */
+    [data-testid="stExpandSidebarButton"] {
+        position: fixed !important;
+        top: 0.875rem !important;
+        right: 1rem !important;
+        z-index: 1000 !important;
+    }
+
+    /* Reserve space at the right edge of the action row so EN / Neu / Löschen
+       end before the fixed hamburger toggle and never visually collide. */
+    .st-key-header_actions {
+        padding-right: 2.75rem !important;
+    }
+
+    /* Replace the chevron with a CSS-drawn hamburger so the button reads as
+       a menu toggle rather than a directional control. */
+    [data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"],
+    [data-testid="stSidebarCollapseButton"] [data-testid="stIconMaterial"] {
+        font-size: 0 !important;
+        color: transparent !important;
+        width: 16px;
+        height: 12px;
+        position: relative;
+        display: inline-block;
+    }
+
+    [data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"]::before,
+    [data-testid="stSidebarCollapseButton"] [data-testid="stIconMaterial"]::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 2px;
+        background: var(--accent);
+        border-radius: 2px;
+        box-shadow:
+            0 5px 0 var(--accent),
+            0 10px 0 var(--accent);
+    }
+
+    .block-container {
+        max-width: 900px;
+        padding-top: 1.1rem !important;
+        padding-bottom: max(1rem, calc(env(safe-area-inset-bottom) + 1rem)) !important;
+    }
+
+    [data-testid="stAppViewContainer"],
+    [data-testid="stBottomBlock"] {
+        background: transparent !important;
+    }
+
+    body,
+    button,
+    input,
+    textarea,
+    select,
+    [data-testid="stMarkdownContainer"],
+    [data-testid="stChatMessage"] {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+    }
+
+    h1, h2, h3, h4, h5, h6,
+    .brand-header,
+    .welcome-title {
+        font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif !important;
+        font-weight: 400 !important;
+        letter-spacing: -0.02em;
+        color: #f3eee5 !important;
+    }
+
+    [data-testid="stMarkdownContainer"] p,
+    [data-testid="stMarkdownContainer"] li {
+        color: var(--text);
+        line-height: 1.7;
+    }
+
+    [data-testid="stMarkdownContainer"] h1,
+    [data-testid="stMarkdownContainer"] h2,
+    [data-testid="stMarkdownContainer"] h3,
+    [data-testid="stMarkdownContainer"] h4,
+    [data-testid="stMarkdownContainer"] h5,
+    [data-testid="stMarkdownContainer"] h6 {
+        color: #f1e9df !important;
+        line-height: 1.25 !important;
+        font-weight: 500 !important;
+        letter-spacing: 0 !important;
+        margin-top: 1rem !important;
+        margin-bottom: 0.45rem !important;
+    }
+
+    [data-testid="stMarkdownContainer"] h1 {
+        font-size: 1.28rem !important;
+    }
+
+    [data-testid="stMarkdownContainer"] h2 {
+        font-size: 1.14rem !important;
+    }
+
+    [data-testid="stMarkdownContainer"] h3 {
+        font-size: 1.02rem !important;
+    }
+
+    [data-testid="stMarkdownContainer"] h4 {
+        font-size: 0.95rem !important;
+    }
+
+    [data-testid="stMarkdownContainer"] h5 {
+        font-size: 0.9rem !important;
+    }
+
+    [data-testid="stMarkdownContainer"] h6 {
+        font-size: 0.86rem !important;
+    }
+
+    .brand-kicker,
+    .composer-meta,
+    .message-label {
+        font-size: 0.72rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--muted);
+    }
+
+    .brand-kicker {
+        margin-bottom: 0.2rem;
+    }
+
+    .prototype-notice {
+        display: inline-block;
+        padding: 0.5rem 1.15rem;
+        margin-bottom: 1.25rem;
+        border: 1px solid rgba(235, 84, 70, 0.42);
+        background: rgba(235, 84, 70, 0.08);
+        border-radius: 14px;
+        color: #ef7266;
+        font-size: 0.72rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        font-weight: 500;
+        backdrop-filter: blur(8px) saturate(140%);
+        -webkit-backdrop-filter: blur(8px) saturate(140%);
+        box-shadow: 0 2px 10px rgba(235, 84, 70, 0.08);
+    }
+
+    .composer-meta .prototype-inline {
+        color: #f28b7f;
+        font-weight: 600;
+    }
+
+    .composer-meta .meta-right {
+        margin-left: auto;
+    }
+
+    .composer-prototype-pill {
+        display: inline-block;
+        padding: 0.26rem 0.75rem;
+        border: 1px solid rgba(235, 84, 70, 0.42);
+        background: rgba(235, 84, 70, 0.08);
+        border-radius: 999px;
+        color: #ef7266;
+        font-size: 0.62rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        font-weight: 500;
+        line-height: 1;
+        backdrop-filter: blur(8px) saturate(140%);
+        -webkit-backdrop-filter: blur(8px) saturate(140%);
+        box-shadow: 0 2px 10px rgba(235, 84, 70, 0.08);
+    }
+
+    .brand-header {
+        font-size: 1.46rem;
+        line-height: 1.1;
+    }
+
+    .st-key-page_shell {
+        min-height: calc(100vh - 92px - 170px);
+        display: flex;
+        flex-direction: column;
+    }
+
+    .st-key-app_header {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        width: auto;
+        max-width: none;
+        box-sizing: border-box;
+        z-index: 45;
+        padding: 0.85rem 1.4rem 1.35rem;
+        background: rgba(31, 29, 27, 0.72);
+        backdrop-filter: blur(22px) saturate(160%);
+        -webkit-backdrop-filter: blur(22px) saturate(160%);
+        -webkit-mask-image: linear-gradient(to bottom, black 0%, black 72%, transparent 100%);
+        mask-image: linear-gradient(to bottom, black 0%, black 72%, transparent 100%);
+    }
+
+    .st-key-app_header [data-testid="stHorizontalBlock"] {
+        align-items: center !important;
+        gap: 0.5rem !important;
+    }
+
+    .st-key-app_header [data-testid="stHorizontalBlock"]:not(.st-key-header_actions) {
+        width: 100% !important;
+        max-width: calc(920px - 2.8rem);
+        margin-left: auto !important;
+        margin-right: auto !important;
+    }
+
+    .st-key-conversation_shell {
+        flex: 1 1 auto;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .st-key-empty_state_shell {
+        flex: 1 1 auto;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+    }
+
+    .st-key-page_shell > [data-testid="stLayoutWrapper"]:has(> .st-key-conversation_shell) {
+        flex: 1 1 auto !important;
+        min-height: 0 !important;
+    }
+
+    .st-key-conversation_shell > [data-testid="stLayoutWrapper"]:has(> .st-key-empty_state_shell) {
+        flex: 1 1 auto !important;
+        min-height: 0 !important;
+    }
+
+    [data-testid="stElementContainer"]:has(> [data-testid="stIFrame"]) {
+        position: absolute !important;
+        width: 0 !important;
+        height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        pointer-events: none !important;
+        overflow: hidden !important;
+    }
+
+    .user-msg-anchor {
+        display: block;
+        height: 0;
+        scroll-margin-top: 96px;
+        pointer-events: none;
+    }
+
+    [data-testid="stElementContainer"]:has(> [data-testid="stMarkdown"] .user-msg-anchor) {
+        margin: 0 !important;
+        padding: 0 !important;
+        min-height: 0 !important;
+    }
+
+    .st-key-conversation_shell:has(.user-msg-anchor)::after {
+        content: "";
+        display: block;
+        flex: 0 0 auto;
+        min-height: calc(100vh - 92px - 170px - 96px);
+        pointer-events: none;
+    }
+
+    .welcome-wrap {
+        text-align: center;
+        padding: 0.2rem 0 0.65rem;
+    }
+
+    .welcome-meta {
+        font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+        font-size: 0.78rem;
+        font-style: italic;
+        color: #c9a961;
+        opacity: 0.82;
+        margin: 0 0 1.35rem;
+        letter-spacing: 0.01em;
+    }
+
+    .welcome-meta a {
+        color: #e3c37a;
+        text-decoration: none;
+        border-bottom: 1px solid rgba(227, 195, 122, 0.22);
+        transition: color 0.15s ease, border-color 0.15s ease;
+        padding-bottom: 1px;
+    }
+
+    .welcome-meta a:hover {
+        color: #f3d68a;
+        border-bottom-color: rgba(243, 214, 138, 0.55);
+    }
+
+    .welcome-meta .sep {
+        margin: 0 0.55rem;
+        opacity: 0.5;
+    }
+
+    .welcome-title {
+        font-size: clamp(2.35rem, 5.2vw, 3.35rem);
+        margin-bottom: 0.22rem;
+    }
+
+    .welcome-sub {
+        font-size: 0.94rem;
+        color: var(--muted);
+        max-width: 30rem;
+        margin: 0 auto 0.8rem;
+    }
+
+    .st-key-suggestion_shell {
+        margin-bottom: 0.18rem;
+    }
+
+    [data-testid="stPills"] > div {
+        gap: 0.45rem;
+        justify-content: center;
+    }
+
+    [data-testid="stPills"] button {
+        background: rgba(28, 30, 38, 0.82) !important;
+        border: 1px solid rgba(119, 129, 156, 0.24) !important;
+        border-radius: 999px !important;
+        color: var(--text) !important;
+        padding: 0.2rem 0.66rem !important;
+        font-size: 0.82rem !important;
+    }
+
+    [data-testid="stPills"] button:hover,
+    [data-testid="stButton"] button:hover {
+        border-color: rgba(217, 119, 87, 0.38) !important;
+        background: var(--pill-hover) !important;
+        color: #fff4ed !important;
+    }
+
+    [data-testid="stChatMessage"] {
+        background: transparent !important;
+        border: none !important;
+        padding: 0.1rem 0 0.45rem !important;
+        gap: 0.55rem !important;
+    }
+
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] {
+        background: var(--panel-soft) !important;
+        border: 1px solid var(--line) !important;
+        border-radius: 16px !important;
+        padding: 1.2rem 1.2rem !important;
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.1);
+        font-size: 0.88rem !important;
+        line-height: 1.55 !important;
+        position: relative !important;
+    }
+
+    .chat-role-user,
+    .chat-role-assistant {
+        display: none !important;
+    }
+
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"]:has(.chat-role-user) {
+        background: rgba(49, 45, 42, 0.76) !important;
+        border-color: rgba(244, 236, 225, 0.1) !important;
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.1);
+        backdrop-filter: none !important;
+        -webkit-backdrop-filter: none !important;
+    }
+
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"]:has(.chat-role-assistant) {
+        background:
+            linear-gradient(180deg, rgba(42, 44, 49, 0.68), rgba(39, 36, 34, 0.58)) !important;
+        border-color: rgba(244, 236, 225, 0.14) !important;
+        box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, 0.06),
+            0 14px 30px rgba(0, 0, 0, 0.16);
+        backdrop-filter: blur(16px) saturate(125%);
+        -webkit-backdrop-filter: blur(16px) saturate(125%);
+    }
+
+    .copy-btn {
+        position: absolute;
+        top: 0.55rem;
+        right: 0.55rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        border: 1px solid transparent;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        opacity: 0;
+        transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+        z-index: 4;
+    }
+
+    [data-testid="stChatMessage"]:hover .copy-btn,
+    .copy-btn:focus-visible,
+    .copy-btn.copied {
+        opacity: 1;
+    }
+
+    .copy-btn:hover {
+        background: rgba(255, 255, 255, 0.06);
+        border-color: rgba(255, 255, 255, 0.08);
+        color: var(--text);
+    }
+
+    .copy-btn .check-icon {
+        display: none;
+    }
+
+    .copy-btn.copied {
+        color: #6cc276;
+        border-color: rgba(108, 194, 118, 0.3);
+        background: rgba(108, 194, 118, 0.08);
+    }
+
+    .copy-btn.copied .copy-icon {
+        display: none;
+    }
+
+    .copy-btn.copied .check-icon {
+        display: inline-block;
+    }
+
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] [data-testid="stVerticalBlock"],
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] [data-testid="stElementContainer"],
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] [data-testid="stMarkdown"],
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] [data-testid="stMarkdown"] > div,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] [data-testid="stMarkdownContainer"] {
+        display: contents !important;
+    }
+
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] [data-testid="stMarkdown"]:first-child p:first-child,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] [data-testid="stMarkdown"]:first-child h1:first-child,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] [data-testid="stMarkdown"]:first-child h2:first-child,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] [data-testid="stMarkdown"]:first-child h3:first-child,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] [data-testid="stMarkdown"]:first-child h4:first-child,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] [data-testid="stMarkdown"]:first-child h5:first-child,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] [data-testid="stMarkdown"]:first-child h6:first-child,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] > div > div > [data-testid="stElementContainer"]:first-child p:first-child {
+        margin-top: 0 !important;
+        padding-top: 0 !important;
+    }
+
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] p,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] li {
+        font-size: 0.88rem !important;
+        line-height: 1.55 !important;
+        margin-bottom: 0.5rem !important;
+    }
+
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] > div > div > [data-testid="stElementContainer"]:last-child,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] [data-testid="stElementContainer"]:last-child,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] [data-testid="stVerticalBlock"]:last-child,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] p:last-child,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] li:last-child,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] ol:last-child,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] ul:last-child {
+        margin-bottom: 0 !important;
+        padding-bottom: 0 !important;
+    }
+
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] h1,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] h2,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] h3,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] h4,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] h5,
+    [data-testid="stChatMessage"] [data-testid="stChatMessageContent"] h6 {
+        margin-top: 0.9rem !important;
+        margin-bottom: 0.55rem !important;
+        padding: 0 !important;
+    }
+
+    [data-testid="stChatMessageAvatar"] {
+        background: transparent !important;
+        color: var(--accent) !important;
+        font-size: 1rem !important;
+        margin-top: 0.2rem;
+        width: 1.85rem !important;
+        height: 1.85rem !important;
+    }
+
+    [data-testid="stSelectbox"] label p,
+    [data-testid="stNumberInput"] label p,
+    [data-testid="stSlider"] label p,
+    [data-testid="stToggle"] label p,
+    [data-testid="stRadio"] label p {
+        color: var(--muted) !important;
+        font-size: 0.78rem !important;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+
+    div[data-baseweb="select"] > div {
+        background: var(--panel) !important;
+        border: 1px solid var(--line) !important;
+        border-radius: 18px !important;
+        min-height: 2.72rem !important;
+        box-shadow: 0 8px 18px rgba(0, 0, 0, 0.1);
+    }
+
+    div[data-baseweb="select"] span {
+        color: var(--text) !important;
+    }
+
+    [data-testid="stButton"] button {
+        background: rgba(49, 45, 42, 0.88) !important;
+        color: var(--text) !important;
+        border: 1px solid var(--line) !important;
+        min-height: 2.15rem;
+        border-radius: 999px !important;
+    }
+
+    .st-key-new_chat button,
+    .st-key-delete_chat button {
+        background: var(--pill) !important;
+        border: 1px solid var(--line) !important;
+        border-radius: 999px !important;
+        color: var(--text) !important;
+        min-height: 2.25rem !important;
+        height: 2.25rem !important;
+        padding: 0 0.95rem !important;
+        gap: 0.5rem !important;
+        font-size: 0.78rem !important;
+        letter-spacing: 0.04em !important;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+        transition: border-color .15s ease, background .15s ease;
+    }
+
+    .st-key-new_chat button:hover,
+    .st-key-delete_chat button:hover {
+        background: var(--pill-hover) !important;
+        border-color: rgba(217, 119, 87, 0.38) !important;
+        color: #fff4ed !important;
+    }
+
+    .st-key-new_chat button [data-testid="stIconMaterial"],
+    .st-key-delete_chat button [data-testid="stIconMaterial"] {
+        font-size: 1.08rem !important;
+        line-height: 1 !important;
+        color: var(--accent) !important;
+    }
+
+    .st-key-new_chat button p,
+    .st-key-delete_chat button p {
+        font-size: 0.78rem !important;
+        line-height: 1 !important;
+        margin: 0 !important;
+        letter-spacing: 0.04em !important;
+    }
+
+    @media (max-width: 620px) {
+        .st-key-new_chat button p,
+        .st-key-delete_chat button p {
+            display: none !important;
+        }
+        .st-key-new_chat button,
+        .st-key-delete_chat button {
+            padding: 0 0.7rem !important;
+        }
+    }
+
+    .st-key-composer_shell {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        width: auto;
+        max-width: none;
+        box-sizing: border-box;
+        z-index: 40;
+        padding: 1.1rem 1.2rem calc(0.9rem + env(safe-area-inset-bottom));
+        background: transparent;
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+        -webkit-mask-image: none;
+        mask-image: none;
+        pointer-events: none;
+    }
+
+    [data-testid="stMainBlockContainer"],
+    [data-testid="stAppViewBlockContainer"],
+    section.main > .block-container,
+    [data-testid="stMain"] > .block-container,
+    .block-container {
+        max-width: 860px !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+        padding: 92px 1.2rem 170px !important;
+        height: 100vh !important;
+        max-height: 100vh !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        overscroll-behavior: contain;
+        scroll-behavior: smooth;
+    }
+
+    [data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"],
+    [data-testid="stMain"] > .block-container > [data-testid="stVerticalBlock"],
+    section.main > .block-container > [data-testid="stVerticalBlock"],
+    .block-container > [data-testid="stVerticalBlock"] {
+        gap: 0 !important;
+    }
+
+    .st-key-composer_status,
+    .st-key-composer_input,
+    .st-key-composer_footer {
+        max-width: 720px;
+        margin: 0 auto;
+        pointer-events: auto;
+    }
+
+    .st-key-composer_status {
+        padding: 0 0 0.42rem;
+        min-height: 1.9rem;
+    }
+
+    .st-key-composer_status [data-testid="stHorizontalBlock"] {
+        align-items: center !important;
+        gap: 0.4rem !important;
+    }
+
+    .st-key-composer_status .composer-meta {
+        font-size: 0.68rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: #c4bcae;
+        line-height: 1;
+        padding: 0;
+    }
+
+    .composer-meta-spacer {
+        min-height: 1.2rem;
+    }
+
+    .st-key-composer_footer .st-key-composer_settings_detail_popover {
+        margin-left: 0.1rem !important;
+    }
+
+    .st-key-composer_settings_detail_popover [data-testid="stPopoverButton"] {
+        min-width: 0 !important;
+        padding: 0.32rem 0.55rem !important;
+        height: auto !important;
+        background: rgba(236, 230, 219, 0.04) !important;
+        border: 1px solid rgba(244, 236, 225, 0.1) !important;
+        border-radius: 12px !important;
+        color: var(--muted) !important;
+        opacity: 0.9;
+        transition: opacity .12s ease, border-color .12s ease, color .12s ease, background .12s ease;
+    }
+
+    .st-key-composer_settings_detail_popover [data-testid="stPopoverButton"] p {
+        display: none !important;
+    }
+
+    .st-key-composer_settings_detail_popover [data-testid="stPopoverButton"]:hover {
+        opacity: 1;
+        border-color: rgba(244, 236, 225, 0.22) !important;
+        color: var(--text) !important;
+        background: rgba(236, 230, 219, 0.08) !important;
+    }
+
+    .st-key-composer_settings_detail_popover [data-testid="stPopoverButton"] [data-testid="stIconMaterial"] {
+        font-size: 1.05rem !important;
+        color: inherit !important;
+    }
+
+    .settings-detail-row {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+        padding: 0.22rem 0;
+        font-size: 0.82rem;
+        color: var(--text);
+        border-bottom: 1px solid rgba(244, 236, 225, 0.04);
+    }
+
+    .settings-detail-row:last-child {
+        border-bottom: none;
+    }
+
+    .settings-detail-bullet {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        display: inline-block;
+        background: rgba(244, 236, 225, 0.22);
+        flex-shrink: 0;
+    }
+
+    .settings-detail-label {
+        color: var(--muted);
+        flex: 0 0 6.5rem;
+        font-size: 0.78rem;
+        letter-spacing: 0.02em;
+    }
+
+    .settings-detail-value {
+        color: var(--text);
+        flex: 1 1 auto;
+        font-weight: 400;
+    }
+
+    .settings-detail-default {
+        font-size: 0.62rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+        background: rgba(244, 236, 225, 0.06);
+        border: 1px solid rgba(244, 236, 225, 0.08);
+        border-radius: 999px;
+        padding: 0.05rem 0.45rem;
+        opacity: 0.72;
+    }
+
+    .st-key-composer_footer {
+        margin-top: 0.45rem;
+    }
+
+    .st-key-composer_footer > div[data-testid="stHorizontalBlock"] {
+        flex-wrap: nowrap !important;
+        align-items: center !important;
+        gap: 0.45rem !important;
+    }
+
+    .st-key-composer_footer [data-testid="stToggle"] {
+        margin: 0 !important;
+    }
+
+    .st-key-composer_footer [data-testid="stToggle"] label {
+        gap: 0.5rem !important;
+    }
+
+    .st-key-composer_footer [data-testid="stToggle"] label p {
+        font-size: 0.72rem !important;
+        letter-spacing: 0.08em !important;
+        text-transform: uppercase !important;
+    }
+
+    .st-key-composer_footer [data-testid="stPopoverButton"] {
+        background: var(--pill) !important;
+        border: 1px solid var(--line) !important;
+        border-radius: 999px !important;
+        color: var(--text) !important;
+        min-height: 2.25rem !important;
+        height: 2.25rem !important;
+        width: auto !important;
+        min-width: 0 !important;
+        padding: 0 0.95rem !important;
+        gap: 0.5rem !important;
+        font-size: 0.78rem !important;
+        letter-spacing: 0.04em !important;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+        transition: border-color .15s ease, background .15s ease;
+    }
+
+    .st-key-composer_footer [data-testid="stPopoverButton"]:hover {
+        background: var(--pill-hover) !important;
+        border-color: rgba(217, 119, 87, 0.38) !important;
+        color: #fff4ed !important;
+    }
+
+    .st-key-composer_footer [data-testid="stPopoverButton"] p {
+        font-size: 0.78rem !important;
+        line-height: 1 !important;
+        margin: 0 !important;
+        letter-spacing: 0.04em !important;
+    }
+
+    .st-key-composer_footer [data-testid="stPopoverButton"] [data-testid="stIconMaterial"] {
+        font-size: 1.08rem !important;
+        line-height: 1 !important;
+        color: var(--accent) !important;
+    }
+
+    @media (max-width: 620px) {
+        .st-key-composer_footer [data-testid="stPopoverButton"] p {
+            display: none !important;
+        }
+        .st-key-composer_footer [data-testid="stPopoverButton"] {
+            padding: 0 0.7rem !important;
+        }
+    }
+
+    .st-key-composer_input [data-testid="stChatInput"] {
+        max-width: none !important;
+        margin: 0 !important;
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        padding: 0 !important;
+    }
+
+    .st-key-composer_input [data-testid="stChatInput"] > div {
+        border-radius: 22px !important;
+    }
+
+    .st-key-composer_input [data-testid="stChatInput"] [data-baseweb="textarea"] {
+        min-height: auto !important;
+        border-radius: 22px !important;
+    }
+
+    .st-key-composer_input [data-testid="stChatInputTextArea"],
+    .st-key-composer_input [data-testid="stChatInput"] textarea {
+        color: var(--text) !important;
+        min-height: unset !important;
+        padding-top: 0.18rem !important;
+        padding-bottom: 0.18rem !important;
+        font-size: 0.95rem !important;
+        line-height: 1.35 !important;
+    }
+
+    .st-key-composer_input [data-testid="stChatInputTextArea"]::placeholder,
+    .st-key-composer_input [data-testid="stChatInput"] textarea::placeholder {
+        color: var(--muted) !important;
+    }
+
+    .st-key-composer_input [data-testid="stChatInputFileUploadButton"],
+    .st-key-composer_input [data-testid="stChatInputFileUploadButton"] button,
+    .st-key-composer_input [data-testid="stChatInputSubmitButton"],
+    .st-key-composer_input [data-testid="stChatInputSubmitButton"] button {
+        background: rgba(255, 255, 255, 0.08) !important;
+        border: 1px solid rgba(255, 255, 255, 0.05) !important;
+        color: var(--text) !important;
+        border-radius: 999px !important;
+        box-shadow: none !important;
+    }
+
+    .st-key-composer_input [data-testid="stChatInputFileUploadButton"]:hover,
+    .st-key-composer_input [data-testid="stChatInputFileUploadButton"] button:hover,
+    .st-key-composer_input [data-testid="stChatInputSubmitButton"]:hover,
+    .st-key-composer_input [data-testid="stChatInputSubmitButton"] button:hover {
+        background: rgba(217, 119, 87, 0.16) !important;
+        border-color: rgba(217, 119, 87, 0.28) !important;
+    }
+
+    .composer-meta {
+        display: flex;
+        align-items: center;
+        text-align: left;
+        padding-top: 0.08rem;
+        font-size: 0.61rem;
+        line-height: 1.25;
+        letter-spacing: 0.11em;
+    }
+
+    [data-testid="stPopoverBody"] {
+        background: var(--popover-panel) !important;
+        border: 1px solid var(--line-strong) !important;
+        border-radius: 16px !important;
+        box-shadow: 0 18px 36px rgba(0, 0, 0, 0.32) !important;
+        padding: 1rem 1.1rem 1.05rem !important;
+        min-width: 240px !important;
+        max-height: 82vh !important;
+        overflow-y: auto !important;
+        overscroll-behavior: contain;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(244, 236, 225, 0.22) transparent;
+    }
+
+    .popover-explainer {
+        font-size: 0.78rem !important;
+        line-height: 1.45 !important;
+        color: var(--muted) !important;
+        margin: 0 0 0.7rem !important;
+        padding: 0.55rem 0.7rem !important;
+        border-radius: 10px !important;
+        background: rgba(236, 230, 219, 0.04);
+        border: 1px solid rgba(244, 236, 225, 0.06);
+    }
+
+    .popover-explainer strong {
+        color: var(--text) !important;
+        font-weight: 500 !important;
+    }
+
+    [data-testid="stPopoverBody"] [data-testid="stSlider"] {
+        margin-top: 0.35rem !important;
+    }
+
+    [data-testid="stPopoverBody"] [data-testid="stSlider"] label {
+        display: block !important;
+        font-size: 0.78rem !important;
+        color: var(--muted) !important;
+        letter-spacing: 0.02em !important;
+        margin-bottom: 0.15rem !important;
+    }
+
+    .stack-health-row {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+        padding: 0.22rem 0;
+        font-size: 0.83rem;
+        color: var(--text);
+    }
+
+    .stack-health-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        display: inline-block;
+        flex-shrink: 0;
+    }
+
+    .stack-health-dot.ready {
+        background: #9bba7a;
+        box-shadow: 0 0 0 2px rgba(155, 186, 122, 0.18);
+    }
+
+    .stack-health-dot.down {
+        background: transparent;
+        border: 1px solid rgba(235, 84, 70, 0.55);
+        box-shadow: 0 0 0 2px rgba(235, 84, 70, 0.08);
+    }
+
+    .stack-health-label {
+        color: var(--muted);
+        font-size: 0.78rem;
+    }
+
+    .stack-health-name {
+        color: var(--text);
+        font-weight: 400;
+        letter-spacing: 0.01em;
+    }
+
+    [data-testid="stPopoverBody"]::-webkit-scrollbar {
+        width: 8px;
+    }
+
+    [data-testid="stPopoverBody"]::-webkit-scrollbar-thumb {
+        background: rgba(244, 236, 225, 0.18);
+        border-radius: 8px;
+    }
+
+    [data-testid="stPopoverBody"]::-webkit-scrollbar-track {
+        background: transparent;
+    }
+
+    .st-key-live_progress_panel {
+        --live-progress-header-height: 2.75rem;
+        margin: 0 0 0.95rem !important;
+        position: relative;
+        overflow: hidden;
+        border: 1px solid rgba(119, 129, 156, 0.26);
+        border-radius: 14px;
+        background: rgba(23, 24, 29, 0.62);
+        box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, 0.04),
+            0 10px 22px rgba(0, 0, 0, 0.12);
+    }
+
+    .st-key-live_progress_panel [data-testid="stVerticalBlock"] {
+        gap: 0 !important;
+    }
+
+    .st-key-live_progress_header {
+        min-height: var(--live-progress-header-height);
+        height: var(--live-progress-header-height);
+        box-sizing: border-box;
+        display: flex;
+        align-items: center;
+        min-width: 0;
+        padding: 0.52rem 0.62rem 0.52rem 0.88rem;
+        background: rgba(18, 21, 29, 0.86);
+        border-bottom: 1px solid rgba(119, 129, 156, 0.22);
+    }
+
+    .st-key-live_progress_header [data-testid="stHorizontalBlock"] {
+        width: 100% !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        gap: 0.75rem !important;
+    }
+
+    .st-key-live_progress_header [data-testid="stElementContainer"] {
+        width: auto !important;
+    }
+
+    .st-key-live_progress_header [data-testid="stMarkdown"],
+    .st-key-live_progress_header [data-testid="stMarkdownContainer"],
+    .st-key-live_progress_header [data-testid="stMarkdownContainer"] p {
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+
+    .live-progress-title {
+        display: flex;
+        align-items: center;
+        gap: 0.52rem;
+        color: var(--text);
+        font-size: 0.9rem;
+        font-weight: 600;
+        line-height: 1.2;
+    }
+
+    .live-progress-title::before {
+        content: "";
+        width: 0.78rem;
+        height: 0.78rem;
+        border-radius: 999px;
+        border: 2px solid rgba(244, 236, 225, 0.18);
+        border-top-color: rgba(217, 119, 87, 0.95);
+        box-shadow: 0 0 0 3px rgba(217, 119, 87, 0.08);
+        flex: 0 0 auto;
+        animation: live-progress-spin 0.9s linear infinite;
+    }
+
+    @keyframes live-progress-spin {
+        to {
+            transform: rotate(360deg);
+        }
+    }
+
+    .st-key-stop_stream_button {
+        flex: 0 0 auto !important;
+        width: 2rem !important;
+        height: 2rem !important;
+        margin: 0 !important;
+    }
+
+    .st-key-stop_stream_button [data-testid="stButton"] {
+        width: 2rem !important;
+        height: 2rem !important;
+        margin: 0 !important;
+    }
+
+    .st-key-stop_stream_button button {
+        width: 2rem !important;
+        min-width: 2rem !important;
+        height: 2rem !important;
+        min-height: 2rem !important;
+        padding: 0 !important;
+        border-radius: 999px !important;
+        background: rgba(235, 84, 70, 0.1) !important;
+        border: 1px solid rgba(235, 84, 70, 0.42) !important;
+        color: #ef7266 !important;
+        box-shadow: none !important;
+    }
+
+    .st-key-stop_stream_button button:hover {
+        background: rgba(235, 84, 70, 0.2) !important;
+        border-color: rgba(235, 84, 70, 0.68) !important;
+        color: #f28b7f !important;
+    }
+
+    .st-key-stop_stream_button button p {
+        position: absolute !important;
+        width: 1px !important;
+        height: 1px !important;
+        padding: 0 !important;
+        margin: -1px !important;
+        overflow: hidden !important;
+        clip: rect(0, 0, 0, 0) !important;
+        white-space: nowrap !important;
+        border: 0 !important;
+    }
+
+    .st-key-stop_stream_button button [data-testid="stIconMaterial"] {
+        color: #ef7266 !important;
+        font-size: 1rem !important;
+    }
+
+    .st-key-live_progress_body {
+        min-width: 0;
+    }
+
+    .live-progress-log {
+        max-height: min(21rem, 42vh);
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        padding: 0.55rem 0.78rem 0.68rem;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(244, 236, 225, 0.18) transparent;
+    }
+
+    .live-progress-line {
+        margin: 0.15rem 0;
+    }
+
+    .live-progress-line code {
+        display: inline;
+        background: rgba(236, 230, 219, 0.05);
+        border: 1px solid rgba(244, 236, 225, 0.07);
+        border-radius: 5px;
+        color: var(--muted);
+        padding: 0.08rem 0.36rem;
+        font-size: 0.76rem;
+        line-height: 1.55;
+        letter-spacing: 0.02em;
+        white-space: pre-wrap;
+        box-decoration-break: clone;
+        -webkit-box-decoration-break: clone;
+    }
+
+    /* Persisted progress-log expander inside completed assistant messages. */
+    [data-testid="stChatMessage"] [data-testid="stExpander"] summary {
+        font-size: 0.78rem !important;
+        color: var(--muted) !important;
+        letter-spacing: 0.02em !important;
+    }
+
+    [data-testid="stChatMessage"] [data-testid="stExpander"] [data-testid="stExpanderDetails"] p code,
+    [data-testid="stChatMessage"] [data-testid="stExpander"] [data-testid="stExpanderDetails"] code {
+        background: rgba(236, 230, 219, 0.04) !important;
+        border: 1px solid rgba(244, 236, 225, 0.06) !important;
+        color: var(--muted) !important;
+        padding: 0.1rem 0.4rem !important;
+        font-size: 0.72rem !important;
+        letter-spacing: 0.02em !important;
+    }
+
+    [data-testid="stPopoverBody"] > div,
+    [data-testid="stPopoverBody"] > div > div,
+    [data-testid="stPopoverBody"] [data-testid="stVerticalBlock"],
+    [data-testid="stPopoverBody"] [data-testid="stVerticalBlockBorderWrapper"],
+    [data-testid="stPopoverBody"] [data-testid="stHorizontalBlock"],
+    [data-testid="stPopoverBody"] [data-testid="stElementContainer"] {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+    }
+
+    [data-testid="stPopoverBody"] [data-testid="stCaptionContainer"] {
+        font-size: 0.82rem !important;
+        letter-spacing: 0.02em !important;
+        text-transform: none !important;
+        color: var(--text) !important;
+        font-weight: 600 !important;
+        margin: 0 0 0.5rem !important;
+        padding: 0 !important;
+        opacity: 1 !important;
+    }
+
+    [data-testid="stPopoverBody"] [data-testid="stCaptionContainer"] p {
+        font-size: 0.82rem !important;
+        letter-spacing: 0.02em !important;
+        text-transform: none !important;
+        color: var(--text) !important;
+        font-weight: 600 !important;
+        line-height: 1.2 !important;
+        margin: 0 !important;
+    }
+
+    [data-testid="stPopoverBody"] [data-testid="stRadio"] + [data-testid="stCaptionContainer"],
+    [data-testid="stPopoverBody"] [data-testid="stSelectbox"] + [data-testid="stCaptionContainer"] {
+        margin-top: 0.95rem !important;
+    }
+
+    [data-testid="stPopoverBody"] [data-testid="stSelectbox"],
+    [data-testid="stPopoverBody"] [data-testid="stRadio"] {
+        margin-bottom: 0.1rem !important;
+    }
+
+    [data-testid="stPopoverBody"] [data-testid="stSelectbox"] > label,
+    [data-testid="stPopoverBody"] [data-testid="stRadio"] > label {
+        display: none !important;
+    }
+
+    [data-testid="stPopoverBody"] div[data-baseweb="select"] > div {
+        min-height: 2.2rem !important;
+        border-radius: 12px !important;
+        box-shadow: none !important;
+        background: var(--panel) !important;
+    }
+
+    [data-testid="stPopoverBody"] [role="radiogroup"] {
+        gap: 0.12rem !important;
+    }
+
+    [data-testid="stPopoverBody"] [role="radiogroup"] label {
+        padding: 0.28rem 0.35rem !important;
+        border-radius: 8px !important;
+        transition: background .12s ease;
+        gap: 0.6rem !important;
+    }
+
+    [data-testid="stPopoverBody"] [role="radiogroup"] label:hover {
+        background: rgba(236, 230, 219, 0.05) !important;
+    }
+
+    [data-testid="stPopoverBody"] [role="radiogroup"] label > div:first-child {
+        display: flex !important;
+    }
+
+    [data-testid="stPopoverBody"] [role="radiogroup"] p {
+        font-size: 0.88rem !important;
+        line-height: 1.25 !important;
+        letter-spacing: 0.01em !important;
+        color: var(--text) !important;
+        text-transform: none !important;
+        font-weight: 400 !important;
+    }
+
+    .message-label {
+        margin-bottom: 0.6rem;
+    }
+
+    .provider-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        font-size: 0.69rem;
+        padding: 0.32rem 0.58rem;
+        border-radius: 999px;
+        font-weight: 600;
+        margin-bottom: 0.65rem;
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--muted);
+        border: 1px solid var(--line);
+    }
+
+    .file-chip-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        margin-top: 0.7rem;
+    }
+
+    .file-chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.26rem 0.56rem;
+        border-radius: 999px;
+        background: rgba(217, 119, 87, 0.12);
+        border: 1px solid rgba(217, 119, 87, 0.18);
+        color: #f7d8cb;
+        font-size: 0.72rem;
+    }
+
+    .citation-box {
+        font-size: 0.82rem;
+        padding: 0.85rem 0.95rem;
+        background: rgba(255, 255, 255, 0.03);
+        border-radius: 16px;
+        margin-top: 1rem;
+        color: var(--muted);
+        border: 1px solid var(--line);
+    }
+
+    .citation-box a {
+        color: #efb39d;
+        text-decoration: none;
+        font-weight: 600;
+    }
+
+    .citation-box a:hover {
+        text-decoration: underline;
+    }
+
+    [data-testid="stSidebar"] {
+        background: #24211f !important;
+        border-right: 1px solid var(--line) !important;
+    }
+
+    @media (max-width: 900px) {
+        .block-container {
+            padding-top: 0.9rem !important;
+        }
+
+        .st-key-empty_state_shell {
+            min-height: clamp(15rem, calc(100vh - 21rem), 22rem);
+        }
+
+        .st-key-composer_shell {
+            padding-top: 0.42rem;
+        }
+
+        [data-testid="stMainBlockContainer"] {
+            padding-top: 108px !important;
+        }
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Constants — UI labels + agent_overrides whitelist mappings
+# ---------------------------------------------------------------------------
+
+# Fallback avatar / icon used until the server has been discovered or when
+# a stack has no operator-friendly description. Chat messages only need
+# an icon for st.chat_message; nothing here ever hits the HTTP wire.
+DEFAULT_STACK_AVATAR = ":material/auto_awesome:"
+DEFAULT_STACK_ICON = "✦"
+STACK_AVATARS = {
+    "litellm_perplexity": ":material/hub:",
+    "anthropic_perplexity": ":material/auto_awesome:",
+    "bedrock_perplexity": ":material/memory:",
+    "azure_openai_perplexity": ":material/cloud:",
+    "azure_openai_web_search": ":material/travel_explore:",
+    "azure_openai_bing": ":material/search:",
+    "azure_foundry_web_search": ":material/cloud:",
+}
+
+# report_profile is the primary "Recherche-Modus" lever on the agent.
+# Profile defaults fan out across other settings via
+# AgentSettings.with_report_profile_defaults (see src/inqtrix/settings.py).
+# Display labels live in inqtrix_webapp/translations.py under "profile_<key>".
+REPORT_PROFILES = ["compact", "deep"]
+
+# Effort levels map the UI label onto (max_rounds, min_rounds) pairs from
+# the per-request overrides whitelist (src/inqtrix/server/overrides.py).
+# "Auto" is the only level that omits both fields — the server then
+# applies the AgentSettings defaults (which themselves fan out from
+# report_profile). The German strings are stable session-state values;
+# display labels are localized via EFFORT_DISPLAY_KEYS / effort_display().
+EFFORT_LEVELS = ["Auto", "Niedrig", "Mittel", "Hoch", "Max"]
+EFFORT_ROUNDS: dict[str, tuple[int, int] | None] = {
+    "Auto": None,
+    "Niedrig": (1, 1),
+    "Mittel": (2, 1),
+    "Hoch": (4, 2),
+    "Max": (6, 3),
+}
+
+SUGGESTIONS = {
+    "Suche aktuelle KI-Nachrichten": "Suche nach den aktuellsten Entwicklungen im Bereich künstliche Intelligenz diese Woche.",
+    "Erkläre RAG": "Erkläre mir Retrieval Augmented Generation einfach und verständlich. Was sind die Vorteile gegenüber Fine-Tuning?",
+    "Vergleiche Claude vs GPT-4": "Vergleiche Claude 3.5 Sonnet mit GPT-4o. Wo liegen die Stärken und Schwächen?",
+}
+
+# Maps SUGGESTION dict keys (German display labels) to translation keys.
+# The dict values (prompt texts sent to the agent) stay German on purpose —
+# UI-only scope, agent backend remains German.
+SUGGESTION_DISPLAY_KEYS: dict[str, str] = {
+    "Suche aktuelle KI-Nachrichten": "suggestion_ai_news",
+    "Erkläre RAG": "suggestion_explain_rag",
+    "Vergleiche Claude vs GPT-4": "suggestion_compare_llms",
+}
+
+
+# ---------------------------------------------------------------------------
+# Helper Functions
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=5, show_spinner=False)
+def load_stacks(base_url: str | None) -> tuple[dict[str, dict], str]:
+    """Discover stacks from the server.
+
+    Returns ``({stack_name: payload}, default_stack_name)``. On a
+    single-stack server (``/v1/stacks`` → 404) falls back to
+    ``/v1/models`` and synthesises a single pseudo-stack. On a fully
+    unreachable server the pseudo-stack carries ``ready=False`` so the
+    UI can render the selector without crashing.
+    """
+    normalized = normalize_server_url(base_url)
+    if not normalized:
+        return {}, ""
+    data = fetch_stacks(base_url)
+    if data is not None:
+        stacks = {entry["name"]: entry for entry in data.get("stacks", [])}
+        default = data.get("default") or (next(iter(stacks), "") if stacks else "")
+        return stacks, default
+    models = fetch_models_fallback(base_url)
+    synthetic_name = models[0] if models else "default"
+    return (
+        {
+            synthetic_name: {
+                "name": synthetic_name,
+                "llm": "",
+                "search": "",
+                "ready": bool(models),
+                "description": "Single-stack server (kein /v1/stacks)",
+                "models": {},
+            }
+        },
+        synthetic_name,
+    )
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def load_health(base_url: str | None) -> dict:
+    """Discover health from the server (5 s cache)."""
+    normalized = normalize_server_url(base_url)
+    if not normalized:
+        return {"status": "not_configured", "auth_required": False, "http_status": 0}
+    return fetch_health(base_url)
+
+
+def normalize_server_url(raw_url: str | None) -> str:
+    """Normalize a server URL for transport calls and cache keys."""
+    return (raw_url or "").strip().rstrip("/")
+
+
+def format_stack_option(stack_name: str, stacks: dict[str, dict]) -> str:
+    """Format the stack selectbox option with an elegant ready indicator.
+
+    Ready stacks get a solid bullet (``●``), unavailable ones an open
+    circle (``○``) — monochrome and understated so the selectbox stays
+    typographically coherent. The actual coloring (muted green for
+    ready, muted red for unavailable) is applied via CSS targeting the
+    selectbox options via ``.stack-dot-ready`` / ``.stack-dot-down``.
+    """
+    entry = stacks.get(stack_name, {})
+    marker = "●" if entry.get("ready") else "○"
+    return f"{marker}  {stack_name}"
+
+
+def get_mode_display(profile_value: str) -> str:
+    """Returns a compact label for the active report profile."""
+    key = f"profile_{profile_value}"
+    if key in TRANSLATIONS:
+        return t(key)
+    return profile_value.title()
+
+
+def shorten_label(label: str, max_length: int = 24) -> str:
+    """Shortens long labels for composer pills without losing context."""
+    if len(label) <= max_length:
+        return label
+    return f"{label[:max_length - 1]}..."
+
+
+def get_settings_summary() -> str:
+    """Compact primary summary shown permanently in the composer-meta row.
+
+    Only the two most stable decisions stay visible (stack and profile);
+    every other setting is collapsed into the ``···`` info popover so
+    the meta row never wraps into the composer area.
+    """
+    stack_label = shorten_label(st.session_state.active_stack or "—", 22)
+    return (
+        f'{stack_label} · '
+        f'{get_mode_display(st.session_state.report_profile)}'
+    )
+
+
+def render_settings_detail_popover() -> None:
+    """Detailed active-settings view inside the composer-meta info popover.
+
+    Shown only when the user opens the ``···`` popover. Uses the same
+    CSS-dot pattern as the stack-health row so on/off states are
+    instantly readable without colored emoji. Default values are
+    labelled as such to help operators tell tuned vs untuned runs
+    apart at a glance.
+    """
+
+    def _row(label: str, value: str, *, is_default: bool, state: str = "neutral") -> None:
+        dot = (
+            '<span class="stack-health-dot ready"></span>'
+            if state == "on"
+            else '<span class="stack-health-dot down"></span>'
+            if state == "off"
+            else '<span class="settings-detail-bullet"></span>'
+        )
+        default_tag = (
+            '<span class="settings-detail-default">Default</span>'
+            if is_default else ''
+        )
+        st.markdown(
+            f'<div class="settings-detail-row">'
+            f'{dot}'
+            f'<span class="settings-detail-label">{escape(label)}</span>'
+            f'<span class="settings-detail-value">{escape(value)}</span>'
+            f'{default_tag}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    stack = st.session_state.active_stack or "—"
+    profile = get_mode_display(st.session_state.report_profile)
+    effort = st.session_state.reasoning_effort
+    web_on = bool(st.session_state.get("web_search_enabled", True))
+    streaming_on = bool(st.session_state.streaming_enabled)
+    include_progress = bool(st.session_state.include_progress)
+    on_label = t("settings_value_on")
+    off_label = t("settings_value_off")
+
+    _row(t("row_label_stack"), stack, is_default=False)
+    _row(t("row_label_profile"), profile, is_default=st.session_state.report_profile == "compact")
+    _row(t("row_label_effort"), effort_display(effort), is_default=(effort == "Auto"))
+    _row(
+        t("row_label_websearch"),
+        on_label if web_on else off_label,
+        is_default=web_on,
+        state="on" if web_on else "off",
+    )
+    _row(
+        t("row_label_streaming"),
+        on_label if streaming_on else off_label,
+        is_default=streaming_on,
+        state="on" if streaming_on else "off",
+    )
+    _row(
+        t("row_label_progress"),
+        on_label if include_progress else off_label,
+        is_default=include_progress,
+        state="on" if include_progress else "off",
+    )
+    st.caption(
+        t(
+            "settings_finetuning_caption",
+            confidence=int(st.session_state.confidence_stop),
+            max_seconds=int(st.session_state.max_total_seconds),
+            first_round=int(st.session_state.first_round_queries),
+        )
+    )
+
+
+def get_stack_avatar(stack_name: str) -> str:
+    """Pick an avatar icon for the given stack name."""
+    return STACK_AVATARS.get(stack_name, DEFAULT_STACK_AVATAR)
+
+
+def build_agent_overrides() -> dict:
+    """Collect the per-request overrides from the current session state.
+
+    When the effort level is ``Auto`` both ``max_rounds`` and
+    ``min_rounds`` are omitted so the server-side AgentSettings default
+    (derived from ``report_profile``) applies.
+
+    When the Websuche toggle is off ``skip_search=True`` is emitted so
+    the server short-circuits the research graph and answers purely
+    from the LLM provider.
+    """
+    effort = EFFORT_ROUNDS.get(st.session_state.reasoning_effort)
+    web_search = bool(st.session_state.get("web_search_enabled", True))
+    overrides: dict = {
+        "report_profile": st.session_state.report_profile,
+        "confidence_stop": int(st.session_state.confidence_stop),
+        "max_total_seconds": int(st.session_state.max_total_seconds),
+        "first_round_queries": int(st.session_state.first_round_queries),
+    }
+    if effort is not None:
+        overrides["max_rounds"], overrides["min_rounds"] = effort
+    if not web_search:
+        overrides["skip_search"] = True
+    return overrides
+
+
+def normalize_prompt_input(prompt_value, fallback_prompt: str | None = None) -> tuple[str | None, list[str]]:
+    """Normalizes text/file input returned by st.chat_input."""
+    if prompt_value is None:
+        return fallback_prompt, []
+
+    if hasattr(prompt_value, "text"):
+        file_names = [uploaded_file.name for uploaded_file in getattr(
+            prompt_value, "files", [])]
+        prompt_text = prompt_value.text.strip()
+        if not prompt_text and file_names:
+            prompt_text = "Bitte analysiere die hochgeladenen Dateien."
+        return prompt_text or None, file_names
+
+    prompt_text = str(prompt_value).strip()
+    return prompt_text or None, []
+
+
+def render_uploaded_files(file_names: list[str]) -> None:
+    """Renders uploaded files as compact chips below the user message."""
+    if not file_names:
+        return
+
+    chips = "".join(
+        f'<span class="file-chip">{escape(file_name)}</span>'
+        for file_name in file_names
+    )
+    st.markdown(f'<div class="file-chip-row">{chips}</div>', unsafe_allow_html=True)
+
+
+def _render_live_progress_log(lines: list[str]) -> str:
+    """Render escaped progress lines for the compact live progress panel."""
+    if not lines:
+        return '<div class="live-progress-log"></div>'
+    items = "".join(
+        f'<div class="live-progress-line"><code>{escape(line)}</code></div>'
+        for line in lines
+    )
+    return f'<div class="live-progress-log">{items}</div>'
+
+
+def render_message(message: dict) -> None:
+    """Renders a single chat message with the custom visual style."""
+    if message["role"] == "user":
+        avatar_icon = "user"
+    else:
+        avatar_icon = get_stack_avatar(message.get("stack", ""))
+    content = message.get("content", "")
+    if not isinstance(content, str):
+        content = getattr(content, "text", str(content))
+
+    if message["role"] == "user":
+        st.markdown(
+            '<div class="user-msg-anchor" data-anchor="user"></div>',
+            unsafe_allow_html=True,
+        )
+
+    with st.chat_message(message["role"], avatar=avatar_icon):
+        role_class = (
+            "chat-role-user" if message["role"] == "user" else "chat-role-assistant"
+        )
+        st.markdown(
+            f'<span class="{role_class}" aria-hidden="true"></span>',
+            unsafe_allow_html=True,
+        )
+        copy_payload = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        copy_label = escape(t("btn_copy"))
+        st.markdown(
+            f'<button type="button" class="copy-btn" data-copy-b64="{copy_payload}" '
+            f'aria-label="{copy_label}" title="{copy_label}">'
+            f'<svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" '
+            f'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+            f'<rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>'
+            f'<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>'
+            f'</svg>'
+            f'<svg class="check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" '
+            f'stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">'
+            f'<polyline points="20 6 9 17 4 12"></polyline>'
+            f'</svg>'
+            f'</button>',
+            unsafe_allow_html=True,
+        )
+
+        progress_lines = message.get("progress") or []
+        if progress_lines:
+            with st.expander(
+                t("status_progress_label", count=len(progress_lines)),
+                expanded=False,
+                icon=":material/manage_search:",
+            ):
+                for line in progress_lines:
+                    st.markdown(f"`{line}`")
+
+        st.markdown(content)
+
+        if message["role"] == "user":
+            render_uploaded_files(message.get("files", []))
+
+
+def effort_summary(effort: str) -> str:
+    """Compact human-readable summary of an Aufwand level."""
+    value = EFFORT_ROUNDS.get(effort)
+    if value is None:
+        return t("effort_server_default")
+    max_r, min_r = value
+    return f"max_rounds = {max_r} · min_rounds = {min_r}"
+
+
+# Maps German EFFORT_LEVELS values (used as session-state keys) to translation keys.
+EFFORT_DISPLAY_KEYS: dict[str, str] = {
+    "Auto": "effort_auto",
+    "Niedrig": "effort_low",
+    "Mittel": "effort_medium",
+    "Hoch": "effort_high",
+    "Max": "effort_max",
+}
+
+
+def effort_display(level: str) -> str:
+    """Display label for an EFFORT_LEVELS value (German key → localized label)."""
+    return t(EFFORT_DISPLAY_KEYS.get(level, level))
+
+
+# ---------------------------------------------------------------------------
+# Server discovery + session state init
+# ---------------------------------------------------------------------------
+
+ENV_SERVER_BASE_URL = normalize_server_url(get_base_url())
+API_KEY = get_api_key()
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "server_base_url" not in st.session_state:
+    st.session_state.server_base_url = ENV_SERVER_BASE_URL
+
+if "server_base_url_input" not in st.session_state:
+    st.session_state.server_base_url_input = st.session_state.server_base_url
+
+SERVER_BASE_URL = normalize_server_url(st.session_state.get("server_base_url"))
+AVAILABLE_STACKS, DEFAULT_STACK = load_stacks(SERVER_BASE_URL)
+
+if (
+    "active_stack" not in st.session_state
+    or st.session_state.active_stack not in AVAILABLE_STACKS
+):
+    st.session_state.active_stack = DEFAULT_STACK or (next(iter(AVAILABLE_STACKS), ""))
+
+if "report_profile" not in st.session_state:
+    st.session_state.report_profile = "deep"
+
+if "trigger_prompt" not in st.session_state:
+    st.session_state.trigger_prompt = None
+
+if "reasoning_effort" not in st.session_state:
+    st.session_state.reasoning_effort = "Auto"
+
+if "confidence_stop" not in st.session_state:
+    st.session_state.confidence_stop = 8
+
+if "max_total_seconds" not in st.session_state:
+    st.session_state.max_total_seconds = 600
+
+if "first_round_queries" not in st.session_state:
+    st.session_state.first_round_queries = 6
+
+if "streaming_enabled" not in st.session_state:
+    st.session_state.streaming_enabled = True
+
+if "include_progress" not in st.session_state:
+    st.session_state.include_progress = True
+
+if "web_search_enabled" not in st.session_state:
+    st.session_state.web_search_enabled = True
+
+if "pending_response" not in st.session_state:
+    st.session_state.pending_response = None
+
+if "cancel_requested" not in st.session_state:
+    st.session_state.cancel_requested = False
+
+if "ui_language" not in st.session_state:
+    st.session_state.ui_language = "de"
+
+# Bearer token for the inqtrix server. Pre-filled from INQTRIX_WEBAPP_API_KEY
+# (.env / shell), but always editable in the UI when the server reports
+# auth_required=True. Empty string = no token sent.
+#
+# Two keys on purpose: ``api_token`` is the persistent value that survives
+# popover close / rerun, while ``api_token_input`` is the widget key. The
+# st.text_input in the Modell popover writes through to ``api_token`` via
+# its on_change callback so the value isn't dropped when the widget
+# unmounts (Streamlit clears widget state when the widget is no longer
+# rendered, which would otherwise wipe the token every time the popover
+# closes).
+if "api_token" not in st.session_state:
+    st.session_state.api_token = API_KEY or ""
+
+
+# ---------------------------------------------------------------------------
+# Sidebar (Minimalist)
+# ---------------------------------------------------------------------------
+
+with st.sidebar:
+    st.markdown(t("sidebar_server"))
+    st.text_input(
+        t("label_server_url"),
+        key="server_base_url_input",
+        placeholder=t("server_url_placeholder"),
+        help=t("server_url_help"),
+    )
+    apply_col, reset_col = st.columns(2)
+    with apply_col:
+        if st.button(
+            t("btn_apply_server_url"),
+            key="apply_server_url",
+            icon=":material/check_circle:",
+            use_container_width=True,
+        ):
+            normalized_url = normalize_server_url(
+                st.session_state.get("server_base_url_input")
+            )
+            st.session_state.server_base_url = normalized_url
+            st.session_state.server_base_url_input = normalized_url
+            load_stacks.clear()
+            load_health.clear()
+            st.rerun()
+    with reset_col:
+        if st.button(
+            t("btn_reset_server_url"),
+            key="reset_server_url",
+            icon=":material/restore:",
+            use_container_width=True,
+        ):
+            st.session_state.server_base_url = ENV_SERVER_BASE_URL
+            st.session_state.server_base_url_input = ENV_SERVER_BASE_URL
+            load_stacks.clear()
+            load_health.clear()
+            st.rerun()
+
+    if ENV_SERVER_BASE_URL:
+        st.caption(t("server_url_env_active", url=ENV_SERVER_BASE_URL))
+    else:
+        st.caption(t("server_url_env_absent"))
+
+    if SERVER_BASE_URL:
+        health = load_health(SERVER_BASE_URL)
+    else:
+        health = {"status": "not_configured", "auth_required": False, "http_status": 0}
+    health_status = health.get("status", "unreachable")
+    health_indicator = {
+        "ok": ("🟢", t("health_ok")),
+        "degraded": ("🟠", t("health_degraded")),
+        "unreachable": ("⚪", t("health_unreachable")),
+        "not_configured": ("⚪", t("health_not_configured")),
+    }.get(health_status, ("⚪", health_status))
+    st.caption(f"{health_indicator[0]} {health_indicator[1]}")
+    st.caption(f"URL: `{SERVER_BASE_URL or '—'}`")
+    if not SERVER_BASE_URL:
+        st.caption(t("server_url_missing"))
+    auth_required = bool(health.get("auth_required"))
+    has_token = bool(st.session_state.get("api_token"))
+    if auth_required and not has_token:
+        st.caption(t("auth_required_missing"))
+    elif has_token:
+        st.caption(t("auth_set"))
+    else:
+        st.caption(t("auth_none"))
+    if st.button(
+        t("btn_refresh"),
+        key="refresh_discovery",
+        icon=":material/refresh:",
+        disabled=not bool(SERVER_BASE_URL),
+    ):
+        load_stacks.clear()
+        load_health.clear()
+        st.rerun()
+
+    st.divider()
+
+    st.markdown(t("sidebar_settings"))
+    st.toggle(t("toggle_streaming"), key="streaming_enabled")
+    st.toggle(t("toggle_progress"), key="include_progress")
+
+
+with st.container(key="page_shell"):
+    # -----------------------------------------------------------------------
+    # Header
+    # -----------------------------------------------------------------------
+    with st.container(key="app_header"):
+        brand_col, actions_col = st.columns([5, 4], vertical_alignment="center")
+        with brand_col:
+            st.markdown(
+                '<div class="brand-kicker">Conversational Research Agent</div>'
+                '<div class="brand-header">inqtrix</div>',
+                unsafe_allow_html=True,
+            )
+        with actions_col:
+            with st.container(key="header_actions", horizontal=True, gap="small", vertical_alignment="center", horizontal_alignment="right"):
+                _target_lang = "en" if st.session_state.ui_language == "de" else "de"
+                if st.button(
+                    _target_lang.upper(),
+                    key="lang_toggle",
+                    help=t("lang_toggle_to_en") if _target_lang == "en" else t("lang_toggle_to_de"),
+                ):
+                    st.session_state.ui_language = _target_lang
+                    st.rerun()
+                if st.button(
+                    t("btn_new"),
+                    key="new_chat",
+                    icon=":material/edit_note:",
+                    help=t("btn_new_help"),
+                ):
+                    st.session_state.messages = []
+                    st.session_state.trigger_prompt = None
+                    st.session_state.pending_response = None
+                    st.rerun()
+                if st.button(
+                    t("btn_delete"),
+                    key="delete_chat",
+                    icon=":material/delete:",
+                    help=t("btn_delete_help"),
+                    disabled=len(st.session_state.messages) == 0,
+                ):
+                    st.session_state.messages = []
+                    st.session_state.trigger_prompt = None
+                    st.session_state.pending_response = None
+                    st.rerun()
+
+    # -----------------------------------------------------------------------
+    # Main Chat Logic
+    # -----------------------------------------------------------------------
+    has_history = len(st.session_state.messages) > 0
+
+    conversation_shell = st.container(key="conversation_shell")
+
+    with conversation_shell:
+        if not has_history:
+            with st.container(key="empty_state_shell"):
+                st.markdown(t("welcome_html"), unsafe_allow_html=True)
+
+                with st.container(key="suggestion_shell"):
+                    c1, c2, c3 = st.columns([1.15, 3.7, 1.15])
+                    with c2:
+                        sel_suggestion = st.pills(
+                            t("pills_label"),
+                            options=list(SUGGESTIONS.keys()),
+                            format_func=lambda k: t(SUGGESTION_DISPLAY_KEYS.get(k, k)),
+                            label_visibility="collapsed"
+                        )
+                        if sel_suggestion:
+                            st.session_state.trigger_prompt = SUGGESTIONS[sel_suggestion]
+                            st.rerun()
+
+        for msg in st.session_state.messages:
+            render_message(msg)
+
+        if has_history:
+            st.iframe(
+                """
+                <script>
+                  (function() {
+                    const parentDoc = window.parent.document;
+                    if (parentDoc.__copyHandlerAttached) return;
+                    parentDoc.__copyHandlerAttached = true;
+                    const s = parentDoc.createElement('script');
+                    s.textContent = `
+                      (function() {
+                        function markCopied(btn) {
+                          btn.classList.add('copied');
+                          setTimeout(function() { btn.classList.remove('copied'); }, 1400);
+                        }
+                        function fallbackCopy(text) {
+                          const ta = document.createElement('textarea');
+                          ta.value = text;
+                          ta.setAttribute('readonly', '');
+                          ta.style.position = 'fixed';
+                          ta.style.top = '-1000px';
+                          ta.style.opacity = '0';
+                          document.body.appendChild(ta);
+                          ta.select();
+                          let ok = false;
+                          try { ok = document.execCommand('copy'); } catch (e) {}
+                          document.body.removeChild(ta);
+                          return ok;
+                        }
+                        document.addEventListener('click', function(e) {
+                          const btn = e.target.closest('.copy-btn');
+                          if (!btn) return;
+                          e.preventDefault();
+                          e.stopPropagation();
+                          const b64 = btn.getAttribute('data-copy-b64');
+                          if (!b64) return;
+                          let text = '';
+                          try {
+                            const bin = atob(b64);
+                            const bytes = Uint8Array.from(bin, function(c) { return c.charCodeAt(0); });
+                            text = new TextDecoder('utf-8').decode(bytes);
+                          } catch (err) { return; }
+                          if (navigator.clipboard && navigator.clipboard.writeText) {
+                            navigator.clipboard.writeText(text).then(function() {
+                              markCopied(btn);
+                            }).catch(function() {
+                              if (fallbackCopy(text)) markCopied(btn);
+                            });
+                          } else {
+                            if (fallbackCopy(text)) markCopied(btn);
+                          }
+                        });
+                      })();
+                    `;
+                    parentDoc.head.appendChild(s);
+                  })();
+                </script>
+                """,
+                height=1,
+            )
+
+        scroll_to_user = (
+            st.session_state.pending_response is not None
+            or st.session_state.pop("scroll_to_last_user", False)
+        )
+        if scroll_to_user:
+            st.iframe(
+                """
+                <script>
+                  (function() {
+                    const doc = window.parent.document;
+                    const run = () => {
+                      const anchors = doc.querySelectorAll('.user-msg-anchor');
+                      if (!anchors.length) return;
+                      const last = anchors[anchors.length - 1];
+                      last.scrollIntoView({ behavior: 'auto', block: 'start' });
+                    };
+                    requestAnimationFrame(run);
+                  })();
+                </script>
+                """,
+                height=1,
+            )
+
+    # -----------------------------------------------------------------------
+    # Composer
+    # -----------------------------------------------------------------------
+    with st.container(key="composer_shell"):
+        with st.container(key="composer_status"):
+            if has_history:
+                st.markdown(
+                    '<div class="composer-meta">'
+                    f'<span class="composer-prototype-pill">{escape(t("composer_prototype_pill"))}</span>'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    '<div class="composer-meta-spacer"></div>',
+                    unsafe_allow_html=True,
+                )
+
+        with st.container(key="composer_input"):
+            chat_input_val = st.chat_input(
+                (
+                    t("composer_placeholder")
+                    if SERVER_BASE_URL
+                    else t("composer_placeholder_no_server")
+                ),
+                key="composer_input_field",
+                accept_file="multiple",
+                file_type=["pdf", "png", "jpg", "txt", "csv"],
+                disabled=not bool(SERVER_BASE_URL),
+            )
+
+        with st.container(key="composer_footer"):
+            with st.container(horizontal=True, gap="small", vertical_alignment="center"):
+                with st.popover(
+                    f":material/list_alt: {t('popover_profile')}",
+                    help=t("popover_profile_help"),
+                    key="composer_profile_popover",
+                    width="content",
+                ):
+                    st.caption(t("label_profile"))
+                    st.markdown(t("profile_explainer_html"), unsafe_allow_html=True)
+                    st.radio(
+                        t("label_research_mode"),
+                        REPORT_PROFILES,
+                        key="report_profile",
+                        format_func=get_mode_display,
+                        label_visibility="collapsed",
+                    )
+
+                with st.popover(
+                    f":material/memory: {t('popover_model')}",
+                    help=t("popover_model_help"),
+                    key="composer_stack_popover",
+                    width="content",
+                ):
+                    st.caption(t("label_stack"))
+                    if AVAILABLE_STACKS:
+                        st.selectbox(
+                            t("label_stack"),
+                            options=list(AVAILABLE_STACKS.keys()),
+                            key="active_stack",
+                            format_func=lambda value: format_stack_option(value, AVAILABLE_STACKS),
+                            label_visibility="collapsed",
+                            help=t("stack_select_help"),
+                        )
+                        active_entry = AVAILABLE_STACKS.get(st.session_state.active_stack, {})
+                        ready_count = sum(1 for s in AVAILABLE_STACKS.values() if s.get("ready"))
+                        status_class = "ready" if active_entry.get("ready") else "down"
+                        status_label = t("health_ok") if active_entry.get("ready") else t("health_unreachable")
+                        st.markdown(
+                            f'<div class="stack-health-row">'
+                            f'<span class="stack-health-dot {status_class}"></span>'
+                            f'<span class="stack-health-name">{escape(status_label)}</span>'
+                            f'<span class="stack-health-label">'
+                            f'· {ready_count} / {len(AVAILABLE_STACKS)} {t("stack_count_available")}'
+                            f'</span>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                        if active_entry.get("description"):
+                            st.caption(active_entry["description"])
+                        models = active_entry.get("models") or {}
+                        chip_parts: list[str] = []
+                        if active_entry.get("llm"):
+                            chip_parts.append(f"LLM: `{active_entry['llm']}`")
+                        if active_entry.get("search"):
+                            chip_parts.append(f"Search: `{active_entry['search']}`")
+                        if models.get("reasoning_model"):
+                            chip_parts.append(f"Reasoning: `{models['reasoning_model']}`")
+                        if models.get("search_model"):
+                            chip_parts.append(f"{t('stack_chip_search_model')}: `{models['search_model']}`")
+                        if chip_parts:
+                            st.caption(" · ".join(chip_parts))
+                    else:
+                        st.warning(
+                            t("warn_no_stack") if SERVER_BASE_URL else t("warn_no_stack_no_server")
+                        )
+                    # Bearer-token field appears only when the server actively
+                    # gates requests behind an API key (signaled by /health's
+                    # auth_required flag). Pre-filled from INQTRIX_WEBAPP_API_KEY
+                    # when the env var was set at startup; otherwise empty and
+                    # the user pastes it in here.
+                    if health.get("auth_required"):
+                        st.divider()
+                        st.caption(t("label_token"))
+                        # Keyless text_input: Streamlit garbage-collects widget
+                        # state when the widget is no longer rendered (e.g. on
+                        # popover close). By passing ``value=`` and capturing
+                        # the return into our own persistent key we avoid that
+                        # gotcha entirely.
+                        _typed_token = st.text_input(
+                            t("label_token"),
+                            value=st.session_state.api_token,
+                            type="password",
+                            placeholder=t("token_placeholder"),
+                            help=t("token_help"),
+                            label_visibility="collapsed",
+                        )
+                        if _typed_token != st.session_state.api_token:
+                            st.session_state.api_token = _typed_token
+                            st.rerun()
+                        if not st.session_state.api_token:
+                            st.warning(t("token_missing_warning"), icon=":material/key:")
+                with st.popover(
+                    f":material/tune: {t('popover_effort')}",
+                    help=t("popover_effort_help"),
+                    key="composer_effort_popover",
+                    width="content",
+                ):
+                    st.caption(t("label_effort"))
+                    st.markdown(t("effort_explainer_html"), unsafe_allow_html=True)
+                    st.radio(
+                        t("label_effort"),
+                        EFFORT_LEVELS,
+                        key="reasoning_effort",
+                        label_visibility="collapsed",
+                        help=t("effort_help"),
+                        format_func=effort_display,
+                    )
+                    st.caption(
+                        f"{t('label_current')}: {effort_summary(st.session_state.reasoning_effort)}"
+                    )
+
+                    st.caption(t("label_finetuning"))
+                    st.slider(
+                        t("slider_confidence_stop"),
+                        1, 10,
+                        key="confidence_stop",
+                        help=t("slider_confidence_stop_help"),
+                    )
+                    st.slider(
+                        t("slider_max_seconds"),
+                        30, 1800,
+                        key="max_total_seconds",
+                        step=30,
+                        help=t("slider_max_seconds_help"),
+                    )
+                    st.slider(
+                        t("slider_first_round"),
+                        1, 20,
+                        key="first_round_queries",
+                        help=t("slider_first_round_help"),
+                    )
+                st.toggle(
+                    t("toggle_web_search"),
+                    key="web_search_enabled",
+                    help=t("toggle_web_search_help"),
+                )
+                with st.popover(
+                    ":material/fact_check:",
+                    help=t("popover_settings_help"),
+                    key="composer_settings_detail_popover",
+                    width="content",
+                ):
+                    st.caption(t("settings_active"))
+                    render_settings_detail_popover()
+
+    actual_prompt, uploaded_files = normalize_prompt_input(
+        chat_input_val,
+        st.session_state.trigger_prompt,
+    )
+
+    # Handle new user interaction
+    if actual_prompt and not SERVER_BASE_URL:
+        st.session_state.trigger_prompt = None
+        st.warning(t("server_url_missing"), icon=":material/link_off:")
+        actual_prompt = None
+
+    if actual_prompt:
+        st.session_state.trigger_prompt = None
+        st.session_state.cancel_requested = False
+
+        user_message = {
+            "role": "user",
+            "content": actual_prompt,
+            "files": uploaded_files,
+        }
+        st.session_state.messages.append(user_message)
+        st.session_state.pending_response = {
+            "stack": st.session_state.active_stack,
+            "overrides": build_agent_overrides(),
+            "stream": bool(st.session_state.streaming_enabled),
+            "include_progress": bool(st.session_state.include_progress),
+            "base_url": SERVER_BASE_URL,
+        }
+
+        st.rerun()
+
+    # If a cancel was queued, swallow it *before* the pending-response block
+    # so the UI does not start another stream against the server.
+    if st.session_state.cancel_requested and not st.session_state.pending_response:
+        st.session_state.cancel_requested = False
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": t("research_cancelled"),
+            "stack": st.session_state.active_stack,
+        })
+        st.session_state.scroll_to_last_user = True
+        st.rerun()
+
+    if st.session_state.pending_response:
+        pending = st.session_state.pending_response
+        stack_name = pending["stack"]
+        overrides = pending["overrides"]
+        stream_requested = pending["stream"]
+        include_progress = pending["include_progress"]
+        base_url = normalize_server_url(pending.get("base_url"))
+
+        wire_messages = [
+            {"role": m["role"], "content": m["content"]}
+            for m in st.session_state.messages
+            if isinstance(m.get("content"), str) and m.get("content")
+        ]
+
+        # The stop-button ``on_click`` callback: sets a cancel flag and
+        # clears the pending_response so that the next rerun does not
+        # immediately re-enter this block. Streamlit's built-in
+        # widget-interaction rerun aborts the currently running script,
+        # which closes the ``httpx.stream(...)`` context manager, which
+        # in turn causes the server-side ``_watch_disconnect`` task to
+        # set ``cancel_event`` and surface it into the LangGraph probe.
+        def _on_stop_click() -> None:
+            st.session_state.cancel_requested = True
+            st.session_state.pending_response = None
+
+        with conversation_shell:
+            pending_avatar = get_stack_avatar(stack_name)
+            with st.chat_message("assistant", avatar=pending_avatar):
+                st.markdown(
+                    '<span class="chat-role-assistant" aria-hidden="true"></span>',
+                    unsafe_allow_html=True,
+                )
+                full_response = ""
+                error_state: dict[str, str] = {}
+                progress_log: list[str] = []
+                progress_placeholder = None
+
+                with st.container(key="live_progress_panel"):
+                    with st.container(
+                        key="live_progress_header",
+                        horizontal=True,
+                        vertical_alignment="center",
+                        horizontal_alignment="distribute",
+                        gap="small",
+                    ):
+                        st.markdown(
+                            f'<div class="live-progress-title">{escape(t("status_researching"))}</div>',
+                            unsafe_allow_html=True,
+                        )
+                        st.button(
+                            t("btn_stop"),
+                            key="stop_stream_button",
+                            icon=":material/stop_circle:",
+                            help=t("btn_stop_help"),
+                            on_click=_on_stop_click,
+                            type="secondary",
+                        )
+                    if stream_requested and include_progress:
+                        with st.container(key="live_progress_body"):
+                            progress_placeholder = st.empty()
+                            progress_placeholder.markdown(
+                                _render_live_progress_log(progress_log),
+                                unsafe_allow_html=True,
+                            )
+
+                if stream_requested:
+                    def _stream_generator(
+                        state=error_state,
+                        progress=progress_placeholder,
+                        log=progress_log,
+                    ):
+                        for kind, payload in stream_chat(
+                            wire_messages,
+                            stack=stack_name,
+                            agent_overrides=overrides,
+                            include_progress=include_progress,
+                            api_key=(st.session_state.get("api_token") or None),
+                            base_url=base_url,
+                        ):
+                            if kind == "progress":
+                                log.append(payload)
+                                if progress is not None:
+                                    progress.markdown(
+                                        _render_live_progress_log(log),
+                                        unsafe_allow_html=True,
+                                    )
+                            elif kind == "delta":
+                                yield payload
+                            elif kind == "error":
+                                state["message"] = payload
+                                return
+                            elif kind == "done":
+                                return
+
+                    try:
+                        streamed = st.write_stream(_stream_generator())
+                    except Exception as exc:  # noqa: BLE001
+                        error_state["message"] = t("error_streaming", error=str(exc))
+                        streamed = ""
+
+                    if isinstance(streamed, list):
+                        full_response = "".join(str(chunk) for chunk in streamed)
+                    else:
+                        full_response = str(streamed or "")
+                else:
+                    response = call_chat(
+                        wire_messages,
+                        stack=stack_name,
+                        agent_overrides=overrides,
+                        api_key=(st.session_state.get("api_token") or None),
+                        base_url=base_url,
+                    )
+                    if "error" in response:
+                        error_state["message"] = response["error"].get(
+                            "message", t("error_unknown")
+                        )
+                    else:
+                        choices = response.get("choices") or []
+                        if choices:
+                            full_response = (
+                                choices[0].get("message", {}).get("content", "")
+                            )
+                        else:
+                            error_state["message"] = t("error_no_choices")
+
+                    if full_response:
+                        st.markdown(full_response)
+
+                error_message = error_state.get("message")
+                if error_message and not full_response:
+                    st.error(error_message)
+                elif error_message and full_response:
+                    st.warning(t("warn_partial", message=error_message))
+
+        if not error_message or full_response:
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": full_response or (error_message or ""),
+                "stack": stack_name,
+                "progress": list(progress_log),
+            })
+        st.session_state.pending_response = None
+        st.session_state.scroll_to_last_user = True
+
+        st.rerun()

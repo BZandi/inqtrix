@@ -1,0 +1,26 @@
+{
+  "name": "inqtrix",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "packageManager": "pnpm@11.1.1",
+  "workspaces": [
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22.12.0",
+    "npm": ">=10.9.0",
+    "pnpm": ">=11.1.1"
+  },
+  "scripts": {
+    "ui:dev": "node scripts/run_research_desk_ui.mjs dev",
+    "ui:build": "node scripts/run_research_desk_ui.mjs build",
+    "ui:lint": "node scripts/run_research_desk_ui.mjs lint",
+    "ui:typecheck": "node scripts/run_research_desk_ui.mjs typecheck",
+    "ui:preview": "node scripts/run_research_desk_ui.mjs preview"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

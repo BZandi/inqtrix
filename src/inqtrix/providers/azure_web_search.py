@@ -1,0 +1,372 @@
+"""Azure AI Foundry Web Search adapter for the SearchProvider interface.
+
+Queries a pre-created Azure AI Foundry agent through the Responses API.
+API-key deployments use the OpenAI data-plane client directly with the
+``api-key`` header. Entra ID deployments use
+``AIProjectClient.get_openai_client()`` to mint and refresh bearer tokens.
+Both paths reference the configured agent per request through
+``extra_body["agent_reference"]`` so the optional agent version is pinned.
+
+The agent must be created beforehand (via Azure Portal or CLI). Pass its
+``agent_name`` (and optionally ``agent_version``) and the project endpoint
+to the constructor.
+
+Four auth modes are supported (resolved in this order):
+
+1. **Project API key** — pass ``api_key``; sent in the ``api-key`` header.
+2. An explicit ``credential`` object.
+3. **Service Principal** — ``tenant_id`` + ``client_id`` + ``client_secret``.
+4. ``DefaultAzureCredential`` — fallback (``az login``, Managed Identity,
+   VS Code sign-in, etc.).
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from typing import Any
+
+from openai import APIStatusError, OpenAI, OpenAIError, RateLimitError
+
+from inqtrix.exceptions import (
+    AgentRateLimited,
+    AgentTimeout,
+    AzureFoundryWebSearchAPIError,
+)
+from inqtrix.providers._azure_common import (
+    extract_azure_api_error_details,
+    resolve_azure_credential,
+)
+from inqtrix.providers.base import (
+    SearchProvider,
+    _NonFatalNoticeMixin,
+    _SDK_MAX_RETRIES,
+    _apply_domain_filters,
+    _bounded_timeout,
+    _build_recency_language_hints,
+    _check_deadline,
+)
+from inqtrix.search_result import GroundedSearchResult, GroundedSource
+from inqtrix.urls import extract_urls
+
+log = logging.getLogger("inqtrix")
+
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+
+
+class AzureFoundryWebSearch(_NonFatalNoticeMixin, SearchProvider):
+    """Query the web via an Azure AI Foundry agent and the Responses API.
+
+    Use this provider when search should run through a pre-created Foundry
+    agent referenced by name. The agent's synthesized answer is one prose
+    block with inline Markdown source links; there are no per-source bodies,
+    so the cited URLs are surfaced as :class:`GroundedSource` anchors (with
+    empty snippets) and the answer carries the content.
+
+    Attributes:
+        _agent_name (str): Foundry agent name referenced through the SDK.
+        _agent_version (str): Optional agent version, shown to operators.
+        _timeout (float): Per-call timeout budget before deadline clamping.
+        _client: Authenticated OpenAI client from
+            ``AIProjectClient.get_openai_client``.
+    """
+
+    supported_search_parameters = frozenset({
+        "recency_filter",
+        "language_filter",
+        "domain_filter",
+    })
+    max_search_concurrency = 2
+
+    def __init__(
+        self,
+        *,
+        project_endpoint: str,
+        agent_name: str,
+        agent_version: str = "",
+        api_key: str | None = None,
+        credential: Any | None = None,
+        tenant_id: str | None = None,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        timeout: float = 60.0,
+        # Internal: accept a pre-built OpenAI client from tests.
+        _client: Any | None = None,
+    ) -> None:
+        """Initialize the Azure AI Foundry Web Search provider.
+
+        Args:
+            project_endpoint: Azure AI Foundry project endpoint, e.g.
+                ``"https://<resource>.services.ai.azure.com/api/projects/<proj>"``.
+            agent_name: Name of the existing Web Search agent.
+            agent_version: Optional version label, surfaced in
+                ``search_model``. The SDK routes by agent name to the
+                agent's deployed version.
+            api_key: Optional static Foundry project key. When supplied it
+                wins over all credential modes and is sent in the
+                ``api-key`` header.
+            credential: Optional pre-built Azure token credential. When
+                supplied it wins over the Service Principal fields.
+            tenant_id: Optional Entra tenant id for Service Principal auth.
+            client_id: Optional Entra client id for Service Principal auth.
+            client_secret: Optional Entra client secret for Service
+                Principal auth.
+            timeout: Default per-call timeout budget in seconds.
+            _client: Optional prebuilt OpenAI client used by tests.
+
+        Raises:
+            ValueError: If ``project_endpoint`` or ``agent_name`` is empty.
+
+        Example:
+            >>> from inqtrix import AzureFoundryWebSearch
+            >>> from azure.identity import DefaultAzureCredential
+            >>> search = AzureFoundryWebSearch(
+            ...     project_endpoint="https://ex.services.ai.azure.com/api/projects/demo",
+            ...     agent_name="web-search-agent",
+            ...     agent_version="2",
+            ...     credential=DefaultAzureCredential(),
+            ... )
+            >>> search.is_available()
+            True
+        """
+        if not project_endpoint:
+            raise ValueError("project_endpoint ist erforderlich")
+        if not agent_name:
+            raise ValueError("agent_name ist erforderlich")
+
+        self._project_endpoint = project_endpoint.rstrip("/")
+        self._agent_name = agent_name
+        self._agent_version = agent_version
+        self._timeout = timeout
+
+        if _client is not None:
+            self._client = _client
+        elif api_key:
+            # Static Foundry project key: the agent's data-plane endpoint
+            # (``/openai/v1``) authenticates via the ``api-key`` header, so the
+            # OpenAI client is built directly against it. AIProjectClient is the
+            # control-plane SDK (Entra ID only) and is not used for key auth.
+            # The agent (and its version) is selected per call via
+            # ``agent_reference`` in :meth:`_call_responses`.
+            self._client = OpenAI(
+                base_url=f"{self._project_endpoint}/openai/v1/",
+                api_key=api_key,
+                default_headers={"api-key": api_key},
+                timeout=timeout,
+                max_retries=_SDK_MAX_RETRIES,
+            )
+        else:
+            # Entra ID token credential: AIProjectClient.get_openai_client()
+            # mints and auto-refreshes the bearer token. No ``agent_name`` is
+            # bound at the client; the agent is referenced per call instead.
+            from azure.ai.projects import AIProjectClient
+
+            credential = resolve_azure_credential(
+                credential=credential,
+                tenant_id=tenant_id,
+                client_id=client_id,
+                client_secret=client_secret,
+            )
+            project_client = AIProjectClient(
+                endpoint=self._project_endpoint,
+                credential=credential,
+                allow_preview=True,
+            )
+            self._client = project_client.get_openai_client()
+
+    _extract_api_error_details = staticmethod(extract_azure_api_error_details)
+
+    # ------------------------------------------------------------------
+    # SearchProvider interface
+    # ------------------------------------------------------------------
+
+    def search(
+        self,
+        query: str,
+        *,
+        search_context_size: str = "high",
+        recency_filter: str | None = None,
+        language_filter: list[str] | None = None,
+        domain_filter: list[str] | None = None,
+        search_mode: str | None = None,
+        return_related: bool = False,
+        deadline: float | None = None,
+    ) -> GroundedSearchResult:
+        """Execute a search through the Foundry agent's Responses API.
+
+        Args:
+            query: User-facing search query text.
+            search_context_size: Accepted for ABC compatibility; the agent
+                decides its own context depth, so this value is not used.
+            recency_filter: Optional recency hint, applied as best-effort
+                prompt guidance prepended to the query.
+            language_filter: Optional language hint, applied as best-effort
+                prompt guidance.
+            domain_filter: Optional allow/deny domain list, injected as
+                ``site:`` / ``-site:`` operators into the query text.
+            search_mode: Accepted for ABC compatibility; not used.
+            return_related: Accepted for ABC compatibility; not used.
+            deadline: Optional absolute monotonic deadline for the run.
+
+        Returns:
+            GroundedSearchResult: The agent's synthesized answer plus the
+            cited URLs as URL-only sources (empty snippets).
+
+        Raises:
+            AgentTimeout: If the global deadline has already elapsed.
+            AgentRateLimited: If the backend surfaces a fatal rate limit.
+        """
+        self._clear_nonfatal_notice()
+
+        if deadline is not None:
+            _check_deadline(deadline)
+
+        effective_query = _apply_domain_filters(query, domain_filter)
+        hint = _build_recency_language_hints(recency_filter, language_filter)
+        user_content = f"{hint}\n\n{effective_query}" if hint else effective_query
+        timeout = _bounded_timeout(self._timeout, deadline)
+
+        # Reference the agent (and pin its version when configured) per call,
+        # the documented Foundry pattern. Without the version the backend runs
+        # the agent's "latest" revision, which may differ from the deployed
+        # (e.g. reasoning-effort) configuration the operator expects.
+        agent_ref: dict[str, str] = {"type": "agent_reference", "name": self._agent_name}
+        if self._agent_version:
+            agent_ref["version"] = self._agent_version
+        try:
+            response = self._client.responses.create(
+                input=[{"role": "user", "content": user_content}],
+                extra_body={"agent_reference": agent_ref},
+                timeout=timeout,
+            )
+        except RateLimitError as exc:
+            raise AgentRateLimited(self._agent_name, exc) from exc
+        except APIStatusError as exc:
+            details = self._extract_api_error_details(exc)
+            if details["status_code"] == 429:
+                raise AgentRateLimited(self._agent_name, exc) from exc
+            log.error(
+                "Azure-Foundry-WebSearch fehlgeschlagen fuer '%s': %s", query[:80], exc
+            )
+            self._set_nonfatal_notice(
+                f"Azure-Foundry-WebSearch fehlgeschlagen fuer Query '{query[:80]}': "
+                f"{details['message'] or exc}; leeres Ergebnis wird weiterverwendet."
+            )
+            return GroundedSearchResult()
+        except AgentTimeout:
+            raise
+        except OpenAIError as exc:
+            exc_text = str(exc).lower()
+            if "timeout" in exc_text or "timed out" in exc_text:
+                raise AgentTimeout(
+                    f"Azure-Foundry-WebSearch Timeout fuer '{query[:80]}'"
+                ) from exc
+            log.error(
+                "Azure-Foundry-WebSearch fehlgeschlagen fuer '%s': %s", query[:80], exc
+            )
+            self._set_nonfatal_notice(
+                f"Azure-Foundry-WebSearch fehlgeschlagen fuer Query '{query[:80]}': "
+                f"{exc}; leeres Ergebnis wird weiterverwendet."
+            )
+            return GroundedSearchResult()
+        except Exception as exc:  # noqa: BLE001 -- non-fatal degrade (see gotcha #11)
+            log.error(
+                "Azure-Foundry-WebSearch fehlgeschlagen fuer '%s': %s", query[:80], exc
+            )
+            self._set_nonfatal_notice(
+                f"Azure-Foundry-WebSearch fehlgeschlagen fuer Query '{query[:80]}': "
+                f"{exc}; leeres Ergebnis wird weiterverwendet."
+            )
+            return GroundedSearchResult()
+
+        result = self._parse_response(response)
+        if not result.answer:
+            self._set_nonfatal_notice(
+                f"Azure-Foundry-WebSearch fuer '{query[:80]}' lieferte keine Textantwort"
+            )
+        return result
+
+    # ------------------------------------------------------------------
+    # Response parsing
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_response(response: Any) -> GroundedSearchResult:
+        """Extract the answer and cited URLs from a Responses API reply."""
+        answer = str(getattr(response, "output_text", "") or "")
+        sources: list[GroundedSource] = []
+        seen: set[str] = set()
+
+        for item in getattr(response, "output", []) or []:
+            if getattr(item, "type", None) != "message":
+                continue
+            if not answer:
+                answer = "".join(
+                    str(getattr(part, "text", "") or "")
+                    for part in getattr(item, "content", []) or []
+                    if getattr(part, "type", "output_text") == "output_text"
+                ).strip()
+            for content in getattr(item, "content", []) or []:
+                for ann in getattr(content, "annotations", []) or []:
+                    if getattr(ann, "type", None) != "url_citation":
+                        continue
+                    url = str(getattr(ann, "url", "") or "").strip()
+                    if url and url not in seen:
+                        seen.add(url)
+                        sources.append(
+                            GroundedSource(
+                                url=url,
+                                title=str(getattr(ann, "title", "") or ""),
+                                rank=len(sources) + 1,
+                                origin="url_citation",
+                            )
+                        )
+
+        # Fallback: parse inline Markdown links, then bare URLs, from the answer.
+        if not sources and answer:
+            for match in _MARKDOWN_LINK_RE.finditer(answer):
+                url = match.group(2).strip()
+                if url and url not in seen:
+                    seen.add(url)
+                    sources.append(
+                        GroundedSource(
+                            url=url,
+                            title=match.group(1),
+                            rank=len(sources) + 1,
+                            origin="markdown_link",
+                        )
+                    )
+            for url in extract_urls(answer):
+                if url and url not in seen:
+                    seen.add(url)
+                    sources.append(
+                        GroundedSource(
+                            url=url, rank=len(sources) + 1, origin="answer_url_fallback"
+                        )
+                    )
+
+        usage = getattr(response, "usage", None)
+        return GroundedSearchResult(
+            answer=answer,
+            sources=sources,
+            prompt_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+            completion_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+        )
+
+    def is_available(self) -> bool:
+        """Report whether the provider is configured to attempt requests.
+
+        Returns:
+            bool: ``True`` when both the agent name and project endpoint
+            are present, otherwise ``False``.
+        """
+        return bool(self._agent_name and self._project_endpoint)
+
+    @property
+    def search_model(self) -> str:
+        """Foundry web-search agent identifier shown to operators.
+
+        Format: ``"foundry-web:<agent_name>@<version_or_latest>"``.
+        """
+        version = self._agent_version or "latest"
+        return f"foundry-web:{self._agent_name}@{version}"

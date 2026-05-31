@@ -1,0 +1,72 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inqtrix"
+version = "0.1.0"
+description = "Iterative AI research agent with parallel web search, claim verification, and source tiering"
+readme = "README.md"
+authors = [{ name = "Babak Zandi" }]
+
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.11"
+classifiers = [
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.34,<1.0",
+    "openai>=2.0,<3.0",
+    "langgraph>=1.0,<2.0",
+    "cachetools>=5.5,<6.0",
+    "pydantic-settings>=2.7,<3.0",
+    "python-dotenv>=1.0,<2.0",
+    "rich>=13.0",
+    "boto3>=1.35",
+    "azure-identity>=1.18",
+    # Pure-Python readline replacement that ships line editing (arrow-key
+    # cursor movement, history, Ctrl+A/E/W/U) for input() on Windows. GNU
+    # readline is part of the stdlib on Linux/macOS; the marker below
+    # makes this dependency a no-op on those platforms. Used by the
+    # interactive examples under examples/provider_stacks/*_chat.py.
+    "pyreadline3>=3.4 ; sys_platform == 'win32'",
+    "perplexityai>=0.34.0",
+    "azure-ai-projects>=2.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.23",
+    "requests>=2.31",
+    "vcrpy>=8.1",
+    "pytest-recording>=0.13",
+]
+ui = [
+    "streamlit>=1.55,<2.0",
+    "httpx>=0.28,<1.0",
+]
+
+[project.scripts]
+inqtrix-parity = "inqtrix.parity:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inqtrix"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "vcrpy>=8.1",
+    "pytest-recording>=0.13",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "replay: provider tests using VCR cassettes or botocore.Stubber (offline-replayable)",
+]

@@ -1,0 +1,85 @@
+import { describe, expect, it } from 'vitest'
+import {
+  buildMentionOptions,
+  detectMentionTrigger,
+  resolveInlineMentions,
+  type MentionCategoryLabels,
+  type MentionSources,
+} from './mention'
+
+const sources: MentionSources = {
+  fileGroupOptions: [{ fileCount: 2, groupId: 'g1', label: 'dossier', title: 'Dossier' }],
+  fileOptions: [{ fileId: 'f1', label: 'alpha', pageCount: 3, sizeBytes: 10, title: 'alpha.txt' }],
+  reportOptions: [],
+  ruleOptions: [],
+}
+
+const labels: MentionCategoryLabels = {
+  files: 'Files',
+  filegroups: 'File groups',
+  research: 'Research',
+  rules: 'Rules',
+}
+
+describe('detectMentionTrigger', () => {
+  it('matches a bare @ as the root category step', () => {
+    const match = detectMentionTrigger('@', 1)
+    expect(match?.kind).toBe('root')
+  })
+
+  it('matches a typed @files: token with its query', () => {
+    const match = detectMentionTrigger('use @files:al', 'use @files:al'.length)
+    expect(match).toMatchObject({ kind: 'files', query: 'al' })
+  })
+
+  it('matches @filegroups: tokens', () => {
+    const match = detectMentionTrigger('@filegroups:', '@filegroups:'.length)
+    expect(match?.kind).toBe('filegroups')
+  })
+
+  it('returns null when there is no trigger', () => {
+    expect(detectMentionTrigger('plain text', 10)).toBeNull()
+  })
+})
+
+describe('buildMentionOptions', () => {
+  it('lists all enabled categories at the root step', () => {
+    const match = detectMentionTrigger('@', 1)!
+    const options = buildMentionOptions(match, sources, labels, ['research', 'rules', 'files', 'filegroups'])
+    expect(options.map((option) => option.type)).toEqual(['research', 'rules', 'files', 'filegroups'])
+  })
+
+  it('lists file items filtered by the query', () => {
+    const match = detectMentionTrigger('@files:al', '@files:al'.length)!
+    const options = buildMentionOptions(match, sources, labels, ['rules', 'files', 'filegroups'])
+    expect(options).toHaveLength(1)
+    expect(options[0].ref).toEqual({ fileId: 'f1', kind: 'file-asset' })
+  })
+
+  it('lists file groups with their member count title', () => {
+    const match = detectMentionTrigger('@filegroups:', '@filegroups:'.length)!
+    const options = buildMentionOptions(match, sources, labels, ['rules', 'files', 'filegroups'])
+    expect(options[0].ref).toEqual({ groupId: 'g1', kind: 'file-group' })
+  })
+})
+
+describe('resolveInlineMentions', () => {
+  it('resolves typed file and group mentions to references', () => {
+    const result = resolveInlineMentions(
+      'compare @files:alpha and @filegroups:dossier',
+      sources,
+      ['rules', 'files', 'filegroups'],
+    )
+    expect(result.error).toBeNull()
+    expect(result.refs).toEqual([
+      { fileId: 'f1', kind: 'file-asset' },
+      { groupId: 'g1', kind: 'file-group' },
+    ])
+  })
+
+  it('reports unknown labels instead of dropping them silently', () => {
+    const result = resolveInlineMentions('use @files:missing', sources, ['files'])
+    expect(result.refs).toEqual([])
+    expect(result.error).toContain('@files:missing')
+  })
+})

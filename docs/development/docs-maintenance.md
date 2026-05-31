@@ -1,0 +1,176 @@
+# Docs maintenance
+
+## Scope
+
+How to keep `docs/**` honest over time. The repository uses plain GitHub-rendered Markdown today (no MkDocs, no Sphinx); the conventions below keep structure and cross-links consistent and make a future migration to MkDocs-Material a mechanical move.
+
+## Conventions per page
+
+Every page under `docs/**`:
+
+1. Starts with an H1 title matching the filename (title-cased, spaces allowed).
+2. Has a `## Scope` section as the first sub-heading explaining what the page does and does not cover.
+3. Uses relative links for internal cross-refs (`[Agent config](../configuration/agent-config.md)`), never absolute URLs to GitHub.
+4. Ends with a `## Related docs` block listing 2–4 peer pages with 0–1 sentence teasers.
+5. Mermaid diagrams use only the subset that renders on GitHub: `flowchart`, `stateDiagram`, `sequenceDiagram`. Avoid `timeline`, `mindmap`, `C4Context` until confirmed.
+6. Code examples use triple backticks with an explicit language tag (`python`, `bash`, `yaml`, `json`, `dotenv`).
+7. English-only prose. German strings only inside quoted demo questions or prompt snippets, matching the repository convention.
+8. No Mermaid diagram stands alone. The paragraph before it states the reader question it answers; the paragraph after it names the important transition(s) and clarifies which blocks are code vs data.
+9. New terms are defined on first use. Avoid shorthand such as "ledger", "bundle", "contract", or "strategy" unless the local page says what object it refers to and where it lives.
+10. Technical identifiers in prose include their data kind and type on first use within a section when the kind is not obvious from the sentence.
+
+## Reader depth (configuration, APIs, and heuristics)
+
+Structure alone (Scope, Related docs, tables) is not enough when a reader must predict runtime behaviour.
+
+For pages under `docs/configuration/`, provider setup pages, HTTP deployment pages, and `docs/scoring-and-stopping/`:
+
+1. **Prefer an explicit behaviour column** in tables (for example **Effect** or **Behaviour**) that states what changes for the user or for a single run when the value is set, not only the literal meaning of the name.
+2. **Add at least one copy-paste example** (Python, `dotenv`, `yaml`, or `bash`) when the interaction is non-obvious: precedence chains, per-request overrides, provider auto-creation, or anything that touches more than one subsystem.
+3. **Link to runnable scripts** under `examples/` when they already demonstrate the stack; one sentence of context is enough.
+4. **Use small diagrams or log excerpts** when control flow or iteration-log fields matter (see [`../scoring-and-stopping/confidence.md`](../scoring-and-stopping/confidence.md) and [`../reference/worked-example.md`](../reference/worked-example.md) as references).
+
+Agent-facing coding rules for docstrings and Pydantic fields remain in [`coding-standards.md`](coding-standards.md); this section is the bar for **user-facing Markdown** in `docs/**`.
+
+## Diagrams, schemas, and LLM-call documentation
+
+Architecture diagrams should be readable by someone who has not opened the
+source code yet. Use the legend from
+[`../architecture/overview.md`](../architecture/overview.md#how-to-read-the-diagrams):
+
+| Prefix / shape | Use for |
+|---|---|
+| `fn ...` | Python function, method, node, or helper. |
+| `data ...` / cylinder-style node | `AgentState` field, ledger, Pydantic model, or stored view. |
+| `strategy ...` / double-bracket node | Replaceable strategy or policy object. |
+| `provider ...` / hexagon-style node | External LLM/search backend or provider interface. |
+| `LLM call: ...` | A concrete model call, including strategy-owned helper calls. |
+| `router ...` / diamond | Control-flow decision. |
+
+When documenting a new or changed LLM call, include:
+
+- node/stage that makes the call,
+- provider method (`complete`, `complete_with_metadata`, `complete_structured`, or strategy-owned call),
+- model role (`classify`, `claim extraction`, `evaluate`, `reasoning`),
+- prompt origin (`nodes.py`, `prompts.py`, strategy prompt, provider helper),
+- expected output shape and parser,
+- fallback marker or visible degradation path.
+
+When documenting a new state/evidence structure, include either a compact schema
+or a small example. Also state whether the object is primary truth, derived
+view, prompt-facing view, audit view, or public projection.
+
+## Identifier kind and type notation
+
+Use normal Python/Pydantic vocabulary rather than inventing a custom mini-syntax.
+The goal is to remove ambiguity without making prose noisy.
+
+Preferred first-use forms:
+
+| Identifier shape | First-use annotation |
+|---|---|
+| `state["iteration_logs"]` | `state["iteration_logs"]` (`AgentState` key, `list[dict[str, Any]]`) |
+| `ResearchResult` | `ResearchResult` (`Pydantic BaseModel`) |
+| `ProviderContext` | `ProviderContext` (`@dataclass`) |
+| `LLMProvider` | `LLMProvider` (`ABC`) |
+| `AgentSettings.skip_search` | `AgentSettings.skip_search` (`bool`, env alias `SKIP_SEARCH`) |
+| `body["agent_overrides"]` | `body["agent_overrides"]` (`HTTP JSON object`) |
+
+Do not annotate every repeated mention. For data-heavy sections, prefer a table
+with `Identifier`, `Kind`, `Type`, `Source of truth`, and `Role` columns instead
+of long parenthetical prose.
+
+## Adding a new page
+
+1. Pick the closest existing subdirectory (`architecture/`, `providers/`, `configuration/`, `deployment/`, `observability/`, `scoring-and-stopping/`, `development/`, `getting-started/`, `reference/`).
+2. Write the page following the conventions above.
+3. Add the new page to the `Related docs` blocks of the pages that should link to it.
+4. Update [`../README.md`](../README.md) when the page is a top-level task entry.
+5. Update the root [`../../README.md`](../../README.md) when the page changes a major entry path.
+6. Run a local link check (see below).
+
+## Link check
+
+Use [`lychee`](https://github.com/lycheeverse/lychee) for a fast offline link check. There is no committed CI workflow for link-checking today; the repository's CI configuration is maintainer-owned, and this snippet is the recommended starting point when the project adopts one:
+
+```bash
+# Local check
+lychee --no-progress --include-fragments \
+    README.md 'docs/**/*.md' 'examples/**/README.md'
+```
+
+```yaml
+# Recommended GitHub Actions snippet (not yet committed)
+name: docs
+on:
+  pull_request:
+    paths:
+      - 'README.md'
+      - 'docs/**'
+      - 'examples/**/README.md'
+jobs:
+  link-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lycheeverse/lychee-action@v2
+        with:
+          args: --no-progress --include-fragments README.md docs/**/*.md examples/**/README.md
+          fail: true
+```
+
+Alternative tools: `markdown-link-check` (Node, widely used, deprecated community action has forks), `linkinator` (Node, dual CLI/module). `lychee` is recommended for speed on CI.
+
+## Mermaid syntax constraints
+
+Stick to the following subset — all four were verified to render on GitHub at the time of writing:
+
+- Node IDs: camelCase or snake_case. No spaces (`UserService` OK, `User Service` not).
+- Edge labels with special characters: wrap in quotes (`A -->|"O(1) lookup"| B`).
+- Node labels with `(`, `)`, `:`: wrap in double quotes (`A["Process (main)"]`).
+- Avoid reserved keywords as node IDs (`end`, `graph`, `subgraph`, `flowchart`).
+- Subgraph headers always specify an ID plus a bracketed label: `subgraph gb [Group B]`.
+- Do not use explicit colours or `classDef fill:#...` — they render badly in dark mode.
+- Do not use `click` events; GitHub strips them.
+
+## Keeping docs in sync with code
+
+Whenever a code change alters public behaviour, update the matching `docs/**` page in the same PR:
+
+| Code area | Matching docs page(s) |
+|-----------|-----------------------|
+| `src/inqtrix/providers/<x>.py` | `docs/providers/<x>.md` |
+| `src/inqtrix/strategies/<x>.py` | `docs/architecture/strategies.md` and/or the dedicated page under `docs/scoring-and-stopping/` |
+| `src/inqtrix/settings.py` | `docs/configuration/*.md` |
+| `src/inqtrix/server/<x>.py` | `docs/deployment/webserver-mode.md` and/or `docs/deployment/security-hardening.md` |
+| `src/inqtrix/agent.py` public API | `docs/architecture/public-api.md`, `docs/architecture/overview.md` |
+| `src/inqtrix/nodes.py` | `docs/architecture/nodes.md` |
+| `src/inqtrix/evidence.py` | `docs/architecture/evidence-pipeline.md` |
+| `src/inqtrix/prompts.py` answer behaviour | `docs/architecture/evidence-pipeline.md`, `docs/architecture/nodes.md` |
+| `src/inqtrix/runtime_logging.py` forensic schemas / log tooling | `docs/observability/logging.md`, `docs/observability/forensic-cookbook.md` |
+| `apps/research-desk/**`, `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml` | `docs/deployment/react-ui.md` and, when the run-event contract changes, `docs/observability/run-events.md` |
+
+Maintainer notes are not a substitute for the public docs. Private decision logs describe why a change was made; `docs/**` describes the behaviour a user relies on.
+
+Public docs must stand on their own. Do not reference private memory paths, internal decision ids, or internal issue numbers from user-facing pages; rewrite the behaviour directly or link to another public `docs/**` page.
+
+When a pull request changes public behaviour (`settings.py`, `AgentConfig`, HTTP routes, provider constructors, stop heuristics), update the matching `docs/**` page **in the same PR** and apply the **Reader depth** rules above for any new or materially changed knob.
+
+## Legacy docs migration
+
+When a long-form legacy document is split into the current tree, keep a small migration matrix in [`../README.md`](../README.md) with these columns:
+
+| Legacy section | Current home | Status |
+|----------------|--------------|--------|
+| `Quick Start / explicit providers` | `deployment/library-mode.md` | Updated to current imports and constructor signatures. |
+| `HTTP Streaming` | `deployment/webserver-mode.md` | Updated to current SSE body and overrides. |
+| `Custom Search Provider` | `providers/writing-a-custom-provider.md` | Updated with `search_model` and capability metadata. |
+
+Before copying a legacy snippet, check imports, constructor signatures, enum names, env vars, and whether the feature still exists in code. Code wins over old prose.
+
+## Related docs
+
+- [Configuration cookbook](../configuration/configuration-cookbook.md)
+- [Contributing](contributing.md)
+- [Coding standards](coding-standards.md)
+- [Testing strategy](testing-strategy.md)

@@ -1,0 +1,1642 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-brand-subtle: var(--brand-subtle);
+  --color-canvas: var(--canvas);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-disabled: var(--disabled);
+  --color-disabled-foreground: var(--disabled-foreground);
+  --color-success: var(--success);
+  --color-success-subtle: var(--success-subtle);
+  --color-surface: var(--surface);
+  --color-warning: var(--warning);
+  --color-warning-subtle: var(--warning-subtle);
+  --color-file: var(--file);
+  --color-file-subtle: var(--file-subtle);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  --radius: 0.5rem;
+  /* Single source for the sticky Topbar height; AppRail's offset and the
+     full-height workspaces subtract it, so it must only change here. */
+  --header-h: 3.5rem;
+  --background: oklch(0.985 0 0);
+  --brand: oklch(0.5 0.18 262);
+  --brand-foreground: oklch(0.99 0 0);
+  --brand-shadow: oklch(0.5 0.18 262 / 14%);
+  --brand-subtle: oklch(0.955 0.03 262);
+  --canvas: oklch(0.971 0.006 255);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --disabled: oklch(0.87 0 0);
+  --disabled-foreground: oklch(0.62 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --shadow-hairline: oklch(0.32 0.02 255 / 8%);
+  --shadow-soft: oklch(0.32 0.02 255 / 12%);
+  --success: oklch(0.59 0.16 155);
+  --success-subtle: oklch(0.95 0.04 155);
+  --surface: oklch(0.982 0.004 255);
+  --warning: oklch(0.58 0.13 70);
+  --warning-subtle: oklch(0.96 0.04 80);
+  --file: oklch(0.55 0.12 195);
+  --file-subtle: oklch(0.95 0.035 195);
+}
+
+:root[data-theme-preset="slate"] {
+  --brand: oklch(0.48 0.14 245);
+  --brand-foreground: oklch(0.99 0 0);
+  --brand-shadow: oklch(0.48 0.14 245 / 14%);
+  --brand-subtle: oklch(0.955 0.03 245);
+  --canvas: oklch(0.972 0.008 245);
+  --ring: oklch(0.62 0.08 245);
+  --shadow-hairline: oklch(0.32 0.04 245 / 8%);
+  --shadow-soft: oklch(0.32 0.04 245 / 12%);
+  --surface: oklch(0.982 0.006 245);
+}
+
+:root[data-theme-preset="graphite"] {
+  --brand: oklch(0.42 0.025 260);
+  --brand-foreground: oklch(0.99 0 0);
+  --brand-shadow: oklch(0.28 0.02 260 / 12%);
+  --brand-subtle: oklch(0.94 0.006 260);
+  --canvas: oklch(0.968 0.002 260);
+  --ring: oklch(0.54 0.02 260);
+  --shadow-hairline: oklch(0.22 0.01 260 / 9%);
+  --shadow-soft: oklch(0.22 0.01 260 / 13%);
+  --surface: oklch(0.98 0.002 260);
+}
+
+:root[data-theme-preset="sage"] {
+  --brand: oklch(0.48 0.11 155);
+  --brand-foreground: oklch(0.99 0 0);
+  --brand-shadow: oklch(0.48 0.11 155 / 13%);
+  --brand-subtle: oklch(0.955 0.035 155);
+  --canvas: oklch(0.973 0.008 150);
+  --ring: oklch(0.58 0.08 155);
+  --shadow-hairline: oklch(0.28 0.035 155 / 8%);
+  --shadow-soft: oklch(0.28 0.035 155 / 12%);
+  --surface: oklch(0.982 0.006 150);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --brand: oklch(0.72 0.12 262);
+  --brand-foreground: oklch(0.12 0.02 262);
+  --brand-shadow: oklch(0.72 0.12 262 / 20%);
+  --brand-subtle: oklch(0.25 0.045 262);
+  --canvas: oklch(0.16 0.004 255);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.985 0 0);
+  --primary-foreground: oklch(0.145 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --disabled: oklch(0.27 0 0);
+  --disabled-foreground: oklch(0.62 0 0);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --shadow-hairline: oklch(0 0 0 / 18%);
+  --shadow-soft: oklch(0 0 0 / 28%);
+  --success: oklch(0.72 0.16 155);
+  --success-subtle: oklch(0.25 0.07 155);
+  --surface: oklch(0.235 0 0);
+  --warning: oklch(0.76 0.13 78);
+  --warning-subtle: oklch(0.28 0.07 78);
+  --file: oklch(0.72 0.12 195);
+  --file-subtle: oklch(0.25 0.05 195);
+}
+
+.dark[data-theme-preset="slate"] {
+  --brand: oklch(0.74 0.11 245);
+  --brand-foreground: oklch(0.12 0.02 245);
+  --brand-shadow: oklch(0.74 0.11 245 / 20%);
+  --brand-subtle: oklch(0.25 0.05 245);
+  --canvas: oklch(0.16 0.008 245);
+  --ring: oklch(0.62 0.08 245);
+  --surface: oklch(0.235 0.01 245);
+}
+
+.dark[data-theme-preset="graphite"] {
+  --brand: oklch(0.78 0.015 260);
+  --brand-foreground: oklch(0.14 0 0);
+  --brand-shadow: oklch(0.78 0.015 260 / 18%);
+  --brand-subtle: oklch(0.27 0.008 260);
+  --canvas: oklch(0.155 0.002 260);
+  --ring: oklch(0.62 0.01 260);
+  --surface: oklch(0.23 0.004 260);
+}
+
+.dark[data-theme-preset="sage"] {
+  --brand: oklch(0.72 0.12 155);
+  --brand-foreground: oklch(0.12 0.02 155);
+  --brand-shadow: oklch(0.72 0.12 155 / 19%);
+  --brand-subtle: oklch(0.25 0.055 155);
+  --canvas: oklch(0.16 0.006 150);
+  --ring: oklch(0.62 0.08 155);
+  --surface: oklch(0.235 0.01 150);
+}
+
+:root[data-contrast-mode="high"] {
+  --background: oklch(1 0 0);
+  --brand: oklch(0.34 0.22 262);
+  --brand-foreground: oklch(1 0 0);
+  --brand-shadow: oklch(0 0 0 / 28%);
+  --brand-subtle: oklch(0.91 0.055 262);
+  --canvas: oklch(0.98 0 0);
+  --foreground: oklch(0 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0 0 0);
+  --primary: oklch(0 0 0);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.94 0 0);
+  --secondary-foreground: oklch(0 0 0);
+  --muted: oklch(0.94 0 0);
+  --muted-foreground: oklch(0.23 0 0);
+  --accent: oklch(0.9 0 0);
+  --accent-foreground: oklch(0 0 0);
+  --destructive: oklch(0.42 0.24 27);
+  --destructive-subtle: oklch(0.93 0.06 27);
+  --border: oklch(0 0 0);
+  --disabled: oklch(0.82 0 0);
+  --disabled-foreground: oklch(0.27 0 0);
+  --input: oklch(0 0 0);
+  --ring: oklch(0 0 0);
+  --shadow-hairline: oklch(0 0 0 / 28%);
+  --shadow-soft: oklch(0 0 0 / 36%);
+  --success: oklch(0.36 0.14 155);
+  --success-subtle: oklch(0.91 0.06 155);
+  --surface: oklch(0.97 0 0);
+  --warning: oklch(0.38 0.14 70);
+  --warning-subtle: oklch(0.93 0.07 80);
+  --file: oklch(0.38 0.13 195);
+  --file-subtle: oklch(0.92 0.06 195);
+}
+
+.dark[data-contrast-mode="high"] {
+  --background: oklch(0 0 0);
+  --brand: oklch(0.86 0.13 262);
+  --brand-foreground: oklch(0 0 0);
+  --brand-shadow: oklch(1 0 0 / 30%);
+  --brand-subtle: oklch(0.24 0.075 262);
+  --canvas: oklch(0.04 0 0);
+  --foreground: oklch(1 0 0);
+  --card: oklch(0 0 0);
+  --card-foreground: oklch(1 0 0);
+  --popover: oklch(0 0 0);
+  --popover-foreground: oklch(1 0 0);
+  --primary: oklch(1 0 0);
+  --primary-foreground: oklch(0 0 0);
+  --secondary: oklch(0.16 0 0);
+  --secondary-foreground: oklch(1 0 0);
+  --muted: oklch(0.17 0 0);
+  --muted-foreground: oklch(0.88 0 0);
+  --accent: oklch(0.2 0 0);
+  --accent-foreground: oklch(1 0 0);
+  --destructive: oklch(0.8 0.18 27);
+  --destructive-subtle: oklch(0.24 0.08 27);
+  --border: oklch(1 0 0);
+  --disabled: oklch(0.2 0 0);
+  --disabled-foreground: oklch(0.72 0 0);
+  --input: oklch(1 0 0);
+  --ring: oklch(1 0 0);
+  --shadow-hairline: oklch(1 0 0 / 24%);
+  --shadow-soft: oklch(1 0 0 / 32%);
+  --success: oklch(0.82 0.15 155);
+  --success-subtle: oklch(0.22 0.08 155);
+  --surface: oklch(0.08 0 0);
+  --warning: oklch(0.88 0.13 78);
+  --warning-subtle: oklch(0.24 0.08 78);
+  --file: oklch(0.84 0.13 195);
+  --file-subtle: oklch(0.24 0.07 195);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    margin: 0;
+    font-family:
+      Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+      "Segoe UI", sans-serif;
+  }
+
+  html[data-contrast-mode="high"] :where(:focus, :focus-visible, :focus-within) {
+    outline: none !important;
+    box-shadow: none !important;
+  }
+}
+
+@layer components {
+  .chat-markdown pre[data-theme*=" "],
+  .chat-markdown code[data-theme*=" "],
+  .chat-markdown code[data-theme*=" "] span,
+  .report-markdown pre[data-theme*=" "],
+  .report-markdown code[data-theme*=" "],
+  .report-markdown code[data-theme*=" "] span {
+    color: var(--shiki-light);
+    background-color: transparent;
+  }
+
+  .dark .chat-markdown pre[data-theme*=" "],
+  .dark .chat-markdown code[data-theme*=" "],
+  .dark .chat-markdown code[data-theme*=" "] span,
+  .dark .report-markdown pre[data-theme*=" "],
+  .dark .report-markdown code[data-theme*=" "],
+  .dark .report-markdown code[data-theme*=" "] span {
+    color: var(--shiki-dark);
+    background-color: transparent;
+  }
+
+  html[data-contrast-mode="high"] .chat-markdown pre[data-theme*=" "],
+  html[data-contrast-mode="high"] .chat-markdown code[data-theme*=" "],
+  html[data-contrast-mode="high"] .chat-markdown code[data-theme*=" "] span,
+  html[data-contrast-mode="high"] .report-markdown pre[data-theme*=" "],
+  html[data-contrast-mode="high"] .report-markdown code[data-theme*=" "],
+  html[data-contrast-mode="high"] .report-markdown code[data-theme*=" "] span {
+    background-color: transparent;
+  }
+
+  html[data-contrast-mode="high"] [class*="border-border/"],
+  html[data-contrast-mode="high"] [class*="border-input/"] {
+    border-color: var(--border) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="border-brand/"] {
+    border-color: var(--brand) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="border-success/"] {
+    border-color: var(--success) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="border-warning/"] {
+    border-color: var(--warning) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="border-file/"] {
+    border-color: var(--file) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="border-destructive/"] {
+    border-color: var(--destructive) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="bg-background/"] {
+    background-color: var(--background) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="bg-card/"] {
+    background-color: var(--card) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="bg-muted/"] {
+    background-color: var(--muted) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="bg-surface/"] {
+    background-color: var(--surface) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="bg-brand-subtle/"] {
+    background-color: var(--brand-subtle) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="bg-success-subtle/"] {
+    background-color: var(--success-subtle) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="bg-warning-subtle/"] {
+    background-color: var(--warning-subtle) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="bg-file-subtle"] {
+    background-color: var(--file-subtle) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="bg-destructive-subtle/"] {
+    background-color: var(--destructive-subtle) !important;
+  }
+
+  html[data-contrast-mode="high"] [class*="backdrop-blur"] {
+    backdrop-filter: none !important;
+  }
+
+  .chat-markdown [data-line],
+  .report-markdown [data-line] {
+    padding-inline: 0.75rem;
+  }
+
+  .chat-markdown [data-line]:empty::after,
+  .report-markdown [data-line]:empty::after {
+    content: " ";
+  }
+
+  .chat-markdown pre code,
+  .report-markdown pre code {
+    display: grid;
+    min-width: max-content;
+  }
+
+  .chat-markdown .katex .fbox,
+  .report-markdown .katex .fbox,
+  .editor-prose .katex .fbox {
+    border-style: none !important;
+    border-width: 0 !important;
+  }
+
+  .chat-markdown .katex .boxpad,
+  .report-markdown .katex .boxpad,
+  .editor-prose .katex .boxpad {
+    padding: 0 !important;
+  }
+
+  .editor-prose {
+    color: var(--foreground);
+    font-size: 0.875rem;
+    line-height: 1.75rem;
+    overflow-wrap: anywhere;
+  }
+
+  .editor-prose > *:first-child {
+    margin-top: 0;
+  }
+
+  .editor-prose > *:last-child {
+    margin-bottom: 0;
+  }
+
+  .editor-prose h1 {
+    margin: 1.5rem 0 0.75rem;
+    font-size: 1.5rem;
+    font-weight: 600;
+    line-height: 2.25rem;
+  }
+
+  .editor-prose > h1:first-child {
+    margin-top: 0;
+  }
+
+  .editor-prose h2 {
+    margin: 1.35rem 0 0.65rem;
+    font-size: 1.25rem;
+    font-weight: 600;
+    line-height: 2rem;
+  }
+
+  .editor-prose h3 {
+    margin: 1.1rem 0 0.5rem;
+    font-size: 1rem;
+    font-weight: 600;
+    line-height: 1.75rem;
+  }
+
+  .editor-prose h4 {
+    margin: 1rem 0 0.4rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    line-height: 1.75rem;
+  }
+
+  .editor-prose h5 {
+    margin: 0.85rem 0 0.35rem;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.5rem;
+    text-transform: uppercase;
+  }
+
+  .editor-prose h6 {
+    margin: 0.85rem 0 0.35rem;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.5rem;
+  }
+
+  .editor-prose hr {
+    margin: 1.1rem 0;
+    border: 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .editor-prose hr + h1,
+  .editor-prose hr + h2,
+  .editor-prose hr + h3,
+  .editor-prose hr + h4,
+  .editor-prose hr + h5,
+  .editor-prose hr + h6 {
+    margin-top: 1rem;
+  }
+
+  .editor-prose p {
+    margin: 0.75rem 0;
+    line-height: 1.75rem;
+  }
+
+  .editor-prose ul,
+  .editor-prose ol {
+    margin: 0.75rem 0;
+    padding-left: 1.15rem;
+  }
+
+  .editor-prose ul {
+    list-style: disc;
+  }
+
+  .editor-prose ol {
+    list-style: decimal;
+  }
+
+  .editor-prose li {
+    margin: 0.15rem 0;
+    padding-left: 0.15rem;
+    line-height: 1.6rem;
+  }
+
+  .editor-prose li p {
+    margin: 0;
+    line-height: inherit;
+  }
+
+  .editor-prose li p + p {
+    margin-top: 0.35rem;
+  }
+
+  .editor-prose li > ul,
+  .editor-prose li > ol {
+    margin: 0.35rem 0;
+  }
+
+  .editor-prose blockquote {
+    margin: 1rem 0;
+    border-left: 2px solid color-mix(in oklab, var(--brand) 35%, transparent);
+    background: color-mix(in oklab, var(--brand-subtle) 55%, transparent);
+    padding: 0.6rem 1rem;
+    color: var(--foreground);
+    font-size: 0.875rem;
+    line-height: 1.6rem;
+  }
+
+  .editor-prose blockquote > *:first-child {
+    margin-top: 0;
+  }
+
+  .editor-prose blockquote > *:last-child {
+    margin-bottom: 0;
+  }
+
+  .editor-prose blockquote p,
+  .editor-prose blockquote ul,
+  .editor-prose blockquote ol {
+    margin: 0.35rem 0;
+    line-height: inherit;
+  }
+
+  .editor-prose blockquote li {
+    line-height: inherit;
+  }
+
+  .editor-prose code {
+    border-radius: 0.25rem;
+    background: var(--muted);
+    padding: 0.1rem 0.3rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-size: 0.92em;
+  }
+
+  .editor-prose pre {
+    margin: 1rem 0;
+    overflow-x: auto;
+    border-radius: 0.5rem;
+    background: var(--surface);
+    padding: 1rem;
+  }
+
+  .editor-prose pre code {
+    background: transparent;
+    padding: 0;
+  }
+
+  .editor-prose a {
+    color: var(--brand);
+    position: relative;
+    text-decoration: underline;
+    text-underline-offset: 0.18em;
+  }
+
+  .editor-prose a[href]:where(:hover, :focus-visible)::after {
+    position: absolute;
+    z-index: 50;
+    top: calc(100% + 0.35rem);
+    left: 50%;
+    width: max-content;
+    max-width: min(34rem, calc(100vw - 2rem));
+    transform: translateX(-50%);
+    border: 1px solid color-mix(in oklab, var(--border) 40%, transparent);
+    border-radius: 0.375rem;
+    background: var(--foreground);
+    box-shadow: 0 8px 24px var(--shadow-soft);
+    color: var(--background);
+    content: attr(href);
+    overflow: hidden;
+    padding: 0.375rem 0.625rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    line-height: 1rem;
+    pointer-events: none;
+  }
+
+  .editor-prose .tiptap-mathematics-render {
+    border-radius: 0.25rem;
+  }
+
+  .editor-prose .tiptap-mathematics-render[data-type="inline-math"] {
+    display: inline-flex;
+    vertical-align: baseline;
+  }
+
+  .editor-prose .tiptap-mathematics-render[data-type="block-math"] {
+    display: block;
+    margin: 0.4rem 0 0.55rem;
+    overflow-x: auto;
+    padding: 0;
+    text-align: center;
+  }
+
+  .editor-prose .tiptap-mathematics-render[data-type="block-math"] .katex-display {
+    margin: 0;
+  }
+
+  .editor-prose .tiptap-mathematics-render.inline-math-error,
+  .editor-prose .tiptap-mathematics-render.block-math-error {
+    background: var(--destructive-subtle);
+    color: var(--destructive);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-size: 0.92em;
+    padding: 0.1rem 0.3rem;
+  }
+
+  .editor-prose .tableWrapper {
+    margin: 1rem 0;
+    max-width: 100%;
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: var(--background);
+    scrollbar-width: thin;
+  }
+
+  .editor-prose table {
+    margin: 1rem 0;
+    width: 100%;
+    min-width: 560px;
+    border-collapse: collapse;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    overflow: hidden;
+    font-size: 0.875rem;
+    text-align: left;
+    line-height: 1.4rem;
+  }
+
+  .editor-prose .tableWrapper table {
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .editor-prose tbody {
+    border-top: 1px solid var(--border);
+  }
+
+  .editor-prose tr {
+    border-bottom: 1px solid var(--border);
+  }
+
+  .editor-prose tr:last-child {
+    border-bottom: 0;
+  }
+
+  .editor-prose tr:hover {
+    background: color-mix(in oklab, var(--surface) 60%, transparent);
+  }
+
+  .editor-prose th,
+  .editor-prose td {
+    border-right: 1px solid var(--border);
+    padding: 0.45rem 0.75rem;
+    vertical-align: top;
+  }
+
+  .editor-prose th:last-child,
+  .editor-prose td:last-child {
+    border-right: 0;
+  }
+
+  .editor-prose th {
+    background: var(--surface);
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+    font-weight: 650;
+    text-transform: uppercase;
+  }
+
+  .editor-prose th p,
+  .editor-prose td p {
+    margin: 0;
+    line-height: 1.4rem;
+  }
+
+  .editor-prose th p + p,
+  .editor-prose td p + p {
+    margin-top: 0.45rem;
+  }
+
+  .editor-prose th ul,
+  .editor-prose th ol,
+  .editor-prose td ul,
+  .editor-prose td ol {
+    margin: 0.25rem 0;
+    padding-left: 1rem;
+  }
+
+  .editor-prose th li,
+  .editor-prose td li {
+    margin: 0.1rem 0;
+    line-height: 1.4rem;
+  }
+
+  .editor-prose ul[data-type="taskList"] {
+    list-style: none;
+    padding-left: 0;
+  }
+
+  .editor-prose ul[data-type="taskList"] li {
+    display: flex;
+    gap: 0.55rem;
+  }
+
+  .editor-prose ul[data-type="taskList"] li > label {
+    flex: 0 0 auto;
+    padding-top: 0.1rem;
+  }
+
+  .editor-prose ul[data-type="taskList"] li > div {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .editor-prose .editor-comment-anchor {
+    border-radius: 0.16rem;
+    cursor: pointer;
+    background: color-mix(in oklab, var(--brand-subtle) 45%, transparent);
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+  }
+
+  .editor-prose .editor-comment-anchor[data-editor-comment-kind="inline_edit"] {
+    background: color-mix(in oklab, var(--warning-subtle) 42%, transparent);
+  }
+
+  .editor-prose .editor-comment-anchor[data-editor-comment-kind="evidence_review"] {
+    background: color-mix(in oklab, var(--success-subtle) 42%, transparent);
+  }
+
+  .editor-prose .editor-comment-anchor[data-editor-comment-selected="true"] {
+    background: color-mix(in oklab, var(--brand-subtle) 76%, transparent);
+  }
+
+  .editor-prose .editor-comment-anchor[data-editor-comment-kind="inline_edit"][data-editor-comment-selected="true"] {
+    background: color-mix(in oklab, var(--warning-subtle) 74%, transparent);
+  }
+
+  .editor-prose .editor-comment-anchor[data-editor-comment-kind="evidence_review"][data-editor-comment-selected="true"] {
+    background: color-mix(in oklab, var(--success-subtle) 74%, transparent);
+  }
+
+  .editor-prose .editor-comment-anchor[data-editor-comment-status="stale"] {
+    background: color-mix(in oklab, var(--muted) 50%, transparent);
+  }
+
+  .editor-prose .suggestion-insert {
+    border-radius: 0.2rem;
+    padding: 0 0.12rem;
+    background: color-mix(in oklab, var(--success-subtle) 78%, transparent);
+    color: var(--success);
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--success) 28%, transparent);
+  }
+
+  .editor-prose .suggestion-delete {
+    border-radius: 0.2rem;
+    background: color-mix(in oklab, var(--destructive-subtle) 70%, transparent);
+    color: var(--destructive);
+    text-decoration: line-through;
+    text-decoration-thickness: 1px;
+  }
+
+  .editor-prose .suggestion-block-original {
+    border-radius: 0.16rem;
+    background: color-mix(in oklab, var(--warning-subtle) 30%, transparent);
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+  }
+
+  .editor-prose .suggestion-block-original-active {
+    background: color-mix(in oklab, var(--warning-subtle) 48%, transparent);
+  }
+
+  .editor-prose .suggestion-block-card {
+    display: grid;
+    gap: 0.35rem;
+    margin: 0.42rem 0 0.95rem;
+    border: 1px solid color-mix(in oklab, var(--success) 22%, var(--border));
+    border-left: 2px solid color-mix(in oklab, var(--success) 58%, var(--border));
+    border-radius: 0.5rem;
+    background: var(--background);
+    padding: 0.55rem 0.65rem;
+    box-shadow:
+      0 1px 2px var(--shadow-hairline),
+      0 8px 24px color-mix(in oklab, var(--success-subtle) 28%, transparent);
+  }
+
+  .editor-prose .suggestion-block-card-active {
+    border-color: color-mix(in oklab, var(--success) 44%, var(--border));
+    border-left-color: color-mix(in oklab, var(--success) 72%, var(--border));
+    box-shadow:
+      0 1px 2px var(--shadow-hairline),
+      0 0 0 2px color-mix(in oklab, var(--success-subtle) 56%, transparent);
+  }
+
+  .editor-prose .suggestion-block-header {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+
+  .editor-prose .suggestion-block-title {
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.45rem;
+  }
+
+  .editor-prose .suggestion-block-label {
+    color: var(--success);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    line-height: 1;
+    text-transform: uppercase;
+  }
+
+  .editor-prose .suggestion-block-revision {
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--success-subtle) 62%, transparent);
+    padding: 0.08rem 0.38rem;
+    color: var(--success);
+    font-size: 0.66rem;
+    font-weight: 700;
+    line-height: 1.1;
+  }
+
+  .editor-prose .suggestion-block-proposed {
+    color: var(--foreground);
+    font-size: 0.875rem;
+    line-height: 1.45rem;
+  }
+
+  .editor-prose .suggestion-markdown {
+    min-width: 0;
+  }
+
+  .editor-prose .suggestion-markdown > *:first-child {
+    margin-top: 0;
+  }
+
+  .editor-prose .suggestion-markdown > *:last-child {
+    margin-bottom: 0;
+  }
+
+  .editor-prose .suggestion-markdown-paragraph {
+    margin: 0.45rem 0;
+    line-height: 1.48rem;
+    overflow-wrap: anywhere;
+  }
+
+  .editor-prose .suggestion-markdown-heading {
+    margin: 0.75rem 0 0.35rem;
+    color: var(--foreground);
+    font-weight: 700;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+  }
+
+  .editor-prose .suggestion-markdown-heading-1 {
+    font-size: 1.05rem;
+  }
+
+  .editor-prose .suggestion-markdown-heading-2 {
+    font-size: 1rem;
+  }
+
+  .editor-prose .suggestion-markdown-heading-3,
+  .editor-prose .suggestion-markdown-heading-4 {
+    font-size: 0.95rem;
+  }
+
+  .editor-prose .suggestion-markdown-list {
+    margin: 0.45rem 0;
+    padding-left: 1.2rem;
+  }
+
+  .editor-prose .suggestion-markdown-list-unordered {
+    list-style: disc;
+  }
+
+  .editor-prose .suggestion-markdown-list-ordered {
+    list-style: decimal;
+  }
+
+  .editor-prose .suggestion-markdown-list-item {
+    margin: 0.15rem 0;
+    padding-left: 0.15rem;
+    line-height: 1.48rem;
+  }
+
+  .editor-prose .suggestion-markdown-strong {
+    color: var(--foreground);
+    font-weight: 700;
+  }
+
+  .editor-prose .suggestion-markdown-link {
+    color: var(--brand);
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 0.18em;
+    overflow-wrap: anywhere;
+  }
+
+  .editor-prose .suggestion-markdown-code {
+    border-radius: 0.25rem;
+    background: var(--muted);
+    padding: 0.05rem 0.25rem;
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
+    font-size: 0.85em;
+  }
+
+  .editor-prose .suggestion-markdown-pre {
+    margin: 0.55rem 0;
+    overflow-x: auto;
+    border-radius: 0.45rem;
+    background: var(--muted);
+    padding: 0.65rem;
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
+    font-size: 0.8rem;
+    line-height: 1.35rem;
+    scrollbar-width: thin;
+  }
+
+  .editor-prose .suggestion-markdown-pre .suggestion-markdown-code {
+    background: transparent;
+    padding: 0;
+  }
+
+  .editor-prose .suggestion-markdown-blockquote {
+    margin: 0.6rem 0;
+    border-left: 2px solid color-mix(in oklab, var(--brand) 35%, transparent);
+    background: color-mix(in oklab, var(--brand-subtle) 45%, transparent);
+    padding: 0.45rem 0.7rem;
+  }
+
+  .editor-prose .suggestion-markdown-table-wrap {
+    margin: 0.6rem 0;
+    max-width: 100%;
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: 0.45rem;
+    scrollbar-width: thin;
+  }
+
+  .editor-prose .suggestion-markdown-table {
+    width: 100%;
+    min-width: 28rem;
+    border-collapse: collapse;
+    text-align: left;
+    font-size: 0.8rem;
+    line-height: 1.35rem;
+  }
+
+  .editor-prose .suggestion-markdown-cell {
+    border-right: 1px solid var(--border);
+    padding: 0.4rem 0.6rem;
+    vertical-align: top;
+  }
+
+  .editor-prose .suggestion-markdown-cell:last-child {
+    border-right: 0;
+  }
+
+  .editor-prose .suggestion-markdown-header-cell {
+    background: var(--surface);
+    color: var(--muted-foreground);
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  .editor-prose .suggestion-block-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.2rem;
+  }
+
+  .editor-prose .suggestion-block-button {
+    display: inline-flex;
+    width: 1.7rem;
+    height: 1.7rem;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid transparent;
+    border-radius: 0.375rem;
+    background: transparent;
+    padding: 0;
+    color: var(--muted-foreground);
+    cursor: pointer;
+    transition:
+      background-color 140ms ease,
+      color 140ms ease,
+      border-color 140ms ease;
+  }
+
+  .editor-prose .suggestion-block-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  .editor-prose .suggestion-block-button:hover {
+    background: var(--background);
+    color: var(--foreground);
+  }
+
+  .editor-prose .suggestion-block-button-accept {
+    background: var(--brand);
+    border-color: color-mix(in oklab, var(--brand) 75%, transparent);
+    color: white;
+  }
+
+  .editor-prose .suggestion-block-button-accept:hover {
+    background: color-mix(in oklab, var(--brand) 88%, black);
+    color: white;
+  }
+
+  .editor-prose .suggestion-block-icon {
+    width: 0.95rem;
+    height: 0.95rem;
+    flex-shrink: 0;
+    stroke-width: 2.2;
+  }
+
+  .editor-prose .suggestion-block-editor,
+  .editor-prose .suggestion-block-refine {
+    display: grid;
+    gap: 0.4rem;
+  }
+
+  .editor-prose .suggestion-block-refine {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    border-top: 1px solid color-mix(in oklab, var(--border) 72%, transparent);
+    padding-top: 0.35rem;
+  }
+
+  .editor-prose .suggestion-block-input,
+  .editor-prose .suggestion-block-textarea {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 0.42rem;
+    background: var(--background);
+    color: var(--foreground);
+    font: inherit;
+    outline: none;
+  }
+
+  .editor-prose .suggestion-block-input {
+    height: 2rem;
+    padding: 0 0.55rem;
+    font-size: 0.8rem;
+  }
+
+  .editor-prose .suggestion-block-textarea {
+    min-height: 8rem;
+    resize: vertical;
+    padding: 0.55rem 0.65rem;
+    font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);
+    font-size: 0.84rem;
+    line-height: 1.45rem;
+  }
+
+  .editor-prose .suggestion-block-input:focus,
+  .editor-prose .suggestion-block-textarea:focus {
+    border-color: color-mix(in oklab, var(--brand) 52%, var(--border));
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--brand-subtle) 70%, transparent);
+  }
+
+  .editor-prose .suggestion-block-inline-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.35rem;
+  }
+
+  .editor-prose .suggestion-block-text-button {
+    height: 1.8rem;
+    border: 1px solid transparent;
+    border-radius: 0.4rem;
+    background: transparent;
+    padding: 0 0.55rem;
+    color: var(--muted-foreground);
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-weight: 700;
+  }
+
+  .editor-prose .suggestion-block-text-button:hover {
+    background: var(--surface);
+    color: var(--foreground);
+  }
+
+  .editor-prose .suggestion-block-text-button-primary {
+    background: var(--brand);
+    color: white;
+  }
+
+  .editor-prose .suggestion-block-status,
+  .editor-prose .suggestion-block-error {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border-radius: 0.4rem;
+    padding: 0.35rem 0.5rem;
+    font-size: 0.76rem;
+    font-weight: 650;
+    line-height: 1.1;
+  }
+
+  .editor-prose .suggestion-block-status {
+    display: flex;
+    justify-content: space-between;
+    width: 100%;
+    background: color-mix(in oklab, var(--brand-subtle) 64%, transparent);
+    color: var(--brand);
+  }
+
+  .editor-prose .suggestion-block-status-text {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-width: 0;
+  }
+
+  .editor-prose .suggestion-block-error {
+    background: color-mix(in oklab, var(--destructive-subtle) 58%, transparent);
+    color: var(--destructive);
+  }
+
+  .editor-prose .suggestion-block-spinner {
+    animation: spin 900ms linear infinite;
+  }
+
+  .suggestion-scroll-pulse {
+    animation: suggestion-scroll-pulse 900ms ease-out;
+  }
+
+  @keyframes suggestion-scroll-pulse {
+    0% {
+      box-shadow: 0 0 0 0 color-mix(in oklab, var(--brand) 34%, transparent);
+    }
+
+    45% {
+      box-shadow: 0 0 0 4px color-mix(in oklab, var(--brand) 18%, transparent);
+    }
+
+    100% {
+      box-shadow: 0 0 0 0 transparent;
+    }
+  }
+
+  .editor-document-diff-body {
+    color: var(--foreground);
+  }
+
+  .editor-document-diff-chunk {
+    border-radius: 0.45rem;
+    padding: 0.2rem 0.35rem;
+  }
+
+  .editor-document-diff-chunk > *:first-child {
+    margin-top: 0;
+  }
+
+  .editor-document-diff-chunk > *:last-child {
+    margin-bottom: 0;
+  }
+
+  .editor-document-diff-insert {
+    border: 1px solid color-mix(in oklab, var(--success) 24%, transparent);
+    border-left: 2px solid color-mix(in oklab, var(--success) 58%, transparent);
+    background: color-mix(in oklab, var(--success-subtle) 72%, transparent);
+    color: color-mix(in oklab, var(--success) 74%, var(--foreground));
+  }
+
+  .editor-document-diff-delete {
+    border: 1px solid color-mix(in oklab, var(--destructive) 22%, transparent);
+    border-left: 2px solid color-mix(in oklab, var(--destructive) 58%, transparent);
+    background: color-mix(in oklab, var(--destructive-subtle) 70%, transparent);
+    color: color-mix(in oklab, var(--destructive) 78%, var(--foreground));
+  }
+
+  .editor-document-diff-delete :where(p, li, h1, h2, h3, h4, h5, h6, td, th, blockquote, span, strong, em, code, a) {
+    color: inherit;
+    text-decoration: line-through;
+    text-decoration-thickness: 0.08em;
+  }
+
+  .editor-document-diff-insert :where(p, li, h1, h2, h3, h4, h5, h6, td, th, blockquote, span, strong, em, code, a) {
+    color: inherit;
+  }
+
+  .editor-prose .suggestion-active {
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--brand) 45%, transparent);
+    border-radius: 0.2rem;
+  }
+
+  .editor-prose .ProseMirror-selectednode,
+  .editor-prose .ProseMirror-selectednode * {
+    outline: 2px solid var(--ring);
+  }
+
+  .inqtrix-thinking-mark {
+    position: relative;
+    display: inline-flex;
+    width: 4.75rem;
+    height: 1.125rem;
+    align-items: center;
+    justify-content: space-between;
+    isolation: isolate;
+  }
+
+  .inqtrix-thinking-mark::before {
+    position: absolute;
+    right: 0.25rem;
+    left: 0.25rem;
+    top: 50%;
+    height: 2px;
+    border-radius: 9999px;
+    content: "";
+    background: linear-gradient(
+      90deg,
+      transparent,
+      color-mix(in oklab, var(--brand) 22%, transparent),
+      color-mix(in oklab, var(--brand) 46%, transparent),
+      color-mix(in oklab, var(--brand) 22%, transparent),
+      transparent
+    );
+    opacity: 0.68;
+    transform: translateY(-50%);
+  }
+
+  .inqtrix-thinking-mark::after {
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 1.125rem;
+    height: 1.125rem;
+    border-radius: 9999px;
+    content: "";
+    background:
+      radial-gradient(circle, color-mix(in oklab, var(--brand) 78%, white) 0 13%, var(--brand) 14% 27%, transparent 28%),
+      radial-gradient(circle, color-mix(in oklab, var(--brand) 34%, transparent), transparent 70%);
+    opacity: 0.9;
+    transform: translateY(-50%);
+    filter: drop-shadow(0 0 10px var(--brand-shadow));
+    animation: inqtrix-thinking-sweep 1.9s cubic-bezier(0.45, 0, 0.2, 1) infinite;
+  }
+
+  .inqtrix-thinking-node {
+    position: relative;
+    z-index: 1;
+    width: 0.3125rem;
+    height: 0.3125rem;
+    border-radius: 9999px;
+    background: var(--brand);
+    box-shadow:
+      0 0 0 3px color-mix(in oklab, var(--brand-subtle) 68%, transparent),
+      0 0 10px color-mix(in oklab, var(--brand) 24%, transparent);
+    opacity: 0.5;
+    animation: inqtrix-thinking-node 1.9s ease-in-out infinite;
+  }
+
+  .inqtrix-thinking-node:nth-child(2) {
+    animation-delay: 150ms;
+  }
+
+  .inqtrix-thinking-node:nth-child(3) {
+    animation-delay: 300ms;
+  }
+
+  .inqtrix-thinking-node:nth-child(4) {
+    animation-delay: 450ms;
+  }
+
+  .inqtrix-thinking-mark-static::after,
+  .inqtrix-thinking-mark-static .inqtrix-thinking-node {
+    animation: none;
+  }
+
+  .inqtrix-active-node-halo {
+    background:
+      radial-gradient(circle, color-mix(in oklab, var(--brand) 18%, transparent) 0 34%, transparent 72%),
+      radial-gradient(circle, color-mix(in oklab, var(--brand-subtle) 62%, transparent), transparent 76%);
+    filter: blur(0.35rem);
+    opacity: 0.46;
+    transform-origin: center;
+    animation: inqtrix-active-node-halo 2.75s cubic-bezier(0.42, 0, 0.2, 1) infinite;
+    will-change: opacity, transform;
+  }
+
+  .inqtrix-active-node-shell {
+    animation: inqtrix-active-node-shell 2.75s ease-in-out infinite;
+    will-change: filter;
+  }
+
+  .inqtrix-active-node-ring {
+    border: 1.5px solid color-mix(in oklab, var(--brand) 42%, transparent);
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--brand-foreground) 38%, transparent),
+      0 0 14px color-mix(in oklab, var(--brand) 24%, transparent);
+    opacity: 0;
+    transform-origin: center;
+    animation: inqtrix-active-node-ring 2.75s cubic-bezier(0.42, 0, 0.2, 1) infinite;
+    will-change: opacity, transform;
+  }
+
+  .inqtrix-active-node-ring-delayed {
+    border-color: color-mix(in oklab, var(--brand) 28%, transparent);
+    animation-delay: 1.28s;
+  }
+
+  .inqtrix-active-node-core {
+    box-shadow:
+      0 0 0 2px color-mix(in oklab, var(--brand-foreground) 68%, transparent),
+      0 0 10px color-mix(in oklab, var(--brand) 34%, transparent);
+    transform-origin: center;
+    animation: inqtrix-active-node-core 2.75s ease-in-out infinite;
+    will-change: transform;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .inqtrix-thinking-mark::after,
+    .inqtrix-thinking-node,
+    .inqtrix-active-node-shell,
+    .inqtrix-active-node-halo,
+    .inqtrix-active-node-ring,
+    .inqtrix-active-node-core {
+      animation: none;
+    }
+  }
+}
+
+@keyframes inqtrix-thinking-sweep {
+  0% {
+    opacity: 0;
+    transform: translate(-0.125rem, -50%) scale(0.68);
+  }
+
+  18% {
+    opacity: 0.92;
+  }
+
+  82% {
+    opacity: 0.92;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate(3.75rem, -50%) scale(0.78);
+  }
+}
+
+@keyframes inqtrix-thinking-node {
+  0%,
+  100% {
+    opacity: 0.46;
+    transform: scale(0.86);
+  }
+
+  42%,
+  58% {
+    opacity: 1;
+    transform: scale(1.24);
+  }
+}
+
+@keyframes inqtrix-active-node-halo {
+  0%,
+  100% {
+    opacity: 0.28;
+    transform: scale(0.92);
+  }
+
+  46% {
+    opacity: 0.58;
+    transform: scale(1.06);
+  }
+
+  72% {
+    opacity: 0.38;
+    transform: scale(1.01);
+  }
+}
+
+@keyframes inqtrix-active-node-shell {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 1px color-mix(in oklab, var(--brand) 10%, transparent));
+  }
+
+  46% {
+    filter: drop-shadow(0 0 7px color-mix(in oklab, var(--brand) 24%, transparent));
+  }
+}
+
+@keyframes inqtrix-active-node-ring {
+  0% {
+    opacity: 0;
+    transform: scale(0.72);
+  }
+
+  14% {
+    opacity: 0.46;
+  }
+
+  58% {
+    opacity: 0.14;
+  }
+
+  82% {
+    opacity: 0;
+    transform: scale(1.85);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.85);
+  }
+}
+
+@keyframes inqtrix-active-node-core {
+  0%,
+  100% {
+    transform: scale(0.96);
+  }
+
+  46% {
+    transform: scale(1.08);
+  }
+}
+
+/* Keep markdown rhythm shared across Tiptap and rendered markdown surfaces. */
+:where(.editor-prose, .report-markdown, .chat-markdown) > *:first-child {
+  margin-top: 0;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) > *:last-child {
+  margin-bottom: 0;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) h1,
+:where(.editor-prose, .report-markdown, .chat-markdown) h2 {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) h1 {
+  margin: 1.5rem 0 0.75rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) h2 {
+  margin: 1.35rem 0 0.65rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) h3 {
+  margin: 1.1rem 0 0.5rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) h4 {
+  margin: 1rem 0 0.4rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) h5,
+:where(.editor-prose, .report-markdown, .chat-markdown) h6 {
+  margin: 0.85rem 0 0.35rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) hr {
+  margin: 1.1rem 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) hr + :where(h1, h2, h3, h4, h5, h6) {
+  margin-top: 1rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) p {
+  margin: 0.75rem 0;
+}
+
+:where(.editor-prose, .report-markdown) p {
+  line-height: 1.6;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) ul,
+:where(.editor-prose, .report-markdown, .chat-markdown) ol {
+  margin: 0.75rem 0;
+  padding-left: 1.15rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) li {
+  margin: 0.15rem 0;
+  padding-left: 0.15rem;
+  line-height: 1.6;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) li p {
+  margin: 0;
+  line-height: inherit;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) li p + p {
+  margin-top: 0.35rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) li > :where(ul, ol) {
+  margin: 0.35rem 0;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) blockquote {
+  margin: 1rem 0;
+  padding: 0.6rem 1rem;
+  line-height: 1.6;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) blockquote > *:first-child {
+  margin-top: 0;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) blockquote > *:last-child {
+  margin-bottom: 0;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) blockquote :where(p, ul, ol) {
+  margin: 0.35rem 0;
+  line-height: inherit;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) :where(.tableWrapper, div:has(> table)) {
+  margin: 1rem 0;
+  border-radius: 0.5rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) table {
+  margin: 1rem 0;
+  line-height: 1.4;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) :where(.tableWrapper, div:has(> table)) > table {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) :where(th, td) {
+  padding: 0.45rem 0.75rem;
+  vertical-align: top;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) :where(th, td) p {
+  margin: 0;
+  line-height: 1.4;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) :where(th, td) p + p {
+  margin-top: 0.45rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) :where(th, td) :where(ul, ol) {
+  margin: 0.25rem 0;
+  padding-left: 1rem;
+}
+
+:where(.editor-prose, .report-markdown, .chat-markdown) :where(th, td) li {
+  margin: 0.1rem 0;
+  line-height: 1.4;
+}
+
+@media (forced-colors: active) {
+  body {
+    background: Canvas;
+    color: CanvasText;
+  }
+
+  * {
+    border-color: CanvasText;
+  }
+
+  :focus-visible {
+    outline: 2px solid Highlight !important;
+    outline-offset: 2px;
+  }
+
+  a,
+  .chat-markdown a,
+  .report-markdown a {
+    color: LinkText;
+  }
+
+  button,
+  input,
+  textarea,
+  [role="button"],
+  [role="menuitem"],
+  [role="tab"] {
+    border-color: ButtonText;
+  }
+}

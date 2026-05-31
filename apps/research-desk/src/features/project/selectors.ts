@@ -1,0 +1,678 @@
+import type { Locale } from '@/i18n/translations'
+import type {
+  ChatContextReferenceRecord,
+  ChatMessageAttachmentRecord,
+  ChatRuleRecord,
+  ChatThreadGroupRecord,
+  ChatThreadRecord,
+  EditorCommentThreadRecord,
+  EditorDocumentRecord,
+  EditorFolderRecord,
+  FileAssetRecord,
+  FileGroupRecord,
+  FileLibrarySectionRecord,
+  ProjectState,
+  ResearchRunRecord,
+} from './types'
+import { type JobPhase, type LocalizedText, type ResearchJob } from '@/features/researchDesk/types'
+import type { ReferenceDoc } from '@/features/files/referenceBlocks'
+
+export type CompletedReportOption = {
+  label: string
+  markdown: string
+  runId: string
+  title: string
+}
+
+export type ChatRuleOption = {
+  label: string
+  markdown: string
+  ruleId: string
+  title: string
+}
+
+export type ChatHistorySection =
+  | {
+    group: ChatThreadGroupRecord
+    groupId: string
+    kind: 'group'
+    threads: ChatThreadRecord[]
+  }
+  | {
+    groupId: null
+    kind: 'ungrouped'
+    threads: ChatThreadRecord[]
+  }
+
+export function projectResearchJobs(state: ProjectState): ResearchJob[] {
+  return state.researchRunOrder
+    .map((runId) => state.researchRuns[runId])
+    .filter((run): run is ResearchRunRecord => Boolean(run))
+    .map(researchRunToJob)
+}
+
+export function selectedResearchRun(state: ProjectState) {
+  const selectedJobId = state.ui.selectedJobId
+  return selectedJobId ? state.researchRuns[selectedJobId] ?? null : null
+}
+
+export function projectChatThreads(state: ProjectState): ChatThreadRecord[] {
+  return state.chatThreadOrder
+    .map((threadId) => state.chatThreads[threadId])
+    .filter((thread): thread is ChatThreadRecord => Boolean(thread))
+}
+
+export function projectChatHistorySections(state: ProjectState): ChatHistorySection[] {
+  const validGroupIds = new Set(state.chatThreadGroupOrder.filter((groupId) => Boolean(state.chatThreadGroups[groupId])))
+  const groupedThreads = new Map<string, ChatThreadRecord[]>()
+  const ungroupedThreads: ChatThreadRecord[] = []
+
+  for (const groupId of validGroupIds) {
+    groupedThreads.set(groupId, [])
+  }
+
+  for (const thread of projectChatThreads(state)) {
+    const groupId = state.chatThreadGroupMemberships[thread.id]
+    if (groupId && validGroupIds.has(groupId)) {
+      groupedThreads.get(groupId)?.push(thread)
+    } else {
+      ungroupedThreads.push(thread)
+    }
+  }
+
+  const sections: ChatHistorySection[] = state.chatThreadGroupOrder.flatMap((groupId) => {
+    const group = state.chatThreadGroups[groupId]
+    if (!group) return []
+    return [{
+      group,
+      groupId,
+      kind: 'group' as const,
+      threads: groupedThreads.get(groupId) ?? [],
+    }]
+  })
+
+  if (ungroupedThreads.length > 0 || sections.length === 0 || state.chatThreadGroupOrder.length > 0) {
+    sections.push({
+      groupId: null,
+      kind: 'ungrouped',
+      threads: ungroupedThreads,
+    })
+  }
+
+  return sections
+}
+
+export function projectChatRules(state: ProjectState): ChatRuleRecord[] {
+  return state.chatRuleOrder
+    .map((ruleId) => state.chatRules[ruleId])
+    .filter((rule): rule is ChatRuleRecord => Boolean(rule))
+}
+
+export function selectedChatThread(state: ProjectState) {
+  const selectedThreadId = state.ui.selectedChatThreadId
+  return selectedThreadId ? state.chatThreads[selectedThreadId] ?? null : null
+}
+
+export function projectEditorFolders(state: ProjectState): EditorFolderRecord[] {
+  return state.editorFolderOrder
+    .map((folderId) => state.editorFolders[folderId])
+    .filter((folder): folder is EditorFolderRecord => Boolean(folder))
+}
+
+export function projectEditorDocuments(state: ProjectState): EditorDocumentRecord[] {
+  return state.editorDocumentOrder
+    .map((documentId) => state.editorDocuments[documentId])
+    .filter((document): document is EditorDocumentRecord => Boolean(document))
+}
+
+export function openEditorDocuments(state: ProjectState): EditorDocumentRecord[] {
+  return state.editorUi.openDocumentIds
+    .map((documentId) => state.editorDocuments[documentId])
+    .filter((document): document is EditorDocumentRecord => Boolean(document))
+}
+
+export function selectedEditorDocument(state: ProjectState) {
+  const selectedDocumentId = state.editorUi.activeDocumentId
+  return selectedDocumentId ? state.editorDocuments[selectedDocumentId] ?? null : null
+}
+
+export function editorCommentsForDocument(
+  state: ProjectState,
+  documentId: string | null,
+): EditorCommentThreadRecord[] {
+  if (!documentId) return []
+  return Object.values(state.editorComments)
+    .filter((comment) => comment.documentId === documentId)
+    .sort((a, b) => {
+      const byStatus = commentStatusRank(a.status) - commentStatusRank(b.status)
+      return byStatus || a.anchor.from - b.anchor.from || b.updatedAt.localeCompare(a.updatedAt)
+    })
+}
+
+export function completedReportOptions(state: ProjectState): CompletedReportOption[] {
+  const reports = state.researchRunOrder
+    .map((runId) => state.researchRuns[runId])
+    .filter((run): run is ResearchRunRecord & { result: { markdown: string } } => {
+      return run?.status === 'completed' && Boolean(run.result?.markdown)
+    })
+    .map((run) => ({
+      label: slugLabel(run.summary.title, run.runId, 'report'),
+      markdown: run.result.markdown,
+      runId: run.runId,
+      title: run.summary.title,
+    }))
+  return withUniqueLabels(reports)
+}
+
+function commentStatusRank(status: EditorCommentThreadRecord['status']) {
+  if (status === 'open') return 0
+  if (status === 'stale') return 1
+  return 2
+}
+
+export function chatRuleOptions(state: ProjectState): ChatRuleOption[] {
+  return chatRuleOptionsFromRules(projectChatRules(state))
+}
+
+export function chatRuleOptionsFromRules(rules: readonly ChatRuleRecord[]): ChatRuleOption[] {
+  return rules.map((rule) => ({
+    label: rule.label,
+    markdown: rule.contentMarkdown,
+    ruleId: rule.id,
+    title: rule.title,
+  }))
+}
+
+export type FileMentionOption = {
+  fileId: string
+  label: string
+  pageCount: number | null
+  sizeBytes: number
+  title: string
+}
+
+export type FileGroupMentionOption = {
+  fileCount: number
+  groupId: string
+  label: string
+  title: string
+}
+
+export function projectFileLibrarySections(state: ProjectState): FileLibrarySectionRecord[] {
+  return state.fileLibrarySectionOrder
+    .map((sectionId) => state.fileLibrarySections[sectionId])
+    .filter((section): section is FileLibrarySectionRecord => Boolean(section))
+}
+
+export function projectFileAssets(state: ProjectState): FileAssetRecord[] {
+  return state.fileAssetOrder
+    .map((fileId) => state.fileAssets[fileId])
+    .filter((asset): asset is FileAssetRecord => Boolean(asset))
+}
+
+export function projectFileGroups(state: ProjectState): FileGroupRecord[] {
+  return state.fileGroupOrder
+    .map((groupId) => state.fileGroups[groupId])
+    .filter((group): group is FileGroupRecord => Boolean(group))
+}
+
+export function fileGroupsForSection(state: ProjectState, sectionId: string): FileGroupRecord[] {
+  return projectFileGroups(state).filter((group) => group.sectionId === sectionId)
+}
+
+export function fileAssetsForSection(state: ProjectState, sectionId: string): FileAssetRecord[] {
+  return projectFileAssets(state).filter((asset) => asset.sectionId === sectionId)
+}
+
+export function fileAssetsForGroup(state: ProjectState, groupId: string): FileAssetRecord[] {
+  return projectFileAssets(state).filter((asset) => asset.groupId === groupId)
+}
+
+export function fileMentionOptions(state: ProjectState): FileMentionOption[] {
+  return withUniqueLabels(projectFileAssets(state).map((asset) => ({
+    fileId: asset.id,
+    label: asset.label,
+    pageCount: asset.pageCount,
+    sizeBytes: asset.sizeBytes,
+    title: asset.title,
+  })))
+}
+
+export function fileGroupMentionOptions(state: ProjectState): FileGroupMentionOption[] {
+  return withUniqueLabels(projectFileGroups(state).map((group) => ({
+    fileCount: fileAssetsForGroup(state, group.id).length,
+    groupId: group.id,
+    label: slugLabel(group.title, group.id, 'group'),
+    title: group.title,
+  })))
+}
+
+export function pendingChatAttachments(state: ProjectState): ChatMessageAttachmentRecord[] {
+  return chatAttachmentsFromRefs(state, state.ui.pendingChatAttachmentRefs)
+}
+
+export function pendingChatReportAttachment(state: ProjectState) {
+  return pendingChatAttachments(state).find((attachment) => attachment.kind === 'research-report') ?? null
+}
+
+export function chatAttachmentsFromRefs(
+  state: ProjectState,
+  refs: readonly ChatContextReferenceRecord[],
+): ChatMessageAttachmentRecord[] {
+  const attachedAt = new Date().toISOString()
+  const reports = completedReportOptions(state)
+  const rules = chatRuleOptions(state)
+  const seen = new Set<string>()
+
+  return refs.flatMap<ChatMessageAttachmentRecord>((ref) => {
+    if (ref.kind === 'file-group') {
+      const group = state.fileGroups[ref.groupId]
+      if (!group) return []
+      return fileAssetsForGroup(state, ref.groupId).flatMap<ChatMessageAttachmentRecord>((asset) => {
+        const memberKey = `file-asset:${asset.id}`
+        if (seen.has(memberKey)) return []
+        seen.add(memberKey)
+        return [{
+          attachedAt,
+          contentMarkdown: asset.extractedText,
+          fileId: asset.id,
+          groupId: group.id,
+          groupLabel: group.title,
+          kind: 'file-group' as const,
+          label: asset.label,
+          pageCount: asset.pageCount,
+          sizeBytes: asset.sizeBytes,
+          title: asset.title,
+        }]
+      })
+    }
+
+    const key = chatContextRefKey(ref)
+    if (seen.has(key)) return []
+    seen.add(key)
+
+    if (ref.kind === 'research-report') {
+      const report = reports.find((option) => option.runId === ref.runId)
+      if (!report) return []
+      return [{
+        attachedAt,
+        contentMarkdown: report.markdown,
+        kind: 'research-report' as const,
+        label: report.label,
+        runId: report.runId,
+        title: report.title,
+      }]
+    }
+
+    if (ref.kind === 'file-asset') {
+      const asset = state.fileAssets[ref.fileId]
+      if (!asset) return []
+      return [{
+        attachedAt,
+        contentMarkdown: asset.extractedText,
+        fileId: asset.id,
+        kind: 'file-asset' as const,
+        label: asset.label,
+        pageCount: asset.pageCount,
+        sizeBytes: asset.sizeBytes,
+        title: asset.title,
+      }]
+    }
+
+    const rule = rules.find((option) => option.ruleId === ref.ruleId)
+    if (!rule) return []
+    return [{
+      attachedAt,
+      contentMarkdown: rule.markdown,
+      kind: 'chat-rule' as const,
+      label: rule.label,
+      ruleId: rule.ruleId,
+      title: rule.title,
+    }]
+  })
+}
+
+export function chatContextRefKey(ref: ChatContextReferenceRecord) {
+  switch (ref.kind) {
+    case 'research-report':
+      return `research-report:${ref.runId}`
+    case 'file-asset':
+      return `file-asset:${ref.fileId}`
+    case 'file-group':
+      return `file-group:${ref.groupId}`
+    case 'chat-rule':
+      return `chat-rule:${ref.ruleId}`
+  }
+}
+
+export function attachmentToRef(attachment: ChatMessageAttachmentRecord): ChatContextReferenceRecord {
+  switch (attachment.kind) {
+    case 'research-report':
+      return { kind: 'research-report', runId: attachment.runId }
+    case 'chat-rule':
+      return { kind: 'chat-rule', ruleId: attachment.ruleId }
+    case 'file-asset':
+      return { fileId: attachment.fileId, kind: 'file-asset' }
+    case 'file-group':
+      return { groupId: attachment.groupId, kind: 'file-group' }
+  }
+}
+
+/**
+ * Drop duplicate context references, keeping the first occurrence of each. Used
+ * wherever two ref sources are merged (composer pills plus rule/drop refs) so a
+ * file referenced both inline and via the attach button appears only once.
+ */
+export function dedupeChatContextRefs(
+  refs: readonly ChatContextReferenceRecord[],
+): ChatContextReferenceRecord[] {
+  const seen = new Set<string>()
+  return refs.filter((ref) => {
+    const key = chatContextRefKey(ref)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+/**
+ * Resolve attachment references to backend `ReferenceDoc` DTOs: file, file-group
+ * and research-report sources (chat rules reach the model via the rule snippet,
+ * not as a reference doc, so they are excluded). A file group expands to one
+ * document per member; a research report contributes its markdown. Used by the
+ * editor to send attached documents to `/v1/editor/*`.
+ */
+export function referenceDocsFromRefs(
+  state: ProjectState,
+  refs: readonly ChatContextReferenceRecord[],
+): ReferenceDoc[] {
+  return chatAttachmentsFromRefs(state, refs)
+    .filter((
+      attachment,
+    ): attachment is Extract<ChatMessageAttachmentRecord, { kind: 'file-asset' | 'file-group' | 'research-report' }> =>
+      attachment.kind !== 'chat-rule')
+    .map((attachment) => ({
+      content: attachment.contentMarkdown,
+      label: attachment.label ?? attachment.title,
+      pageCount: 'pageCount' in attachment ? attachment.pageCount : null,
+      sizeBytes: 'sizeBytes' in attachment ? attachment.sizeBytes : undefined,
+    }))
+}
+
+export type ChatAttachmentChipModel = {
+  fileCount: number | null
+  kind: ChatContextReferenceRecord['kind']
+  label: string
+  ref: ChatContextReferenceRecord
+  title: string
+}
+
+/**
+ * Build one chip descriptor per draft reference. Unlike `chatAttachmentsFromRefs`
+ * (which expands a group into one attachment per member for sending), this keeps
+ * a file group as a single chip and is index-aligned with the ref array so chip
+ * reordering maps straight onto `pendingChatAttachmentRefs`.
+ */
+export function chatAttachmentChipsFromRefs(
+  state: ProjectState,
+  refs: readonly ChatContextReferenceRecord[],
+): ChatAttachmentChipModel[] {
+  const reports = completedReportOptions(state)
+  const rules = chatRuleOptions(state)
+  const seen = new Set<string>()
+
+  return refs.flatMap<ChatAttachmentChipModel>((ref) => {
+    const key = chatContextRefKey(ref)
+    if (seen.has(key)) return []
+    seen.add(key)
+
+    switch (ref.kind) {
+      case 'research-report': {
+        const report = reports.find((option) => option.runId === ref.runId)
+        if (!report) return []
+        return [{ fileCount: null, kind: ref.kind, label: `@research:${report.label}`, ref, title: report.title }]
+      }
+      case 'chat-rule': {
+        const rule = rules.find((option) => option.ruleId === ref.ruleId)
+        if (!rule) return []
+        return [{ fileCount: null, kind: ref.kind, label: `@rules:${rule.label}`, ref, title: rule.title }]
+      }
+      case 'file-asset': {
+        const asset = state.fileAssets[ref.fileId]
+        if (!asset) return []
+        return [{ fileCount: null, kind: ref.kind, label: `@files:${asset.label}`, ref, title: asset.title }]
+      }
+      case 'file-group': {
+        const group = state.fileGroups[ref.groupId]
+        if (!group) return []
+        return [{
+          fileCount: fileAssetsForGroup(state, ref.groupId).length,
+          kind: ref.kind,
+          label: `@filegroups:${slugLabel(group.title, group.id, 'group')}`,
+          ref,
+          title: group.title,
+        }]
+      }
+    }
+  })
+}
+
+/**
+ * Collapse resolved message attachments back into one chip per logical unit.
+ * Group members (stored as N `file-group` records) fold into a single chip with
+ * the member count.
+ */
+export function chatAttachmentChipsFromAttachments(
+  attachments: readonly ChatMessageAttachmentRecord[],
+): ChatAttachmentChipModel[] {
+  const groupCounts = new Map<string, number>()
+  for (const attachment of attachments) {
+    if (attachment.kind === 'file-group') {
+      groupCounts.set(attachment.groupId, (groupCounts.get(attachment.groupId) ?? 0) + 1)
+    }
+  }
+  const seen = new Set<string>()
+
+  return attachments.flatMap<ChatAttachmentChipModel>((attachment) => {
+    const ref = attachmentToRef(attachment)
+    const key = chatContextRefKey(ref)
+    if (seen.has(key)) return []
+    seen.add(key)
+
+    switch (attachment.kind) {
+      case 'research-report':
+        return [{ fileCount: null, kind: attachment.kind, label: `@research:${attachment.label ?? attachment.title}`, ref, title: attachment.title }]
+      case 'chat-rule':
+        return [{ fileCount: null, kind: attachment.kind, label: `@rules:${attachment.label}`, ref, title: attachment.title }]
+      case 'file-asset':
+        return [{ fileCount: null, kind: attachment.kind, label: `@files:${attachment.label}`, ref, title: attachment.title }]
+      case 'file-group':
+        return [{ fileCount: groupCounts.get(attachment.groupId) ?? 1, kind: attachment.kind, label: `@filegroups:${attachment.groupLabel}`, ref, title: attachment.groupLabel }]
+    }
+  })
+}
+
+export function researchRunToJob(run: ResearchRunRecord): ResearchJob {
+  return {
+    activePhase: run.phaseState.activePhase,
+    cancelRequested: run.events.some((event) => event.title === 'Cancellation requested'),
+    confidence: run.snapshot?.confidence ? `${run.snapshot.confidence} / 10` : undefined,
+    completedPhases: run.phaseState.completedPhases,
+    duration: run.durationSeconds === undefined ? undefined : formatDuration(run.durationSeconds),
+    error: run.error,
+    events: run.events
+      .filter(isDisplayableResearchEvent)
+      .map((event) => ({
+        active: event.active,
+        kind: event.kind ?? 'progress',
+        phase: event.phase,
+        severity: event.severity ?? 'info',
+        time: formatTime(event.createdAt),
+        title: text(event.title),
+      })),
+    id: run.runId,
+    metrics: run.metrics,
+    phaseVisitCounts: phaseVisitCountsFromEvents(run),
+    queueNote: run.summary.queueNote ? text(run.summary.queueNote) : undefined,
+    score: run.summary.score,
+    startedAt: run.startedAt ? formatTime(run.startedAt) : undefined,
+    startedAtIso: run.startedAt,
+    status: run.status,
+    submittedAt: formatTime(run.submittedAt),
+    title: text(run.summary.title),
+  }
+}
+
+export function displayDateTime(iso: string, locale: Locale) {
+  return new Intl.DateTimeFormat(locale === 'de' ? 'de-DE' : 'en-US', {
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    month: '2-digit',
+  }).format(new Date(iso))
+}
+
+export function displayRelativeDate(iso: string, locale: Locale) {
+  const now = new Date()
+  const value = new Date(iso)
+  if (Number.isNaN(value.getTime())) return ''
+
+  const diffMs = now.getTime() - value.getTime()
+  const oneDay = 24 * 60 * 60 * 1000
+
+  if (isSameCalendarDay(value, now)) {
+    if (diffMs >= 0 && diffMs < 60 * 1000) return locale === 'de' ? 'Gerade eben' : 'Just now'
+    return displayTime(value, locale)
+  }
+
+  const yesterday = new Date(now)
+  yesterday.setDate(now.getDate() - 1)
+  if (isSameCalendarDay(value, yesterday)) {
+    const label = locale === 'de' ? 'Gestern' : 'Yesterday'
+    return `${label}, ${displayTime(value, locale)}`
+  }
+
+  if (diffMs >= 0 && diffMs < oneDay * 2) return locale === 'de' ? 'Gestern' : 'Yesterday'
+  return displayDateTime(iso, locale)
+}
+
+function displayTime(value: Date, locale: Locale) {
+  return new Intl.DateTimeFormat(locale === 'de' ? 'de-DE' : 'en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(value)
+}
+
+function isSameCalendarDay(left: Date, right: Date) {
+  return (
+    left.getFullYear() === right.getFullYear()
+    && left.getMonth() === right.getMonth()
+    && left.getDate() === right.getDate()
+  )
+}
+
+function text(value: string): LocalizedText {
+  return { de: value, en: value }
+}
+
+function withUniqueLabels<T extends { label: string }>(items: readonly T[]): T[] {
+  const counts = new Map<string, number>()
+  return items.map((item) => {
+    const seenCount = counts.get(item.label) ?? 0
+    counts.set(item.label, seenCount + 1)
+    return seenCount === 0 ? item : { ...item, label: `${item.label}-${seenCount + 1}` }
+  })
+}
+
+function slugLabel(value: string, fallbackId: string, fallbackWord = 'item') {
+  const normalized = value
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+  if (normalized) return normalized
+  return fallbackId.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 48) || fallbackWord
+}
+
+function isDisplayableResearchEvent(event: ResearchRunRecord['events'][number]) {
+  const title = event.title.trim()
+  return !(
+    /^run snapshot$/i.test(title)
+    || /^queued$/i.test(title)
+    || /^run started$/i.test(title)
+    || /^started\s+\w+/i.test(title)
+    || /^finished\s+\w+/i.test(title)
+  )
+}
+
+function phaseVisitCountsFromEvents(run: ResearchRunRecord): Record<JobPhase, number> {
+  const counts = emptyPhaseVisitCounts()
+  let previousPhase: JobPhase | null = null
+
+  for (const event of run.events.filter(isDisplayableResearchEvent)) {
+    const phase = event.phase ?? phaseFromEventTitle(event.title)
+    if (!phase || phase === previousPhase) continue
+
+    counts[phase] += 1
+    previousPhase = phase
+  }
+
+  if (run.status === 'running' && counts[run.phaseState.activePhase] === 0) {
+    counts[run.phaseState.activePhase] = 1
+  }
+
+  return counts
+}
+
+function emptyPhaseVisitCounts(): Record<JobPhase, number> {
+  return {
+    analysis: 0,
+    answer: 0,
+    evaluation: 0,
+    planning: 0,
+    search: 0,
+  }
+}
+
+function phaseFromEventTitle(title: string): JobPhase | undefined {
+  const normalized = title.trim()
+  if (!normalized) return undefined
+
+  if (/\b(analysiere|analyzing|analyseziele|analysis goals|analysis targets|websuche erforderlich|web search required|detected analysis)\b/i.test(normalized)) {
+    return 'analysis'
+  }
+  if (/\b(plane suchanfragen|planning search queries|neue suchanfragen|suchanfragen generiert|generated \d+ new search queries|generated .* search queries)\b/i.test(normalized)) {
+    return 'planning'
+  }
+  if (/\b(durchsuche|searching \d+|suchantworten verarbeitet|processed \d+ search responses|referenzen gesammelt|references|evidence units|evidence records|evidence-records|evidenz|claims-lage|claim status|report evidence|source mix|quellenmix|related questions|verwandte fragen|semantically grouping)\b/i.test(normalized)) {
+    return 'search'
+  }
+  if (/\b(formuliere|formulating answer|writing report|preparing final report|schreibe bericht|run completed|bericht wird|answer)\b/i.test(normalized)) {
+    return 'answer'
+  }
+  if (/\b(bewerte|evaluating|confidence|vertrauen|weitere recherche|more research|research completed|recherche abgeschlossen|contradiction|contradictions|widerspruch|moegliche erklaerungen|mögliche erklärungen|quality)\b/i.test(normalized)) {
+    return 'evaluation'
+  }
+
+  return undefined
+}
+
+function formatTime(iso: string) {
+  return new Intl.DateTimeFormat('de-DE', {
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(iso))
+}
+
+function formatDuration(seconds: number) {
+  const wholeSeconds = Math.max(0, Math.round(seconds))
+  const hours = Math.floor(wholeSeconds / 3600)
+  const minutes = Math.floor((wholeSeconds % 3600) / 60)
+  const remainingSeconds = wholeSeconds % 60
+
+  return [hours, minutes, remainingSeconds]
+    .map((part) => part.toString().padStart(2, '0'))
+    .join(':')
+}

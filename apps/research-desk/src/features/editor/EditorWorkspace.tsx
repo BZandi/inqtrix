@@ -1287,9 +1287,16 @@ function EditorTopBar({
             )}
             {isDirty ? <span className="size-1.5 shrink-0 rounded-full bg-brand" aria-label="Unsaved changes" /> : null}
           </div>
-          <p className="truncate text-[11px] leading-4 text-muted-foreground">
+          <p
+            className="truncate text-[11px] leading-4 text-muted-foreground"
+            title={
+              document.source === 'imported-research-report' && document.sourceRunId
+                ? `${copy.importedFrom} ${document.sourceRunId} · ${copy.updated} ${formatEditorTime(document.updatedAt)}`
+                : undefined
+            }
+          >
             {document.source === 'imported-research-report' && document.sourceRunId
-              ? `${copy.importedFrom} ${document.sourceRunId} · `
+              ? `${copy.importedFrom} ${shortenRunId(document.sourceRunId)} · `
               : ''}
             {copy.updated} {formatEditorTime(document.updatedAt)}
           </p>
@@ -2866,6 +2873,10 @@ function compactCommentQuote(value: string, maxLength: number): string {
   const text = value.replace(/\s+/g, ' ').trim()
   if (text.length <= maxLength) return text
   return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`
+}
+
+function shortenRunId(runId: string): string {
+  return runId.length > 12 ? `${runId.slice(0, 12)}…` : runId
 }
 
 function activeSuggestionFor(

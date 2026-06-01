@@ -1,6 +1,6 @@
 import { useEffect, useState, type MouseEvent, type ReactNode } from 'react'
 import { Check, LoaderCircle, MessageSquareText, PencilLine, SendHorizontal, X } from '@/components/icons'
-import { MarkdownHooks, type Components } from 'react-markdown'
+import Markdown, { type Components } from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -252,14 +252,14 @@ export function EditorSuggestionBlockCard({
 function SuggestionMarkdownPreview({ markdown }: { markdown: string }) {
   return (
     <div className="suggestion-block-proposed suggestion-markdown" data-suggestion-markdown-root="true">
-      <MarkdownHooks
+      <Markdown
         components={SUGGESTION_MARKDOWN_COMPONENTS}
         rehypePlugins={[rehypeKatex]}
         remarkPlugins={[remarkGfm, remarkMath]}
         skipHtml
       >
         {normalizeSuggestionMarkdown(markdown)}
-      </MarkdownHooks>
+      </Markdown>
     </div>
   )
 }

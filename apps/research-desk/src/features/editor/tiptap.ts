@@ -1,4 +1,4 @@
-import { Extension, type Extensions } from '@tiptap/core'
+import { Extension, type Editor, type Extensions } from '@tiptap/core'
 import Highlight from '@tiptap/extension-highlight'
 import Link from '@tiptap/extension-link'
 import { BlockMath, InlineMath } from '@tiptap/extension-mathematics'
@@ -11,9 +11,8 @@ import StarterKit from '@tiptap/starter-kit'
 import { type Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
-import { createElement } from 'react'
-import { createRoot, type Root } from 'react-dom/client'
-import { EditorSuggestionBlockCard } from './EditorSuggestionBlockCard'
+import { ReactRenderer } from '@tiptap/react'
+import { EditorSuggestionBlockCard, type EditorSuggestionBlockCardProps } from './EditorSuggestionBlockCard'
 
 type CommentDecorationOptions = {
   onClick?: (commentId: string) => void
@@ -158,8 +157,8 @@ type SuggestionDecorationCallbacks = {
   onSelect?: (suggestionId: string) => void
 }
 
-type SuggestionMarkdownElement = HTMLElement & {
-  __inqtrixMarkdownRoot?: Root
+type SuggestionWidgetElement = HTMLElement & {
+  __inqtrixSuggestionRenderer?: ReactRenderer
 }
 
 function buildInsertWidget(text: string): HTMLElement {
@@ -171,15 +170,11 @@ function buildInsertWidget(text: string): HTMLElement {
 }
 
 function buildBlockSuggestionWidget(
+  editor: Editor,
   item: SuggestionDecorationItem,
   callbacks: SuggestionDecorationCallbacks,
 ): HTMLElement {
-  const wrapper = document.createElement('div') as SuggestionMarkdownElement
-  wrapper.className = 'suggestion-block-widget'
-  wrapper.setAttribute('data-suggestion-block-card', item.id)
-  const root = createRoot(wrapper)
-  wrapper.__inqtrixMarkdownRoot = root
-  root.render(createElement(EditorSuggestionBlockCard, {
+  const props: EditorSuggestionBlockCardProps = {
     active: item.active,
     labels: {
       accept: item.acceptLabel,
@@ -207,22 +202,32 @@ function buildBlockSuggestionWidget(
     proposedText: item.proposedText,
     reviewSurface: item.reviewSurface,
     revision: item.revision,
-  }))
-  return wrapper
+  }
+  const renderer = new ReactRenderer(EditorSuggestionBlockCard, {
+    editor,
+    as: 'div',
+    className: 'suggestion-block-widget',
+    props,
+  })
+  const element = renderer.element as SuggestionWidgetElement
+  element.setAttribute('data-suggestion-block-card', item.id)
+  element.__inqtrixSuggestionRenderer = renderer
+  return element
 }
 
-function destroySuggestionMarkdownWidget(node: Node) {
-  const element = node instanceof HTMLElement ? node as SuggestionMarkdownElement : null
-  const root = element?.__inqtrixMarkdownRoot
-  if (!root) return
-  element.__inqtrixMarkdownRoot = undefined
-  queueMicrotask(() => root.unmount())
+function destroySuggestionWidget(node: Node) {
+  const element = node instanceof HTMLElement ? (node as SuggestionWidgetElement) : null
+  const renderer = element?.__inqtrixSuggestionRenderer
+  if (!renderer) return
+  element.__inqtrixSuggestionRenderer = undefined
+  renderer.destroy()
 }
 
 function buildSuggestionDecorations(
   doc: ProseMirrorNode,
   items: SuggestionDecorationItem[],
   callbacks: SuggestionDecorationCallbacks,
+  editor: Editor,
 ): DecorationSet {
   const maxPos = doc.content.size
   const decorations: Decoration[] = []
@@ -236,8 +241,8 @@ function buildSuggestionDecorations(
           'data-suggestion-id': item.id,
         }))
       }
-      decorations.push(Decoration.widget(item.widgetAt ?? to, () => buildBlockSuggestionWidget(item, callbacks), {
-        destroy: destroySuggestionMarkdownWidget,
+      decorations.push(Decoration.widget(item.widgetAt ?? to, () => buildBlockSuggestionWidget(editor, item, callbacks), {
+        destroy: destroySuggestionWidget,
         key: `suggestion-block-${item.id}-${item.revision}-${item.proposedText.length}-${item.isRunning ? 'running' : 'idle'}-${item.error ?? ''}`,
         side: 1,
         stopEvent: (event) => event.type !== 'click',
@@ -292,6 +297,7 @@ export const SuggestionDecorationExtension = Extension.create<CommentDecorationO
       onReject: this.options.onSuggestionReject,
       onSelect: this.options.onSuggestionSelect,
     }
+    const editor = this.editor
     return [
       new Plugin<SuggestionDecorationState>({
         key: suggestionDecorationPluginKey,
@@ -300,7 +306,7 @@ export const SuggestionDecorationExtension = Extension.create<CommentDecorationO
           apply(tr, value) {
             const meta = tr.getMeta(suggestionDecorationPluginKey) as { items: SuggestionDecorationItem[] } | undefined
             if (meta) {
-              return { decorations: buildSuggestionDecorations(tr.doc, meta.items, callbacks) }
+              return { decorations: buildSuggestionDecorations(tr.doc, meta.items, callbacks, editor) }
             }
             if (tr.docChanged) {
               return { decorations: value.decorations.map(tr.mapping, tr.doc) }

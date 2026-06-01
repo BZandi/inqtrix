@@ -42,7 +42,11 @@ research reports, and a persistent assistant composer under the document.
 The document tree mirrors the chat history ergonomics: folders and documents can
 be reordered via drag handles, documents can be moved into and out of folders,
 and folder/document titles can be renamed inline. Document titles are also
-editable from the compact editor toolbar via double-click.
+editable from the compact editor toolbar via double-click. The toolbar also offers a
+one-click **Export to Word** action that converts the document Markdown to a styled
+`.docx` in a LaTeX-report look (serif justified body, numbered headings, title block,
+page numbers) entirely client-side via the `docx` library plus the unified/remark parser
+-- no server round-trip; math degrades to its LaTeX source text and raw HTML is skipped.
 The editor assistant composer and inline comment composer auto-grow up to six
 visible rows before scrolling, matching the chat workspace composer behaviour.
 

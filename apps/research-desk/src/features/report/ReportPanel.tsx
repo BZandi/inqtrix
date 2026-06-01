@@ -341,7 +341,7 @@ function ReportPreview({
 }) {
   const { t } = useLocale()
   const [copyFeedback, setCopyFeedback] = useState<'copied' | 'idle'>('idle')
-  const copyResetRef = useRef<ReturnType<typeof window.setTimeout> | null>(null)
+  const copyResetRef = useRef<number | null>(null)
 
   useEffect(() => {
     return () => {

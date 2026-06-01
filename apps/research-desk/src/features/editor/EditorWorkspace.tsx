@@ -23,6 +23,7 @@ import {
   ChevronDown,
   ChevronRight,
   Code2,
+  Download,
   Eye,
   FileText,
   Folder,
@@ -161,6 +162,8 @@ type EditorCopy = { [Key in keyof typeof editorCopy.de]: string }
 
 const editorCopy = {
   de: {
+    exportWord: 'Als Word exportieren',
+    exportWordFailed: 'Word-Export fehlgeschlagen',
     assistant: 'Editor-Assistent',
     assistantPlaceholder: 'Beschreiben Sie, was am Dokument geändert werden soll...',
     attachComments: 'Kommentare anhängen',
@@ -251,6 +254,8 @@ const editorCopy = {
     updated: 'zuletzt bearbeitet',
   },
   en: {
+    exportWord: 'Export to Word',
+    exportWordFailed: 'Word export failed',
     assistant: 'Editor assistant',
     assistantPlaceholder: 'Describe what should change in this document...',
     attachComments: 'Attach comments',
@@ -1205,6 +1210,8 @@ function EditorTopBar({
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const [titleDraft, setTitleDraft] = useState(document.title)
   const titleInputRef = useRef<HTMLInputElement | null>(null)
+  const [isExporting, setIsExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
 
   useLayoutEffect(() => {
     if (!isEditingTitle) return
@@ -1225,6 +1232,21 @@ function EditorTopBar({
       setTitleDraft(document.title)
     }
     setIsEditingTitle(false)
+  }
+
+  async function handleExportWord() {
+    if (isExporting) return
+    setExportError(null)
+    setIsExporting(true)
+    try {
+      const { exportMarkdownToDocx } = await import('./export/docxExport')
+      await exportMarkdownToDocx(document.contentMarkdown, document.title)
+    } catch (error) {
+      setExportError(copy.exportWordFailed)
+      console.error('Inqtrix Word export failed.', error)
+    } finally {
+      setIsExporting(false)
+    }
   }
 
   return (
@@ -1265,9 +1287,16 @@ function EditorTopBar({
             )}
             {isDirty ? <span className="size-1.5 shrink-0 rounded-full bg-brand" aria-label="Unsaved changes" /> : null}
           </div>
-          <p className="truncate text-[11px] leading-4 text-muted-foreground">
+          <p
+            className="truncate text-[11px] leading-4 text-muted-foreground"
+            title={
+              document.source === 'imported-research-report' && document.sourceRunId
+                ? `${copy.importedFrom} ${document.sourceRunId} · ${copy.updated} ${formatEditorTime(document.updatedAt)}`
+                : undefined
+            }
+          >
             {document.source === 'imported-research-report' && document.sourceRunId
-              ? `${copy.importedFrom} ${document.sourceRunId} · `
+              ? `${copy.importedFrom} ${shortenRunId(document.sourceRunId)} · `
               : ''}
             {copy.updated} {formatEditorTime(document.updatedAt)}
           </p>
@@ -1278,6 +1307,13 @@ function EditorTopBar({
         <Badge className="h-5 rounded-full px-1.5 text-[10px]" variant="outline">{commentCount}</Badge>
         <Badge className="h-5 rounded-full px-1.5 text-[10px]" variant="outline">R{document.revision}</Badge>
         <Separator className="mx-0.5 h-5" orientation="vertical" />
+        <TooltipButton
+          disabled={isExporting}
+          label={exportError ?? copy.exportWord}
+          onClick={() => { void handleExportWord() }}
+        >
+          {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
+        </TooltipButton>
         <TooltipButton
           label={viewMode === 'source' ? copy.live : copy.source}
           onClick={() => dispatch({ mode: viewMode === 'source' ? 'live' : 'source', type: 'setEditorViewMode' })}
@@ -2839,6 +2875,10 @@ function compactCommentQuote(value: string, maxLength: number): string {
   return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`
 }
 
+function shortenRunId(runId: string): string {
+  return runId.length > 12 ? `${runId.slice(0, 12)}…` : runId
+}
+
 function activeSuggestionFor(
   suggestions: EditorSuggestionRecord[],
   commentId: string,
@@ -3094,11 +3134,13 @@ function ToolbarButton({
 function TooltipButton({
   children,
   className,
+  disabled = false,
   label,
   onClick,
 }: {
   children: ReactNode
   className?: string
+  disabled?: boolean
   label: string
   onClick: () => void
 }) {
@@ -3108,6 +3150,7 @@ function TooltipButton({
         <Button
           aria-label={label}
           className={cn('size-7 rounded-md', className)}
+          disabled={disabled}
           onClick={onClick}
           size="icon"
           type="button"

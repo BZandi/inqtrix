@@ -570,7 +570,10 @@ export default function ChatWorkspace({
                     </Badge>
                   )}
                 </div>
-                <p className="max-w-full truncate text-xs text-muted-foreground">
+                <p
+                  className="max-w-md truncate text-xs text-muted-foreground"
+                  title={selectedThread ? selectedThread.preview : undefined}
+                >
                   {selectedThread ? selectedThread.preview : t.chat.empty}
                 </p>
               </div>

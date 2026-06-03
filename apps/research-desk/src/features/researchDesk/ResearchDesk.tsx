@@ -60,7 +60,10 @@ import SettingsWorkspace from '@/features/settings/SettingsWorkspace'
 import { FileLibraryWorkspace } from '@/features/fileLibrary/FileLibraryWorkspace'
 import { ingestFiles } from '@/features/files/ingest'
 import { FILE_SECTION_TEMP_ID } from '@/features/files/sections'
-import { evaluateBudget } from '@/features/files/budget'
+import {
+  evaluateBudget,
+  shouldShowAttachmentBudgetNotice,
+} from '@/features/files/budget'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { useTheme } from '@/theme/ThemeProvider'
 import { contentWithAttachmentContext } from './attachmentContext'
@@ -202,13 +205,9 @@ export function ResearchDesk() {
       content: attachment.contentMarkdown,
       label: attachment.label ?? attachment.title,
     })),
-    { limitTokens: 128_000 },
   )
-  const attachmentBudgetNotice = pendingAttachmentBudget.estTokens > pendingAttachmentBudget.limitTokens * 0.5
-    ? t.chat.attachmentBudgetWarning.replace(
-      '{pct}',
-      String(Math.round((pendingAttachmentBudget.estTokens / pendingAttachmentBudget.limitTokens) * 100)),
-    )
+  const attachmentBudgetNotice = shouldShowAttachmentBudgetNotice(pendingAttachmentBudget)
+    ? t.chat.attachmentBudgetWarning
     : null
   const displayedChatThread = isIncognitoChat
     ? incognitoThread

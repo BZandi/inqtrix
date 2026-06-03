@@ -59,3 +59,8 @@ export function evaluateBudget(
     withinBudget: estTokens <= limitTokens,
   }
 }
+
+/** Show only a soft warning once attachments exceed the shared request budget. */
+export function shouldShowAttachmentBudgetNotice(evaluation: BudgetEvaluation): boolean {
+  return !evaluation.withinBudget
+}

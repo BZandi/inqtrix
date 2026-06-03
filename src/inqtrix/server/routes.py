@@ -531,6 +531,38 @@ def register_routes(
             mode=mode,
         )
 
+    def _chat_settings_for_question(
+        agent_settings: AgentSettings,
+        question: str,
+    ) -> AgentSettings:
+        """Return request-local settings for direct chat with large attachments.
+
+        ``max_question_length`` is a character guard for research questions.
+        Direct chat already passed the route-level aggregate token cap, and the
+        chat composer may inline attached documents into the final user
+        message. In that mode, raise only the local character guard so the
+        central graph check does not reject otherwise accepted payloads.
+
+        Args:
+            agent_settings: Resolved settings for this request after stack,
+                override, and mode handling.
+            question: The normalized current user message that will be passed
+                to the agent entry point.
+
+        Returns:
+            The original settings for normal research or already-short direct
+            chat requests; otherwise a request-local copy with
+            ``max_question_length`` raised to the current message length.
+        """
+        if (
+            not agent_settings.skip_search
+            or len(question) <= agent_settings.max_question_length
+        ):
+            return agent_settings
+        return agent_settings.model_copy(
+            update={"max_question_length": len(question)}
+        )
+
     @_router.get("/health")
     def health():
         llm_label = _provider_label(providers.llm)
@@ -1298,7 +1330,10 @@ def register_routes(
                 content["error"]["available_stacks"] = exc.available
             return JSONResponse(status_code=400, content=content)
 
-        if len(question) > resolved.agent_settings.max_question_length:
+        if (
+            not resolved.agent_settings.skip_search
+            and len(question) > resolved.agent_settings.max_question_length
+        ):
             return JSONResponse(
                 status_code=400,
                 content={"error": {
@@ -1309,6 +1344,10 @@ def register_routes(
                     "type": "invalid_request_error",
                 }},
             )
+        chat_agent_settings = _chat_settings_for_question(
+            resolved.agent_settings,
+            question,
+        )
 
         history = _format_history(
             messages, max_messages=settings.server.max_messages_history
@@ -1342,7 +1381,7 @@ def register_routes(
                     sem,
                     providers=resolved.providers,
                     strategies=resolved.strategies,
-                    settings=resolved.agent_settings,
+                    settings=chat_agent_settings,
                     messages=messages,
                     include_progress=include_progress,
                     request=req,
@@ -1371,10 +1410,10 @@ def register_routes(
                             history=history,
                             providers=resolved.providers,
                             strategies=resolved.strategies,
-                            settings=resolved.agent_settings,
+                            settings=chat_agent_settings,
                         ),
                     ),
-                    timeout=_request_timeout_seconds(resolved.agent_settings),
+                    timeout=_request_timeout_seconds(chat_agent_settings),
                 )
             except asyncio.TimeoutError:
                 return JSONResponse(

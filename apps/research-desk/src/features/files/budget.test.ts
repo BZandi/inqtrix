@@ -4,6 +4,7 @@ import {
   estimateTokens,
   evaluateBudget,
   MAX_DOC_CHARS_SOFT,
+  shouldShowAttachmentBudgetNotice,
 } from './budget'
 
 describe('estimateTokens', () => {
@@ -35,5 +36,19 @@ describe('evaluateBudget', () => {
     )
     expect(result.withinBudget).toBe(false)
     expect(result.overBy).toBe(estimateTokens(4000) - 500)
+  })
+
+  it('shows the attachment notice only after the fixed request budget is exceeded', () => {
+    const halfBudget = evaluateBudget([{
+      content: 'x'.repeat((DEFAULT_ATTACHMENT_BUDGET_TOKENS / 2) * 4 + 4),
+      label: 'half',
+    }])
+    const overBudget = evaluateBudget([{
+      content: 'x'.repeat((DEFAULT_ATTACHMENT_BUDGET_TOKENS + 1) * 4),
+      label: 'over',
+    }])
+
+    expect(shouldShowAttachmentBudgetNotice(halfBudget)).toBe(false)
+    expect(shouldShowAttachmentBudgetNotice(overBudget)).toBe(true)
   })
 })

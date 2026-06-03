@@ -45,6 +45,7 @@ class _DummySearch:
 
 def _make_app(
     *,
+    agent_settings: AgentSettings | None = None,
     llm_available: bool = True,
     search_available: bool = True,
     agent_max_total_seconds: int = 300,
@@ -55,7 +56,7 @@ def _make_app(
 
     settings = Settings(
         models=ModelSettings(),
-        agent=AgentSettings(),
+        agent=agent_settings or AgentSettings(),
         server=server_settings or ServerSettings(),
     )
     settings.agent.max_total_seconds = agent_max_total_seconds
@@ -645,7 +646,7 @@ def test_chat_completions_rejects_too_many_messages():
 
 
 def test_chat_completions_rejects_oversized_total_tokens():
-    """``max_total_input_tokens`` rejects oversized bodies with HTTP 413."""
+    """``max_total_input_tokens`` rejects oversized direct-chat bodies."""
     # 10_000 token cap = 40_000 chars at 4 chars per token.
     server = ServerSettings(INQTRIX_MAX_TOTAL_INPUT_TOKENS=10_000)
     client = _make_app(server_settings=server)
@@ -655,6 +656,7 @@ def test_chat_completions_rejects_oversized_total_tokens():
         "/v1/chat/completions",
         json={
             "messages": [{"role": "user", "content": huge_content}],
+            "mode": "direct_llm",
             "stream": False,
         },
     )
@@ -663,6 +665,124 @@ def test_chat_completions_rejects_oversized_total_tokens():
     payload = response.json()
     assert payload["error"]["type"] == "payload_too_large"
     assert "tokens" in payload["error"]["message"].lower()
+
+
+def test_chat_completions_direct_llm_allows_large_embedded_context(monkeypatch):
+    """Direct chat uses the route token cap, not the research question cap."""
+    captured: dict[str, int | bool] = {}
+
+    def fake_run(question, *, history, providers, strategies, settings):
+        captured["question_len"] = len(question)
+        captured["max_question_length"] = settings.max_question_length
+        captured["skip_search"] = settings.skip_search
+        return {
+            "answer": "ok",
+            "result_state": {},
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+        }
+
+    monkeypatch.setattr(routes_module, "agent_run", fake_run)
+
+    client = _make_app(agent_settings=AgentSettings(max_question_length=1_000))
+    large_chat_context = "x" * 5_000
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": large_chat_context}],
+            "mode": "direct_llm",
+            "stream": False,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "question_len": len(large_chat_context),
+        "max_question_length": len(large_chat_context),
+        "skip_search": True,
+    }
+
+
+def test_chat_completions_research_mode_keeps_question_length_limit(monkeypatch):
+    """Research-mode chat still rejects questions above ``max_question_length``."""
+    def fail_run(*args, **kwargs):
+        raise AssertionError("agent_run must not be called")
+
+    monkeypatch.setattr(
+        routes_module,
+        "agent_run",
+        fail_run,
+    )
+
+    client = _make_app(agent_settings=AgentSettings(max_question_length=1_000))
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "x" * 5_000}],
+            "mode": "research",
+            "stream": False,
+        },
+    )
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["error"]["type"] == "invalid_request_error"
+    assert "Frage zu lang" in payload["error"]["message"]
+
+
+def test_native_runs_keep_question_length_limit():
+    """Native research runs keep the character guard even with direct mode."""
+    client = _make_app(agent_settings=AgentSettings(max_question_length=1_000))
+
+    response = client.post(
+        "/v1/runs",
+        json={
+            "question": "x" * 5_000,
+            "mode": "direct_llm",
+        },
+    )
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["error"]["type"] == "invalid_request_error"
+    assert "Frage zu lang" in payload["error"]["message"]
+
+
+def test_chat_completions_streaming_direct_llm_uses_expanded_limit(monkeypatch):
+    """Streaming direct chat receives the same request-local settings copy."""
+    captured: dict[str, int | bool] = {}
+
+    async def fake_guarded_stream(question, history, sem, **kwargs):
+        settings = kwargs["settings"]
+        captured["question_len"] = len(question)
+        captured["max_question_length"] = settings.max_question_length
+        captured["skip_search"] = settings.skip_search
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(routes_module, "guarded_stream", fake_guarded_stream)
+
+    client = _make_app(agent_settings=AgentSettings(max_question_length=1_000))
+    large_chat_context = "x" * 5_000
+
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": large_chat_context}],
+            "mode": "direct_llm",
+            "stream": True,
+        },
+    ) as response:
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert "data: [DONE]" in body
+    assert captured == {
+        "question_len": len(large_chat_context),
+        "max_question_length": len(large_chat_context),
+        "skip_search": True,
+    }
 
 
 def test_chat_completions_accepts_typical_payload(monkeypatch):

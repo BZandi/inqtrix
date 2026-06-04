@@ -16,7 +16,8 @@
     "ui:build": "node scripts/run_research_desk_ui.mjs build",
     "ui:lint": "node scripts/run_research_desk_ui.mjs lint",
     "ui:typecheck": "node scripts/run_research_desk_ui.mjs typecheck",
-    "ui:preview": "node scripts/run_research_desk_ui.mjs preview"
+    "ui:preview": "node scripts/run_research_desk_ui.mjs preview",
+    "ui:prod": "node scripts/run_research_desk_ui.mjs build && node scripts/run_research_desk_ui.mjs preview"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

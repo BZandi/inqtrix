@@ -145,8 +145,9 @@ run resources, live event snapshots update the cards and agent protocol, and
 completed runs fetch `/v1/runs/{run_id}/result` for the Markdown report,
 sources, claims, metrics, and usage data. Install with
 `corepack pnpm install --frozen-lockfile` or `npm ci`, run locally with
-`pnpm run ui:dev` or `npm run ui:dev`, and build with `pnpm run ui:build` or
-`npm run ui:build`; the generated `apps/research-desk/dist/` directory is
+`pnpm run ui:dev` or `npm run ui:dev`, build with `pnpm run ui:build` or
+`npm run ui:build`, and preview that production build locally with
+`pnpm run ui:prod`; the generated `apps/research-desk/dist/` directory is
 intentionally not committed. See [React UI](docs/deployment/react-ui.md) for
 setup, API-origin configuration, security, build, and deployment notes. The
 Streamlit UI remains available for local operation, demos, and integration

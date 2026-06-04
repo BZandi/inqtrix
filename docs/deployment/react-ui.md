@@ -228,6 +228,41 @@ git because it is a generated artifact. Deployment should build it in CI and
 publish the resulting static files, or copy them into a release artifact in a
 dedicated packaging step.
 
+## Local production preview
+
+The dev server (`ui:dev`) always runs the development React build, which wraps the
+app in `React.StrictMode`. StrictMode double-invokes effects, reducers, and render
+functions in development; the production build does not. Some defects are therefore
+invisible under `ui:dev` and surface only in the production bundle, so verify a
+change against the production build before shipping it.
+
+`ui:prod` builds the bundle and serves it through `vite preview` in one step:
+
+```bash
+pnpm run ui:prod
+# or:
+npm run ui:prod
+```
+
+`vite preview` listens on `127.0.0.1:4173`.
+
+| Command | Compiles | Hot reload | React mode | Proxies `/v1`, `/health` |
+|---|---|---|---|---|
+| `ui:dev` | on demand | yes (HMR) | development (StrictMode) | yes, to `localhost:5100` |
+| `ui:build` | once, to `dist/` | no | production | build only |
+| `ui:preview` | no (serves `dist/`) | no | production | no |
+| `ui:prod` | `ui:build` then `ui:preview` | no | production | no |
+
+Two caveats for the preview path:
+
+- `ui:preview` serves the static `dist/` directory only; it does not rebuild. Re-run
+  `ui:build` (or use `ui:prod`) after every source change. A stale `dist/` is the most
+  common reason a fix appears to have no effect in the preview.
+- `vite preview` does not proxy `/v1` or `/health` -- only the dev server does -- so
+  the preview is UI-only. To exercise the production bundle against a running backend
+  on one origin, use the Python launcher (Path B under *Same-origin serving without
+  Node*).
+
 ## Runtime API boundary
 
 The React app should use the native run API rather than treating research runs

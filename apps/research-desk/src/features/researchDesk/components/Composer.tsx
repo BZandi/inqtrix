@@ -143,14 +143,14 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={appMotion.composer}
-      className="sticky bottom-0 z-20 rounded-lg border border-border bg-card/98 p-3 shadow-[0_18px_50px_var(--shadow-soft)] backdrop-blur will-change-opacity"
+      className="shrink-0 border-t border-border bg-background px-4 py-3"
     >
-      <form onSubmit={submitResearch}>
-        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
+      <form className="mx-auto max-w-4xl" onSubmit={submitResearch}>
+        <div className="relative rounded-md border border-border bg-background px-3 py-2 shadow-sm">
           <Textarea
             aria-label={t.composer.placeholder}
             className={cn(
-              'min-h-24 resize-none border-0 py-2 pl-3 pr-2 text-base leading-6 focus-visible:ring-0',
+              'min-h-16 resize-none border-0 bg-transparent px-0 py-0 text-base leading-6 shadow-none focus-visible:ring-0 md:text-base',
               '[scrollbar-width:thin]',
               '[scrollbar-color:color-mix(in_oklch,var(--muted-foreground)_22%,transparent)_transparent]',
               '[&::-webkit-scrollbar]:w-1',
@@ -169,19 +169,8 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
             rows={1}
             value={form.question}
           />
-          <Button
-            aria-label={t.composer.send}
-            className="mb-2 h-8 w-8"
-            disabled={!canSubmit}
-            size="icon"
-            type="submit"
-            variant="ghost"
-          >
-            <SendHorizontal className="size-3.5" />
-          </Button>
-        </div>
-        <Separator className="my-1" />
-        <div className="flex flex-wrap items-center gap-1">
+          <div className="mt-1.5 flex items-center justify-between gap-2 border-t border-border/70 pt-1.5">
+            <div className="flex min-w-0 items-center gap-1 overflow-hidden">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -257,7 +246,8 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
             ]}
             value={String(form.maxRounds)}
           />
-          <div className="ml-auto flex items-center gap-1">
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
             <ComposerStatusMenu
               confidenceStop={form.confidenceStop}
               firstRoundQueries={form.firstRoundQueries}
@@ -314,6 +304,22 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
                 ))}
               </DropdownMenuContent>
             </DropdownMenu>
+              <Button
+                aria-label={t.composer.send}
+                className={cn(
+                  'size-7 shrink-0 rounded-md',
+                  canSubmit
+                    ? 'bg-brand text-white hover:bg-brand/90 hover:text-white'
+                    : 'text-muted-foreground/45',
+                )}
+                disabled={!canSubmit}
+                size="icon"
+                type="submit"
+                variant={canSubmit ? 'default' : 'ghost'}
+              >
+                <SendHorizontal className="size-4" />
+              </Button>
+            </div>
           </div>
         </div>
       </form>

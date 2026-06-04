@@ -2209,7 +2209,7 @@ function EditorAssistantComposer({
           <MentionComposer
             ariaLabel={copy.assistantPlaceholder}
             categoryLabels={mentionCategoryLabels}
-            contentClassName="min-h-14 pb-2 pr-9 text-sm leading-6"
+            contentClassName="min-h-16 pb-2 pr-9 text-base leading-6"
             enabledKinds={['research', 'rules', 'files', 'filegroups']}
             maxRows={6}
             mentionSources={mentionSources}

@@ -58,13 +58,13 @@ export function ResearchRunColumn({
   const [composerForm, setComposerForm] = useState(defaultComposerFormState)
 
   return (
-    <section className="relative flex min-h-[calc(100svh-var(--header-h))] min-w-0 flex-col overflow-hidden lg:h-full lg:min-h-0">
+    <section className="relative flex min-h-[calc(100svh-var(--header-h))] min-w-0 flex-col overflow-hidden bg-background lg:h-full lg:min-h-0">
       <JobFilterMenu
         activeFilter={activeFilter}
         jobs={allJobs}
         onActiveFilterChange={onActiveFilterChange}
       />
-      <div className="relative flex min-h-0 flex-1 flex-col gap-3 px-4 pb-3 pt-3">
+      <div className="relative flex min-h-0 flex-1 flex-col gap-3 px-4 pt-3">
       {allJobs.length === 0 ? (
         <>
           <ResearchEmptyState
@@ -105,6 +105,7 @@ export function ResearchRunColumn({
           </motion.div>
         </ScrollArea>
       )}
+      </div>
 
       <AnimatePresence initial={false} mode="sync">
         {isComposerVisible ? (
@@ -124,7 +125,7 @@ export function ResearchRunColumn({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={appMotion.composer}
-            className="sticky bottom-0 z-20 flex shrink-0 border-t border-border bg-background/95 px-1 pt-2 backdrop-blur"
+            className="shrink-0 border-t border-border bg-background px-4 py-2"
           >
             <Button
               aria-label={t.composer.show}
@@ -140,7 +141,6 @@ export function ResearchRunColumn({
           </motion.div>
         )}
       </AnimatePresence>
-      </div>
     </section>
   )
 }

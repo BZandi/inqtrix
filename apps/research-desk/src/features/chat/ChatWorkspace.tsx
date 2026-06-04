@@ -1034,7 +1034,7 @@ export default function ChatWorkspace({
                     {isSending ? (
                       <Button
                         aria-label={t.chat.stopGenerating}
-                        className="size-8 rounded-md text-muted-foreground hover:bg-accent/70 hover:text-destructive focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0"
+                        className="size-7 rounded-md text-muted-foreground hover:bg-accent/70 hover:text-destructive focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0"
                         onClick={onStopGenerating}
                         size="icon"
                         type="button"
@@ -1045,11 +1045,16 @@ export default function ChatWorkspace({
                     ) : (
                       <Button
                         aria-label={t.chat.send}
-                        className="size-8 rounded-md text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:bg-transparent disabled:text-muted-foreground/45"
+                        className={cn(
+                          'size-7 rounded-md focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0',
+                          canSend
+                            ? 'bg-brand text-white hover:bg-brand/90 hover:text-white'
+                            : 'text-muted-foreground/45',
+                        )}
                         disabled={!canSend}
                         size="icon"
                         type="submit"
-                        variant="ghost"
+                        variant={canSend ? 'default' : 'ghost'}
                       >
                         <SendHorizontal className="size-4" />
                       </Button>

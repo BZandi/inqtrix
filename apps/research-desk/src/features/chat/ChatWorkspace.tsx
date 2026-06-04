@@ -90,6 +90,7 @@ import {
   useTextImprovement,
   type TextImprovementApiOptions,
 } from '@/features/textImprove'
+import { PanelRail } from '@/components/ui/panel-rail'
 import { ChatHistoryPanel } from './history/ChatHistoryPanel'
 import { RuleLibraryDialog } from './rules/RuleLibraryDialog'
 import type { ChatMessage, ChatThread } from './types'
@@ -108,6 +109,7 @@ type ChatWorkspaceProps = {
   fileGroupOptions: FileGroupMentionOption[]
   fileOptions: FileMentionOption[]
   isDesktop: boolean
+  isHistoryVisible: boolean
   isIncognito: boolean
   isSending: boolean
   onAttachContext: (ref: ChatContextReferenceRecord) => void
@@ -126,6 +128,7 @@ type ChatWorkspaceProps = {
   chainingEnabled: boolean
   onChainingEnabledChange: (enabled: boolean) => void
   onIncognitoChange: (enabled: boolean) => void
+  onHistoryVisibleChange: (isVisible: boolean) => void
   onMoveThreadGroup: (groupId: string, targetIndex: number) => void
   onMoveThreadToGroup: (threadId: string, groupId: string | null, targetIndex: number) => void
   onRenameThread: (threadId: string, title: string) => void
@@ -172,6 +175,7 @@ export default function ChatWorkspace({
   chatRules,
   defaultChatModel,
   isDesktop,
+  isHistoryVisible,
   isIncognito,
   isSending,
   onAttachContext,
@@ -188,6 +192,7 @@ export default function ChatWorkspace({
   chainingEnabled,
   onChainingEnabledChange,
   onIncognitoChange,
+  onHistoryVisibleChange,
   onMoveThreadGroup,
   onMoveThreadToGroup,
   onRenameThread,
@@ -511,6 +516,7 @@ export default function ChatWorkspace({
       onCreateThreadGroup={onCreateThreadGroup}
       onDeleteThread={onDeleteThread}
       onDeleteThreadGroup={onDeleteThreadGroup}
+      onHide={isDesktop ? () => onHistoryVisibleChange(false) : undefined}
       onMoveThreadGroup={onMoveThreadGroup}
       onMoveThreadToGroup={onMoveThreadToGroup}
       onRenameThread={onRenameThread}
@@ -1079,27 +1085,38 @@ export default function ChatWorkspace({
   return (
     <div className="flex min-h-[calc(100svh-var(--header-h))] w-full lg:h-full lg:min-h-0">
       {isDesktop ? (
-        <ResizablePanelGroup
-          className="min-h-0 w-full overflow-hidden bg-background"
-          orientation="horizontal"
-        >
-          <ResizablePanel
-            className="min-h-0 min-w-0 overflow-hidden border-r border-border bg-surface/60"
-            defaultSize="26%"
-            maxSize="42%"
-            minSize="18%"
+        isHistoryVisible ? (
+          <ResizablePanelGroup
+            className="min-h-0 w-full overflow-hidden bg-background"
+            orientation="horizontal"
           >
-            {historyPanel}
-          </ResizablePanel>
-          <ResizableHandle
-            aria-label={t.chat.resizeHistory}
-            className="w-3 cursor-col-resize bg-transparent after:w-px after:rounded-full after:bg-border/60 hover:after:w-1 hover:after:bg-brand/55 active:after:bg-brand/80 focus-visible:ring-2 focus-visible:ring-ring [&>div]:h-8 [&>div]:w-3 [&>div]:rounded-full [&>div]:border-border/70 [&>div]:bg-background/95 [&>div]:shadow-[0_1px_2px_var(--shadow-hairline)]"
-            withHandle
-          />
-          <ResizablePanel className="min-h-0 min-w-0 overflow-hidden" defaultSize="74%" minSize="58%">
-            {conversationPanel}
-          </ResizablePanel>
-        </ResizablePanelGroup>
+            <ResizablePanel
+              className="min-h-0 min-w-0 overflow-hidden border-r border-border bg-surface/60"
+              defaultSize="26%"
+              maxSize="42%"
+              minSize="18%"
+            >
+              {historyPanel}
+            </ResizablePanel>
+            <ResizableHandle
+              aria-label={t.chat.resizeHistory}
+              className="w-3 cursor-col-resize bg-transparent after:w-px after:rounded-full after:bg-border/60 hover:after:w-1 hover:after:bg-brand/55 active:after:bg-brand/80 focus-visible:ring-2 focus-visible:ring-ring [&>div]:h-8 [&>div]:w-3 [&>div]:rounded-full [&>div]:border-border/70 [&>div]:bg-background/95 [&>div]:shadow-[0_1px_2px_var(--shadow-hairline)]"
+              withHandle
+            />
+            <ResizablePanel className="min-h-0 min-w-0 overflow-hidden" defaultSize="74%" minSize="58%">
+              {conversationPanel}
+            </ResizablePanel>
+          </ResizablePanelGroup>
+        ) : (
+          <div className="flex min-h-0 w-full overflow-hidden bg-background">
+            <PanelRail
+              label={t.chat.showHistory}
+              onExpand={() => onHistoryVisibleChange(true)}
+              side="left"
+            />
+            <div className="min-h-0 min-w-0 flex-1 overflow-hidden">{conversationPanel}</div>
+          </div>
+        )
       ) : (
         <motion.section
           initial={reduceMotion ? false : { opacity: 0, y: 8 }}

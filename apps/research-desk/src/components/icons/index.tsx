@@ -182,6 +182,15 @@ export const FileText = createIcon('FileText', 'lucide-file-text', (
   </>
 ))
 
+export const FileDown = createIcon('FileDown', 'lucide-file-down', (
+  <>
+    <path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" />
+    <path d="M14 2v5a1 1 0 0 0 1 1h5" />
+    <path d="M12 18v-6" />
+    <path d="m9 15 3 3 3-3" />
+  </>
+))
+
 export const Folder = createIcon('Folder', 'lucide-folder', (
   <>
     <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
@@ -430,6 +439,30 @@ export const PanelBottomClose = createIcon('PanelBottomClose', 'lucide-panel-bot
     <rect width="18" height="18" x="3" y="3" rx="2" />
     <path d="M3 15h18" />
     <path d="m15 8-3 3-3-3" />
+  </>
+))
+
+export const PanelBottomOpen = createIcon('PanelBottomOpen', 'lucide-panel-bottom-open', (
+  <>
+    <rect width="18" height="18" x="3" y="3" rx="2" />
+    <path d="M3 15h18" />
+    <path d="m9 10 3-3 3 3" />
+  </>
+))
+
+export const PanelLeftClose = createIcon('PanelLeftClose', 'lucide-panel-left-close', (
+  <>
+    <rect width="18" height="18" x="3" y="3" rx="2" />
+    <path d="M9 3v18" />
+    <path d="m16 15-3-3 3-3" />
+  </>
+))
+
+export const PanelLeftOpen = createIcon('PanelLeftOpen', 'lucide-panel-left-open', (
+  <>
+    <rect width="18" height="18" x="3" y="3" rx="2" />
+    <path d="M9 3v18" />
+    <path d="m14 9 3 3-3 3" />
   </>
 ))
 

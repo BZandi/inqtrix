@@ -25,6 +25,21 @@ function makeAsset(id: string, label: string, overrides: Partial<FileAssetRecord
   }
 }
 
+describe('ui visibility reducer actions', () => {
+  it('hides and shows the chat history panel', () => {
+    const hidden = researchDeskReducer(createEmptyProjectState(), {
+      isVisible: false,
+      type: 'setChatHistoryVisible',
+    })
+    expect(hidden.ui.isChatHistoryVisible).toBe(false)
+    const shown = researchDeskReducer(hidden, {
+      isVisible: true,
+      type: 'setChatHistoryVisible',
+    })
+    expect(shown.ui.isChatHistoryVisible).toBe(true)
+  })
+})
+
 describe('file-asset reducer actions', () => {
   it('ingests assets into the store and order', () => {
     const next = researchDeskReducer(createEmptyProjectState(), {

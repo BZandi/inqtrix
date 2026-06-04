@@ -1230,6 +1230,7 @@ export function ResearchDesk() {
               chatRules={chatRules}
               defaultChatModel={defaultChatModel}
               isDesktop={isDesktop}
+              isHistoryVisible={state.ui.isChatHistoryVisible}
               isIncognito={isIncognitoChat}
               isSending={activeChatRequest !== null}
               onAttachContext={(ref) => dispatch({ ref, type: 'attachChatContextToDraft' })}
@@ -1248,6 +1249,10 @@ export function ResearchDesk() {
               chainingEnabled={state.ui.chatChainingEnabled}
               onChainingEnabledChange={(enabled) => dispatch({ enabled, type: 'setChatChainingEnabled' })}
               onIncognitoChange={handleIncognitoChange}
+              onHistoryVisibleChange={(isVisible) => dispatch({
+                isVisible,
+                type: 'setChatHistoryVisible',
+              })}
               onRenameThread={(threadId, title) => dispatch({ threadId, title, type: 'renameChatThread' })}
               onRenameThreadGroup={(groupId, title) => dispatch({ groupId, title, type: 'renameChatThreadGroup' })}
               onMoveThreadGroup={(groupId, targetIndex) => dispatch({

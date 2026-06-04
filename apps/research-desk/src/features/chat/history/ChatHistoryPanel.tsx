@@ -5,6 +5,7 @@ import {
   FolderOpen,
   GripVertical,
   MessagesSquare,
+  PanelLeftClose,
   Plus,
   Trash2,
 } from '@/components/icons'
@@ -43,6 +44,7 @@ type ChatHistoryPanelProps = {
   onCreateThreadGroup: () => void
   onDeleteThread: (threadId: string) => void
   onDeleteThreadGroup: (groupId: string) => void
+  onHide?: () => void
   onMoveThreadGroup: (groupId: string, targetIndex: number) => void
   onMoveThreadToGroup: (threadId: string, groupId: string | null, targetIndex: number) => void
   onRenameThread: (threadId: string, title: string) => void
@@ -64,6 +66,7 @@ export function ChatHistoryPanel({
   onCreateThreadGroup,
   onDeleteThread,
   onDeleteThreadGroup,
+  onHide,
   onMoveThreadGroup,
   onMoveThreadToGroup,
   onRenameThread,
@@ -361,6 +364,23 @@ export function ChatHistoryPanel({
             </TooltipTrigger>
             <TooltipContent>{t.chat.new}</TooltipContent>
           </Tooltip>
+          {onHide ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label={t.chat.hideHistory}
+                  className="size-8 shrink-0"
+                  onClick={onHide}
+                  size="icon"
+                  type="button"
+                  variant="ghost"
+                >
+                  <PanelLeftClose className="size-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{t.chat.hideHistory}</TooltipContent>
+            </Tooltip>
+          ) : null}
         </div>
       </div>
       <ScrollArea className="max-h-64 min-h-0 lg:max-h-none lg:flex-1">

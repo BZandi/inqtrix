@@ -23,8 +23,8 @@ import {
   ChevronDown,
   ChevronRight,
   Code2,
-  Download,
   Eye,
+  FileDown,
   FileText,
   Folder,
   FolderOpen,
@@ -40,8 +40,9 @@ import {
   MessageSquareText,
   MessagesSquare,
   PanelBottomClose,
+  PanelBottomOpen,
+  PanelLeftClose,
   PanelRightClose,
-  PanelRightOpen,
   Paperclip,
   PencilLine,
   Plus,
@@ -58,6 +59,7 @@ import {
 } from '@/components/icons'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { PanelRail } from '@/components/ui/panel-rail'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -493,7 +495,13 @@ export default function EditorWorkspace({
           folders={folders}
           reportOptions={reportOptions}
         />
-      ) : null}
+      ) : (
+        <PanelRail
+          label={copy.showTree}
+          onExpand={() => dispatch({ isVisible: true, type: 'setEditorTreeVisible' })}
+          side="left"
+        />
+      )}
       <main className="flex min-w-0 flex-1 flex-col border-r border-border bg-background">
         {activeDocument ? (
           <>
@@ -503,10 +511,8 @@ export default function EditorWorkspace({
               dispatch={dispatch}
               document={activeDocument}
               editor={activeEditor}
-              isCommentPanelVisible={state.editorUi.isCommentPanelVisible}
               isDiffVisible={state.editorUi.isDiffVisible}
               isDirty={state.dirty}
-              isTreeVisible={state.editorUi.isTreeVisible}
               viewMode={state.editorUi.viewMode}
             />
             <div className="flex min-h-0 flex-1 flex-col">
@@ -614,7 +620,13 @@ export default function EditorWorkspace({
           selectedCommentId={state.editorUi.selectedCommentId}
           suggestions={documentSuggestions}
         />
-      ) : null}
+      ) : (
+        <PanelRail
+          label={copy.showComments}
+          onExpand={() => dispatch({ isVisible: true, type: 'setEditorCommentPanelVisible' })}
+          side="right"
+        />
+      )}
     </div>
   )
 }
@@ -847,6 +859,12 @@ function EditorFileTree({
             onClick={() => dispatch({ type: 'createEditorDocument' })}
           >
             <Plus className="size-4" />
+          </TooltipButton>
+          <TooltipButton
+            label={copy.hideTree}
+            onClick={() => dispatch({ isVisible: false, type: 'setEditorTreeVisible' })}
+          >
+            <PanelLeftClose className="size-4" />
           </TooltipButton>
         </div>
       </div>
@@ -1190,10 +1208,8 @@ function EditorTopBar({
   dispatch,
   document,
   editor,
-  isCommentPanelVisible,
   isDiffVisible,
   isDirty,
-  isTreeVisible,
   viewMode,
 }: {
   commentCount: number
@@ -1201,10 +1217,8 @@ function EditorTopBar({
   dispatch: Dispatch<ResearchDeskAction>
   document: EditorDocumentRecord
   editor: Editor | null
-  isCommentPanelVisible: boolean
   isDiffVisible: boolean
   isDirty: boolean
-  isTreeVisible: boolean
   viewMode: ProjectState['editorUi']['viewMode']
 }) {
   const [isEditingTitle, setIsEditingTitle] = useState(false)
@@ -1308,13 +1322,6 @@ function EditorTopBar({
         <Badge className="h-5 rounded-full px-1.5 text-[10px]" variant="outline">R{document.revision}</Badge>
         <Separator className="mx-0.5 h-5" orientation="vertical" />
         <TooltipButton
-          disabled={isExporting}
-          label={exportError ?? copy.exportWord}
-          onClick={() => { void handleExportWord() }}
-        >
-          {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-        </TooltipButton>
-        <TooltipButton
           label={viewMode === 'source' ? copy.live : copy.source}
           onClick={() => dispatch({ mode: viewMode === 'source' ? 'live' : 'source', type: 'setEditorViewMode' })}
         >
@@ -1334,18 +1341,15 @@ function EditorTopBar({
         >
           <Scale className="size-4" />
         </TooltipButton>
+        <Separator className="mx-0.5 h-5" orientation="vertical" />
         <TooltipButton
-          label={isTreeVisible ? copy.hideTree : copy.showTree}
-          onClick={() => dispatch({ isVisible: !isTreeVisible, type: 'setEditorTreeVisible' })}
+          disabled={isExporting}
+          label={exportError ?? copy.exportWord}
+          onClick={() => { void handleExportWord() }}
         >
-          <Folder className="size-4" />
+          {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <FileDown className="size-4" />}
         </TooltipButton>
-        <TooltipButton
-          label={isCommentPanelVisible ? copy.hideComments : copy.showComments}
-          onClick={() => dispatch({ isVisible: !isCommentPanelVisible, type: 'setEditorCommentPanelVisible' })}
-        >
-          {isCommentPanelVisible ? <PanelRightClose className="size-4" /> : <PanelRightOpen className="size-4" />}
-        </TooltipButton>
+        <Separator className="mx-0.5 h-5" orientation="vertical" />
         <TooltipButton
           label={copy.deleteDocument}
           onClick={() => dispatch({ documentId: document.id, type: 'deleteEditorDocument' })}
@@ -1735,11 +1739,6 @@ function EditorCommandToolbar({
       <ToolbarButton active={editor?.isActive('bulletList')} disabled={disabled} icon={List} label="Bullet list" onClick={() => editor?.chain().focus().toggleBulletList().run()} />
       <ToolbarButton active={editor?.isActive('orderedList')} disabled={disabled} icon={ListOrdered} label="Ordered list" onClick={() => editor?.chain().focus().toggleOrderedList().run()} />
       <Separator className="mx-0.5 h-5" orientation="vertical" />
-      <ToolbarButton active={editor?.isActive('bold')} disabled={disabled} icon={Bold} label="Bold" onClick={() => editor?.chain().focus().toggleBold().run()} />
-      <ToolbarButton active={editor?.isActive('italic')} disabled={disabled} icon={Italic} label="Italic" onClick={() => editor?.chain().focus().toggleItalic().run()} />
-      <ToolbarButton active={editor?.isActive('strike')} disabled={disabled} icon={Strikethrough} label="Strike" onClick={() => editor?.chain().focus().toggleStrike().run()} />
-      <ToolbarButton active={editor?.isActive('underline')} disabled={disabled} icon={Underline} label="Underline" onClick={() => editor?.chain().focus().toggleUnderline().run()} />
-      <ToolbarButton active={editor?.isActive('highlight')} disabled={disabled} icon={Highlighter} label="Highlight" onClick={() => editor?.chain().focus().toggleHighlight().run()} />
       <ToolbarButton active={editor?.isActive('link')} disabled={disabled} icon={Link} label="Link" onClick={setLink} />
     </div>
   )
@@ -2103,7 +2102,7 @@ function EditorAssistantComposer({
           type="button"
           variant="outline"
         >
-          <PanelBottomClose className="size-4 rotate-180" />
+          <PanelBottomOpen className="size-4" />
           {copy.showAssistant}
         </Button>
       </div>
@@ -2548,7 +2547,7 @@ function EditorCommentsPanel({
           label={copy.hideComments}
           onClick={() => dispatch({ isVisible: false, type: 'setEditorCommentPanelVisible' })}
         >
-          <X className="size-4" />
+          <PanelRightClose className="size-4" />
         </TooltipButton>
       </div>
       <div className="flex flex-col gap-2 border-b border-border px-3 py-2">

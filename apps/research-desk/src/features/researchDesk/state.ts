@@ -156,6 +156,7 @@ export type ResearchDeskAction =
   | { type: 'setComposerVisible'; isVisible: boolean }
   | { type: 'setReportExpanded'; isExpanded: boolean }
   | { type: 'setReportVisible'; isVisible: boolean }
+  | { type: 'setChatHistoryVisible'; isVisible: boolean }
   | { enabled: boolean; type: 'setChatChainingEnabled' }
   | { type: 'setSelectedChatModelTier'; tier: ChatModelTier | null }
   | { type: 'setSelectedStack'; stack: string }
@@ -243,6 +244,9 @@ export function researchDeskReducer(
   }
   if (action.type === 'setReportVisible') {
     return { ...state, ui: { ...state.ui, isReportVisible: action.isVisible } }
+  }
+  if (action.type === 'setChatHistoryVisible') {
+    return { ...state, ui: { ...state.ui, isChatHistoryVisible: action.isVisible } }
   }
   if (action.type === 'setComposerVisible') {
     return { ...state, ui: { ...state.ui, isComposerVisible: action.isVisible } }

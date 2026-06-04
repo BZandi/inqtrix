@@ -436,6 +436,7 @@ function buildProjectStateFromFiles({
       expandedJobId: researchRunOrder.includes((ui as Record<string, unknown>).expandedJobId as string)
         ? (ui as Record<string, unknown>).expandedJobId as string
         : researchRunOrder[0] ?? null,
+      isChatHistoryVisible: booleanOrDefault((ui as Record<string, unknown>).isChatHistoryVisible, true),
       isComposerVisible: booleanOrDefault((ui as Record<string, unknown>).isComposerVisible, true),
       isReportExpanded: booleanOrDefault((ui as Record<string, unknown>).isReportExpanded, false),
       isReportVisible: booleanOrDefault((ui as Record<string, unknown>).isReportVisible, true),

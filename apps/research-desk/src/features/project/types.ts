@@ -37,6 +37,7 @@ export type ProjectUiState = {
   activeView: AppView
   chatChainingEnabled: boolean
   expandedJobId: string | null
+  isChatHistoryVisible: boolean
   isComposerVisible: boolean
   isReportExpanded: boolean
   isReportVisible: boolean

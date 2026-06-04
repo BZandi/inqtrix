@@ -557,7 +557,7 @@ function ChatHistorySectionView({
         <span className="pointer-events-none absolute -bottom-1 left-1 right-1 h-0.5 rounded-full bg-brand shadow-[0_0_0_1px_var(--background)]" />
       )}
       {section.kind === 'group' && (
-        <div className="group/header grid min-h-8 grid-cols-[1.5rem_1rem_minmax(0,1fr)_auto_auto_auto_auto] items-center gap-1 rounded-md px-1.5 text-foreground/75 transition-colors hover:bg-background/70">
+        <div className="group/header grid min-h-8 grid-cols-[1.5rem_1rem_minmax(0,1fr)_auto_auto_auto_auto] items-center gap-1 px-1.5 text-foreground/75 transition-colors hover:text-foreground">
           <button
             aria-expanded={!isCollapsed}
             aria-label={`${isCollapsed ? t.chat.expandGroup : t.chat.collapseGroup}: ${section.group.title}`}
@@ -771,11 +771,13 @@ function ChatThreadHistoryItem({
   return (
     <motion.div
       className={cn(
-        'group/thread relative rounded-md border transition-colors',
+        'group/thread relative transition-colors',
         isNested
-          ? 'border-transparent bg-transparent hover:bg-background/70'
+          ? 'bg-transparent hover:text-foreground'
           : 'border-border/60 bg-card/60 shadow-[0_1px_1px_var(--shadow-hairline)] hover:border-border hover:bg-background',
-        isActive && 'border-brand/25 bg-brand-subtle/45 ring-1 ring-brand/10',
+        !isNested && 'rounded-md border',
+        isNested && isActive && 'before:absolute before:-left-[9px] before:bottom-1.5 before:top-1.5 before:w-0.5 before:rounded-full before:bg-brand',
+        !isNested && isActive && 'border-brand/25 bg-brand-subtle/45 ring-1 ring-brand/10',
         isDragging && 'scale-[0.99] opacity-75 shadow-[0_8px_20px_var(--shadow-soft)] ring-1 ring-ring/50',
       )}
       data-chat-history-thread-id={thread.id}
@@ -846,8 +848,10 @@ function ChatThreadHistoryItem({
         >
           <span className="flex min-w-0 items-center gap-2">
             <span className={cn(
-              'block min-w-0 flex-1 truncate font-semibold text-foreground',
+              'block min-w-0 flex-1 truncate font-semibold',
               isNested ? 'text-[13px]' : 'text-sm',
+              isNested ? 'text-foreground/85' : 'text-foreground',
+              isActive && 'text-foreground',
             )}>
               {thread.title}
             </span>

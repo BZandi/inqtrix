@@ -881,7 +881,7 @@ function EditorFileTree({
             return (
               <section
                 className={cn(
-                  'relative rounded-md transition-colors',
+                  'relative transition-colors',
                   showDropFrame && 'bg-brand-subtle/45',
                   isDraggingFolder && 'scale-[0.995] opacity-80 shadow-[0_8px_20px_var(--shadow-soft)] ring-1 ring-ring/40',
                 )}
@@ -892,7 +892,7 @@ function EditorFileTree({
               >
                 {showFolderBeforeIndicator ? <DropIndicator className="-top-1" /> : null}
                 {showFolderAfterIndicator ? <DropIndicator className="-bottom-1" /> : null}
-                <div className="group/folder grid min-h-8 grid-cols-[1.35rem_1rem_minmax(0,1fr)_auto_auto_auto_auto] items-center gap-1 rounded-md px-1.5 text-foreground/75 hover:bg-background/70">
+                <div className="group/folder grid min-h-8 grid-cols-[1.35rem_1rem_minmax(0,1fr)_auto_auto_auto_auto] items-center gap-1 px-1.5 text-foreground/75 transition-colors hover:text-foreground">
                   <button
                     aria-expanded={isExpanded}
                     aria-label={`${isExpanded ? copy.hideTree : copy.showTree}: ${folder.title}`}
@@ -1073,11 +1073,13 @@ function EditorDocumentTreeItem({
   return (
     <div
       className={cn(
-        'group/document relative rounded-md border transition-colors',
+        'group/document relative transition-colors',
         isNested
-          ? 'border-transparent bg-transparent hover:bg-background/70'
+          ? 'bg-transparent hover:text-foreground'
           : 'border-border/60 bg-card/60 shadow-[0_1px_1px_var(--shadow-hairline)] hover:border-border hover:bg-background',
-        isActive && 'bg-brand-subtle text-foreground ring-1 ring-brand/25',
+        !isNested && 'rounded-md border',
+        isNested && isActive && 'text-foreground before:absolute before:-left-[9px] before:bottom-1.5 before:top-1.5 before:w-0.5 before:rounded-full before:bg-brand',
+        !isNested && isActive && 'bg-brand-subtle text-foreground ring-1 ring-brand/25',
         isDragging && 'scale-[0.99] opacity-75 shadow-[0_8px_20px_var(--shadow-soft)] ring-1 ring-ring/50',
       )}
       data-editor-document-id={document.id}
@@ -1100,7 +1102,12 @@ function EditorDocumentTreeItem({
           'grid w-full min-w-0 grid-cols-[1rem_minmax(0,1fr)] items-center gap-2 text-left',
           isNested ? 'min-h-8 px-2 py-1 pr-14' : 'min-h-9 px-3 py-1.5 pr-16',
         )}>
-          <FileText className="size-3.5 shrink-0 text-muted-foreground" />
+          <FileText
+            className={cn(
+              'size-3.5 shrink-0',
+              isNested && isActive ? 'text-brand' : 'text-muted-foreground',
+            )}
+          />
           <input
             aria-label={copy.renameDocument}
             className="min-w-0 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 text-sm font-semibold text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -1132,8 +1139,19 @@ function EditorDocumentTreeItem({
           title={copy.renameDocument}
           type="button"
         >
-          <FileText className="size-3.5 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 truncate text-sm font-semibold">{document.title}</span>
+          <FileText
+            className={cn(
+              'size-3.5 shrink-0',
+              isNested && isActive ? 'text-brand' : 'text-muted-foreground',
+            )}
+          />
+          <span className={cn(
+            'min-w-0 truncate text-sm font-semibold',
+            isNested ? 'text-foreground/85' : 'text-foreground',
+            isActive && 'text-foreground',
+          )}>
+            {document.title}
+          </span>
         </button>
       )}
       <Button
@@ -1163,11 +1181,13 @@ function ImportReportMenu({
   copy,
   dispatch,
   reportOptions,
+  triggerClassName,
   variant = 'icon',
 }: {
   copy: EditorCopy
   dispatch: Dispatch<ResearchDeskAction>
   reportOptions: CompletedReportOption[]
+  triggerClassName?: string
   variant?: 'button' | 'icon'
 }) {
   return (
@@ -1175,8 +1195,12 @@ function ImportReportMenu({
       <DropdownMenuTrigger asChild>
         <Button
           aria-label={copy.importReport}
-          className={cn(variant === 'icon' && 'size-8 rounded-md', variant === 'button' && 'justify-start')}
-          size={variant === 'button' ? 'sm' : 'icon'}
+          className={cn(
+            variant === 'icon' && 'size-8 rounded-md',
+            variant === 'button' && 'justify-center',
+            triggerClassName,
+          )}
+          size={variant === 'button' ? 'default' : 'icon'}
           type="button"
           variant={variant === 'button' ? 'outline' : 'ghost'}
         >
@@ -3052,16 +3076,26 @@ function EditorEmptyState({
 }) {
   return (
     <div className="grid min-h-0 flex-1 place-items-center bg-canvas p-8">
-      <div className="w-full max-w-lg rounded-md border border-border bg-background p-8 text-center shadow-sm">
+      <div className="w-full max-w-2xl rounded-md border border-border bg-background p-8 text-center shadow-sm">
         <FileText className="mx-auto mb-4 size-8 text-muted-foreground" />
         <h2 className="text-lg font-semibold">{copy.emptyTitle}</h2>
         <p className="mt-2 text-sm text-muted-foreground">{copy.emptyBody}</p>
-        <div className="mt-5 flex justify-center gap-2">
-          <Button onClick={() => dispatch({ type: 'createEditorDocument' })} type="button">
+        <div className="mx-auto mt-5 grid w-full max-w-[31rem] grid-cols-1 gap-2 sm:grid-cols-2">
+          <Button
+            className="h-10 w-full justify-center gap-1.5 px-2 text-[13px]"
+            onClick={() => dispatch({ type: 'createEditorDocument' })}
+            type="button"
+          >
             <SquarePen className="size-4" />
             {copy.createDocument}
           </Button>
-          <ImportReportMenu copy={copy} dispatch={dispatch} reportOptions={reportOptions} variant="button" />
+          <ImportReportMenu
+            copy={copy}
+            dispatch={dispatch}
+            reportOptions={reportOptions}
+            triggerClassName="h-10 w-full gap-1.5 px-2 text-[13px]"
+            variant="button"
+          />
         </div>
       </div>
     </div>

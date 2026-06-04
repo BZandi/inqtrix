@@ -1098,11 +1098,7 @@ export default function ChatWorkspace({
             >
               {historyPanel}
             </ResizablePanel>
-            <ResizableHandle
-              aria-label={t.chat.resizeHistory}
-              className="w-3 cursor-col-resize bg-transparent after:w-px after:rounded-full after:bg-border/60 hover:after:w-1 hover:after:bg-brand/55 active:after:bg-brand/80 focus-visible:ring-2 focus-visible:ring-ring [&>div]:h-8 [&>div]:w-3 [&>div]:rounded-full [&>div]:border-border/70 [&>div]:bg-background/95 [&>div]:shadow-[0_1px_2px_var(--shadow-hairline)]"
-              withHandle
-            />
+            <ResizableHandle aria-label={t.chat.resizeHistory} />
             <ResizablePanel className="min-h-0 min-w-0 overflow-hidden" defaultSize="74%" minSize="58%">
               {conversationPanel}
             </ResizablePanel>

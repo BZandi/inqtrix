@@ -2,6 +2,7 @@ import {
   FileText,
   Globe2,
   ListChecks,
+  PanelBottomClose,
   Repeat2,
   Search,
   SendHorizontal,
@@ -49,6 +50,7 @@ import { appMotion } from '@/motion/transitions'
 
 type ComposerProps = {
   form: ComposerFormState
+  onHide: () => void
   onSubmit: (request: CreateResearchRunRequest) => void
   reduceMotion: boolean | null
   selectedStack: string
@@ -95,7 +97,7 @@ export function buildComposerRequest(
 }
 
 export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer(
-  { form, onSubmit, reduceMotion, selectedStack, setForm },
+  { form, onHide, onSubmit, reduceMotion, selectedStack, setForm },
   ref,
 ) {
   const { t } = useLocale()
@@ -180,6 +182,21 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
         </div>
         <Separator className="my-1" />
         <div className="flex flex-wrap items-center gap-1">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                aria-label={t.composer.hide}
+                className={composerIconButtonClassName()}
+                onClick={onHide}
+                type="button"
+                variant="ghost"
+              >
+                <PanelBottomClose className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t.composer.hide}</TooltipContent>
+          </Tooltip>
+          <Separator className="mx-0.5 h-5" orientation="vertical" />
           <ComposerSelect
             icon={FileText}
             label={t.composer.reportProfile}

@@ -116,15 +116,15 @@ export function ReportPanel({
       animate={{ opacity: 1 }}
       transition={appMotion.panel}
       className={cn(
-        'min-h-0 w-full min-w-0 max-w-full overflow-hidden rounded-lg border border-border bg-card shadow-[0_1px_2px_var(--shadow-hairline)]',
+        'min-h-0 w-full min-w-0 max-w-full overflow-hidden bg-background',
         isExpanded
-          ? 'fixed bottom-4 left-4 right-4 top-20 z-40 w-auto max-w-none shadow-[0_24px_80px_var(--shadow-soft)] md:bottom-5 md:left-[76px] md:right-5 xl:left-[88px] xl:right-8'
-          : 'lg:h-full',
+          ? 'fixed bottom-4 left-4 right-4 top-20 z-40 w-auto max-w-none rounded-lg border border-border shadow-[0_24px_80px_var(--shadow-soft)] md:bottom-5 md:left-[76px] md:right-5 xl:left-[88px] xl:right-8'
+          : 'border-t border-border lg:h-full lg:border-t-0',
       )}
     >
       <Tabs defaultValue="preview" className="flex h-full min-h-[420px] flex-col lg:min-h-0">
         <div className="border-b border-border">
-          <div className="flex h-11 items-center justify-between gap-3 px-3">
+          <div className="flex h-12 items-center justify-between gap-3 px-3">
             <div className="min-w-0">
               <h2 className="truncate text-sm font-semibold text-foreground">
                 {panelTitle}
@@ -135,7 +135,7 @@ export function ReportPanel({
                 <TooltipTrigger asChild>
                   <Button
                     aria-label={t.report.useInChat}
-                    className="size-8"
+                    className="size-7"
                     disabled={!canUseReportInChat}
                     onClick={() => {
                       if (!selectedRun || !canUseReportInChat) return
@@ -145,7 +145,7 @@ export function ReportPanel({
                     type="button"
                     variant="ghost"
                   >
-                    <MessageSquarePlus className="size-3.5" />
+                    <MessageSquarePlus className="size-4" />
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>{t.report.useInChat}</TooltipContent>
@@ -154,13 +154,13 @@ export function ReportPanel({
                 <TooltipTrigger asChild>
                   <Button
                     aria-label={t.report.hide}
-                    className="size-8"
+                    className="size-7"
                     onClick={onHide}
                     size="icon"
                     type="button"
                     variant="ghost"
                   >
-                    <PanelRightClose className="size-3.5" />
+                    <PanelRightClose className="size-4" />
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>{t.report.hide}</TooltipContent>
@@ -169,16 +169,16 @@ export function ReportPanel({
                 <TooltipTrigger asChild>
                   <Button
                     aria-label={isExpanded ? t.report.collapse : t.report.expand}
-                    className="size-8"
+                    className="size-7"
                     onClick={() => onExpandedChange(!isExpanded)}
                     size="icon"
                     type="button"
                     variant="ghost"
                   >
                     {isExpanded ? (
-                      <Minimize2 className="size-3.5" />
+                      <Minimize2 className="size-4" />
                     ) : (
-                      <Maximize2 className="size-3.5" />
+                      <Maximize2 className="size-4" />
                     )}
                   </Button>
                 </TooltipTrigger>

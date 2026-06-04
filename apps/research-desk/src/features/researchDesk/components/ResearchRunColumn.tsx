@@ -1,4 +1,4 @@
-import { FileSearch, Sparkles } from '@/components/icons'
+import { FileSearch, PanelBottomOpen, Sparkles } from '@/components/icons'
 import { AnimatePresence, motion } from 'motion/react'
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
@@ -58,15 +58,13 @@ export function ResearchRunColumn({
   const [composerForm, setComposerForm] = useState(defaultComposerFormState)
 
   return (
-    <section className="relative flex min-h-[calc(100svh-var(--header-h)-3rem)] min-w-0 flex-col gap-3 overflow-hidden lg:h-full lg:min-h-0">
+    <section className="relative flex min-h-[calc(100svh-var(--header-h))] min-w-0 flex-col overflow-hidden lg:h-full lg:min-h-0">
       <JobFilterMenu
         activeFilter={activeFilter}
-        isComposerVisible={isComposerVisible}
         jobs={allJobs}
         onActiveFilterChange={onActiveFilterChange}
-        onComposerVisibleChange={onComposerVisibleChange}
       />
-
+      <div className="relative flex min-h-0 flex-1 flex-col gap-3 px-4 pb-3 pt-3">
       {allJobs.length === 0 ? (
         <>
           <ResearchEmptyState
@@ -109,17 +107,40 @@ export function ResearchRunColumn({
       )}
 
       <AnimatePresence initial={false} mode="sync">
-        {isComposerVisible && (
+        {isComposerVisible ? (
           <Composer
             form={composerForm}
             key="composer"
+            onHide={() => onComposerVisibleChange(false)}
             onSubmit={onComposerSubmit}
             reduceMotion={reduceMotion}
             selectedStack={selectedStack}
             setForm={setComposerForm}
           />
+        ) : (
+          <motion.div
+            key="composer-collapsed"
+            initial={reduceMotion ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={appMotion.composer}
+            className="sticky bottom-0 z-20 flex shrink-0 border-t border-border bg-background/95 px-1 pt-2 backdrop-blur"
+          >
+            <Button
+              aria-label={t.composer.show}
+              className="h-8 gap-1.5 rounded-md"
+              onClick={() => onComposerVisibleChange(true)}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              <PanelBottomOpen className="size-4" />
+              {t.composer.show}
+            </Button>
+          </motion.div>
         )}
       </AnimatePresence>
+      </div>
     </section>
   )
 }

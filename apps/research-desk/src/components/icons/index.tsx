@@ -1,6 +1,7 @@
 import { createIcon } from './createIcon'
 
 export type { IconProps, LucideIcon } from './createIcon'
+export { FolderPlus, SquarePen } from 'lucide-react'
 
 export const AlertTriangle = createIcon('AlertTriangle', 'lucide-alert-triangle', (
   <>

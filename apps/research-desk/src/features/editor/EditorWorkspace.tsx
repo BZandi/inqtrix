@@ -27,7 +27,7 @@ import {
   FileDown,
   FileText,
   Folder,
-  FolderOpen,
+  FolderPlus,
   GripVertical,
   Highlighter,
   Italic,
@@ -45,12 +45,12 @@ import {
   PanelRightClose,
   Paperclip,
   PencilLine,
-  Plus,
   Redo2,
   SearchCheck,
   SendHorizontal,
   Scale,
   Sparkles,
+  SquarePen,
   Strikethrough,
   Trash2,
   Underline,
@@ -853,13 +853,13 @@ function EditorFileTree({
             label={copy.createFolder}
             onClick={() => dispatch({ title: copy.createFolder, type: 'createEditorFolder' })}
           >
-            <FolderOpen className="size-4" />
+            <FolderPlus className="size-4" />
           </TooltipButton>
           <TooltipButton
             label={copy.createDocument}
             onClick={() => dispatch({ type: 'createEditorDocument' })}
           >
-            <Plus className="size-4" />
+            <SquarePen className="size-4" />
           </TooltipButton>
           <TooltipButton
             label={copy.hideTree}
@@ -942,7 +942,7 @@ function EditorFileTree({
                     onClick={() => dispatch({ folderId: folder.id, type: 'createEditorDocument' })}
                     type="button"
                   >
-                    <Plus className="size-3.5" />
+                    <SquarePen className="size-3.5" />
                   </button>
                   <button
                     aria-label={copy.moveFolder}
@@ -3058,7 +3058,7 @@ function EditorEmptyState({
         <p className="mt-2 text-sm text-muted-foreground">{copy.emptyBody}</p>
         <div className="mt-5 flex justify-center gap-2">
           <Button onClick={() => dispatch({ type: 'createEditorDocument' })} type="button">
-            <Plus className="size-4" />
+            <SquarePen className="size-4" />
             {copy.createDocument}
           </Button>
           <ImportReportMenu copy={copy} dispatch={dispatch} reportOptions={reportOptions} variant="button" />

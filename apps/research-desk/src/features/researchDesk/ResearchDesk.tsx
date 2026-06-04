@@ -985,7 +985,17 @@ export function ResearchDesk() {
     }
   }
 
-  function handleCreateChatThread() {
+  function handleCreateChatThread(groupId?: string | null) {
+    if (groupId) {
+      if (isIncognitoChat && chatControllerByThreadIdRef.current.has(INCOGNITO_THREAD_ID)) return
+      if (isIncognitoChat) {
+        setIsIncognitoChat(false)
+        setIncognitoThread(createIncognitoThread(t.chat.incognitoTitle, t.chat.incognitoPreview))
+      }
+      dispatch({ groupId, type: 'createChatThread' })
+      return
+    }
+
     if (isIncognitoChat) {
       if (chatControllerByThreadIdRef.current.has(INCOGNITO_THREAD_ID)) return
       setChatErrorByThreadId((current) => {

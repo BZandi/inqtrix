@@ -56,7 +56,7 @@ export type ResearchDeskAction =
   | { ref: ChatContextReferenceRecord; type: 'removeChatContextFromDraft' }
   | { fromIndex: number; toIndex: number; type: 'reorderChatContextInDraft' }
   | { type: 'clearChatDraftAttachment' }
-  | { type: 'createChatThread' }
+  | { groupId?: string | null; type: 'createChatThread' }
   | { messageId: string; threadId: string; type: 'branchChatThreadFromMessage' }
   | { type: 'createLocalRun'; request: CreateResearchRunRequest }
   | { type: 'cancelLocalRun'; runId: string }
@@ -1290,9 +1290,20 @@ export function researchDeskReducer(
   }
   if (action.type === 'createChatThread') {
     const thread = createChatThread()
+    const groupId = action.groupId && state.chatThreadGroups[action.groupId]
+      ? action.groupId
+      : null
+    const chatThreadGroupMemberships = groupId
+      ? { ...state.chatThreadGroupMemberships, [thread.id]: groupId }
+      : state.chatThreadGroupMemberships
+    const chatThreadOrder = groupId
+      ? insertThreadIntoSection(state, chatThreadGroupMemberships, thread.id, groupId, 0)
+      : [thread.id, ...state.chatThreadOrder]
+
     return {
       ...state,
-      chatThreadOrder: [thread.id, ...state.chatThreadOrder],
+      chatThreadGroupMemberships,
+      chatThreadOrder,
       chatThreads: {
         ...state.chatThreads,
         [thread.id]: thread,

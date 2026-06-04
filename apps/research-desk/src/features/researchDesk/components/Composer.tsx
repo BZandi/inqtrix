@@ -151,7 +151,7 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
           <Textarea
             aria-label={t.composer.placeholder}
             className={cn(
-              'min-h-16 resize-none border-0 bg-transparent px-0 py-0 text-sm leading-6 shadow-none focus-visible:ring-0',
+              'min-h-16 resize-none border-0 bg-transparent pb-2 pl-2 pr-11 pt-2 text-sm font-normal leading-6 shadow-none placeholder:text-muted-foreground/70 focus-visible:ring-0',
               '[scrollbar-width:thin]',
               '[scrollbar-color:color-mix(in_oklch,var(--muted-foreground)_22%,transparent)_transparent]',
               '[&::-webkit-scrollbar]:w-1',

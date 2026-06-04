@@ -2,11 +2,12 @@ import {
   ChevronDown,
   ChevronRight,
   Folder,
+  FolderPlus,
   FolderOpen,
   GripVertical,
   MessagesSquare,
   PanelLeftClose,
-  Plus,
+  SquarePen,
   Trash2,
 } from '@/components/icons'
 import { Button } from '@/components/ui/button'
@@ -40,7 +41,7 @@ type ChatHistoryPanelProps = {
   chatHistorySections: ChatHistorySection[]
   isIncognito: boolean
   locale: Locale
-  onCreateThread: () => void
+  onCreateThread: (groupId?: string | null) => void
   onCreateThreadGroup: () => void
   onDeleteThread: (threadId: string) => void
   onDeleteThreadGroup: (groupId: string) => void
@@ -344,7 +345,7 @@ export function ChatHistoryPanel({
                 type="button"
                 variant="ghost"
               >
-                <Folder className="size-4 text-foreground/85" />
+                <FolderPlus className="size-4 text-foreground/85" />
               </Button>
             </TooltipTrigger>
             <TooltipContent>{t.chat.newGroup}</TooltipContent>
@@ -354,12 +355,12 @@ export function ChatHistoryPanel({
               <Button
                 aria-label={t.chat.new}
                 className="size-7 shrink-0 rounded-md"
-                onClick={onCreateThread}
+                onClick={() => onCreateThread()}
                 size="icon"
                 type="button"
                 variant="ghost"
               >
-                <Plus className="size-4" />
+                <SquarePen className="size-4" />
               </Button>
             </TooltipTrigger>
             <TooltipContent>{t.chat.new}</TooltipContent>
@@ -409,6 +410,7 @@ export function ChatHistoryPanel({
                 isIncognito={isIncognito}
                 key={section.kind === 'group' ? section.groupId : UNGROUPED_CHAT_SECTION_ID}
                 locale={locale}
+                onCreateThread={onCreateThread}
                 onDeleteThread={onDeleteThread}
                 onDeleteThreadGroup={onDeleteThreadGroup}
                 onGroupTitleDraftChange={setGroupTitleDraft}
@@ -458,6 +460,7 @@ function ChatHistorySectionView({
   historyThreadTitleInputRef,
   isIncognito,
   locale,
+  onCreateThread,
   onDeleteThread,
   onDeleteThreadGroup,
   onGroupTitleDraftChange,
@@ -494,6 +497,7 @@ function ChatHistorySectionView({
   historyThreadTitleInputRef: RefObject<HTMLInputElement | null>
   isIncognito: boolean
   locale: Locale
+  onCreateThread: (groupId?: string | null) => void
   onDeleteThread: (threadId: string) => void
   onDeleteThreadGroup: (groupId: string) => void
   onGroupTitleDraftChange: (value: string) => void
@@ -553,7 +557,7 @@ function ChatHistorySectionView({
         <span className="pointer-events-none absolute -bottom-1 left-1 right-1 h-0.5 rounded-full bg-brand shadow-[0_0_0_1px_var(--background)]" />
       )}
       {section.kind === 'group' && (
-        <div className="group/header grid min-h-8 grid-cols-[1.5rem_1rem_minmax(0,1fr)_auto_auto_auto] items-center gap-1 rounded-md px-1.5 text-foreground/75 transition-colors hover:bg-background/70">
+        <div className="group/header grid min-h-8 grid-cols-[1.5rem_1rem_minmax(0,1fr)_auto_auto_auto_auto] items-center gap-1 rounded-md px-1.5 text-foreground/75 transition-colors hover:bg-background/70">
           <button
             aria-expanded={!isCollapsed}
             aria-label={`${isCollapsed ? t.chat.expandGroup : t.chat.collapseGroup}: ${section.group.title}`}
@@ -596,6 +600,21 @@ function ChatHistorySectionView({
           <span className="shrink-0 rounded-sm px-1 text-[10px] font-semibold tabular-nums text-muted-foreground">
             {section.threads.length}
           </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                aria-label={`${t.chat.newInFolder}: ${section.group.title}`}
+                className="size-6 shrink-0 text-foreground/50 opacity-0 transition hover:text-foreground focus-visible:opacity-100 group-hover/header:opacity-100"
+                onClick={() => onCreateThread(section.groupId)}
+                size="icon"
+                type="button"
+                variant="ghost"
+              >
+                <SquarePen className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t.chat.newInFolder}</TooltipContent>
+          </Tooltip>
           <button
             aria-label={`${t.chat.moveGroup}: ${section.group.title}`}
             className="grid size-6 shrink-0 cursor-grab place-items-center rounded-sm text-foreground/50 opacity-0 transition hover:bg-surface hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/header:opacity-100 active:cursor-grabbing"

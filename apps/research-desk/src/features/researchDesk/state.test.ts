@@ -40,6 +40,27 @@ describe('ui visibility reducer actions', () => {
   })
 })
 
+describe('chat folder reducer actions', () => {
+  it('creates a chat thread inside the requested folder', () => {
+    const withFolder = researchDeskReducer(createEmptyProjectState(), {
+      title: 'Folder',
+      type: 'createChatThreadGroup',
+    })
+    const groupId = withFolder.chatThreadGroupOrder[0]
+
+    const next = researchDeskReducer(withFolder, {
+      groupId,
+      type: 'createChatThread',
+    })
+    const threadId = next.ui.selectedChatThreadId
+
+    expect(threadId).toBeTruthy()
+    expect(next.chatThreadGroupMemberships[threadId as string]).toBe(groupId)
+    expect(next.chatThreadOrder[0]).toBe(threadId)
+    expect(next.dirty).toBe(true)
+  })
+})
+
 describe('file-asset reducer actions', () => {
   it('ingests assets into the store and order', () => {
     const next = researchDeskReducer(createEmptyProjectState(), {

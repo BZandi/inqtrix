@@ -1828,7 +1828,7 @@ function ChatMessageAttachments({
             <Icon className="size-3.5 shrink-0" />
             <span className="min-w-0 truncate">{chip.label}</span>
             {chip.fileCount !== null && (
-              <span className="shrink-0 rounded-sm bg-background/60 px-1 text-[10px] tabular-nums">{chip.fileCount}</span>
+              <span className="shrink-0 text-[10px] font-bold tabular-nums opacity-75">{chip.fileCount}</span>
             )}
           </span>
         )

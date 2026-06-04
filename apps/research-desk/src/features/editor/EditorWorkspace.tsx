@@ -564,6 +564,7 @@ export default function EditorWorkspace({
                 instructionFeedback={instructionFeedback}
                 isRunning={isGlobalRunning}
                 isVisible={state.editorUi.isAssistantVisible}
+                isWideCanvas={!state.editorUi.isTreeVisible && !state.editorUi.isCommentPanelVisible}
                 onAttachFiles={(files) => void handleAttachEditorFiles(files)}
                 onAttachRule={(ruleId) => addExtraRef({ kind: 'chat-rule', ruleId })}
                 onRefsChange={setPillRefs}
@@ -1993,6 +1994,7 @@ function EditorAssistantComposer({
   instructionFeedback,
   isRunning,
   isVisible,
+  isWideCanvas,
   onAttachFiles,
   onAttachRule,
   onRefsChange,
@@ -2027,6 +2029,7 @@ function EditorAssistantComposer({
   instructionFeedback: EditorInstructionFeedback | null
   isRunning: boolean
   isVisible: boolean
+  isWideCanvas: boolean
   onAttachFiles: (files: File[]) => void
   onAttachRule: (ruleId: string) => void
   onRefsChange: (refs: ChatContextReferenceRecord[]) => void
@@ -2135,7 +2138,19 @@ function EditorAssistantComposer({
   }
 
   return (
-    <div className="shrink-0 px-4 pb-4 pt-2">
+    <div className="relative z-10 shrink-0 px-4 pb-4 pt-2">
+      {isWideCanvas ? (
+        <>
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute bottom-0 left-4 top-2 hidden rounded-r-xl bg-background/30 backdrop-blur-xl xl:block xl:right-[calc(50%+28rem)]"
+          />
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute bottom-0 right-4 top-2 hidden rounded-l-xl bg-background/30 backdrop-blur-xl xl:left-[calc(50%+28rem)] xl:block"
+          />
+        </>
+      ) : null}
       <div className="relative mx-auto max-w-4xl">
         <AnimatePresence initial={false}>
           {isAttachActive ? (
@@ -2234,7 +2249,7 @@ function EditorAssistantComposer({
           <MentionComposer
             ariaLabel={copy.assistantPlaceholder}
             categoryLabels={mentionCategoryLabels}
-            contentClassName="min-h-16 pb-2 pr-9 text-sm leading-6"
+            contentClassName="min-h-16 pb-2 pl-2 pr-9 pt-2 text-sm leading-6"
             enabledKinds={['research', 'rules', 'files', 'filegroups']}
             maxRows={6}
             mentionSources={mentionSources}

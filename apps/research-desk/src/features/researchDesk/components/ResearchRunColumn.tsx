@@ -65,46 +65,47 @@ export function ResearchRunColumn({
         onActiveFilterChange={onActiveFilterChange}
       />
       <div className="relative flex min-h-0 flex-1 flex-col gap-3 px-4 pt-3">
-      {allJobs.length === 0 ? (
-        <>
-          <ResearchEmptyState
-            onSuggestionSelect={(question) => onComposerSubmit(
-              buildComposerRequest(composerForm, question, selectedStack),
-            )}
-          />
-          <div className="min-h-0 flex-1" />
-        </>
-      ) : (
-        <ScrollArea className="min-h-0 flex-1 pr-2">
-          <motion.div
-            layout
-            className="flex flex-col gap-2.5 pb-3"
-            transition={appMotion.list}
-          >
-            <AnimatePresence initial={false} mode={reduceMotion ? 'sync' : 'popLayout'}>
-              {jobs.map((job) => (
-                <ResearchJobCard
-                  isExpanded={expandedJobId === job.id}
-                  isSelected={selectedJobId === job.id}
-                  job={job}
-                  key={job.id}
-                  cancelError={cancelErrorByRunId[job.id]}
-                  isCancelSubmitting={cancelSubmittingRunIds.has(job.id)}
-                  onCancel={() => onCancelJob(job.id)}
-                  onDelete={() => onDeleteJob(job.id)}
-                  onSelect={() => onSelectJob(job.id)}
-                  onToggleExpanded={() => onToggleJob(job.id)}
-                />
-              ))}
-            </AnimatePresence>
-            {jobs.length === 0 && (
-              <div className="flex min-h-40 items-center justify-center rounded-lg border border-dashed border-border px-4 text-sm text-muted-foreground">
-                {t.home.emptyFilter}
-              </div>
-            )}
-          </motion.div>
-        </ScrollArea>
-      )}
+        {allJobs.length === 0 ? (
+          <>
+            <ResearchEmptyState
+              isComposerVisible={isComposerVisible}
+              onSuggestionSelect={(question) => onComposerSubmit(
+                buildComposerRequest(composerForm, question, selectedStack),
+              )}
+            />
+            <div className="min-h-0 flex-1" />
+          </>
+        ) : (
+          <ScrollArea className="min-h-0 flex-1 pr-2">
+            <motion.div
+              layout
+              className="flex flex-col gap-2.5 pb-3"
+              transition={appMotion.list}
+            >
+              <AnimatePresence initial={false} mode={reduceMotion ? 'sync' : 'popLayout'}>
+                {jobs.map((job) => (
+                  <ResearchJobCard
+                    isExpanded={expandedJobId === job.id}
+                    isSelected={selectedJobId === job.id}
+                    job={job}
+                    key={job.id}
+                    cancelError={cancelErrorByRunId[job.id]}
+                    isCancelSubmitting={cancelSubmittingRunIds.has(job.id)}
+                    onCancel={() => onCancelJob(job.id)}
+                    onDelete={() => onDeleteJob(job.id)}
+                    onSelect={() => onSelectJob(job.id)}
+                    onToggleExpanded={() => onToggleJob(job.id)}
+                  />
+                ))}
+              </AnimatePresence>
+              {jobs.length === 0 && (
+                <div className="flex min-h-40 items-center justify-center rounded-lg border border-dashed border-border px-4 text-sm text-muted-foreground">
+                  {t.home.emptyFilter}
+                </div>
+              )}
+            </motion.div>
+          </ScrollArea>
+        )}
       </div>
 
       <AnimatePresence initial={false} mode="sync">
@@ -146,8 +147,10 @@ export function ResearchRunColumn({
 }
 
 function ResearchEmptyState({
+  isComposerVisible,
   onSuggestionSelect,
 }: {
+  isComposerVisible: boolean
   onSuggestionSelect: (question: string) => void
 }) {
   const { t } = useLocale()
@@ -167,7 +170,12 @@ function ResearchEmptyState({
   ]
 
   return (
-    <div className="absolute inset-x-0 bottom-0 top-8 z-0 flex items-center justify-center px-4 py-10">
+    <div
+      className={[
+        'absolute inset-x-0 top-8 z-0 flex items-center justify-center px-4 py-10',
+        isComposerVisible ? 'bottom-0' : 'bottom-[5.75rem]',
+      ].join(' ')}
+    >
       <div className="mx-auto flex w-full max-w-xl flex-col items-center text-center">
         <div className="mb-5 flex size-12 items-center justify-center rounded-full border border-brand/20 bg-brand-subtle text-brand shadow-[0_12px_32px_var(--shadow-soft)]">
           <FileSearch className="size-5" />

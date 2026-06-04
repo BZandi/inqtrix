@@ -187,9 +187,9 @@ export function ContextChipLegend({
             )}
             {/* Displayed number = position in the combined list (matches the text);
                 drag rank = scope position. */}
-            <span className="relative grid size-4 shrink-0 place-items-center rounded-sm bg-background/70 text-[10px] leading-none tabular-nums text-muted-foreground">
+            <span className="relative grid h-4 min-w-4 shrink-0 place-items-center px-0.5 text-[11px] font-bold leading-none tabular-nums text-current">
               <span className={cn(
-                'transition-opacity',
+                'opacity-80 transition-opacity',
                 canReorder && 'group-hover:opacity-0 group-focus-within:opacity-0',
                 draggedKey === key && 'opacity-0',
               )}>
@@ -205,7 +205,7 @@ export function ContextChipLegend({
             <Icon className="size-3.5 shrink-0" />
             <span className="min-w-0 flex-1 truncate">{chip.label}</span>
             {chip.fileCount !== null && (
-              <span className="shrink-0 rounded-sm bg-background/60 px-1 text-[10px] tabular-nums">{chip.fileCount}</span>
+              <span className="shrink-0 text-[10px] font-bold tabular-nums opacity-75">{chip.fileCount}</span>
             )}
             <button
               aria-label={labels.removeContext}

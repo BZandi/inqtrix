@@ -57,8 +57,12 @@ The assistant has two LLM-backed server contracts:
 - `/v1/editor/instruct` handles free document-level instructions from the
   composer. The request sends the current Markdown document plus the instruction;
   the response returns an assistant message and a list of content-anchored edits
-  (`replace`, `before`, `after`, or `append`). The UI renders these as document
-  changes that can be accepted or rejected individually or as a group.
+  (`replace`, `before`, `after`, or `append`). The route budgets document-wide
+  edits against at least a 128k-token editor context floor before applying the
+  remaining hard `400_000` character payload guard, so modern local stacks do not
+  reject ordinary reports because of a stale or missing provider context-window
+  hint. The UI renders these as document changes that can be accepted or rejected
+  individually or as a group.
 
 Both endpoints also accept an optional additive `attachments` array of reference
 documents (`{label, content, page_count, size_bytes}`) -- user-uploaded source
@@ -598,14 +602,15 @@ after that probe succeeds does the app store the token in React memory and pass
 it to protected `/v1/*` requests and to the fetch-based SSE stream through the
 `Authorization` header. The token is not stored in `localStorage`,
 `sessionStorage`, project files, Markdown exports, logs, URLs, or `VITE_*`
-variables, so a page reload asks for it again.
+variables, so a page reload asks for it again. The same runtime token field is
+also available under Settings > Security while the app is open.
 
-The unlock gate and Settings workspace both show the repository, documentation,
-and license links. When `/health` includes the server `legal` block, the
-Settings workspace uses that source URL, license identifier, copyright notice,
-attribution notice, and no-warranty notice; otherwise it falls back to the
-bundled Inqtrix project metadata. The unlock gate also shows a static
-no-warranty usage notice before authentication.
+The unlock gate and Settings > Licensing section both show the repository,
+documentation, and license links. When `/health` includes the server `legal`
+block, the Settings workspace uses that source URL, license identifier,
+copyright notice, attribution notice, and no-warranty notice; otherwise it
+falls back to the bundled Inqtrix project metadata. The unlock gate also shows
+a static no-warranty usage notice before authentication.
 
 The unlock gate is a UX guard, not the security boundary. The backend Bearer
 dependency remains authoritative. Any non-local deployment that uses Bearer

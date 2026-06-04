@@ -1,7 +1,8 @@
 import {
   Download,
+  ExternalLink,
   FolderOpen,
-  Languages,
+  Github,
   LoaderCircle,
   Monitor,
   Moon,
@@ -133,7 +134,7 @@ export function Topbar({
             />
           </div>
           <ThemeToggle />
-          <LanguageToggle />
+          <RepoLink />
         </div>
       </div>
       {projectActionError ? (
@@ -253,29 +254,20 @@ function ThemeToggle() {
   )
 }
 
-function LanguageToggle() {
-  const { locale, setLocale, t } = useLocale()
+function RepoLink() {
+  const { t } = useLocale()
 
   return (
-    <div
-      aria-label={t.common.language}
-      className="inline-flex h-9 items-center rounded-md border border-border bg-card p-0.5 shadow-[0_1px_2px_var(--shadow-hairline)]"
-      role="group"
+    <a
+      className="inline-flex h-9 items-center gap-1.5 rounded-md border border-border bg-card px-2.5 text-xs font-medium text-muted-foreground shadow-[0_1px_2px_var(--shadow-hairline)] transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      href={t.authLock.repositoryUrl}
+      rel="noreferrer"
+      target="_blank"
+      title={t.authLock.repositoryLabel}
     >
-      {(['de', 'en'] as const).map((nextLocale) => (
-        <button
-          className={cn(
-            'inline-flex h-8 min-w-9 items-center justify-center gap-1 rounded-[6px] px-2 text-xs font-semibold text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground',
-            locale === nextLocale && 'bg-brand-subtle text-brand hover:bg-brand-subtle hover:text-brand',
-          )}
-          key={nextLocale}
-          onClick={() => setLocale(nextLocale)}
-          type="button"
-        >
-          <Languages className="size-3.5" />
-          <span>{nextLocale.toUpperCase()}</span>
-        </button>
-      ))}
-    </div>
+      <Github className="size-4 shrink-0" />
+      <span className="hidden sm:inline">{t.authLock.repositoryLabel}</span>
+      <ExternalLink className="hidden size-3 shrink-0 sm:inline" />
+    </a>
   )
 }

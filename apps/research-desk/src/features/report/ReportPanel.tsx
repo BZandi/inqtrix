@@ -123,8 +123,8 @@ export function ReportPanel({
       )}
     >
       <Tabs defaultValue="preview" className="flex h-full min-h-[420px] flex-col lg:min-h-0">
-        <div className="border-b border-border">
-          <div className="flex h-12 items-center justify-between gap-3 px-3">
+        <div>
+          <div className="flex h-12 items-center justify-between gap-3 border-b border-border px-3">
             <div className="min-w-0">
               <h2 className="truncate text-sm font-semibold text-foreground">
                 {panelTitle}
@@ -189,7 +189,7 @@ export function ReportPanel({
             </div>
           </div>
           {selectedRun && (
-            <div className="border-t border-border px-4 py-2.5">
+            <div className="border-b border-border px-4 py-2.5">
               <div className="min-w-0">
                 <p className="truncate text-xs text-muted-foreground">
                   {selectedRun.summary.title}

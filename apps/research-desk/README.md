@@ -98,7 +98,7 @@ Bare IP addresses without scheme are not accepted by the browser fetch
 layer. Leave the variable unset during local proxy development.
 
 If the server has `INQTRIX_SERVER_API_KEY` enabled, enter the matching
-Bearer token in the app's Settings view at runtime; do not put API keys
+Bearer token in the app's Settings > Security view at runtime; do not put API keys
 into `VITE_*` variables because they are exposed in the browser bundle.
 
 ### Available environment variables

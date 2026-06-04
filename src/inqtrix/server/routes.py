@@ -83,6 +83,8 @@ log = logging.getLogger("inqtrix")
 RunMode = Literal["research", "direct_llm"]
 _WORKSPACE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,80}$")
 _WORKSPACE_ID_HEADER = "x-inqtrix-workspace-id"
+_EDITOR_INSTRUCT_CONTEXT_FLOOR_TOKENS = 128_000
+_EDITOR_INSTRUCT_RESERVED_PROMPT_TOKENS = 6_000
 
 
 def create_router() -> APIRouter:
@@ -895,7 +897,16 @@ def register_routes(
 
         llm = resolved.providers.llm
         context_window = getattr(llm, "context_window_tokens", None)
-        budget_chars = max(2000, (context_window or 16000) - 6000) * 3
+        if not isinstance(context_window, int) or context_window <= 0:
+            context_window = None
+        effective_context_window = max(
+            context_window or 0,
+            _EDITOR_INSTRUCT_CONTEXT_FLOOR_TOKENS,
+        )
+        budget_chars = max(
+            2000,
+            effective_context_window - _EDITOR_INSTRUCT_RESERVED_PROMPT_TOKENS,
+        ) * 3
         if len(instruct_request.document_markdown) > budget_chars:
             return _error_response(
                 400,

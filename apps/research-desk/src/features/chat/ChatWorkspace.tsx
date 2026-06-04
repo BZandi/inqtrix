@@ -1065,7 +1065,7 @@ export default function ChatWorkspace({
             orientation="horizontal"
           >
             <ResizablePanel
-              className="min-h-0 min-w-0 overflow-hidden border-r border-border bg-surface/60"
+              className="min-h-0 min-w-0 overflow-hidden bg-surface/60"
               defaultSize="26%"
               maxSize="42%"
               minSize="18%"

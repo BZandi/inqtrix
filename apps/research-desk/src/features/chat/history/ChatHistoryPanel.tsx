@@ -326,7 +326,7 @@ export function ChatHistoryPanel({
 
   return (
     <aside className="flex min-h-0 flex-col border-b border-border bg-surface/60 lg:h-full lg:border-b-0">
-      <div className="flex min-h-14 items-center justify-between gap-2 border-b border-border px-3">
+      <div className="flex h-12 items-center justify-between gap-2 border-b border-border px-3">
         <div className="flex min-w-0 items-center gap-2">
           <MessagesSquare className="size-4 shrink-0 text-foreground/80" />
           <h1 className="truncate text-sm font-semibold text-foreground">
@@ -338,7 +338,7 @@ export function ChatHistoryPanel({
             <TooltipTrigger asChild>
               <Button
                 aria-label={t.chat.newGroup}
-                className="size-8 shrink-0"
+                className="size-7 shrink-0 rounded-md"
                 onClick={onCreateThreadGroup}
                 size="icon"
                 type="button"
@@ -353,11 +353,11 @@ export function ChatHistoryPanel({
             <TooltipTrigger asChild>
               <Button
                 aria-label={t.chat.new}
-                className="size-8 shrink-0"
+                className="size-7 shrink-0 rounded-md"
                 onClick={onCreateThread}
                 size="icon"
                 type="button"
-                variant="outline"
+                variant="ghost"
               >
                 <Plus className="size-4" />
               </Button>
@@ -369,7 +369,7 @@ export function ChatHistoryPanel({
               <TooltipTrigger asChild>
                 <Button
                   aria-label={t.chat.hideHistory}
-                  className="size-8 shrink-0"
+                  className="size-7 shrink-0 rounded-md"
                   onClick={onHide}
                   size="icon"
                   type="button"

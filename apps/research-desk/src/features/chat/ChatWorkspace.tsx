@@ -531,7 +531,7 @@ export default function ChatWorkspace({
 
   const conversationPanel = (
         <section className="flex min-h-[620px] min-w-0 flex-col bg-background lg:h-full lg:min-h-0 lg:overflow-hidden">
-	          <div className="z-10 flex min-h-14 shrink-0 items-center justify-between gap-2 border-b border-border bg-background px-4 py-2 md:px-6">
+	          <div className="z-10 flex h-12 shrink-0 items-center justify-between gap-2 border-b border-border bg-background px-4 md:px-6">
             <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
               <MessageSquareText className="size-4 shrink-0 text-foreground/80" />
               <div className="min-w-0 flex-1 overflow-hidden">
@@ -577,7 +577,7 @@ export default function ChatWorkspace({
                   )}
                 </div>
                 <p
-                  className="max-w-md truncate text-xs text-muted-foreground"
+                  className="max-w-md truncate text-[11px] leading-4 text-muted-foreground"
                   title={selectedThread ? selectedThread.preview : undefined}
                 >
                   {selectedThread ? selectedThread.preview : t.chat.empty}
@@ -591,7 +591,7 @@ export default function ChatWorkspace({
                     aria-label={t.chat.incognito}
                     aria-pressed={isIncognito}
                     className={cn(
-                      'size-8 text-foreground/75',
+                      'size-7 text-foreground/75',
                       isIncognito && 'bg-brand-subtle text-brand hover:bg-brand-subtle',
                     )}
                     disabled={isSending}
@@ -605,14 +605,14 @@ export default function ChatWorkspace({
 	                </TooltipTrigger>
 	                <TooltipContent>{t.chat.incognito}</TooltipContent>
 	              </Tooltip>
-	              <div className="flex h-8 overflow-hidden rounded-md border border-border bg-card shadow-[0_1px_2px_var(--shadow-hairline)]">
+	              <div className="flex h-7 overflow-hidden rounded-md border border-border bg-card shadow-[0_1px_2px_var(--shadow-hairline)]">
 	                <Tooltip>
 	                  <TooltipTrigger asChild>
 	                    <Button
 	                      aria-label={isMessageSelectionMode ? t.chat.exitMessageEditMode : t.chat.editMessages}
 	                      aria-pressed={isMessageSelectionMode}
 	                      className={cn(
-	                        'h-8 w-8 rounded-none border-r border-border text-foreground/75 hover:text-foreground',
+	                        'h-7 w-7 rounded-none border-r border-border text-foreground/75 hover:text-foreground',
 	                        isMessageSelectionMode && 'bg-brand-subtle text-brand hover:bg-brand-subtle hover:text-brand',
 	                      )}
 	                      disabled={!canManageMessages && !isMessageSelectionMode}
@@ -632,7 +632,7 @@ export default function ChatWorkspace({
 	                  <TooltipTrigger asChild>
 	                    <Button
 	                      aria-label={t.chat.clearChat}
-                      className="h-8 w-8 rounded-none border-r border-border text-foreground/75 hover:text-foreground"
+                      className="h-7 w-7 rounded-none border-r border-border text-foreground/75 hover:text-foreground"
                       disabled={!selectedThread || isSending}
                       onClick={onClearThread}
                       size="icon"
@@ -648,7 +648,7 @@ export default function ChatWorkspace({
                   <TooltipTrigger asChild>
                     <Button
                       aria-label={t.chat.delete}
-                      className="h-8 w-8 rounded-none text-foreground/75 hover:text-destructive"
+                      className="h-7 w-7 rounded-none text-foreground/75 hover:text-destructive"
                       disabled={!selectedThread || isIncognito}
                       onClick={deleteSelectedThread}
                       size="icon"

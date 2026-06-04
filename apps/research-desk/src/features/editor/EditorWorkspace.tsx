@@ -2538,7 +2538,7 @@ function EditorCommentsPanel({
 
   return (
     <aside className="flex w-[22rem] shrink-0 flex-col bg-background">
-      <div className="flex h-14 items-center justify-between border-b border-border px-4">
+      <div className="flex h-12 items-center justify-between border-b border-border px-3">
         <div className="flex items-center gap-2">
           <MessageSquarePlus className="size-4 text-brand" />
           <h2 className="text-sm font-semibold">{copy.assistant}</h2>

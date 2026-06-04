@@ -639,14 +639,21 @@ export function researchDeskReducer(
         now,
       )
     }
+    // Spread into a fresh object before adding the new suggestions. When nothing was
+    // retired, the retire helpers return the input map by reference, so mutating it here
+    // would keep `state.editorSuggestions` referentially equal across the update. Consumers
+    // memoize on that reference (e.g. documentSuggestions in useEditorSuggestions), so an
+    // in-place mutation leaves the new suggestion invisible until an unrelated re-render --
+    // the "first suggestion only shows after a second action" bug in production builds.
+    const nextEditorSuggestions = { ...editorSuggestions }
     for (const suggestion of action.suggestions) {
-      editorSuggestions[suggestion.id] = suggestion
+      nextEditorSuggestions[suggestion.id] = suggestion
     }
     return {
       ...state,
       dirty: true,
       editorSuggestionGroups: { ...state.editorSuggestionGroups, [action.group.id]: action.group },
-      editorSuggestions,
+      editorSuggestions: nextEditorSuggestions,
     }
   }
   if (

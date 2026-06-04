@@ -1,19 +1,26 @@
+import { useId } from 'react'
+
 type BrandMarkProps = {
   className?: string
 }
 
 /**
- * Inqtrix brand mark, simplified for small UI sizes (header, ~24–32px): a broken
- * research-orbit ring with a few nodes around a central verified-check core, in
- * the brand teal→purple gradient. Hand-derived from the detailed logo-kit mark,
- * which turns to mush below ~40px (too many thin rings + ~20 tiny nodes). Drawn
- * as a vector so it stays crisp at any size, and self-contained (filled core +
- * mid-tone gradient) so it reads on both light and dark headers without a swap.
+ * Small-size Inqtrix mark for compact UI chrome.
+ *
+ * The full asset-kit mark has several rings, connector lines, shadows, and many
+ * nodes. Those details are useful in hero placements, but become pixel-noisy in
+ * the 24-32px header range. This version turns the brand idea into a compact
+ * "verified query" mark: a Q-like inquiry orbit, one evidence node, and a check.
+ * It uses theme tokens for the gradient so it stays balanced across the app's
+ * light, dark, preset, and high contrast palettes.
  *
  * Decorative: the adjacent "Inqtrix" wordmark carries the accessible name, so
  * this is `aria-hidden`.
  */
 export function BrandMark({ className }: BrandMarkProps) {
+  const gradientId = `inqtrix-mark-${useId().replaceAll(':', '')}`
+  const gradient = `url(#${gradientId})`
+
   return (
     <svg
       aria-hidden="true"
@@ -23,19 +30,33 @@ export function BrandMark({ className }: BrandMarkProps) {
       xmlns="http://www.w3.org/2000/svg"
     >
       <defs>
-        <linearGradient id="inqtrix-mark" x1="4" y1="5" x2="27" y2="27" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#7F77DD" />
-          <stop offset="1" stopColor="#34BD98" />
+        <linearGradient
+          gradientUnits="userSpaceOnUse"
+          id={gradientId}
+          x1="6"
+          x2="27"
+          y1="5"
+          y2="27"
+        >
+          <stop stopColor="var(--brand)" />
+          <stop offset="0.55" stopColor="var(--file)" />
+          <stop offset="1" stopColor="var(--success)" />
         </linearGradient>
       </defs>
       <g strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="16" cy="16" r="12.3" stroke="url(#inqtrix-mark)" strokeWidth="2.1" strokeDasharray="58 19" transform="rotate(108 16 16)" />
-        <path d="M16 16 5.4 9.9M16 16l11-1.6" stroke="url(#inqtrix-mark)" strokeWidth="1.3" opacity="0.5" />
-        <circle cx="5.4" cy="9.9" r="2.3" fill="#7F77DD" />
-        <circle cx="27" cy="14.4" r="2" fill="#34BD98" />
-        <circle cx="13.6" cy="27.9" r="1.7" fill="#46C0A6" />
-        <circle cx="16" cy="16" r="6.2" fill="url(#inqtrix-mark)" />
-        <path d="m13 16.3 2.1 2.2 4.1-4.6" stroke="#fff" strokeWidth="2" />
+        <circle cx="15.25" cy="15.25" r="10.1" stroke={gradient} strokeWidth="4.25" />
+        <path
+          d="m21.75 22.05 4.85 4.75"
+          stroke={gradient}
+          strokeWidth="4.25"
+        />
+        <circle cx="22.05" cy="8.45" fill={gradient} r="3.05" />
+        <circle cx="22.05" cy="8.45" fill="var(--background)" r="1.3" />
+        <path
+          d="m10.55 15.75 3.55 3.6 6.65-7.3"
+          stroke="var(--success)"
+          strokeWidth="2.65"
+        />
       </g>
     </svg>
   )

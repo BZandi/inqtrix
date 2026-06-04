@@ -1,4 +1,4 @@
-import { Database, FileText, MessagesSquare, Search, Settings, type LucideIcon } from '@/components/icons'
+import { Database, FileText, Globe2, MessagesSquare, Settings, type LucideIcon } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useLocale } from '@/i18n/LocaleProvider'
@@ -17,7 +17,7 @@ export function AppRail({ activeView, onViewChange }: AppRailProps) {
     label: string
     value: AppView
   }> = [
-    { icon: Search, label: t.navigation.research, value: 'research' },
+    { icon: Globe2, label: t.navigation.research, value: 'research' },
     { icon: MessagesSquare, label: t.navigation.chat, value: 'chat' },
     { icon: FileText, label: t.navigation.editor, value: 'editor' },
   ]

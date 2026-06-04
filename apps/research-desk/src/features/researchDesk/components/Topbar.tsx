@@ -50,7 +50,7 @@ export function Topbar({
       <div className="flex min-h-[var(--header-h)] w-full flex-wrap items-center gap-3 py-1.5 pr-4 md:pr-5 xl:pr-8">
         <div className="flex min-w-0 items-center">
           <div className="flex w-12 shrink-0 items-center justify-center md:w-14">
-            <BrandMark className="size-7 shrink-0" />
+            <BrandMark className="size-8 shrink-0" />
           </div>
           <span className="text-lg font-semibold tracking-normal text-brand">
             {t.appName}

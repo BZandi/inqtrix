@@ -240,13 +240,29 @@ def test_route_uses_structured_output_schema_when_available() -> None:
     assert llm.kwargs["schema_name"] == EDITOR_INSTRUCT_SCHEMA_NAME
 
 
-def test_route_rejects_document_over_budget_before_model_call() -> None:
+def test_route_allows_document_against_modern_editor_budget_floor() -> None:
     client, llm = _make_client(llm=_CapturingLLM(context_window_tokens=7000))
 
     response = client.post(
         "/v1/editor/instruct",
         json={
             "document_markdown": "x" * 7000,
+            "instruction": "Überarbeite das Dokument.",
+            "locale": "de",
+        },
+    )
+
+    assert response.status_code == 200
+    assert llm.prompt is not None
+
+
+def test_route_rejects_document_over_budget_before_model_call() -> None:
+    client, llm = _make_client(llm=_CapturingLLM(context_window_tokens=7000))
+
+    response = client.post(
+        "/v1/editor/instruct",
+        json={
+            "document_markdown": "x" * 366_001,
             "instruction": "Überarbeite das Dokument.",
             "locale": "de",
         },
@@ -351,7 +367,10 @@ def test_route_truncates_oversized_attachments_with_visible_warning() -> None:
             "document_markdown": "Dieser Absatz ist zu lang.",
             "instruction": "Nutze Fakten aus [1].",
             "locale": "de",
-            "attachments": [{"label": "alpha", "content": "x" * 50_000}],
+            "attachments": [
+                {"label": f"alpha-{index}", "content": "x" * 95_000}
+                for index in range(4)
+            ],
         },
     )
 

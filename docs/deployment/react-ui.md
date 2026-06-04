@@ -57,8 +57,12 @@ The assistant has two LLM-backed server contracts:
 - `/v1/editor/instruct` handles free document-level instructions from the
   composer. The request sends the current Markdown document plus the instruction;
   the response returns an assistant message and a list of content-anchored edits
-  (`replace`, `before`, `after`, or `append`). The UI renders these as document
-  changes that can be accepted or rejected individually or as a group.
+  (`replace`, `before`, `after`, or `append`). The route budgets document-wide
+  edits against at least a 128k-token editor context floor before applying the
+  remaining hard `400_000` character payload guard, so modern local stacks do not
+  reject ordinary reports because of a stale or missing provider context-window
+  hint. The UI renders these as document changes that can be accepted or rejected
+  individually or as a group.
 
 Both endpoints also accept an optional additive `attachments` array of reference
 documents (`{label, content, page_count, size_bytes}`) -- user-uploaded source
@@ -598,14 +602,15 @@ after that probe succeeds does the app store the token in React memory and pass
 it to protected `/v1/*` requests and to the fetch-based SSE stream through the
 `Authorization` header. The token is not stored in `localStorage`,
 `sessionStorage`, project files, Markdown exports, logs, URLs, or `VITE_*`
-variables, so a page reload asks for it again.
+variables, so a page reload asks for it again. The same runtime token field is
+also available under Settings > Security while the app is open.
 
-The unlock gate and Settings workspace both show the repository, documentation,
-and license links. When `/health` includes the server `legal` block, the
-Settings workspace uses that source URL, license identifier, copyright notice,
-attribution notice, and no-warranty notice; otherwise it falls back to the
-bundled Inqtrix project metadata. The unlock gate also shows a static
-no-warranty usage notice before authentication.
+The unlock gate and Settings > Licensing section both show the repository,
+documentation, and license links. When `/health` includes the server `legal`
+block, the Settings workspace uses that source URL, license identifier,
+copyright notice, attribution notice, and no-warranty notice; otherwise it
+falls back to the bundled Inqtrix project metadata. The unlock gate also shows
+a static no-warranty usage notice before authentication.
 
 The unlock gate is a UX guard, not the security boundary. The backend Bearer
 dependency remains authoritative. Any non-local deployment that uses Bearer
@@ -684,20 +689,34 @@ task lists plus TeX math rendered through KaTeX. Message hover actions expose a
 copy button for the rendered message source, and thread titles are edited
 inline by focusing the title, then committing on blur or Enter.
 
-Completed research reports and chat rules attached in chat remain regular chat
-attachments in the exported project. For the live request only, the client
-prepends bounded context blocks to the current user message so the model can
-answer against the selected material without adding a second persisted context
-model. Rules are ordered before research reports, and the visible message
-remains the user's own text plus compact attachment chips.
+Completed research reports and Prompt Library entries attached in chat remain
+regular chat attachments in the exported project. For the live request only,
+the client prepends bounded context blocks to the current user message so the
+model can answer against the selected material without adding a second
+persisted context model. Prompt Library entries are ordered before research
+reports, and the visible message remains the user's own text plus compact
+attachment chips.
 
-Chat rules are project-scoped prompt templates, not backend resources. Each
-rule has a required lowercase slug label (`a-z`, digits, hyphens, max 48
-characters), a title, and Markdown prompt content. The composer supports
-`@rules:<label>` and `@research:<label>` mentions with keyboard completion;
-selecting a mention converts it into a chip. Remaining exact mentions in the
-draft are resolved defensively on send. Unknown labels block the send with a
-composer warning instead of being silently ignored.
+Prompt Library entries are project-scoped prompt templates, not backend
+resources. Each entry has a required lowercase slug label (`a-z`, digits,
+hyphens, max 48 characters), a title, Markdown prompt content, a category, a
+Chat/Editor visibility setting, and an autocomplete setting. The categories are
+Instructions, Functions, and Context Packs. Functions are the only entries used
+as prompt-chaining steps; Instructions and Context Packs can be attached as
+context but are not chained. Context Packs can also link existing Database
+files or file groups through a search-based picker with a bounded result list.
+The prompt text can place linked files with `{{context}}`; if that placeholder
+is omitted, the rendered context blocks are appended at the end. Attaching a
+Context Pack stores the rendered snapshot in chat history so older chats do not
+drift after Database edits. Disabling autocomplete hides an entry from all
+surfaces and disables its Chat/Editor visibility controls. The composer keeps
+the backward-compatible `@rules:<label>` mention shortcut and supports
+`@research:<label>` mentions with keyboard completion; `@rules:` autocomplete
+filters entries per surface and groups visible results by category. The Prompt
+Library list is sorted by category, then title. Selecting a mention converts it
+into a chip. Remaining exact mentions in the draft are resolved defensively on
+send. Unknown labels block the send with a composer warning instead of being
+silently ignored.
 
 Run cancellation is explicit and non-optimistic. The run card exposes a cancel
 action for queued and running native API runs. The button calls
@@ -772,12 +791,16 @@ the existing transcript to `/v1/chat/completions`. These operations rewrite only
 the affected chat thread in project state; they do not create new backend API
 concepts.
 
-Project export persists chat rules separately under `rules/`, one Markdown file
-per label. Rule files use `kind: "inqtrix.chat_rule"` frontmatter with
-`rule_id`, `label`, `title`, `created_at`, and `updated_at`; the file body is
-the prompt text. `project.md` also carries `rule_order` so the rule library
-order remains stable. Project load accepts missing rule data as an empty rule
-library and keeps existing chat attachment snapshots readable.
+Project export persists Prompt Library entries separately under `rules/`, one
+Markdown file per label. Rule files keep `kind: "inqtrix.chat_rule"`
+frontmatter with `rule_id`, `label`, `title`, `created_at`, and `updated_at`;
+new Prompt Library fields (`category`, `visibility`,
+`include_in_autocomplete`, and `linked_context_refs`) are additive, and the file
+body is the prompt text. `project.md` also carries `rule_order` so the Prompt
+Library order remains stable. Project load accepts missing Prompt Library data
+as an empty library, defaults older rule files to Instruction entries visible
+in Chat and Editor autocomplete, and keeps existing chat attachment snapshots
+readable.
 
 `project.md` also persists project UI preferences under `preferences`: locale,
 theme mode (`light`, `dark`, or `system`), theme preset, and contrast mode.

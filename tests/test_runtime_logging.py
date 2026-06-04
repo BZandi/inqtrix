@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -792,6 +793,88 @@ def test_search_respects_provider_max_concurrency_cap():
         if entry.get("event") == "iteration_summary" and entry.get("node") == "search"
     ][-1]
     assert summary["worker_count"] == 1
+
+
+def test_search_retry_progress_labels_parallel_query_position() -> None:
+    class _RetryingSearch:
+        def observe_retries(self, callback: Any) -> Any:
+            class _RetryContext:
+                def __enter__(self_inner: Any) -> Any:
+                    callback({
+                        "provider": "RetryingSearch",
+                        "model": "test-search",
+                        "attempt": 1,
+                        "max_attempts": 5,
+                        "delay_seconds": 0.0,
+                        "error_code": "APITimeoutError",
+                    })
+                    return self_inner
+
+                def __exit__(
+                    self_inner: Any,
+                    exc_type: type[BaseException] | None,
+                    exc: BaseException | None,
+                    tb: object | None,
+                ) -> bool:
+                    return False
+
+            return _RetryContext()
+
+        def search(self, query: str, **kwargs: Any) -> GroundedSearchResult:
+            return GroundedSearchResult(answer=f"Antwort fuer {query}")
+
+        def is_available(self) -> bool:
+            return True
+
+    class _LLM:
+        models = SimpleNamespace(reasoning_model="reasoning-model")
+
+        def complete(self, *args: Any, **kwargs: Any) -> str:
+            return ""
+
+        def is_available(self) -> bool:
+            return True
+
+    class _EmptyClaimExtraction:
+        def extract(self, *args: Any, **kwargs: Any) -> tuple[list[object], int, int]:
+            return ([], 0, 0)
+
+        def consume_nonfatal_notice(self) -> None:
+            return None
+
+    settings = AgentSettings(first_round_queries=2, testing_mode=True)
+    llm = _LLM()
+    defaults = create_default_strategies(settings, llm=llm, claim_extract_model="claim-extract-model")
+    strategies = StrategyContext(
+        source_tiering=defaults.source_tiering,
+        claim_extraction=_EmptyClaimExtraction(),
+        claim_consolidation=defaults.claim_consolidation,
+        risk_scoring=defaults.risk_scoring,
+        stop_criteria=defaults.stop_criteria,
+    )
+    progress_queue = Queue()
+    state = initial_state("Was ist passiert?", progress_queue=progress_queue, max_total_seconds=30)
+    state["queries"] = ["q1", "q2"]
+
+    search(
+        state,
+        providers=ProviderContext(llm=llm, search=_RetryingSearch()),
+        strategies=strategies,
+        settings=settings,
+    )
+
+    messages = []
+    while not progress_queue.empty():
+        messages.append(progress_queue.get()[1])
+
+    assert any("RetryingSearch-Retry 1/5 bei Websuche 1/2" in message for message in messages)
+    assert any("RetryingSearch-Retry 1/5 bei Websuche 2/2" in message for message in messages)
+    retry_operations = [
+        entry.get("operation")
+        for entry in state["iteration_logs"]
+        if entry.get("event") == "provider_retry"
+    ]
+    assert sorted(retry_operations) == ["Websuche 1/2", "Websuche 2/2"]
 
 
 def test_search_records_unknown_provider_ref_markers():

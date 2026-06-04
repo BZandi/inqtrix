@@ -37,6 +37,7 @@ export type ProjectUiState = {
   activeView: AppView
   chatChainingEnabled: boolean
   expandedJobId: string | null
+  isChatHistoryVisible: boolean
   isComposerVisible: boolean
   isReportExpanded: boolean
   isReportVisible: boolean
@@ -248,13 +249,24 @@ export type ResearchRunRecord = {
 
 export type ChatRole = 'assistant' | 'user'
 
+export type ChatRuleCategory = 'context' | 'function' | 'instruction'
+
+export type ChatRuleVisibility = {
+  chat: boolean
+  editor: boolean
+}
+
 export type ChatRuleRecord = {
+  category?: ChatRuleCategory
   contentMarkdown: string
   createdAt: string
   id: string
+  includeInAutocomplete?: boolean
   label: string
+  linkedContextRefs?: ChatContextReferenceRecord[]
   title: string
   updatedAt: string
+  visibility?: ChatRuleVisibility
 }
 
 export type ChatThreadGroupRecord = {

@@ -1,7 +1,8 @@
 import {
   AlertTriangle,
   BookOpen,
-  Database,
+  Check,
+  CircleUserRound,
   ExternalLink,
   Github,
   Monitor,
@@ -10,12 +11,13 @@ import {
   Scale,
   Server,
   Settings,
+  Shield,
+  SlidersHorizontal,
   Sun,
   type LucideIcon,
 } from '@/components/icons'
 import { motion } from 'motion/react'
-import type { ReactNode } from 'react'
-import { Button } from '@/components/ui/button'
+import { useState, type ReactNode } from 'react'
 import { Switch } from '@/components/ui/switch'
 import { useLocale } from '@/i18n/LocaleProvider'
 import type { InqtrixHealth, StackDiscoveryStatus } from '@/features/researchRuns/types'
@@ -37,6 +39,27 @@ type SettingsWorkspaceProps = {
   stackOptions: string[]
 }
 
+type SettingsSectionId =
+  | 'appearance'
+  | 'connection'
+  | 'licensing'
+  | 'preferences'
+  | 'security'
+
+type SettingsNavItem = {
+  description: string
+  icon: LucideIcon
+  id: SettingsSectionId
+  label: string
+}
+
+type SettingsNavGroup = {
+  icon: LucideIcon
+  id: 'account' | 'application'
+  items: SettingsNavItem[]
+  label: string
+}
+
 export default function SettingsWorkspace({
   apiError,
   apiHealth,
@@ -52,6 +75,7 @@ export default function SettingsWorkspace({
 }: SettingsWorkspaceProps) {
   const { contrastMode, preset, setContrastMode, setPreset, setTheme, theme } = useTheme()
   const { t } = useLocale()
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>('preferences')
   const modeOptions: Array<{
     icon: LucideIcon
     label: string
@@ -107,385 +131,880 @@ export default function SettingsWorkspace({
     : stackDiscoveryStatus === 'unsupported'
       ? t.settings.singleStackServer
       : t.settings.stackDiscoveryPending
+  const navGroups: SettingsNavGroup[] = [
+    {
+      icon: CircleUserRound,
+      id: 'account',
+      label: t.settings.account,
+      items: [
+        {
+          description: t.settings.preferencesDescription,
+          icon: SlidersHorizontal,
+          id: 'preferences',
+          label: t.settings.preferences,
+        },
+        {
+          description: t.settings.securityDescription,
+          icon: Shield,
+          id: 'security',
+          label: t.settings.security,
+        },
+      ],
+    },
+    {
+      icon: Settings,
+      id: 'application',
+      label: t.settings.application,
+      items: [
+        {
+          description: t.settings.appearanceDescription,
+          icon: Palette,
+          id: 'appearance',
+          label: t.settings.appearance,
+        },
+        {
+          description: t.settings.connectionDescription,
+          icon: Server,
+          id: 'connection',
+          label: t.settings.connection,
+        },
+      ],
+    },
+  ]
+  const standaloneItems: SettingsNavItem[] = [
+    {
+      description: t.settings.licensingDescription,
+      icon: Scale,
+      id: 'licensing',
+      label: t.settings.licensing,
+    },
+  ]
+  const activeItem =
+    [...navGroups.flatMap((group) => group.items), ...standaloneItems].find(
+      (item) => item.id === activeSection,
+    ) ?? navGroups[0].items[0]
 
   return (
-    <div className="flex min-h-0 w-full px-4 py-4 md:px-5 lg:h-full xl:px-8">
+    <SettingsShell reduceMotion={reduceMotion}>
+      <SettingsSidebar
+        activeSection={activeSection}
+        groups={navGroups}
+        isDemoMode={isDemoMode}
+        onSectionChange={setActiveSection}
+        standaloneItems={standaloneItems}
+      />
+      <SettingsPanel
+        activeItem={activeItem}
+        apiBaseUrl={apiBaseUrl}
+        apiError={apiError}
+        apiHealth={apiHealth}
+        apiKey={apiKey}
+        contrastMode={contrastMode}
+        hasMultiStackSelection={hasMultiStackSelection}
+        isDemoMode={isDemoMode}
+        legal={legal}
+        modeOptions={modeOptions}
+        onApiKeyChange={onApiKeyChange}
+        onDemoModeChange={onDemoModeChange}
+        onStackChange={onStackChange}
+        preset={preset}
+        presetOptions={presetOptions}
+        projectSourceUrl={projectSourceUrl}
+        selectedStack={selectedStack}
+        setContrastMode={setContrastMode}
+        setPreset={setPreset}
+        setTheme={setTheme}
+        stackDiscoveryStatus={stackDiscoveryStatus}
+        stackModeLabel={stackModeLabel}
+        stackOptions={stackOptions}
+        theme={theme}
+      />
+    </SettingsShell>
+  )
+}
+
+function SettingsShell({
+  children,
+  reduceMotion,
+}: {
+  children: ReactNode
+  reduceMotion: boolean | null
+}) {
+  return (
+    <div className="flex min-h-0 w-full bg-canvas lg:h-full">
       <motion.section
-        initial={reduceMotion ? false : { opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
+        className="grid min-h-[calc(100svh-var(--header-h))] w-full grid-rows-[auto_minmax(0,1fr)] lg:h-full lg:min-h-0 lg:grid-cols-[240px_minmax(0,1fr)] lg:grid-rows-1"
+        initial={reduceMotion ? false : { opacity: 0, y: 8 }}
         transition={appMotion.panel}
-        className="mx-auto flex min-h-[calc(100svh-var(--header-h)-2rem)] w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-[0_1px_2px_var(--shadow-hairline)] lg:h-full lg:min-h-0"
       >
-        <div className="flex shrink-0 items-center justify-between gap-4 border-b border-border px-5 py-4">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <Settings className="size-4 text-muted-foreground" />
-              <h1 className="text-sm font-semibold text-foreground">{t.settings.title}</h1>
-            </div>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              {t.settings.workspaceDescription}
-            </p>
-          </div>
-          <span
-            className={cn(
-              'inline-flex h-7 shrink-0 items-center rounded-md border px-2 text-xs font-semibold',
-              isDemoMode
-                ? 'border-brand/25 bg-brand-subtle text-brand'
-                : 'border-border bg-background text-muted-foreground',
-            )}
-          >
-            {isDemoMode ? t.common.demoMode : t.settings.localWorkspace}
-          </span>
-        </div>
-        <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto overscroll-contain [scrollbar-gutter:stable] [scrollbar-width:thin]">
-          <SettingsGroup
-            description={t.settings.workspaceDescription}
-            icon={Database}
-            title={t.settings.workspace}
-          >
-            <div className="rounded-lg border border-border bg-background/70">
-              <div className="flex items-start justify-between gap-4 p-4">
-                <div className="min-w-0">
-                  <p className="text-sm font-semibold text-foreground">
-                    {t.settings.demoMode}
-                  </p>
-                  <p className="mt-1 max-w-xl text-xs leading-5 text-muted-foreground">
-                    {t.settings.demoModeDescription}
-                  </p>
-                </div>
-                <Switch
-                  aria-describedby="demo-mode-warning"
-                  aria-label={t.settings.demoMode}
-                  checked={isDemoMode}
-                  onCheckedChange={onDemoModeChange}
-                />
-              </div>
-              <div
-                className="flex gap-2 border-t border-border/70 px-4 py-3 text-xs leading-5 text-muted-foreground"
-                id="demo-mode-warning"
-              >
-                <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" />
-                <p className="min-w-0">{t.settings.demoModeWarning}</p>
-              </div>
-            </div>
-          </SettingsGroup>
-
-          <SettingsGroup
-            description={t.settings.stackDescription}
-            icon={Server}
-            title={t.common.stack}
-          >
-            <div className="grid gap-4">
-              <SettingsRow label={t.settings.apiConnection}>
-                <div className="rounded-lg border border-border bg-background p-3 text-sm">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span
-                      className={cn(
-                        'inline-flex h-6 items-center rounded-md border px-2 text-xs font-semibold',
-                        apiHealth?.status === 'ok'
-                          ? 'border-success/20 bg-success-subtle text-success'
-                          : 'border-border bg-muted text-muted-foreground',
-                      )}
-                    >
-                      {apiHealth?.status ?? t.settings.notConnected}
-                    </span>
-                    {apiHealth?.auth_required && (
-                      <span className="inline-flex h-6 items-center rounded-md border border-warning/25 bg-warning/10 px-2 text-xs font-semibold text-warning">
-                        {t.settings.authRequired}
-                      </span>
-                    )}
-                    {apiHealth && (
-                      <span className="inline-flex h-6 items-center rounded-md border border-border bg-muted px-2 text-xs font-semibold text-muted-foreground">
-                        {stackModeLabel}
-                      </span>
-                    )}
-                  </div>
-                  <p className="mt-2 break-words text-xs leading-5 text-muted-foreground">
-                    {apiBaseUrl}
-                  </p>
-                  {apiHealth && (
-                    <div className="mt-2 grid gap-1 text-xs leading-5 text-muted-foreground sm:grid-cols-2">
-                      <span className="min-w-0 truncate">
-                        {t.settings.llmProvider}: <strong className="font-semibold text-foreground">{apiHealth.llm.provider}</strong>
-                      </span>
-                      <span className="min-w-0 truncate">
-                        {t.settings.searchProvider}: <strong className="font-semibold text-foreground">{apiHealth.search.provider}</strong>
-                      </span>
-                      {apiHealth.reasoning_model && (
-                        <span className="min-w-0 truncate sm:col-span-2">
-                          {t.settings.reasoningModel}: <strong className="font-semibold text-foreground">{apiHealth.reasoning_model}</strong>
-                        </span>
-                      )}
-                    </div>
-                  )}
-                  {apiError && (
-                    <p className="mt-2 text-xs leading-5 text-destructive">
-                      {apiError}
-                    </p>
-                  )}
-                </div>
-              </SettingsRow>
-              {(apiHealth?.auth_required || apiKey) && (
-                <SettingsRow label={t.settings.apiToken}>
-                  <input
-                    aria-label={t.settings.apiToken}
-                    autoComplete="off"
-                    className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground shadow-[0_1px_2px_var(--shadow-hairline)] outline-none transition focus-visible:ring-2 focus-visible:ring-ring"
-                    onChange={(event) => onApiKeyChange(event.target.value)}
-                    placeholder={t.settings.apiTokenPlaceholder}
-                    type="password"
-                    value={apiKey}
-                  />
-                </SettingsRow>
-              )}
-              <SettingsRow label={t.settings.currentStack}>
-                {hasMultiStackSelection ? (
-                  <div className="flex flex-wrap gap-2">
-                    {stackOptions.map((stack) => {
-                      const isActive = selectedStack === stack
-                      return (
-                        <Button
-                          aria-pressed={isActive}
-                          className="h-9 max-w-full"
-                          key={stack}
-                          onClick={() => onStackChange(stack)}
-                          type="button"
-                          variant={isActive ? 'default' : 'outline'}
-                        >
-                          <span className="max-w-64 truncate">{stack}</span>
-                        </Button>
-                      )
-                    })}
-                  </div>
-                ) : (
-                  <div className="max-w-full rounded-lg border border-border bg-background px-3 py-2">
-                    <div className="flex min-w-0 flex-wrap items-center gap-2">
-                      <span className="inline-flex h-6 shrink-0 items-center rounded-md border border-border bg-muted px-2 text-xs font-semibold text-muted-foreground">
-                        {stackModeLabel}
-                      </span>
-                      <span className="min-w-0 truncate text-sm font-semibold text-foreground">
-                        {selectedStack}
-                      </span>
-                    </div>
-                    {stackDiscoveryStatus === 'unsupported' && (
-                      <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                        {t.settings.singleStackDescription}
-                      </p>
-                    )}
-                  </div>
-                )}
-              </SettingsRow>
-            </div>
-          </SettingsGroup>
-
-          <SettingsGroup
-            description={t.settings.visualDesignDescription}
-            icon={Palette}
-            title={t.settings.visualDesign}
-          >
-            <div className="grid gap-5">
-              <SettingsRow label={t.settings.mode}>
-                <div className="flex flex-wrap gap-2">
-                  {modeOptions.map((option) => {
-                    const Icon = option.icon
-                    const isActive = theme === option.value
-                    return (
-                      <Button
-                        aria-pressed={isActive}
-                        className="h-9 gap-2"
-                        key={option.value}
-                        onClick={() => setTheme(option.value)}
-                        type="button"
-                        variant={isActive ? 'default' : 'outline'}
-                      >
-                        <Icon className="size-4" />
-                        <span>{option.label}</span>
-                      </Button>
-                    )
-                  })}
-                </div>
-              </SettingsRow>
-
-              <SettingsRow label={t.settings.theme}>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  {presetOptions.map((option) => {
-                    const isActive = preset === option.value
-                    return (
-                      <button
-                        aria-pressed={isActive}
-                        className={cn(
-                          'rounded-lg border border-border bg-background p-3 text-left shadow-[0_1px_2px_var(--shadow-hairline)] transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                          isActive && 'border-brand bg-brand-subtle',
-                        )}
-                        key={option.value}
-                        onClick={() => setPreset(option.value)}
-                        type="button"
-                      >
-                        <span className="flex items-center gap-2">
-                          <span
-                            className="size-4 rounded-full border border-border"
-                            style={{ background: option.accent }}
-                          />
-                          <span
-                            className="size-4 rounded-full border border-border"
-                            style={{ background: option.surface }}
-                          />
-                          <span className="ml-auto size-3 rounded-full border border-border bg-background" />
-                        </span>
-                        <span className="mt-3 block text-sm font-semibold text-foreground">
-                          {option.label}
-                        </span>
-                        <span className="mt-1 block text-xs leading-5 text-muted-foreground">
-                          {option.description}
-                        </span>
-                      </button>
-                    )
-                  })}
-                </div>
-              </SettingsRow>
-
-              <SettingsRow label={t.settings.highContrast}>
-                <div className="rounded-lg border border-border bg-background p-4">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0">
-                      <p className="text-sm font-semibold text-foreground">
-                        {t.settings.highContrast}
-                      </p>
-                      <p
-                        className="mt-1 max-w-xl text-xs leading-5 text-muted-foreground"
-                        id="high-contrast-description"
-                      >
-                        {t.settings.highContrastDescription}
-                      </p>
-                    </div>
-                    <Switch
-                      aria-describedby="high-contrast-description"
-                      aria-label={t.settings.highContrast}
-                      checked={contrastMode === 'high'}
-                      onCheckedChange={(checked) =>
-                        setContrastMode(checked ? 'high' : 'standard')}
-                    />
-                  </div>
-                </div>
-              </SettingsRow>
-            </div>
-          </SettingsGroup>
-
-          <SettingsGroup
-            description={t.settings.licensingDescription}
-            icon={Scale}
-            title={t.settings.licensing}
-          >
-            <div className="rounded-lg border border-border bg-background/70 p-4">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-sm font-semibold text-foreground">
-                    {legal?.project ?? t.appName}
-                  </p>
-                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                    {legal?.copyright ?? t.authLock.copyright}
-                  </p>
-                </div>
-                <span className="inline-flex h-7 shrink-0 items-center rounded-md border border-brand/25 bg-brand-subtle px-2 text-xs font-semibold text-brand">
-                  {legal?.license ?? t.authLock.licenseLabel}
-                </span>
-              </div>
-              <div className="mt-4 grid gap-2 text-xs leading-5 text-muted-foreground">
-                <SettingsInlineValue
-                  label={t.settings.projectSource}
-                  value={projectSourceUrl}
-                />
-                <SettingsInlineValue
-                  label={t.settings.legalNotice}
-                  value={legal?.notice ?? t.settings.attributionNotice}
-                />
-                <SettingsInlineValue
-                  label={t.settings.warranty}
-                  value={legal?.warranty_notice ?? t.authLock.warrantyNotice}
-                />
-              </div>
-              <p className="mt-3 text-xs leading-5 text-muted-foreground">
-                {t.settings.commercialLicensing}
-              </p>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <SettingsLink
-                  href={projectSourceUrl}
-                  icon={Github}
-                  label={t.authLock.repositoryLabel}
-                />
-                <SettingsLink
-                  href={t.authLock.documentationUrl}
-                  icon={BookOpen}
-                  label={t.authLock.documentationLabel}
-                />
-                <SettingsLink
-                  href={t.authLock.licenseUrl}
-                  icon={Scale}
-                  label={t.authLock.licenseLabel}
-                />
-              </div>
-            </div>
-          </SettingsGroup>
-        </div>
+        {children}
       </motion.section>
     </div>
   )
 }
 
-function SettingsGroup({
+function SettingsSidebar({
+  activeSection,
+  groups,
+  isDemoMode,
+  onSectionChange,
+  standaloneItems,
+}: {
+  activeSection: SettingsSectionId
+  groups: SettingsNavGroup[]
+  standaloneItems: SettingsNavItem[]
+  isDemoMode: boolean
+  onSectionChange: (section: SettingsSectionId) => void
+}) {
+  const { t } = useLocale()
+
+  return (
+    <aside className="min-w-0 border-b border-border bg-background/95 backdrop-blur lg:border-b-0 lg:border-r">
+      <div className="flex items-start justify-between gap-4 px-4 py-4 md:px-5 lg:block lg:px-5 lg:pb-4 lg:pt-5">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <Settings className="size-4 text-muted-foreground" />
+            <h1 className="text-base font-semibold leading-6 text-foreground">{t.settings.title}</h1>
+          </div>
+          <p className="mt-1 hidden max-w-48 text-xs leading-5 text-muted-foreground lg:block">
+            {t.settings.settingsDescription}
+          </p>
+        </div>
+        <StatusBadge
+          className="lg:mt-4"
+          label={isDemoMode ? t.common.demoMode : t.settings.localWorkspace}
+          tone={isDemoMode ? 'brand' : 'neutral'}
+        />
+      </div>
+      <nav
+        aria-label={t.settings.sectionsLabel}
+        className="flex gap-2 overflow-x-auto px-4 pb-3 [scrollbar-width:none] md:px-5 lg:block lg:space-y-4 lg:overflow-visible lg:px-3 lg:pb-5 [&::-webkit-scrollbar]:hidden"
+      >
+        {groups.map((group) => {
+          const GroupIcon = group.icon
+
+          return (
+            <div className="flex shrink-0 items-center gap-1.5 lg:block" key={group.id}>
+              <p className="hidden h-8 items-center gap-2 rounded-md px-2 text-sm font-semibold text-foreground lg:flex">
+                <GroupIcon className="size-4 text-muted-foreground" />
+                {group.label}
+              </p>
+              <div className="flex gap-1.5 lg:ml-6 lg:flex-col lg:gap-1">
+                {group.items.map((item) => (
+                  <SettingsNavButton
+                    item={item}
+                    isActive={activeSection === item.id}
+                    key={item.id}
+                    onClick={() => onSectionChange(item.id)}
+                  />
+                ))}
+              </div>
+            </div>
+          )
+        })}
+        {standaloneItems.length > 0 ? (
+          <div className="flex shrink-0 items-center gap-1.5 lg:block">
+            <div className="flex gap-1.5 lg:flex-col lg:gap-1">
+              {standaloneItems.map((item) => (
+                <SettingsNavButton
+                  item={item}
+                  isActive={activeSection === item.id}
+                  key={item.id}
+                  onClick={() => onSectionChange(item.id)}
+                />
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </nav>
+    </aside>
+  )
+}
+
+function SettingsNavButton({
+  isActive,
+  item,
+  onClick,
+}: {
+  isActive: boolean
+  item: SettingsNavItem
+  onClick: () => void
+}) {
+  const Icon = item.icon
+
+  return (
+    <button
+      aria-current={isActive ? 'page' : undefined}
+      className={cn(
+        'relative flex h-9 shrink-0 items-center gap-2 rounded-md border border-transparent px-3 text-sm font-medium text-muted-foreground transition hover:border-border hover:bg-card hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:h-8 lg:w-full lg:justify-start lg:px-2',
+        isActive && 'border-brand/20 bg-brand-subtle text-brand shadow-[0_1px_2px_var(--shadow-hairline)] hover:border-brand/20 hover:bg-brand-subtle hover:text-brand',
+      )}
+      onClick={onClick}
+      title={item.description}
+      type="button"
+    >
+      <span
+        aria-hidden
+        className={cn(
+          'absolute left-0 top-1/2 hidden h-4 w-0.5 -translate-y-1/2 rounded-full bg-transparent lg:block',
+          isActive && 'bg-brand',
+        )}
+      />
+      <Icon className="size-4 shrink-0" />
+      <span className="whitespace-nowrap">{item.label}</span>
+    </button>
+  )
+}
+
+function SettingsPanel({
+  activeItem,
+  apiBaseUrl,
+  apiError,
+  apiHealth,
+  apiKey,
+  contrastMode,
+  hasMultiStackSelection,
+  isDemoMode,
+  legal,
+  modeOptions,
+  onApiKeyChange,
+  onDemoModeChange,
+  onStackChange,
+  preset,
+  presetOptions,
+  projectSourceUrl,
+  selectedStack,
+  setContrastMode,
+  setPreset,
+  setTheme,
+  stackDiscoveryStatus,
+  stackModeLabel,
+  stackOptions,
+  theme,
+}: {
+  activeItem: SettingsNavItem
+  apiBaseUrl: string
+  apiError: string | null
+  apiHealth: InqtrixHealth | null
+  apiKey: string
+  contrastMode: 'high' | 'standard'
+  hasMultiStackSelection: boolean
+  isDemoMode: boolean
+  legal: InqtrixHealth['legal'] | undefined
+  modeOptions: Array<{
+    icon: LucideIcon
+    label: string
+    value: ThemeMode
+  }>
+  onApiKeyChange: (apiKey: string) => void
+  onDemoModeChange: (enabled: boolean) => void
+  onStackChange: (stack: string) => void
+  preset: ThemePreset
+  presetOptions: Array<{
+    accent: string
+    description: string
+    label: string
+    surface: string
+    value: ThemePreset
+  }>
+  projectSourceUrl: string
+  selectedStack: string
+  setContrastMode: (mode: 'high' | 'standard') => void
+  setPreset: (preset: ThemePreset) => void
+  setTheme: (theme: ThemeMode) => void
+  stackDiscoveryStatus: StackDiscoveryStatus
+  stackModeLabel: string
+  stackOptions: string[]
+  theme: ThemeMode
+}) {
+  return (
+    <main className="min-h-0 overflow-y-auto overscroll-contain px-4 py-5 [scrollbar-gutter:stable] [scrollbar-width:thin] md:px-6 lg:px-8 xl:px-10">
+      <div className="flex max-w-[920px] flex-col gap-6 pb-8">
+        <SettingsPanelHeader item={activeItem} />
+        {activeItem.id === 'preferences' ? (
+          <PreferencesPanel
+            isDemoMode={isDemoMode}
+            onDemoModeChange={onDemoModeChange}
+          />
+        ) : activeItem.id === 'security' ? (
+          <SecurityPanel
+            apiHealth={apiHealth}
+            apiKey={apiKey}
+            onApiKeyChange={onApiKeyChange}
+          />
+        ) : activeItem.id === 'appearance' ? (
+          <AppearancePanel
+            contrastMode={contrastMode}
+            modeOptions={modeOptions}
+            preset={preset}
+            presetOptions={presetOptions}
+            setContrastMode={setContrastMode}
+            setPreset={setPreset}
+            setTheme={setTheme}
+            theme={theme}
+          />
+        ) : activeItem.id === 'connection' ? (
+          <ConnectionPanel
+            apiBaseUrl={apiBaseUrl}
+            apiError={apiError}
+            apiHealth={apiHealth}
+            hasMultiStackSelection={hasMultiStackSelection}
+            onStackChange={onStackChange}
+            selectedStack={selectedStack}
+            stackDiscoveryStatus={stackDiscoveryStatus}
+            stackModeLabel={stackModeLabel}
+            stackOptions={stackOptions}
+          />
+        ) : (
+          <LicensingPanel
+            legal={legal}
+            projectSourceUrl={projectSourceUrl}
+          />
+        )}
+      </div>
+    </main>
+  )
+}
+
+function SettingsPanelHeader({ item }: { item: SettingsNavItem }) {
+  return (
+    <header className="min-w-0 border-b border-border pb-4">
+      <h2 className="text-xl font-semibold leading-8 text-foreground">{item.label}</h2>
+      <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
+        {item.description}
+      </p>
+    </header>
+  )
+}
+
+function PreferencesPanel({
+  isDemoMode,
+  onDemoModeChange,
+}: {
+  isDemoMode: boolean
+  onDemoModeChange: (enabled: boolean) => void
+}) {
+  const { locale, setLocale, t } = useLocale()
+
+  return (
+    <SettingsSection>
+      <div className="flex flex-col gap-3 px-4 py-3.5 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
+        <div className="min-w-0 sm:flex-1">
+          <h4 className="text-sm font-medium text-foreground">{t.settings.demoMode}</h4>
+          <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{t.settings.demoModeDescription}</p>
+          <div
+            className="mt-2 flex gap-2 rounded-md border border-warning/25 bg-warning-subtle/35 p-2.5 text-xs leading-5 text-foreground"
+            id="demo-mode-warning"
+          >
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" />
+            <p className="min-w-0">{t.settings.demoModeWarning}</p>
+          </div>
+        </div>
+        <div className="shrink-0 sm:mt-0.5">
+          <Switch
+            aria-describedby="demo-mode-warning"
+            aria-label={t.settings.demoMode}
+            checked={isDemoMode}
+            onCheckedChange={onDemoModeChange}
+          />
+        </div>
+      </div>
+      <SettingsRow
+        description={t.settings.languageDescription}
+        title={t.common.language}
+      >
+        <SettingsSegmented
+          ariaLabel={t.common.language}
+          onChange={setLocale}
+          options={[
+            { label: 'DE', value: 'de' },
+            { label: 'EN', value: 'en' },
+          ]}
+          value={locale}
+        />
+      </SettingsRow>
+      <SettingsRow
+        description={t.settings.workspaceStateDescription}
+        title={t.settings.workspaceState}
+      >
+        <StatusBadge
+          label={isDemoMode ? t.common.demoMode : t.settings.localWorkspace}
+          tone={isDemoMode ? 'brand' : 'neutral'}
+        />
+      </SettingsRow>
+    </SettingsSection>
+  )
+}
+
+function SecurityPanel({
+  apiHealth,
+  apiKey,
+  onApiKeyChange,
+}: {
+  apiHealth: InqtrixHealth | null
+  apiKey: string
+  onApiKeyChange: (apiKey: string) => void
+}) {
+  const { t } = useLocale()
+  const shouldShowTokenInput = apiHealth?.auth_required || apiKey
+
+  return (
+    <SettingsSection>
+      {shouldShowTokenInput ? (
+        <SettingsRow
+          description={t.settings.runtimeTokenDescription}
+          title={t.settings.apiToken}
+        >
+          <input
+            aria-label={t.settings.apiToken}
+            autoComplete="off"
+            className="h-9 w-full rounded-md border border-border bg-background px-3 text-left text-sm text-foreground shadow-[0_1px_2px_var(--shadow-hairline)] outline-none transition focus-visible:ring-2 focus-visible:ring-ring sm:w-72"
+            onChange={(event) => onApiKeyChange(event.target.value)}
+            placeholder={t.settings.apiTokenPlaceholder}
+            type="password"
+            value={apiKey}
+          />
+        </SettingsRow>
+      ) : (
+        <SettingsRow
+          description={t.settings.noBearerRequiredDescription}
+          title={t.settings.noBearerRequired}
+        >
+          <StatusBadge label={t.settings.notConnected} tone="neutral" />
+        </SettingsRow>
+      )}
+    </SettingsSection>
+  )
+}
+
+function AppearancePanel({
+  contrastMode,
+  modeOptions,
+  preset,
+  presetOptions,
+  setContrastMode,
+  setPreset,
+  setTheme,
+  theme,
+}: {
+  contrastMode: 'high' | 'standard'
+  modeOptions: Array<{
+    icon: LucideIcon
+    label: string
+    value: ThemeMode
+  }>
+  preset: ThemePreset
+  presetOptions: Array<{
+    accent: string
+    description: string
+    label: string
+    surface: string
+    value: ThemePreset
+  }>
+  setContrastMode: (mode: 'high' | 'standard') => void
+  setPreset: (preset: ThemePreset) => void
+  setTheme: (theme: ThemeMode) => void
+  theme: ThemeMode
+}) {
+  const { t } = useLocale()
+
+  return (
+    <SettingsSection>
+      <SettingsRow description={t.settings.modeDescription} title={t.settings.mode}>
+        <SettingsSegmented
+          ariaLabel={t.settings.mode}
+          onChange={setTheme}
+          options={modeOptions}
+          value={theme}
+        />
+      </SettingsRow>
+      <SettingsRowBlock description={t.settings.themeDescription} title={t.settings.theme}>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          {presetOptions.map((option) => {
+            const isActive = preset === option.value
+
+            return (
+              <button
+                aria-pressed={isActive}
+                className={cn(
+                  'group relative rounded-md border border-border bg-background p-2.5 text-left transition-colors hover:border-brand/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                  isActive && 'border-brand ring-2 ring-brand',
+                )}
+                key={option.value}
+                onClick={() => setPreset(option.value)}
+                type="button"
+              >
+                {isActive ? (
+                  <span className="absolute right-2 top-2 inline-flex size-4 items-center justify-center rounded-full bg-brand text-brand-foreground">
+                    <Check className="size-3" />
+                  </span>
+                ) : null}
+                <span
+                  aria-hidden
+                  className="flex h-9 items-center gap-1.5 overflow-hidden rounded-[5px] border border-border px-2"
+                  style={{ background: option.surface }}
+                >
+                  <span className="h-2.5 w-10 rounded-full" style={{ background: option.accent }} />
+                  <span className="h-2.5 w-5 rounded-full opacity-40" style={{ background: option.accent }} />
+                </span>
+                <span className="mt-2 block text-sm font-medium text-foreground">{option.label}</span>
+                <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">{option.description}</span>
+              </button>
+            )
+          })}
+        </div>
+      </SettingsRowBlock>
+      <SettingsRow
+        description={t.settings.highContrastDescription}
+        descriptionId="high-contrast-description"
+        title={t.settings.highContrast}
+      >
+        <Switch
+          aria-describedby="high-contrast-description"
+          aria-label={t.settings.highContrast}
+          checked={contrastMode === 'high'}
+          onCheckedChange={(checked) => setContrastMode(checked ? 'high' : 'standard')}
+        />
+      </SettingsRow>
+    </SettingsSection>
+  )
+}
+
+function ConnectionPanel({
+  apiBaseUrl,
+  apiError,
+  apiHealth,
+  hasMultiStackSelection,
+  onStackChange,
+  selectedStack,
+  stackDiscoveryStatus,
+  stackModeLabel,
+  stackOptions,
+}: {
+  apiBaseUrl: string
+  apiError: string | null
+  apiHealth: InqtrixHealth | null
+  hasMultiStackSelection: boolean
+  onStackChange: (stack: string) => void
+  selectedStack: string
+  stackDiscoveryStatus: StackDiscoveryStatus
+  stackModeLabel: string
+  stackOptions: string[]
+}) {
+  const { t } = useLocale()
+  const modelRows = apiHealth
+    ? [
+        { label: t.settings.classifyModel, value: apiHealth.classify_model },
+        { label: t.settings.evaluateModel, value: apiHealth.evaluate_model },
+        { label: t.settings.searchModel, value: apiHealth.search_model },
+        { label: t.settings.summarizeModel, value: apiHealth.summarize_model },
+        { label: t.settings.reasoningModel, value: apiHealth.reasoning_model },
+      ].filter((row) => Boolean(row.value))
+    : []
+  const hasModelInfo =
+    modelRows.length > 0
+    || Boolean(apiHealth?.report_profile)
+    || Boolean(apiHealth?.model_tier)
+    || Boolean(apiHealth?.testing_mode)
+
+  return (
+    <>
+      <SettingsSection
+        description={t.settings.apiStatusDescription}
+        title={t.settings.apiConnection}
+      >
+        <div className="grid gap-2 px-4 py-3.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusBadge
+              label={apiHealth?.status ?? t.settings.notConnected}
+              tone={apiHealth?.status === 'ok' ? 'success' : 'neutral'}
+            />
+            {apiHealth?.auth_required ? (
+              <StatusBadge label={t.settings.authRequired} tone="warning" />
+            ) : null}
+            {apiHealth ? <StatusBadge label={stackModeLabel} tone="neutral" /> : null}
+          </div>
+          <p className="break-words text-xs leading-5 text-muted-foreground">
+            <span className="font-medium text-foreground">{t.settings.baseUrl}:</span> {apiBaseUrl}
+          </p>
+          {apiError ? (
+            <p className="text-xs leading-5 text-destructive">{apiError}</p>
+          ) : null}
+        </div>
+      </SettingsSection>
+      {apiHealth ? (
+        <SettingsSection
+          description={t.settings.providerMetadataDescription}
+          title={t.settings.providerMetadata}
+        >
+          <div className="grid gap-1 px-4 py-3.5 text-xs leading-5 text-muted-foreground sm:grid-cols-2">
+            <span className="min-w-0 truncate">
+              {t.settings.llmProvider}: <strong className="font-semibold text-foreground">{apiHealth.llm.provider}</strong>
+            </span>
+            <span className="min-w-0 truncate">
+              {t.settings.searchProvider}: <strong className="font-semibold text-foreground">{apiHealth.search.provider}</strong>
+            </span>
+          </div>
+          <SettingsRow description={t.settings.stackDescription} title={t.settings.currentStack}>
+            {hasMultiStackSelection ? (
+              <SettingsSegmented
+                ariaLabel={t.common.stack}
+                onChange={onStackChange}
+                options={stackOptions.map((stack) => ({ label: stack, value: stack }))}
+                value={selectedStack}
+                wrap
+              />
+            ) : (
+              <div className="grid gap-1">
+                <div className="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
+                  <StatusBadge label={stackModeLabel} tone="neutral" />
+                  <span className="min-w-0 truncate text-sm font-semibold text-foreground">
+                    {selectedStack}
+                  </span>
+                </div>
+                {stackDiscoveryStatus === 'unsupported' ? (
+                  <p className="text-xs leading-5 text-muted-foreground sm:text-right">
+                    {t.settings.singleStackDescription}
+                  </p>
+                ) : null}
+              </div>
+            )}
+          </SettingsRow>
+        </SettingsSection>
+      ) : null}
+      {apiHealth && hasModelInfo ? (
+        <SettingsSection
+          description={t.settings.activeModelsDescription}
+          title={t.settings.activeModels}
+        >
+          <div className="grid gap-x-6 gap-y-1.5 px-4 py-3.5 text-xs leading-5 sm:grid-cols-2">
+            {modelRows.map((row) => (
+              <span className="min-w-0 truncate text-muted-foreground" key={row.label}>
+                {row.label}: <strong className="font-semibold text-foreground">{row.value}</strong>
+              </span>
+            ))}
+            {apiHealth.report_profile || apiHealth.model_tier || apiHealth.testing_mode ? (
+              <div className="flex flex-wrap items-center gap-2 pt-1 sm:col-span-2">
+                {apiHealth.report_profile ? (
+                  <span className="text-muted-foreground">
+                    {t.settings.reportProfile}: <strong className="font-semibold text-foreground">{apiHealth.report_profile}</strong>
+                  </span>
+                ) : null}
+                {apiHealth.model_tier ? (
+                  <StatusBadge label={`${t.settings.modelTier}: ${apiHealth.model_tier}`} tone="neutral" />
+                ) : null}
+                {apiHealth.testing_mode ? (
+                  <StatusBadge label={t.settings.testingMode} tone="warning" />
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        </SettingsSection>
+      ) : null}
+    </>
+  )
+}
+
+function LicensingPanel({
+  legal,
+  projectSourceUrl,
+}: {
+  legal: InqtrixHealth['legal'] | undefined
+  projectSourceUrl: string
+}) {
+  const { t } = useLocale()
+
+  return (
+    <SettingsSection>
+      <SettingsRow
+        description={legal?.copyright ?? t.authLock.copyright}
+        title={legal?.project ?? t.appName}
+      >
+        <StatusBadge
+          label={legal?.license ?? t.authLock.licenseLabel}
+          tone="brand"
+        />
+      </SettingsRow>
+      <SettingsRow title={t.settings.projectSource}>
+        <span className="block min-w-0 break-words text-xs leading-5 text-foreground sm:text-right">
+          {projectSourceUrl}
+        </span>
+      </SettingsRow>
+      <SettingsRow title={t.settings.legalNotice}>
+        <span className="block min-w-0 break-words text-xs leading-5 text-foreground sm:text-right">
+          {legal?.notice ?? t.settings.attributionNotice}
+        </span>
+      </SettingsRow>
+      <SettingsRow title={t.settings.warranty}>
+        <span className="block min-w-0 break-words text-xs leading-5 text-foreground sm:text-right">
+          {legal?.warranty_notice ?? t.authLock.warrantyNotice}
+        </span>
+      </SettingsRow>
+      <SettingsRow
+        description={t.settings.commercialLicensing}
+        title={t.settings.legalResources}
+      >
+        <div className="flex flex-wrap gap-2 sm:justify-end">
+          <SettingsLink
+            href={projectSourceUrl}
+            icon={Github}
+            label={t.authLock.repositoryLabel}
+          />
+          <SettingsLink
+            href={t.authLock.documentationUrl}
+            icon={BookOpen}
+            label={t.authLock.documentationLabel}
+          />
+          <SettingsLink
+            href={t.authLock.licenseUrl}
+            icon={Scale}
+            label={t.authLock.licenseLabel}
+          />
+        </div>
+      </SettingsRow>
+    </SettingsSection>
+  )
+}
+
+function SettingsSection({
   children,
   description,
-  icon: Icon,
   title,
 }: {
   children: ReactNode
-  description: string
-  icon: LucideIcon
-  title: string
+  description?: string
+  title?: string
 }) {
   return (
-    <section className="grid gap-4 px-4 py-5 md:grid-cols-[220px_minmax(0,1fr)] md:px-5">
-      <div className="min-w-0">
-        <div className="flex items-center gap-2">
-          <Icon className="size-4 text-muted-foreground" />
-          <h2 className="text-sm font-semibold text-foreground">{title}</h2>
+    <section className="overflow-hidden rounded-lg border border-border bg-card shadow-[0_1px_2px_var(--shadow-hairline)]">
+      {title ? (
+        <div className="border-b border-border px-4 py-3">
+          <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+          {description ? (
+            <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{description}</p>
+          ) : null}
         </div>
-        <p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">
-          {description}
-        </p>
-      </div>
-      <div className="min-w-0">{children}</div>
+      ) : null}
+      <div className="divide-y divide-border">{children}</div>
     </section>
   )
 }
 
 function SettingsRow({
   children,
-  label,
+  description,
+  descriptionId,
+  title,
 }: {
   children: ReactNode
-  label: string
+  description?: string
+  descriptionId?: string
+  title: string
 }) {
   return (
-    <div className="grid gap-2 md:grid-cols-[150px_minmax(0,1fr)]">
-      <p className="pt-2 text-xs font-semibold text-muted-foreground">{label}</p>
-      <div className="min-w-0">{children}</div>
+    <div className="flex flex-col gap-3 px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
+      <div className="min-w-0 sm:flex-1">
+        <h4 className="text-sm font-medium text-foreground">{title}</h4>
+        {description ? (
+          <p className="mt-0.5 text-xs leading-5 text-muted-foreground" id={descriptionId}>
+            {description}
+          </p>
+        ) : null}
+      </div>
+      <div className="min-w-0 shrink-0 sm:max-w-[60%] sm:text-right">{children}</div>
     </div>
   )
 }
 
-function SettingsInlineValue({
-  label,
-  value,
+function SettingsRowBlock({
+  children,
+  description,
+  title,
 }: {
-  label: string
-  value: string
+  children: ReactNode
+  description?: string
+  title: string
 }) {
   return (
-    <div className="grid gap-1 sm:grid-cols-[120px_minmax(0,1fr)]">
-      <span className="font-semibold text-muted-foreground">{label}</span>
-      <span className="min-w-0 break-words text-foreground">{value}</span>
+    <div className="px-4 py-3.5">
+      <h4 className="text-sm font-medium text-foreground">{title}</h4>
+      {description ? (
+        <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{description}</p>
+      ) : null}
+      <div className="mt-3">{children}</div>
     </div>
+  )
+}
+
+function SettingsSegmented<T extends string>({
+  ariaLabel,
+  onChange,
+  options,
+  value,
+  wrap,
+}: {
+  ariaLabel: string
+  onChange: (value: T) => void
+  options: Array<{ icon?: LucideIcon; label: string; value: T }>
+  value: T
+  wrap?: boolean
+}) {
+  return (
+    <div
+      aria-label={ariaLabel}
+      className={cn(
+        'inline-flex h-9 items-center rounded-md border border-border bg-card p-0.5 shadow-[0_1px_2px_var(--shadow-hairline)]',
+        wrap && 'h-auto flex-wrap gap-0.5',
+      )}
+      role="group"
+    >
+      {options.map((option) => {
+        const Icon = option.icon
+        const isActive = value === option.value
+
+        return (
+          <button
+            aria-pressed={isActive}
+            className={cn(
+              'inline-flex h-8 items-center gap-1.5 rounded-[6px] px-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+              isActive && 'bg-brand-subtle text-brand hover:bg-brand-subtle hover:text-brand',
+            )}
+            key={option.value}
+            onClick={() => onChange(option.value)}
+            type="button"
+          >
+            {Icon ? <Icon className="size-4 shrink-0" /> : null}
+            <span className={cn(wrap && 'max-w-[12rem] truncate')}>{option.label}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function StatusBadge({
+  className,
+  label,
+  tone,
+}: {
+  className?: string
+  label: string
+  tone: 'brand' | 'neutral' | 'success' | 'warning'
+}) {
+  return (
+    <span
+      className={cn(
+        'inline-flex h-7 shrink-0 items-center rounded-md border px-2 text-xs font-semibold',
+        tone === 'brand' && 'border-brand/25 bg-brand-subtle text-brand',
+        tone === 'neutral' && 'border-border bg-background text-muted-foreground',
+        tone === 'success' && 'border-success/20 bg-success-subtle text-success',
+        tone === 'warning' && 'border-warning/25 bg-warning/10 text-warning',
+        className,
+      )}
+    >
+      {label}
+    </span>
   )
 }
 
@@ -500,7 +1019,7 @@ function SettingsLink({
 }) {
   return (
     <a
-      className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-surface px-2 text-xs font-medium text-muted-foreground transition hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-background px-2 text-xs font-medium text-muted-foreground transition hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       href={href}
       rel="noreferrer"
       target="_blank"

@@ -260,7 +260,7 @@ export const MentionComposer = forwardRef<MentionComposerHandle, MentionComposer
   return (
     <div className={cn('relative', className)}>
       {editor?.isEmpty && (
-        <div className="pointer-events-none absolute left-2 top-2 text-base leading-6 text-muted-foreground/70">
+        <div className="pointer-events-none absolute left-2 top-2 text-sm leading-6 text-muted-foreground/70">
           {placeholder}
         </div>
       )}

@@ -2,10 +2,12 @@ import {
   ChevronDown,
   ChevronRight,
   Folder,
+  FolderPlus,
   FolderOpen,
   GripVertical,
   MessagesSquare,
-  Plus,
+  PanelLeftClose,
+  SquarePen,
   Trash2,
 } from '@/components/icons'
 import { Button } from '@/components/ui/button'
@@ -39,10 +41,11 @@ type ChatHistoryPanelProps = {
   chatHistorySections: ChatHistorySection[]
   isIncognito: boolean
   locale: Locale
-  onCreateThread: () => void
+  onCreateThread: (groupId?: string | null) => void
   onCreateThreadGroup: () => void
   onDeleteThread: (threadId: string) => void
   onDeleteThreadGroup: (groupId: string) => void
+  onHide?: () => void
   onMoveThreadGroup: (groupId: string, targetIndex: number) => void
   onMoveThreadToGroup: (threadId: string, groupId: string | null, targetIndex: number) => void
   onRenameThread: (threadId: string, title: string) => void
@@ -64,6 +67,7 @@ export function ChatHistoryPanel({
   onCreateThreadGroup,
   onDeleteThread,
   onDeleteThreadGroup,
+  onHide,
   onMoveThreadGroup,
   onMoveThreadToGroup,
   onRenameThread,
@@ -323,7 +327,7 @@ export function ChatHistoryPanel({
 
   return (
     <aside className="flex min-h-0 flex-col border-b border-border bg-surface/60 lg:h-full lg:border-b-0">
-      <div className="flex min-h-14 items-center justify-between gap-2 border-b border-border px-3">
+      <div className="flex h-12 items-center justify-between gap-2 border-b border-border px-3">
         <div className="flex min-w-0 items-center gap-2">
           <MessagesSquare className="size-4 shrink-0 text-foreground/80" />
           <h1 className="truncate text-sm font-semibold text-foreground">
@@ -335,13 +339,13 @@ export function ChatHistoryPanel({
             <TooltipTrigger asChild>
               <Button
                 aria-label={t.chat.newGroup}
-                className="size-8 shrink-0"
+                className="size-7 shrink-0 rounded-md"
                 onClick={onCreateThreadGroup}
                 size="icon"
                 type="button"
                 variant="ghost"
               >
-                <Folder className="size-4 text-foreground/85" />
+                <FolderPlus className="size-4 text-foreground/85" />
               </Button>
             </TooltipTrigger>
             <TooltipContent>{t.chat.newGroup}</TooltipContent>
@@ -350,17 +354,34 @@ export function ChatHistoryPanel({
             <TooltipTrigger asChild>
               <Button
                 aria-label={t.chat.new}
-                className="size-8 shrink-0"
-                onClick={onCreateThread}
+                className="size-7 shrink-0 rounded-md"
+                onClick={() => onCreateThread()}
                 size="icon"
                 type="button"
-                variant="outline"
+                variant="ghost"
               >
-                <Plus className="size-4" />
+                <SquarePen className="size-4" />
               </Button>
             </TooltipTrigger>
             <TooltipContent>{t.chat.new}</TooltipContent>
           </Tooltip>
+          {onHide ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label={t.chat.hideHistory}
+                  className="size-7 shrink-0 rounded-md"
+                  onClick={onHide}
+                  size="icon"
+                  type="button"
+                  variant="ghost"
+                >
+                  <PanelLeftClose className="size-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{t.chat.hideHistory}</TooltipContent>
+            </Tooltip>
+          ) : null}
         </div>
       </div>
       <ScrollArea className="max-h-64 min-h-0 lg:max-h-none lg:flex-1">
@@ -389,6 +410,7 @@ export function ChatHistoryPanel({
                 isIncognito={isIncognito}
                 key={section.kind === 'group' ? section.groupId : UNGROUPED_CHAT_SECTION_ID}
                 locale={locale}
+                onCreateThread={onCreateThread}
                 onDeleteThread={onDeleteThread}
                 onDeleteThreadGroup={onDeleteThreadGroup}
                 onGroupTitleDraftChange={setGroupTitleDraft}
@@ -438,6 +460,7 @@ function ChatHistorySectionView({
   historyThreadTitleInputRef,
   isIncognito,
   locale,
+  onCreateThread,
   onDeleteThread,
   onDeleteThreadGroup,
   onGroupTitleDraftChange,
@@ -474,6 +497,7 @@ function ChatHistorySectionView({
   historyThreadTitleInputRef: RefObject<HTMLInputElement | null>
   isIncognito: boolean
   locale: Locale
+  onCreateThread: (groupId?: string | null) => void
   onDeleteThread: (threadId: string) => void
   onDeleteThreadGroup: (groupId: string) => void
   onGroupTitleDraftChange: (value: string) => void
@@ -533,7 +557,7 @@ function ChatHistorySectionView({
         <span className="pointer-events-none absolute -bottom-1 left-1 right-1 h-0.5 rounded-full bg-brand shadow-[0_0_0_1px_var(--background)]" />
       )}
       {section.kind === 'group' && (
-        <div className="group/header grid min-h-8 grid-cols-[1.5rem_1rem_minmax(0,1fr)_auto_auto_auto] items-center gap-1 rounded-md px-1.5 text-foreground/75 transition-colors hover:bg-background/70">
+        <div className="group/header grid min-h-8 grid-cols-[1.5rem_1rem_minmax(0,1fr)_auto_auto_auto_auto] items-center gap-1 px-1.5 text-foreground/75 transition-colors hover:text-foreground">
           <button
             aria-expanded={!isCollapsed}
             aria-label={`${isCollapsed ? t.chat.expandGroup : t.chat.collapseGroup}: ${section.group.title}`}
@@ -576,6 +600,21 @@ function ChatHistorySectionView({
           <span className="shrink-0 rounded-sm px-1 text-[10px] font-semibold tabular-nums text-muted-foreground">
             {section.threads.length}
           </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                aria-label={`${t.chat.newInFolder}: ${section.group.title}`}
+                className="size-6 shrink-0 text-foreground/50 opacity-0 transition hover:text-foreground focus-visible:opacity-100 group-hover/header:opacity-100"
+                onClick={() => onCreateThread(section.groupId)}
+                size="icon"
+                type="button"
+                variant="ghost"
+              >
+                <SquarePen className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t.chat.newInFolder}</TooltipContent>
+          </Tooltip>
           <button
             aria-label={`${t.chat.moveGroup}: ${section.group.title}`}
             className="grid size-6 shrink-0 cursor-grab place-items-center rounded-sm text-foreground/50 opacity-0 transition hover:bg-surface hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/header:opacity-100 active:cursor-grabbing"
@@ -732,11 +771,13 @@ function ChatThreadHistoryItem({
   return (
     <motion.div
       className={cn(
-        'group/thread relative rounded-md border transition-colors',
+        'group/thread relative transition-colors',
         isNested
-          ? 'border-transparent bg-transparent hover:bg-background/70'
+          ? 'bg-transparent hover:text-foreground'
           : 'border-border/60 bg-card/60 shadow-[0_1px_1px_var(--shadow-hairline)] hover:border-border hover:bg-background',
-        isActive && 'border-brand/25 bg-brand-subtle/45 ring-1 ring-brand/10',
+        !isNested && 'rounded-md border',
+        isNested && isActive && 'before:absolute before:-left-[9px] before:bottom-1.5 before:top-1.5 before:w-0.5 before:rounded-full before:bg-brand',
+        !isNested && isActive && 'border-brand/25 bg-brand-subtle/45 ring-1 ring-brand/10',
         isDragging && 'scale-[0.99] opacity-75 shadow-[0_8px_20px_var(--shadow-soft)] ring-1 ring-ring/50',
       )}
       data-chat-history-thread-id={thread.id}
@@ -807,8 +848,10 @@ function ChatThreadHistoryItem({
         >
           <span className="flex min-w-0 items-center gap-2">
             <span className={cn(
-              'block min-w-0 flex-1 truncate font-semibold text-foreground',
+              'block min-w-0 flex-1 truncate font-semibold',
               isNested ? 'text-[13px]' : 'text-sm',
+              isNested ? 'text-foreground/85' : 'text-foreground',
+              isActive && 'text-foreground',
             )}>
               {thread.title}
             </span>

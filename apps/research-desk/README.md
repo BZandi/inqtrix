@@ -98,7 +98,7 @@ Bare IP addresses without scheme are not accepted by the browser fetch
 layer. Leave the variable unset during local proxy development.
 
 If the server has `INQTRIX_SERVER_API_KEY` enabled, enter the matching
-Bearer token in the app's Settings view at runtime; do not put API keys
+Bearer token in the app's Settings > Security view at runtime; do not put API keys
 into `VITE_*` variables because they are exposed in the browser bundle.
 
 ### Available environment variables
@@ -141,13 +141,35 @@ a full reload only works while the server still retains the terminal run under
 for longer review windows, or add durable backend run storage before relying on
 reloads after that TTL.
 
-## Chat rules and mentions
+## Prompt Library and mentions
 
-The Chat mode can store project-scoped prompt rules. Rules are client-side
+The Prompt Library stores project-scoped prompt entries. Entries are client-side
 Markdown snippets with a required slug label such as `executive-brief`; they
-are referenced in the composer as `@rules:executive-brief` and injected into
-the next `/v1/chat/completions` request as bounded context. They are not a
-backend concept and do not change the selected provider stack.
+are still referenced in the composer as `@rules:executive-brief` for backward
+compatibility and injected into the next `/v1/chat/completions` request as
+bounded context. They are not a backend concept and do not change the selected
+provider stack.
+
+Prompt Library entries can be categorized as Instructions, Functions, or
+Context Packs. Instructions describe roles, behavior, style, or skills.
+Functions are action prompts such as translate, summarize, or rewrite; only
+Function entries are used as prompt-chaining steps. Context Packs combine long
+context text with optional references to existing Database files or file
+groups. The Prompt Library page can link only existing Database entries, not
+upload new files. Context Packs can place linked files with `{{context}}` inside
+the prompt text; if the placeholder is omitted, the rendered context blocks are
+appended at the end. The Database context picker is search-based and shows a
+bounded result list, with selected files and groups kept separately above the
+search results.
+
+Visibility controls whether an entry appears in Chat autocomplete, Editor
+autocomplete, both, or neither. Disabling autocomplete hides the entry from all
+surfaces and disables the Chat/Editor checkboxes. `@rules:` remains the single
+mention shortcut; autocomplete filters entries per surface and groups visible
+results by category. The Prompt Library list is sorted by category, then title.
+When a Context Pack is attached to a chat, the rendered context snapshot is
+stored in chat history so older chats remain stable even if Database files later
+change.
 
 Completed research reports can be referenced the same way through
 `@research:<label>`. The composer also exposes both groups through the plus
@@ -175,10 +197,13 @@ the transcript up to that response. If deletion leaves a user message as the
 last transcript item, its hover actions can start a new assistant response
 without duplicating the user message.
 
-Project export writes rules to `rules/<label>.md` with frontmatter identifying
-`kind: "inqtrix.chat_rule"`. `project.md` stores `rule_order` so the library
-order survives a save/load cycle. Older projects without rules still load with
-an empty rule library.
+Project export writes Prompt Library entries to `rules/<label>.md` with
+frontmatter identifying `kind: "inqtrix.chat_rule"`. The frontmatter stores the
+entry category, visibility, autocomplete status, and linked Context Pack
+references additively; older rule files without those fields load as
+Instruction entries that are visible in Chat and Editor autocomplete.
+`project.md` stores `rule_order` so the library order survives a save/load
+cycle. Older projects without rules still load with an empty Prompt Library.
 
 Project export also stores UI preferences in `project.md`: locale, theme mode
 (`light`, `dark`, or `system`), theme preset, and contrast mode. Loading a

@@ -50,6 +50,9 @@ Return only valid JSON:
   "clarification_questions": []
 }
 
+Additional guidance:
+<<<GUIDANCE>>>
+
 Draft:
 <<<TEXT>>>
 <<<USER_TEXT>>>
@@ -86,6 +89,9 @@ Return only valid JSON:
   "clarification_questions": []
 }
 
+Additional guidance:
+<<<GUIDANCE>>>
+
 Prompt template:
 <<<TEXT>>>
 <<<USER_TEXT>>>
@@ -109,11 +115,14 @@ class TextImprovementRequestData:
         context: Editing context that selects the prompt family.
         text: User-visible field contents to improve.
         locale: Interface language for metadata strings in the JSON response.
+        guidance: Optional caller-provided prompt context. It guides the edit
+            but is not part of the text the model should return.
     """
 
     context: TextImprovementContext
     text: str
     locale: TextImprovementLocale
+    guidance: str | None = None
 
 
 @dataclass(frozen=True)
@@ -187,7 +196,20 @@ def parse_text_improvement_payload(
 
     raw_locale = body.get("locale", "en")
     locale: TextImprovementLocale = "de" if raw_locale == "de" else "en"
-    return TextImprovementRequestData(context=context, text=text, locale=locale)
+
+    raw_guidance = body.get("guidance")
+    guidance = raw_guidance.strip() if isinstance(raw_guidance, str) else None
+    if guidance and text_looks_sensitive(guidance):
+        raise ValueError(
+            "guidance appears to contain secret material and was not sent to the model."
+        )
+
+    return TextImprovementRequestData(
+        context=context,
+        text=text,
+        locale=locale,
+        guidance=guidance or None,
+    )
 
 
 def build_text_improvement_prompt(request: TextImprovementRequestData) -> str:
@@ -205,9 +227,11 @@ def build_text_improvement_prompt(request: TextImprovementRequestData) -> str:
         else _CHAT_INPUT_PROMPT
     )
     metadata_language = "German" if request.locale == "de" else "English"
+    guidance = request.guidance or "No additional guidance."
     return (
         template
         .replace("<<<METADATA_LANGUAGE>>>", metadata_language)
+        .replace("<<<GUIDANCE>>>", guidance)
         .replace("<<<USER_TEXT>>>", request.text)
     )
 

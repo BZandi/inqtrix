@@ -6,6 +6,8 @@ import type {
   ResearchRunSummary,
 } from '@/features/researchRuns/types'
 import { createEmptyProjectState, createSeedProjectState } from '@/features/project/seedProject'
+import { normalizeChatRule } from '@/features/project/chatRules'
+import { renderChatRuleAttachmentContent } from '@/features/project/chatRuleRendering'
 import type {
   ChatChainStepRecord,
   ChatContextReferenceRecord,
@@ -56,7 +58,7 @@ export type ResearchDeskAction =
   | { ref: ChatContextReferenceRecord; type: 'removeChatContextFromDraft' }
   | { fromIndex: number; toIndex: number; type: 'reorderChatContextInDraft' }
   | { type: 'clearChatDraftAttachment' }
-  | { type: 'createChatThread' }
+  | { groupId?: string | null; type: 'createChatThread' }
   | { messageId: string; threadId: string; type: 'branchChatThreadFromMessage' }
   | { type: 'createLocalRun'; request: CreateResearchRunRequest }
   | { type: 'cancelLocalRun'; runId: string }
@@ -156,6 +158,7 @@ export type ResearchDeskAction =
   | { type: 'setComposerVisible'; isVisible: boolean }
   | { type: 'setReportExpanded'; isExpanded: boolean }
   | { type: 'setReportVisible'; isVisible: boolean }
+  | { type: 'setChatHistoryVisible'; isVisible: boolean }
   | { enabled: boolean; type: 'setChatChainingEnabled' }
   | { type: 'setSelectedChatModelTier'; tier: ChatModelTier | null }
   | { type: 'setSelectedStack'; stack: string }
@@ -243,6 +246,9 @@ export function researchDeskReducer(
   }
   if (action.type === 'setReportVisible') {
     return { ...state, ui: { ...state.ui, isReportVisible: action.isVisible } }
+  }
+  if (action.type === 'setChatHistoryVisible') {
+    return { ...state, ui: { ...state.ui, isChatHistoryVisible: action.isVisible } }
   }
   if (action.type === 'setComposerVisible') {
     return { ...state, ui: { ...state.ui, isComposerVisible: action.isVisible } }
@@ -1193,11 +1199,11 @@ export function researchDeskReducer(
   if (action.type === 'upsertChatRule') {
     const now = new Date().toISOString()
     const existing = state.chatRules[action.rule.id]
-    const rule = {
+    const rule = normalizeChatRule({
       ...action.rule,
       createdAt: existing?.createdAt ?? action.rule.createdAt,
       updatedAt: action.rule.updatedAt || now,
-    }
+    })
     const chatRuleOrder = state.chatRuleOrder.includes(rule.id)
       ? state.chatRuleOrder
       : [rule.id, ...state.chatRuleOrder]
@@ -1286,9 +1292,20 @@ export function researchDeskReducer(
   }
   if (action.type === 'createChatThread') {
     const thread = createChatThread()
+    const groupId = action.groupId && state.chatThreadGroups[action.groupId]
+      ? action.groupId
+      : null
+    const chatThreadGroupMemberships = groupId
+      ? { ...state.chatThreadGroupMemberships, [thread.id]: groupId }
+      : state.chatThreadGroupMemberships
+    const chatThreadOrder = groupId
+      ? insertThreadIntoSection(state, chatThreadGroupMemberships, thread.id, groupId, 0)
+      : [thread.id, ...state.chatThreadOrder]
+
     return {
       ...state,
-      chatThreadOrder: [thread.id, ...state.chatThreadOrder],
+      chatThreadGroupMemberships,
+      chatThreadOrder,
       chatThreads: {
         ...state.chatThreads,
         [thread.id]: thread,
@@ -2066,10 +2083,11 @@ function createReportAttachment(
 function createRuleAttachment(
   rule: ChatRuleRecord,
   attachedAt: string,
+  contentMarkdown: string,
 ): ChatMessageAttachmentRecord {
   return {
     attachedAt,
-    contentMarkdown: rule.contentMarkdown,
+    contentMarkdown,
     kind: 'chat-rule',
     label: rule.label,
     ruleId: rule.id,
@@ -2131,7 +2149,13 @@ function createMessageAttachments(
       }]
     }
     const rule = state.chatRules[ref.ruleId]
-    return rule ? [createRuleAttachment(rule, attachedAt)] : []
+    return rule
+      ? [createRuleAttachment(
+        normalizeChatRule(rule),
+        attachedAt,
+        renderChatRuleAttachmentContent(state, rule, attachedAt),
+      )]
+      : []
   })
 }
 

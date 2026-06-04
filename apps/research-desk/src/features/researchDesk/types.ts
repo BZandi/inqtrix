@@ -48,7 +48,7 @@ export type ResearchJob = {
 
 export type JobFilter = Extract<JobStatus, 'cancelled' | 'completed' | 'queued' | 'running'> | 'all'
 
-export type AppView = 'research' | 'chat' | 'editor' | 'database' | 'settings'
+export type AppView = 'research' | 'chat' | 'editor' | 'prompt-library' | 'database' | 'settings'
 
 export function localizedText(value: LocalizedText, locale: Locale) {
   return value[locale]

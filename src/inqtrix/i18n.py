@@ -248,6 +248,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "de": "Suchplanung",
         "en": "search planning",
     },
+    "retry_operation_search": {
+        "de": "Websuche",
+        "en": "web search",
+    },
     "retry_operation_claim_extraction": {
         "de": "Claim-Extraktion",
         "en": "claim extraction",

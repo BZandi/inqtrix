@@ -13,6 +13,7 @@ import type {
   ProjectState,
 } from '@/features/project/types'
 import { referenceDocsFromRefs } from '@/features/project/selectors'
+import { renderChatRuleAttachmentContent } from '@/features/project/chatRuleRendering'
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
 import {
   blockInsertionPositionForRange,
@@ -111,10 +112,14 @@ export function useEditorSuggestions({
   const ruleSnippet = useMemo(
     () => attachedRefs
       .filter((ref) => ref.kind === 'chat-rule')
-      .map((ref) => (ref.kind === 'chat-rule' ? state.chatRules[ref.ruleId]?.contentMarkdown ?? '' : ''))
+      .map((ref) => {
+        if (ref.kind !== 'chat-rule') return ''
+        const rule = state.chatRules[ref.ruleId]
+        return rule ? renderChatRuleAttachmentContent(state, rule, new Date().toISOString()) : ''
+      })
       .filter(Boolean)
       .join('\n\n'),
-    [attachedRefs, state.chatRules],
+    [attachedRefs, state],
   )
   const attachments = useMemo(
     () => referenceDocsFromRefs(state, attachedRefs),

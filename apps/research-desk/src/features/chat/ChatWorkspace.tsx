@@ -74,7 +74,6 @@ import type {
   ChatChainStepRecord,
   ChatContextReferenceRecord,
   ChatMessageAttachmentRecord,
-  ChatRuleRecord,
 } from '@/features/project/types'
 import type {
   ChatModelOption,
@@ -90,8 +89,9 @@ import {
   useTextImprovement,
   type TextImprovementApiOptions,
 } from '@/features/textImprove'
+import { PanelRail } from '@/components/ui/panel-rail'
+import { ComposerIconButton, composerIconButtonClassName } from '@/features/composer/ComposerIconButton'
 import { ChatHistoryPanel } from './history/ChatHistoryPanel'
-import { RuleLibraryDialog } from './rules/RuleLibraryDialog'
 import type { ChatMessage, ChatThread } from './types'
 import { ContextChipLegend } from '@/features/composer/ContextChipLegend'
 import { MentionComposer, type MentionComposerHandle } from '@/features/composer/MentionComposer'
@@ -103,11 +103,11 @@ type ChatWorkspaceProps = {
   chatModelOptions: ChatModelOption[]
   chatModelOptionsStatus: 'available' | 'missing' | 'unresolved'
   chatHistorySections: ChatHistorySection[]
-  chatRules: ChatRuleRecord[]
   defaultChatModel: NodeModelResolution | null
   fileGroupOptions: FileGroupMentionOption[]
   fileOptions: FileMentionOption[]
   isDesktop: boolean
+  isHistoryVisible: boolean
   isIncognito: boolean
   isSending: boolean
   onAttachContext: (ref: ChatContextReferenceRecord) => void
@@ -116,16 +116,17 @@ type ChatWorkspaceProps = {
   onAnswerLastUserMessage: (threadId: string, messageId: string) => void
   onBranchFromMessage: (threadId: string, messageId: string) => void
   onClearThread: () => void
-  onCreateThread: () => void
+  onCreateThread: (groupId?: string | null) => void
   onCreateThreadGroup: () => void
   onDeleteMessages: (threadId: string, messageIds: string[]) => void
-  onDeleteRule: (ruleId: string) => void
   onDeleteThreadGroup: (groupId: string) => void
   onDeleteThread: (threadId: string) => void
   onEditMessage: (threadId: string, messageId: string, contentMarkdown: string) => void
   chainingEnabled: boolean
   onChainingEnabledChange: (enabled: boolean) => void
   onIncognitoChange: (enabled: boolean) => void
+  onHistoryVisibleChange: (isVisible: boolean) => void
+  onOpenPromptLibrary: () => void
   onMoveThreadGroup: (groupId: string, targetIndex: number) => void
   onMoveThreadToGroup: (threadId: string, groupId: string | null, targetIndex: number) => void
   onRenameThread: (threadId: string, title: string) => void
@@ -134,7 +135,6 @@ type ChatWorkspaceProps = {
   onReorderContext: (fromIndex: number, toIndex: number) => void
   pendingReorderKeys: string[]
   pillKeys: string[]
-  onSaveRule: (rule: ChatRuleRecord) => void
   onSendMessage: (
     contentMarkdown: string,
     refs?: ChatContextReferenceRecord[],
@@ -169,9 +169,9 @@ export default function ChatWorkspace({
   chatModelOptions,
   chatModelOptionsStatus,
   chatHistorySections,
-  chatRules,
   defaultChatModel,
   isDesktop,
+  isHistoryVisible,
   isIncognito,
   isSending,
   onAttachContext,
@@ -181,13 +181,14 @@ export default function ChatWorkspace({
   onCreateThread,
   onCreateThreadGroup,
   onDeleteMessages,
-  onDeleteRule,
   onDeleteThreadGroup,
   onDeleteThread,
   onEditMessage,
   chainingEnabled,
   onChainingEnabledChange,
   onIncognitoChange,
+  onHistoryVisibleChange,
+  onOpenPromptLibrary,
   onMoveThreadGroup,
   onMoveThreadToGroup,
   onRenameThread,
@@ -196,7 +197,6 @@ export default function ChatWorkspace({
   onReorderContext,
   pendingReorderKeys,
   pillKeys,
-  onSaveRule,
   onSendMessage,
   onSelectThread,
   onSelectedModelTierChange,
@@ -228,7 +228,6 @@ export default function ChatWorkspace({
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const [isMessageSelectionMode, setIsMessageSelectionMode] = useState(false)
-  const [isRuleLibraryOpen, setIsRuleLibraryOpen] = useState(false)
   const [messageEditDraft, setMessageEditDraft] = useState('')
   const [pillRefs, setPillRefs] = useState<ChatContextReferenceRecord[]>([])
   const [selectedMessageIds, setSelectedMessageIds] = useState<ReadonlySet<string>>(() => new Set())
@@ -511,6 +510,7 @@ export default function ChatWorkspace({
       onCreateThreadGroup={onCreateThreadGroup}
       onDeleteThread={onDeleteThread}
       onDeleteThreadGroup={onDeleteThreadGroup}
+      onHide={isDesktop ? () => onHistoryVisibleChange(false) : undefined}
       onMoveThreadGroup={onMoveThreadGroup}
       onMoveThreadToGroup={onMoveThreadToGroup}
       onRenameThread={onRenameThread}
@@ -525,7 +525,7 @@ export default function ChatWorkspace({
 
   const conversationPanel = (
         <section className="flex min-h-[620px] min-w-0 flex-col bg-background lg:h-full lg:min-h-0 lg:overflow-hidden">
-	          <div className="z-10 flex min-h-14 shrink-0 items-center justify-between gap-2 border-b border-border bg-background px-4 py-2 md:px-6">
+	          <div className="z-10 flex h-12 shrink-0 items-center justify-between gap-2 border-b border-border bg-background px-4 md:px-6">
             <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
               <MessageSquareText className="size-4 shrink-0 text-foreground/80" />
               <div className="min-w-0 flex-1 overflow-hidden">
@@ -571,7 +571,7 @@ export default function ChatWorkspace({
                   )}
                 </div>
                 <p
-                  className="max-w-md truncate text-xs text-muted-foreground"
+                  className="max-w-md truncate text-[11px] leading-4 text-muted-foreground"
                   title={selectedThread ? selectedThread.preview : undefined}
                 >
                   {selectedThread ? selectedThread.preview : t.chat.empty}
@@ -585,7 +585,7 @@ export default function ChatWorkspace({
                     aria-label={t.chat.incognito}
                     aria-pressed={isIncognito}
                     className={cn(
-                      'size-8 text-foreground/75',
+                      'size-7 text-foreground/75',
                       isIncognito && 'bg-brand-subtle text-brand hover:bg-brand-subtle',
                     )}
                     disabled={isSending}
@@ -599,14 +599,14 @@ export default function ChatWorkspace({
 	                </TooltipTrigger>
 	                <TooltipContent>{t.chat.incognito}</TooltipContent>
 	              </Tooltip>
-	              <div className="flex h-8 overflow-hidden rounded-md border border-border bg-card shadow-[0_1px_2px_var(--shadow-hairline)]">
+	              <div className="flex h-7 overflow-hidden rounded-md border border-border bg-card shadow-[0_1px_2px_var(--shadow-hairline)]">
 	                <Tooltip>
 	                  <TooltipTrigger asChild>
 	                    <Button
 	                      aria-label={isMessageSelectionMode ? t.chat.exitMessageEditMode : t.chat.editMessages}
 	                      aria-pressed={isMessageSelectionMode}
 	                      className={cn(
-	                        'h-8 w-8 rounded-none border-r border-border text-foreground/75 hover:text-foreground',
+	                        'h-7 w-7 rounded-none border-r border-border text-foreground/75 hover:text-foreground',
 	                        isMessageSelectionMode && 'bg-brand-subtle text-brand hover:bg-brand-subtle hover:text-brand',
 	                      )}
 	                      disabled={!canManageMessages && !isMessageSelectionMode}
@@ -626,7 +626,7 @@ export default function ChatWorkspace({
 	                  <TooltipTrigger asChild>
 	                    <Button
 	                      aria-label={t.chat.clearChat}
-                      className="h-8 w-8 rounded-none border-r border-border text-foreground/75 hover:text-foreground"
+                      className="h-7 w-7 rounded-none border-r border-border text-foreground/75 hover:text-foreground"
                       disabled={!selectedThread || isSending}
                       onClick={onClearThread}
                       size="icon"
@@ -642,7 +642,7 @@ export default function ChatWorkspace({
                   <TooltipTrigger asChild>
                     <Button
                       aria-label={t.chat.delete}
-                      className="h-8 w-8 rounded-none text-foreground/75 hover:text-destructive"
+                      className="h-7 w-7 rounded-none text-foreground/75 hover:text-destructive"
                       disabled={!selectedThread || isIncognito}
                       onClick={deleteSelectedThread}
                       size="icon"
@@ -751,7 +751,7 @@ export default function ChatWorkspace({
             </div>
           </ScrollArea>
 
-          <div className="z-10 shrink-0 border-t border-border bg-background p-3 md:px-6">
+          <div className="z-10 shrink-0 px-3 pb-4 pt-2 md:px-6">
             <form
               className="mx-auto max-w-5xl"
               onSubmit={handleSendMessage}
@@ -768,7 +768,7 @@ export default function ChatWorkspace({
                 type="file"
               />
               <Dropzone disabled={isSending} label={t.chat.dropFiles} onFiles={onAttachFiles}>
-              <div className="relative overflow-visible rounded-lg border border-border/85 bg-card/98 px-2 py-1.5 shadow-[0_1px_2px_var(--shadow-hairline)]">
+              <div className="relative overflow-visible rounded-xl border border-border bg-card px-2.5 py-2 shadow-[0_8px_28px_-12px_var(--shadow-soft)]">
                 {attachmentBudgetNotice && (
                   <div className="mb-2 flex items-center gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-2 py-1 text-[11px] font-medium text-warning">
                     <AlertTriangle className="size-3.5 shrink-0" />
@@ -827,7 +827,7 @@ export default function ChatWorkspace({
                   <MentionComposer
                     ariaLabel={t.chat.placeholder}
                     categoryLabels={mentionCategoryLabels}
-                    contentClassName="min-h-16 pb-2 pl-2 pr-11 pt-2 text-base leading-6"
+                    contentClassName="min-h-16 pb-2 pl-2 pr-11 pt-2 text-sm leading-6"
                     enabledKinds={['research', 'rules', 'files', 'filegroups']}
                     mentionSources={mentionSources}
                     onAttachRule={(ruleId) => onAttachContext({ kind: 'chat-rule', ruleId })}
@@ -854,12 +854,11 @@ export default function ChatWorkspace({
                     <DropdownMenuTrigger asChild>
                       <Button
                         aria-label={t.chat.attachContext}
-                        className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0 data-[state=open]:bg-accent data-[state=open]:text-foreground"
-                        size="icon"
+                        className={cn(composerIconButtonClassName, 'shrink-0')}
                         type="button"
                         variant="ghost"
                       >
-                        <Plus className="size-4" />
+                        <Plus />
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent
@@ -925,74 +924,37 @@ export default function ChatWorkspace({
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
                         className="gap-2"
-                        onSelect={() => setIsRuleLibraryOpen(true)}
+                        onSelect={onOpenPromptLibrary}
                       >
                         <Library className="size-4 text-muted-foreground" />
                         {t.chat.manageRules}
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        aria-label={t.chat.attachFiles}
-                        className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0"
-                        disabled={isSending}
-                        onClick={() => chatFileInputRef.current?.click()}
-                        size="icon"
-                        type="button"
-                        variant="ghost"
-                      >
-                        <Paperclip className="size-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>{t.chat.attachFiles}</TooltipContent>
-                  </Tooltip>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        aria-label={t.chat.chaining}
-                        aria-pressed={chainingEnabled}
-                        className={cn(
-                          'size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0',
-                          chainingEnabled && 'bg-brand-subtle text-brand hover:bg-brand-subtle hover:text-brand',
-                        )}
-                        disabled={isSending}
-                        onClick={() => onChainingEnabledChange(!chainingEnabled)}
-                        size="icon"
-                        type="button"
-                        variant={chainingEnabled ? 'secondary' : 'ghost'}
-                      >
-                        <ListOrdered className="size-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>{`${t.chat.chaining} · ${t.chat.chainingTooltip}`}</TooltipContent>
-                  </Tooltip>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        aria-label={t.chat.manageRules}
-                        className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0"
-                        onClick={() => setIsRuleLibraryOpen(true)}
-                        size="icon"
-                        type="button"
-                        variant="ghost"
-                      >
-                        <Library className="size-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>{t.chat.manageRules}</TooltipContent>
-                  </Tooltip>
+                  <ComposerIconButton
+                    className="shrink-0"
+                    disabled={isSending}
+                    icon={Paperclip}
+                    label={t.chat.attachFiles}
+                    onClick={() => chatFileInputRef.current?.click()}
+                  />
+                  <ComposerIconButton
+                    active={chainingEnabled}
+                    className="shrink-0"
+                    disabled={isSending}
+                    icon={ListOrdered}
+                    label={`${t.chat.chaining} · ${t.chat.chainingTooltip}`}
+                    onClick={() => onChainingEnabledChange(!chainingEnabled)}
+                  />
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button
                         aria-label={t.composer.moreSettings}
-                        className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0 data-[state=open]:bg-accent data-[state=open]:text-foreground"
-                        size="icon"
+                        className={cn(composerIconButtonClassName, 'shrink-0')}
                         type="button"
                         variant="ghost"
                       >
-                        <SlidersHorizontal className="size-4" />
+                        <SlidersHorizontal />
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="start" className="w-64" side="top" sideOffset={8}>
@@ -1028,7 +990,7 @@ export default function ChatWorkspace({
                     {isSending ? (
                       <Button
                         aria-label={t.chat.stopGenerating}
-                        className="size-8 rounded-md text-muted-foreground hover:bg-accent/70 hover:text-destructive focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0"
+                        className="size-7 rounded-md text-muted-foreground hover:bg-accent/70 hover:text-destructive focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0"
                         onClick={onStopGenerating}
                         size="icon"
                         type="button"
@@ -1039,11 +1001,16 @@ export default function ChatWorkspace({
                     ) : (
                       <Button
                         aria-label={t.chat.send}
-                        className="size-8 rounded-md text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:bg-transparent disabled:text-muted-foreground/45"
+                        className={cn(
+                          'size-7 rounded-md focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0',
+                          canSend
+                            ? 'bg-brand text-white hover:bg-brand/90 hover:text-white'
+                            : 'text-muted-foreground/45',
+                        )}
                         disabled={!canSend}
                         size="icon"
                         type="submit"
-                        variant="ghost"
+                        variant={canSend ? 'default' : 'ghost'}
                       >
                         <SendHorizontal className="size-4" />
                       </Button>
@@ -1079,27 +1046,34 @@ export default function ChatWorkspace({
   return (
     <div className="flex min-h-[calc(100svh-var(--header-h))] w-full lg:h-full lg:min-h-0">
       {isDesktop ? (
-        <ResizablePanelGroup
-          className="min-h-0 w-full overflow-hidden bg-background"
-          orientation="horizontal"
-        >
-          <ResizablePanel
-            className="min-h-0 min-w-0 overflow-hidden border-r border-border bg-surface/60"
-            defaultSize="26%"
-            maxSize="42%"
-            minSize="18%"
+        isHistoryVisible ? (
+          <ResizablePanelGroup
+            className="min-h-0 w-full overflow-hidden bg-background"
+            orientation="horizontal"
           >
-            {historyPanel}
-          </ResizablePanel>
-          <ResizableHandle
-            aria-label={t.chat.resizeHistory}
-            className="w-3 cursor-col-resize bg-transparent after:w-px after:rounded-full after:bg-border/60 hover:after:w-1 hover:after:bg-brand/55 active:after:bg-brand/80 focus-visible:ring-2 focus-visible:ring-ring [&>div]:h-8 [&>div]:w-3 [&>div]:rounded-full [&>div]:border-border/70 [&>div]:bg-background/95 [&>div]:shadow-[0_1px_2px_var(--shadow-hairline)]"
-            withHandle
-          />
-          <ResizablePanel className="min-h-0 min-w-0 overflow-hidden" defaultSize="74%" minSize="58%">
-            {conversationPanel}
-          </ResizablePanel>
-        </ResizablePanelGroup>
+            <ResizablePanel
+              className="min-h-0 min-w-0 overflow-hidden bg-surface/60"
+              defaultSize="26%"
+              maxSize="42%"
+              minSize="18%"
+            >
+              {historyPanel}
+            </ResizablePanel>
+            <ResizableHandle aria-label={t.chat.resizeHistory} />
+            <ResizablePanel className="min-h-0 min-w-0 overflow-hidden" defaultSize="74%" minSize="58%">
+              {conversationPanel}
+            </ResizablePanel>
+          </ResizablePanelGroup>
+        ) : (
+          <div className="flex min-h-0 w-full overflow-hidden bg-background">
+            <PanelRail
+              label={t.chat.showHistory}
+              onExpand={() => onHistoryVisibleChange(true)}
+              side="left"
+            />
+            <div className="min-h-0 min-w-0 flex-1 overflow-hidden">{conversationPanel}</div>
+          </div>
+        )
       ) : (
         <motion.section
           initial={reduceMotion ? false : { opacity: 0, y: 8 }}
@@ -1111,15 +1085,6 @@ export default function ChatWorkspace({
           {conversationPanel}
         </motion.section>
       )}
-      <RuleLibraryDialog
-        isOpen={isRuleLibraryOpen}
-        onClose={() => setIsRuleLibraryOpen(false)}
-        onDeleteRule={onDeleteRule}
-        onSaveRule={onSaveRule}
-        reduceMotion={reduceMotion}
-        rules={chatRules}
-        textImprovement={textImprovement}
-      />
     </div>
   )
 }
@@ -1841,7 +1806,7 @@ function ChatMessageAttachments({
             <Icon className="size-3.5 shrink-0" />
             <span className="min-w-0 truncate">{chip.label}</span>
             {chip.fileCount !== null && (
-              <span className="shrink-0 rounded-sm bg-background/60 px-1 text-[10px] tabular-nums">{chip.fileCount}</span>
+              <span className="shrink-0 text-[10px] font-bold tabular-nums opacity-75">{chip.fileCount}</span>
             )}
           </span>
         )

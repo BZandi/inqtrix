@@ -23,11 +23,11 @@ import {
   ChevronDown,
   ChevronRight,
   Code2,
-  Download,
   Eye,
+  FileDown,
   FileText,
   Folder,
-  FolderOpen,
+  FolderPlus,
   GripVertical,
   Highlighter,
   Italic,
@@ -40,16 +40,17 @@ import {
   MessageSquareText,
   MessagesSquare,
   PanelBottomClose,
+  PanelBottomOpen,
+  PanelLeftClose,
   PanelRightClose,
-  PanelRightOpen,
   Paperclip,
   PencilLine,
-  Plus,
   Redo2,
   SearchCheck,
   SendHorizontal,
   Scale,
   Sparkles,
+  SquarePen,
   Strikethrough,
   Trash2,
   Underline,
@@ -58,6 +59,8 @@ import {
 } from '@/components/icons'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { PanelRail } from '@/components/ui/panel-rail'
+import { ComposerIconButton } from '@/features/composer/ComposerIconButton'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -368,7 +371,7 @@ export default function EditorWorkspace({
     () => editorCommentsForDocument(state, activeDocument?.id ?? null),
     [activeDocument?.id, state.editorComments],
   )
-  const ruleOptions = useMemo(() => chatRuleOptions(state), [state.chatRuleOrder, state.chatRules])
+  const ruleOptions = useMemo(() => chatRuleOptions(state, 'editor'), [state.chatRuleOrder, state.chatRules])
   const fileOptions = useMemo(() => fileMentionOptions(state), [state.fileAssetOrder, state.fileAssets])
   const fileGroupOptions = useMemo(() => fileGroupMentionOptions(state), [state.fileGroupOrder, state.fileGroups])
   const [attachedCommentIds, setAttachedCommentIds] = useState<string[]>([])
@@ -493,7 +496,13 @@ export default function EditorWorkspace({
           folders={folders}
           reportOptions={reportOptions}
         />
-      ) : null}
+      ) : (
+        <PanelRail
+          label={copy.showTree}
+          onExpand={() => dispatch({ isVisible: true, type: 'setEditorTreeVisible' })}
+          side="left"
+        />
+      )}
       <main className="flex min-w-0 flex-1 flex-col border-r border-border bg-background">
         {activeDocument ? (
           <>
@@ -503,10 +512,8 @@ export default function EditorWorkspace({
               dispatch={dispatch}
               document={activeDocument}
               editor={activeEditor}
-              isCommentPanelVisible={state.editorUi.isCommentPanelVisible}
               isDiffVisible={state.editorUi.isDiffVisible}
               isDirty={state.dirty}
-              isTreeVisible={state.editorUi.isTreeVisible}
               viewMode={state.editorUi.viewMode}
             />
             <div className="flex min-h-0 flex-1 flex-col">
@@ -557,6 +564,7 @@ export default function EditorWorkspace({
                 instructionFeedback={instructionFeedback}
                 isRunning={isGlobalRunning}
                 isVisible={state.editorUi.isAssistantVisible}
+                isWideCanvas={!state.editorUi.isTreeVisible && !state.editorUi.isCommentPanelVisible}
                 onAttachFiles={(files) => void handleAttachEditorFiles(files)}
                 onAttachRule={(ruleId) => addExtraRef({ kind: 'chat-rule', ruleId })}
                 onRefsChange={setPillRefs}
@@ -614,7 +622,13 @@ export default function EditorWorkspace({
           selectedCommentId={state.editorUi.selectedCommentId}
           suggestions={documentSuggestions}
         />
-      ) : null}
+      ) : (
+        <PanelRail
+          label={copy.showComments}
+          onExpand={() => dispatch({ isVisible: true, type: 'setEditorCommentPanelVisible' })}
+          side="right"
+        />
+      )}
     </div>
   )
 }
@@ -840,13 +854,19 @@ function EditorFileTree({
             label={copy.createFolder}
             onClick={() => dispatch({ title: copy.createFolder, type: 'createEditorFolder' })}
           >
-            <FolderOpen className="size-4" />
+            <FolderPlus className="size-4" />
           </TooltipButton>
           <TooltipButton
             label={copy.createDocument}
             onClick={() => dispatch({ type: 'createEditorDocument' })}
           >
-            <Plus className="size-4" />
+            <SquarePen className="size-4" />
+          </TooltipButton>
+          <TooltipButton
+            label={copy.hideTree}
+            onClick={() => dispatch({ isVisible: false, type: 'setEditorTreeVisible' })}
+          >
+            <PanelLeftClose className="size-4" />
           </TooltipButton>
         </div>
       </div>
@@ -862,7 +882,7 @@ function EditorFileTree({
             return (
               <section
                 className={cn(
-                  'relative rounded-md transition-colors',
+                  'relative transition-colors',
                   showDropFrame && 'bg-brand-subtle/45',
                   isDraggingFolder && 'scale-[0.995] opacity-80 shadow-[0_8px_20px_var(--shadow-soft)] ring-1 ring-ring/40',
                 )}
@@ -873,7 +893,7 @@ function EditorFileTree({
               >
                 {showFolderBeforeIndicator ? <DropIndicator className="-top-1" /> : null}
                 {showFolderAfterIndicator ? <DropIndicator className="-bottom-1" /> : null}
-                <div className="group/folder grid min-h-8 grid-cols-[1.35rem_1rem_minmax(0,1fr)_auto_auto_auto_auto] items-center gap-1 rounded-md px-1.5 text-foreground/75 hover:bg-background/70">
+                <div className="group/folder grid min-h-8 grid-cols-[1.35rem_1rem_minmax(0,1fr)_auto_auto_auto_auto] items-center gap-1 px-1.5 text-foreground/75 transition-colors hover:text-foreground">
                   <button
                     aria-expanded={isExpanded}
                     aria-label={`${isExpanded ? copy.hideTree : copy.showTree}: ${folder.title}`}
@@ -923,7 +943,7 @@ function EditorFileTree({
                     onClick={() => dispatch({ folderId: folder.id, type: 'createEditorDocument' })}
                     type="button"
                   >
-                    <Plus className="size-3.5" />
+                    <SquarePen className="size-3.5" />
                   </button>
                   <button
                     aria-label={copy.moveFolder}
@@ -1054,11 +1074,13 @@ function EditorDocumentTreeItem({
   return (
     <div
       className={cn(
-        'group/document relative rounded-md border transition-colors',
+        'group/document relative transition-colors',
         isNested
-          ? 'border-transparent bg-transparent hover:bg-background/70'
+          ? 'bg-transparent hover:text-foreground'
           : 'border-border/60 bg-card/60 shadow-[0_1px_1px_var(--shadow-hairline)] hover:border-border hover:bg-background',
-        isActive && 'bg-brand-subtle text-foreground ring-1 ring-brand/25',
+        !isNested && 'rounded-md border',
+        isNested && isActive && 'text-foreground before:absolute before:-left-[9px] before:bottom-1.5 before:top-1.5 before:w-0.5 before:rounded-full before:bg-brand',
+        !isNested && isActive && 'bg-brand-subtle text-foreground ring-1 ring-brand/25',
         isDragging && 'scale-[0.99] opacity-75 shadow-[0_8px_20px_var(--shadow-soft)] ring-1 ring-ring/50',
       )}
       data-editor-document-id={document.id}
@@ -1081,7 +1103,12 @@ function EditorDocumentTreeItem({
           'grid w-full min-w-0 grid-cols-[1rem_minmax(0,1fr)] items-center gap-2 text-left',
           isNested ? 'min-h-8 px-2 py-1 pr-14' : 'min-h-9 px-3 py-1.5 pr-16',
         )}>
-          <FileText className="size-3.5 shrink-0 text-muted-foreground" />
+          <FileText
+            className={cn(
+              'size-3.5 shrink-0',
+              isNested && isActive ? 'text-brand' : 'text-muted-foreground',
+            )}
+          />
           <input
             aria-label={copy.renameDocument}
             className="min-w-0 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 text-sm font-semibold text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -1113,8 +1140,19 @@ function EditorDocumentTreeItem({
           title={copy.renameDocument}
           type="button"
         >
-          <FileText className="size-3.5 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 truncate text-sm font-semibold">{document.title}</span>
+          <FileText
+            className={cn(
+              'size-3.5 shrink-0',
+              isNested && isActive ? 'text-brand' : 'text-muted-foreground',
+            )}
+          />
+          <span className={cn(
+            'min-w-0 truncate text-sm font-semibold',
+            isNested ? 'text-foreground/85' : 'text-foreground',
+            isActive && 'text-foreground',
+          )}>
+            {document.title}
+          </span>
         </button>
       )}
       <Button
@@ -1144,11 +1182,13 @@ function ImportReportMenu({
   copy,
   dispatch,
   reportOptions,
+  triggerClassName,
   variant = 'icon',
 }: {
   copy: EditorCopy
   dispatch: Dispatch<ResearchDeskAction>
   reportOptions: CompletedReportOption[]
+  triggerClassName?: string
   variant?: 'button' | 'icon'
 }) {
   return (
@@ -1156,8 +1196,12 @@ function ImportReportMenu({
       <DropdownMenuTrigger asChild>
         <Button
           aria-label={copy.importReport}
-          className={cn(variant === 'icon' && 'size-8 rounded-md', variant === 'button' && 'justify-start')}
-          size={variant === 'button' ? 'sm' : 'icon'}
+          className={cn(
+            variant === 'icon' && 'size-8 rounded-md',
+            variant === 'button' && 'justify-center',
+            triggerClassName,
+          )}
+          size={variant === 'button' ? 'default' : 'icon'}
           type="button"
           variant={variant === 'button' ? 'outline' : 'ghost'}
         >
@@ -1190,10 +1234,8 @@ function EditorTopBar({
   dispatch,
   document,
   editor,
-  isCommentPanelVisible,
   isDiffVisible,
   isDirty,
-  isTreeVisible,
   viewMode,
 }: {
   commentCount: number
@@ -1201,10 +1243,8 @@ function EditorTopBar({
   dispatch: Dispatch<ResearchDeskAction>
   document: EditorDocumentRecord
   editor: Editor | null
-  isCommentPanelVisible: boolean
   isDiffVisible: boolean
   isDirty: boolean
-  isTreeVisible: boolean
   viewMode: ProjectState['editorUi']['viewMode']
 }) {
   const [isEditingTitle, setIsEditingTitle] = useState(false)
@@ -1308,13 +1348,6 @@ function EditorTopBar({
         <Badge className="h-5 rounded-full px-1.5 text-[10px]" variant="outline">R{document.revision}</Badge>
         <Separator className="mx-0.5 h-5" orientation="vertical" />
         <TooltipButton
-          disabled={isExporting}
-          label={exportError ?? copy.exportWord}
-          onClick={() => { void handleExportWord() }}
-        >
-          {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-        </TooltipButton>
-        <TooltipButton
           label={viewMode === 'source' ? copy.live : copy.source}
           onClick={() => dispatch({ mode: viewMode === 'source' ? 'live' : 'source', type: 'setEditorViewMode' })}
         >
@@ -1334,18 +1367,15 @@ function EditorTopBar({
         >
           <Scale className="size-4" />
         </TooltipButton>
+        <Separator className="mx-0.5 h-5" orientation="vertical" />
         <TooltipButton
-          label={isTreeVisible ? copy.hideTree : copy.showTree}
-          onClick={() => dispatch({ isVisible: !isTreeVisible, type: 'setEditorTreeVisible' })}
+          disabled={isExporting}
+          label={exportError ?? copy.exportWord}
+          onClick={() => { void handleExportWord() }}
         >
-          <Folder className="size-4" />
+          {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <FileDown className="size-4" />}
         </TooltipButton>
-        <TooltipButton
-          label={isCommentPanelVisible ? copy.hideComments : copy.showComments}
-          onClick={() => dispatch({ isVisible: !isCommentPanelVisible, type: 'setEditorCommentPanelVisible' })}
-        >
-          {isCommentPanelVisible ? <PanelRightClose className="size-4" /> : <PanelRightOpen className="size-4" />}
-        </TooltipButton>
+        <Separator className="mx-0.5 h-5" orientation="vertical" />
         <TooltipButton
           label={copy.deleteDocument}
           onClick={() => dispatch({ documentId: document.id, type: 'deleteEditorDocument' })}
@@ -1735,11 +1765,6 @@ function EditorCommandToolbar({
       <ToolbarButton active={editor?.isActive('bulletList')} disabled={disabled} icon={List} label="Bullet list" onClick={() => editor?.chain().focus().toggleBulletList().run()} />
       <ToolbarButton active={editor?.isActive('orderedList')} disabled={disabled} icon={ListOrdered} label="Ordered list" onClick={() => editor?.chain().focus().toggleOrderedList().run()} />
       <Separator className="mx-0.5 h-5" orientation="vertical" />
-      <ToolbarButton active={editor?.isActive('bold')} disabled={disabled} icon={Bold} label="Bold" onClick={() => editor?.chain().focus().toggleBold().run()} />
-      <ToolbarButton active={editor?.isActive('italic')} disabled={disabled} icon={Italic} label="Italic" onClick={() => editor?.chain().focus().toggleItalic().run()} />
-      <ToolbarButton active={editor?.isActive('strike')} disabled={disabled} icon={Strikethrough} label="Strike" onClick={() => editor?.chain().focus().toggleStrike().run()} />
-      <ToolbarButton active={editor?.isActive('underline')} disabled={disabled} icon={Underline} label="Underline" onClick={() => editor?.chain().focus().toggleUnderline().run()} />
-      <ToolbarButton active={editor?.isActive('highlight')} disabled={disabled} icon={Highlighter} label="Highlight" onClick={() => editor?.chain().focus().toggleHighlight().run()} />
       <ToolbarButton active={editor?.isActive('link')} disabled={disabled} icon={Link} label="Link" onClick={setLink} />
     </div>
   )
@@ -1969,6 +1994,7 @@ function EditorAssistantComposer({
   instructionFeedback,
   isRunning,
   isVisible,
+  isWideCanvas,
   onAttachFiles,
   onAttachRule,
   onRefsChange,
@@ -2003,6 +2029,7 @@ function EditorAssistantComposer({
   instructionFeedback: EditorInstructionFeedback | null
   isRunning: boolean
   isVisible: boolean
+  isWideCanvas: boolean
   onAttachFiles: (files: File[]) => void
   onAttachRule: (ruleId: string) => void
   onRefsChange: (refs: ChatContextReferenceRecord[]) => void
@@ -2095,7 +2122,7 @@ function EditorAssistantComposer({
 
   if (!isVisible) {
     return (
-      <div className="shrink-0 border-t border-border bg-background px-4 py-2">
+      <div className="shrink-0 px-4 pb-4 pt-2">
         <Button
           className="h-8 rounded-md"
           onClick={() => dispatch({ isVisible: true, type: 'setEditorAssistantVisible' })}
@@ -2103,7 +2130,7 @@ function EditorAssistantComposer({
           type="button"
           variant="outline"
         >
-          <PanelBottomClose className="size-4 rotate-180" />
+          <PanelBottomOpen className="size-4" />
           {copy.showAssistant}
         </Button>
       </div>
@@ -2111,7 +2138,19 @@ function EditorAssistantComposer({
   }
 
   return (
-    <div className="shrink-0 border-t border-border bg-background px-4 py-3">
+    <div className="relative z-10 shrink-0 px-4 pb-4 pt-2">
+      {isWideCanvas ? (
+        <>
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute bottom-0 left-4 top-2 hidden rounded-r-xl bg-background/30 backdrop-blur-xl xl:block xl:right-[calc(50%+28rem)]"
+          />
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute bottom-0 right-4 top-2 hidden rounded-l-xl bg-background/30 backdrop-blur-xl xl:left-[calc(50%+28rem)] xl:block"
+          />
+        </>
+      ) : null}
       <div className="relative mx-auto max-w-4xl">
         <AnimatePresence initial={false}>
           {isAttachActive ? (
@@ -2192,7 +2231,7 @@ function EditorAssistantComposer({
           type="file"
         />
         <Dropzone disabled={isRunning} label={t.chat.dropFiles} onFiles={onAttachFiles}>
-        <div className="relative rounded-md border border-border bg-background px-3 py-2 shadow-sm">
+        <div className="relative rounded-xl border border-border bg-card px-3 py-2 shadow-[0_8px_28px_-12px_var(--shadow-soft)]">
           <TextImproveFloatingLayer
             labels={{
               accept: t.textImprove.accept,
@@ -2210,7 +2249,7 @@ function EditorAssistantComposer({
           <MentionComposer
             ariaLabel={copy.assistantPlaceholder}
             categoryLabels={mentionCategoryLabels}
-            contentClassName="min-h-14 pb-2 pr-9 text-sm leading-6"
+            contentClassName="min-h-16 pb-2 pl-2 pr-9 pt-2 text-sm leading-6"
             enabledKinds={['research', 'rules', 'files', 'filegroups']}
             maxRows={6}
             mentionSources={mentionSources}
@@ -2238,25 +2277,22 @@ function EditorAssistantComposer({
           ) : null}
           <div className="flex items-center justify-between gap-2 border-t border-border/70 pt-1.5">
             <div className="flex min-w-0 items-center gap-1">
-              <TooltipButton
+              <ComposerIconButton
+                icon={PanelBottomClose}
                 label={copy.hideAssistant}
                 onClick={() => dispatch({ isVisible: false, type: 'setEditorAssistantVisible' })}
-              >
-                <PanelBottomClose className="size-4" />
-              </TooltipButton>
-              <TooltipButton
-                className={cn(isAttachActive && 'bg-brand-subtle text-brand')}
+              />
+              <ComposerIconButton
+                active={isAttachActive}
+                icon={MessageSquareText}
                 label={copy.attachComments}
                 onClick={onToggleAttach}
-              >
-                <MessageSquareText className="size-4" />
-              </TooltipButton>
-              <TooltipButton
+              />
+              <ComposerIconButton
+                icon={Paperclip}
                 label={t.chat.attachFiles}
                 onClick={() => fileInputRef.current?.click()}
-              >
-                <Paperclip className="size-4" />
-              </TooltipButton>
+              />
               <EditorModelPicker
                 defaultModel={defaultChatModel}
                 disabled={false}
@@ -2539,7 +2575,7 @@ function EditorCommentsPanel({
 
   return (
     <aside className="flex w-[22rem] shrink-0 flex-col bg-background">
-      <div className="flex h-14 items-center justify-between border-b border-border px-4">
+      <div className="flex h-12 items-center justify-between border-b border-border px-3">
         <div className="flex items-center gap-2">
           <MessageSquarePlus className="size-4 text-brand" />
           <h2 className="text-sm font-semibold">{copy.assistant}</h2>
@@ -2548,7 +2584,7 @@ function EditorCommentsPanel({
           label={copy.hideComments}
           onClick={() => dispatch({ isVisible: false, type: 'setEditorCommentPanelVisible' })}
         >
-          <X className="size-4" />
+          <PanelRightClose className="size-4" />
         </TooltipButton>
       </div>
       <div className="flex flex-col gap-2 border-b border-border px-3 py-2">
@@ -3055,16 +3091,26 @@ function EditorEmptyState({
 }) {
   return (
     <div className="grid min-h-0 flex-1 place-items-center bg-canvas p-8">
-      <div className="w-full max-w-lg rounded-md border border-border bg-background p-8 text-center shadow-sm">
+      <div className="w-full max-w-2xl rounded-md border border-border bg-background p-8 text-center shadow-sm">
         <FileText className="mx-auto mb-4 size-8 text-muted-foreground" />
         <h2 className="text-lg font-semibold">{copy.emptyTitle}</h2>
         <p className="mt-2 text-sm text-muted-foreground">{copy.emptyBody}</p>
-        <div className="mt-5 flex justify-center gap-2">
-          <Button onClick={() => dispatch({ type: 'createEditorDocument' })} type="button">
-            <Plus className="size-4" />
+        <div className="mx-auto mt-5 grid w-full max-w-[31rem] grid-cols-1 gap-2 sm:grid-cols-2">
+          <Button
+            className="h-10 w-full justify-center gap-1.5 px-2 text-[13px]"
+            onClick={() => dispatch({ type: 'createEditorDocument' })}
+            type="button"
+          >
+            <SquarePen className="size-4" />
             {copy.createDocument}
           </Button>
-          <ImportReportMenu copy={copy} dispatch={dispatch} reportOptions={reportOptions} variant="button" />
+          <ImportReportMenu
+            copy={copy}
+            dispatch={dispatch}
+            reportOptions={reportOptions}
+            triggerClassName="h-10 w-full gap-1.5 px-2 text-[13px]"
+            variant="button"
+          />
         </div>
       </div>
     </div>

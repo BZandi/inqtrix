@@ -87,24 +87,20 @@ export function ResearchWorkspace({
   if (isDesktop && isReportVisible) {
     return (
       <ResizablePanelGroup
-        className="h-full w-full overflow-hidden px-4 py-4 md:px-5 lg:min-h-0 xl:px-8"
+        className="h-full w-full overflow-hidden lg:min-h-0"
         orientation="horizontal"
       >
         <ResizablePanel
-          className="min-h-0 min-w-0 overflow-hidden pr-3 xl:pr-4"
+          className="min-h-0 min-w-0 overflow-hidden"
           defaultSize="58%"
           maxSize="74%"
           minSize="42%"
         >
           {runColumn}
         </ResizablePanel>
-        <ResizableHandle
-          aria-label="Resize report panel"
-          className="mx-0 w-4 cursor-col-resize bg-transparent after:w-4 after:rounded-full after:bg-transparent hover:after:bg-border/70 active:after:bg-brand/30 focus-visible:ring-2 focus-visible:ring-ring [&>div]:h-10 [&>div]:w-5 [&>div]:rounded-md [&>div]:bg-background [&>div]:shadow-[0_1px_2px_var(--shadow-hairline)]"
-          withHandle
-        />
+        <ResizableHandle aria-label="Resize report panel" />
         <ResizablePanel
-          className="min-h-0 min-w-0 overflow-hidden pl-3 xl:pl-4"
+          className="min-h-0 min-w-0 overflow-hidden"
           defaultSize="42%"
           maxSize="58%"
           minSize="26%"
@@ -123,7 +119,7 @@ export function ResearchWorkspace({
 
   if (isDesktop) {
     return (
-      <div className="grid h-full grid-cols-[minmax(0,1fr)_44px] gap-3 overflow-hidden px-4 py-4 md:px-5 lg:min-h-0 xl:px-8">
+      <div className="grid h-full grid-cols-[minmax(0,1fr)_44px] gap-2 overflow-hidden lg:min-h-0">
         <div className="min-h-0 overflow-hidden">{runColumn}</div>
         <ReportRestoreRail onShow={() => onReportVisibleChange(true)} />
       </div>
@@ -131,7 +127,7 @@ export function ResearchWorkspace({
   }
 
   return (
-    <div className="grid w-full grid-cols-1 gap-4 px-4 py-4 md:px-5">
+    <div className="grid w-full grid-cols-1 gap-4 py-4">
       {runColumn}
       {isReportVisible ? (
         <ReportPanel

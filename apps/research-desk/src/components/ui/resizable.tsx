@@ -1,4 +1,3 @@
-import { GripVertical } from "@/components/icons"
 import * as ResizablePrimitive from "react-resizable-panels"
 
 import { cn } from "@/lib/utils"
@@ -18,26 +17,29 @@ const ResizablePanelGroup = ({
 
 const ResizablePanel = ResizablePrimitive.Panel
 
+/**
+ * Minimalist split divider: a 1px hairline seam (so an adjacent panel reads as
+ * attached, not as a floating window) with a wide transparent hit area for a
+ * comfortable drag target. The line stays quiet at rest and only brightens on
+ * hover, then turns to the brand colour while dragging (`data-separator` is the
+ * state hook react-resizable-panels sets: inactive | hover | drag). No grip
+ * pill — the affordance is the cursor plus the subtle highlight. Shared by the
+ * research-desk report split and the chat history split so both feel identical.
+ */
 const ResizableHandle = ({
-  withHandle,
   className,
   ...props
-}: React.ComponentProps<typeof ResizablePrimitive.Separator> & {
-  withHandle?: boolean
-}) => (
+}: React.ComponentProps<typeof ResizablePrimitive.Separator>) => (
   <ResizablePrimitive.Separator
     className={cn(
-      "relative flex w-px items-center justify-center bg-border after:absolute after:inset-y-0 after:left-1/2 after:w-1 after:-translate-x-1/2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1 data-[panel-group-direction=vertical]:h-px data-[panel-group-direction=vertical]:w-full data-[panel-group-direction=vertical]:after:left-0 data-[panel-group-direction=vertical]:after:h-1 data-[panel-group-direction=vertical]:after:w-full data-[panel-group-direction=vertical]:after:-translate-y-1/2 data-[panel-group-direction=vertical]:after:translate-x-0 [&[data-panel-group-direction=vertical]>div]:rotate-90",
+      "relative w-px shrink-0 cursor-col-resize bg-border outline-none transition-colors duration-150",
+      "after:absolute after:inset-y-0 after:left-1/2 after:w-4 after:-translate-x-1/2",
+      "hover:bg-foreground/20 data-[separator=hover]:bg-foreground/20 data-[separator=drag]:bg-brand",
+      "focus-visible:ring-1 focus-visible:ring-ring",
       className
     )}
     {...props}
-  >
-    {withHandle && (
-      <div className="z-10 flex h-4 w-3 items-center justify-center rounded-sm border bg-border">
-        <GripVertical className="h-2.5 w-2.5" />
-      </div>
-    )}
-  </ResizablePrimitive.Separator>
+  />
 )
 
 export { ResizablePanelGroup, ResizablePanel, ResizableHandle }

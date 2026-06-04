@@ -2,6 +2,7 @@ import type {
   ResearchSource,
 } from '@/features/researchRuns/types'
 import type {
+  ChatContextReferenceRecord,
   ChatMessageAttachmentRecord,
   ChatMessageModelResolutionRecord,
   ChatMessageRecord,
@@ -23,6 +24,13 @@ import type {
 import type { JobStatus } from '@/features/researchDesk/types'
 import { PROJECT_SCHEMA_VERSION } from './types'
 import { normalizeReportReferences } from './reportReferences'
+import {
+  chatRuleAutocompleteOrDefault,
+  chatRuleCategoryOrDefault,
+  chatRuleVisibilityOrDefault,
+  normalizeChatRule,
+  normalizeLinkedContextRefs,
+} from './chatRules'
 
 const MESSAGE_START = /^<!-- inqtrix:message (.+) -->$/
 const MESSAGE_END = '<!-- /inqtrix:message -->'
@@ -188,18 +196,23 @@ export function serializeChatRule(
   rule: ChatRuleRecord,
   path = `rules/${sanitizeFileSegment(rule.label)}.md`,
 ): ProjectFile {
+  const normalized = normalizeChatRule(rule)
   const frontmatter = {
+    category: normalized.category,
     created_at: rule.createdAt,
+    include_in_autocomplete: normalized.includeInAutocomplete,
     kind: 'inqtrix.chat_rule',
     label: rule.label,
+    linked_context_refs: linkedContextRefsToFrontmatter(normalized.linkedContextRefs ?? []),
     rule_id: rule.id,
     schema_version: PROJECT_SCHEMA_VERSION,
     title: rule.title,
     updated_at: rule.updatedAt,
+    visibility: normalized.visibility,
   }
 
   return {
-    contents: withFrontmatter(frontmatter, rule.contentMarkdown),
+    contents: withFrontmatter(frontmatter, normalized.contentMarkdown),
     path,
   }
 }
@@ -488,13 +501,52 @@ export function parseChatRule(markdown: string): ChatRuleRecord {
   requireKind(data, 'inqtrix.chat_rule')
 
   return {
+    category: chatRuleCategoryOrDefault(data.category),
     contentMarkdown: parsed.body.trimStart(),
     createdAt: stringValue(data.created_at),
     id: stringValue(data.rule_id),
+    includeInAutocomplete: chatRuleAutocompleteOrDefault(data.include_in_autocomplete),
     label: stringValue(data.label),
+    linkedContextRefs: chatRuleCategoryOrDefault(data.category) === 'context'
+      ? linkedContextRefsFromUnknown(data.linked_context_refs)
+      : [],
     title: stringValue(data.title),
     updatedAt: stringValue(data.updated_at),
+    visibility: chatRuleVisibilityOrDefault(data.visibility),
   }
+}
+
+function linkedContextRefsToFrontmatter(refs: readonly ChatContextReferenceRecord[]) {
+  return normalizeLinkedContextRefs(refs).map((ref) => {
+    if (ref.kind === 'file-asset') {
+      return {
+        file_id: ref.fileId,
+        kind: 'file-asset',
+      }
+    }
+    return {
+      group_id: ref.groupId,
+      kind: 'file-group',
+    }
+  })
+}
+
+function linkedContextRefsFromUnknown(value: unknown): ChatContextReferenceRecord[] {
+  if (!Array.isArray(value)) return []
+  const refs = value.flatMap<ChatContextReferenceRecord>((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+    const record = item as Record<string, unknown>
+    if (record.kind === 'file-asset') {
+      const fileId = optionalString(record.fileId) ?? optionalString(record.file_id)
+      return fileId ? [{ fileId, kind: 'file-asset' }] : []
+    }
+    if (record.kind === 'file-group') {
+      const groupId = optionalString(record.groupId) ?? optionalString(record.group_id)
+      return groupId ? [{ groupId, kind: 'file-group' }] : []
+    }
+    return []
+  })
+  return normalizeLinkedContextRefs(refs)
 }
 
 export function parseFileAsset(markdown: string): FileAssetRecord {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyProjectState } from '@/features/project/seedProject'
-import type { FileAssetRecord } from '@/features/project/types'
+import type { ChatRuleRecord, FileAssetRecord } from '@/features/project/types'
 import { researchDeskReducer } from './state'
 
 function makeAsset(id: string, label: string, overrides: Partial<FileAssetRecord> = {}): FileAssetRecord {
@@ -24,6 +24,54 @@ function makeAsset(id: string, label: string, overrides: Partial<FileAssetRecord
     ...overrides,
   }
 }
+
+function makeRule(id: string, label: string, overrides: Partial<ChatRuleRecord> = {}): ChatRuleRecord {
+  return {
+    contentMarkdown: `${label} prompt`,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    id,
+    label,
+    title: `${label} prompt`,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+describe('ui visibility reducer actions', () => {
+  it('hides and shows the chat history panel', () => {
+    const hidden = researchDeskReducer(createEmptyProjectState(), {
+      isVisible: false,
+      type: 'setChatHistoryVisible',
+    })
+    expect(hidden.ui.isChatHistoryVisible).toBe(false)
+    const shown = researchDeskReducer(hidden, {
+      isVisible: true,
+      type: 'setChatHistoryVisible',
+    })
+    expect(shown.ui.isChatHistoryVisible).toBe(true)
+  })
+})
+
+describe('chat folder reducer actions', () => {
+  it('creates a chat thread inside the requested folder', () => {
+    const withFolder = researchDeskReducer(createEmptyProjectState(), {
+      title: 'Folder',
+      type: 'createChatThreadGroup',
+    })
+    const groupId = withFolder.chatThreadGroupOrder[0]
+
+    const next = researchDeskReducer(withFolder, {
+      groupId,
+      type: 'createChatThread',
+    })
+    const threadId = next.ui.selectedChatThreadId
+
+    expect(threadId).toBeTruthy()
+    expect(next.chatThreadGroupMemberships[threadId as string]).toBe(groupId)
+    expect(next.chatThreadOrder[0]).toBe(threadId)
+    expect(next.dirty).toBe(true)
+  })
+})
 
 describe('file-asset reducer actions', () => {
   it('ingests assets into the store and order', () => {
@@ -123,6 +171,77 @@ describe('file-group reducer actions', () => {
     const next = researchDeskReducer(withAsset, { groupId, type: 'deleteFileGroup' })
     expect(next.fileGroups[groupId]).toBeUndefined()
     expect(next.fileAssets.f1.groupId).toBeNull()
+  })
+})
+
+describe('chat rule reducer actions', () => {
+  it('upserts legacy rules with prompt-library defaults', () => {
+    const next = researchDeskReducer(createEmptyProjectState(), {
+      rule: makeRule('r1', 'legacy'),
+      type: 'upsertChatRule',
+    })
+
+    expect(next.chatRules.r1).toMatchObject({
+      category: 'instruction',
+      includeInAutocomplete: true,
+      linkedContextRefs: [],
+      visibility: { chat: true, editor: true },
+    })
+    expect(next.chatRuleOrder).toEqual(['r1'])
+  })
+
+  it('keeps only database references on context-pack rules', () => {
+    const next = researchDeskReducer(createEmptyProjectState(), {
+      rule: makeRule('r1', 'profile', {
+        category: 'context',
+        linkedContextRefs: [
+          { fileId: 'f1', kind: 'file-asset' },
+          { kind: 'chat-rule', ruleId: 'nested-rule' },
+          { groupId: 'g1', kind: 'file-group' },
+        ],
+      }),
+      type: 'upsertChatRule',
+    })
+
+    expect(next.chatRules.r1.linkedContextRefs).toEqual([
+      { fileId: 'f1', kind: 'file-asset' },
+      { groupId: 'g1', kind: 'file-group' },
+    ])
+  })
+
+  it('stores rendered context-pack content on chat attachments', () => {
+    const base = createEmptyProjectState()
+    const seeded = {
+      ...base,
+      chatRuleOrder: ['r1'],
+      chatRules: {
+        r1: makeRule('r1', 'profile', {
+          category: 'context',
+          contentMarkdown: 'Apply the profile.\n{{context}}',
+          linkedContextRefs: [{ fileId: 'f1', kind: 'file-asset' }],
+        }),
+      },
+      fileAssetOrder: ['f1'],
+      fileAssets: {
+        f1: makeAsset('f1', 'alpha', { extractedText: 'Original profile content.' }),
+      },
+    }
+
+    const next = researchDeskReducer(seeded, {
+      assistantMessageId: 'a1',
+      attachmentRefs: [{ kind: 'chat-rule', ruleId: 'r1' }],
+      contentMarkdown: 'Use @rules:profile',
+      createdAt: '2026-01-03T00:00:00.000Z',
+      threadId: 'thread-1',
+      type: 'startChatExchange',
+      userMessageId: 'u1',
+    })
+
+    const attachment = next.chatThreads['thread-1'].messages[0].attachments?.[0]
+    expect(attachment).toMatchObject({ kind: 'chat-rule', label: 'profile' })
+    expect(attachment?.contentMarkdown).toContain('Apply the profile.')
+    expect(attachment?.contentMarkdown).toContain('Original profile content.')
+    expect(attachment?.contentMarkdown).not.toContain('{{context}}')
   })
 })
 

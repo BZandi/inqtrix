@@ -2,6 +2,7 @@ import {
   FileText,
   Globe2,
   ListChecks,
+  PanelBottomClose,
   Repeat2,
   Search,
   SendHorizontal,
@@ -43,12 +44,14 @@ import { Separator } from '@/components/ui/separator'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { CreateResearchRunRequest } from '@/features/researchRuns/types'
+import { ComposerIconButton, composerIconButtonClassName } from '@/features/composer/ComposerIconButton'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
 
 type ComposerProps = {
   form: ComposerFormState
+  onHide: () => void
   onSubmit: (request: CreateResearchRunRequest) => void
   reduceMotion: boolean | null
   selectedStack: string
@@ -95,7 +98,7 @@ export function buildComposerRequest(
 }
 
 export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer(
-  { form, onSubmit, reduceMotion, selectedStack, setForm },
+  { form, onHide, onSubmit, reduceMotion, selectedStack, setForm },
   ref,
 ) {
   const { t } = useLocale()
@@ -141,14 +144,14 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={appMotion.composer}
-      className="sticky bottom-0 z-20 rounded-lg border border-border bg-card/98 p-3 shadow-[0_18px_50px_var(--shadow-soft)] backdrop-blur will-change-opacity"
+      className="shrink-0 px-4 pb-4 pt-2"
     >
-      <form onSubmit={submitResearch}>
-        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
+      <form className="mx-auto max-w-4xl" onSubmit={submitResearch}>
+        <div className="relative rounded-xl border border-border bg-card px-3 py-2.5 shadow-[0_8px_28px_-12px_var(--shadow-soft)]">
           <Textarea
             aria-label={t.composer.placeholder}
             className={cn(
-              'min-h-24 resize-none border-0 py-2 pl-3 pr-2 text-base leading-6 focus-visible:ring-0',
+              'min-h-16 resize-none border-0 bg-transparent pb-2 pl-2 pr-11 pt-2 text-sm font-normal leading-6 shadow-none placeholder:text-muted-foreground/70 focus-visible:ring-0',
               '[scrollbar-width:thin]',
               '[scrollbar-color:color-mix(in_oklch,var(--muted-foreground)_22%,transparent)_transparent]',
               '[&::-webkit-scrollbar]:w-1',
@@ -167,19 +170,14 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
             rows={1}
             value={form.question}
           />
-          <Button
-            aria-label={t.composer.send}
-            className="mb-2 h-8 w-8"
-            disabled={!canSubmit}
-            size="icon"
-            type="submit"
-            variant="ghost"
-          >
-            <SendHorizontal className="size-3.5" />
-          </Button>
-        </div>
-        <Separator className="my-1" />
-        <div className="flex flex-wrap items-center gap-1">
+          <div className="mt-1.5 flex items-center justify-between gap-2 border-t border-border/70 pt-1.5">
+            <div className="flex min-w-0 items-center gap-1 overflow-hidden">
+          <ComposerIconButton
+            icon={PanelBottomClose}
+            label={t.composer.hide}
+            onClick={onHide}
+          />
+          <Separator className="mx-0.5 h-5" orientation="vertical" />
           <ComposerSelect
             icon={FileText}
             label={t.composer.reportProfile}
@@ -240,7 +238,8 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
             ]}
             value={String(form.maxRounds)}
           />
-          <div className="ml-auto flex items-center gap-1">
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
             <ComposerStatusMenu
               confidenceStop={form.confidenceStop}
               firstRoundQueries={form.firstRoundQueries}
@@ -256,7 +255,7 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
                   <TooltipTrigger asChild>
                     <Button
                       aria-label={t.composer.moreSettings}
-                      className={composerIconButtonClassName()}
+                      className={composerIconButtonClassName}
                       type="button"
                       variant="ghost"
                     >
@@ -297,6 +296,22 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
                 ))}
               </DropdownMenuContent>
             </DropdownMenu>
+              <Button
+                aria-label={t.composer.send}
+                className={cn(
+                  'size-7 shrink-0 rounded-md',
+                  canSubmit
+                    ? 'bg-brand text-white hover:bg-brand/90 hover:text-white'
+                    : 'text-muted-foreground/45',
+                )}
+                disabled={!canSubmit}
+                size="icon"
+                type="submit"
+                variant={canSubmit ? 'default' : 'ghost'}
+              >
+                <SendHorizontal className="size-4" />
+              </Button>
+            </div>
           </div>
         </div>
       </form>
@@ -331,7 +346,7 @@ function ComposerStatusMenu({
           <TooltipTrigger asChild>
             <Button
               aria-label={t.composer.settingsSummary}
-              className={composerIconButtonClassName()}
+              className={composerIconButtonClassName}
               type="button"
               variant="ghost"
             >
@@ -425,7 +440,7 @@ function ComposerSelect({
         <TooltipTrigger asChild>
           <SelectTrigger
             aria-label={triggerLabel}
-            className={cn(composerIconButtonClassName(), 'w-10 gap-0.5 px-1')}
+            className={cn(composerIconButtonClassName, 'w-10 gap-0.5 px-1')}
           >
             <Icon className="size-3.5 shrink-0" />
             <span className="sr-only">
@@ -451,11 +466,6 @@ function ComposerSelect({
     </Select>
   )
 }
-
-function composerIconButtonClassName() {
-  return 'h-7 w-7 rounded-md border border-transparent bg-transparent p-0 text-muted-foreground shadow-none hover:bg-accent hover:text-foreground focus-visible:ring-1 data-[state=open]:bg-accent data-[state=open]:text-foreground'
-}
-
 
 function ToggleVisual({ checked }: { checked: boolean }) {
   return (

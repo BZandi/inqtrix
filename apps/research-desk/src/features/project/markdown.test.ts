@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest'
 import { createDefaultFileLibrarySections } from '@/features/files/sections'
 import { createEmptyProjectState } from './seedProject'
 import {
+  parseChatRule,
   parseFileAsset,
   parseProjectManifest,
+  serializeChatRule,
   serializeFileAsset,
   serializeProjectManifest,
 } from './markdown'
-import type { FileAssetRecord, FileGroupRecord, ProjectState } from './types'
+import type { ChatRuleRecord, FileAssetRecord, FileGroupRecord, ProjectState } from './types'
 
 function makeAsset(id: string, label: string, overrides: Partial<FileAssetRecord> = {}): FileAssetRecord {
   return {
@@ -30,6 +32,73 @@ function makeAsset(id: string, label: string, overrides: Partial<FileAssetRecord
     ...overrides,
   }
 }
+
+function makeRule(overrides: Partial<ChatRuleRecord> = {}): ChatRuleRecord {
+  return {
+    contentMarkdown: 'Follow the profile context.',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    id: 'rule-1',
+    label: 'profile',
+    title: 'Profile',
+    updatedAt: '2026-01-02T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+describe('serializeChatRule / parseChatRule', () => {
+  it('parses legacy rule files with prompt-library defaults', () => {
+    const parsed = parseChatRule([
+      '---',
+      'created_at: 2026-01-01T00:00:00.000Z',
+      'kind: inqtrix.chat_rule',
+      'label: legacy',
+      'rule_id: rule-legacy',
+      'schema_version: 1',
+      'title: Legacy',
+      'updated_at: 2026-01-02T00:00:00.000Z',
+      '---',
+      'Legacy instruction.',
+    ].join('\n'))
+
+    expect(parsed).toEqual({
+      category: 'instruction',
+      contentMarkdown: 'Legacy instruction.',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      id: 'rule-legacy',
+      includeInAutocomplete: true,
+      label: 'legacy',
+      linkedContextRefs: [],
+      title: 'Legacy',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+      visibility: { chat: true, editor: true },
+    })
+  })
+
+  it('round-trips prompt-library frontmatter additively', () => {
+    const rule = makeRule({
+      category: 'context',
+      includeInAutocomplete: false,
+      linkedContextRefs: [
+        { fileId: 'file-1', kind: 'file-asset' },
+        { groupId: 'group-1', kind: 'file-group' },
+        { kind: 'chat-rule', ruleId: 'ignored-linked-rule' },
+      ],
+      visibility: { chat: true, editor: false },
+    })
+
+    const file = serializeChatRule(rule)
+    const parsed = parseChatRule(file.contents)
+
+    expect(file.path).toBe('rules/profile.md')
+    expect(parsed).toEqual({
+      ...rule,
+      linkedContextRefs: [
+        { fileId: 'file-1', kind: 'file-asset' },
+        { groupId: 'group-1', kind: 'file-group' },
+      ],
+    })
+  })
+})
 
 describe('serializeFileAsset / parseFileAsset', () => {
   it('round-trips an asset with all metadata', () => {

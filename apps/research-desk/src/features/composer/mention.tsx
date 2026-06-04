@@ -7,7 +7,7 @@ import type {
   FileGroupMentionOption,
   FileMentionOption,
 } from '@/features/project/selectors'
-import type { ChatContextReferenceRecord } from '@/features/project/types'
+import type { ChatContextReferenceRecord, ChatRuleCategory } from '@/features/project/types'
 
 export type MentionKind = 'research' | 'rules' | 'files' | 'filegroups'
 
@@ -33,6 +33,7 @@ export type MentionSources = {
 }
 
 export type MentionOption = {
+  category?: ChatRuleCategory
   label: string
   prefix?: '@research:' | '@rules:' | '@files:' | '@filegroups:'
   ref?: ChatContextReferenceRecord
@@ -120,6 +121,7 @@ function mentionItemsForKind(
     .filter((rule) => matchesMentionQuery(query, rule.label, rule.title))
     .slice(0, 8)
     .map((rule) => ({
+      category: rule.category,
       label: rule.label,
       ref: { kind: 'chat-rule', ruleId: rule.ruleId },
       title: rule.title,
@@ -229,6 +231,11 @@ export function MentionAutocomplete({
   options: MentionOption[]
 }) {
   const { t } = useLocale()
+  const groups = groupMentionOptions(options, {
+    context: t.promptLibrary.categoryContext,
+    function: t.promptLibrary.categoryFunction,
+    instruction: t.promptLibrary.categoryInstruction,
+  })
   return (
     <div className="absolute bottom-full left-0 z-30 mb-2 w-full max-w-lg overflow-hidden rounded-lg border border-border bg-popover shadow-lg">
       <div className="border-b border-border px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
@@ -238,34 +245,62 @@ export function MentionAutocomplete({
         </span>
       </div>
       <div className="max-h-64 overflow-y-auto p-1">
-        {options.map((option, index) => {
-          const Icon = MENTION_ICON[option.type]
-          return (
-            <button
-              className={cn(
-                'flex w-full min-w-0 items-start gap-2 rounded-md px-2 py-2 text-left transition-colors',
-                index === activeIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/70',
-              )}
-              key={`${option.type}-${option.label}`}
-              onMouseDown={(event) => {
-                event.preventDefault()
-                onSelect(option)
-              }}
-              type="button"
-            >
-              <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-              <span className="min-w-0">
-                <span className="block truncate text-sm font-semibold">
-                  {option.prefix ? option.label : `@${option.type}:${option.label}`}
-                </span>
-                <span className="block truncate text-xs text-muted-foreground">
-                  {option.title}
-                </span>
-              </span>
-            </button>
-          )
-        })}
+        {groups.map((group) => (
+          <div key={group.key}>
+            {group.label ? (
+              <div className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                {group.label}
+              </div>
+            ) : null}
+            {group.options.map(({ index, option }) => {
+              const Icon = MENTION_ICON[option.type]
+              return (
+                <button
+                  className={cn(
+                    'flex w-full min-w-0 items-start gap-2 rounded-md px-2 py-2 text-left transition-colors',
+                    index === activeIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/70',
+                  )}
+                  key={`${option.type}-${option.label}`}
+                  onMouseDown={(event) => {
+                    event.preventDefault()
+                    onSelect(option)
+                  }}
+                  type="button"
+                >
+                  <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-semibold">
+                      {option.prefix ? option.label : `@${option.type}:${option.label}`}
+                    </span>
+                    <span className="block truncate text-xs text-muted-foreground">
+                      {option.title}
+                    </span>
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        ))}
       </div>
     </div>
   )
+}
+
+function groupMentionOptions(options: MentionOption[], labels: Record<ChatRuleCategory, string>): Array<{
+  key: string
+  label: string | null
+  options: Array<{ index: number; option: MentionOption }>
+}> {
+  if (!options.some((option) => option.type === 'rules' && !option.prefix)) {
+    return [{ key: 'all', label: null, options: options.map((option, index) => ({ index, option })) }]
+  }
+  const order: ChatRuleCategory[] = ['instruction', 'function', 'context']
+  return order.flatMap((category) => {
+    const grouped = options
+      .map((option, index) => ({ index, option }))
+      .filter(({ option }) => option.category === category)
+    return grouped.length > 0
+      ? [{ key: category, label: labels[category], options: grouped }]
+      : []
+  })
 }

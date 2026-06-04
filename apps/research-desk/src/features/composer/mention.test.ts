@@ -61,6 +61,46 @@ describe('buildMentionOptions', () => {
     const options = buildMentionOptions(match, sources, labels, ['rules', 'files', 'filegroups'])
     expect(options[0].ref).toEqual({ groupId: 'g1', kind: 'file-group' })
   })
+
+  it('carries prompt categories for grouped @rules: autocomplete rendering', () => {
+    const match = detectMentionTrigger('@rules:', '@rules:'.length)!
+    const options = buildMentionOptions(
+      match,
+      {
+        ...sources,
+        ruleOptions: [
+          {
+            category: 'instruction',
+            includeInAutocomplete: true,
+            label: 'style',
+            linkedContextRefs: [],
+            markdown: 'Write concise answers.',
+            ruleId: 'r1',
+            title: 'Style',
+            visibility: { chat: true, editor: true },
+          },
+          {
+            category: 'function',
+            includeInAutocomplete: true,
+            label: 'translate',
+            linkedContextRefs: [],
+            markdown: 'Translate the input.',
+            ruleId: 'r2',
+            title: 'Translate',
+            visibility: { chat: true, editor: true },
+          },
+        ],
+      },
+      labels,
+      ['rules', 'files', 'filegroups'],
+    )
+
+    expect(options.map((option) => option.category)).toEqual(['instruction', 'function'])
+    expect(options.map((option) => option.ref)).toEqual([
+      { kind: 'chat-rule', ruleId: 'r1' },
+      { kind: 'chat-rule', ruleId: 'r2' },
+    ])
+  })
 })
 
 describe('resolveInlineMentions', () => {

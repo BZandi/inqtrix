@@ -2,7 +2,9 @@ import type { Locale } from '@/i18n/translations'
 import type {
   ChatContextReferenceRecord,
   ChatMessageAttachmentRecord,
+  ChatRuleCategory,
   ChatRuleRecord,
+  ChatRuleVisibility,
   ChatThreadGroupRecord,
   ChatThreadRecord,
   EditorCommentThreadRecord,
@@ -16,6 +18,12 @@ import type {
 } from './types'
 import { type JobPhase, type LocalizedText, type ResearchJob } from '@/features/researchDesk/types'
 import type { ReferenceDoc } from '@/features/files/referenceBlocks'
+import {
+  normalizeChatRule,
+} from './chatRules'
+import {
+  renderChatRuleAttachmentContent,
+} from './chatRuleRendering'
 
 export type CompletedReportOption = {
   label: string
@@ -25,11 +33,17 @@ export type CompletedReportOption = {
 }
 
 export type ChatRuleOption = {
+  category: ChatRuleCategory
+  includeInAutocomplete: boolean
   label: string
+  linkedContextRefs: ChatContextReferenceRecord[]
   markdown: string
   ruleId: string
   title: string
+  visibility: ChatRuleVisibility
 }
+
+export type ChatRuleSurface = 'chat' | 'editor'
 
 export type ChatHistorySection =
   | {
@@ -106,6 +120,7 @@ export function projectChatRules(state: ProjectState): ChatRuleRecord[] {
   return state.chatRuleOrder
     .map((ruleId) => state.chatRules[ruleId])
     .filter((rule): rule is ChatRuleRecord => Boolean(rule))
+    .map(normalizeChatRule)
 }
 
 export function selectedChatThread(state: ProjectState) {
@@ -170,17 +185,31 @@ function commentStatusRank(status: EditorCommentThreadRecord['status']) {
   return 2
 }
 
-export function chatRuleOptions(state: ProjectState): ChatRuleOption[] {
-  return chatRuleOptionsFromRules(projectChatRules(state))
+export function chatRuleOptions(state: ProjectState, surface?: ChatRuleSurface): ChatRuleOption[] {
+  return chatRuleOptionsFromRules(projectChatRules(state), surface)
 }
 
-export function chatRuleOptionsFromRules(rules: readonly ChatRuleRecord[]): ChatRuleOption[] {
-  return rules.map((rule) => ({
-    label: rule.label,
-    markdown: rule.contentMarkdown,
-    ruleId: rule.id,
-    title: rule.title,
-  }))
+export function chatRuleOptionsFromRules(
+  rules: readonly ChatRuleRecord[],
+  surface?: ChatRuleSurface,
+): ChatRuleOption[] {
+  return rules
+    .map(normalizeChatRule)
+    .filter((rule) => (
+      surface
+        ? rule.includeInAutocomplete !== false && rule.visibility?.[surface] !== false
+        : true
+    ))
+    .map((rule) => ({
+      category: rule.category ?? 'instruction',
+      includeInAutocomplete: rule.includeInAutocomplete ?? true,
+      label: rule.label,
+      linkedContextRefs: rule.linkedContextRefs ?? [],
+      markdown: rule.contentMarkdown,
+      ruleId: rule.id,
+      title: rule.title,
+      visibility: rule.visibility ?? { chat: true, editor: true },
+    }))
 }
 
 export type FileMentionOption = {
@@ -261,7 +290,7 @@ export function chatAttachmentsFromRefs(
 ): ChatMessageAttachmentRecord[] {
   const attachedAt = new Date().toISOString()
   const reports = completedReportOptions(state)
-  const rules = chatRuleOptions(state)
+  const rules = projectChatRules(state)
   const seen = new Set<string>()
 
   return refs.flatMap<ChatMessageAttachmentRecord>((ref) => {
@@ -319,14 +348,14 @@ export function chatAttachmentsFromRefs(
       }]
     }
 
-    const rule = rules.find((option) => option.ruleId === ref.ruleId)
+    const rule = rules.find((item) => item.id === ref.ruleId)
     if (!rule) return []
     return [{
       attachedAt,
-      contentMarkdown: rule.markdown,
+      contentMarkdown: renderChatRuleAttachmentContent(state, rule, attachedAt),
       kind: 'chat-rule' as const,
       label: rule.label,
-      ruleId: rule.ruleId,
+      ruleId: rule.id,
       title: rule.title,
     }]
   })
@@ -418,7 +447,7 @@ export function chatAttachmentChipsFromRefs(
   refs: readonly ChatContextReferenceRecord[],
 ): ChatAttachmentChipModel[] {
   const reports = completedReportOptions(state)
-  const rules = chatRuleOptions(state)
+  const rules = projectChatRules(state)
   const seen = new Set<string>()
 
   return refs.flatMap<ChatAttachmentChipModel>((ref) => {
@@ -433,7 +462,7 @@ export function chatAttachmentChipsFromRefs(
         return [{ fileCount: null, kind: ref.kind, label: `@research:${report.label}`, ref, title: report.title }]
       }
       case 'chat-rule': {
-        const rule = rules.find((option) => option.ruleId === ref.ruleId)
+        const rule = rules.find((item) => item.id === ref.ruleId)
         if (!rule) return []
         return [{ fileCount: null, kind: ref.kind, label: `@rules:${rule.label}`, ref, title: rule.title }]
       }

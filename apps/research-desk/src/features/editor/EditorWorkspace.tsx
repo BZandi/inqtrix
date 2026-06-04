@@ -371,7 +371,7 @@ export default function EditorWorkspace({
     () => editorCommentsForDocument(state, activeDocument?.id ?? null),
     [activeDocument?.id, state.editorComments],
   )
-  const ruleOptions = useMemo(() => chatRuleOptions(state), [state.chatRuleOrder, state.chatRules])
+  const ruleOptions = useMemo(() => chatRuleOptions(state, 'editor'), [state.chatRuleOrder, state.chatRules])
   const fileOptions = useMemo(() => fileMentionOptions(state), [state.fileAssetOrder, state.fileAssets])
   const fileGroupOptions = useMemo(() => fileGroupMentionOptions(state), [state.fileGroupOrder, state.fileGroups])
   const [attachedCommentIds, setAttachedCommentIds] = useState<string[]>([])

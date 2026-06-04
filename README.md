@@ -20,7 +20,7 @@ Inqtrix has two layers:
    It decomposes questions, searches the web, verifies claims, ranks sources, and produces cited research results.
 
 2. **Research Desk**: a React-based research workspace built on top of the backend.
-   It provides live run monitoring, report views, evidence attachments, chat context, reusable prompt rules, and project import/export.
+   It provides live run monitoring, report views, evidence attachments, chat context, a Prompt Library, and project import/export.
 Self-hostable Python library and HTTP server for an iterative AI research agent with parallel web search, claim verification, and source tiering.
 
 ![Demo](./assets/Demo-1.gif)

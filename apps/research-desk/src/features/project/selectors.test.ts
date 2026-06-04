@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyProjectState } from './seedProject'
 import {
+  chatRuleOptions,
   chatAttachmentsFromRefs,
   chatContextRefKey,
   dedupeChatContextRefs,
+  projectChatRules,
   referenceDocsFromRefs,
 } from './selectors'
-import type { FileAssetRecord, FileGroupRecord, ProjectState } from './types'
+import type { ChatRuleRecord, FileAssetRecord, FileGroupRecord, ProjectState } from './types'
 
 function makeAsset(id: string, label: string, overrides: Partial<FileAssetRecord> = {}): FileAssetRecord {
   return {
@@ -30,6 +32,18 @@ function makeAsset(id: string, label: string, overrides: Partial<FileAssetRecord
   }
 }
 
+function makeRule(id: string, label: string, overrides: Partial<ChatRuleRecord> = {}): ChatRuleRecord {
+  return {
+    contentMarkdown: `${label} prompt`,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    id,
+    label,
+    title: `${label} prompt`,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
 function stateWith(assets: FileAssetRecord[], groups: FileGroupRecord[] = []): ProjectState {
   const base = createEmptyProjectState()
   return {
@@ -38,6 +52,15 @@ function stateWith(assets: FileAssetRecord[], groups: FileGroupRecord[] = []): P
     fileAssets: Object.fromEntries(assets.map((asset) => [asset.id, asset])),
     fileGroupOrder: groups.map((group) => group.id),
     fileGroups: Object.fromEntries(groups.map((group) => [group.id, group])),
+  }
+}
+
+function stateWithRules(rules: ChatRuleRecord[]): ProjectState {
+  const base = createEmptyProjectState()
+  return {
+    ...base,
+    chatRuleOrder: rules.map((rule) => rule.id),
+    chatRules: Object.fromEntries(rules.map((rule) => [rule.id, rule])),
   }
 }
 
@@ -85,6 +108,67 @@ describe('chatAttachmentsFromRefs', () => {
     const attachments = chatAttachmentsFromRefs(state, [{ groupId: 'g1', kind: 'file-group' }])
     expect(attachments.map((attachment) => attachment.label)).toEqual(['alpha', 'beta'])
     expect(attachments.every((attachment) => attachment.kind === 'file-group')).toBe(true)
+  })
+
+  it('renders context-pack rules with linked database files as a stored snapshot', () => {
+    const state = {
+      ...stateWith([makeAsset('f1', 'alpha')]),
+      chatRuleOrder: ['r1'],
+      chatRules: {
+        r1: makeRule('r1', 'cv', {
+          category: 'context',
+          contentMarkdown: 'Use this profile context:\n{{context}}\nThen answer.',
+          linkedContextRefs: [{ fileId: 'f1', kind: 'file-asset' }],
+        }),
+      },
+    }
+
+    const attachments = chatAttachmentsFromRefs(state, [{ kind: 'chat-rule', ruleId: 'r1' }])
+
+    expect(attachments).toHaveLength(1)
+    expect(attachments[0]).toMatchObject({ kind: 'chat-rule', label: 'cv' })
+    expect(attachments[0].contentMarkdown).toContain('Use this profile context:')
+    expect(attachments[0].contentMarkdown).toContain('--- [1] @files:alpha ---')
+    expect(attachments[0].contentMarkdown).toContain('alpha content')
+    expect(attachments[0].contentMarkdown).toContain('Then answer.')
+    expect(attachments[0].contentMarkdown).not.toContain('{{context}}')
+  })
+})
+
+describe('projectChatRules', () => {
+  it('normalizes legacy rules without new prompt-library fields', () => {
+    const state = stateWithRules([makeRule('r1', 'legacy')])
+
+    expect(projectChatRules(state)[0]).toMatchObject({
+      category: 'instruction',
+      includeInAutocomplete: true,
+      linkedContextRefs: [],
+      visibility: { chat: true, editor: true },
+    })
+  })
+})
+
+describe('chatRuleOptions', () => {
+  it('filters autocomplete options by surface visibility and autocomplete status', () => {
+    const state = stateWithRules([
+      makeRule('r1', 'chat-only', {
+        category: 'instruction',
+        visibility: { chat: true, editor: false },
+      }),
+      makeRule('r2', 'editor-only', {
+        category: 'function',
+        visibility: { chat: false, editor: true },
+      }),
+      makeRule('r3', 'hidden-autocomplete', {
+        category: 'context',
+        includeInAutocomplete: false,
+        visibility: { chat: true, editor: true },
+      }),
+    ])
+
+    expect(chatRuleOptions(state, 'chat').map((rule) => rule.label)).toEqual(['chat-only'])
+    expect(chatRuleOptions(state, 'editor').map((rule) => rule.label)).toEqual(['editor-only'])
+    expect(chatRuleOptions(state).map((rule) => rule.category)).toEqual(['instruction', 'function', 'context'])
   })
 })
 

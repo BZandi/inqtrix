@@ -37,7 +37,7 @@ export function useTextImprovement({
     setProposal(null)
   }
 
-  async function improve(context: TextImprovementContext, text: string) {
+  async function improve(context: TextImprovementContext, text: string, guidance?: string) {
     const sourceText = text.trim()
     if (!sourceText || isImproving) return
     if (!enabled) {
@@ -58,6 +58,7 @@ export function useTextImprovement({
       const response = await improveText(
         {
           context,
+          guidance,
           locale,
           stack: selectedStack,
           text: sourceText,

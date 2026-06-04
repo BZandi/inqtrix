@@ -74,7 +74,6 @@ import type {
   ChatChainStepRecord,
   ChatContextReferenceRecord,
   ChatMessageAttachmentRecord,
-  ChatRuleRecord,
 } from '@/features/project/types'
 import type {
   ChatModelOption,
@@ -93,7 +92,6 @@ import {
 import { PanelRail } from '@/components/ui/panel-rail'
 import { ComposerIconButton, composerIconButtonClassName } from '@/features/composer/ComposerIconButton'
 import { ChatHistoryPanel } from './history/ChatHistoryPanel'
-import { RuleLibraryDialog } from './rules/RuleLibraryDialog'
 import type { ChatMessage, ChatThread } from './types'
 import { ContextChipLegend } from '@/features/composer/ContextChipLegend'
 import { MentionComposer, type MentionComposerHandle } from '@/features/composer/MentionComposer'
@@ -105,7 +103,6 @@ type ChatWorkspaceProps = {
   chatModelOptions: ChatModelOption[]
   chatModelOptionsStatus: 'available' | 'missing' | 'unresolved'
   chatHistorySections: ChatHistorySection[]
-  chatRules: ChatRuleRecord[]
   defaultChatModel: NodeModelResolution | null
   fileGroupOptions: FileGroupMentionOption[]
   fileOptions: FileMentionOption[]
@@ -122,7 +119,6 @@ type ChatWorkspaceProps = {
   onCreateThread: (groupId?: string | null) => void
   onCreateThreadGroup: () => void
   onDeleteMessages: (threadId: string, messageIds: string[]) => void
-  onDeleteRule: (ruleId: string) => void
   onDeleteThreadGroup: (groupId: string) => void
   onDeleteThread: (threadId: string) => void
   onEditMessage: (threadId: string, messageId: string, contentMarkdown: string) => void
@@ -130,6 +126,7 @@ type ChatWorkspaceProps = {
   onChainingEnabledChange: (enabled: boolean) => void
   onIncognitoChange: (enabled: boolean) => void
   onHistoryVisibleChange: (isVisible: boolean) => void
+  onOpenPromptLibrary: () => void
   onMoveThreadGroup: (groupId: string, targetIndex: number) => void
   onMoveThreadToGroup: (threadId: string, groupId: string | null, targetIndex: number) => void
   onRenameThread: (threadId: string, title: string) => void
@@ -138,7 +135,6 @@ type ChatWorkspaceProps = {
   onReorderContext: (fromIndex: number, toIndex: number) => void
   pendingReorderKeys: string[]
   pillKeys: string[]
-  onSaveRule: (rule: ChatRuleRecord) => void
   onSendMessage: (
     contentMarkdown: string,
     refs?: ChatContextReferenceRecord[],
@@ -173,7 +169,6 @@ export default function ChatWorkspace({
   chatModelOptions,
   chatModelOptionsStatus,
   chatHistorySections,
-  chatRules,
   defaultChatModel,
   isDesktop,
   isHistoryVisible,
@@ -186,7 +181,6 @@ export default function ChatWorkspace({
   onCreateThread,
   onCreateThreadGroup,
   onDeleteMessages,
-  onDeleteRule,
   onDeleteThreadGroup,
   onDeleteThread,
   onEditMessage,
@@ -194,6 +188,7 @@ export default function ChatWorkspace({
   onChainingEnabledChange,
   onIncognitoChange,
   onHistoryVisibleChange,
+  onOpenPromptLibrary,
   onMoveThreadGroup,
   onMoveThreadToGroup,
   onRenameThread,
@@ -202,7 +197,6 @@ export default function ChatWorkspace({
   onReorderContext,
   pendingReorderKeys,
   pillKeys,
-  onSaveRule,
   onSendMessage,
   onSelectThread,
   onSelectedModelTierChange,
@@ -234,7 +228,6 @@ export default function ChatWorkspace({
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const [isMessageSelectionMode, setIsMessageSelectionMode] = useState(false)
-  const [isRuleLibraryOpen, setIsRuleLibraryOpen] = useState(false)
   const [messageEditDraft, setMessageEditDraft] = useState('')
   const [pillRefs, setPillRefs] = useState<ChatContextReferenceRecord[]>([])
   const [selectedMessageIds, setSelectedMessageIds] = useState<ReadonlySet<string>>(() => new Set())
@@ -931,7 +924,7 @@ export default function ChatWorkspace({
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
                         className="gap-2"
-                        onSelect={() => setIsRuleLibraryOpen(true)}
+                        onSelect={onOpenPromptLibrary}
                       >
                         <Library className="size-4 text-muted-foreground" />
                         {t.chat.manageRules}
@@ -952,12 +945,6 @@ export default function ChatWorkspace({
                     icon={ListOrdered}
                     label={`${t.chat.chaining} · ${t.chat.chainingTooltip}`}
                     onClick={() => onChainingEnabledChange(!chainingEnabled)}
-                  />
-                  <ComposerIconButton
-                    className="shrink-0"
-                    icon={Library}
-                    label={t.chat.manageRules}
-                    onClick={() => setIsRuleLibraryOpen(true)}
                   />
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
@@ -1098,15 +1085,6 @@ export default function ChatWorkspace({
           {conversationPanel}
         </motion.section>
       )}
-      <RuleLibraryDialog
-        isOpen={isRuleLibraryOpen}
-        onClose={() => setIsRuleLibraryOpen(false)}
-        onDeleteRule={onDeleteRule}
-        onSaveRule={onSaveRule}
-        reduceMotion={reduceMotion}
-        rules={chatRules}
-        textImprovement={textImprovement}
-      />
     </div>
   )
 }

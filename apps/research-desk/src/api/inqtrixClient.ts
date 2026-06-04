@@ -65,6 +65,7 @@ export type TextImprovementContext = 'chat_input' | 'prompt_template'
 
 export type TextImprovementRequest = {
   context: TextImprovementContext
+  guidance?: string
   locale: 'de' | 'en'
   stack?: string
   text: string
@@ -179,6 +180,7 @@ export async function improveText(
     method: 'POST',
     body: {
       context: textRequest.context,
+      guidance: textRequest.guidance,
       locale: textRequest.locale,
       stack: textRequest.stack,
       text: textRequest.text,

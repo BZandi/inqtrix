@@ -1050,7 +1050,13 @@ function filterOrDefault(value: unknown) {
 }
 
 function viewOrDefault(value: unknown) {
-  if (value === 'chat' || value === 'settings') return value
+  if (
+    value === 'chat'
+    || value === 'database'
+    || value === 'editor'
+    || value === 'prompt-library'
+    || value === 'settings'
+  ) return value
   return 'research'
 }
 

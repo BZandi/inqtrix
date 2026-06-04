@@ -6,6 +6,8 @@ import type {
   ResearchRunSummary,
 } from '@/features/researchRuns/types'
 import { createEmptyProjectState, createSeedProjectState } from '@/features/project/seedProject'
+import { normalizeChatRule } from '@/features/project/chatRules'
+import { renderChatRuleAttachmentContent } from '@/features/project/chatRuleRendering'
 import type {
   ChatChainStepRecord,
   ChatContextReferenceRecord,
@@ -1197,11 +1199,11 @@ export function researchDeskReducer(
   if (action.type === 'upsertChatRule') {
     const now = new Date().toISOString()
     const existing = state.chatRules[action.rule.id]
-    const rule = {
+    const rule = normalizeChatRule({
       ...action.rule,
       createdAt: existing?.createdAt ?? action.rule.createdAt,
       updatedAt: action.rule.updatedAt || now,
-    }
+    })
     const chatRuleOrder = state.chatRuleOrder.includes(rule.id)
       ? state.chatRuleOrder
       : [rule.id, ...state.chatRuleOrder]
@@ -2081,10 +2083,11 @@ function createReportAttachment(
 function createRuleAttachment(
   rule: ChatRuleRecord,
   attachedAt: string,
+  contentMarkdown: string,
 ): ChatMessageAttachmentRecord {
   return {
     attachedAt,
-    contentMarkdown: rule.contentMarkdown,
+    contentMarkdown,
     kind: 'chat-rule',
     label: rule.label,
     ruleId: rule.id,
@@ -2146,7 +2149,13 @@ function createMessageAttachments(
       }]
     }
     const rule = state.chatRules[ref.ruleId]
-    return rule ? [createRuleAttachment(rule, attachedAt)] : []
+    return rule
+      ? [createRuleAttachment(
+        normalizeChatRule(rule),
+        attachedAt,
+        renderChatRuleAttachmentContent(state, rule, attachedAt),
+      )]
+      : []
   })
 }
 

@@ -81,6 +81,7 @@ def test_chat_input_prompt_preserves_bilingual_contract() -> None:
 def test_prompt_template_prompt_preserves_placeholders_contract() -> None:
     request = TextImprovementRequestData(
         context="prompt_template",
+        guidance="Category: Function. Preserve the callable task shape.",
         locale="en",
         text="Use {topic} and @rules:style to write the answer.",
     )
@@ -88,6 +89,7 @@ def test_prompt_template_prompt_preserves_placeholders_contract() -> None:
     prompt = build_text_improvement_prompt(request)
 
     assert "prompt-engineering assistant" in prompt
+    assert "Category: Function" in prompt
     assert "Preserve all placeholders" in prompt
     assert "interface language: English" in prompt
     assert "Use {topic} and @rules:style" in prompt
@@ -134,6 +136,7 @@ def test_text_improvement_route_uses_prompt_template_prompt() -> None:
         "/v1/text/improvements",
         json={
             "context": "prompt_template",
+            "guidance": "Category: Context Pack. Preserve {{context}} exactly.",
             "locale": "en",
             "text": "Write about {{topic}}.",
         },
@@ -142,6 +145,7 @@ def test_text_improvement_route_uses_prompt_template_prompt() -> None:
     assert response.status_code == 200
     assert llm.prompt is not None
     assert "prompt-engineering assistant" in llm.prompt
+    assert "Category: Context Pack" in llm.prompt
     assert "Write about {{topic}}." in llm.prompt
 
 

@@ -160,6 +160,7 @@ export function Topbar({
 }
 
 function viewLabel(view: AppView, t: TranslationDictionary) {
+  if (view === 'prompt-library') return t.navigation.promptLibrary
   return t.navigation[view]
 }
 

@@ -1,4 +1,4 @@
-import { Database, FileText, Globe2, MessagesSquare, Settings, type LucideIcon } from '@/components/icons'
+import { Database, FileText, Globe2, Library, MessagesSquare, Settings, type LucideIcon } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useLocale } from '@/i18n/LocaleProvider'
@@ -39,6 +39,15 @@ export function AppRail({ activeView, onViewChange }: AppRailProps) {
     label: string
     value: AppView
   }
+  const promptLibraryItem = {
+    icon: Library,
+    label: t.navigation.promptLibrary,
+    value: 'prompt-library',
+  } satisfies {
+    icon: LucideIcon
+    label: string
+    value: AppView
+  }
 
   return (
     <nav
@@ -74,6 +83,25 @@ export function AppRail({ activeView, onViewChange }: AppRailProps) {
       </div>
       <div className="mt-auto flex flex-col items-center gap-1">
         <span aria-hidden className="mb-0.5 h-px w-5 rounded-full bg-border/70" />
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              aria-label={promptLibraryItem.label}
+              aria-pressed={activeView === promptLibraryItem.value}
+              className={cn(
+                'size-9 rounded-md text-muted-foreground',
+                activeView === promptLibraryItem.value && 'bg-brand-subtle text-brand shadow-none hover:bg-brand-subtle hover:text-brand',
+              )}
+              onClick={() => onViewChange(promptLibraryItem.value)}
+              size="icon"
+              type="button"
+              variant={activeView === promptLibraryItem.value ? 'default' : 'ghost'}
+            >
+              <Library className="size-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="right">{promptLibraryItem.label}</TooltipContent>
+        </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
             <Button

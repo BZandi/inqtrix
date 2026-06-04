@@ -34,6 +34,7 @@ import {
   projectResearchJobs,
   selectedResearchRun,
 } from '@/features/project/selectors'
+import { chatFunctionChainTemplatesFromRefs } from '@/features/project/chatRules'
 import type {
   ChatChainStepRecord,
   ChatContextReferenceRecord,
@@ -58,6 +59,7 @@ import type {
 } from '@/features/researchRuns/types'
 import SettingsWorkspace from '@/features/settings/SettingsWorkspace'
 import { FileLibraryWorkspace } from '@/features/fileLibrary/FileLibraryWorkspace'
+import { PromptLibraryWorkspace } from '@/features/promptLibrary/PromptLibraryWorkspace'
 import { ingestFiles } from '@/features/files/ingest'
 import { FILE_SECTION_TEMP_ID } from '@/features/files/sections'
 import {
@@ -66,7 +68,7 @@ import {
 } from '@/features/files/budget'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { useTheme } from '@/theme/ThemeProvider'
-import { contentWithAttachmentContext } from './attachmentContext'
+import { contentWithAttachmentContext } from '@/features/project/attachmentContext'
 import { AppRail } from './components/AppRail'
 import { ResearchWorkspace } from './components/ResearchWorkspace'
 import { Topbar } from './components/Topbar'
@@ -180,7 +182,7 @@ export function ResearchDesk() {
     [state.chatRuleOrder, state.chatRules],
   )
   const ruleOptions = useMemo(
-    () => chatRuleOptionsFromRules(chatRules),
+    () => chatRuleOptionsFromRules(chatRules, 'chat'),
     [chatRules],
   )
   const reportOptions = completedReportOptions(state)
@@ -519,11 +521,7 @@ export function ResearchDesk() {
     }))
 
     const chainTemplates = state.ui.chatChainingEnabled
-      ? messageAttachmentRefs.flatMap((ref) => {
-        if (ref.kind !== 'chat-rule') return []
-        const rule = state.chatRules[ref.ruleId]
-        return rule ? [{ instruction: rule.contentMarkdown, label: rule.label }] : []
-      })
+      ? chatFunctionChainTemplatesFromRefs(state.chatRules, messageAttachmentRefs)
       : []
 
     if (chainTemplates.length > 0) {
@@ -1238,7 +1236,6 @@ export function ResearchDesk() {
               chatModelOptions={chatModelOptions}
               chatModelOptionsStatus={chatModelOptionsState.status}
               chatHistorySections={chatHistorySections}
-              chatRules={chatRules}
               defaultChatModel={defaultChatModel}
               isDesktop={isDesktop}
               isHistoryVisible={state.ui.isChatHistoryVisible}
@@ -1254,7 +1251,6 @@ export function ResearchDesk() {
               onBranchFromMessage={handleBranchChatThreadFromMessage}
               onDeleteMessages={handleDeleteChatMessages}
               onDeleteThreadGroup={(groupId) => dispatch({ groupId, type: 'deleteChatThreadGroup' })}
-              onDeleteRule={(ruleId) => dispatch({ ruleId, type: 'deleteChatRule' })}
               onDeleteThread={handleDeleteChatThread}
               onEditMessage={handleEditChatMessage}
               chainingEnabled={state.ui.chatChainingEnabled}
@@ -1264,6 +1260,7 @@ export function ResearchDesk() {
                 isVisible,
                 type: 'setChatHistoryVisible',
               })}
+              onOpenPromptLibrary={() => dispatch({ type: 'setActiveView', view: 'prompt-library' })}
               onRenameThread={(threadId, title) => dispatch({ threadId, title, type: 'renameChatThread' })}
               onRenameThreadGroup={(groupId, title) => dispatch({ groupId, title, type: 'renameChatThreadGroup' })}
               onMoveThreadGroup={(groupId, targetIndex) => dispatch({
@@ -1281,7 +1278,6 @@ export function ResearchDesk() {
               onReorderContext={(fromIndex, toIndex) => dispatch({ fromIndex, toIndex, type: 'reorderChatContextInDraft' })}
               pendingReorderKeys={state.ui.pendingChatAttachmentRefs.map(chatContextRefKey)}
               pillKeys={chatPillRefs.map(chatContextRefKey)}
-              onSaveRule={(rule) => dispatch({ rule, type: 'upsertChatRule' })}
               onSendMessage={(contentMarkdown, refs, options) => void handleChatMessageSubmit(contentMarkdown, refs, options)}
               onSelectThread={handleSelectChatThread}
               onSelectedModelTierChange={(tier) => dispatch({ tier, type: 'setSelectedChatModelTier' })}
@@ -1322,6 +1318,17 @@ export function ResearchDesk() {
               dispatch={dispatch}
               reportOptions={reportOptions}
               selectedModelTier={state.ui.selectedChatModelTier}
+              state={state}
+              textImprovement={{
+                apiKey: apiKey.trim() || undefined,
+                enabled: canImproveText,
+                selectedStack: textImprovementStack,
+                workspaceId: state.workspaceId,
+              }}
+            />
+          ) : state.ui.activeView === 'prompt-library' ? (
+            <PromptLibraryWorkspace
+              dispatch={dispatch}
               state={state}
               textImprovement={{
                 apiKey: apiKey.trim() || undefined,

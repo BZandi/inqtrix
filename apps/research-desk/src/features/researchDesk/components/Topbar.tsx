@@ -10,6 +10,7 @@ import {
   X,
   type LucideIcon,
 } from '@/components/icons'
+import { BrandMark } from '@/components/BrandMark'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { ProjectConnection } from '@/features/project/types'
@@ -46,12 +47,16 @@ export function Topbar({
 
   return (
     <header className="sticky top-0 z-30 border-b border-border bg-background/95 backdrop-blur">
-      <div className="flex min-h-[var(--header-h)] w-full flex-wrap items-center gap-3 px-4 py-2 md:px-5 xl:px-8">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="text-2xl font-semibold tracking-normal text-brand">
+      <div className="flex min-h-[var(--header-h)] w-full flex-wrap items-center gap-3 py-1.5 pr-4 md:pr-5 xl:pr-8">
+        <div className="flex min-w-0 items-center">
+          <div className="flex w-12 shrink-0 items-center justify-center md:w-14">
+            <BrandMark className="size-7 shrink-0" />
+          </div>
+          <span className="text-lg font-semibold tracking-normal text-brand">
             {t.appName}
           </span>
-          <span className="hidden text-sm font-semibold text-foreground sm:inline">
+          <span aria-hidden className="mx-2 hidden h-4 w-px bg-border sm:block" />
+          <span className="hidden text-sm font-medium text-muted-foreground sm:inline">
             {t.appSubtitle}
           </span>
         </div>

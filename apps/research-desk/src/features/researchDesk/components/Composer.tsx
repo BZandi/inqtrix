@@ -44,6 +44,7 @@ import { Separator } from '@/components/ui/separator'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { CreateResearchRunRequest } from '@/features/researchRuns/types'
+import { ComposerIconButton, composerIconButtonClassName } from '@/features/composer/ComposerIconButton'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
@@ -143,14 +144,14 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={appMotion.composer}
-      className="shrink-0 border-t border-border bg-background px-4 py-3"
+      className="shrink-0 px-4 pb-4 pt-2"
     >
       <form className="mx-auto max-w-4xl" onSubmit={submitResearch}>
-        <div className="relative rounded-md border border-border bg-background px-3 py-2 shadow-sm">
+        <div className="relative rounded-xl border border-border bg-card px-3 py-2.5 shadow-[0_8px_28px_-12px_var(--shadow-soft)]">
           <Textarea
             aria-label={t.composer.placeholder}
             className={cn(
-              'min-h-16 resize-none border-0 bg-transparent px-0 py-0 text-base leading-6 shadow-none focus-visible:ring-0 md:text-base',
+              'min-h-16 resize-none border-0 bg-transparent px-0 py-0 text-sm leading-6 shadow-none focus-visible:ring-0',
               '[scrollbar-width:thin]',
               '[scrollbar-color:color-mix(in_oklch,var(--muted-foreground)_22%,transparent)_transparent]',
               '[&::-webkit-scrollbar]:w-1',
@@ -171,20 +172,11 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
           />
           <div className="mt-1.5 flex items-center justify-between gap-2 border-t border-border/70 pt-1.5">
             <div className="flex min-w-0 items-center gap-1 overflow-hidden">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label={t.composer.hide}
-                className={composerIconButtonClassName()}
-                onClick={onHide}
-                type="button"
-                variant="ghost"
-              >
-                <PanelBottomClose className="size-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{t.composer.hide}</TooltipContent>
-          </Tooltip>
+          <ComposerIconButton
+            icon={PanelBottomClose}
+            label={t.composer.hide}
+            onClick={onHide}
+          />
           <Separator className="mx-0.5 h-5" orientation="vertical" />
           <ComposerSelect
             icon={FileText}
@@ -263,7 +255,7 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
                   <TooltipTrigger asChild>
                     <Button
                       aria-label={t.composer.moreSettings}
-                      className={composerIconButtonClassName()}
+                      className={composerIconButtonClassName}
                       type="button"
                       variant="ghost"
                     >
@@ -354,7 +346,7 @@ function ComposerStatusMenu({
           <TooltipTrigger asChild>
             <Button
               aria-label={t.composer.settingsSummary}
-              className={composerIconButtonClassName()}
+              className={composerIconButtonClassName}
               type="button"
               variant="ghost"
             >
@@ -448,7 +440,7 @@ function ComposerSelect({
         <TooltipTrigger asChild>
           <SelectTrigger
             aria-label={triggerLabel}
-            className={cn(composerIconButtonClassName(), 'w-10 gap-0.5 px-1')}
+            className={cn(composerIconButtonClassName, 'w-10 gap-0.5 px-1')}
           >
             <Icon className="size-3.5 shrink-0" />
             <span className="sr-only">
@@ -474,11 +466,6 @@ function ComposerSelect({
     </Select>
   )
 }
-
-function composerIconButtonClassName() {
-  return 'h-7 w-7 rounded-md border border-transparent bg-transparent p-0 text-muted-foreground shadow-none hover:bg-accent hover:text-foreground focus-visible:ring-1 data-[state=open]:bg-accent data-[state=open]:text-foreground'
-}
-
 
 function ToggleVisual({ checked }: { checked: boolean }) {
   return (

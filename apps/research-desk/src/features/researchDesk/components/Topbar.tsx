@@ -198,7 +198,7 @@ function ThemeToggle() {
             aria-label={option.label}
             className={cn(
               'inline-flex size-8 items-center justify-center rounded-[6px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground',
-              theme === option.value && 'bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground',
+              theme === option.value && 'bg-brand-subtle text-brand hover:bg-brand-subtle hover:text-brand',
             )}
             key={option.value}
             onClick={() => setTheme(option.value)}
@@ -225,7 +225,7 @@ function LanguageToggle() {
         <button
           className={cn(
             'inline-flex h-8 min-w-9 items-center justify-center gap-1 rounded-[6px] px-2 text-xs font-semibold text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground',
-            locale === nextLocale && 'bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground',
+            locale === nextLocale && 'bg-brand-subtle text-brand hover:bg-brand-subtle hover:text-brand',
           )}
           key={nextLocale}
           onClick={() => setLocale(nextLocale)}

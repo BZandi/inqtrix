@@ -125,7 +125,7 @@ export function ResearchRunColumn({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={appMotion.composer}
-            className="shrink-0 border-t border-border bg-background px-4 py-2"
+            className="shrink-0 px-4 pb-4 pt-2"
           >
             <Button
               aria-label={t.composer.show}

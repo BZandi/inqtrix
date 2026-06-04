@@ -57,7 +57,7 @@ export function AppRail({ activeView, onViewChange }: AppRailProps) {
                   aria-pressed={isActive}
                   className={cn(
                     'size-9 rounded-md text-muted-foreground',
-                    isActive && 'bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground',
+                    isActive && 'bg-brand-subtle text-brand shadow-none hover:bg-brand-subtle hover:text-brand',
                   )}
                   onClick={() => onViewChange(item.value)}
                   size="icon"
@@ -81,7 +81,7 @@ export function AppRail({ activeView, onViewChange }: AppRailProps) {
               aria-pressed={activeView === databaseItem.value}
               className={cn(
                 'size-9 rounded-md text-muted-foreground',
-                activeView === databaseItem.value && 'bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground',
+                activeView === databaseItem.value && 'bg-brand-subtle text-brand shadow-none hover:bg-brand-subtle hover:text-brand',
               )}
               onClick={() => onViewChange(databaseItem.value)}
               size="icon"
@@ -100,7 +100,7 @@ export function AppRail({ activeView, onViewChange }: AppRailProps) {
               aria-pressed={activeView === settingsItem.value}
               className={cn(
                 'size-9 rounded-md text-muted-foreground',
-                activeView === settingsItem.value && 'bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground',
+                activeView === settingsItem.value && 'bg-brand-subtle text-brand shadow-none hover:bg-brand-subtle hover:text-brand',
               )}
               onClick={() => onViewChange(settingsItem.value)}
               size="icon"

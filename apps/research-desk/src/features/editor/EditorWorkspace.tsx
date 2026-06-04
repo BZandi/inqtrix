@@ -60,6 +60,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { PanelRail } from '@/components/ui/panel-rail'
+import { ComposerIconButton } from '@/features/composer/ComposerIconButton'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -2094,7 +2095,7 @@ function EditorAssistantComposer({
 
   if (!isVisible) {
     return (
-      <div className="shrink-0 border-t border-border bg-background px-4 py-2">
+      <div className="shrink-0 px-4 pb-4 pt-2">
         <Button
           className="h-8 rounded-md"
           onClick={() => dispatch({ isVisible: true, type: 'setEditorAssistantVisible' })}
@@ -2110,7 +2111,7 @@ function EditorAssistantComposer({
   }
 
   return (
-    <div className="shrink-0 border-t border-border bg-background px-4 py-3">
+    <div className="shrink-0 px-4 pb-4 pt-2">
       <div className="relative mx-auto max-w-4xl">
         <AnimatePresence initial={false}>
           {isAttachActive ? (
@@ -2191,7 +2192,7 @@ function EditorAssistantComposer({
           type="file"
         />
         <Dropzone disabled={isRunning} label={t.chat.dropFiles} onFiles={onAttachFiles}>
-        <div className="relative rounded-md border border-border bg-background px-3 py-2 shadow-sm">
+        <div className="relative rounded-xl border border-border bg-card px-3 py-2 shadow-[0_8px_28px_-12px_var(--shadow-soft)]">
           <TextImproveFloatingLayer
             labels={{
               accept: t.textImprove.accept,
@@ -2209,7 +2210,7 @@ function EditorAssistantComposer({
           <MentionComposer
             ariaLabel={copy.assistantPlaceholder}
             categoryLabels={mentionCategoryLabels}
-            contentClassName="min-h-16 pb-2 pr-9 text-base leading-6"
+            contentClassName="min-h-16 pb-2 pr-9 text-sm leading-6"
             enabledKinds={['research', 'rules', 'files', 'filegroups']}
             maxRows={6}
             mentionSources={mentionSources}
@@ -2237,25 +2238,22 @@ function EditorAssistantComposer({
           ) : null}
           <div className="flex items-center justify-between gap-2 border-t border-border/70 pt-1.5">
             <div className="flex min-w-0 items-center gap-1">
-              <TooltipButton
+              <ComposerIconButton
+                icon={PanelBottomClose}
                 label={copy.hideAssistant}
                 onClick={() => dispatch({ isVisible: false, type: 'setEditorAssistantVisible' })}
-              >
-                <PanelBottomClose className="size-4" />
-              </TooltipButton>
-              <TooltipButton
-                className={cn(isAttachActive && 'bg-brand-subtle text-brand')}
+              />
+              <ComposerIconButton
+                active={isAttachActive}
+                icon={MessageSquareText}
                 label={copy.attachComments}
                 onClick={onToggleAttach}
-              >
-                <MessageSquareText className="size-4" />
-              </TooltipButton>
-              <TooltipButton
+              />
+              <ComposerIconButton
+                icon={Paperclip}
                 label={t.chat.attachFiles}
                 onClick={() => fileInputRef.current?.click()}
-              >
-                <Paperclip className="size-4" />
-              </TooltipButton>
+              />
               <EditorModelPicker
                 defaultModel={defaultChatModel}
                 disabled={false}

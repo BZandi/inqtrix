@@ -91,6 +91,7 @@ import {
   type TextImprovementApiOptions,
 } from '@/features/textImprove'
 import { PanelRail } from '@/components/ui/panel-rail'
+import { ComposerIconButton, composerIconButtonClassName } from '@/features/composer/ComposerIconButton'
 import { ChatHistoryPanel } from './history/ChatHistoryPanel'
 import { RuleLibraryDialog } from './rules/RuleLibraryDialog'
 import type { ChatMessage, ChatThread } from './types'
@@ -757,7 +758,7 @@ export default function ChatWorkspace({
             </div>
           </ScrollArea>
 
-          <div className="z-10 shrink-0 border-t border-border bg-background p-3 md:px-6">
+          <div className="z-10 shrink-0 px-3 pb-4 pt-2 md:px-6">
             <form
               className="mx-auto max-w-5xl"
               onSubmit={handleSendMessage}
@@ -774,7 +775,7 @@ export default function ChatWorkspace({
                 type="file"
               />
               <Dropzone disabled={isSending} label={t.chat.dropFiles} onFiles={onAttachFiles}>
-              <div className="relative overflow-visible rounded-lg border border-border/85 bg-card/98 px-2 py-1.5 shadow-[0_1px_2px_var(--shadow-hairline)]">
+              <div className="relative overflow-visible rounded-xl border border-border bg-card px-2.5 py-2 shadow-[0_8px_28px_-12px_var(--shadow-soft)]">
                 {attachmentBudgetNotice && (
                   <div className="mb-2 flex items-center gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-2 py-1 text-[11px] font-medium text-warning">
                     <AlertTriangle className="size-3.5 shrink-0" />
@@ -833,7 +834,7 @@ export default function ChatWorkspace({
                   <MentionComposer
                     ariaLabel={t.chat.placeholder}
                     categoryLabels={mentionCategoryLabels}
-                    contentClassName="min-h-16 pb-2 pl-2 pr-11 pt-2 text-base leading-6"
+                    contentClassName="min-h-16 pb-2 pl-2 pr-11 pt-2 text-sm leading-6"
                     enabledKinds={['research', 'rules', 'files', 'filegroups']}
                     mentionSources={mentionSources}
                     onAttachRule={(ruleId) => onAttachContext({ kind: 'chat-rule', ruleId })}
@@ -860,12 +861,11 @@ export default function ChatWorkspace({
                     <DropdownMenuTrigger asChild>
                       <Button
                         aria-label={t.chat.attachContext}
-                        className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0 data-[state=open]:bg-accent data-[state=open]:text-foreground"
-                        size="icon"
+                        className={cn(composerIconButtonClassName, 'shrink-0')}
                         type="button"
                         variant="ghost"
                       >
-                        <Plus className="size-4" />
+                        <Plus />
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent
@@ -938,67 +938,36 @@ export default function ChatWorkspace({
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        aria-label={t.chat.attachFiles}
-                        className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0"
-                        disabled={isSending}
-                        onClick={() => chatFileInputRef.current?.click()}
-                        size="icon"
-                        type="button"
-                        variant="ghost"
-                      >
-                        <Paperclip className="size-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>{t.chat.attachFiles}</TooltipContent>
-                  </Tooltip>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        aria-label={t.chat.chaining}
-                        aria-pressed={chainingEnabled}
-                        className={cn(
-                          'size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0',
-                          chainingEnabled && 'bg-brand-subtle text-brand hover:bg-brand-subtle hover:text-brand',
-                        )}
-                        disabled={isSending}
-                        onClick={() => onChainingEnabledChange(!chainingEnabled)}
-                        size="icon"
-                        type="button"
-                        variant={chainingEnabled ? 'secondary' : 'ghost'}
-                      >
-                        <ListOrdered className="size-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>{`${t.chat.chaining} · ${t.chat.chainingTooltip}`}</TooltipContent>
-                  </Tooltip>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        aria-label={t.chat.manageRules}
-                        className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0"
-                        onClick={() => setIsRuleLibraryOpen(true)}
-                        size="icon"
-                        type="button"
-                        variant="ghost"
-                      >
-                        <Library className="size-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>{t.chat.manageRules}</TooltipContent>
-                  </Tooltip>
+                  <ComposerIconButton
+                    className="shrink-0"
+                    disabled={isSending}
+                    icon={Paperclip}
+                    label={t.chat.attachFiles}
+                    onClick={() => chatFileInputRef.current?.click()}
+                  />
+                  <ComposerIconButton
+                    active={chainingEnabled}
+                    className="shrink-0"
+                    disabled={isSending}
+                    icon={ListOrdered}
+                    label={`${t.chat.chaining} · ${t.chat.chainingTooltip}`}
+                    onClick={() => onChainingEnabledChange(!chainingEnabled)}
+                  />
+                  <ComposerIconButton
+                    className="shrink-0"
+                    icon={Library}
+                    label={t.chat.manageRules}
+                    onClick={() => setIsRuleLibraryOpen(true)}
+                  />
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button
                         aria-label={t.composer.moreSettings}
-                        className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0 data-[state=open]:bg-accent data-[state=open]:text-foreground"
-                        size="icon"
+                        className={cn(composerIconButtonClassName, 'shrink-0')}
                         type="button"
                         variant="ghost"
                       >
-                        <SlidersHorizontal className="size-4" />
+                        <SlidersHorizontal />
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="start" className="w-64" side="top" sideOffset={8}>

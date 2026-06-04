@@ -1179,6 +1179,7 @@ export function ResearchDesk() {
   return (
     <main className="min-h-svh bg-canvas text-foreground lg:flex lg:h-svh lg:flex-col lg:overflow-hidden">
       <Topbar
+        activeView={state.ui.activeView}
         dirty={state.dirty}
         isProjectActionPending={projectAction !== null}
         onDismissProjectActionError={() => setProjectActionError(null)}

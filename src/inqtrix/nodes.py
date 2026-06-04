@@ -1149,6 +1149,7 @@ def _provider_retry_progress_context(
     s: dict[str, Any],
     *,
     operation_label: str,
+    testing_mode: bool = False,
 ) -> ContextManager[object]:
     """Bind provider retry attempts to live progress events for one call."""
     observer = getattr(provider, "observe_retries", None)
@@ -1191,6 +1192,7 @@ def _provider_retry_progress_context(
                 "delay_seconds": delay,
                 "reason": reason,
             },
+            testing_mode=testing_mode,
         )
 
     return observer(_on_retry)
@@ -1426,6 +1428,7 @@ def _compose_answer_sections(
                 f"{t(s, 'retry_operation_answer_synthesis')}: "
                 f"{section_spec.heading}"
             ),
+            testing_mode=settings.testing_mode,
         ):
             response = _llm_complete_with_metadata(
                 providers.llm,
@@ -2169,6 +2172,7 @@ def classify(
             providers.llm,
             s,
             operation_label=t(s, "retry_operation_classify"),
+            testing_mode=settings.testing_mode,
         ):
             d = providers.llm.complete(
                 f"Heutiges Datum: {today()}\n\n"
@@ -2663,6 +2667,7 @@ def plan(
             providers.llm,
             s,
             operation_label=t(s, "retry_operation_plan"),
+            testing_mode=settings.testing_mode,
         ):
             q = providers.llm.complete(
                 f"Heutiges Datum: {today()}\n\n"
@@ -3077,16 +3082,23 @@ def search(
     _query_domain_filters = [_domain_filter_for_query(q) for q in new_q]
 
     # Parallel search
-    def _search_one(item: tuple[str, list[str] | None]) -> SearchOutcome:
-        q, domain_filter = item
+    def _search_one(item: tuple[int, str, list[str] | None]) -> SearchOutcome:
+        query_index, q, domain_filter = item
         effective_domain_filter = (
             domain_filter if search_capabilities.supports("domain_filter") else None
         )
-        result = providers.search.search(
-            q,
-            domain_filter=effective_domain_filter,
-            **search_kwargs,
-        )
+        operation_label = f"{t(s, 'retry_operation_search')} {query_index + 1}/{len(new_q)}"
+        with _provider_retry_progress_context(
+            providers.search,
+            s,
+            operation_label=operation_label,
+            testing_mode=settings.testing_mode,
+        ):
+            result = providers.search.search(
+                q,
+                domain_filter=effective_domain_filter,
+                **search_kwargs,
+            )
         if not isinstance(result, GroundedSearchResult):
             raise TypeError("SearchProvider.search() must return GroundedSearchResult")
         return SearchOutcome(result, _consume_nonfatal_notice(providers.search))
@@ -3099,7 +3111,17 @@ def search(
     )
 
     with ThreadPoolExecutor(max_workers=_n_workers) as ex:
-        _outcomes = list(ex.map(_search_one, zip(new_q, _query_domain_filters)))
+        _outcomes = list(
+            ex.map(
+                _search_one,
+                (
+                    (query_index, q, domain_filter)
+                    for query_index, (q, domain_filter) in enumerate(
+                        zip(new_q, _query_domain_filters, strict=True)
+                    )
+                ),
+            )
+        )
     results = [outcome.result for outcome in _outcomes]
     notices = [outcome.notice for outcome in _outcomes]
 
@@ -3304,6 +3326,7 @@ def search(
                 providers.llm,
                 s,
                 operation_label=t(s, "retry_operation_claim_extraction"),
+                testing_mode=settings.testing_mode,
             ):
                 result_tuple = strategies.claim_extraction.extract(
                     text,
@@ -4445,6 +4468,7 @@ def evaluate(
             providers.llm,
             s,
             operation_label=t(s, "retry_operation_evaluate"),
+            testing_mode=settings.testing_mode,
         ):
             a = providers.llm.complete(
                 eval_prompt,

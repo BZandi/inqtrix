@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
-from openai import APIStatusError, OpenAIError, RateLimitError
+from openai import APIStatusError, APITimeoutError, OpenAIError, RateLimitError
 
 from inqtrix.exceptions import (
     AgentRateLimited,
@@ -78,7 +78,9 @@ def test_construction_entra_uses_project_client_without_agent_name():
     The agent is referenced per call via ``agent_reference``, not bound at the
     client, so the documented version-pinning path stays available.
     """
+    configured_openai_client = MagicMock()
     openai_client = MagicMock()
+    openai_client.with_options.return_value = configured_openai_client
     project_client = MagicMock()
     project_client.get_openai_client.return_value = openai_client
     custom_cred = MagicMock()
@@ -94,7 +96,8 @@ def test_construction_entra_uses_project_client_without_agent_name():
     assert mock_proj.call_args.kwargs["credential"] is custom_cred
     assert mock_proj.call_args.kwargs["allow_preview"] is True
     project_client.get_openai_client.assert_called_once_with()
-    assert provider._client is openai_client
+    openai_client.with_options.assert_called_once_with(max_retries=0, timeout=60.0)
+    assert provider._client is configured_openai_client
 
 
 def test_construction_with_project_api_key_uses_data_plane_client():
@@ -116,6 +119,7 @@ def test_construction_with_project_api_key_uses_data_plane_client():
     assert call.kwargs["base_url"] == "https://test.ai.azure.com/api/projects/p/openai/v1/"
     assert call.kwargs["api_key"] == "proj-key-123"
     assert call.kwargs["default_headers"] == {"api-key": "proj-key-123"}
+    assert call.kwargs["max_retries"] == 0
     assert provider._client is openai_client
 
 
@@ -318,13 +322,39 @@ def test_status_429_escalated_to_rate_limited():
         _provider(client).search("Test")
 
 
-def test_non_429_status_error_degrades_to_empty():
+def test_non_429_status_error_degrades_to_empty(monkeypatch):
+    monkeypatch.setattr("inqtrix.providers.base._retry_delay_seconds", lambda attempt: 0.0)
     client = MagicMock()
     client.responses.create.side_effect = _http_error(APIStatusError, 503)
     provider = _provider(client)
     result = provider.search("Test")
     assert result.answer == ""
     assert provider.consume_nonfatal_notice() is not None
+
+
+def test_transient_timeout_retry_emits_notice(monkeypatch):
+    monkeypatch.setattr("inqtrix.providers.base._retry_delay_seconds", lambda attempt: 0.0)
+    request = httpx.Request("POST", "https://test.ai.azure.com/responses")
+    client = MagicMock()
+    client.responses.create.side_effect = [
+        APITimeoutError(request=request),
+        _response("ok"),
+    ]
+    provider = _provider(client)
+    notices = []
+
+    with provider.observe_retries(lambda notice: notices.append(notice)):
+        result = provider.search("Test")
+
+    assert result.answer == "ok"
+    assert client.responses.create.call_count == 2
+    assert len(notices) == 1
+    assert notices[0]["provider"] == "AzureFoundryWebSearch"
+    assert notices[0]["model"] == "foundry-web:web-search-agent@latest"
+    assert notices[0]["operation"] == "web_search"
+    assert notices[0]["attempt"] == 1
+    assert notices[0]["max_attempts"] == 5
+    assert notices[0]["error_code"] == "APITimeoutError"
 
 
 def test_timeout_exception_re_raised():

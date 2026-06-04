@@ -10,16 +10,20 @@ import {
   X,
   type LucideIcon,
 } from '@/components/icons'
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { BrandMark } from '@/components/BrandMark'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { ProjectConnection } from '@/features/project/types'
+import type { AppView } from '@/features/researchDesk/types'
 import { useLocale } from '@/i18n/LocaleProvider'
 import type { TranslationDictionary } from '@/i18n/translations'
 import { useTheme, type ThemeMode } from '@/theme/ThemeProvider'
 import { cn } from '@/lib/utils'
+import { appMotion } from '@/motion/transitions'
 
 type TopbarProps = {
+  activeView: AppView
   dirty: boolean
   isProjectActionPending: boolean
   onDismissProjectActionError: () => void
@@ -32,6 +36,7 @@ type TopbarProps = {
 }
 
 export function Topbar({
+  activeView,
   dirty,
   isProjectActionPending,
   onDismissProjectActionError,
@@ -43,7 +48,9 @@ export function Topbar({
   projectName,
 }: TopbarProps) {
   const { t } = useLocale()
+  const reduceMotion = useReducedMotion()
   const status = projectStatus(projectConnection, dirty, t)
+  const activeModeLabel = viewLabel(activeView, t)
 
   return (
     <header className="sticky top-0 z-30 border-b border-border bg-background/95 backdrop-blur">
@@ -56,9 +63,34 @@ export function Topbar({
             {t.appName}
           </span>
           <span aria-hidden className="mx-2 hidden h-4 w-px bg-border sm:block" />
-          <span className="hidden text-sm font-medium text-muted-foreground sm:inline">
-            {t.appSubtitle}
-          </span>
+          <motion.span
+            aria-live="polite"
+            className="hidden min-w-0 items-center overflow-hidden text-sm font-medium text-muted-foreground sm:inline-grid"
+            layout={!reduceMotion}
+            transition={appMotion.list}
+          >
+            <AnimatePresence initial={false} mode="sync">
+              <motion.span
+                animate={reduceMotion
+                  ? { opacity: 1 }
+                  : { opacity: 1, y: 0 }}
+                className="col-start-1 row-start-1 inline-flex whitespace-nowrap"
+                exit={reduceMotion
+                  ? { opacity: 0 }
+                  : { opacity: 0, y: -2 }}
+                initial={reduceMotion
+                  ? { opacity: 0 }
+                  : { opacity: 0, y: 2 }}
+                key={activeModeLabel}
+                transition={{
+                  duration: reduceMotion ? 0.01 : 0.065,
+                  ease: [0.22, 1, 0.36, 1],
+                }}
+              >
+                {activeModeLabel}
+              </motion.span>
+            </AnimatePresence>
+          </motion.span>
         </div>
 
         <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
@@ -124,6 +156,10 @@ export function Topbar({
       ) : null}
     </header>
   )
+}
+
+function viewLabel(view: AppView, t: TranslationDictionary) {
+  return t.navigation[view]
 }
 
 function ProjectActionButton({

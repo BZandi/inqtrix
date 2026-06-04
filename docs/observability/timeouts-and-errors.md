@@ -49,13 +49,14 @@ The invariant across all of them: a partial result is always returned to the cal
 
 ## Provider retry behaviour
 
-The built-in LLM providers implement visible retry loops on top of the deadline model:
+The built-in providers implement visible retry loops on top of the deadline model:
 
 - `AnthropicLLM` — up to 5 attempts with exponential backoff and jitter on 5xx and 529 (overloaded). Rate-limit responses raise `AgentRateLimited` directly.
 - `BedrockLLM` — up to 5 attempts on transient Converse errors; throttling after the last attempt is translated to `AgentRateLimited`.
 - `AzureOpenAILLM` and `LiteLLM` — OpenAI SDK retries are disabled and Inqtrix retries transient 408/409/5xx plus SDK timeout/connection errors itself.
+- `AzureFoundryWebSearch` — OpenAI SDK retries are disabled and Inqtrix retries transient Responses API 408/409/5xx plus SDK timeout/connection errors itself.
 
-Every retry emits a warning log and a live progress event. The Azure Foundry search provider (`AzureFoundryWebSearch`) still uses its endpoint-specific SDK/search behavior; the visible retry loop described here is for LLM calls.
+Every retry emits a warning log and a live progress event. Search retries also include the parallel query position in the operation label, for example `Websuche 2/6`, so operators can see which concurrent query is retrying.
 
 ## Deadline interaction with retries
 

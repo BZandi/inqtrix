@@ -63,8 +63,8 @@ export const translations = {
     navigation: {
       label: 'Ansichten',
       research: 'Research Desk',
-      chat: 'Chatmodus',
-      editor: 'Editor-Modus',
+      chat: 'Chat',
+      editor: 'Editor',
       database: 'Datenbank',
       settings: 'Einstellungen',
     },
@@ -89,7 +89,7 @@ export const translations = {
       dropFiles: 'Dateien hier ablegen',
     },
     chat: {
-      title: 'Chatmodus',
+      title: 'Chat',
       addRule: 'Rule anlegen',
       attachContext: 'Kontext anhängen',
       attachFiles: 'Dateien anhängen',
@@ -490,8 +490,8 @@ export const translations = {
     navigation: {
       label: 'Views',
       research: 'Research Desk',
-      chat: 'Chat mode',
-      editor: 'Editor mode',
+      chat: 'Chat',
+      editor: 'Editor',
       database: 'Database',
       settings: 'Settings',
     },
@@ -516,7 +516,7 @@ export const translations = {
       dropFiles: 'Drop files here',
     },
     chat: {
-      title: 'Chat mode',
+      title: 'Chat',
       addRule: 'Add rule',
       attachContext: 'Attach context',
       attachFiles: 'Attach files',

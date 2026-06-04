@@ -40,10 +40,11 @@ from inqtrix.providers._azure_common import (
 from inqtrix.providers.base import (
     SearchProvider,
     _NonFatalNoticeMixin,
-    _SDK_MAX_RETRIES,
+    _RetryNoticeMixin,
     _apply_domain_filters,
     _bounded_timeout,
     _build_recency_language_hints,
+    _call_openai_chat_completion_with_retries,
     _check_deadline,
 )
 from inqtrix.search_result import GroundedSearchResult, GroundedSource
@@ -54,7 +55,7 @@ log = logging.getLogger("inqtrix")
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 
 
-class AzureFoundryWebSearch(_NonFatalNoticeMixin, SearchProvider):
+class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
     """Query the web via an Azure AI Foundry agent and the Responses API.
 
     Use this provider when search should run through a pre-created Foundry
@@ -153,7 +154,7 @@ class AzureFoundryWebSearch(_NonFatalNoticeMixin, SearchProvider):
                 api_key=api_key,
                 default_headers={"api-key": api_key},
                 timeout=timeout,
-                max_retries=_SDK_MAX_RETRIES,
+                max_retries=0,
             )
         else:
             # Entra ID token credential: AIProjectClient.get_openai_client()
@@ -172,7 +173,10 @@ class AzureFoundryWebSearch(_NonFatalNoticeMixin, SearchProvider):
                 credential=credential,
                 allow_preview=True,
             )
-            self._client = project_client.get_openai_client()
+            self._client = project_client.get_openai_client().with_options(
+                max_retries=0,
+                timeout=timeout,
+            )
 
     _extract_api_error_details = staticmethod(extract_azure_api_error_details)
 
@@ -217,6 +221,7 @@ class AzureFoundryWebSearch(_NonFatalNoticeMixin, SearchProvider):
             AgentRateLimited: If the backend surfaces a fatal rate limit.
         """
         self._clear_nonfatal_notice()
+        self._clear_retry_notices()
 
         if deadline is not None:
             _check_deadline(deadline)
@@ -224,7 +229,6 @@ class AzureFoundryWebSearch(_NonFatalNoticeMixin, SearchProvider):
         effective_query = _apply_domain_filters(query, domain_filter)
         hint = _build_recency_language_hints(recency_filter, language_filter)
         user_content = f"{hint}\n\n{effective_query}" if hint else effective_query
-        timeout = _bounded_timeout(self._timeout, deadline)
 
         # Reference the agent (and pin its version when configured) per call,
         # the documented Foundry pattern. Without the version the backend runs
@@ -234,10 +238,17 @@ class AzureFoundryWebSearch(_NonFatalNoticeMixin, SearchProvider):
         if self._agent_version:
             agent_ref["version"] = self._agent_version
         try:
-            response = self._client.responses.create(
-                input=[{"role": "user", "content": user_content}],
-                extra_body={"agent_reference": agent_ref},
-                timeout=timeout,
+            response = _call_openai_chat_completion_with_retries(
+                provider_label=type(self).__name__,
+                model=self.search_model,
+                operation="web_search",
+                deadline=deadline,
+                create=lambda: self._client.responses.create(
+                    input=[{"role": "user", "content": user_content}],
+                    extra_body={"agent_reference": agent_ref},
+                    timeout=_bounded_timeout(self._timeout, deadline),
+                ),
+                append_retry_notice=self._append_retry_notice,
             )
         except RateLimitError as exc:
             raise AgentRateLimited(self._agent_name, exc) from exc

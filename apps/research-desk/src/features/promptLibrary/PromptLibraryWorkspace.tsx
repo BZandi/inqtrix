@@ -1,13 +1,16 @@
 import { useMemo, useState, type Dispatch } from 'react'
 import { useReducedMotion } from 'motion/react'
 import {
+  AlertTriangle,
   BookOpen,
   Bot,
   Check,
   EyeOff,
+  FileText,
   FolderOpen,
   Library,
   ListOrdered,
+  MessagesSquare,
   Paperclip,
   Plus,
   Save,
@@ -19,7 +22,6 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import {
   TextImproveButton,
@@ -55,6 +57,15 @@ import type {
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
+import {
+  toneAccentBorderLeft,
+  toneActiveCard,
+  toneBadge,
+  toneBar,
+  toneIconTile,
+  toneText,
+  type MentionTone,
+} from '@/lib/tone'
 import { createRuleId, normalizeRuleLabel } from '@/features/chat/rules/ruleLabels'
 
 type CategoryFilter = ChatRuleCategory | 'all'
@@ -121,6 +132,7 @@ export function PromptLibraryWorkspace({
   const [isPreviewOpen, setPreviewOpen] = useState(false)
   const [promptImproveError, setPromptImproveError] = useState<string | null>(null)
   const [draft, setDraft] = useState<PromptDraft>(() => draftFromRule(rules[0] ?? null))
+  const [pendingNav, setPendingNav] = useState<(() => void) | null>(null)
   const promptTextImprove = useTextImprovement({
     ...textImprovement,
     locale,
@@ -200,6 +212,14 @@ export function PromptLibraryWorkspace({
     setPreviewOpen(false)
   }
 
+  function guardedLoad(rule: ChatRuleRecord | null) {
+    if (draft.isDirty) {
+      setPendingNav(() => () => loadRule(rule))
+      return
+    }
+    loadRule(rule)
+  }
+
   function updateDraft(patch: Partial<PromptDraft>) {
     setDraft((current) => ({
       ...current,
@@ -210,23 +230,10 @@ export function PromptLibraryWorkspace({
   }
 
   function setVisibility(key: keyof ChatRuleVisibility, value: boolean) {
-    if (!draft.includeInAutocomplete) return
+    const visibility = { ...draft.visibility, [key]: value }
     updateDraft({
-      visibility: {
-        ...draft.visibility,
-        [key]: value,
-      },
-    })
-  }
-
-  function setAutocomplete(includeInAutocomplete: boolean) {
-    updateDraft({
-      includeInAutocomplete,
-      visibility: includeInAutocomplete
-        ? draft.visibility.chat || draft.visibility.editor
-          ? draft.visibility
-          : { chat: true, editor: true }
-        : { chat: false, editor: false },
+      includeInAutocomplete: visibility.chat || visibility.editor,
+      visibility,
     })
   }
 
@@ -247,21 +254,21 @@ export function PromptLibraryWorkspace({
     })
   }
 
-  function savePrompt() {
+  function savePrompt(): boolean {
     const label = normalizeRuleLabel(draft.label)
     const title = draft.title.trim() || label
     const contentMarkdown = draft.contentMarkdown.trim()
     if (!label) {
       updateDraft({ error: t.promptLibrary.labelRequired, isDirty: draft.isDirty })
-      return
+      return false
     }
     if (rules.some((rule) => rule.label === label && rule.id !== draft.selectedRuleId)) {
       updateDraft({ error: t.promptLibrary.labelDuplicate, isDirty: draft.isDirty })
-      return
+      return false
     }
     if (!contentMarkdown) {
       updateDraft({ error: t.promptLibrary.promptRequired, isDirty: draft.isDirty })
-      return
+      return false
     }
     const now = new Date().toISOString()
     const rule = normalizeChatRule({
@@ -280,6 +287,7 @@ export function PromptLibraryWorkspace({
     })
     dispatch({ rule, type: 'upsertChatRule' })
     setDraft(draftFromRule(rule))
+    return true
   }
 
   function deletePrompt() {
@@ -322,7 +330,7 @@ export function PromptLibraryWorkspace({
                 <p className="truncate text-xs text-muted-foreground">{t.promptLibrary.subtitle}</p>
               </div>
             </div>
-            <Button aria-label={t.promptLibrary.newPrompt} className="size-8" onClick={() => loadRule(null)} size="icon" type="button" variant="outline">
+            <Button aria-label={t.promptLibrary.newPrompt} className="size-8" onClick={() => guardedLoad(null)} size="icon" type="button" variant="outline">
               <Plus className="size-4" />
             </Button>
           </div>
@@ -335,52 +343,80 @@ export function PromptLibraryWorkspace({
               value={query}
             />
           </label>
-          <div className="mt-3 grid grid-cols-1 gap-2">
-            <select
-              className="h-8 rounded-md border border-border bg-background px-2 text-xs font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              onChange={(event) => setCategoryFilter(event.target.value as CategoryFilter)}
-              value={categoryFilter}
-            >
-              <option value="all">{t.promptLibrary.allCategories}</option>
-              {chatRuleCategories.map((category) => (
-                <option key={category} value={category}>{categoryLabel(category, t)}</option>
-              ))}
-            </select>
-            <select
-              className="h-8 rounded-md border border-border bg-background px-2 text-xs font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              onChange={(event) => setVisibilityFilter(event.target.value as VisibilityFilter)}
-              value={visibilityFilter}
-            >
-              <option value="all">{t.promptLibrary.allVisibility}</option>
-              <option value="chat">{t.promptLibrary.chatVisible}</option>
-              <option value="editor">{t.promptLibrary.editorVisible}</option>
-              <option value="hidden">{t.promptLibrary.hiddenEverywhere}</option>
-            </select>
-            <select
-              className="h-8 rounded-md border border-border bg-background px-2 text-xs font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              onChange={(event) => setAutocompleteFilter(event.target.value as AutocompleteFilter)}
-              value={autocompleteFilter}
-            >
-              <option value="all">{t.promptLibrary.allAutocomplete}</option>
-              <option value="visible">{t.promptLibrary.autocompleteVisible}</option>
-              <option value="hidden">{t.promptLibrary.autocompleteHidden}</option>
-            </select>
+          <div className="mt-3 space-y-2">
+            <div className="flex items-center gap-0.5 rounded-md border border-border bg-background p-0.5">
+              <button
+                aria-pressed={categoryFilter === 'all'}
+                className={cn(
+                  'h-7 flex-1 rounded-[5px] px-2 text-xs font-semibold transition-colors',
+                  categoryFilter === 'all' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground',
+                )}
+                onClick={() => setCategoryFilter('all')}
+                type="button"
+              >
+                {t.promptLibrary.allFilter}
+              </button>
+              {chatRuleCategories.map((category) => {
+                const Icon = categoryIcon(category)
+                const active = categoryFilter === category
+                return (
+                  <button
+                    aria-label={categoryLabel(category, t)}
+                    aria-pressed={active}
+                    className={cn(
+                      'grid h-7 flex-1 place-items-center rounded-[5px] transition-colors',
+                      active ? 'bg-accent' : 'hover:bg-accent/60',
+                    )}
+                    key={category}
+                    onClick={() => setCategoryFilter(category)}
+                    title={categoryLabel(category, t)}
+                    type="button"
+                  >
+                    <Icon className={cn('size-3.5', active ? toneText[categoryToTone[category]] : 'text-muted-foreground')} />
+                  </button>
+                )
+              })}
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <select
+                aria-label={t.promptLibrary.allVisibility}
+                className="h-8 rounded-md border border-border bg-background px-2 text-xs font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onChange={(event) => setVisibilityFilter(event.target.value as VisibilityFilter)}
+                value={visibilityFilter}
+              >
+                <option value="all">{t.promptLibrary.allVisibility}</option>
+                <option value="chat">{t.promptLibrary.chatVisible}</option>
+                <option value="editor">{t.promptLibrary.editorVisible}</option>
+                <option value="hidden">{t.promptLibrary.hiddenEverywhere}</option>
+              </select>
+              <select
+                aria-label={t.promptLibrary.allAutocomplete}
+                className="h-8 rounded-md border border-border bg-background px-2 text-xs font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onChange={(event) => setAutocompleteFilter(event.target.value as AutocompleteFilter)}
+                value={autocompleteFilter}
+              >
+                <option value="all">{t.promptLibrary.allAutocomplete}</option>
+                <option value="visible">{t.promptLibrary.autocompleteVisible}</option>
+                <option value="hidden">{t.promptLibrary.autocompleteHidden}</option>
+              </select>
+            </div>
           </div>
         </div>
         <ScrollArea className="min-h-0 flex-1">
           <div className="space-y-3 p-2">
             {groupedRules.length > 0 ? groupedRules.map((group) => (
               <div key={group.category}>
-                <div className="mb-1.5 flex items-center gap-2 px-2 text-[10px] font-semibold uppercase text-muted-foreground">
-                  <span className={cn('h-1.5 w-1.5 rounded-full', categoryTone(group.category).dot)} />
-                  {categoryLabel(group.category, t)}
+                <div className="mb-1.5 flex items-center gap-2 px-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  <span className={cn('size-1.5 shrink-0 rounded-full', toneBar[categoryToTone[group.category]])} />
+                  <span>{categoryLabel(group.category, t)}</span>
+                  <span className="ml-auto shrink-0 tabular-nums text-muted-foreground/60">{group.rules.length}</span>
                 </div>
                 <div className="space-y-1">
                   {group.rules.map((rule) => (
                     <PromptListItem
                       isSelected={draft.selectedRuleId === rule.id}
                       key={rule.id}
-                      onSelect={() => loadRule(rule)}
+                      onSelect={() => guardedLoad(rule)}
                       rule={rule}
                     />
                   ))}
@@ -459,19 +495,19 @@ export function PromptLibraryWorkspace({
                   {chatRuleCategories.map((category) => {
                     const Icon = categoryIcon(category)
                     const active = draft.category === category
-                    const tone = categoryTone(category)
+                    const tone = categoryToTone[category]
                     return (
                       <button
                         aria-pressed={active}
                         className={cn(
-                          'flex min-w-0 items-start gap-2 rounded-md border border-border bg-background px-3 py-2 text-left transition-colors hover:bg-accent',
-                          active && tone.active,
+                          'flex min-w-0 items-start gap-2 rounded-md border px-3 py-2 text-left transition-colors',
+                          active ? toneActiveCard[tone] : 'border-border bg-background hover:bg-accent',
                         )}
                         key={category}
                         onClick={() => updateDraft({ category })}
                         type="button"
                       >
-                        <Icon className={cn('mt-0.5 size-4 shrink-0', active ? tone.icon : 'text-muted-foreground')} />
+                        <Icon className={cn('mt-0.5 size-4 shrink-0', active ? toneText[tone] : 'text-muted-foreground')} />
                         <span className="min-w-0">
                           <span className="block truncate text-sm font-semibold">{categoryLabel(category, t)}</span>
                           <span className="block truncate text-[11px] font-medium text-muted-foreground">
@@ -484,22 +520,24 @@ export function PromptLibraryWorkspace({
                 </div>
               </div>
 
-              <VisibilityPanel
-                draft={draft}
-                onAutocompleteChange={setAutocomplete}
-                onVisibilityChange={setVisibility}
-              />
+              <VisibilityPanel draft={draft} onVisibilityChange={setVisibility} />
 
               <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-muted-foreground" htmlFor="prompt-library-prompt">
-                  {t.promptLibrary.promptLabel}
-                </label>
                 <div className={cn(
-                  'overflow-hidden rounded-md border border-border bg-background shadow-[0_1px_2px_var(--shadow-hairline)]',
-                  draft.category === 'context' && 'lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(288px,332px)]',
+                  'grid gap-4',
+                  draft.category === 'context' && 'lg:grid-cols-[minmax(0,1fr)_320px]',
                 )}>
-                  <div className="relative min-w-0">
-                    <div className="absolute right-5 top-3 z-10 rounded-md bg-background/90 shadow-sm">
+                  <div className="overflow-hidden rounded-md border border-border bg-background shadow-[0_1px_2px_var(--shadow-hairline)] focus-within:border-brand/40 focus-within:ring-2 focus-within:ring-brand/15">
+                    <div className="flex items-center gap-2 border-b border-border bg-surface/50 px-3 py-1.5">
+                      <span className="text-xs font-semibold text-muted-foreground">{t.promptLibrary.promptLabel}</span>
+                      {draft.category === 'context' ? (
+                        <span className="inline-flex items-center gap-1 rounded border border-warning/25 bg-warning-subtle/60 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-warning">
+                          {contextPackPlaceholder}
+                        </span>
+                      ) : null}
+                      <span className="ml-auto shrink-0 tabular-nums text-[11px] text-muted-foreground/70">
+                        {t.promptLibrary.charCount.replace('{count}', draft.contentMarkdown.length.toLocaleString(locale))}
+                      </span>
                       <TextImproveButton
                         disabled={!draft.contentMarkdown.trim() || !textImprovement.enabled}
                         isLoading={promptTextImprove.isImproving}
@@ -509,29 +547,32 @@ export function PromptLibraryWorkspace({
                         reduceMotion={reduceMotion}
                       />
                     </div>
-                    <Textarea
-                      className="min-h-[23rem] resize-y rounded-none border-0 bg-transparent pr-16 text-sm leading-6 shadow-none focus-visible:ring-0 [scrollbar-width:thin]"
-                      id="prompt-library-prompt"
-                      onChange={(event) => updateDraft({ contentMarkdown: event.target.value })}
-                      placeholder={draft.category === 'context'
-                        ? t.promptLibrary.contextPromptPlaceholder.replace('{placeholder}', contextPackPlaceholder)
-                        : t.promptLibrary.promptPlaceholder}
-                      value={draft.contentMarkdown}
-                    />
-                    <TextImproveFieldLayer
-                      labels={{
-                        accept: t.textImprove.accept,
-                        changes: t.textImprove.changes,
-                        noChanges: t.textImprove.noChanges,
-                        reject: t.textImprove.reject,
-                        title: t.textImprove.title,
-                        warnings: t.textImprove.warnings,
-                      }}
-                      onAccept={acceptPromptImprovement}
-                      onReject={promptTextImprove.clearProposal}
-                      proposal={promptTextImprove.proposal}
-                      reduceMotion={reduceMotion}
-                    />
+                    <div className="relative min-w-0">
+                      <Textarea
+                        aria-label={t.promptLibrary.promptLabel}
+                        className="min-h-[23rem] resize-y rounded-none border-0 bg-transparent text-sm leading-6 shadow-none focus-visible:ring-0 [scrollbar-width:thin]"
+                        id="prompt-library-prompt"
+                        onChange={(event) => updateDraft({ contentMarkdown: event.target.value })}
+                        placeholder={draft.category === 'context'
+                          ? t.promptLibrary.contextPromptPlaceholder.replace('{placeholder}', contextPackPlaceholder)
+                          : t.promptLibrary.promptPlaceholder}
+                        value={draft.contentMarkdown}
+                      />
+                      <TextImproveFieldLayer
+                        labels={{
+                          accept: t.textImprove.accept,
+                          changes: t.textImprove.changes,
+                          noChanges: t.textImprove.noChanges,
+                          reject: t.textImprove.reject,
+                          title: t.textImprove.title,
+                          warnings: t.textImprove.warnings,
+                        }}
+                        onAccept={acceptPromptImprovement}
+                        onReject={promptTextImprove.clearProposal}
+                        proposal={promptTextImprove.proposal}
+                        reduceMotion={reduceMotion}
+                      />
+                    </div>
                   </div>
 
                   {draft.category === 'context' ? (
@@ -562,13 +603,29 @@ export function PromptLibraryWorkspace({
       {isPreviewOpen ? (
         <RenderedPreviewModal onClose={() => setPreviewOpen(false)} preview={preview} title={t.promptLibrary.previewLabel} />
       ) : null}
+      {pendingNav ? (
+        <UnsavedGuardModal
+          onCancel={() => setPendingNav(null)}
+          onDiscard={() => {
+            const run = pendingNav
+            setPendingNav(null)
+            run?.()
+          }}
+          onSave={() => {
+            const ok = savePrompt()
+            const run = pendingNav
+            setPendingNav(null)
+            if (ok) run?.()
+          }}
+        />
+      ) : null}
     </div>
   )
 }
 
 function PromptUsageHint({ draft }: { draft: PromptDraft }) {
   const { t } = useLocale()
-  const tone = categoryTone(draft.category)
+  const tone = categoryToTone[draft.category]
   const Icon = categoryIcon(draft.category)
   const shortcutLabel = normalizeRuleLabel(draft.label) || t.promptLibrary.labelPlaceholder
   const shortcut = `@rules:${shortcutLabel}`
@@ -577,16 +634,16 @@ function PromptUsageHint({ draft }: { draft: PromptDraft }) {
     .replace('{placeholder}', contextPackPlaceholder)
 
   return (
-    <section className={cn('flex items-center gap-3 rounded-md px-3 py-2.5', tone.callout)}>
-      <span className={cn('grid size-7 shrink-0 place-items-center rounded-md', tone.calloutIcon)}>
+    <section className="flex items-start gap-2.5 rounded-md border border-border bg-surface/50 px-3 py-2.5">
+      <span className={cn('mt-0.5 grid size-7 shrink-0 place-items-center rounded-md', toneIconTile[tone])}>
         <Icon className="size-4" />
       </span>
-      <div className="min-w-0 text-sm leading-6 text-foreground">
+      <div className="min-w-0 text-xs leading-5 text-muted-foreground">
         <p>
-          <span className="font-semibold">{categoryLabel(draft.category, t)}: </span>
+          <span className="font-semibold text-foreground">{categoryLabel(draft.category, t)}: </span>
           {usage}
         </p>
-        <p className="mt-0.5 text-xs text-muted-foreground">
+        <p className="mt-0.5">
           {t.promptLibrary.shortcutHint.replace('{mention}', shortcut)}
         </p>
       </div>
@@ -596,70 +653,51 @@ function PromptUsageHint({ draft }: { draft: PromptDraft }) {
 
 function VisibilityPanel({
   draft,
-  onAutocompleteChange,
   onVisibilityChange,
 }: {
   draft: PromptDraft
-  onAutocompleteChange: (includeInAutocomplete: boolean) => void
   onVisibilityChange: (key: keyof ChatRuleVisibility, value: boolean) => void
 }) {
   const { t } = useLocale()
+  const hidden = !draft.visibility.chat && !draft.visibility.editor
 
   return (
-    <section className={cn(
-      'rounded-md border border-border/80 bg-surface/45 px-3 py-2 transition-colors',
-      !draft.includeInAutocomplete && 'bg-muted/25',
-    )}>
-      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-        <div className="min-w-0">
-          <h3 className="text-xs font-semibold text-foreground">{t.promptLibrary.visibilityLabel}</h3>
-          <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
-            {draft.includeInAutocomplete
-              ? t.promptLibrary.autocompleteEnabledHint
-              : t.promptLibrary.autocompleteDisabledHint}
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <label className="flex h-8 items-center gap-2 rounded-md border border-border bg-background px-2">
-            <span className="text-[11px] font-semibold text-muted-foreground">{t.promptLibrary.autocompleteLabel}</span>
-            <Switch
-              aria-label={t.promptLibrary.autocompleteLabel}
-              checked={draft.includeInAutocomplete}
-              className="data-[state=checked]:bg-brand data-[state=unchecked]:bg-muted"
-              onCheckedChange={onAutocompleteChange}
-            />
-          </label>
-          <div className={cn(
-            'inline-flex h-8 items-center gap-0.5 rounded-md border border-border bg-background p-0.5',
-            !draft.includeInAutocomplete && 'opacity-45',
-          )}>
-            <VisibilityToggle
-              active={draft.visibility.chat}
-              disabled={!draft.includeInAutocomplete}
-              label={t.promptLibrary.chatVisible}
-              onClick={() => onVisibilityChange('chat', !draft.visibility.chat)}
-            />
-            <VisibilityToggle
-              active={draft.visibility.editor}
-              disabled={!draft.includeInAutocomplete}
-              label={t.promptLibrary.editorVisible}
-              onClick={() => onVisibilityChange('editor', !draft.visibility.editor)}
-            />
-          </div>
-        </div>
+    <section className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 rounded-md border border-border bg-surface/45 px-3 py-2">
+      <div className="min-w-0">
+        <span className="text-xs font-semibold text-foreground">{t.promptLibrary.visibilityLabel}</span>
+        {hidden ? (
+          <span className="ml-2 inline-flex items-center gap-1 align-middle text-[11px] font-medium text-destructive/80">
+            <EyeOff className="size-3" />
+            {t.promptLibrary.hiddenEverywhere}
+          </span>
+        ) : null}
+      </div>
+      <div className="flex shrink-0 items-center gap-1.5">
+        <VisChip
+          active={draft.visibility.chat}
+          icon={MessagesSquare}
+          label={t.promptLibrary.chatVisible}
+          onClick={() => onVisibilityChange('chat', !draft.visibility.chat)}
+        />
+        <VisChip
+          active={draft.visibility.editor}
+          icon={FileText}
+          label={t.promptLibrary.editorVisible}
+          onClick={() => onVisibilityChange('editor', !draft.visibility.editor)}
+        />
       </div>
     </section>
   )
 }
 
-function VisibilityToggle({
+function VisChip({
   active,
-  disabled,
+  icon: Icon,
   label,
   onClick,
 }: {
   active: boolean
-  disabled: boolean
+  icon: LucideIcon
   label: string
   onClick: () => void
 }) {
@@ -667,16 +705,17 @@ function VisibilityToggle({
     <button
       aria-pressed={active}
       className={cn(
-        'inline-flex h-7 items-center justify-center gap-1.5 rounded-[5px] px-2.5 text-xs font-semibold text-muted-foreground transition-colors hover:bg-accent hover:text-foreground',
-        active && 'bg-brand text-brand-foreground shadow-[0_1px_2px_var(--brand-shadow)] hover:bg-brand hover:text-brand-foreground',
-        disabled && 'cursor-not-allowed',
+        'inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-xs font-medium transition-colors',
+        active
+          ? 'border-brand/40 bg-brand-subtle text-brand'
+          : 'border-border text-muted-foreground hover:bg-accent hover:text-foreground',
       )}
-      disabled={disabled}
       onClick={onClick}
       type="button"
     >
-      {active ? <Check className="size-3.5" /> : null}
+      <Icon className="size-3.5" />
       {label}
+      {active ? <Check className="size-3" /> : null}
     </button>
   )
 }
@@ -718,7 +757,7 @@ function ContextPackPanel({
   const visibleOptions = matchingOptions.slice(0, contextPickerLimit)
 
   return (
-    <section className="flex h-full min-h-0 flex-col border-t border-border/70 bg-surface/35 lg:border-l lg:border-t-0">
+    <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-md border border-border bg-surface/35">
       <div className="border-b border-border/60 px-3 py-2.5">
         <div className="flex items-center justify-between gap-2">
           <h3 className="text-xs font-semibold text-foreground">{t.promptLibrary.contextLabel}</h3>
@@ -851,7 +890,7 @@ function PromptListItem({
   const { t } = useLocale()
   const normalized = normalizeChatRule(rule)
   const category = normalized.category ?? 'instruction'
-  const tone = categoryTone(category)
+  const tone = categoryToTone[category]
   const visibility = normalized.visibility ?? { chat: true, editor: true }
   const isAutocompleteVisible = normalized.includeInAutocomplete !== false
   const locations = isAutocompleteVisible
@@ -860,48 +899,44 @@ function PromptListItem({
       visibility.editor ? t.promptLibrary.editorVisible : null,
     ].filter(Boolean)
     : []
+  const hidden = locations.length === 0
   return (
     <button
       className={cn(
-        'group relative w-full min-w-0 rounded-md border border-transparent bg-transparent py-2 pl-3.5 pr-2 text-left transition-colors hover:bg-background',
-        !isAutocompleteVisible && 'bg-muted/35 opacity-75 hover:bg-muted/45',
-        isSelected && 'border-border bg-background shadow-[0_1px_2px_var(--shadow-hairline)]',
-        isSelected && !isAutocompleteVisible && 'bg-muted/45',
+        'group flex w-full min-w-0 flex-col gap-0.5 border-l-2 py-1.5 pl-3 pr-2 text-left transition-colors',
+        isSelected ? cn(toneAccentBorderLeft[tone], 'bg-card') : 'border-l-transparent hover:bg-card/60',
+        hidden && 'opacity-60',
       )}
       onClick={onSelect}
       type="button"
     >
-      <span className={cn('absolute bottom-2 left-1 top-2 w-1 rounded-full', tone.dot)} />
-      <span className="flex min-w-0 items-center justify-between gap-2">
+      <span className="flex min-w-0 items-center gap-2">
         <span className={cn(
-          'min-w-0 truncate text-xs font-semibold text-muted-foreground',
-          !isAutocompleteVisible && 'text-muted-foreground/75',
+          'min-w-0 flex-1 truncate text-[13px] font-medium',
+          isSelected ? 'text-foreground' : 'text-foreground/90',
         )}>
-          @rules:{normalized.label}
+          {normalized.title}
         </span>
         <Badge className={cn(
-          'h-5 shrink-0 rounded-full px-1.5 text-[10px]',
-          isAutocompleteVisible ? tone.badge : 'border-muted-foreground/20 bg-muted text-muted-foreground',
+          'h-5 shrink-0 rounded px-1.5 text-[9px] font-semibold uppercase tracking-wide',
+          hidden ? 'border-muted-foreground/20 bg-muted text-muted-foreground' : toneBadge[tone],
         )} variant="outline">
-          {categoryLabel(category, t)}
+          {categoryLabelShort(category, t)}
         </Badge>
       </span>
-      <span className={cn(
-        'mt-0.5 block truncate text-sm font-semibold text-foreground',
-        !isAutocompleteVisible && 'text-foreground/70',
-      )}>
-        {normalized.title}
-      </span>
-      <span className={cn(
-        'mt-1 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground',
-        !isAutocompleteVisible && 'text-destructive',
-      )}>
-        {locations.length > 0 ? (
-          <span className="truncate">{locations.join(' · ')}</span>
+      <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+        {hidden ? (
+          <span className="min-w-0 truncate">
+            <span className="font-mono">@rules:{normalized.label}</span>{' '}
+            <span className="inline-flex items-center gap-1 text-destructive/80">
+              <EyeOff className="size-3 shrink-0" />
+              {t.promptLibrary.hiddenEverywhere}
+            </span>
+          </span>
         ) : (
-          <span className="inline-flex min-w-0 items-center gap-1 rounded-full bg-destructive/10 px-1.5 py-0.5 font-semibold">
-            <EyeOff className="size-3 shrink-0" />
-            {t.promptLibrary.autocompleteHidden}
+          <span className="min-w-0 truncate font-mono">
+            @rules:{normalized.label}
+            <span className="text-muted-foreground/70"> · {locations.join(' · ')}</span>
           </span>
         )}
       </span>
@@ -955,6 +990,59 @@ function RenderedPreviewModal({
   )
 }
 
+function UnsavedGuardModal({
+  onCancel,
+  onDiscard,
+  onSave,
+}: {
+  onCancel: () => void
+  onDiscard: () => void
+  onSave: () => void
+}) {
+  const { t } = useLocale()
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-background/75 px-4 backdrop-blur"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onCancel()
+      }}
+    >
+      <section
+        aria-modal="true"
+        className="w-full max-w-md overflow-hidden rounded-lg border border-border bg-background shadow-xl"
+        role="dialog"
+      >
+        <div className="flex items-start gap-3 border-b border-border px-4 py-3">
+          <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-md bg-warning-subtle text-warning">
+            <AlertTriangle className="size-4" />
+          </span>
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold text-foreground">{t.promptLibrary.discardTitle}</h2>
+            <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{t.promptLibrary.discardBody}</p>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-2 px-4 py-3">
+          <Button autoFocus onClick={onCancel} type="button" variant="ghost">
+            {t.promptLibrary.keepEditing}
+          </Button>
+          <Button
+            className="text-destructive hover:text-destructive"
+            onClick={onDiscard}
+            type="button"
+            variant="ghost"
+          >
+            {t.promptLibrary.discard}
+          </Button>
+          <Button className="gap-1.5" onClick={onSave} type="button">
+            <Save className="size-4" />
+            {t.promptLibrary.savePrompt}
+          </Button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 function draftFromRule(rule: ChatRuleRecord | null): PromptDraft {
   if (!rule) return emptyDraft
   const normalized = normalizeChatRule(rule)
@@ -998,6 +1086,12 @@ function categoryLabel(category: ChatRuleCategory, t: ReturnType<typeof useLocal
   if (category === 'function') return t.promptLibrary.categoryFunction
   if (category === 'context') return t.promptLibrary.categoryContext
   return t.promptLibrary.categoryInstruction
+}
+
+function categoryLabelShort(category: ChatRuleCategory, t: ReturnType<typeof useLocale>['t']) {
+  if (category === 'function') return t.promptLibrary.categoryFunctionShort
+  if (category === 'context') return t.promptLibrary.categoryContextShort
+  return t.promptLibrary.categoryInstructionShort
 }
 
 function categoryHint(category: ChatRuleCategory, t: ReturnType<typeof useLocale>['t']) {
@@ -1051,33 +1145,8 @@ function messageFromUnknown(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }
 
-function categoryTone(category: ChatRuleCategory) {
-  if (category === 'function') {
-    return {
-      active: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200',
-      badge: 'border-emerald-500/25 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200',
-      callout: 'bg-emerald-500/10',
-      calloutIcon: 'bg-emerald-500/15 text-emerald-800 dark:text-emerald-200',
-      dot: 'bg-emerald-500',
-      icon: 'text-emerald-700 dark:text-emerald-300',
-    }
-  }
-  if (category === 'context') {
-    return {
-      active: 'border-amber-500/30 bg-amber-500/10 text-amber-900 dark:text-amber-200',
-      badge: 'border-amber-500/25 bg-amber-500/10 text-amber-900 dark:text-amber-200',
-      callout: 'bg-amber-500/10',
-      calloutIcon: 'bg-amber-500/15 text-amber-900 dark:text-amber-200',
-      dot: 'bg-amber-500',
-      icon: 'text-amber-700 dark:text-amber-300',
-    }
-  }
-  return {
-    active: 'border-sky-500/30 bg-sky-500/10 text-sky-900 dark:text-sky-200',
-    badge: 'border-sky-500/25 bg-sky-500/10 text-sky-900 dark:text-sky-200',
-    callout: 'bg-sky-500/10',
-    calloutIcon: 'bg-sky-500/15 text-sky-900 dark:text-sky-200',
-    dot: 'bg-sky-500',
-    icon: 'text-sky-700 dark:text-sky-300',
-  }
+const categoryToTone: Record<ChatRuleCategory, MentionTone> = {
+  context: 'warning',
+  function: 'success',
+  instruction: 'brand',
 }

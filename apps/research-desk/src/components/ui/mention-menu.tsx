@@ -1,7 +1,8 @@
 import { ChevronLeft, ChevronRight, type LucideIcon } from '@/components/icons'
 import { cn } from '@/lib/utils'
+import { toneBar, toneChip, toneText, type MentionTone } from '@/lib/tone'
 
-export type MentionTone = 'brand' | 'success' | 'file' | 'warning'
+export type { MentionTone }
 
 export type MentionMenuOption = {
   /** Human-readable primary line (category: description, item: title). */
@@ -31,27 +32,6 @@ export type MentionMenuLabels = {
   selectHint: string
   closeHint: string
   backHint: string
-}
-
-const toneText: Record<MentionTone, string> = {
-  brand: 'text-brand',
-  success: 'text-success',
-  file: 'text-file',
-  warning: 'text-warning',
-}
-
-const toneBar: Record<MentionTone, string> = {
-  brand: 'bg-brand',
-  success: 'bg-success',
-  file: 'bg-file',
-  warning: 'bg-warning',
-}
-
-const toneChip: Record<MentionTone, string> = {
-  brand: 'bg-brand-subtle/70 text-brand',
-  success: 'bg-success-subtle/70 text-success',
-  file: 'bg-file-subtle/70 text-file',
-  warning: 'bg-warning-subtle/70 text-warning',
 }
 
 const kbd =

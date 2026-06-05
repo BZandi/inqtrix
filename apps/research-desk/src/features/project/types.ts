@@ -211,6 +211,7 @@ export type ResearchRunCardSummary = {
 }
 
 export type ResearchRunCardMetrics = {
+  claims: number
   queries: number
   rounds: string
   sources: number
@@ -469,6 +470,7 @@ export function fromRunSummary(
     events: [],
     finishedAt: finishedAt ?? undefined,
     metrics: {
+      claims: snapshot.consolidated_claim_count ?? 0,
       queries: snapshot.total_queries ?? 0,
       rounds: maxRounds ? `${currentRounds} / ${maxRounds}` : String(currentRounds),
       sources: snapshot.total_sources ?? snapshot.total_citations ?? 0,
@@ -560,6 +562,10 @@ export function attachRunResult(
     durationSeconds: result.metrics.elapsed_seconds,
     finishedAt: new Date().toISOString(),
     metrics: {
+      // "Claims found" = total consolidated claims, summed across the status
+      // buckets so a completed card matches the live snapshot's
+      // consolidated_claim_count semantics.
+      claims: Object.values(result.metrics.claims.status_counts).reduce((sum, count) => sum + count, 0),
       queries: result.metrics.total_queries,
       rounds: `${result.metrics.rounds} / ${maxRounds}`,
       sources: result.metrics.total_citations,
@@ -635,6 +641,7 @@ function applySnapshotToRecord(
   return {
     ...record,
     metrics: {
+      claims: snapshot.consolidated_claim_count ?? record.metrics.claims,
       queries: snapshot.total_queries ?? record.metrics.queries,
       rounds: maxRounds ? `${currentRounds} / ${maxRounds}` : String(currentRounds),
       sources: snapshot.total_sources ?? snapshot.total_citations ?? record.metrics.sources,

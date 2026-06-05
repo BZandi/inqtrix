@@ -347,6 +347,7 @@ function seedResearchRuns(): ResearchRunRecord[] {
         runEvent('RO-0247-15', '2026-05-15T08:21:00.000Z', 'Evaluating information quality (after round 2/5)...', true),
       ],
       metrics: {
+        claims: 41,
         queries: 13,
         rounds: '2 / 5',
         sources: 72,
@@ -370,6 +371,7 @@ function seedResearchRuns(): ResearchRunRecord[] {
       createdAt: '2026-05-15T08:18:00.000Z',
       events: [],
       metrics: {
+        claims: 0,
         queries: 0,
         rounds: '0 / 10',
         sources: 0,
@@ -475,6 +477,7 @@ function completedRun(
     events: completedRunEvents(runId, submittedAt, durationSeconds, queries, rounds, sources),
     finishedAt: addSeconds(submittedAt, durationSeconds),
     metrics: {
+      claims: 0,
       queries,
       rounds,
       sources,

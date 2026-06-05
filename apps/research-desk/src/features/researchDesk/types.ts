@@ -32,6 +32,7 @@ export type ResearchJob = {
   }>
   id: string
   metrics: {
+    claims: number
     queries: number
     rounds: string
     sources: number

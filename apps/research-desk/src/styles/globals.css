@@ -1492,14 +1492,36 @@
     will-change: transform;
   }
 
+  .inqtrix-segment-breathe {
+    animation: inqtrix-segment-breathe 2s ease-in-out infinite;
+    will-change: opacity;
+  }
+
+  .inqtrix-running-dot {
+    transform-origin: center;
+    animation: inqtrix-running-dot 2s ease-in-out infinite;
+    will-change: opacity, transform;
+  }
+
+  .inqtrix-metric-flash {
+    animation: inqtrix-metric-flash 600ms ease-out;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .inqtrix-thinking-mark::after,
     .inqtrix-thinking-node,
     .inqtrix-active-node-shell,
     .inqtrix-active-node-halo,
     .inqtrix-active-node-ring,
-    .inqtrix-active-node-core {
+    .inqtrix-active-node-core,
+    .inqtrix-segment-breathe,
+    .inqtrix-running-dot,
+    .inqtrix-metric-flash {
       animation: none;
+    }
+
+    .inqtrix-segment-breathe {
+      opacity: 1;
     }
   }
 }
@@ -1600,6 +1622,43 @@
 
   46% {
     transform: scale(1.08);
+  }
+}
+
+/* Active phase segment: calm opacity breathe (no blink, no slide). */
+@keyframes inqtrix-segment-breathe {
+  0%,
+  100% {
+    opacity: 0.42;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Status dots (active phase, live indicator): soft breathing pulse. */
+@keyframes inqtrix-running-dot {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(0.85);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Metric value flash on count-up; re-mount via key={value} replays it. */
+@keyframes inqtrix-metric-flash {
+  0% {
+    color: var(--brand);
+  }
+
+  100% {
+    color: var(--foreground);
   }
 }
 

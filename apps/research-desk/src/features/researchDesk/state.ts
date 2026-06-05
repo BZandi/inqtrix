@@ -1696,6 +1696,7 @@ function createLocalResearchRun(
     createdAt: now,
     events: [],
     metrics: {
+      claims: 0,
       queries: firstRoundQueries,
       rounds: `0 / ${maxRounds}`,
       sources: 0,

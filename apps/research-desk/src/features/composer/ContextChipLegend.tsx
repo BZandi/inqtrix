@@ -136,7 +136,7 @@ export function ContextChipLegend({
   }
 
   return (
-    <div className="mb-2 flex min-w-0 flex-wrap items-center gap-1.5" ref={chipListRef}>
+    <div className="mb-1.5 flex min-w-0 flex-wrap items-center gap-1.5 border-b border-border/70 pb-1.5" ref={chipListRef}>
       {chips.map((chip, index) => {
         const key = chatContextRefKey(chip.ref)
         const { chipClassName, icon: Icon } = attachmentChipVisual(chip.kind)

@@ -1193,11 +1193,16 @@
 
   .editor-document-diff-body {
     color: var(--foreground);
+    --document-diff-insert-bg: color-mix(in oklab, var(--success-subtle) 50%, transparent);
+    --document-diff-insert-ink: color-mix(in oklab, var(--success) 70%, var(--foreground));
+    --document-diff-insert-line: color-mix(in oklab, var(--success) 54%, transparent);
+    --document-diff-delete-bg: color-mix(in oklab, var(--destructive-subtle) 48%, transparent);
+    --document-diff-delete-ink: color-mix(in oklab, var(--destructive) 72%, var(--foreground));
+    --document-diff-delete-line: color-mix(in oklab, var(--destructive) 52%, transparent);
   }
 
   .editor-document-diff-chunk {
-    border-radius: 0.45rem;
-    padding: 0.2rem 0.35rem;
+    padding: 0.04rem 0;
   }
 
   .editor-document-diff-chunk > *:first-child {
@@ -1208,28 +1213,154 @@
     margin-bottom: 0;
   }
 
+  .editor-document-diff-layer,
+  .editor-document-diff-replace {
+    position: relative;
+    margin: 0.28rem 0;
+    border-radius: 0.22rem;
+    padding: 0.16rem 0.45rem 0.16rem 0.72rem;
+  }
+
+  .editor-document-diff-layer::before,
+  .editor-document-diff-replace::before {
+    position: absolute;
+    bottom: 0.36rem;
+    left: 0.25rem;
+    top: 0.36rem;
+    width: 2px;
+    border-radius: 999px;
+    content: "";
+  }
+
+  .editor-document-diff-replace {
+    display: grid;
+    gap: 0.1rem;
+  }
+
+  .editor-document-diff-replace::before {
+    background: linear-gradient(
+      to bottom,
+      var(--document-diff-delete-line) 0 48%,
+      transparent 48% 52%,
+      var(--document-diff-insert-line) 52% 100%
+    );
+  }
+
+  .editor-document-diff-replace-inline {
+    background: transparent;
+    padding-bottom: 0;
+    padding-top: 0;
+  }
+
+  .editor-document-diff-replace-structured {
+    background: transparent;
+    padding-right: 0;
+  }
+
+  .editor-document-diff-replace-inline::before {
+    background: color-mix(in oklab, var(--brand) 34%, transparent);
+  }
+
   .editor-document-diff-insert {
-    border: 1px solid color-mix(in oklab, var(--success) 24%, transparent);
-    border-left: 2px solid color-mix(in oklab, var(--success) 58%, transparent);
-    background: color-mix(in oklab, var(--success-subtle) 72%, transparent);
-    color: color-mix(in oklab, var(--success) 74%, var(--foreground));
+    background: var(--document-diff-insert-bg);
+    color: var(--document-diff-insert-ink);
+  }
+
+  .editor-document-diff-insert::before {
+    background: var(--document-diff-insert-line);
   }
 
   .editor-document-diff-delete {
-    border: 1px solid color-mix(in oklab, var(--destructive) 22%, transparent);
-    border-left: 2px solid color-mix(in oklab, var(--destructive) 58%, transparent);
-    background: color-mix(in oklab, var(--destructive-subtle) 70%, transparent);
-    color: color-mix(in oklab, var(--destructive) 78%, var(--foreground));
+    background: var(--document-diff-delete-bg);
+    color: var(--document-diff-delete-ink);
   }
 
-  .editor-document-diff-delete :where(p, li, h1, h2, h3, h4, h5, h6, td, th, blockquote, span, strong, em, code, a) {
+  .editor-document-diff-delete::before {
+    background: var(--document-diff-delete-line);
+  }
+
+  .editor-document-diff-layer > *:first-child {
+    margin-top: 0;
+  }
+
+  .editor-document-diff-layer > *:last-child {
+    margin-bottom: 0;
+  }
+
+  .editor-document-diff-delete :where(p, li, h1, h2, h3, h4, h5, h6, td, th, blockquote, span, strong, em, code) {
     color: inherit;
     text-decoration: line-through;
     text-decoration-thickness: 0.08em;
   }
 
+  .editor-document-diff-delete a {
+    color: inherit;
+    text-decoration-color: currentcolor;
+  }
+
   .editor-document-diff-insert :where(p, li, h1, h2, h3, h4, h5, h6, td, th, blockquote, span, strong, em, code, a) {
     color: inherit;
+  }
+
+  .editor-document-diff-inline-row {
+    overflow-wrap: anywhere;
+  }
+
+  .editor-document-diff-token {
+    white-space: pre-wrap;
+  }
+
+  .editor-document-diff-token-insert,
+  .editor-document-diff-token-delete {
+    border-radius: 0.18rem;
+    padding: 0.02rem 0.1rem;
+    text-decoration-thickness: 0.08em;
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+  }
+
+  .editor-document-diff-token-insert {
+    background: var(--document-diff-insert-bg);
+    color: var(--document-diff-insert-ink);
+    text-decoration: none;
+  }
+
+  .editor-document-diff-token-delete {
+    background: var(--document-diff-delete-bg);
+    color: var(--document-diff-delete-ink);
+    text-decoration: line-through;
+  }
+
+  .editor-document-diff-inline-link {
+    color: var(--brand);
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 0.18em;
+  }
+
+  .editor-document-diff-inline-code {
+    border-radius: 0.22rem;
+    background: color-mix(in oklab, var(--muted) 72%, transparent);
+    padding: 0.05rem 0.24rem;
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
+    font-size: 0.86em;
+  }
+
+  @media (max-width: 640px) {
+    .editor-document-diff-layer,
+    .editor-document-diff-replace {
+      padding-left: 0.58rem;
+      padding-right: 0.25rem;
+    }
+
+    .editor-document-diff-layer::before,
+    .editor-document-diff-replace::before {
+      left: 0.12rem;
+    }
+
+    .editor-document-diff-inline-row {
+      overflow-wrap: anywhere;
+    }
   }
 
   .editor-prose .suggestion-active {

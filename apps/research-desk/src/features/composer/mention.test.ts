@@ -101,6 +101,52 @@ describe('buildMentionOptions', () => {
       { kind: 'chat-rule', ruleId: 'r2' },
     ])
   })
+
+  it('sorts rule items into instruction -> function -> context order', () => {
+    const match = detectMentionTrigger('@rules:', '@rules:'.length)!
+    const options = buildMentionOptions(
+      match,
+      {
+        ...sources,
+        ruleOptions: [
+          {
+            category: 'context',
+            includeInAutocomplete: true,
+            label: 'pack',
+            linkedContextRefs: [],
+            markdown: 'Context pack.',
+            ruleId: 'r-context',
+            title: 'Pack',
+            visibility: { chat: true, editor: true },
+          },
+          {
+            category: 'function',
+            includeInAutocomplete: true,
+            label: 'translate',
+            linkedContextRefs: [],
+            markdown: 'Translate the input.',
+            ruleId: 'r-function',
+            title: 'Translate',
+            visibility: { chat: true, editor: true },
+          },
+          {
+            category: 'instruction',
+            includeInAutocomplete: true,
+            label: 'style',
+            linkedContextRefs: [],
+            markdown: 'Write concise answers.',
+            ruleId: 'r-instruction',
+            title: 'Style',
+            visibility: { chat: true, editor: true },
+          },
+        ],
+      },
+      labels,
+      ['rules', 'files', 'filegroups'],
+    )
+
+    expect(options.map((option) => option.category)).toEqual(['instruction', 'function', 'context'])
+  })
 })
 
 describe('resolveInlineMentions', () => {

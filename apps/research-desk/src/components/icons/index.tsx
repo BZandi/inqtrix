@@ -1,7 +1,7 @@
 import { createIcon } from './createIcon'
 
 export type { IconProps, LucideIcon } from './createIcon'
-export { FolderPlus, SquarePen } from 'lucide-react'
+export { AlignCenter, AlignLeft, AlignRight, FolderPlus, SquarePen, WrapText } from 'lucide-react'
 
 export const AlertTriangle = createIcon('AlertTriangle', 'lucide-alert-triangle', (
   <>
@@ -74,6 +74,12 @@ export const Code2 = createIcon('Code2', 'lucide-code-2', (
 export const ChevronDown = createIcon('ChevronDown', 'lucide-chevron-down', (
   <>
     <path d="m6 9 6 6 6-6" />
+  </>
+))
+
+export const ChevronLeft = createIcon('ChevronLeft', 'lucide-chevron-left', (
+  <>
+    <path d="m15 18-6-6 6-6" />
   </>
 ))
 

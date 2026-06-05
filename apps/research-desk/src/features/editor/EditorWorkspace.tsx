@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -112,7 +113,8 @@ import type { ResearchDeskAction } from '@/features/researchDesk/state'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import { commentDecorationPluginKey, createEditorExtensions, normalizeEditorMarkdownForTiptap, suggestionDecorationPluginKey } from './tiptap'
-import { markdownDiffSegments, suggestionDiffPlan } from './suggestionDiff'
+import { MarkdownSourceEditor } from './MarkdownSourceEditor'
+import { documentDiffPlan, suggestionDiffPlan, type DocumentDiffBlock, type SuggestionDiffSegment } from './suggestionDiff'
 import {
   blockInsertionPositionForRange,
   blockWidgetPositionForRange,
@@ -238,6 +240,23 @@ const editorCopy = {
     importedFrom: 'Importiert aus Research-Run',
     inlineComment: 'Kommentar hinzufügen...',
     inlineCommentSubmit: 'Kommentar',
+    addColumn: 'Spalte hinzufügen',
+    addRow: 'Zeile hinzufügen',
+    closeTableEditor: 'Tabelleneditor schließen',
+    columnLabel: 'Spalte',
+    deleteColumn: 'Spalte löschen',
+    deleteRow: 'Zeile löschen',
+    formatTables: 'Markdown-Tabellen bereinigen',
+    insertOrEditTable: 'Tabelle einfügen oder bearbeiten',
+    sourceEditor: 'Markdown Source',
+    sourceLineWrap: 'Zeilenumbruch umschalten',
+    tableAlignmentCenter: 'Spalte zentrieren',
+    tableAlignmentLeft: 'Spalte linksbündig ausrichten',
+    tableAlignmentRight: 'Spalte rechtsbündig ausrichten',
+    tableColumn: 'Spalten',
+    tableEditor: 'Tabelleneditor',
+    tableLines: 'Zeilen',
+    tableRows: 'Datenzeilen',
     live: 'Live',
     markdown: 'Markdown',
     noComments: 'Noch keine Kommentare in diesem Dokument.',
@@ -330,6 +349,23 @@ const editorCopy = {
     importedFrom: 'Imported from research run',
     inlineComment: 'Add comment...',
     inlineCommentSubmit: 'Comment',
+    addColumn: 'Add column',
+    addRow: 'Add row',
+    closeTableEditor: 'Close table editor',
+    columnLabel: 'Column',
+    deleteColumn: 'Delete column',
+    deleteRow: 'Delete row',
+    formatTables: 'Clean up Markdown tables',
+    insertOrEditTable: 'Insert or edit table',
+    sourceEditor: 'Markdown source',
+    sourceLineWrap: 'Toggle line wrap',
+    tableAlignmentCenter: 'Center column',
+    tableAlignmentLeft: 'Align column left',
+    tableAlignmentRight: 'Align column right',
+    tableColumn: 'Columns',
+    tableEditor: 'Table editor',
+    tableLines: 'Lines',
+    tableRows: 'Data rows',
     live: 'Live',
     markdown: 'Markdown',
     noComments: 'No comments in this document yet.',
@@ -1625,14 +1661,29 @@ function MarkdownLiveEditor({
 
   if (mode === 'source') {
     return (
-      <div className="min-h-0 flex-1 bg-background">
-        <textarea
-          className="h-full min-h-full w-full resize-none border-0 bg-background px-10 py-8 font-mono text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground focus:ring-0"
-          onChange={(event) => onChange(event.target.value)}
-          spellCheck={false}
-          value={document.contentMarkdown}
-        />
-      </div>
+      <MarkdownSourceEditor
+        labels={{
+          addColumn: copy.addColumn,
+          addRow: copy.addRow,
+          closeTableEditor: copy.closeTableEditor,
+          columnLabel: copy.columnLabel,
+          deleteColumn: copy.deleteColumn,
+          deleteRow: copy.deleteRow,
+          editor: copy.sourceEditor,
+          formatTables: copy.formatTables,
+          insertOrEditTable: copy.insertOrEditTable,
+          lineWrap: copy.sourceLineWrap,
+          tableAlignmentCenter: copy.tableAlignmentCenter,
+          tableAlignmentLeft: copy.tableAlignmentLeft,
+          tableAlignmentRight: copy.tableAlignmentRight,
+          tableColumn: copy.tableColumn,
+          tableEditor: copy.tableEditor,
+          tableLines: copy.tableLines,
+          tableRows: copy.tableRows,
+        }}
+        onChange={onChange}
+        value={document.contentMarkdown}
+      />
     )
   }
 
@@ -1710,31 +1761,139 @@ function EditorDocumentDiffView({
       </div>
     )
   }
-  const segments = markdownDiffSegments(anchorMarkdown, currentMarkdown)
+  const blocks = documentDiffPlan(anchorMarkdown, currentMarkdown)
   return (
     <ScrollArea className="min-h-0 flex-1 bg-background">
-      <div className="editor-document-diff mx-auto min-h-full max-w-[72rem] px-10 py-8">
+      <div className="editor-document-diff mx-auto min-h-full max-w-[72rem] px-4 py-6 sm:px-10 sm:py-8">
         <div className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-brand">
           <Scale className="size-3.5" />
           {copy.diffView}
         </div>
-        <div className="editor-document-diff-body space-y-1.5">
-          {segments.map((segment, index) => (
-            <div
-              className={cn(
-                'editor-document-diff-chunk',
-                segment.type === 'insert' && 'editor-document-diff-insert',
-                segment.type === 'delete' && 'editor-document-diff-delete',
-              )}
-              key={`${segment.type}-${index}-${segment.text.length}`}
-            >
-              <MarkdownRenderer markdown={segment.text} variant="report" />
-            </div>
+        <div className="editor-document-diff-body editor-prose">
+          {blocks.map((block, index) => (
+            <EditorDocumentDiffBlock block={block} index={index} key={documentDiffBlockKey(block, index)} />
           ))}
         </div>
       </div>
     </ScrollArea>
   )
+}
+
+function EditorDocumentDiffBlock({ block, index }: { block: DocumentDiffBlock; index: number }) {
+  if (block.kind === 'replace') {
+    if (block.inlineSegments) {
+      return (
+        <div className="editor-document-diff-replace editor-document-diff-replace-inline">
+          <p className="editor-document-diff-inline-row">
+            {block.inlineSegments.map((segment, segmentIndex) => (
+              <EditorDocumentDiffInlineSegment
+                key={`${index}-${segmentIndex}-${segment.type}-${segment.text.length}`}
+                segment={segment}
+              />
+            ))}
+          </p>
+        </div>
+      )
+    }
+
+    return (
+      <div className="editor-document-diff-replace editor-document-diff-replace-structured">
+        <div className="editor-document-diff-layer editor-document-diff-delete">
+          <MarkdownRenderer markdown={block.beforeMarkdown} variant="report" />
+        </div>
+        <div className="editor-document-diff-layer editor-document-diff-insert">
+          <MarkdownRenderer markdown={block.afterMarkdown} variant="report" />
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div
+      className={cn(
+        'editor-document-diff-chunk',
+        block.kind === 'equal' && 'editor-document-diff-equal',
+        block.kind === 'insert' && 'editor-document-diff-layer editor-document-diff-insert',
+        block.kind === 'delete' && 'editor-document-diff-layer editor-document-diff-delete',
+      )}
+    >
+      <MarkdownRenderer markdown={block.markdown} variant="report" />
+    </div>
+  )
+}
+
+function EditorDocumentDiffInlineSegment({ segment }: { segment: SuggestionDiffSegment }) {
+  if (segment.type === 'insert') {
+    return (
+      <ins className="editor-document-diff-token editor-document-diff-token-insert">
+        {renderInlineMarkdownText(segment.text)}
+      </ins>
+    )
+  }
+  if (segment.type === 'delete') {
+    return (
+      <del className="editor-document-diff-token editor-document-diff-token-delete">
+        {renderInlineMarkdownText(segment.text)}
+      </del>
+    )
+  }
+  return (
+    <span className="editor-document-diff-token">
+      {renderInlineMarkdownText(segment.text)}
+    </span>
+  )
+}
+
+function documentDiffBlockKey(block: DocumentDiffBlock, index: number): string {
+  if (block.kind === 'replace') {
+    return `${block.kind}-${index}-${block.beforeMarkdown.length}-${block.afterMarkdown.length}`
+  }
+  return `${block.kind}-${index}-${block.markdown.length}`
+}
+
+function renderInlineMarkdownText(text: string): ReactNode[] {
+  const nodes: ReactNode[] = []
+  const tokenPattern = /(\[[^\]\n]+\]\([^) \n]+(?:\s+"[^"\n]*")?\)|`[^`\n]+`|\*\*[^*\n][^*\n]*\*\*|\*[^*\n][^*\n]*\*)/g
+  let cursor = 0
+  let match: RegExpExecArray | null
+  while ((match = tokenPattern.exec(text))) {
+    if (match.index > cursor) {
+      nodes.push(<Fragment key={`text-${cursor}`}>{text.slice(cursor, match.index)}</Fragment>)
+    }
+    nodes.push(renderInlineMarkdownToken(match[0], match.index))
+    cursor = match.index + match[0].length
+  }
+  if (cursor < text.length) {
+    nodes.push(<Fragment key={`text-${cursor}`}>{text.slice(cursor)}</Fragment>)
+  }
+  return nodes
+}
+
+function renderInlineMarkdownToken(token: string, index: number): ReactNode {
+  const link = token.match(/^\[([^\]\n]+)\]\(([^) \n]+)(?:\s+"[^"\n]*")?\)$/)
+  if (link) {
+    return (
+      <a
+        className="editor-document-diff-inline-link"
+        href={link[2]}
+        key={`link-${index}`}
+        rel="noreferrer"
+        target="_blank"
+      >
+        {link[1]}
+      </a>
+    )
+  }
+  if (token.startsWith('`') && token.endsWith('`')) {
+    return <code className="editor-document-diff-inline-code" key={`code-${index}`}>{token.slice(1, -1)}</code>
+  }
+  if (token.startsWith('**') && token.endsWith('**')) {
+    return <strong key={`strong-${index}`}>{token.slice(2, -2)}</strong>
+  }
+  if (token.startsWith('*') && token.endsWith('*')) {
+    return <em key={`em-${index}`}>{token.slice(1, -1)}</em>
+  }
+  return <Fragment key={`token-${index}`}>{token}</Fragment>
 }
 
 function EditorCommandToolbar({
@@ -2196,18 +2355,6 @@ function EditorAssistantComposer({
             </motion.div>
           ) : null}
         </AnimatePresence>
-        <ContextChipLegend
-          chips={attachmentChips}
-          labels={{
-            removeContext: copy.removeFromQueue,
-            reorderHint: t.chat.reorderContextHint,
-          }}
-          onRemove={onRemoveChip}
-          onReorderPending={onReorderPending}
-          onReorderPill={onReorderPill}
-          pendingKeys={pendingKeys}
-          pillKeys={pillKeys}
-        />
         <EditorInstructionFeedbackCard
           feedback={instructionFeedback}
           labels={{
@@ -2231,7 +2378,7 @@ function EditorAssistantComposer({
           type="file"
         />
         <Dropzone disabled={isRunning} label={t.chat.dropFiles} onFiles={onAttachFiles}>
-        <div className="relative rounded-xl border border-border bg-card px-3 py-2 shadow-[0_8px_28px_-12px_var(--shadow-soft)]">
+        <div className="relative rounded-xl border border-border bg-card px-3 py-2 shadow-[0_8px_28px_-12px_var(--shadow-soft)] transition-[border-color,box-shadow] duration-150 focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/15">
           <TextImproveFloatingLayer
             labels={{
               accept: t.textImprove.accept,
@@ -2245,6 +2392,18 @@ function EditorAssistantComposer({
             onReject={assistantTextImprove.clearProposal}
             proposal={assistantTextImprove.proposal}
             reduceMotion={reduceMotion}
+          />
+          <ContextChipLegend
+            chips={attachmentChips}
+            labels={{
+              removeContext: copy.removeFromQueue,
+              reorderHint: t.chat.reorderContextHint,
+            }}
+            onRemove={onRemoveChip}
+            onReorderPending={onReorderPending}
+            onReorderPill={onReorderPill}
+            pendingKeys={pendingKeys}
+            pillKeys={pillKeys}
           />
           <MentionComposer
             ariaLabel={copy.assistantPlaceholder}

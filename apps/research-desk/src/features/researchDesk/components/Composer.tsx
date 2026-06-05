@@ -147,7 +147,7 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
       className="shrink-0 px-4 pb-4 pt-2"
     >
       <form className="mx-auto max-w-4xl" onSubmit={submitResearch}>
-        <div className="relative rounded-xl border border-border bg-card px-3 py-2.5 shadow-[0_8px_28px_-12px_var(--shadow-soft)]">
+        <div className="relative rounded-xl border border-border bg-card px-3 py-2.5 shadow-[0_8px_28px_-12px_var(--shadow-soft)] transition-[border-color,box-shadow] duration-150 focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/15">
           <Textarea
             aria-label={t.composer.placeholder}
             className={cn(

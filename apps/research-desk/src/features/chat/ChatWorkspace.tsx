@@ -1,3 +1,4 @@
+import { BrandMark } from '@/components/BrandMark'
 import {
   AlertTriangle,
   BookOpen,
@@ -15,7 +16,6 @@ import {
   ListOrdered,
   MessageSquareText,
   MessageSquarePlus,
-  MessagesSquare,
   Paperclip,
   PencilLine,
   Plus,
@@ -713,7 +713,17 @@ export default function ChatWorkspace({
 	            )}
 	          </AnimatePresence>
 
-	          <ScrollArea className="min-h-0 flex-1" ref={messagesScrollAreaRef}>
+	          <ScrollArea
+            className={cn(
+              'min-h-0 flex-1',
+              // When empty, let the Radix viewport wrapper fill its height so the
+              // inner `min-h-full` resolves and the hero can center vertically.
+              // Only in the empty case, so message scrolling stays unaffected.
+              !(selectedThread && selectedThread.messages.length > 0) &&
+                '[&_[data-scroll-area-viewport]>div]:h-full',
+            )}
+            ref={messagesScrollAreaRef}
+          >
 	            <div className="mx-auto flex min-h-full w-full max-w-5xl flex-col gap-5 px-4 py-6 md:px-8">
               {selectedThread && selectedThread.messages.length > 0 ? (
                 selectedThread.messages.map((message) => (
@@ -741,11 +751,11 @@ export default function ChatWorkspace({
                 ))
               ) : selectedThread ? (
                 <EmptyChatState
-                  label={pendingChips.length > 0 ? t.chat.emptyWithContext : t.chat.empty}
-                  type="thread"
+                  subtitle={pendingChips.length > 0 ? t.chat.emptyWithContext : t.chat.emptyHint}
+                  title={t.chat.emptyTitle}
                 />
               ) : (
-                <EmptyChatState label={t.chat.empty} type="all" />
+                <EmptyChatState subtitle={t.chat.emptyHint} title={t.chat.emptyTitle} />
               )}
               <div ref={chatEndRef} />
             </div>
@@ -768,7 +778,7 @@ export default function ChatWorkspace({
                 type="file"
               />
               <Dropzone disabled={isSending} label={t.chat.dropFiles} onFiles={onAttachFiles}>
-              <div className="relative overflow-visible rounded-xl border border-border bg-card px-2.5 py-2 shadow-[0_8px_28px_-12px_var(--shadow-soft)]">
+              <div className="relative overflow-visible rounded-xl border border-border bg-card px-2.5 py-2 shadow-[0_8px_28px_-12px_var(--shadow-soft)] transition-[border-color,box-shadow] duration-150 focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/15">
                 {attachmentBudgetNotice && (
                   <div className="mb-2 flex items-center gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-2 py-1 text-[11px] font-medium text-warning">
                     <AlertTriangle className="size-3.5 shrink-0" />
@@ -1292,22 +1302,40 @@ function effortLabelFromToken(
   return `${t.chat.modelThinkingOn} ${shortEffort(effort)}`
 }
 
+/**
+ * Highlight the `@kind` context tokens in a hint sentence so they read as
+ * typeable handles (mono, slightly darker) without leaving the prose flow.
+ */
+function renderMentionHint(text: string) {
+  return text.split(/(@[a-z]+)/gi).map((part, index) =>
+    /^@[a-z]+$/i.test(part) ? (
+      <span className="font-mono text-foreground/75" key={index}>
+        {part}
+      </span>
+    ) : (
+      part
+    ),
+  )
+}
+
 function EmptyChatState({
-  label,
-  type,
+  subtitle,
+  title,
 }: {
-  label: string
-  type: 'all' | 'thread'
+  subtitle: string
+  title: string
 }) {
-  const Icon = type === 'thread' ? MessageSquareText : MessagesSquare
   return (
     <div className="flex flex-1 items-center justify-center p-8 text-center">
-      <div className="max-w-sm">
-        <div className="mx-auto flex size-14 items-center justify-center rounded-full border border-border bg-surface text-muted-foreground">
-          <Icon className="size-7" />
+      <div className="mx-auto flex w-full max-w-md flex-col items-center">
+        <div className="flex size-14 items-center justify-center rounded-2xl border border-brand/15 bg-brand-subtle shadow-[0_12px_32px_var(--shadow-soft)]">
+          <BrandMark className="size-8" />
         </div>
-        <p className="mt-4 text-sm font-medium text-muted-foreground">
-          {label}
+        <h2 className="mt-5 text-2xl font-semibold tracking-tight text-foreground">
+          {title}
+        </h2>
+        <p className="mt-2 max-w-sm text-sm leading-6 text-muted-foreground">
+          {renderMentionHint(subtitle)}
         </p>
       </div>
     </div>

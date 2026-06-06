@@ -1,8 +1,9 @@
-import { FileSearch, PanelBottomOpen, Sparkles } from '@/components/icons'
+import { PanelBottomOpen } from '@/components/icons'
 import { AnimatePresence, motion } from 'motion/react'
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { WelcomeState } from '@/components/ui/welcome-state'
 import type { CreateResearchRunRequest } from '@/features/researchRuns/types'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { appMotion } from '@/motion/transitions'
@@ -64,17 +65,16 @@ export function ResearchRunColumn({
         jobs={allJobs}
         onActiveFilterChange={onActiveFilterChange}
       />
+      {allJobs.length === 0 ? (
+        <ResearchEmptyState
+          onSuggestionSelect={(question) => onComposerSubmit(
+            buildComposerRequest(composerForm, question, selectedStack),
+          )}
+        />
+      ) : null}
       <div className="relative flex min-h-0 flex-1 flex-col gap-3 px-4 pt-3">
         {allJobs.length === 0 ? (
-          <>
-            <ResearchEmptyState
-              isComposerVisible={isComposerVisible}
-              onSuggestionSelect={(question) => onComposerSubmit(
-                buildComposerRequest(composerForm, question, selectedStack),
-              )}
-            />
-            <div className="min-h-0 flex-1" />
-          </>
+          <div className="min-h-0 flex-1" />
         ) : (
           <ScrollArea className="min-h-0 flex-1 pr-2">
             <motion.div
@@ -108,7 +108,7 @@ export function ResearchRunColumn({
         )}
       </div>
 
-      <AnimatePresence initial={false} mode="sync">
+      <AnimatePresence initial={false} mode={reduceMotion ? 'sync' : 'popLayout'}>
         {isComposerVisible ? (
           <Composer
             form={composerForm}
@@ -147,10 +147,8 @@ export function ResearchRunColumn({
 }
 
 function ResearchEmptyState({
-  isComposerVisible,
   onSuggestionSelect,
 }: {
-  isComposerVisible: boolean
   onSuggestionSelect: (question: string) => void
 }) {
   const { t } = useLocale()
@@ -170,40 +168,28 @@ function ResearchEmptyState({
   ]
 
   return (
-    <div
-      className={[
-        'absolute inset-x-0 top-8 z-0 flex items-center justify-center px-4 py-10',
-        isComposerVisible ? 'bottom-0' : 'bottom-[5.75rem]',
-      ].join(' ')}
-    >
-      <div className="mx-auto flex w-full max-w-xl flex-col items-center text-center">
-        <div className="mb-5 flex size-12 items-center justify-center rounded-full border border-brand/20 bg-brand-subtle text-brand shadow-[0_12px_32px_var(--shadow-soft)]">
-          <FileSearch className="size-5" />
-        </div>
-        <p className="text-[0.72rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-          {t.home.emptyKicker}
-        </p>
-        <h2 className="mt-2 text-3xl font-semibold tracking-normal text-foreground">
-          {t.home.emptyTitle}
-        </h2>
-        <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">
-          {t.home.emptyDescription}
-        </p>
-        <div className="mt-6 flex flex-wrap justify-center gap-2">
+    <div className="pointer-events-none absolute inset-x-4 bottom-40 top-12 z-10 flex items-center justify-center px-4 py-8">
+      <WelcomeState
+        actions={(
+          <div className="flex flex-wrap justify-center gap-2">
           {suggestions.map((suggestion) => (
             <Button
-              className="h-9 gap-2 rounded-full px-3 text-xs"
+              className="h-8 rounded-md px-2.5 text-xs"
               key={suggestion.label}
               onClick={() => onSuggestionSelect(suggestion.question)}
               type="button"
               variant="outline"
             >
-              <Sparkles className="size-3.5" />
               <span>{suggestion.label}</span>
             </Button>
           ))}
-        </div>
-      </div>
+          </div>
+        )}
+        className="pointer-events-auto"
+        kicker={t.home.emptyKicker}
+        subtitle={t.home.emptyDescription}
+        title={t.home.emptyTitle}
+      />
     </div>
   )
 }

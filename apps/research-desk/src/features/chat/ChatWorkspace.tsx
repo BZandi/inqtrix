@@ -1,4 +1,3 @@
-import { BrandMark } from '@/components/BrandMark'
 import {
   AlertTriangle,
   BookOpen,
@@ -24,6 +23,7 @@ import {
   SlidersHorizontal,
   Square,
   Trash2,
+  type LucideIcon,
   X,
 } from '@/components/icons'
 import { AnimatePresence, motion } from 'motion/react'
@@ -39,6 +39,7 @@ import {
 import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { WelcomeState } from '@/components/ui/welcome-state'
 import {
   ResizableHandle,
   ResizablePanel,
@@ -46,12 +47,8 @@ import {
 } from '@/components/ui/resizable'
 import {
   DropdownMenu,
-  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
@@ -80,6 +77,8 @@ import type {
   ChatModelTier,
   NodeModelResolution,
 } from '@/features/researchRuns/types'
+import { ModelTierPicker } from '@/features/researchRuns/ModelTierPicker'
+import { modelEffortLabelFromToken, modelNameLabel } from '@/features/researchRuns/modelLabels'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
@@ -97,6 +96,8 @@ import { ContextChipLegend } from '@/features/composer/ContextChipLegend'
 import { MentionComposer, type MentionComposerHandle } from '@/features/composer/MentionComposer'
 import { type LabelResolver } from '@/features/composer/mentionDoc'
 import { resizeTextareaToRows } from '@/features/composer/textareaAutosize'
+
+const chatComposerMenuContentClassName = 'w-max min-w-48 max-w-72 overflow-hidden rounded-xl p-0 shadow-lg'
 
 type ChatWorkspaceProps = {
   activeAssistantMessageId: string | null
@@ -873,71 +874,86 @@ export default function ChatWorkspace({
                     </DropdownMenuTrigger>
                     <DropdownMenuContent
                       align="start"
-                      className="w-72 max-w-[calc(100vw-2rem)]"
+                      className="w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl p-0 shadow-lg"
                       side="top"
                       sideOffset={8}
                     >
-                      <DropdownMenuLabel className="text-xs text-muted-foreground">
-                        {t.chat.research}
-                      </DropdownMenuLabel>
-                      <DropdownMenuSeparator />
-                      {reportOptions.length > 0 ? (
-                        reportOptions.map((report) => (
-                          <DropdownMenuItem
-                            className="w-full min-w-0 items-start gap-2 py-2"
-                            key={report.runId}
-                            onSelect={() => onAttachContext({ kind: 'research-report', runId: report.runId })}
-                          >
-                            <FileText className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                            <span className="min-w-0 flex-1">
-                              <span className="block max-w-full truncate text-sm font-medium">
-                                @research:{report.label}
+                      <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-1.5">
+                        <span className="t-meta-sm font-medium text-muted-foreground">{t.chat.attachContext}</span>
+                        <span className="ml-auto t-hint tabular-nums text-muted-foreground/50">
+                          {reportOptions.length + ruleOptions.length}
+                        </span>
+                      </div>
+                      <div className="py-1">
+                        <div className="px-2.5 pb-0.5 pt-1.5 t-caption text-muted-foreground/60">
+                          {t.chat.research}
+                        </div>
+                        {reportOptions.length > 0 ? (
+                          reportOptions.map((report) => (
+                            <DropdownMenuItem
+                              className="group relative w-full min-w-0 items-start gap-2.5 rounded-none px-2.5 py-1.5 hover:bg-accent/50 focus:bg-accent/80 data-[highlighted]:bg-accent/80"
+                              key={report.runId}
+                              onSelect={() => onAttachContext({ kind: 'research-report', runId: report.runId })}
+                            >
+                              <span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-brand opacity-0 transition-opacity group-hover:opacity-100 group-focus:opacity-100 group-data-[highlighted]:opacity-100" />
+                              <FileText className="mt-0.5 size-4 shrink-0 text-muted-foreground/70 transition-colors group-hover:text-brand group-focus:text-brand group-data-[highlighted]:text-brand" />
+                              <span className="min-w-0 flex-1">
+                                <span className="block max-w-full truncate t-list text-foreground">
+                                  @research:{report.label}
+                                </span>
+                                <span className="block max-w-full truncate t-meta-sm text-muted-foreground">
+                                  {report.title}
+                                </span>
                               </span>
-                              <span className="block max-w-full truncate text-xs text-muted-foreground">
-                                {report.title}
+                            </DropdownMenuItem>
+                          ))
+                        ) : (
+                          <div className="px-2.5 py-2 t-meta text-muted-foreground">
+                            {t.chat.noReports}
+                          </div>
+                        )}
+                        <DropdownMenuSeparator className="mx-0 my-1" />
+                        <div className="px-2.5 pb-0.5 pt-1.5 t-caption text-muted-foreground/60">
+                          {t.chat.rules}
+                        </div>
+                        {ruleOptions.length > 0 ? (
+                          ruleOptions.map((rule) => (
+                            <DropdownMenuItem
+                              className="group relative w-full min-w-0 items-start gap-2.5 rounded-none px-2.5 py-1.5 hover:bg-accent/50 focus:bg-accent/80 data-[highlighted]:bg-accent/80"
+                              key={rule.ruleId}
+                              onSelect={() => onAttachContext({ kind: 'chat-rule', ruleId: rule.ruleId })}
+                            >
+                              <span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-success opacity-0 transition-opacity group-hover:opacity-100 group-focus:opacity-100 group-data-[highlighted]:opacity-100" />
+                              <BookOpen className="mt-0.5 size-4 shrink-0 text-muted-foreground/70 transition-colors group-hover:text-success group-focus:text-success group-data-[highlighted]:text-success" />
+                              <span className="min-w-0 flex-1">
+                                <span className="block max-w-full truncate t-list text-foreground">
+                                  @rules:{rule.label}
+                                </span>
+                                <span className="block max-w-full truncate t-meta-sm text-muted-foreground">
+                                  {rule.title}
+                                </span>
                               </span>
-                            </span>
-                          </DropdownMenuItem>
-                        ))
-                      ) : (
-                        <DropdownMenuItem disabled>
-                          {t.chat.noReports}
-                        </DropdownMenuItem>
-                      )}
-                      <DropdownMenuSeparator />
-                      <DropdownMenuLabel className="text-xs text-muted-foreground">
-                        {t.chat.rules}
-                      </DropdownMenuLabel>
-                      {ruleOptions.length > 0 ? (
-                        ruleOptions.map((rule) => (
-                          <DropdownMenuItem
-                            className="w-full min-w-0 items-start gap-2 py-2"
-                            key={rule.ruleId}
-                            onSelect={() => onAttachContext({ kind: 'chat-rule', ruleId: rule.ruleId })}
-                          >
-                            <BookOpen className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                            <span className="min-w-0 flex-1">
-                              <span className="block max-w-full truncate text-sm font-medium">
-                                @rules:{rule.label}
-                              </span>
-                              <span className="block max-w-full truncate text-xs text-muted-foreground">
-                                {rule.title}
-                              </span>
-                            </span>
-                          </DropdownMenuItem>
-                        ))
-                      ) : (
-                        <DropdownMenuItem disabled>
-                          {t.chat.noRules}
-                        </DropdownMenuItem>
-                      )}
-                      <DropdownMenuSeparator />
+                            </DropdownMenuItem>
+                          ))
+                        ) : (
+                          <div className="px-2.5 py-2 t-meta text-muted-foreground">
+                            {t.chat.noRules}
+                          </div>
+                        )}
+                      </div>
+                      <DropdownMenuSeparator className="mx-0 my-0" />
                       <DropdownMenuItem
-                        className="gap-2"
+                        className="group relative items-start gap-2.5 rounded-none px-2.5 py-1.5 hover:bg-accent/50 focus:bg-accent/80 data-[highlighted]:bg-accent/80"
                         onSelect={onOpenPromptLibrary}
                       >
-                        <Library className="size-4 text-muted-foreground" />
-                        {t.chat.manageRules}
+                        <span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-success opacity-0 transition-opacity group-hover:opacity-100 group-focus:opacity-100 group-data-[highlighted]:opacity-100" />
+                        <Library className="mt-0.5 size-4 shrink-0 text-muted-foreground/70 transition-colors group-hover:text-success group-focus:text-success group-data-[highlighted]:text-success" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate t-list text-foreground">{t.chat.manageRules}</span>
+                          <span className="block truncate t-meta-sm text-muted-foreground">
+                            {t.chat.manageRulesDescription}
+                          </span>
+                        </span>
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
@@ -967,27 +983,23 @@ export default function ChatWorkspace({
                         <SlidersHorizontal />
                       </Button>
                     </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start" className="w-64" side="top" sideOffset={8}>
-                      <DropdownMenuLabel>{t.composer.moreSettings}</DropdownMenuLabel>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuCheckboxItem
+                    <DropdownMenuContent align="start" className={chatComposerMenuContentClassName} side="top" sideOffset={8}>
+                      <ChatComposerMenuHeader count={1} title={t.composer.moreSettings} />
+                      <div className="py-1">
+                      <ChatComposerToggleItem
                         checked={streamingEnabled}
-                        className="gap-3 py-2 pl-2 pr-2 [&>span:first-child]:hidden"
+                        description={t.chat.streamingDescription}
                         disabled={isSending}
+                        icon={MessageSquareText}
+                        label={t.chat.streaming}
+                        offLabel={t.chat.streamingOff}
                         onCheckedChange={onStreamingEnabledChange}
-                        onSelect={(event) => event.preventDefault()}
-                      >
-                        <span className="grid min-w-0 flex-1 text-left leading-tight">
-                          <span className="truncate text-sm font-medium">{t.chat.streaming}</span>
-                          <span className="truncate text-xs text-muted-foreground">
-                            {streamingEnabled ? t.chat.streamingOn : t.chat.streamingOff}
-                          </span>
-                        </span>
-                        <ChatToggleVisual checked={streamingEnabled} />
-                      </DropdownMenuCheckboxItem>
+                        onLabel={t.chat.streamingOn}
+                      />
+                      </div>
                     </DropdownMenuContent>
                   </DropdownMenu>
-                  <ChatModelPicker
+                  <ModelTierPicker
                     defaultModel={defaultChatModel}
                     disabled={isSending}
                     onChange={onSelectedModelTierChange}
@@ -1105,7 +1117,7 @@ function ChatToggleVisual({ checked }: { checked: boolean }) {
       aria-hidden
       className={cn(
         'inline-flex h-5 w-9 shrink-0 items-center rounded-full border-2 border-transparent shadow-sm transition-colors',
-        checked ? 'bg-primary' : 'bg-input',
+        checked ? 'bg-brand' : 'bg-input',
       )}
     >
       <span
@@ -1118,160 +1130,83 @@ function ChatToggleVisual({ checked }: { checked: boolean }) {
   )
 }
 
-const chatModelTierOrder: ChatModelTier[] = ['high', 'mid', 'fast']
-
-function ChatModelPicker({
-  defaultModel,
-  disabled,
-  onChange,
-  options,
-  optionsStatus,
-  selectedTier,
-}: {
-  defaultModel: NodeModelResolution | null
-  disabled: boolean
-  onChange: (tier: ChatModelTier | null) => void
-  options: ChatModelOption[]
-  optionsStatus: 'available' | 'missing' | 'unresolved'
-  selectedTier: ChatModelTier | null
-}) {
-  const { t } = useLocale()
-  const selectedOption = selectedTier ? chatModelOptionForTier(options, selectedTier) : null
-  const activeModel = selectedOption ?? defaultModel ?? chatModelOptionForTier(options, 'mid') ?? null
-  const unavailableLabel = optionsStatus === 'unresolved'
-    ? t.chat.modelMetadataMissing
-    : t.chat.modelDiscoveryMissing
-  const activeLabel = selectedTier && optionsStatus !== 'available'
-    ? `${tierLabel(selectedTier, t)} · ${unavailableLabel}`
-    : `${modelNameLabel(activeModel, t.chat.modelUnknown)} · ${effortLabel(activeModel, t)}`
-  const pickerValue = selectedTier ?? 'default'
-
+function ChatComposerMenuHeader({ count, title }: { count: number; title: string }) {
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          aria-label={t.chat.modelPicker}
-          className={cn(
-            'h-7 min-w-0 max-w-[min(48vw,17rem)] shrink rounded-md px-1.5 text-xs font-semibold text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0',
-            'data-[state=open]:bg-accent data-[state=open]:text-foreground',
-          )}
-          disabled={disabled}
-          type="button"
-          variant="ghost"
-        >
-          <span className="min-w-0 truncate">{activeLabel}</span>
-          <ChevronDown className="size-3 shrink-0 opacity-60" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="start"
-        className="w-80 max-w-[calc(100vw-2rem)]"
-        side="top"
-        sideOffset={8}
-      >
-        <DropdownMenuLabel className="text-xs text-muted-foreground">
-          {t.chat.modelPicker}
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        <DropdownMenuRadioGroup
-          onValueChange={(value) => onChange(isChatModelTier(value) ? value : null)}
-          value={pickerValue}
-        >
-          <DropdownMenuRadioItem className="items-start py-2 pr-3" value="default">
-            <span className="grid min-w-0 flex-1 text-left leading-tight">
-              <span className="truncate text-sm font-medium">{t.chat.modelServerDefault}</span>
-              <span className="truncate text-xs text-muted-foreground">
-                {modelDetailLabel(defaultModel, t)}
-              </span>
-            </span>
-          </DropdownMenuRadioItem>
-          <DropdownMenuSeparator />
-          {optionsStatus === 'available' ? chatModelTierOrder.map((tier) => {
-            const option = chatModelOptionForTier(options, tier)
-            return (
-              <DropdownMenuRadioItem
-                className="items-start py-2 pr-3"
-                key={tier}
-                value={tier}
-              >
-                <span className="grid min-w-0 flex-1 text-left leading-tight">
-                  <span className="flex min-w-0 items-baseline gap-2">
-                    <span className="shrink-0 text-sm font-medium">
-                      {tierLabel(tier, t)}
-                    </span>
-                    <span className="min-w-0 truncate text-xs font-medium text-muted-foreground">
-                      {modelNameLabel(option, t.chat.modelUnknown)}
-                    </span>
-                  </span>
-                  <span className="truncate text-xs text-muted-foreground">
-                    {effortLabel(option, t)}
-                  </span>
-                </span>
-              </DropdownMenuRadioItem>
-            )
-          }) : (
-            <DropdownMenuItem disabled className="items-start py-2">
-              <span className="grid min-w-0 flex-1 text-left leading-tight">
-                <span className="truncate text-sm font-medium">{unavailableLabel}</span>
-                <span className="truncate text-xs text-muted-foreground">
-                  {t.chat.modelServerDefault}
-                </span>
-              </span>
-            </DropdownMenuItem>
-          )}
-        </DropdownMenuRadioGroup>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-1.5">
+      <span className="t-meta-sm font-medium text-muted-foreground">{title}</span>
+      <span className="ml-auto t-hint tabular-nums text-muted-foreground/50">{count}</span>
+    </div>
   )
 }
 
-function chatModelOptionForTier(
-  options: readonly ChatModelOption[],
-  tier: ChatModelTier,
-): ChatModelOption | null {
-  return options.find((option) => option.tier === tier) ?? null
-}
-
-function isChatModelTier(value: string): value is ChatModelTier {
-  return value === 'high' || value === 'mid' || value === 'fast'
-}
-
-function modelNameLabel(
-  option: Pick<NodeModelResolution, 'model'> | null | undefined,
-  fallback: string,
-) {
-  const model = option?.model?.trim()
-  if (!model) return fallback
-  return model.replace(/^.+\//, '')
-}
-
-function modelDetailLabel(
-  option: NodeModelResolution | null,
-  t: ReturnType<typeof useLocale>['t'],
-) {
-  return `${modelNameLabel(option, t.chat.modelUnknown)} · ${effortLabel(option, t)}`
-}
-
-function effortLabel(
-  option: Pick<NodeModelResolution, 'effort'> | null | undefined,
-  t: ReturnType<typeof useLocale>['t'],
-) {
-  const effort = option?.effort?.trim().toLowerCase()
-  if (!effort) return t.chat.modelEffortDefault
-  if (effort === 'none') return t.chat.modelThinkingOff
-  return `${t.chat.modelThinkingOn} ${shortEffort(effort)}`
-}
-
-function shortEffort(effort: string) {
-  if (effort === 'medium') return 'med'
-  if (effort === 'minimal') return 'min'
-  return effort
-}
-
-function tierLabel(tier: ChatModelTier, t: ReturnType<typeof useLocale>['t']) {
-  if (tier === 'high') return t.chat.modelTierHigh
-  if (tier === 'fast') return t.chat.modelTierFast
-  return t.chat.modelTierMid
+function ChatComposerToggleItem({
+  checked,
+  description,
+  disabled,
+  icon: Icon,
+  label,
+  offLabel,
+  onCheckedChange,
+  onLabel,
+}: {
+  checked: boolean
+  description: string
+  disabled?: boolean
+  icon: LucideIcon
+  label: string
+  offLabel: string
+  onCheckedChange: (checked: boolean) => void
+  onLabel: string
+}) {
+  return (
+    <DropdownMenuItem
+      className="group relative items-center gap-2.5 rounded-none px-2.5 py-1.5 hover:bg-accent/50 focus:bg-accent/80 data-[highlighted]:bg-accent/80"
+      disabled={disabled}
+      onSelect={(event) => {
+        event.preventDefault()
+        onCheckedChange(!checked)
+      }}
+    >
+      <span
+        className={cn(
+          'absolute inset-y-1 left-0 w-0.5 rounded-full opacity-0 transition-opacity group-hover:opacity-100 group-focus:opacity-100 group-data-[highlighted]:opacity-100',
+          checked ? 'bg-success' : 'bg-muted-foreground/50',
+        )}
+      />
+      <Icon
+        className={cn(
+          'icon-md shrink-0 transition-colors',
+          checked
+            ? 'text-success'
+            : 'text-muted-foreground/70 group-hover:text-foreground group-focus:text-foreground group-data-[highlighted]:text-foreground',
+        )}
+      />
+      <span className="min-w-0 flex-1 text-left">
+        <span className="block truncate t-list text-foreground">{label}</span>
+        <span className="block truncate t-meta-sm text-muted-foreground">{description}</span>
+      </span>
+      <span
+        className={cn(
+          'shrink-0 rounded-md px-1.5 py-0.5 t-hint font-medium',
+          checked ? 'bg-success-subtle text-success' : 'bg-surface text-muted-foreground',
+        )}
+      >
+        {checked ? onLabel : offLabel}
+      </span>
+      <button
+        aria-label={`${label}: ${checked ? onLabel : offLabel}`}
+        className="shrink-0 disabled:cursor-not-allowed disabled:opacity-40"
+        disabled={disabled}
+        onClick={(event) => {
+          event.stopPropagation()
+          onCheckedChange(!checked)
+        }}
+        type="button"
+      >
+        <ChatToggleVisual checked={checked} />
+      </button>
+    </DropdownMenuItem>
+  )
 }
 
 function ChatMessageModelChip({
@@ -1281,7 +1216,7 @@ function ChatMessageModelChip({
 }) {
   const { t } = useLocale()
   if (!modelResolution?.model) return null
-  const label = `${modelNameLabel(modelResolution, t.chat.modelUnknown)} · ${effortLabelFromToken(modelResolution.effort, t)}`
+  const label = `${modelNameLabel(modelResolution, t.chat.modelUnknown)} · ${modelEffortLabelFromToken(modelResolution.effort, t.chat)}`
   return (
     <span
       className="max-w-[min(42vw,16rem)] truncate rounded-md bg-muted/60 px-1.5 py-0.5 t-hint font-semibold text-muted-foreground"
@@ -1290,16 +1225,6 @@ function ChatMessageModelChip({
       {label}
     </span>
   )
-}
-
-function effortLabelFromToken(
-  effortToken: string | undefined,
-  t: ReturnType<typeof useLocale>['t'],
-) {
-  const effort = effortToken?.trim().toLowerCase()
-  if (!effort) return t.chat.modelEffortDefault
-  if (effort === 'none') return t.chat.modelThinkingOff
-  return `${t.chat.modelThinkingOn} ${shortEffort(effort)}`
 }
 
 /**
@@ -1325,19 +1250,15 @@ function EmptyChatState({
   subtitle: string
   title: string
 }) {
+  const { t } = useLocale()
+
   return (
-    <div className="flex flex-1 items-center justify-center p-8 text-center">
-      <div className="mx-auto flex w-full max-w-md flex-col items-center">
-        <div className="flex size-14 items-center justify-center rounded-2xl border border-brand/15 bg-brand-subtle shadow-[0_12px_32px_var(--shadow-soft)]">
-          <BrandMark className="size-8" />
-        </div>
-        <h2 className="mt-5 t-display tracking-tight text-foreground">
-          {title}
-        </h2>
-        <p className="mt-2 max-w-sm t-body text-muted-foreground">
-          {renderMentionHint(subtitle)}
-        </p>
-      </div>
+    <div className="flex flex-1 items-center justify-center px-6 py-8 text-center">
+      <WelcomeState
+        kicker={t.chat.title}
+        subtitle={renderMentionHint(subtitle)}
+        title={title}
+      />
     </div>
   )
 }

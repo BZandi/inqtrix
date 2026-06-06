@@ -1,4 +1,5 @@
 import {
+  Check,
   FileText,
   Globe2,
   ListChecks,
@@ -15,6 +16,8 @@ import {
   forwardRef,
   useLayoutEffect,
   useRef,
+  useState,
+  type ReactNode,
   type SetStateAction,
   type FormEvent,
   type KeyboardEvent,
@@ -24,22 +27,11 @@ import { resizeTextareaToRows } from '@/features/composer/textareaAutosize'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
-  DropdownMenuCheckboxItem,
   DropdownMenuContent,
-  DropdownMenuLabel,
+  DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectSeparator,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -78,6 +70,37 @@ export const defaultComposerFormState: ComposerFormState = {
   webSearch: true,
 }
 
+type ComposerMenuKey =
+  | 'confidence'
+  | 'maxRounds'
+  | 'more'
+  | 'queries'
+  | 'report'
+  | 'summary'
+
+type ComposerOption = {
+  description: string
+  label: string
+  value: string
+}
+
+const composerMenuContentClassName = 'w-max min-w-48 max-w-72 overflow-hidden rounded-xl p-0 shadow-lg'
+
+function switchComposerMenu(
+  currentMenu: ComposerMenuKey | null,
+  nextMenu: ComposerMenuKey,
+  onOpenMenuChange: (menu: ComposerMenuKey | null) => void,
+) {
+  if (currentMenu === nextMenu) return
+
+  if (currentMenu === null) {
+    onOpenMenuChange(nextMenu)
+    return
+  }
+
+  window.setTimeout(() => onOpenMenuChange(nextMenu), 0)
+}
+
 export function buildComposerRequest(
   form: ComposerFormState,
   question: string,
@@ -103,7 +126,76 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
 ) {
   const { t } = useLocale()
   const questionTextareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const [openMenu, setOpenMenu] = useState<ComposerMenuKey | null>(null)
   const canSubmit = form.question.trim().length > 0
+  const reportProfileOptions: ComposerOption[] = [
+    {
+      description: t.composer.optionCompactDescription,
+      label: t.composer.compact,
+      value: 'compact',
+    },
+    {
+      description: t.composer.optionDeepDescription,
+      label: t.composer.deep,
+      value: 'deep',
+    },
+  ]
+  const confidenceOptions: ComposerOption[] = [
+    {
+      description: t.composer.optionConfidence7Description,
+      label: '7 / 10',
+      value: '7',
+    },
+    {
+      description: t.composer.optionConfidence8Description,
+      label: '8 / 10',
+      value: '8',
+    },
+    {
+      description: t.composer.optionConfidence9Description,
+      label: '9 / 10',
+      value: '9',
+    },
+  ]
+  const firstQueryOptions: ComposerOption[] = [
+    {
+      description: t.composer.optionQueries4Description,
+      label: '4',
+      value: '4',
+    },
+    {
+      description: t.composer.optionQueries6Description,
+      label: '6',
+      value: '6',
+    },
+    {
+      description: t.composer.optionQueries8Description,
+      label: '8',
+      value: '8',
+    },
+  ]
+  const maxRoundOptions: ComposerOption[] = [
+    {
+      description: t.composer.optionRounds2Description,
+      label: '2',
+      value: '2',
+    },
+    {
+      description: t.composer.optionRounds3Description,
+      label: '3',
+      value: '3',
+    },
+    {
+      description: t.composer.optionRounds4Description,
+      label: '4',
+      value: '4',
+    },
+    {
+      description: t.composer.optionRounds5Description,
+      label: '5',
+      value: '5',
+    },
+  ]
 
   useLayoutEffect(() => {
     resizeTextareaToRows(questionTextareaRef.current, 4)
@@ -172,130 +264,163 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
           />
           <div className="mt-1.5 flex items-center justify-between gap-2 border-t border-border/70 pt-1.5">
             <div className="flex min-w-0 items-center gap-1 overflow-hidden">
-          <ComposerIconButton
-            icon={PanelBottomClose}
-            label={t.composer.hide}
-            onClick={onHide}
-          />
-          <Separator className="mx-0.5 h-5" orientation="vertical" />
-          <ComposerSelect
-            icon={FileText}
-            label={t.composer.reportProfile}
-            onValueChange={(value) => setForm((currentForm) => ({
-              ...currentForm,
-              reportProfile: value as ComposerFormState['reportProfile'],
-            }))}
-            options={[
-              { label: t.composer.compact, value: 'compact' },
-              { label: t.composer.deep, value: 'deep' },
-            ]}
-            value={form.reportProfile}
-          />
-          <ComposerSelect
-            icon={Shield}
-            label={t.composer.confidenceTarget}
-            onValueChange={(value) => setForm((currentForm) => ({
-              ...currentForm,
-              confidenceStop: Number(value) as ComposerFormState['confidenceStop'],
-            }))}
-            options={[
-              { label: '7 / 10', value: '7' },
-              { label: '8 / 10', value: '8' },
-              { label: '9 / 10', value: '9' },
-            ]}
-            value={String(form.confidenceStop)}
-          />
-          <ComposerSelect
-            icon={Search}
-            label={t.composer.firstQueries}
-            onValueChange={(value) => setForm((currentForm) => ({
-              ...currentForm,
-              firstRoundQueries: Number(value) as ComposerFormState['firstRoundQueries'],
-            }))}
-            options={[
-              { label: '4', value: '4' },
-              { label: '6', value: '6' },
-              { label: '8', value: '8' },
-            ]}
-            value={String(form.firstRoundQueries)}
-          />
-          <ComposerSelect
-            icon={Repeat2}
-            label={t.composer.maxRounds}
-            onValueChange={(value) => setForm((currentForm) => {
-              const maxRounds = Number(value) as ComposerFormState['maxRounds']
-              return {
-                ...currentForm,
-                maxRounds,
-                minRounds: Math.min(currentForm.minRounds, maxRounds) as ComposerFormState['minRounds'],
-              }
-            })}
-            options={[
-              { label: '2', value: '2' },
-              { label: '3', value: '3' },
-              { label: '4', value: '4' },
-              { label: '5', value: '5' },
-            ]}
-            value={String(form.maxRounds)}
-          />
+              <ComposerIconButton
+                icon={PanelBottomClose}
+                label={t.composer.hide}
+                onClick={onHide}
+              />
+              <Separator className="mx-0.5 h-5" orientation="vertical" />
+              <ComposerParameterMenu
+                icon={FileText}
+                label={t.composer.reportProfile}
+                menuKey="report"
+                onOpenMenuChange={setOpenMenu}
+                onValueChange={(value) => setForm((currentForm) => ({
+                  ...currentForm,
+                  reportProfile: value as ComposerFormState['reportProfile'],
+                }))}
+                openMenu={openMenu}
+                options={reportProfileOptions}
+                value={form.reportProfile}
+              />
+              <ComposerParameterMenu
+                icon={Shield}
+                label={t.composer.confidenceTarget}
+                menuKey="confidence"
+                onOpenMenuChange={setOpenMenu}
+                onValueChange={(value) => setForm((currentForm) => ({
+                  ...currentForm,
+                  confidenceStop: Number(value) as ComposerFormState['confidenceStop'],
+                }))}
+                openMenu={openMenu}
+                options={confidenceOptions}
+                value={String(form.confidenceStop)}
+              />
+              <ComposerParameterMenu
+                icon={Search}
+                label={t.composer.firstQueries}
+                menuKey="queries"
+                onOpenMenuChange={setOpenMenu}
+                onValueChange={(value) => setForm((currentForm) => ({
+                  ...currentForm,
+                  firstRoundQueries: Number(value) as ComposerFormState['firstRoundQueries'],
+                }))}
+                openMenu={openMenu}
+                options={firstQueryOptions}
+                value={String(form.firstRoundQueries)}
+              />
+              <ComposerParameterMenu
+                icon={Repeat2}
+                label={t.composer.maxRounds}
+                menuKey="maxRounds"
+                onOpenMenuChange={setOpenMenu}
+                onValueChange={(value) => setForm((currentForm) => {
+                  const maxRounds = Number(value) as ComposerFormState['maxRounds']
+                  return {
+                    ...currentForm,
+                    maxRounds,
+                    minRounds: Math.min(currentForm.minRounds, maxRounds) as ComposerFormState['minRounds'],
+                  }
+                })}
+                openMenu={openMenu}
+                options={maxRoundOptions}
+                value={String(form.maxRounds)}
+              />
             </div>
             <div className="flex shrink-0 items-center gap-1">
-            <ComposerStatusMenu
-              confidenceStop={form.confidenceStop}
-              firstRoundQueries={form.firstRoundQueries}
-              maxRounds={form.maxRounds}
-              minRounds={form.minRounds}
-              reportProfile={form.reportProfile}
-              selectedStack={selectedStack}
-              webSearch={form.webSearch}
-            />
-            <DropdownMenu>
-              <Tooltip>
-                <DropdownMenuTrigger asChild>
-                  <TooltipTrigger asChild>
-                    <Button
-                      aria-label={t.composer.moreSettings}
-                      className={composerIconButtonClassName}
-                      type="button"
-                      variant="ghost"
-                    >
-                      <SlidersHorizontal className="size-3.5" />
-                    </Button>
-                  </TooltipTrigger>
-                </DropdownMenuTrigger>
-                <TooltipContent>{t.composer.moreSettings}</TooltipContent>
-              </Tooltip>
-              <DropdownMenuContent align="end" className="w-64">
-                <DropdownMenuLabel>{t.composer.moreSettings}</DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                <ComposerMenuToggle
-                  checked={form.webSearch}
-                  icon={Globe2}
-                  label={t.composer.webSearch}
-                  onCheckedChange={(checked) => setForm((currentForm) => ({
-                    ...currentForm,
-                    webSearch: checked,
-                  }))}
-                />
-                <DropdownMenuSeparator />
-                <DropdownMenuLabel className="text-xs text-muted-foreground">
-                  {t.composer.minRounds}
-                </DropdownMenuLabel>
-                {[1, 2].map((rounds) => (
-                  <DropdownMenuCheckboxItem
-                    checked={form.minRounds === rounds}
-                    disabled={rounds > form.maxRounds}
-                    key={rounds}
-                    onCheckedChange={() => setForm((currentForm) => ({
-                      ...currentForm,
-                      minRounds: rounds as ComposerFormState['minRounds'],
-                    }))}
-                  >
-                    {rounds}
-                  </DropdownMenuCheckboxItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
+              <ComposerStatusMenu
+                confidenceStop={form.confidenceStop}
+                firstRoundQueries={form.firstRoundQueries}
+                maxRounds={form.maxRounds}
+                minRounds={form.minRounds}
+                onOpenMenuChange={setOpenMenu}
+                openMenu={openMenu}
+                reportProfile={form.reportProfile}
+                selectedStack={selectedStack}
+                webSearch={form.webSearch}
+              />
+              <DropdownMenu
+                modal={false}
+                onOpenChange={(isOpen) => setOpenMenu(isOpen ? 'more' : null)}
+                open={openMenu === 'more'}
+              >
+                <Tooltip>
+                  <DropdownMenuTrigger asChild>
+                    <TooltipTrigger asChild>
+                      <Button
+                        aria-label={t.composer.moreSettings}
+                        className={composerIconButtonClassName}
+                        onPointerDown={(event) => {
+                          if (openMenu === 'more') return
+
+                          event.preventDefault()
+                          event.currentTarget.focus()
+                          switchComposerMenu(openMenu, 'more', setOpenMenu)
+                        }}
+                        type="button"
+                        variant="ghost"
+                      >
+                        <SlidersHorizontal className="size-3.5" />
+                      </Button>
+                    </TooltipTrigger>
+                  </DropdownMenuTrigger>
+                  <TooltipContent>{t.composer.moreSettings}</TooltipContent>
+                </Tooltip>
+                <DropdownMenuContent align="end" className={composerMenuContentClassName} side="top" sideOffset={8}>
+                  <ComposerMenuHeader count={2} title={t.composer.moreSettings} />
+                  <div className="py-1">
+                    <ComposerMenuToggle
+                      checked={form.webSearch}
+                      description={t.composer.webSearchDescription}
+                      icon={Globe2}
+                      label={t.composer.webSearch}
+                      onCheckedChange={(checked) => setForm((currentForm) => ({
+                        ...currentForm,
+                        webSearch: checked,
+                      }))}
+                    />
+                    <DropdownMenuSeparator className="mx-0 my-1" />
+                    <div className="px-2.5 pb-1 pt-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <Repeat2 className="icon-sm shrink-0 text-muted-foreground/70" />
+                        <span className="t-list text-foreground">{t.composer.minRounds}</span>
+                        <span className="ml-auto rounded-md bg-brand-subtle px-1.5 py-0.5 t-hint font-medium tabular-nums text-brand">
+                          {form.minRounds}
+                        </span>
+                      </div>
+                      <p className="mt-0.5 t-meta-sm text-muted-foreground">{t.composer.minRoundsDescription}</p>
+                      <div className="mt-2 grid h-7 grid-cols-2 rounded-md bg-surface p-0.5">
+                        {[1, 2].map((rounds) => {
+                          const disabled = rounds > form.maxRounds
+                          const active = form.minRounds === rounds
+                          return (
+                            <button
+                              aria-pressed={active}
+                              className={cn(
+                                'inline-flex items-center justify-center gap-1 rounded px-2 t-meta-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40',
+                                active && 'bg-brand-subtle text-brand shadow-[0_1px_2px_var(--shadow-hairline)] ring-1 ring-brand/20',
+                                !active && !disabled && 'text-muted-foreground hover:bg-background hover:text-foreground',
+                              )}
+                              disabled={disabled}
+                              key={rounds}
+                              onClick={() => setForm((currentForm) => ({
+                                ...currentForm,
+                                minRounds: rounds as ComposerFormState['minRounds'],
+                              }))}
+                              type="button"
+                            >
+                              <span className="tabular-nums">{rounds}</span>
+                              <span className="flex icon-xs items-center justify-center">
+                                {active ? <Check className="icon-xs" /> : null}
+                              </span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <Button
                 aria-label={t.composer.send}
                 className={cn(
@@ -324,6 +449,8 @@ function ComposerStatusMenu({
   firstRoundQueries,
   maxRounds,
   minRounds,
+  onOpenMenuChange,
+  openMenu,
   reportProfile,
   selectedStack,
   webSearch,
@@ -332,6 +459,8 @@ function ComposerStatusMenu({
   firstRoundQueries: ComposerFormState['firstRoundQueries']
   maxRounds: ComposerFormState['maxRounds']
   minRounds: ComposerFormState['minRounds']
+  onOpenMenuChange: (menu: ComposerMenuKey | null) => void
+  openMenu: ComposerMenuKey | null
   reportProfile: ComposerFormState['reportProfile']
   selectedStack: string
   webSearch: boolean
@@ -340,13 +469,24 @@ function ComposerStatusMenu({
   const reportProfileLabel = reportProfile === 'compact' ? t.composer.compact : t.composer.deep
 
   return (
-    <DropdownMenu>
+    <DropdownMenu
+      modal={false}
+      onOpenChange={(isOpen) => onOpenMenuChange(isOpen ? 'summary' : null)}
+      open={openMenu === 'summary'}
+    >
       <Tooltip>
         <DropdownMenuTrigger asChild>
           <TooltipTrigger asChild>
             <Button
               aria-label={t.composer.settingsSummary}
               className={composerIconButtonClassName}
+              onPointerDown={(event) => {
+                if (openMenu === 'summary') return
+
+                event.preventDefault()
+                event.currentTarget.focus()
+                switchComposerMenu(openMenu, 'summary', onOpenMenuChange)
+              }}
               type="button"
               variant="ghost"
             >
@@ -356,42 +496,78 @@ function ComposerStatusMenu({
         </DropdownMenuTrigger>
         <TooltipContent>{t.composer.settingsSummary}</TooltipContent>
       </Tooltip>
-      <DropdownMenuContent align="end" className="w-72">
-        <DropdownMenuLabel>{t.composer.settingsSummary}</DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        <div className="grid gap-1 p-1">
-          <StatusRow label={t.common.stack} value={selectedStack} />
-          <StatusRow label={t.composer.reportProfile} value={reportProfileLabel} />
-          <StatusRow label={t.composer.confidenceTarget} value={`${confidenceStop} / 10`} />
-          <StatusRow label={t.composer.firstQueries} value={String(firstRoundQueries)} />
-          <StatusRow label={t.composer.maxRounds} value={String(maxRounds)} />
-          <StatusRow label={t.composer.minRounds} value={String(minRounds)} />
-          <StatusRow
-            label={t.composer.webSearch}
-            value={webSearch ? t.composer.enabled : t.composer.disabled}
-          />
+      <DropdownMenuContent align="end" className={composerMenuContentClassName} side="top" sideOffset={8}>
+        <ComposerMenuHeader count={7} title={t.composer.settingsSummary} />
+        <div className="py-1">
+          <SummaryGroup label={t.composer.summaryStrategy}>
+            <StatusRow label={t.common.stack} value={selectedStack} />
+            <StatusRow
+              label={t.composer.webSearch}
+              tone={webSearch ? 'success' : 'muted'}
+              value={webSearch ? t.composer.enabled : t.composer.disabled}
+            />
+          </SummaryGroup>
+          <DropdownMenuSeparator className="mx-0 my-1" />
+          <SummaryGroup label={t.composer.summaryPlanning}>
+            <StatusRow label={t.composer.firstQueries} value={String(firstRoundQueries)} />
+            <StatusRow label={t.composer.minRounds} value={String(minRounds)} />
+            <StatusRow label={t.composer.maxRounds} value={String(maxRounds)} />
+          </SummaryGroup>
+          <DropdownMenuSeparator className="mx-0 my-1" />
+          <SummaryGroup label={t.composer.summaryStopAndOutput}>
+            <StatusRow label={t.composer.confidenceTarget} value={`${confidenceStop} / 10`} />
+            <StatusRow label={t.composer.reportProfile} value={reportProfileLabel} />
+          </SummaryGroup>
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
   )
 }
 
-function StatusRow({ label, value }: { label: string; value: string }) {
+function SummaryGroup({ children, label }: { children: ReactNode; label: string }) {
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md px-2 py-1.5">
-      <span className="truncate text-xs font-semibold text-muted-foreground">{label}</span>
-      <span className="max-w-40 truncate text-right text-xs font-semibold text-foreground">{value}</span>
+    <div>
+      <div className="px-2.5 pb-0.5 pt-1.5 t-caption text-muted-foreground/60">{label}</div>
+      <div className="grid gap-0.5">{children}</div>
+    </div>
+  )
+}
+
+function StatusRow({
+  label,
+  tone = 'default',
+  value,
+}: {
+  label: string
+  tone?: 'default' | 'muted' | 'success'
+  value: string
+}) {
+  return (
+    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-2.5 py-1">
+      <span className="truncate t-meta-sm text-muted-foreground">{label}</span>
+      <span
+        className={cn(
+          'max-w-36 truncate rounded-md px-1.5 py-0.5 text-right t-meta-sm font-medium',
+          tone === 'success' && 'bg-success-subtle text-success',
+          tone === 'muted' && 'bg-surface text-muted-foreground',
+          tone === 'default' && 'bg-background text-foreground',
+        )}
+      >
+        {value}
+      </span>
     </div>
   )
 }
 
 function ComposerMenuToggle({
   checked,
+  description,
   icon: Icon,
   label,
   onCheckedChange,
 }: {
   checked: boolean
+  description: string
   icon: LucideIcon
   label: string
   onCheckedChange: (checked: boolean) => void
@@ -399,35 +575,63 @@ function ComposerMenuToggle({
   const { t } = useLocale()
 
   return (
-    <DropdownMenuCheckboxItem
-      checked={checked}
-      className="gap-3 py-2 pl-2 pr-2 [&>span:first-child]:hidden"
-      onCheckedChange={onCheckedChange}
-      onSelect={(event) => event.preventDefault()}
+    <DropdownMenuItem
+      className="group relative items-center gap-2.5 rounded-none px-2.5 py-1.5 hover:bg-accent/50 focus:bg-accent/80 data-[highlighted]:bg-accent/80"
+      onSelect={(event) => {
+        event.preventDefault()
+        onCheckedChange(!checked)
+      }}
     >
-      <Icon className="size-4 shrink-0 text-muted-foreground" />
-      <span className="grid min-w-0 flex-1 text-left leading-tight">
-        <span className="truncate text-sm font-medium">{label}</span>
-        <span className="truncate text-xs text-muted-foreground">
-          {checked ? t.composer.enabled : t.composer.disabled}
-        </span>
+      <span
+        className={cn(
+          'absolute inset-y-1 left-0 w-0.5 rounded-full opacity-0 transition-opacity group-hover:opacity-100 group-focus:opacity-100 group-data-[highlighted]:opacity-100',
+          checked ? 'bg-success' : 'bg-muted-foreground/50',
+        )}
+      />
+      <Icon
+        className={cn(
+          'icon-md shrink-0 transition-colors',
+          checked
+            ? 'text-success'
+            : 'text-muted-foreground/70 group-hover:text-foreground group-focus:text-foreground group-data-[highlighted]:text-foreground',
+        )}
+      />
+      <span className="min-w-0 flex-1 text-left">
+        <span className="block truncate t-list text-foreground">{label}</span>
+        <span className="block truncate t-meta-sm text-muted-foreground">{description}</span>
       </span>
-      <ToggleVisual checked={checked} />
-    </DropdownMenuCheckboxItem>
+      <button
+        aria-label={`${label}: ${checked ? t.composer.enabled : t.composer.disabled}`}
+        className="shrink-0"
+        onClick={(event) => {
+          event.stopPropagation()
+          onCheckedChange(!checked)
+        }}
+        type="button"
+      >
+        <ToggleVisual checked={checked} />
+      </button>
+    </DropdownMenuItem>
   )
 }
 
-function ComposerSelect({
+function ComposerParameterMenu({
   icon: Icon,
   label,
+  menuKey,
+  onOpenMenuChange,
   onValueChange,
+  openMenu,
   options,
   value,
 }: {
   icon: LucideIcon
   label: string
+  menuKey: ComposerMenuKey
+  onOpenMenuChange: (menu: ComposerMenuKey | null) => void
   onValueChange: (value: string) => void
-  options: Array<{ label: string; value: string }>
+  openMenu: ComposerMenuKey | null
+  options: ComposerOption[]
   value: string
 }) {
   const selectedOption = options.find((option) => option.value === value)
@@ -435,35 +639,113 @@ function ComposerSelect({
   const triggerLabel = `${label}: ${valueLabel}`
 
   return (
-    <Select onValueChange={onValueChange} value={value}>
+    <DropdownMenu
+      modal={false}
+      onOpenChange={(isOpen) => onOpenMenuChange(isOpen ? menuKey : null)}
+      open={openMenu === menuKey}
+    >
       <Tooltip>
         <TooltipTrigger asChild>
-          <SelectTrigger
-            aria-label={triggerLabel}
-            className={cn(composerIconButtonClassName, 'w-10 gap-0.5 px-1')}
-          >
-            <Icon className="size-3.5 shrink-0" />
-            <span className="sr-only">
-              <SelectValue />
-            </span>
-          </SelectTrigger>
+          <DropdownMenuTrigger asChild>
+            <Button
+              aria-label={triggerLabel}
+              className={cn(composerIconButtonClassName, 'w-10 gap-0.5 px-1')}
+              onPointerDown={(event) => {
+                if (openMenu === menuKey) return
+
+                event.preventDefault()
+                event.currentTarget.focus()
+                switchComposerMenu(openMenu, menuKey, onOpenMenuChange)
+              }}
+              type="button"
+              variant="ghost"
+            >
+              <Icon className="size-3.5 shrink-0" />
+              <span className="sr-only">{valueLabel}</span>
+            </Button>
+          </DropdownMenuTrigger>
         </TooltipTrigger>
         <TooltipContent>{triggerLabel}</TooltipContent>
       </Tooltip>
-      <SelectContent>
-        <SelectGroup>
-          <SelectLabel className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">
-            {label}
-          </SelectLabel>
-          <SelectSeparator />
+      <DropdownMenuContent align="start" className={composerMenuContentClassName} side="top" sideOffset={8}>
+        <ComposerMenuHeader count={options.length} title={label} value={valueLabel} />
+        <div className="py-1">
           {options.map((option) => (
-            <SelectItem key={option.value} value={option.value}>
-              {option.label}
-            </SelectItem>
+            <ComposerOptionRow
+              active={option.value === value}
+              description={option.description}
+              icon={Icon}
+              key={option.value}
+              label={option.label}
+              onSelect={() => onValueChange(option.value)}
+            />
           ))}
-        </SelectGroup>
-      </SelectContent>
-    </Select>
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+function ComposerMenuHeader({
+  count,
+  title,
+  value,
+}: {
+  count: number
+  title: string
+  value?: string
+}) {
+  return (
+    <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-1.5">
+      <span className="t-meta-sm font-medium text-muted-foreground">{title}</span>
+      <span className="ml-auto t-hint tabular-nums text-muted-foreground/50">{value ?? count}</span>
+    </div>
+  )
+}
+
+function ComposerOptionRow({
+  active,
+  description,
+  icon: Icon,
+  label,
+  onSelect,
+}: {
+  active: boolean
+  description: string
+  icon: LucideIcon
+  label: string
+  onSelect: () => void
+}) {
+  return (
+    <DropdownMenuItem
+      className={cn(
+        'group relative items-center gap-2.5 rounded-none px-2.5 py-1.5 pr-1.5 hover:bg-accent/50 focus:bg-accent/80 data-[highlighted]:bg-accent/80',
+        active && 'bg-accent',
+      )}
+      onSelect={onSelect}
+    >
+      <span
+        className={cn(
+          'absolute inset-y-1 left-0 w-0.5 rounded-full bg-brand transition-opacity group-hover:opacity-100 group-focus:opacity-100 group-data-[highlighted]:opacity-100',
+          active ? 'opacity-100' : 'opacity-0',
+        )}
+      />
+      <Icon
+        className={cn(
+          'icon-md shrink-0 transition-colors',
+          active
+            ? 'text-brand'
+            : 'text-muted-foreground/70 group-hover:text-brand group-focus:text-brand group-data-[highlighted]:text-brand',
+        )}
+      />
+      <span className="min-w-0 flex-1 text-left">
+        <span className="block truncate t-list text-foreground">{label}</span>
+        <span className="block truncate t-meta-sm text-muted-foreground">{description}</span>
+      </span>
+      <span className="flex size-4 shrink-0 items-center justify-center">
+        {active ? <Check className="size-3.5 text-brand" /> : null}
+      </span>
+    </DropdownMenuItem>
   )
 }
 

@@ -62,6 +62,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Chip } from '@/components/ui/chip'
 import { PanelRail } from '@/components/ui/panel-rail'
+import { WelcomeState } from '@/components/ui/welcome-state'
 import { ComposerIconButton } from '@/features/composer/ComposerIconButton'
 import {
   DropdownMenu,
@@ -100,6 +101,7 @@ import type {
   ChatModelTier,
   NodeModelResolution,
 } from '@/features/researchRuns/types'
+import { ModelTierPicker } from '@/features/researchRuns/ModelTierPicker'
 import type {
   ChatContextReferenceRecord,
   EditorCommentKind,
@@ -231,8 +233,9 @@ const editorCopy = {
     deleteFolder: 'Ordner löschen',
     documents: 'Dokumente',
     dropIntoFolder: 'In Ordner verschieben',
-    emptyBody: 'Legen Sie eine neue Markdown-Datei an oder importieren Sie einen abgeschlossenen Research Report.',
-    emptyTitle: 'Noch kein Dokument geöffnet',
+    emptyBody: 'Neue Markdown-Datei anlegen oder abgeschlossenen Research Report importieren.',
+    emptyKicker: 'Editor',
+    emptyTitle: 'Kein Dokument geöffnet',
     focus: 'Fokus',
     hideAssistant: 'Assistant ausblenden',
     hideComments: 'Kommentare ausblenden',
@@ -340,7 +343,8 @@ const editorCopy = {
     deleteFolder: 'Delete folder',
     documents: 'Documents',
     dropIntoFolder: 'Move into folder',
-    emptyBody: 'Create a Markdown file or import a completed research report.',
+    emptyBody: 'Create a Markdown file or import a research report.',
+    emptyKicker: 'Editor',
     emptyTitle: 'No document open',
     focus: 'Focus',
     hideAssistant: 'Hide assistant',
@@ -1246,20 +1250,40 @@ function ImportReportMenu({
           {variant === 'button' ? <span className="min-w-0 truncate">{copy.importReport}</span> : null}
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-72">
-        <DropdownMenuLabel>{copy.importReport}</DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        {reportOptions.length === 0 ? (
-          <DropdownMenuItem disabled>{copy.noReports}</DropdownMenuItem>
-        ) : reportOptions.map((report) => (
-          <DropdownMenuItem
-            key={report.runId}
-            onClick={() => dispatch({ runId: report.runId, type: 'importResearchReportToEditor' })}
-          >
-            <FileText className="size-4" />
-            <span className="min-w-0 truncate">{report.title}</span>
-          </DropdownMenuItem>
-        ))}
+      <DropdownMenuContent
+        align="start"
+        className="w-64 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl p-0 shadow-lg"
+      >
+        <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-1.5">
+          <span className="t-meta-sm font-medium text-muted-foreground">{copy.importReport}</span>
+          <span className="ml-auto t-hint tabular-nums text-muted-foreground/50">
+            {reportOptions.length}
+          </span>
+        </div>
+        <div className="py-1">
+          {reportOptions.length === 0 ? (
+            <div className="px-2.5 py-2 t-meta text-muted-foreground">
+              {copy.noReports}
+            </div>
+          ) : reportOptions.map((report) => (
+            <DropdownMenuItem
+              className="group relative w-full min-w-0 items-start gap-2.5 rounded-none px-2.5 py-1.5 hover:bg-accent/50 focus:bg-accent/80 data-[highlighted]:bg-accent/80"
+              key={report.runId}
+              onSelect={() => dispatch({ runId: report.runId, type: 'importResearchReportToEditor' })}
+            >
+              <span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-brand opacity-0 transition-opacity group-hover:opacity-100 group-focus:opacity-100 group-data-[highlighted]:opacity-100" />
+              <FileText className="mt-0.5 icon-md shrink-0 text-muted-foreground/70 transition-colors group-hover:text-brand group-focus:text-brand group-data-[highlighted]:text-brand" />
+              <span className="min-w-0 flex-1">
+                <span className="block max-w-full truncate t-list text-foreground">
+                  @research:{report.label}
+                </span>
+                <span className="block max-w-full truncate t-meta-sm text-muted-foreground">
+                  {report.title}
+                </span>
+              </span>
+            </DropdownMenuItem>
+          ))}
+        </div>
       </DropdownMenuContent>
     </DropdownMenu>
   )
@@ -2453,7 +2477,7 @@ function EditorAssistantComposer({
                 label={t.chat.attachFiles}
                 onClick={() => fileInputRef.current?.click()}
               />
-              <EditorModelPicker
+              <ModelTierPicker
                 defaultModel={defaultChatModel}
                 disabled={false}
                 onChange={(tier) => dispatch({ tier, type: 'setSelectedChatModelTier' })}
@@ -2488,146 +2512,6 @@ function EditorAssistantComposer({
       </div>
     </div>
   )
-}
-
-const editorModelTierOrder: ChatModelTier[] = ['high', 'mid', 'fast']
-
-function EditorModelPicker({
-  defaultModel,
-  disabled,
-  onChange,
-  options,
-  optionsStatus,
-  selectedTier,
-}: {
-  defaultModel: NodeModelResolution | null
-  disabled: boolean
-  onChange: (tier: ChatModelTier | null) => void
-  options: ChatModelOption[]
-  optionsStatus: 'available' | 'missing' | 'unresolved'
-  selectedTier: ChatModelTier | null
-}) {
-  const { t } = useLocale()
-  const selectedOption = selectedTier ? editorModelOptionForTier(options, selectedTier) : null
-  const activeModel = selectedOption ?? defaultModel ?? editorModelOptionForTier(options, 'mid') ?? null
-  const unavailableLabel = optionsStatus === 'unresolved'
-    ? t.chat.modelMetadataMissing
-    : t.chat.modelDiscoveryMissing
-  const activeLabel = selectedTier && optionsStatus !== 'available'
-    ? `${editorTierLabel(selectedTier, t)} · ${unavailableLabel}`
-    : `${editorModelNameLabel(activeModel, t.chat.modelUnknown)} · ${editorEffortLabel(activeModel, t)}`
-  const pickerValue = selectedTier ?? 'default'
-
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          aria-label={t.chat.modelPicker}
-          className="h-7 min-w-0 max-w-[min(48vw,17rem)] shrink rounded-md px-1.5 text-xs font-semibold text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0 data-[state=open]:bg-accent data-[state=open]:text-foreground"
-          disabled={disabled}
-          type="button"
-          variant="ghost"
-        >
-          <span className="min-w-0 truncate">{activeLabel}</span>
-          <ChevronDown className="size-3 shrink-0 opacity-60" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-80 max-w-[calc(100vw-2rem)]" side="top" sideOffset={8}>
-        <DropdownMenuLabel className="text-xs text-muted-foreground">
-          {t.chat.modelPicker}
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        <DropdownMenuRadioGroup
-          onValueChange={(value) => onChange(isEditorModelTier(value) ? value : null)}
-          value={pickerValue}
-        >
-          <DropdownMenuRadioItem className="items-start py-2 pr-3" value="default">
-            <span className="grid min-w-0 flex-1 text-left leading-tight">
-              <span className="truncate text-sm font-medium">{t.chat.modelServerDefault}</span>
-              <span className="truncate text-xs text-muted-foreground">
-                {editorModelDetailLabel(defaultModel, t)}
-              </span>
-            </span>
-          </DropdownMenuRadioItem>
-          <DropdownMenuSeparator />
-          {optionsStatus === 'available' ? editorModelTierOrder.map((tier) => {
-            const option = editorModelOptionForTier(options, tier)
-            return (
-              <DropdownMenuRadioItem className="items-start py-2 pr-3" key={tier} value={tier}>
-                <span className="grid min-w-0 flex-1 text-left leading-tight">
-                  <span className="flex min-w-0 items-baseline gap-2">
-                    <span className="shrink-0 text-sm font-medium">{editorTierLabel(tier, t)}</span>
-                    <span className="min-w-0 truncate text-xs font-medium text-muted-foreground">
-                      {editorModelNameLabel(option, t.chat.modelUnknown)}
-                    </span>
-                  </span>
-                  <span className="truncate text-xs text-muted-foreground">
-                    {editorEffortLabel(option, t)}
-                  </span>
-                </span>
-              </DropdownMenuRadioItem>
-            )
-          }) : (
-            <DropdownMenuItem disabled className="items-start py-2">
-              <span className="grid min-w-0 flex-1 text-left leading-tight">
-                <span className="truncate text-sm font-medium">{unavailableLabel}</span>
-                <span className="truncate text-xs text-muted-foreground">{t.chat.modelServerDefault}</span>
-              </span>
-            </DropdownMenuItem>
-          )}
-        </DropdownMenuRadioGroup>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  )
-}
-
-function editorModelOptionForTier(
-  options: readonly ChatModelOption[],
-  tier: ChatModelTier,
-): ChatModelOption | null {
-  return options.find((option) => option.tier === tier) ?? null
-}
-
-function isEditorModelTier(value: string): value is ChatModelTier {
-  return value === 'high' || value === 'mid' || value === 'fast'
-}
-
-function editorModelNameLabel(
-  option: Pick<NodeModelResolution, 'model'> | null | undefined,
-  fallback: string,
-) {
-  const model = option?.model?.trim()
-  if (!model) return fallback
-  return model.replace(/^.+\//, '')
-}
-
-function editorModelDetailLabel(
-  option: NodeModelResolution | null,
-  t: ReturnType<typeof useLocale>['t'],
-) {
-  return `${editorModelNameLabel(option, t.chat.modelUnknown)} · ${editorEffortLabel(option, t)}`
-}
-
-function editorEffortLabel(
-  option: Pick<NodeModelResolution, 'effort'> | null | undefined,
-  t: ReturnType<typeof useLocale>['t'],
-) {
-  const effort = option?.effort?.trim().toLowerCase()
-  if (!effort) return t.chat.modelEffortDefault
-  if (effort === 'none') return t.chat.modelThinkingOff
-  return `${t.chat.modelThinkingOn} ${editorShortEffort(effort)}`
-}
-
-function editorShortEffort(effort: string) {
-  if (effort === 'medium') return 'med'
-  if (effort === 'minimal') return 'min'
-  return effort
-}
-
-function editorTierLabel(tier: ChatModelTier, t: ReturnType<typeof useLocale>['t']) {
-  if (tier === 'high') return t.chat.modelTierHigh
-  if (tier === 'fast') return t.chat.modelTierFast
-  return t.chat.modelTierMid
 }
 
 const COMMENT_KIND_ORDER: EditorCommentKind[] = ['collect', 'inline_edit', 'evidence_review']
@@ -3242,29 +3126,32 @@ function EditorEmptyState({
   reportOptions: CompletedReportOption[]
 }) {
   return (
-    <div className="grid min-h-0 flex-1 place-items-center bg-canvas p-8">
-      <div className="w-full max-w-2xl rounded-md border border-border bg-background p-8 text-center shadow-sm">
-        <FileText className="mx-auto mb-4 size-8 text-muted-foreground" />
-        <h2 className="t-display">{copy.emptyTitle}</h2>
-        <p className="mt-2 text-sm text-muted-foreground">{copy.emptyBody}</p>
-        <div className="mx-auto mt-5 grid w-full max-w-[31rem] grid-cols-1 gap-2 sm:grid-cols-2">
-          <Button
-            className="h-10 w-full justify-center gap-1.5 px-2"
-            onClick={() => dispatch({ type: 'createEditorDocument' })}
-            type="button"
-          >
-            <SquarePen className="size-4" />
-            {copy.createDocument}
-          </Button>
-          <ImportReportMenu
-            copy={copy}
-            dispatch={dispatch}
-            reportOptions={reportOptions}
-            triggerClassName="h-10 w-full gap-1.5 px-2"
-            variant="button"
-          />
-        </div>
-      </div>
+    <div className="flex min-h-0 flex-1 items-center justify-center bg-background px-6 py-8">
+      <WelcomeState
+        actions={(
+          <div className="flex flex-wrap justify-center gap-2">
+            <Button
+              className="h-8 gap-1.5 rounded-md bg-brand px-3 text-xs text-brand-foreground hover:bg-brand/90 hover:text-brand-foreground"
+              onClick={() => dispatch({ type: 'createEditorDocument' })}
+              type="button"
+              variant="default"
+            >
+              <SquarePen className="icon-sm" />
+              {copy.createDocument}
+            </Button>
+            <ImportReportMenu
+              copy={copy}
+              dispatch={dispatch}
+              reportOptions={reportOptions}
+              triggerClassName="h-8 gap-1.5 rounded-md px-3 text-xs"
+              variant="button"
+            />
+          </div>
+        )}
+        kicker={copy.emptyKicker}
+        subtitle={copy.emptyBody}
+        title={copy.emptyTitle}
+      />
     </div>
   )
 }

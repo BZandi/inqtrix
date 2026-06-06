@@ -273,3 +273,111 @@ describe('reorderChatContextInDraft', () => {
     expect(researchDeskReducer(seeded, { fromIndex: 0, toIndex: 5, type: 'reorderChatContextInDraft' })).toBe(seeded)
   })
 })
+
+describe('vector index reducer actions', () => {
+  function withAssets(...labels: string[]) {
+    return researchDeskReducer(createEmptyProjectState(), {
+      assets: labels.map((label) => makeAsset(label, label, { pageCount: 10 })),
+      type: 'ingestFileAssets',
+    })
+  }
+
+  it('creates an index with members as stale and an empty index as ready', () => {
+    const seeded = withAssets('a', 'b')
+    const withIndex = researchDeskReducer(seeded, { fileIds: ['a', 'b'], title: 'EU Recht', type: 'createVectorIndex' })
+    const index = withIndex.vectorIndexes[withIndex.vectorIndexOrder[0]]
+    expect(index.title).toBe('EU Recht')
+    expect(index.handle).toBe('eu-recht')
+    expect(index.dims).toBe(3072)
+    expect(index.status).toBe('stale')
+    expect(index.members.map((member) => member.fileId)).toEqual(['a', 'b'])
+    expect(index.members.every((member) => member.state === 'pending')).toBe(true)
+
+    const empty = researchDeskReducer(seeded, { fileIds: [], title: 'Empty', type: 'createVectorIndex' })
+    expect(empty.vectorIndexes[empty.vectorIndexOrder[0]].status).toBe('ready')
+  })
+
+  it('assigns unique handles for duplicate titles', () => {
+    let state = withAssets('a')
+    state = researchDeskReducer(state, { fileIds: [], title: 'EU', type: 'createVectorIndex' })
+    state = researchDeskReducer(state, { fileIds: [], title: 'EU', type: 'createVectorIndex' })
+    const handles = state.vectorIndexOrder.map((id) => state.vectorIndexes[id].handle).sort()
+    expect(handles).toEqual(['eu', 'eu-2'])
+  })
+
+  it('re-slugs the handle on rename', () => {
+    let state = researchDeskReducer(withAssets('a'), { fileIds: ['a'], title: 'Old', type: 'createVectorIndex' })
+    const id = state.vectorIndexOrder[0]
+    state = researchDeskReducer(state, { indexId: id, title: 'Neuer Titel', type: 'renameVectorIndex' })
+    expect(state.vectorIndexes[id].title).toBe('Neuer Titel')
+    expect(state.vectorIndexes[id].handle).toBe('neuer-titel')
+  })
+
+  it('adds documents as pending and marks the index stale', () => {
+    let state = researchDeskReducer(withAssets('a', 'b'), { fileIds: ['a'], title: 'X', type: 'createVectorIndex' })
+    const id = state.vectorIndexOrder[0]
+    state = researchDeskReducer(state, { indexId: id, type: 'markVectorIndexIndexing' })
+    state = researchDeskReducer(state, { indexId: id, type: 'completeVectorIndexReindex' })
+    expect(state.vectorIndexes[id].status).toBe('ready')
+    state = researchDeskReducer(state, { fileIds: ['b'], indexId: id, type: 'addDocsToVectorIndex' })
+    expect(state.vectorIndexes[id].status).toBe('stale')
+    expect(state.vectorIndexes[id].members.find((member) => member.fileId === 'b')?.state).toBe('pending')
+  })
+
+  it('changing the model updates dims, marks stale, and resets members to pending', () => {
+    let state = researchDeskReducer(withAssets('a'), { fileIds: ['a'], title: 'X', type: 'createVectorIndex' })
+    const id = state.vectorIndexOrder[0]
+    state = researchDeskReducer(state, { indexId: id, type: 'markVectorIndexIndexing' })
+    state = researchDeskReducer(state, { indexId: id, type: 'completeVectorIndexReindex' })
+    expect(state.vectorIndexes[id].members[0].state).toBe('embedded')
+    state = researchDeskReducer(state, { indexId: id, model: 'text-embedding-3-small', type: 'setVectorIndexModel' })
+    expect(state.vectorIndexes[id].dims).toBe(1536)
+    expect(state.vectorIndexes[id].status).toBe('stale')
+    expect(state.vectorIndexes[id].members[0].state).toBe('pending')
+  })
+
+  it('reindex marks indexing then ready with embedded members; complete is a no-op otherwise', () => {
+    let state = researchDeskReducer(withAssets('a', 'b'), { fileIds: ['a', 'b'], title: 'X', type: 'createVectorIndex' })
+    const id = state.vectorIndexOrder[0]
+    const indexing = researchDeskReducer(state, { indexId: id, type: 'markVectorIndexIndexing' })
+    expect(indexing.vectorIndexes[id].status).toBe('indexing')
+    state = researchDeskReducer(indexing, { indexId: id, type: 'completeVectorIndexReindex' })
+    expect(state.vectorIndexes[id].status).toBe('ready')
+    expect(state.vectorIndexes[id].members.every((member) => member.state === 'embedded')).toBe(true)
+    expect(researchDeskReducer(state, { indexId: id, type: 'completeVectorIndexReindex' })).toBe(state)
+  })
+
+  it('removing the last member returns the index to ready', () => {
+    let state = researchDeskReducer(withAssets('a'), { fileIds: ['a'], title: 'X', type: 'createVectorIndex' })
+    const id = state.vectorIndexOrder[0]
+    expect(state.vectorIndexes[id].status).toBe('stale')
+    state = researchDeskReducer(state, { fileId: 'a', indexId: id, type: 'removeDocFromVectorIndex' })
+    expect(state.vectorIndexes[id].members).toHaveLength(0)
+    expect(state.vectorIndexes[id].status).toBe('ready')
+  })
+
+  it('deleting a file drops it from every index membership', () => {
+    let state = researchDeskReducer(withAssets('a', 'b'), { fileIds: ['a', 'b'], title: 'X', type: 'createVectorIndex' })
+    const id = state.vectorIndexOrder[0]
+    state = researchDeskReducer(state, { fileId: 'a', type: 'deleteFileAsset' })
+    expect(state.fileAssets.a).toBeUndefined()
+    expect(state.vectorIndexes[id].members.map((member) => member.fileId)).toEqual(['b'])
+  })
+
+  it('deleting a custom section removes its assets and their index memberships', () => {
+    let state = researchDeskReducer(createEmptyProjectState(), { sectionId: '', title: 'Custom', type: 'createFileLibrarySection' })
+    const sectionId = state.fileLibrarySectionOrder[state.fileLibrarySectionOrder.length - 1]
+    state = researchDeskReducer(state, { assets: [makeAsset('a', 'a', { sectionId })], type: 'ingestFileAssets' })
+    state = researchDeskReducer(state, { fileIds: ['a'], title: 'X', type: 'createVectorIndex' })
+    const id = state.vectorIndexOrder[0]
+    state = researchDeskReducer(state, { sectionId, type: 'deleteFileLibrarySection' })
+    expect(state.fileLibrarySections[sectionId]).toBeUndefined()
+    expect(state.fileAssets.a).toBeUndefined()
+    expect(state.vectorIndexes[id].members).toHaveLength(0)
+  })
+
+  it('refuses to delete the temporary section', () => {
+    const state = createEmptyProjectState()
+    expect(researchDeskReducer(state, { sectionId: 'file-section-temp', type: 'deleteFileLibrarySection' })).toBe(state)
+  })
+})

@@ -336,6 +336,55 @@ export type FileAssetRecord = {
   updatedAt: string
 }
 
+export type EmbedModelId =
+  | 'text-embedding-3-large'
+  | 'text-embedding-3-small'
+  | 'voyage-3-large'
+  | 'e5-mistral-7b'
+
+export type EmbedModelDescriptor = {
+  dims: number
+  id: EmbedModelId
+  label: string
+  provider: string
+}
+
+/** Selectable embedding models for vector indexes. `dims` is the reported
+ * vector dimensionality; the actual embedding run is simulated client-side
+ * until a backend exists (see VectorIndexRecord.status). */
+export const EMBED_MODELS: readonly EmbedModelDescriptor[] = [
+  { dims: 3072, id: 'text-embedding-3-large', label: 'text-embedding-3-large', provider: 'OpenAI' },
+  { dims: 1536, id: 'text-embedding-3-small', label: 'text-embedding-3-small', provider: 'OpenAI' },
+  { dims: 1024, id: 'voyage-3-large', label: 'voyage-3-large', provider: 'Voyage' },
+  { dims: 4096, id: 'e5-mistral-7b', label: 'e5-mistral-7b', provider: 'open' },
+]
+
+export const DEFAULT_EMBED_MODEL_ID: EmbedModelId = 'text-embedding-3-large'
+
+export type VectorIndexStatus = 'ready' | 'indexing' | 'stale'
+
+export type VectorIndexMemberState = 'pending' | 'embedded'
+
+/** A document referenced by a vector index (n:m). The asset stays in its
+ * collection; only `state` is persisted lifecycle data — chunk/vector counts
+ * are derived, never stored. */
+export type VectorIndexMemberRecord = {
+  fileId: string
+  state: VectorIndexMemberState
+}
+
+export type VectorIndexRecord = {
+  createdAt: string
+  dims: number
+  handle: string
+  id: string
+  members: VectorIndexMemberRecord[]
+  model: EmbedModelId
+  status: VectorIndexStatus
+  title: string
+  updatedAt: string
+}
+
 export type FileAssetAttachmentRecord = {
   attachedAt: string
   contentMarkdown: string
@@ -439,6 +488,8 @@ export type ProjectState = {
   researchRunOrder: string[]
   researchRuns: Record<string, ResearchRunRecord>
   ui: ProjectUiState
+  vectorIndexOrder: string[]
+  vectorIndexes: Record<string, VectorIndexRecord>
   workspaceId: string
 }
 

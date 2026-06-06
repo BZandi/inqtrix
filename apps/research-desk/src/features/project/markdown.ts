@@ -122,6 +122,11 @@ export function serializeProjectManifest(
       const section = state.fileLibrarySections[sectionId]
       return section ? [section] : []
     }),
+    vector_index_order: state.vectorIndexOrder,
+    vector_indexes: state.vectorIndexOrder.flatMap((indexId) => {
+      const index = state.vectorIndexes[indexId]
+      return index ? [index] : []
+    }),
     rule_order: state.chatRuleOrder,
     schema_version: PROJECT_SCHEMA_VERSION,
     ui: savedUi,

@@ -19,6 +19,55 @@ export const Anchor = createIcon('Anchor', 'lucide-anchor', (
   </>
 ))
 
+export const ArrowUpDown = createIcon('ArrowUpDown', 'lucide-arrow-up-down', (
+  <>
+    <path d="m21 16-4 4-4-4" />
+    <path d="M17 20V4" />
+    <path d="m3 8 4-4 4 4" />
+    <path d="M7 4v16" />
+  </>
+))
+
+export const HardDrive = createIcon('HardDrive', 'lucide-hard-drive', (
+  <>
+    <line x1="22" x2="2" y1="12" y2="12" />
+    <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+    <line x1="6" x2="6.01" y1="16" y2="16" />
+    <line x1="10" x2="10.01" y1="16" y2="16" />
+  </>
+))
+
+export const Inbox = createIcon('Inbox', 'lucide-inbox', (
+  <>
+    <polyline points="22 12 16 12 14 15 10 15 8 12 2 12" />
+    <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+  </>
+))
+
+export const Layers = createIcon('Layers', 'lucide-layers', (
+  <>
+    <path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z" />
+    <path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12" />
+    <path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17" />
+  </>
+))
+
+export const LayoutGrid = createIcon('LayoutGrid', 'lucide-layout-grid', (
+  <>
+    <rect width="7" height="7" x="3" y="3" rx="1" />
+    <rect width="7" height="7" x="14" y="3" rx="1" />
+    <rect width="7" height="7" x="14" y="14" rx="1" />
+    <rect width="7" height="7" x="3" y="14" rx="1" />
+  </>
+))
+
+export const RotateCcw = createIcon('RotateCcw', 'lucide-rotate-ccw', (
+  <>
+    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+    <path d="M3 3v5h5" />
+  </>
+))
+
 export const BadgeCheck = createIcon('BadgeCheck', 'lucide-badge-check', (
   <>
     <path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.77 4.78 4 4 0 0 1-6.75 0 4 4 0 0 1-4.78-4.77 4 4 0 0 1 0-6.76Z" />

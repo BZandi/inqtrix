@@ -28,16 +28,22 @@ import type {
   EditorSuggestionRecord,
   EditorSuggestionRevisionSource,
   EditorViewMode,
+  EmbedModelId,
   FileAssetRecord,
   FileGroupRecord,
+  FileLibrarySectionRecord,
   ProjectConnection,
   ProjectPreferences,
   ProjectState,
   ResearchRunRecord,
+  VectorIndexMemberRecord,
+  VectorIndexRecord,
 } from '@/features/project/types'
 import {
   applyRunEvent,
   attachRunResult,
+  DEFAULT_EMBED_MODEL_ID,
+  EMBED_MODELS,
   mergeRunSummary,
 } from '@/features/project/types'
 import { moveItem } from '@/features/composer/reorder'
@@ -172,6 +178,16 @@ export type ResearchDeskAction =
   | { groupId: string; title: string; type: 'renameFileGroup' }
   | { groupId: string; type: 'deleteFileGroup' }
   | { sectionId: string; title: string; type: 'renameFileLibrarySection' }
+  | { sectionId: string; title: string; type: 'createFileLibrarySection' }
+  | { sectionId: string; type: 'deleteFileLibrarySection' }
+  | { fileIds: string[]; title: string; type: 'createVectorIndex' }
+  | { indexId: string; title: string; type: 'renameVectorIndex' }
+  | { indexId: string; type: 'deleteVectorIndex' }
+  | { indexId: string; model: EmbedModelId; type: 'setVectorIndexModel' }
+  | { fileIds: string[]; indexId: string; type: 'addDocsToVectorIndex' }
+  | { fileId: string; indexId: string; type: 'removeDocFromVectorIndex' }
+  | { indexId: string; type: 'markVectorIndexIndexing' }
+  | { indexId: string; type: 'completeVectorIndexReindex' }
 
 export function initializeResearchDeskState(): ResearchDeskState {
   return createEmptyProjectState()
@@ -1123,6 +1139,11 @@ export function researchDeskReducer(
     const fileAssets = { ...state.fileAssets }
     delete fileAssets[action.fileId]
     const keepRef = (ref: ChatContextReferenceRecord) => ref.kind !== 'file-asset' || ref.fileId !== action.fileId
+    const { vectorIndexes } = dropFilesFromVectorIndexes(
+      state.vectorIndexes,
+      new Set([action.fileId]),
+      new Date().toISOString(),
+    )
     return {
       ...state,
       dirty: true,
@@ -1132,6 +1153,7 @@ export function researchDeskReducer(
         ...state.ui,
         pendingChatAttachmentRefs: state.ui.pendingChatAttachmentRefs.filter(keepRef),
       },
+      vectorIndexes,
     }
   }
   if (action.type === 'createFileGroup') {
@@ -1195,6 +1217,178 @@ export function researchDeskReducer(
         [section.id]: { ...section, title, updatedAt: new Date().toISOString() },
       },
     }
+  }
+  if (action.type === 'createFileLibrarySection') {
+    const now = new Date().toISOString()
+    const section: FileLibrarySectionRecord = {
+      createdAt: now,
+      id: createId('file-section'),
+      kind: 'custom',
+      title: action.title.trim() || 'Neue Sammlung',
+      updatedAt: now,
+    }
+    return {
+      ...state,
+      dirty: true,
+      fileLibrarySectionOrder: [...state.fileLibrarySectionOrder, section.id],
+      fileLibrarySections: { ...state.fileLibrarySections, [section.id]: section },
+    }
+  }
+  if (action.type === 'deleteFileLibrarySection') {
+    const section = state.fileLibrarySections[action.sectionId]
+    if (!section || section.kind === 'temporary') return state
+    const now = new Date().toISOString()
+    const removedFileIds = new Set(
+      Object.values(state.fileAssets)
+        .filter((asset) => asset.sectionId === action.sectionId)
+        .map((asset) => asset.id),
+    )
+    const removedGroupIds = new Set(
+      Object.values(state.fileGroups)
+        .filter((group) => group.sectionId === action.sectionId)
+        .map((group) => group.id),
+    )
+    const fileAssets = { ...state.fileAssets }
+    for (const fileId of removedFileIds) delete fileAssets[fileId]
+    const fileGroups = { ...state.fileGroups }
+    for (const groupId of removedGroupIds) delete fileGroups[groupId]
+    const fileLibrarySections = { ...state.fileLibrarySections }
+    delete fileLibrarySections[action.sectionId]
+    const { vectorIndexes } = dropFilesFromVectorIndexes(state.vectorIndexes, removedFileIds, now)
+    const keepRef = (ref: ChatContextReferenceRecord) => {
+      if (ref.kind === 'file-asset') return !removedFileIds.has(ref.fileId)
+      if (ref.kind === 'file-group') return !removedGroupIds.has(ref.groupId)
+      return true
+    }
+    return {
+      ...state,
+      dirty: true,
+      fileAssetOrder: state.fileAssetOrder.filter((fileId) => !removedFileIds.has(fileId)),
+      fileAssets,
+      fileGroupOrder: state.fileGroupOrder.filter((groupId) => !removedGroupIds.has(groupId)),
+      fileGroups,
+      fileLibrarySectionOrder: state.fileLibrarySectionOrder.filter((sectionId) => sectionId !== action.sectionId),
+      fileLibrarySections,
+      ui: {
+        ...state.ui,
+        pendingChatAttachmentRefs: state.ui.pendingChatAttachmentRefs.filter(keepRef),
+      },
+      vectorIndexes,
+    }
+  }
+  if (action.type === 'createVectorIndex') {
+    const now = new Date().toISOString()
+    const seen = new Set<string>()
+    const members: VectorIndexMemberRecord[] = []
+    for (const fileId of action.fileIds) {
+      if (seen.has(fileId) || !state.fileAssets[fileId]) continue
+      seen.add(fileId)
+      members.push({ fileId, state: 'pending' })
+    }
+    const id = createId('vector-index')
+    const index: VectorIndexRecord = {
+      createdAt: now,
+      dims: dimsForEmbedModel(DEFAULT_EMBED_MODEL_ID),
+      handle: uniqueVectorHandle(slugifyVectorHandle(action.title), state),
+      id,
+      members,
+      model: DEFAULT_EMBED_MODEL_ID,
+      status: members.length > 0 ? 'stale' : 'ready',
+      title: action.title.trim() || 'Neuer Vektor-Index',
+      updatedAt: now,
+    }
+    return {
+      ...state,
+      dirty: true,
+      vectorIndexOrder: [id, ...state.vectorIndexOrder],
+      vectorIndexes: { ...state.vectorIndexes, [id]: index },
+    }
+  }
+  if (action.type === 'renameVectorIndex') {
+    const index = state.vectorIndexes[action.indexId]
+    const title = action.title.trim()
+    if (!index || !title || index.title === title) return state
+    return writeVectorIndex(state, {
+      ...index,
+      handle: uniqueVectorHandle(slugifyVectorHandle(title), state, index.id),
+      title,
+      updatedAt: new Date().toISOString(),
+    })
+  }
+  if (action.type === 'deleteVectorIndex') {
+    if (!state.vectorIndexes[action.indexId]) return state
+    const vectorIndexes = { ...state.vectorIndexes }
+    delete vectorIndexes[action.indexId]
+    return {
+      ...state,
+      dirty: true,
+      vectorIndexOrder: state.vectorIndexOrder.filter((indexId) => indexId !== action.indexId),
+      vectorIndexes,
+    }
+  }
+  if (action.type === 'setVectorIndexModel') {
+    const index = state.vectorIndexes[action.indexId]
+    if (!index || index.model === action.model) return state
+    const hasMembers = index.members.length > 0
+    return writeVectorIndex(state, {
+      ...index,
+      dims: dimsForEmbedModel(action.model),
+      members: hasMembers
+        ? index.members.map((member): VectorIndexMemberRecord => ({ ...member, state: 'pending' }))
+        : index.members,
+      model: action.model,
+      status: hasMembers ? 'stale' : 'ready',
+      updatedAt: new Date().toISOString(),
+    })
+  }
+  if (action.type === 'addDocsToVectorIndex') {
+    const index = state.vectorIndexes[action.indexId]
+    if (!index) return state
+    const have = new Set(index.members.map((member) => member.fileId))
+    const additions: VectorIndexMemberRecord[] = []
+    for (const fileId of action.fileIds) {
+      if (have.has(fileId) || !state.fileAssets[fileId]) continue
+      have.add(fileId)
+      additions.push({ fileId, state: 'pending' })
+    }
+    if (additions.length === 0) return state
+    return writeVectorIndex(state, {
+      ...index,
+      members: [...index.members, ...additions],
+      status: 'stale',
+      updatedAt: new Date().toISOString(),
+    })
+  }
+  if (action.type === 'removeDocFromVectorIndex') {
+    const index = state.vectorIndexes[action.indexId]
+    if (!index || !index.members.some((member) => member.fileId === action.fileId)) return state
+    const members = index.members.filter((member) => member.fileId !== action.fileId)
+    const status = members.length === 0
+      ? 'ready'
+      : members.some((member) => member.state === 'pending')
+        ? 'stale'
+        : index.status
+    return writeVectorIndex(state, {
+      ...index,
+      members,
+      status,
+      updatedAt: new Date().toISOString(),
+    })
+  }
+  if (action.type === 'markVectorIndexIndexing') {
+    const index = state.vectorIndexes[action.indexId]
+    if (!index || index.status === 'indexing') return state
+    return writeVectorIndex(state, { ...index, status: 'indexing', updatedAt: new Date().toISOString() })
+  }
+  if (action.type === 'completeVectorIndexReindex') {
+    const index = state.vectorIndexes[action.indexId]
+    if (!index || index.status !== 'indexing') return state
+    return writeVectorIndex(state, {
+      ...index,
+      members: index.members.map((member): VectorIndexMemberRecord => ({ ...member, state: 'embedded' })),
+      status: 'ready',
+      updatedAt: new Date().toISOString(),
+    })
   }
   if (action.type === 'upsertChatRule') {
     const now = new Date().toISOString()
@@ -2227,6 +2421,69 @@ function reportLabel(title: string, runId: string) {
 
 function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function slugifyVectorHandle(value: string): string {
+  const normalized = value
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+  return normalized || 'index'
+}
+
+function uniqueVectorHandle(base: string, state: ProjectState, exceptId?: string): string {
+  const taken = new Set(
+    Object.values(state.vectorIndexes)
+      .filter((index) => index.id !== exceptId)
+      .map((index) => index.handle),
+  )
+  if (!taken.has(base)) return base
+  let suffix = 2
+  while (taken.has(`${base}-${suffix}`)) suffix += 1
+  return `${base}-${suffix}`
+}
+
+function dimsForEmbedModel(model: EmbedModelId): number {
+  return EMBED_MODELS.find((entry) => entry.id === model)?.dims ?? 3072
+}
+
+function writeVectorIndex(state: ProjectState, index: VectorIndexRecord): ProjectState {
+  return {
+    ...state,
+    dirty: true,
+    vectorIndexes: { ...state.vectorIndexes, [index.id]: index },
+  }
+}
+
+/** Removes the given file ids from every vector index's membership and
+ * recomputes status. Used by file- and section-deletion cascades; an
+ * in-flight `indexing` status is left untouched so a running simulation
+ * is not disturbed. */
+function dropFilesFromVectorIndexes(
+  vectorIndexes: ProjectState['vectorIndexes'],
+  removedFileIds: ReadonlySet<string>,
+  updatedAt: string,
+): { changed: boolean; vectorIndexes: ProjectState['vectorIndexes'] } {
+  let changed = false
+  const next: ProjectState['vectorIndexes'] = {}
+  for (const [id, index] of Object.entries(vectorIndexes)) {
+    const members = index.members.filter((member) => !removedFileIds.has(member.fileId))
+    if (members.length === index.members.length) {
+      next[id] = index
+      continue
+    }
+    changed = true
+    next[id] = {
+      ...index,
+      members,
+      status: members.length === 0 && index.status !== 'indexing' ? 'ready' : index.status,
+      updatedAt,
+    }
+  }
+  return changed ? { changed, vectorIndexes: next } : { changed, vectorIndexes }
 }
 
 function nextOpenEditorCommentId(state: ProjectState, currentCommentId: string) {

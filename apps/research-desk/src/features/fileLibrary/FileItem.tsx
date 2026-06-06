@@ -44,7 +44,7 @@ function ChunkCell({ asset, state }: { asset: FileAssetRecord; state: VectorInde
         <TooltipTrigger asChild>
           <span className="inline-flex cursor-help items-center justify-end gap-1 text-brand">
             <span className="inqtrix-running-dot size-1.5 rounded-full bg-brand" />
-            <span className="text-[11px] font-medium">{t.vectorIndex.embeddingRunning}</span>
+            <span className="t-meta-sm font-medium">{t.vectorIndex.embeddingRunning}</span>
           </span>
         </TooltipTrigger>
         <TooltipContent side="top">{t.vectorIndex.embeddingRunningTooltip}</TooltipContent>
@@ -98,20 +98,20 @@ function NameCell({
       <TypeTile asset={asset} size="sm" />
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-1.5">
-          <span className="shrink-0 font-mono text-[11px] text-muted-foreground/70">@files:</span>
+          <span className="shrink-0 t-mono text-muted-foreground/70">@files:</span>
           {onRename ? (
             <InlineText
               ariaLabel={t.fileLibrary.rename}
-              className="min-w-0 max-w-full text-[13px] font-semibold text-foreground"
+              className="min-w-0 max-w-full t-list text-foreground"
               onCommit={(label) => onRename(asset.id, label)}
               value={asset.label}
             />
           ) : (
-            <span className="min-w-0 truncate text-[13px] font-semibold text-foreground">{asset.label}</span>
+            <span className="min-w-0 truncate t-list text-foreground">{asset.label}</span>
           )}
           <StatusMark asset={asset} />
         </div>
-        <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+        <div className="flex min-w-0 items-center gap-1.5 t-meta-sm text-muted-foreground">
           <span className="min-w-0 flex-1 truncate" title={asset.fileName}>{asset.fileName}</span>
           {breadcrumb ? <span className="shrink-0 whitespace-nowrap text-muted-foreground/60">· {breadcrumb}</span> : null}
         </div>
@@ -186,7 +186,7 @@ export function FileRow(props: FileItemProps) {
     >
       <NameCell asset={asset} breadcrumb={breadcrumb} draggable={!isIndex} onRename={props.onRename} />
       <div className="min-w-0"><TypeBadge asset={asset} /></div>
-      <div className="text-right text-xs tabular-nums text-muted-foreground">
+      <div className="text-right t-meta tabular-nums text-muted-foreground">
         {isIndex ? (
           <ChunkCell asset={asset} state={memberState ?? 'pending'} />
         ) : meta.paged && asset.pageCount != null ? (
@@ -195,14 +195,14 @@ export function FileRow(props: FileItemProps) {
           <span className="text-muted-foreground/40">{t.fileLibrary.referencedNone}</span>
         )}
       </div>
-      <div className="text-right text-xs tabular-nums text-muted-foreground">{formatBytes(asset.sizeBytes, locale)}</div>
+      <div className="text-right t-meta tabular-nums text-muted-foreground">{formatBytes(asset.sizeBytes, locale)}</div>
       {isIndex ? (
-        <div className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
+        <div className="flex min-w-0 items-center gap-1 t-meta-sm text-muted-foreground">
           <Folder className="size-3 shrink-0" />
           <span className="truncate">{source ?? t.fileLibrary.referencedNone}</span>
         </div>
       ) : (
-        <div className="flex justify-end text-[11px]"><UsedCell count={referenceCount ?? 0} /></div>
+        <div className="flex justify-end t-meta-sm"><UsedCell count={referenceCount ?? 0} /></div>
       )}
       <div className="flex items-center justify-end gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
         <RowActions {...props} />
@@ -232,25 +232,25 @@ export function FileCard(props: FileItemProps) {
       </div>
       <div className="mt-2.5 min-w-0">
         <div className="flex min-w-0 items-center gap-1.5">
-          <span className="shrink-0 font-mono text-[11px] text-muted-foreground/70">@files:</span>
+          <span className="shrink-0 t-mono text-muted-foreground/70">@files:</span>
           {props.onRename ? (
             <InlineText
               ariaLabel={t.fileLibrary.rename}
-              className="min-w-0 max-w-full text-[13px] font-semibold text-foreground"
+              className="min-w-0 max-w-full t-list text-foreground"
               onCommit={(label) => props.onRename?.(asset.id, label)}
               value={asset.label}
             />
           ) : (
-            <span className="min-w-0 truncate text-[13px] font-semibold text-foreground">{asset.label}</span>
+            <span className="min-w-0 truncate t-list text-foreground">{asset.label}</span>
           )}
           <StatusMark asset={asset} />
         </div>
-        <p className="mt-0.5 truncate text-[11px] text-muted-foreground" title={asset.fileName}>
+        <p className="mt-0.5 truncate t-meta-sm text-muted-foreground" title={asset.fileName}>
           {asset.fileName}
           {breadcrumb ? ` · ${breadcrumb}` : ''}
         </p>
       </div>
-      <div className="mt-3 flex items-center justify-between gap-2 border-t border-border/60 pt-2 text-[11px] text-muted-foreground">
+      <div className="mt-3 flex items-center justify-between gap-2 border-t border-border/60 pt-2 t-meta-sm text-muted-foreground">
         <span className="inline-flex items-center gap-2">
           <TypeBadge asset={asset} />
           <span className="tabular-nums">{formatBytes(asset.sizeBytes, locale)}</span>
@@ -276,7 +276,7 @@ export function ListHeader({ mode }: { mode: 'library' | 'index' }) {
     <div
       className={cn(
         isIndex ? INDEX_GRID : LIBRARY_GRID,
-        'px-3 pb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground',
+        'px-3 pb-1.5 t-caption text-muted-foreground',
       )}
     >
       <span>{t.fileLibrary.nameColumn}</span>

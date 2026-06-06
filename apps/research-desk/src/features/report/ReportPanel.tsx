@@ -126,7 +126,7 @@ export function ReportPanel({
         <div>
           <div className="flex h-12 items-center justify-between gap-3 border-b border-border px-3">
             <div className="min-w-0">
-              <h2 className="truncate text-sm font-semibold text-foreground">
+              <h2 className="t-section truncate text-foreground">
                 {panelTitle}
               </h2>
             </div>
@@ -191,7 +191,7 @@ export function ReportPanel({
           {selectedRun && (
             <div className="border-b border-border px-4 py-2.5">
               <div className="min-w-0">
-                <p className="truncate text-xs text-muted-foreground">
+                <p className="t-meta truncate text-muted-foreground">
                   {selectedRun.summary.title}
                 </p>
                 {isRunningRun ? (
@@ -511,7 +511,7 @@ function LiveRunMetric({
 }) {
   return (
     <div className="rounded-md border border-border bg-surface px-3 py-2">
-      <p className="text-[11px] font-semibold uppercase tracking-normal text-muted-foreground">
+      <p className="t-caption text-muted-foreground">
         {label}
       </p>
       <p className="mt-1 truncate text-sm font-semibold text-foreground">{value}</p>
@@ -566,7 +566,7 @@ function ReportAgentSteps({ run }: { run: ResearchRunRecord }) {
   return (
     <div className="space-y-3">
       <section className="rounded-md border border-border bg-background p-3">
-        <h3 className="text-sm font-semibold text-foreground">
+        <h3 className="t-section text-foreground">
           {t.report.agentStepsTitle}
         </h3>
         <p className="mt-1 text-sm leading-6 text-muted-foreground">
@@ -755,7 +755,7 @@ function AgentStepTimeline({
                         >
                           {displayAgentEventTitle(event.title, t)}
                         </p>
-                        <span className="flex items-center gap-1 pt-1 text-[11px] font-medium text-muted-foreground">
+                        <span className="t-hint flex items-center gap-1 pt-1 text-muted-foreground">
                           {event.severity === 'warning' ? (
                             <AlertTriangle className="size-3 text-warning" />
                           ) : event.severity === 'error' ? (
@@ -767,7 +767,7 @@ function AgentStepTimeline({
                         </span>
                       </div>
                       {isActive && isLive && (
-                        <span className="mt-1.5 inline-flex rounded-full bg-brand/10 px-2 py-0.5 text-[11px] font-semibold text-brand">
+                        <span className="mt-1.5 inline-flex rounded-full bg-brand/10 px-2 py-0.5 t-meta-sm font-semibold text-brand">
                           {t.report.activeEvent}
                         </span>
                       )}
@@ -822,7 +822,7 @@ function ReportEvidence({ run }: { run: ResearchRunRecord }) {
         )}
         {references.length > 0 && (
           <section>
-            <h3 className="text-sm font-semibold text-foreground">{t.report.reportReferences}</h3>
+            <h3 className="t-section text-foreground">{t.report.reportReferences}</h3>
             <ol className="mt-2 space-y-2">
               {references.map((reference, index) => (
                 <li
@@ -830,7 +830,7 @@ function ReportEvidence({ run }: { run: ResearchRunRecord }) {
                   key={`${reference.url}-${index}`}
                 >
                   <div className="flex min-w-0 items-start gap-2">
-                    <span className="mt-0.5 inline-flex h-5 shrink-0 items-center rounded-sm border border-border bg-card px-1.5 text-[10px] font-semibold text-muted-foreground">
+                    <span className="mt-0.5 inline-flex h-5 shrink-0 items-center rounded-sm border border-border bg-card px-1.5 t-hint font-semibold text-muted-foreground">
                       {reference.label}
                     </span>
                     <a
@@ -842,7 +842,7 @@ function ReportEvidence({ run }: { run: ResearchRunRecord }) {
                       {reference.url}
                     </a>
                   </div>
-                  <p className="mt-1 text-xs font-semibold text-muted-foreground">{reference.tier}</p>
+                  <p className="t-label mt-1 text-muted-foreground">{reference.tier}</p>
                 </li>
               ))}
             </ol>
@@ -850,7 +850,7 @@ function ReportEvidence({ run }: { run: ResearchRunRecord }) {
         )}
         {fallbackSources.length > 0 && (
           <section>
-            <h3 className="text-sm font-semibold text-foreground">{t.runCard.sources}</h3>
+            <h3 className="t-section text-foreground">{t.runCard.sources}</h3>
             <ol className="mt-2 space-y-2">
               {fallbackSources.map((source) => (
                 <li
@@ -865,7 +865,7 @@ function ReportEvidence({ run }: { run: ResearchRunRecord }) {
                   >
                     {source.url}
                   </a>
-                  <p className="mt-1 text-xs font-semibold text-muted-foreground">{source.tier}</p>
+                  <p className="t-label mt-1 text-muted-foreground">{source.tier}</p>
                 </li>
               ))}
             </ol>
@@ -873,7 +873,7 @@ function ReportEvidence({ run }: { run: ResearchRunRecord }) {
         )}
         {topClaims.length > 0 && (
           <section>
-            <h3 className="text-sm font-semibold text-foreground">{t.report.claims}</h3>
+            <h3 className="t-section text-foreground">{t.report.claims}</h3>
             <ol className="mt-2 space-y-2">
               {topClaims.slice(0, 10).map((claim, index) => (
                 <li
@@ -881,7 +881,7 @@ function ReportEvidence({ run }: { run: ResearchRunRecord }) {
                   key={`${claim.status}-${index}-${claim.text}`}
                 >
                   <p className="text-foreground">{claim.text}</p>
-                  <p className="mt-1 text-xs font-semibold text-muted-foreground">
+                  <p className="t-label mt-1 text-muted-foreground">
                     {claim.status} · {claim.support_count} support / {claim.contradict_count} contradict
                   </p>
                 </li>
@@ -931,7 +931,7 @@ function EvidenceMetric({
 }) {
   return (
     <div className="rounded-md border border-border bg-background p-3">
-      <p className="text-xs font-semibold text-muted-foreground">{label}</p>
+      <p className="t-label text-muted-foreground">{label}</p>
       <p className="mt-1 text-sm font-semibold text-foreground">{value}</p>
     </div>
   )
@@ -975,7 +975,7 @@ function ReportExport({
 
   return (
     <div className="rounded-lg border border-border bg-surface p-4">
-      <h3 className="text-sm font-semibold text-foreground">{t.report.exportTitle}</h3>
+      <h3 className="t-section text-foreground">{t.report.exportTitle}</h3>
       <p className="mt-2 text-sm leading-6 text-muted-foreground">
         {hasReport ? t.report.exportReadyDescription : t.report.exportDescription}
       </p>

@@ -53,8 +53,8 @@ function NavItem({
   return (
     <button
       className={cn(
-        'flex w-full items-center gap-2 rounded-md border px-2.5 py-2 text-left text-[13px] transition-colors',
-        active ? 'border-transparent bg-brand-subtle font-semibold text-brand' : 'border-transparent text-foreground/90 hover:bg-accent',
+        'flex w-full items-center gap-2 rounded-md border px-2.5 py-2 text-left t-list transition-colors',
+        active ? 'border-transparent bg-brand-subtle text-brand' : 'border-transparent text-foreground/90 hover:bg-accent',
         drop?.over && 'border-brand/60 bg-brand-subtle/60 ring-1 ring-brand/30',
       )}
       onClick={onClick}
@@ -70,7 +70,7 @@ function NavItem({
         ) : null}
       </span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      <span className={cn('shrink-0 text-[11px] tabular-nums', active ? 'text-brand/80' : 'text-muted-foreground')}>{count}</span>
+      <span className={cn('shrink-0 t-meta-sm tabular-nums', active ? 'text-brand/80' : 'text-muted-foreground')}>{count}</span>
     </button>
   )
 }
@@ -78,7 +78,7 @@ function NavItem({
 function AddButton({ label, onClick }: { label: string; onClick: () => void }) {
   return (
     <button
-      className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[13px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+      className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left t-list font-normal text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
       onClick={onClick}
       type="button"
     >
@@ -107,16 +107,16 @@ function StorageCard({
   return (
     <div className="rounded-lg border border-border bg-card p-3">
       <div className="flex items-center justify-between gap-2">
-        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-foreground">
+        <span className="inline-flex items-center gap-1.5 t-label text-foreground">
           <HardDrive className="size-3.5 text-muted-foreground" />
           {t.fileLibrary.storageTitle}
         </span>
-        <span className="text-[11px] tabular-nums text-muted-foreground">{usage}</span>
+        <span className="t-meta-sm tabular-nums text-muted-foreground">{usage}</span>
       </div>
       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
         <div className="h-full rounded-full bg-brand" style={{ width: `${pct}%` }} />
       </div>
-      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 t-meta-sm text-muted-foreground">
         <span>{t.fileLibrary.countDocuments.replace('{count}', String(docCount))}</span>
         <span>{t.fileLibrary.countCollections.replace('{count}', String(collectionCount))}</span>
         <span>{t.fileLibrary.countIndexes.replace('{count}', String(indexCount))}</span>
@@ -182,8 +182,8 @@ export function Rail({
           <Database className="size-4" />
         </span>
         <div className="min-w-0">
-          <h1 className="truncate text-sm font-semibold text-foreground">{t.fileLibrary.title}</h1>
-          <p className="truncate text-[11px] text-muted-foreground">{t.fileLibrary.headerSubtitle}</p>
+          <h1 className="truncate t-title text-foreground">{t.fileLibrary.title}</h1>
+          <p className="truncate t-meta text-muted-foreground">{t.fileLibrary.headerSubtitle}</p>
         </div>
       </div>
 
@@ -191,7 +191,7 @@ export function Rail({
         <label className="flex items-center gap-2 rounded-md border border-border bg-background px-2 focus-within:ring-2 focus-within:ring-ring">
           <Search className="size-4 shrink-0 text-muted-foreground" />
           <input
-            className="min-w-0 flex-1 border-0 bg-transparent py-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground"
+            className="min-w-0 flex-1 border-0 bg-transparent py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground"
             onChange={(event) => onQueryChange(event.target.value)}
             placeholder={active.kind === 'index' ? t.fileLibrary.searchPlaceholderIndex : t.fileLibrary.searchPlaceholderDocs}
             value={query}
@@ -200,7 +200,7 @@ export function Rail({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
-        <p className="px-1.5 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/80">{t.fileLibrary.sectionDocuments}</p>
+        <p className="px-1.5 pb-1 pt-2 t-caption text-muted-foreground/80">{t.fileLibrary.sectionDocuments}</p>
         <div className="flex flex-col gap-0.5">
           <NavItem
             active={active.kind === 'all'}
@@ -224,7 +224,7 @@ export function Rail({
         </div>
 
         <div className="mt-3 flex items-center gap-1.5 px-1.5 pb-1 pt-1">
-          <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/80">{t.fileLibrary.sectionIndexes}</p>
+          <p className="t-caption text-muted-foreground/80">{t.fileLibrary.sectionIndexes}</p>
           <Tooltip>
             <TooltipTrigger asChild>
               <span className="inline-flex cursor-help items-center text-muted-foreground/60">

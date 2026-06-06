@@ -264,10 +264,10 @@ function SettingsSidebar({
       <div className="flex items-start justify-between gap-4 px-4 py-4 md:px-5 lg:block lg:px-5 lg:pb-4 lg:pt-5">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <Settings className="size-4 text-muted-foreground" />
-            <h1 className="text-base font-semibold leading-6 text-foreground">{t.settings.title}</h1>
+            <Settings className="icon-md text-muted-foreground" />
+            <h1 className="t-title text-foreground">{t.settings.title}</h1>
           </div>
-          <p className="mt-1 hidden max-w-48 text-xs leading-5 text-muted-foreground lg:block">
+          <p className="mt-1 hidden max-w-48 t-meta text-muted-foreground lg:block">
             {t.settings.settingsDescription}
           </p>
         </div>
@@ -286,8 +286,8 @@ function SettingsSidebar({
 
           return (
             <div className="flex shrink-0 items-center gap-1.5 lg:block" key={group.id}>
-              <p className="hidden h-8 items-center gap-2 rounded-md px-2 text-sm font-semibold text-foreground lg:flex">
-                <GroupIcon className="size-4 text-muted-foreground" />
+              <p className="hidden h-8 items-center gap-2 rounded-md px-2 t-label text-foreground lg:flex">
+                <GroupIcon className="icon-md text-muted-foreground" />
                 {group.label}
               </p>
               <div className="flex gap-1.5 lg:ml-6 lg:flex-col lg:gap-1">
@@ -337,7 +337,7 @@ function SettingsNavButton({
     <button
       aria-current={isActive ? 'page' : undefined}
       className={cn(
-        'relative flex h-9 shrink-0 items-center gap-2 rounded-md border border-transparent px-3 text-sm font-medium text-muted-foreground transition hover:border-border hover:bg-card hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:h-8 lg:w-full lg:justify-start lg:px-2',
+        'relative flex h-9 shrink-0 items-center gap-2 rounded-md border border-transparent px-3 text-muted-foreground transition hover:border-border hover:bg-card hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:h-8 lg:w-full lg:justify-start lg:px-2',
         isActive && 'border-brand/20 bg-brand-subtle text-brand shadow-[0_1px_2px_var(--shadow-hairline)] hover:border-brand/20 hover:bg-brand-subtle hover:text-brand',
       )}
       onClick={onClick}
@@ -351,8 +351,8 @@ function SettingsNavButton({
           isActive && 'bg-brand',
         )}
       />
-      <Icon className="size-4 shrink-0" />
-      <span className="whitespace-nowrap">{item.label}</span>
+      <Icon className="icon-md shrink-0" />
+      <span className="t-list whitespace-nowrap">{item.label}</span>
     </button>
   )
 }
@@ -470,8 +470,8 @@ function SettingsPanel({
 function SettingsPanelHeader({ item }: { item: SettingsNavItem }) {
   return (
     <header className="min-w-0 border-b border-border pb-4">
-      <h2 className="text-xl font-semibold leading-8 text-foreground">{item.label}</h2>
-      <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
+      <h2 className="t-section text-foreground">{item.label}</h2>
+      <p className="mt-1 max-w-2xl t-body text-muted-foreground">
         {item.description}
       </p>
     </header>
@@ -491,13 +491,13 @@ function PreferencesPanel({
     <SettingsSection>
       <div className="flex flex-col gap-3 px-4 py-3.5 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
         <div className="min-w-0 sm:flex-1">
-          <h4 className="text-sm font-medium text-foreground">{t.settings.demoMode}</h4>
-          <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{t.settings.demoModeDescription}</p>
+          <h4 className="t-card text-foreground">{t.settings.demoMode}</h4>
+          <p className="mt-0.5 t-meta text-muted-foreground">{t.settings.demoModeDescription}</p>
           <div
-            className="mt-2 flex gap-2 rounded-md border border-warning/25 bg-warning-subtle/35 p-2.5 text-xs leading-5 text-foreground"
+            className="mt-2 flex gap-2 rounded-md border border-warning/25 bg-warning-subtle/35 p-2.5 t-meta text-foreground"
             id="demo-mode-warning"
           >
-            <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" />
+            <AlertTriangle className="mt-0.5 icon-sm shrink-0 text-warning" />
             <p className="min-w-0">{t.settings.demoModeWarning}</p>
           </div>
         </div>
@@ -637,7 +637,7 @@ function AppearancePanel({
               >
                 {isActive ? (
                   <span className="absolute right-2 top-2 inline-flex size-4 items-center justify-center rounded-full bg-brand text-brand-foreground">
-                    <Check className="size-3" />
+                    <Check className="icon-xs" />
                   </span>
                 ) : null}
                 <span
@@ -648,8 +648,8 @@ function AppearancePanel({
                   <span className="h-2.5 w-10 rounded-full" style={{ background: option.accent }} />
                   <span className="h-2.5 w-5 rounded-full opacity-40" style={{ background: option.accent }} />
                 </span>
-                <span className="mt-2 block text-sm font-medium text-foreground">{option.label}</span>
-                <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">{option.description}</span>
+                <span className="mt-2 block t-card text-foreground">{option.label}</span>
+                <span className="mt-0.5 block t-meta text-muted-foreground">{option.description}</span>
               </button>
             )
           })}
@@ -725,11 +725,11 @@ function ConnectionPanel({
             ) : null}
             {apiHealth ? <StatusBadge label={stackModeLabel} tone="neutral" /> : null}
           </div>
-          <p className="break-words text-xs leading-5 text-muted-foreground">
+          <p className="break-words t-meta text-muted-foreground">
             <span className="font-medium text-foreground">{t.settings.baseUrl}:</span> {apiBaseUrl}
           </p>
           {apiError ? (
-            <p className="text-xs leading-5 text-destructive">{apiError}</p>
+            <p className="t-meta text-destructive">{apiError}</p>
           ) : null}
         </div>
       </SettingsSection>
@@ -738,7 +738,7 @@ function ConnectionPanel({
           description={t.settings.providerMetadataDescription}
           title={t.settings.providerMetadata}
         >
-          <div className="grid gap-1 px-4 py-3.5 text-xs leading-5 text-muted-foreground sm:grid-cols-2">
+          <div className="grid gap-1 px-4 py-3.5 t-meta text-muted-foreground sm:grid-cols-2">
             <span className="min-w-0 truncate">
               {t.settings.llmProvider}: <strong className="font-semibold text-foreground">{apiHealth.llm.provider}</strong>
             </span>
@@ -759,12 +759,12 @@ function ConnectionPanel({
               <div className="grid gap-1">
                 <div className="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
                   <StatusBadge label={stackModeLabel} tone="neutral" />
-                  <span className="min-w-0 truncate text-sm font-semibold text-foreground">
+                  <span className="min-w-0 truncate t-card text-foreground">
                     {selectedStack}
                   </span>
                 </div>
                 {stackDiscoveryStatus === 'unsupported' ? (
-                  <p className="text-xs leading-5 text-muted-foreground sm:text-right">
+                  <p className="t-meta text-muted-foreground sm:text-right">
                     {t.settings.singleStackDescription}
                   </p>
                 ) : null}
@@ -778,7 +778,7 @@ function ConnectionPanel({
           description={t.settings.activeModelsDescription}
           title={t.settings.activeModels}
         >
-          <div className="grid gap-x-6 gap-y-1.5 px-4 py-3.5 text-xs leading-5 sm:grid-cols-2">
+          <div className="grid gap-x-6 gap-y-1.5 px-4 py-3.5 t-meta sm:grid-cols-2">
             {modelRows.map((row) => (
               <span className="min-w-0 truncate text-muted-foreground" key={row.label}>
                 {row.label}: <strong className="font-semibold text-foreground">{row.value}</strong>
@@ -827,17 +827,17 @@ function LicensingPanel({
         />
       </SettingsRow>
       <SettingsRow title={t.settings.projectSource}>
-        <span className="block min-w-0 break-words text-xs leading-5 text-foreground sm:text-right">
+        <span className="block min-w-0 break-words t-meta text-foreground sm:text-right">
           {projectSourceUrl}
         </span>
       </SettingsRow>
       <SettingsRow title={t.settings.legalNotice}>
-        <span className="block min-w-0 break-words text-xs leading-5 text-foreground sm:text-right">
+        <span className="block min-w-0 break-words t-meta text-foreground sm:text-right">
           {legal?.notice ?? t.settings.attributionNotice}
         </span>
       </SettingsRow>
       <SettingsRow title={t.settings.warranty}>
-        <span className="block min-w-0 break-words text-xs leading-5 text-foreground sm:text-right">
+        <span className="block min-w-0 break-words t-meta text-foreground sm:text-right">
           {legal?.warranty_notice ?? t.authLock.warrantyNotice}
         </span>
       </SettingsRow>
@@ -880,9 +880,9 @@ function SettingsSection({
     <section className="overflow-hidden rounded-lg border border-border bg-card shadow-[0_1px_2px_var(--shadow-hairline)]">
       {title ? (
         <div className="border-b border-border px-4 py-3">
-          <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+          <h3 className="t-section text-foreground">{title}</h3>
           {description ? (
-            <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{description}</p>
+            <p className="mt-0.5 t-meta text-muted-foreground">{description}</p>
           ) : null}
         </div>
       ) : null}
@@ -905,9 +905,9 @@ function SettingsRow({
   return (
     <div className="flex flex-col gap-3 px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
       <div className="min-w-0 sm:flex-1">
-        <h4 className="text-sm font-medium text-foreground">{title}</h4>
+        <h4 className="t-card text-foreground">{title}</h4>
         {description ? (
-          <p className="mt-0.5 text-xs leading-5 text-muted-foreground" id={descriptionId}>
+          <p className="mt-0.5 t-meta text-muted-foreground" id={descriptionId}>
             {description}
           </p>
         ) : null}
@@ -928,9 +928,9 @@ function SettingsRowBlock({
 }) {
   return (
     <div className="px-4 py-3.5">
-      <h4 className="text-sm font-medium text-foreground">{title}</h4>
+      <h4 className="t-card text-foreground">{title}</h4>
       {description ? (
-        <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{description}</p>
+        <p className="mt-0.5 t-meta text-muted-foreground">{description}</p>
       ) : null}
       <div className="mt-3">{children}</div>
     </div>
@@ -974,7 +974,7 @@ function SettingsSegmented<T extends string>({
             onClick={() => onChange(option.value)}
             type="button"
           >
-            {Icon ? <Icon className="size-4 shrink-0" /> : null}
+            {Icon ? <Icon className="icon-md shrink-0" /> : null}
             <span className={cn(wrap && 'max-w-[12rem] truncate')}>{option.label}</span>
           </button>
         )
@@ -1024,9 +1024,9 @@ function SettingsLink({
       rel="noreferrer"
       target="_blank"
     >
-      <Icon className="size-3.5" />
+      <Icon className="icon-sm" />
       <span>{label}</span>
-      <ExternalLink className="size-3" />
+      <ExternalLink className="icon-xs" />
     </a>
   )
 }

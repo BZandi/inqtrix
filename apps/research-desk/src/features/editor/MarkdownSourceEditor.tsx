@@ -314,7 +314,7 @@ export function MarkdownSourceEditor({ labels, onChange, value }: MarkdownSource
   return (
     <div className="markdown-source-editor flex min-h-0 flex-1 flex-col bg-background">
       <div className="flex shrink-0 items-center justify-between border-b border-border bg-background/95 px-4 py-2">
-        <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <div className="flex items-center gap-2 t-meta-sm font-semibold uppercase tracking-wide text-muted-foreground">
           <CodeLabel />
           {labels.editor}
         </div>
@@ -414,7 +414,7 @@ function MarkdownTableEditor({
           </div>
           <div className="min-w-0">
             <div className="text-xs font-semibold text-foreground">{labels.tableEditor}</div>
-            <div className="truncate text-[11px] text-muted-foreground">
+            <div className="truncate t-meta-sm text-muted-foreground">
               {columnCount} {labels.tableColumn} · {bodyRowCount} {labels.tableRows} · {labels.tableLines}{' '}
               {selection.fromLine}-{selection.toLine}
             </div>
@@ -474,7 +474,7 @@ function MarkdownTableEditor({
         </div>
       </div>
       <div className="overflow-x-auto rounded-md border border-border bg-background shadow-[0_1px_0_color-mix(in_oklab,var(--border)_70%,transparent)]">
-        <table className="w-full table-fixed border-collapse text-left text-[13px]">
+        <table className="w-full table-fixed border-collapse text-left t-meta">
           <thead>
             <tr className="border-b border-border bg-surface/70">
               {table.rows[0]?.map((cell, columnIndex) => (
@@ -487,7 +487,7 @@ function MarkdownTableEditor({
                   scope="col"
                 >
                   <div className="border-b border-border/70 px-2 py-1.5">
-                    <span className="truncate text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    <span className="truncate t-meta-sm font-medium uppercase tracking-wide text-muted-foreground">
                       {labels.columnLabel} {columnIndex + 1}
                     </span>
                   </div>
@@ -571,7 +571,7 @@ function MarkdownTableCellTextarea({
     <textarea
       aria-label={ariaLabel}
       className={cn(
-        'block min-h-[2.125rem] w-full resize-none overflow-hidden bg-transparent px-2 py-1.5 text-[13px] leading-5 text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus:bg-brand-subtle/60',
+        'block min-h-[2.125rem] w-full resize-none overflow-hidden bg-transparent px-2 py-1.5 t-meta leading-5 text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus:bg-brand-subtle/60',
         isHeader && 'font-semibold',
       )}
       onChange={(event) => onChange(event.target.value)}

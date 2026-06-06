@@ -42,12 +42,12 @@ function PickRow({
       <TypeTile asset={asset} size="sm" />
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5">
-          <span className="font-mono text-[11px] text-muted-foreground/70">@files:</span>
-          <span className="truncate text-[13px] font-semibold text-foreground">{asset.label}</span>
+          <span className="t-mono text-muted-foreground/70">@files:</span>
+          <span className="truncate t-list text-foreground">{asset.label}</span>
         </span>
-        <span className="block truncate text-[11px] text-muted-foreground">{asset.fileName}</span>
+        <span className="block truncate t-meta-sm text-muted-foreground">{asset.fileName}</span>
       </span>
-      {member ? <span className="shrink-0 whitespace-nowrap text-[10px] font-medium text-muted-foreground">{t.vectorIndex.inIndex}</span> : null}
+      {member ? <span className="shrink-0 whitespace-nowrap t-hint font-medium text-muted-foreground">{t.vectorIndex.inIndex}</span> : null}
     </button>
   )
 }
@@ -95,7 +95,7 @@ export function AddDocsPanel({
       <div className="flex items-center justify-between gap-3 border-b border-border px-3.5 py-2.5">
         <div className="flex items-center gap-2">
           <Plus className="size-4 text-brand" />
-          <h3 className="text-sm font-semibold text-foreground">{t.vectorIndex.addDocumentsTitle}</h3>
+          <h3 className="t-section text-foreground">{t.vectorIndex.addDocumentsTitle}</h3>
         </div>
         <Button aria-label={t.fileLibrary.cancel} className="size-7" onClick={onClose} size="icon" type="button" variant="ghost">
           <X className="size-4" />
@@ -126,7 +126,7 @@ export function AddDocsPanel({
           const sectionGroups = groups.filter((group) => group.sectionId === section.id)
           return (
             <div className="mb-2" key={section.id}>
-              <div className="flex items-center gap-1.5 px-1.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <div className="flex items-center gap-1.5 px-1.5 py-1 t-caption text-muted-foreground">
                 <Folder className="size-3" />
                 {section.title}
               </div>
@@ -145,12 +145,12 @@ export function AddDocsPanel({
                 const addable = groupDocs.filter((asset) => !memberIds.has(asset.id)).map((asset) => asset.id)
                 return (
                   <div className="mt-0.5" key={group.id}>
-                    <div className="flex items-center gap-1.5 px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                    <div className="flex items-center gap-1.5 px-1.5 py-0.5 t-meta-sm text-muted-foreground">
                       <FolderOpen className="size-3 text-file" />
                       <span className="truncate">{group.title}</span>
                       {addable.length > 0 ? (
                         <button
-                          className="ml-auto shrink-0 whitespace-nowrap rounded border border-border px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+                          className="ml-auto shrink-0 whitespace-nowrap rounded border border-border px-1.5 py-0.5 t-hint font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
                           onClick={() => addAll(addable)}
                           type="button"
                         >
@@ -177,7 +177,7 @@ export function AddDocsPanel({
       </div>
 
       <div className="flex items-center justify-between gap-3 border-t border-border px-3.5 py-2.5">
-        <span className="text-xs text-muted-foreground">
+        <span className="t-meta text-muted-foreground">
           {t.vectorIndex.selectedCount.replace('{count}', String(selected.size))}
         </span>
         <div className="flex items-center gap-2">

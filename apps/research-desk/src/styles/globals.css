@@ -41,6 +41,19 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
+/* Font families live in a non-inline @theme so they are emitted as :root
+   custom properties (the inline block above is not emitted). This lets both
+   Tailwind's font-sans/font-mono utilities and the runtime var(--font-sans)/
+   var(--font-mono) references further down resolve to the same self-hosted
+   stack. Inter is bundled via @fontsource-variable/inter (imported in main.tsx)
+   so the UI renders identically regardless of locally installed fonts. */
+@theme {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", monospace;
+}
+
 :root {
   --radius: 0.5rem;
   /* Single source for the sticky Topbar height; AppRail's offset and the
@@ -277,9 +290,7 @@
   body {
     @apply bg-background text-foreground;
     margin: 0;
-    font-family:
-      Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-      "Segoe UI", sans-serif;
+    font-family: var(--font-sans);
   }
 
   html[data-contrast-mode="high"] :where(:focus, :focus-visible, :focus-within) {
@@ -289,6 +300,47 @@
 }
 
 @layer components {
+  /* Semantic design-language roles — single source of truth. Prefer these
+     over ad-hoc text-[..]/leading-[..]/size-[..] so each UI function has one
+     owner and cannot drift. Values are calibrated to the gold-standard
+     components (MentionMenu, Composer, report Markdown); editing a role here
+     changes it everywhere it is used. Living in @layer components keeps them
+     below utilities, so a one-off utility override still wins. These cover
+     plain UI text only — the Markdown renderers (.editor-prose /
+     .report-markdown / .chat-markdown and MarkdownRenderer.tsx) keep their own
+     dedicated reading scale and are intentionally NOT covered by these roles. */
+
+  /* Typography scale — there is a real size STEP between body and headings, not
+     just a weight change (a same-size heading reads as weak hierarchy). Headings
+     step display 24 > title 16 > card 14; body is 14 at line-height 1.5 (the
+     comfortable body ratio, ~matching the chat reading body). Dense tier 13/12/11
+     for lists, labels and metadata; 10 for eyebrows/hints. Calibrated to Carbon's
+     productive type set (heading-compact 14/16, body 14). Editing a role here
+     changes it everywhere; the Markdown renderers keep their own reading scale. */
+  .t-display { @apply text-2xl font-semibold leading-tight; }   /* 24 — hero / empty-state */
+  .t-title { @apply text-base font-semibold leading-snug; }     /* 16 — whole-PAGE / view title only (e.g. "Prompt Library", "Datenbank", "Einstellungen") */
+  .t-section { @apply text-sm font-semibold leading-snug; }     /* 14 — section / panel / content heading ("Report", "Gespräche", "Dokumente", "Alle Dokumente") */
+  .t-card { @apply text-sm font-semibold leading-snug; }        /* 14 — card / item / row title (shares 14/600 with t-section; the name conveys intent) */
+  .t-body { @apply text-sm leading-normal; }                    /* 14 — reading text + inputs (line-height 1.5, matches chat) */
+  .t-list { @apply text-[13px] font-semibold leading-snug; }    /* 13 — dense list / nav / menu primary label */
+  .t-label { @apply text-xs font-semibold; }                    /* 12 — form / control labels, group headers */
+  .t-meta { @apply text-xs; }                                   /* 12 — subtitle / metadata / helper */
+  .t-meta-sm { @apply text-[11px]; }                            /* 11 — dense subtitle / file metadata */
+  .t-caption { @apply text-[10px] font-semibold uppercase tracking-wide; } /* 10 — eyebrows (UPPERCASE) */
+  .t-hint { @apply text-[10px]; }                               /* 10 — counts, timestamps, keyboard legends (non-uppercase) */
+  .t-mono { @apply font-mono text-[11px] font-medium tabular-nums; }       /* 11 — IDs, URLs, numbers */
+
+  /* Icon sizes — 3 tiers, one role per size, so the same function never renders
+     two sizes. (The Button component already forces size-4 on its svg.) */
+  .icon-md { @apply size-4; }     /* 16 — nav rail, toolbars, button glyphs, tone tiles */
+  .icon-sm { @apply size-3.5; }   /* 14 — chat-input footer, file/list leading icons, inline/secondary actions, dense metadata */
+  .icon-xs { @apply size-3; }     /* 12 — status dots, micro affordances */
+
+  /* Surface tiers (applied during component migration, kept here as the
+     reference): radius — controls/inputs rounded-md, cards/panels rounded-lg,
+     overlays/composer rounded-xl. Shadow — cards shadow-[0_1px_2px_var(--shadow-hairline)],
+     floating shadow-[0_8px_28px_-12px_var(--shadow-soft)], menus shadow-lg. */
+
   .chat-markdown pre[data-theme*=" "],
   .chat-markdown code[data-theme*=" "],
   .chat-markdown code[data-theme*=" "] span,
@@ -563,7 +615,7 @@
     border-radius: 0.25rem;
     background: var(--muted);
     padding: 0.1rem 0.3rem;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-family: var(--font-mono);
     font-size: 0.92em;
   }
 
@@ -605,7 +657,7 @@
     padding: 0.375rem 0.625rem;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-family: var(--font-mono);
     font-size: 0.6875rem;
     font-weight: 500;
     line-height: 1rem;
@@ -637,7 +689,7 @@
   .editor-prose .tiptap-mathematics-render.block-math-error {
     background: var(--destructive-subtle);
     color: var(--destructive);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-family: var(--font-mono);
     font-size: 0.92em;
     padding: 0.1rem 0.3rem;
   }

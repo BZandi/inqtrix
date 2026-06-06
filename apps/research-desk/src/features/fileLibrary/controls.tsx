@@ -110,7 +110,7 @@ export function TypeTile({ asset, size = 'md' }: { asset: FileAssetRecord; size?
 
 export function TypeBadge({ asset }: { asset: FileAssetRecord }) {
   return (
-    <span className="inline-flex h-5 items-center rounded border border-border bg-surface px-1.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+    <span className="inline-flex h-5 items-center rounded border border-border bg-surface px-1.5 font-mono t-caption font-semibold text-muted-foreground">
       {typeMeta(asset).label}
     </span>
   )
@@ -160,7 +160,7 @@ export function ConfirmDelete({
         {label ? (
           <Button
             aria-label={ariaLabel}
-            className="h-9 gap-1.5 text-muted-foreground hover:text-destructive"
+            className="gap-1.5 text-muted-foreground hover:text-destructive"
             size="sm"
             type="button"
             variant="outline"
@@ -256,7 +256,7 @@ export function SortSelect({ onChange, value }: { onChange: (value: SortMode) =>
       <ArrowUpDown className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
       <select
         aria-label={t.fileLibrary.sortRecent}
-        className="h-9 cursor-pointer appearance-none rounded-md border border-border bg-background pl-7 pr-7 text-xs font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="h-8 cursor-pointer appearance-none rounded-md border border-border bg-background pl-7 pr-7 text-xs font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
         onChange={(event) => onChange(event.target.value as SortMode)}
         value={value}
       >
@@ -277,7 +277,7 @@ export function ViewToggle({ onChange, value }: { onChange: (value: ViewMode) =>
     { icon: LayoutGrid, label: t.fileLibrary.viewGrid, value: 'grid' },
   ]
   return (
-    <div className="inline-flex h-9 items-center rounded-md border border-border bg-surface p-0.5">
+    <div className="inline-flex h-8 items-center rounded-md border border-border bg-surface p-0.5">
       {options.map((option) => {
         const Icon = option.icon
         const active = option.value === value
@@ -288,7 +288,7 @@ export function ViewToggle({ onChange, value }: { onChange: (value: ViewMode) =>
                 aria-label={option.label}
                 aria-pressed={active}
                 className={cn(
-                  'grid size-8 place-items-center rounded-[6px] transition-colors',
+                  'grid size-7 place-items-center rounded-[6px] transition-colors',
                   active
                     ? 'bg-background text-foreground shadow-[0_1px_2px_var(--shadow-hairline)]'
                     : 'text-muted-foreground hover:text-foreground',

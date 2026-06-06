@@ -1,4 +1,5 @@
 import { ChevronLeft, ChevronRight, type LucideIcon } from '@/components/icons'
+import { Kbd } from '@/components/ui/kbd'
 import { cn } from '@/lib/utils'
 import { toneBar, toneChip, toneText, type MentionTone } from '@/lib/tone'
 
@@ -33,9 +34,6 @@ export type MentionMenuLabels = {
   closeHint: string
   backHint: string
 }
-
-const kbd =
-  'inline-flex h-4 min-w-4 items-center justify-center rounded border border-border bg-surface px-1 text-[10px] font-sans text-muted-foreground'
 
 /**
  * Presentation-only mention popover shared by every `@`-autocomplete surface
@@ -145,7 +143,7 @@ export function MentionMenu({
                   {option.isCategory ? (
                     <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/40" />
                   ) : active ? (
-                    <kbd className={kbd}>↵</kbd>
+                    <Kbd>↵</Kbd>
                   ) : null}
                 </button>
               )
@@ -156,22 +154,22 @@ export function MentionMenu({
 
       <div className="flex items-center gap-3 border-t border-border bg-surface/40 px-2.5 py-1.5 text-[10px] text-muted-foreground/70">
         <span className="inline-flex items-center gap-1">
-          <kbd className={kbd}>↑</kbd>
-          <kbd className={kbd}>↓</kbd>
+          <Kbd>↑</Kbd>
+          <Kbd>↓</Kbd>
           {labels.navHint}
         </span>
         <span className="inline-flex items-center gap-1">
-          <kbd className={kbd}>↵</kbd>
+          <Kbd>↵</Kbd>
           {labels.selectHint}
         </span>
         {canGoBack ? (
           <span className="inline-flex items-center gap-1">
-            <kbd className={kbd}>⌫</kbd>
+            <Kbd>⌫</Kbd>
             {labels.backHint}
           </span>
         ) : null}
         <span className="ml-auto inline-flex items-center gap-1">
-          <kbd className={kbd}>Esc</kbd>
+          <Kbd>Esc</Kbd>
           {labels.closeHint}
         </span>
       </div>

@@ -326,8 +326,8 @@ export function PromptLibraryWorkspace({
                 <Library className="size-4" />
               </span>
               <div className="min-w-0">
-                <h1 className="truncate text-base font-semibold text-foreground">{t.promptLibrary.title}</h1>
-                <p className="truncate text-xs text-muted-foreground">{t.promptLibrary.subtitle}</p>
+                <h1 className="t-title truncate text-foreground">{t.promptLibrary.title}</h1>
+                <p className="t-meta truncate text-muted-foreground">{t.promptLibrary.subtitle}</p>
               </div>
             </div>
             <Button aria-label={t.promptLibrary.newPrompt} className="size-8" onClick={() => guardedLoad(null)} size="icon" type="button" variant="outline">
@@ -337,7 +337,7 @@ export function PromptLibraryWorkspace({
           <label className="mt-3 flex items-center gap-2 rounded-md border border-border bg-background px-2 focus-within:ring-2 focus-within:ring-ring">
             <Search className="size-4 shrink-0 text-muted-foreground" />
             <input
-              className="min-w-0 flex-1 border-0 bg-transparent py-2 text-sm text-foreground outline-none"
+              className="min-w-0 flex-1 border-0 bg-transparent py-1.5 text-sm text-foreground outline-none"
               onChange={(event) => setQuery(event.target.value)}
               placeholder={t.promptLibrary.searchPlaceholder}
               value={query}
@@ -406,7 +406,7 @@ export function PromptLibraryWorkspace({
           <div className="space-y-3 p-2">
             {groupedRules.length > 0 ? groupedRules.map((group) => (
               <div key={group.category}>
-                <div className="mb-1.5 flex items-center gap-2 px-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                <div className="t-caption mb-1.5 flex items-center gap-2 px-2 text-muted-foreground">
                   <span className={cn('size-1.5 shrink-0 rounded-full', toneBar[categoryToTone[group.category]])} />
                   <span>{categoryLabel(group.category, t)}</span>
                   <span className="ml-auto shrink-0 tabular-nums text-muted-foreground/60">{group.rules.length}</span>
@@ -423,7 +423,7 @@ export function PromptLibraryWorkspace({
                 </div>
               </div>
             )) : (
-              <div className="rounded-md border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
+              <div className="t-meta rounded-md border border-dashed border-border p-4 text-center text-muted-foreground">
                 {t.promptLibrary.noPrompts}
               </div>
             )}
@@ -436,11 +436,11 @@ export function PromptLibraryWorkspace({
           <section className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
               <div className="min-w-0">
-                <h2 className="truncate text-sm font-semibold text-foreground">
+                <h2 className="t-section truncate text-foreground">
                   {selectedRule ? selectedRule.title : t.promptLibrary.newPrompt}
                 </h2>
                 {draft.isDirty ? (
-                  <p className="text-xs font-medium text-warning">{t.promptLibrary.unsaved}</p>
+                  <p className="t-meta text-warning">{t.promptLibrary.unsaved}</p>
                 ) : null}
               </div>
               <div className="flex shrink-0 items-center gap-2">
@@ -448,13 +448,19 @@ export function PromptLibraryWorkspace({
                   className="gap-1.5 text-destructive hover:text-destructive"
                   disabled={!selectedRule}
                   onClick={deletePrompt}
+                  size="sm"
                   type="button"
                   variant="ghost"
                 >
                   <Trash2 className="size-4" />
                   {t.promptLibrary.deletePrompt}
                 </Button>
-                <Button className="gap-1.5" onClick={savePrompt} type="button">
+                <Button
+                  className="gap-1.5 bg-brand text-brand-foreground hover:bg-brand/90"
+                  onClick={savePrompt}
+                  size="sm"
+                  type="button"
+                >
                   <Save className="size-4" />
                   {t.promptLibrary.savePrompt}
                 </Button>
@@ -466,7 +472,7 @@ export function PromptLibraryWorkspace({
             <div className="space-y-4">
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="block space-y-1.5">
-                  <span className="text-xs font-semibold text-muted-foreground">{t.promptLibrary.labelLabel}</span>
+                  <span className="t-label text-muted-foreground">{t.promptLibrary.labelLabel}</span>
                   <div className="flex items-center rounded-md border border-border bg-background px-2 focus-within:ring-2 focus-within:ring-ring">
                     <span className="text-sm font-semibold text-muted-foreground">@rules:</span>
                     <input
@@ -479,7 +485,7 @@ export function PromptLibraryWorkspace({
                   </div>
                 </label>
                 <label className="block space-y-1.5">
-                  <span className="text-xs font-semibold text-muted-foreground">{t.promptLibrary.titleLabel}</span>
+                  <span className="t-label text-muted-foreground">{t.promptLibrary.titleLabel}</span>
                   <input
                     className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     onChange={(event) => updateDraft({ title: event.target.value })}
@@ -490,7 +496,7 @@ export function PromptLibraryWorkspace({
               </div>
 
               <div className="space-y-1.5">
-                <span className="text-xs font-semibold text-muted-foreground">{t.promptLibrary.categoryLabel}</span>
+                <span className="t-label text-muted-foreground">{t.promptLibrary.categoryLabel}</span>
                 <div className="grid gap-2 sm:grid-cols-3">
                   {chatRuleCategories.map((category) => {
                     const Icon = categoryIcon(category)
@@ -509,8 +515,8 @@ export function PromptLibraryWorkspace({
                       >
                         <Icon className={cn('mt-0.5 size-4 shrink-0', active ? toneText[tone] : 'text-muted-foreground')} />
                         <span className="min-w-0">
-                          <span className="block truncate text-sm font-semibold">{categoryLabel(category, t)}</span>
-                          <span className="block truncate text-[11px] font-medium text-muted-foreground">
+                          <span className="t-list block truncate">{categoryLabel(category, t)}</span>
+                          <span className="t-meta-sm block truncate text-muted-foreground">
                             {categoryHint(category, t)}
                           </span>
                         </span>
@@ -529,13 +535,13 @@ export function PromptLibraryWorkspace({
                 )}>
                   <div className="overflow-hidden rounded-md border border-border bg-background shadow-[0_1px_2px_var(--shadow-hairline)] focus-within:border-brand/40 focus-within:ring-2 focus-within:ring-brand/15">
                     <div className="flex items-center gap-2 border-b border-border bg-surface/50 px-3 py-1.5">
-                      <span className="text-xs font-semibold text-muted-foreground">{t.promptLibrary.promptLabel}</span>
+                      <span className="t-label text-muted-foreground">{t.promptLibrary.promptLabel}</span>
                       {draft.category === 'context' ? (
-                        <span className="inline-flex items-center gap-1 rounded border border-warning/25 bg-warning-subtle/60 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-warning">
+                        <span className="t-mono inline-flex items-center gap-1 rounded border border-warning/25 bg-warning-subtle/60 px-1.5 py-0.5 text-warning">
                           {contextPackPlaceholder}
                         </span>
                       ) : null}
-                      <span className="ml-auto shrink-0 tabular-nums text-[11px] text-muted-foreground/70">
+                      <span className="t-hint ml-auto shrink-0 tabular-nums text-muted-foreground/70">
                         {t.promptLibrary.charCount.replace('{count}', draft.contentMarkdown.length.toLocaleString(locale))}
                       </span>
                       <TextImproveButton
@@ -550,7 +556,7 @@ export function PromptLibraryWorkspace({
                     <div className="relative min-w-0">
                       <Textarea
                         aria-label={t.promptLibrary.promptLabel}
-                        className="min-h-[23rem] resize-y rounded-none border-0 bg-transparent text-sm leading-6 shadow-none focus-visible:ring-0 [scrollbar-width:thin]"
+                        className="t-body min-h-[23rem] resize-y rounded-none border-0 bg-transparent shadow-none focus-visible:ring-0 [scrollbar-width:thin]"
                         id="prompt-library-prompt"
                         onChange={(event) => updateDraft({ contentMarkdown: event.target.value })}
                         placeholder={draft.category === 'context'
@@ -590,12 +596,12 @@ export function PromptLibraryWorkspace({
                   ) : null}
                 </div>
                 {promptImproveError ? (
-                  <p className="text-xs font-medium text-warning">{promptImproveError}</p>
+                  <p className="t-meta text-warning">{promptImproveError}</p>
                 ) : null}
               </div>
             </div>
             {draft.error ? (
-              <p className="pt-3 text-xs font-medium text-warning">{draft.error}</p>
+              <p className="t-meta pt-3 text-warning">{draft.error}</p>
             ) : null}
           </section>
         </div>
@@ -638,7 +644,7 @@ function PromptUsageHint({ draft }: { draft: PromptDraft }) {
       <span className={cn('mt-0.5 grid size-7 shrink-0 place-items-center rounded-md', toneIconTile[tone])}>
         <Icon className="size-4" />
       </span>
-      <div className="min-w-0 text-xs leading-5 text-muted-foreground">
+      <div className="t-body min-w-0 text-muted-foreground">
         <p>
           <span className="font-semibold text-foreground">{categoryLabel(draft.category, t)}: </span>
           {usage}
@@ -664,9 +670,9 @@ function VisibilityPanel({
   return (
     <section className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 rounded-md border border-border bg-surface/45 px-3 py-2">
       <div className="min-w-0">
-        <span className="text-xs font-semibold text-foreground">{t.promptLibrary.visibilityLabel}</span>
+        <span className="t-label text-foreground">{t.promptLibrary.visibilityLabel}</span>
         {hidden ? (
-          <span className="ml-2 inline-flex items-center gap-1 align-middle text-[11px] font-medium text-destructive/80">
+          <span className="t-meta-sm ml-2 inline-flex items-center gap-1 align-middle text-destructive/80">
             <EyeOff className="size-3" />
             {t.promptLibrary.hiddenEverywhere}
           </span>
@@ -760,12 +766,12 @@ function ContextPackPanel({
     <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-md border border-border bg-surface/35">
       <div className="border-b border-border/60 px-3 py-2.5">
         <div className="flex items-center justify-between gap-2">
-          <h3 className="text-xs font-semibold text-foreground">{t.promptLibrary.contextLabel}</h3>
-          <Badge className="h-5 rounded-full border-border/70 bg-background px-1.5 text-[10px]" variant="outline">
+          <h3 className="t-label text-foreground">{t.promptLibrary.contextLabel}</h3>
+          <Badge className="t-hint h-5 rounded-full border-border/70 bg-background px-1.5" variant="outline">
             {draft.linkedContextRefs.length}
           </Badge>
         </div>
-        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+        <p className="t-meta-sm mt-1 text-muted-foreground">
           {t.promptLibrary.contextPickerHint}
         </p>
       </div>
@@ -782,8 +788,8 @@ function ContextPackPanel({
                 >
                   <Icon className="size-4 shrink-0 text-muted-foreground" />
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-xs font-semibold text-foreground">{chip.label}</span>
-                    <span className="block truncate text-[11px] text-muted-foreground">{chip.title}</span>
+                    <span className="t-label block truncate text-foreground">{chip.label}</span>
+                    <span className="t-meta-sm block truncate text-muted-foreground">{chip.title}</span>
                   </span>
                   <button
                     aria-label={t.promptLibrary.removeContext}
@@ -798,7 +804,7 @@ function ContextPackPanel({
             })}
           </div>
         ) : (
-          <p className="rounded-md bg-background/55 px-2.5 py-2 text-xs text-muted-foreground">
+          <p className="t-meta rounded-md bg-background/55 px-2.5 py-2 text-muted-foreground">
             {t.promptLibrary.noContextSelected}
           </p>
         )}
@@ -823,17 +829,17 @@ function ContextPackPanel({
             />
           ))}
           {contextOptions.length === 0 ? (
-            <p className="rounded-md bg-background/45 px-2.5 py-2 text-xs text-muted-foreground">
+            <p className="t-meta rounded-md bg-background/45 px-2.5 py-2 text-muted-foreground">
               {t.promptLibrary.noContextFiles}
             </p>
           ) : null}
           {contextOptions.length > 0 && visibleOptions.length === 0 ? (
-            <p className="rounded-md bg-background/45 px-2.5 py-2 text-xs text-muted-foreground">
+            <p className="t-meta rounded-md bg-background/45 px-2.5 py-2 text-muted-foreground">
               {t.promptLibrary.noContextMatches}
             </p>
           ) : null}
           {matchingOptions.length > visibleOptions.length ? (
-            <p className="px-1 text-[11px] text-muted-foreground">
+            <p className="t-meta-sm px-1 text-muted-foreground">
               {t.promptLibrary.contextResultsLimited.replace('{count}', String(visibleOptions.length))}
             </p>
           ) : null}
@@ -870,8 +876,8 @@ function ContextOptionButton({
     >
       <Icon className="size-4 shrink-0 text-muted-foreground" />
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-xs font-semibold">{option.label}</span>
-        <span className="block truncate text-[11px] text-muted-foreground">{option.title}</span>
+        <span className="t-label block truncate">{option.label}</span>
+        <span className="t-meta-sm block truncate text-muted-foreground">{option.title}</span>
       </span>
       {isSelected ? <Check className="size-4 shrink-0" /> : null}
     </button>
@@ -912,19 +918,19 @@ function PromptListItem({
     >
       <span className="flex min-w-0 items-center gap-2">
         <span className={cn(
-          'min-w-0 flex-1 truncate text-[13px] font-medium',
+          't-list min-w-0 flex-1 truncate',
           isSelected ? 'text-foreground' : 'text-foreground/90',
         )}>
           {normalized.title}
         </span>
         <Badge className={cn(
-          'h-5 shrink-0 rounded px-1.5 text-[9px] font-semibold uppercase tracking-wide',
+          'h-5 shrink-0 rounded px-1.5 t-caption font-semibold uppercase tracking-wide',
           hidden ? 'border-muted-foreground/20 bg-muted text-muted-foreground' : toneBadge[tone],
         )} variant="outline">
           {categoryLabelShort(category, t)}
         </Badge>
       </span>
-      <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+      <span className="t-meta-sm flex min-w-0 items-center gap-1.5 text-muted-foreground">
         {hidden ? (
           <span className="min-w-0 truncate">
             <span className="font-mono">@rules:{normalized.label}</span>{' '}
@@ -968,12 +974,12 @@ function RenderedPreviewModal({
       >
         <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
           <div className="min-w-0">
-            <h2 className="truncate text-sm font-semibold text-foreground">{title}</h2>
-            <p className="text-xs text-muted-foreground">{t.promptLibrary.previewHint}</p>
+            <h2 className="t-section truncate text-foreground">{title}</h2>
+            <p className="t-meta text-muted-foreground">{t.promptLibrary.previewHint}</p>
           </div>
           <button
             aria-label={t.common.close}
-            className="grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+            className="grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
             onClick={onClose}
             type="button"
           >
@@ -1017,8 +1023,8 @@ function UnsavedGuardModal({
             <AlertTriangle className="size-4" />
           </span>
           <div className="min-w-0">
-            <h2 className="text-sm font-semibold text-foreground">{t.promptLibrary.discardTitle}</h2>
-            <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{t.promptLibrary.discardBody}</p>
+            <h2 className="t-section text-foreground">{t.promptLibrary.discardTitle}</h2>
+            <p className="t-meta mt-0.5 text-muted-foreground">{t.promptLibrary.discardBody}</p>
           </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 px-4 py-3">
@@ -1033,7 +1039,12 @@ function UnsavedGuardModal({
           >
             {t.promptLibrary.discard}
           </Button>
-          <Button className="gap-1.5" onClick={onSave} type="button">
+          <Button
+            className="gap-1.5 bg-brand text-brand-foreground hover:bg-brand/90"
+            onClick={onSave}
+            size="sm"
+            type="button"
+          >
             <Save className="size-4" />
             {t.promptLibrary.savePrompt}
           </Button>

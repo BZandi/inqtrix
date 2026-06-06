@@ -84,23 +84,23 @@ function BandHeader({
       {band.isGroup ? (
         <InlineText
           ariaLabel={t.fileLibrary.renameGroup}
-          className="text-[13px] font-semibold text-foreground"
+          className="t-list text-foreground"
           onCommit={(title) => onRenameGroup(band.groupId as string, title)}
           value={band.title}
         />
       ) : onNavigate ? (
-        <button className="inline-flex items-center gap-1 rounded-sm px-1 text-[13px] font-semibold text-foreground hover:bg-accent/60" onClick={onNavigate} type="button">
+        <button className="inline-flex items-center gap-1 rounded-sm px-1 t-list text-foreground hover:bg-accent/60" onClick={onNavigate} type="button">
           {band.title}
           <ChevronRight className="size-3 text-muted-foreground" />
         </button>
       ) : (
-        <span className="text-[13px] font-semibold text-foreground">{band.title}</span>
+        <span className="t-list text-foreground">{band.title}</span>
       )}
-      <span className="shrink-0 rounded-full border border-border px-1.5 text-[10px] font-semibold leading-[18px] tabular-nums text-muted-foreground">{band.count}</span>
+      <span className="shrink-0 rounded-full border border-border px-1.5 t-hint font-semibold leading-4 tabular-nums text-muted-foreground">{band.count}</span>
       {band.isGroup ? (
         <Tooltip>
           <TooltipTrigger asChild>
-            <span className="hidden shrink-0 cursor-help items-center gap-1 rounded border border-border bg-surface px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground sm:inline-flex">
+            <span className="hidden shrink-0 cursor-help items-center gap-1 rounded border border-border bg-surface px-1.5 py-0.5 font-mono t-hint text-muted-foreground sm:inline-flex">
               @filegroups:{groupSlug(band.title)}
             </span>
           </TooltipTrigger>
@@ -380,7 +380,7 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
       <div className="flex min-h-0 min-w-0 flex-col">
         <header className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border px-4 py-3 md:px-6">
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <div className="flex items-center gap-1.5 t-meta text-muted-foreground">
               <span>{crumbRoot}</span>
               <ChevronRight className="size-3" />
               <span className="truncate text-foreground">{headerTitle}</span>
@@ -388,19 +388,19 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
             {active.kind === 'collection' && activeCollection ? (
               <InlineText
                 ariaLabel={t.fileLibrary.renameCollection}
-                className="mt-0.5 text-base font-semibold text-foreground"
+                className="mt-0.5 t-section text-foreground"
                 onCommit={(title) => dispatch({ sectionId: activeCollection.id, title, type: 'renameFileLibrarySection' })}
                 value={activeCollection.title}
               />
             ) : (
-              <h1 className="mt-0.5 truncate text-base font-semibold text-foreground">{headerTitle}</h1>
+              <h1 className="mt-0.5 truncate t-section text-foreground">{headerTitle}</h1>
             )}
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
             <ViewToggle onChange={setView} value={view} />
             <SortSelect onChange={setSort} value={sort} />
             {active.kind === 'index' && activeIndex ? (
-              <Button className="h-9 gap-1.5 bg-brand text-brand-foreground hover:bg-brand/90" onClick={() => setPickerIndexId(activeIndex.id)} size="sm" type="button">
+              <Button className="gap-1.5 bg-brand text-brand-foreground hover:bg-brand/90" onClick={() => setPickerIndexId(activeIndex.id)} size="sm" type="button">
                 <Plus className="size-4" />
                 {t.vectorIndex.addDocuments}
               </Button>
@@ -409,7 +409,7 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
                 {active.kind === 'collection' && activeCollection ? (
                   <>
                     <Button
-                      className="h-9 gap-1.5"
+                      className="gap-1.5"
                       onClick={() => dispatch({ sectionId: activeCollection.id, title: t.fileLibrary.newGroupTitle, type: 'createFileGroup' })}
                       size="sm"
                       type="button"
@@ -429,7 +429,7 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
                   </>
                 ) : null}
                 <Button
-                  className="h-9 gap-1.5 bg-brand text-brand-foreground hover:bg-brand/90"
+                  className="gap-1.5 bg-brand text-brand-foreground hover:bg-brand/90"
                   onClick={() =>
                     openUpload(
                       active.kind === 'collection'

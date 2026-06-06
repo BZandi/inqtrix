@@ -301,7 +301,7 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
                 className={cn(
                   'size-7 shrink-0 rounded-md',
                   canSubmit
-                    ? 'bg-brand text-white hover:bg-brand/90 hover:text-white'
+                    ? 'bg-brand text-brand-foreground hover:bg-brand/90 hover:text-brand-foreground'
                     : 'text-muted-foreground/45',
                 )}
                 disabled={!canSubmit}

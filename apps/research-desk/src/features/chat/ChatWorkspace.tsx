@@ -533,7 +533,7 @@ export default function ChatWorkspace({
                   {isEditingTitle && selectedThread ? (
                     <input
                       aria-label={t.chat.renameTitle}
-                      className="min-w-0 flex-1 rounded-sm border-0 bg-transparent px-0 text-sm font-semibold text-foreground outline-none focus-visible:ring-0"
+                      className="min-w-0 flex-1 rounded-sm border-0 bg-transparent px-0 t-section text-foreground outline-none focus-visible:ring-0"
                       onBlur={commitTitleEdit}
                       onChange={(event) => setTitleDraft(event.target.value)}
                       onKeyDown={(event) => {
@@ -552,7 +552,7 @@ export default function ChatWorkspace({
                     />
                   ) : (
                     <button
-                      className="min-w-0 flex-1 truncate rounded-sm text-left text-sm font-semibold text-foreground hover:text-brand focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      className="min-w-0 flex-1 truncate rounded-sm text-left t-section text-foreground hover:text-brand focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                       onClick={() => selectedThread && setIsEditingTitle(true)}
                       title={selectedThread ? t.chat.renameTitle : undefined}
                       type="button"
@@ -571,7 +571,7 @@ export default function ChatWorkspace({
                   )}
                 </div>
                 <p
-                  className="max-w-md truncate text-[11px] leading-4 text-muted-foreground"
+                  className="max-w-md truncate t-meta-sm text-muted-foreground"
                   title={selectedThread ? selectedThread.preview : undefined}
                 >
                   {selectedThread ? selectedThread.preview : t.chat.empty}
@@ -780,7 +780,7 @@ export default function ChatWorkspace({
               <Dropzone disabled={isSending} label={t.chat.dropFiles} onFiles={onAttachFiles}>
               <div className="relative overflow-visible rounded-xl border border-border bg-card px-2.5 py-2 shadow-[0_8px_28px_-12px_var(--shadow-soft)] transition-[border-color,box-shadow] duration-150 focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/15">
                 {attachmentBudgetNotice && (
-                  <div className="mb-2 flex items-center gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-2 py-1 text-[11px] font-medium text-warning">
+                  <div className="mb-2 flex items-center gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-2 py-1 t-meta-sm font-medium text-warning">
                     <AlertTriangle className="size-3.5 shrink-0" />
                     <span className="min-w-0">{attachmentBudgetNotice}</span>
                   </div>
@@ -1014,7 +1014,7 @@ export default function ChatWorkspace({
                         className={cn(
                           'size-7 rounded-md focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0',
                           canSend
-                            ? 'bg-brand text-white hover:bg-brand/90 hover:text-white'
+                            ? 'bg-brand text-brand-foreground hover:bg-brand/90 hover:text-brand-foreground'
                             : 'text-muted-foreground/45',
                         )}
                         disabled={!canSend}
@@ -1032,17 +1032,17 @@ export default function ChatWorkspace({
               {(requestError || requestNotice || composerNotice) && (
                 <div className="mt-1 flex min-h-6 flex-wrap items-center justify-end gap-2 border-t border-border/70 pt-1.5">
                   {requestError && (
-                    <span className="min-w-0 truncate text-[11px] font-medium text-destructive">
+                    <span className="min-w-0 truncate t-meta-sm font-medium text-destructive">
                       {requestError}
                     </span>
                   )}
                   {!requestError && requestNotice && (
-                    <span className="min-w-0 truncate text-[11px] font-medium text-warning">
+                    <span className="min-w-0 truncate t-meta-sm font-medium text-warning">
                       {requestNotice}
                     </span>
                   )}
                   {!requestError && !requestNotice && composerNotice && (
-                    <span className="min-w-0 truncate text-[11px] font-medium text-warning">
+                    <span className="min-w-0 truncate t-meta-sm font-medium text-warning">
                       {composerNotice}
                     </span>
                   )}
@@ -1152,7 +1152,7 @@ function ChatModelPicker({
         <Button
           aria-label={t.chat.modelPicker}
           className={cn(
-            'h-7 min-w-0 max-w-[min(48vw,17rem)] shrink rounded-md px-1.5 text-[11px] font-semibold text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0',
+            'h-7 min-w-0 max-w-[min(48vw,17rem)] shrink rounded-md px-1.5 text-xs font-semibold text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0',
             'data-[state=open]:bg-accent data-[state=open]:text-foreground',
           )}
           disabled={disabled}
@@ -1284,7 +1284,7 @@ function ChatMessageModelChip({
   const label = `${modelNameLabel(modelResolution, t.chat.modelUnknown)} · ${effortLabelFromToken(modelResolution.effort, t)}`
   return (
     <span
-      className="max-w-[min(42vw,16rem)] truncate rounded-md bg-muted/60 px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground"
+      className="max-w-[min(42vw,16rem)] truncate rounded-md bg-muted/60 px-1.5 py-0.5 t-hint font-semibold text-muted-foreground"
       title={label}
     >
       {label}
@@ -1331,10 +1331,10 @@ function EmptyChatState({
         <div className="flex size-14 items-center justify-center rounded-2xl border border-brand/15 bg-brand-subtle shadow-[0_12px_32px_var(--shadow-soft)]">
           <BrandMark className="size-8" />
         </div>
-        <h2 className="mt-5 text-2xl font-semibold tracking-tight text-foreground">
+        <h2 className="mt-5 t-display tracking-tight text-foreground">
           {title}
         </h2>
-        <p className="mt-2 max-w-sm text-sm leading-6 text-muted-foreground">
+        <p className="mt-2 max-w-sm t-body text-muted-foreground">
           {renderMentionHint(subtitle)}
         </p>
       </div>
@@ -1432,7 +1432,7 @@ function ChatMessageBubble({
             <Icon className="size-4" />
           </span>
           <div className="min-w-0" aria-live={isStreaming ? 'polite' : undefined}>
-            <div className="mb-1 flex items-center gap-2 text-[11px] font-semibold text-muted-foreground">
+            <div className="mb-1 flex items-center gap-2 t-meta-sm font-semibold text-muted-foreground">
               <span>{t.chat.assistant}</span>
               <ChatMessageModelChip modelResolution={message.modelResolution} />
               <span>{formatTime(message.createdAt)}</span>
@@ -1462,7 +1462,7 @@ function ChatMessageBubble({
             {message.contentMarkdown ? (
               <div
                 className={cn(
-                  'chat-markdown max-w-4xl text-sm leading-[1.42] text-foreground',
+                  'chat-markdown max-w-4xl text-sm leading-snug text-foreground',
                   isStreaming && !reduceMotion && 'animate-in fade-in-0 duration-200',
                 )}
               >
@@ -1503,7 +1503,7 @@ function ChatMessageBubble({
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 justify-end">
             <div className="min-w-0 max-w-[min(72%,44rem)]">
-              <div className="mb-1 flex items-center justify-end gap-2 text-[11px] font-semibold text-muted-foreground">
+              <div className="mb-1 flex items-center justify-end gap-2 t-meta-sm font-semibold text-muted-foreground">
                 {!isSelectionMode && (
                   <>
                     <MessageActionButton
@@ -1571,7 +1571,7 @@ function MessageSelectionPill({
   return (
     <span
       className={cn(
-        'rounded-full border border-border bg-background px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground',
+        'rounded-full border border-border bg-background px-1.5 py-0.5 t-hint font-semibold text-muted-foreground',
         isSelected && 'border-brand/30 bg-brand-subtle text-brand',
       )}
     >
@@ -1733,7 +1733,7 @@ function ChatChainTrace({ steps }: { steps: ChatChainStepRecord[] }) {
     <div className="mb-2 max-w-4xl rounded-md border border-border/70 bg-surface/60">
       <button
         aria-expanded={expanded}
-        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] font-semibold text-muted-foreground transition hover:text-foreground"
+        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left t-meta-sm font-semibold text-muted-foreground transition hover:text-foreground"
         onClick={() => setExpanded((value) => !value)}
         type="button"
       >
@@ -1755,7 +1755,7 @@ function ChatChainTrace({ steps }: { steps: ChatChainStepRecord[] }) {
               <div className="border-b border-border/40 py-1 last:border-0" key={index}>
                 <button
                   className={cn(
-                    'flex w-full items-center gap-1.5 text-left text-[11px] font-medium transition',
+                    'flex w-full items-center gap-1.5 text-left t-meta-sm font-medium transition',
                     step.status === 'error'
                       ? 'text-destructive'
                       : step.status === 'stopped'
@@ -1769,7 +1769,7 @@ function ChatChainTrace({ steps }: { steps: ChatChainStepRecord[] }) {
                   <span className="min-w-0 flex-1 truncate">{label}</span>
                 </button>
                 {open && (
-                  <div className="chat-markdown mt-1 max-w-full pl-4 text-xs leading-[1.4] text-foreground/90">
+                  <div className="chat-markdown mt-1 max-w-full pl-4 text-xs leading-snug text-foreground/90">
                     <MarkdownRenderer markdown={step.output} variant="chat" />
                   </div>
                 )}
@@ -1798,7 +1798,7 @@ function GeneratingPlaceholder({ reduceMotion }: { reduceMotion: boolean | null 
         <span className="inqtrix-thinking-node" />
         <span className="inqtrix-thinking-node" />
       </span>
-      <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground/80">
+      <span className="t-caption tracking-[0.14em] text-muted-foreground/80">
         {t.chat.thinking}
       </span>
     </div>
@@ -1834,7 +1834,7 @@ function ChatMessageAttachments({
             <Icon className="size-3.5 shrink-0" />
             <span className="min-w-0 truncate">{chip.label}</span>
             {chip.fileCount !== null && (
-              <span className="shrink-0 text-[10px] font-bold tabular-nums opacity-75">{chip.fileCount}</span>
+              <span className="shrink-0 t-hint font-bold tabular-nums opacity-75">{chip.fileCount}</span>
             )}
           </span>
         )

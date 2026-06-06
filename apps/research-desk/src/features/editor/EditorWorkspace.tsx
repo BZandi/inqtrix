@@ -60,6 +60,7 @@ import {
 } from '@/components/icons'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Chip } from '@/components/ui/chip'
 import { PanelRail } from '@/components/ui/panel-rail'
 import { ComposerIconButton } from '@/features/composer/ComposerIconButton'
 import {
@@ -882,7 +883,7 @@ function EditorFileTree({
       <div className="flex h-12 items-center justify-between border-b border-border px-3">
         <div className="flex min-w-0 items-center gap-2">
           <Folder className="size-4 text-muted-foreground" />
-          <h2 className="truncate text-sm font-semibold">{copy.documents}</h2>
+          <h2 className="t-section truncate">{copy.documents}</h2>
         </div>
         <div className="flex items-center gap-1">
           <ImportReportMenu copy={copy} dispatch={dispatch} reportOptions={reportOptions} />
@@ -943,7 +944,7 @@ function EditorFileTree({
                   {editingFolderId === folder.id ? (
                     <input
                       aria-label={copy.renameFolder}
-                      className="min-w-0 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 text-xs font-semibold text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      className="t-label min-w-0 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       onBlur={commitFolderTitleEdit}
                       onChange={(event) => setFolderTitleDraft(event.target.value)}
                       onKeyDown={(event) => {
@@ -961,7 +962,7 @@ function EditorFileTree({
                     />
                   ) : (
                     <button
-                      className="min-w-0 truncate rounded-sm px-1 py-0.5 text-left text-xs font-semibold text-foreground/75 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      className="t-label min-w-0 truncate rounded-sm px-1 py-0.5 text-left text-foreground/75 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       onDoubleClick={() => startFolderTitleEdit(folder)}
                       onClick={() => toggleFolder(folder.id)}
                       title={copy.renameFolder}
@@ -970,7 +971,7 @@ function EditorFileTree({
                       {folder.title}
                     </button>
                   )}
-                  <span className="shrink-0 rounded-sm px-1 text-[10px] font-semibold tabular-nums text-muted-foreground">
+                  <span className="t-hint shrink-0 rounded-sm px-1 tabular-nums text-muted-foreground">
                     {folderDocuments.length}
                   </span>
                   <button
@@ -1023,7 +1024,7 @@ function EditorFileTree({
                       />
                     ))}
                     {folderDocuments.length === 0 ? (
-                      <p className="rounded-md px-2 py-1.5 text-[11px] font-medium text-muted-foreground">{copy.dropIntoFolder}</p>
+                      <p className="rounded-md px-2 py-1.5 t-meta-sm font-medium text-muted-foreground">{copy.dropIntoFolder}</p>
                     ) : null}
                   </div>
                 ) : null}
@@ -1036,7 +1037,7 @@ function EditorFileTree({
               data-editor-document-section
               data-editor-folder-id="__ungrouped__"
             >
-              {hasFolders && <p className="px-1.5 py-1 text-[11px] font-semibold uppercase text-muted-foreground">{copy.documents}</p>}
+              {hasFolders && <p className="t-caption px-1.5 py-1 text-muted-foreground">{copy.documents}</p>}
               {ungroupedDocuments.map((document, index) => (
                 <EditorDocumentTreeItem
                   beginDocumentDrag={beginDocumentDrag}
@@ -1147,7 +1148,7 @@ function EditorDocumentTreeItem({
           />
           <input
             aria-label={copy.renameDocument}
-            className="min-w-0 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 text-sm font-semibold text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="t-list min-w-0 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
             onBlur={commitTitleEdit}
             onChange={(event) => onDraftChange(event.target.value)}
             onKeyDown={(event) => {
@@ -1183,7 +1184,7 @@ function EditorDocumentTreeItem({
             )}
           />
           <span className={cn(
-            'min-w-0 truncate text-sm font-semibold',
+            't-list min-w-0 truncate',
             isNested ? 'text-foreground/85' : 'text-foreground',
             isActive && 'text-foreground',
           )}>
@@ -1334,7 +1335,7 @@ function EditorTopBar({
             {isEditingTitle ? (
               <input
                 aria-label={copy.renameDocument}
-                className="min-w-0 flex-1 rounded-sm border-0 bg-transparent px-0 text-sm font-semibold text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                className="t-section min-w-0 flex-1 rounded-sm border-0 bg-transparent px-0 text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 onBlur={commitTitleEdit}
                 onChange={(event) => setTitleDraft(event.target.value)}
                 onKeyDown={(event) => {
@@ -1353,7 +1354,7 @@ function EditorTopBar({
               />
             ) : (
               <button
-                className="min-w-0 flex-1 truncate rounded-sm text-left text-sm font-semibold hover:text-brand focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                className="t-section min-w-0 flex-1 truncate rounded-sm text-left hover:text-brand focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 onDoubleClick={() => setIsEditingTitle(true)}
                 title={copy.renameDocument}
                 type="button"
@@ -1364,7 +1365,7 @@ function EditorTopBar({
             {isDirty ? <span className="size-1.5 shrink-0 rounded-full bg-brand" aria-label="Unsaved changes" /> : null}
           </div>
           <p
-            className="truncate text-[11px] leading-4 text-muted-foreground"
+            className="t-meta-sm truncate text-muted-foreground"
             title={
               document.source === 'imported-research-report' && document.sourceRunId
                 ? `${copy.importedFrom} ${document.sourceRunId} · ${copy.updated} ${formatEditorTime(document.updatedAt)}`
@@ -1380,8 +1381,8 @@ function EditorTopBar({
       </div>
       <EditorCommandToolbar editor={editor} isSource={viewMode === 'source'} />
       <div className="flex min-w-0 justify-end gap-0.5">
-        <Badge className="h-5 rounded-full px-1.5 text-[10px]" variant="outline">{commentCount}</Badge>
-        <Badge className="h-5 rounded-full px-1.5 text-[10px]" variant="outline">R{document.revision}</Badge>
+        <Badge className="h-5 rounded-full px-1.5 t-hint" variant="outline">{commentCount}</Badge>
+        <Badge className="h-5 rounded-full px-1.5 t-hint" variant="outline">R{document.revision}</Badge>
         <Separator className="mx-0.5 h-5" orientation="vertical" />
         <TooltipButton
           label={viewMode === 'source' ? copy.live : copy.source}
@@ -1397,7 +1398,7 @@ function EditorTopBar({
           <Anchor className="size-4" />
         </TooltipButton>
         <TooltipButton
-          className={isDiffVisible ? 'bg-brand text-white hover:bg-brand/90 hover:text-white' : undefined}
+          className={isDiffVisible ? 'bg-brand text-brand-foreground hover:bg-brand/90 hover:text-brand-foreground' : undefined}
           label={isDiffVisible ? copy.hideDiff : copy.showDiff}
           onClick={() => dispatch({ isVisible: !isDiffVisible, type: 'setEditorDiffVisible' })}
         >
@@ -1765,7 +1766,7 @@ function EditorDocumentDiffView({
   return (
     <ScrollArea className="min-h-0 flex-1 bg-background">
       <div className="editor-document-diff mx-auto min-h-full max-w-[72rem] px-4 py-6 sm:px-10 sm:py-8">
-        <div className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-brand">
+        <div className="t-caption mb-3 flex items-center gap-2 text-brand">
           <Scale className="size-3.5" />
           {copy.diffView}
         </div>
@@ -2063,7 +2064,7 @@ function EditorBubbleMenu({
             />
             <Textarea
               autoFocus
-              className="min-h-16 resize-none border-border/70 bg-background/60 pr-16 text-sm focus-visible:ring-1 [scrollbar-width:thin]"
+              className="t-body min-h-16 resize-none border-border/70 bg-background/60 pr-16 focus-visible:ring-1 [scrollbar-width:thin]"
               onChange={(event) => handleCommentDraftChange(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -2085,7 +2086,7 @@ function EditorBubbleMenu({
               reduceMotion={reduceMotion}
             />
             {commentImproveError ? (
-              <p className="rounded-md border border-destructive/20 bg-destructive/5 px-2 py-1 text-[11px] leading-4 text-destructive">
+              <p className="t-meta-sm rounded-md border border-destructive/20 bg-destructive/5 px-2 py-1 text-destructive">
                 {commentImproveError}
               </p>
             ) : null}
@@ -2099,7 +2100,7 @@ function EditorBubbleMenu({
                     <button
                       aria-pressed={active}
                       className={cn(
-                        'inline-flex h-6 shrink-0 items-center gap-1 rounded-full border px-2 text-[11px] font-medium transition-colors',
+                        'inline-flex h-6 shrink-0 items-center gap-1 rounded-full border px-2 t-meta-sm font-medium transition-colors',
                         active
                           ? cn(kindMeta.selectedBorderClass, kindMeta.selectedBgClass, kindMeta.accentText)
                           : 'border-border text-muted-foreground hover:text-foreground',
@@ -2320,7 +2321,7 @@ function EditorAssistantComposer({
               initial={{ height: 0, opacity: 0 }}
               transition={{ duration: 0.18 }}
             >
-              <div className="flex items-center gap-1.5 px-3 pb-1 pt-2 text-[11px] font-semibold text-brand">
+              <div className="flex items-center gap-1.5 px-3 pb-1 pt-2 t-meta-sm font-semibold text-brand">
                 <MessagesSquare className="size-3.5" />
                 {attachedComments.length} {copy.attachedComments}
               </div>
@@ -2329,14 +2330,14 @@ function EditorAssistantComposer({
                   {attachedComments.map((comment) => (
                     <motion.span
                       animate={{ opacity: 1, scale: 1 }}
-                      className="inline-flex max-w-full items-center gap-1 rounded-full border border-brand/30 bg-background px-2 py-0.5 text-[11px] text-foreground"
+                      className="inline-flex max-w-full items-center gap-1 rounded-full border border-brand/30 bg-background px-2 py-0.5 t-meta-sm text-foreground"
                       exit={{ opacity: 0, scale: 0.85 }}
                       initial={{ opacity: 0, scale: 0.85 }}
                       key={comment.id}
                       layout
                       transition={{ duration: 0.15 }}
                     >
-                      <span className="grid size-4 shrink-0 place-items-center rounded-[4px] bg-brand-subtle text-[9px] font-semibold tabular-nums text-brand">
+                      <span className="grid size-4 shrink-0 place-items-center rounded-[4px] bg-brand-subtle t-hint font-semibold tabular-nums text-brand">
                         {commentNumbers.get(comment.id) ?? 0}
                       </span>
                       <span className="max-w-40 truncate text-muted-foreground">“{comment.anchor.selectedText}”</span>
@@ -2430,7 +2431,7 @@ function EditorAssistantComposer({
             reduceMotion={reduceMotion}
           />
           {improveError ? (
-            <p className="mb-1 rounded-md border border-destructive/20 bg-destructive/5 px-2 py-1 text-[11px] leading-4 text-destructive">
+            <p className="t-meta-sm mb-1 rounded-md border border-destructive/20 bg-destructive/5 px-2 py-1 text-destructive">
               {improveError}
             </p>
           ) : null}
@@ -2467,7 +2468,7 @@ function EditorAssistantComposer({
                 'size-7 rounded-md',
                 !isRunning && attachedComments.length === 0 && draft.trim().length === 0
                   ? 'text-muted-foreground/45'
-                  : 'bg-brand text-white hover:bg-brand/90 hover:text-white',
+                  : 'bg-brand text-brand-foreground hover:bg-brand/90 hover:text-brand-foreground',
               )}
               disabled={!isRunning && attachedComments.length === 0 && draft.trim().length === 0}
               onClick={isRunning ? onStop : onSend}
@@ -2522,7 +2523,7 @@ function EditorModelPicker({
       <DropdownMenuTrigger asChild>
         <Button
           aria-label={t.chat.modelPicker}
-          className="h-7 min-w-0 max-w-[min(48vw,17rem)] shrink rounded-md px-1.5 text-[11px] font-semibold text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0 data-[state=open]:bg-accent data-[state=open]:text-foreground"
+          className="h-7 min-w-0 max-w-[min(48vw,17rem)] shrink rounded-md px-1.5 text-xs font-semibold text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0 data-[state=open]:bg-accent data-[state=open]:text-foreground"
           disabled={disabled}
           type="button"
           variant="ghost"
@@ -2737,7 +2738,7 @@ function EditorCommentsPanel({
       <div className="flex h-12 items-center justify-between border-b border-border px-3">
         <div className="flex items-center gap-2">
           <MessageSquarePlus className="size-4 text-brand" />
-          <h2 className="text-sm font-semibold">{copy.assistant}</h2>
+          <h2 className="t-section">{copy.assistant}</h2>
         </div>
         <TooltipButton
           label={copy.hideComments}
@@ -2826,7 +2827,7 @@ function CommentStatusTab({ active, count, label, onClick }: {
       type="button"
     >
       {label}
-      <span className="text-[10px] tabular-nums text-muted-foreground/80">{count}</span>
+      <span className="t-hint tabular-nums text-muted-foreground/80">{count}</span>
     </button>
   )
 }
@@ -2838,17 +2839,9 @@ function CommentKindChip({ active, dotClass, label, onClick }: {
   onClick: () => void
 }) {
   return (
-    <button
-      className={cn(
-        'inline-flex h-6 shrink-0 items-center gap-1 rounded-full border px-2 text-[11px] font-medium transition-colors',
-        active ? 'border-brand/40 bg-brand-subtle text-brand' : 'border-border bg-background text-muted-foreground hover:text-foreground',
-      )}
-      onClick={onClick}
-      type="button"
-    >
-      {dotClass ? <span className={cn('size-1.5 rounded-full', dotClass)} /> : null}
+    <Chip active={active} dot={dotClass} onClick={onClick}>
       {label}
-    </button>
+    </Chip>
   )
 }
 
@@ -2913,7 +2906,7 @@ function EditorCommentCard({
       onClick={() => dispatch({ commentId: comment.id, type: 'selectEditorComment' })}
     >
       <div className="flex items-center gap-1.5 px-3 pt-2.5">
-        <span className={cn('grid size-5 shrink-0 place-items-center rounded-[5px] bg-background/70 text-[10px] font-semibold tabular-nums', meta.accentText)}>
+        <span className={cn('grid size-5 shrink-0 place-items-center rounded-[5px] bg-background/70 t-hint font-semibold tabular-nums', meta.accentText)}>
           {commentNumber}
         </span>
         <CommentKindMenu comment={comment} copy={copy} dispatch={dispatch} meta={meta} />
@@ -2956,7 +2949,7 @@ function EditorCommentCard({
         >
           {isResolved ? <Undo2 className="size-3.5" /> : <Check className="size-3.5" />}
         </Button>
-        <span className="shrink-0 text-[11px] text-muted-foreground">{formatEditorTime(comment.updatedAt)}</span>
+        <span className="t-hint shrink-0 text-muted-foreground">{formatEditorTime(comment.updatedAt)}</span>
       </div>
       <div className="px-3 pb-2.5 pt-1">
         <p className={cn('text-muted-foreground', isSelected ? 'line-clamp-2' : 'line-clamp-1')}>
@@ -2968,7 +2961,7 @@ function EditorCommentCard({
           <div className="mt-1.5" onClick={(event) => event.stopPropagation()}>
             <Textarea
               autoFocus
-              className="min-h-16 resize-none text-sm [scrollbar-width:thin]"
+              className="t-body min-h-16 resize-none [scrollbar-width:thin]"
               onChange={(event) => setEditDraft(event.target.value)}
               ref={editTextareaRef}
               value={editDraft}
@@ -2992,7 +2985,7 @@ function EditorCommentCard({
         ) : null}
         {isSelected && !isEditing ? (
           isRunning ? (
-            <div className="mt-2.5 flex items-center justify-center gap-2 rounded-md border border-brand/25 bg-brand-subtle/30 py-2 text-[11px] font-medium text-brand">
+            <div className="mt-2.5 flex items-center justify-center gap-2 rounded-md border border-brand/25 bg-brand-subtle/30 py-2 t-meta-sm font-medium text-brand">
               <LoaderCircle className="size-3.5 animate-spin" />
               {copy.runningSuggestion}
             </div>
@@ -3008,7 +3001,7 @@ function EditorCommentCard({
               className="mt-2.5 rounded-md border border-warning/30 bg-warning-subtle/40 p-2.5"
               onClick={(event) => event.stopPropagation()}
             >
-              <div className="flex items-center gap-1.5 text-[11px] text-warning">
+              <div className="t-meta-sm flex items-center gap-1.5 text-warning">
                 <AlertTriangle className="size-3.5 shrink-0" />
                 {copy.suggestionStale}
               </div>
@@ -3029,7 +3022,7 @@ function EditorCommentCard({
             <>
               {runError ? (
                 <div
-                  className="mt-2.5 rounded-md border border-destructive/30 bg-destructive-subtle/40 p-2 text-[11px] text-destructive"
+                  className="t-meta-sm mt-2.5 rounded-md border border-destructive/30 bg-destructive-subtle/40 p-2 text-destructive"
                   onClick={(event) => event.stopPropagation()}
                 >
                   {runError}
@@ -3098,43 +3091,43 @@ function SuggestionReview({ copy, onAccept, onReject, suggestion }: {
       className="mt-2.5 rounded-md border border-brand/25 bg-brand-subtle/30 p-2.5"
       onClick={(event) => event.stopPropagation()}
     >
-      <div className="flex items-center gap-1.5 text-[11px] font-medium text-brand">
+      <div className="flex items-center gap-1.5 t-meta-sm font-medium text-brand">
         <Sparkles className="size-3.5 shrink-0" />
         {reviewInEditor ? copy.reviewInEditor : copy.reviewInPanel}
       </div>
       <div className="mt-2 rounded-md border border-success/20 bg-success-subtle/25 p-2">
-        <div className="text-[10px] font-semibold uppercase tracking-wide text-success">{copy.proposedText}</div>
-        <p className="mt-1 line-clamp-4 whitespace-pre-wrap text-xs leading-5 text-foreground">{suggestion.proposedText}</p>
+        <div className="t-caption text-success">{copy.proposedText}</div>
+        <p className="t-meta mt-1 line-clamp-4 whitespace-pre-wrap text-foreground">{suggestion.proposedText}</p>
       </div>
       {suggestion.changeSummary?.length ? (
         <div className="mt-2 border-t border-border/60 pt-1.5">
-          <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{copy.changeSummary}</div>
+          <div className="t-caption text-muted-foreground">{copy.changeSummary}</div>
           <ul className="mt-1 space-y-0.5">
             {suggestion.changeSummary.map((item, index) => (
-              <li className="text-xs leading-4 text-muted-foreground" key={`${index}-${item}`}>{item}</li>
+              <li className="t-meta text-muted-foreground" key={`${index}-${item}`}>{item}</li>
             ))}
           </ul>
         </div>
       ) : null}
       {suggestion.warnings?.length ? (
         <div className="mt-2 rounded-md border border-warning/25 bg-warning-subtle/35 p-2">
-          <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-warning">
+          <div className="t-caption flex items-center gap-1.5 text-warning">
             <AlertTriangle className="size-3" />
             {copy.warnings}
           </div>
           <ul className="mt-1 space-y-0.5">
             {suggestion.warnings.map((item, index) => (
-              <li className="text-xs leading-4 text-warning" key={`${index}-${item}`}>{item}</li>
+              <li className="t-meta text-warning" key={`${index}-${item}`}>{item}</li>
             ))}
           </ul>
         </div>
       ) : null}
       {suggestion.evidence ? (
         <div className="mt-2 border-t border-border/60 pt-1.5">
-          <div className="text-[10px] font-semibold uppercase tracking-wide text-success">{copy.sources}</div>
+          <div className="t-caption text-success">{copy.sources}</div>
           <ul className="mt-1 space-y-0.5">
             {suggestion.evidence.sources.map((source) => (
-              <li className="truncate text-xs" key={source.url}>
+              <li className="t-meta truncate" key={source.url}>
                 <a className="text-brand hover:underline" href={source.url} rel="noopener noreferrer" target="_blank">
                   {source.title}
                 </a>
@@ -3150,7 +3143,7 @@ function SuggestionReview({ copy, onAccept, onReject, suggestion }: {
             {copy.reject}
           </Button>
           <Button
-            className="h-7 bg-brand text-white hover:bg-brand/90 hover:text-white"
+            className="h-7 bg-brand text-brand-foreground hover:bg-brand/90 hover:text-brand-foreground"
             onClick={() => onAccept(suggestion)}
             size="sm"
             type="button"
@@ -3176,7 +3169,7 @@ function CommentKindMenu({ comment, copy, dispatch, meta }: {
       <DropdownMenuTrigger asChild>
         <button
           aria-label={copy.changeKind}
-          className={cn('inline-flex h-6 shrink-0 items-center gap-1 rounded-full bg-background px-1.5 text-[11px] font-semibold', meta.accentText)}
+          className={cn('inline-flex h-6 shrink-0 items-center gap-1 rounded-full bg-background px-1.5 t-meta-sm font-semibold', meta.accentText)}
           onClick={(event) => event.stopPropagation()}
           type="button"
         >
@@ -3216,12 +3209,12 @@ function EvidencePresetPicker({ comment, copy, dispatch }: {
   const activePreset = comment.evidencePreset ?? 'add_sources'
   return (
     <div className="mt-2.5 flex flex-col gap-1 rounded-md border border-success/25 bg-success-subtle/40 p-2">
-      <span className="text-[10px] font-semibold uppercase tracking-wide text-success">{copy.preset}</span>
+      <span className="t-caption text-success">{copy.preset}</span>
       <div className="flex flex-wrap gap-1">
         {EVIDENCE_PRESET_ORDER.map((preset) => (
           <button
             className={cn(
-              'inline-flex h-6 items-center rounded-full border px-2 text-[11px] font-medium transition-colors',
+              'inline-flex h-6 items-center rounded-full border px-2 t-meta-sm font-medium transition-colors',
               activePreset === preset ? 'border-success/50 bg-success-subtle text-success' : 'border-border bg-background text-muted-foreground hover:text-foreground',
             )}
             key={preset}
@@ -3252,11 +3245,11 @@ function EditorEmptyState({
     <div className="grid min-h-0 flex-1 place-items-center bg-canvas p-8">
       <div className="w-full max-w-2xl rounded-md border border-border bg-background p-8 text-center shadow-sm">
         <FileText className="mx-auto mb-4 size-8 text-muted-foreground" />
-        <h2 className="text-lg font-semibold">{copy.emptyTitle}</h2>
+        <h2 className="t-display">{copy.emptyTitle}</h2>
         <p className="mt-2 text-sm text-muted-foreground">{copy.emptyBody}</p>
         <div className="mx-auto mt-5 grid w-full max-w-[31rem] grid-cols-1 gap-2 sm:grid-cols-2">
           <Button
-            className="h-10 w-full justify-center gap-1.5 px-2 text-[13px]"
+            className="h-10 w-full justify-center gap-1.5 px-2"
             onClick={() => dispatch({ type: 'createEditorDocument' })}
             type="button"
           >
@@ -3267,7 +3260,7 @@ function EditorEmptyState({
             copy={copy}
             dispatch={dispatch}
             reportOptions={reportOptions}
-            triggerClassName="h-10 w-full gap-1.5 px-2 text-[13px]"
+            triggerClassName="h-10 w-full gap-1.5 px-2"
             variant="button"
           />
         </div>

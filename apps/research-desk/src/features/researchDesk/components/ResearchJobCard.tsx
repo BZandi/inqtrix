@@ -26,6 +26,7 @@ import { localizedText, phaseOrder, type JobPhase, type ResearchJob } from '../t
 import {
   phaseLabel,
   queuedPhaseIcon,
+  shortRunId,
   statusBadgeClassName,
   statusIcon,
 } from './runDisplay'
@@ -59,31 +60,33 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
     const reduceMotion = useReducedMotion()
     const runningDuration = useRunningDuration(job.status, job.startedAtIso)
     const canCancel = job.status === 'running' || job.status === 'queued'
-    const metadata = [
-      `${t.runCard.jobId}: ${job.id}`,
-      job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled' || job.status === 'expired'
-        ? `${t.runCard.submitted}: ${job.submittedAt}`
-        : `${t.runCard.started}: ${job.startedAt ?? job.submittedAt}`,
+    const metadata: { text: string; title?: string }[] = [
+      { text: `${t.runCard.jobId}: ${shortRunId(job.id)}`, title: `${t.runCard.jobId}: ${job.id}` },
+      {
+        text: job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled' || job.status === 'expired'
+          ? `${t.runCard.submitted}: ${job.submittedAt}`
+          : `${t.runCard.started}: ${job.startedAt ?? job.submittedAt}`,
+      },
     ]
 
     if (job.duration) {
-      metadata.push(`${t.runCard.duration}: ${job.duration}`)
+      metadata.push({ text: `${t.runCard.duration}: ${job.duration}` })
     }
     if (job.status === 'queued' && job.queueNote) {
-      metadata.push(localizedText(job.queueNote, locale))
+      metadata.push({ text: localizedText(job.queueNote, locale) })
     }
     if (job.status === 'running') {
-      metadata.push(`${t.runCard.runtime}: ${runningDuration}`)
+      metadata.push({ text: `${t.runCard.runtime}: ${runningDuration}` })
     }
     if (isCancelSubmitting) {
-      metadata.push(t.runCard.cancelSubmitted)
+      metadata.push({ text: t.runCard.cancelSubmitted })
     } else if (canCancel && job.cancelRequested) {
-      metadata.push(t.runCard.cancelRequested)
+      metadata.push({ text: t.runCard.cancelRequested })
     } else if (cancelError) {
-      metadata.push(`${t.runCard.cancelFailed}: ${cancelError}`)
+      metadata.push({ text: `${t.runCard.cancelFailed}: ${cancelError}` })
     }
     if (job.error) {
-      metadata.push(job.error)
+      metadata.push({ text: job.error })
     }
 
     return (
@@ -106,7 +109,7 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
         <div className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-3 sm:grid-cols-[auto_minmax(0,1fr)_auto]">
           <StatusIcon
             className={cn(
-              'mt-1 size-5 shrink-0',
+              'mt-1 size-4 shrink-0',
               job.status === 'completed' && 'text-success',
               job.status === 'queued' && 'text-muted-foreground',
               job.status === 'running' && 'text-brand',
@@ -117,13 +120,13 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
             )}
           />
           <div className="min-w-0">
-            <h2 className="line-clamp-2 text-sm font-semibold leading-6 text-foreground md:text-base">
+            <h2 className="line-clamp-2 t-card text-foreground">
               {localizedText(job.title, locale)}
             </h2>
-            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 t-meta text-muted-foreground">
               {metadata.map((item) => (
-                <span className="min-w-0 truncate" key={item}>
-                  {item}
+                <span className="min-w-0 truncate" key={item.text} title={item.title}>
+                  {item.text}
                 </span>
               ))}
             </div>
@@ -181,7 +184,7 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
                 >
                   <ChevronDown
                     className={cn(
-                      'size-5 transition-transform duration-300',
+                      'size-4 transition-transform duration-300',
                       isSelected && isExpanded ? '' : '-rotate-90',
                     )}
                   />
@@ -276,7 +279,7 @@ function PhaseSegments({
           {phaseOrder.map((phase, index) => (
             <span
               className={cn(
-                'min-w-0 flex-1 truncate text-center text-[10px] font-semibold uppercase tracking-wide',
+                'min-w-0 flex-1 truncate text-center t-caption font-semibold',
                 index === activeIndex
                   ? 'text-brand'
                   : index < activeIndex
@@ -329,13 +332,13 @@ function RunningCompactStatus({ job }: { job: ResearchJob }) {
           </AnimatePresence>
         </span>
         <PhaseSegments activePhase={job.activePhase} completedPhases={job.completedPhases} thin />
-        <span className="shrink-0 text-[11px] font-medium tabular-nums text-muted-foreground">
+        <span className="shrink-0 t-meta-sm font-medium tabular-nums text-muted-foreground">
           {t.runCard.currentRound}&nbsp;{roundInfo.current}{roundInfo.max ? `/${roundInfo.max}` : ''}
         </span>
       </div>
 
       {(latestEvent || hasMetrics) && (
-        <div className="mt-2 flex items-center gap-3 text-[11px] text-muted-foreground">
+        <div className="mt-2 flex items-center gap-3 t-meta-sm text-muted-foreground">
           {latestEvent && (
             <span className="flex min-w-0 flex-1 items-center gap-1.5">
               <MessageIcon
@@ -391,11 +394,11 @@ function RunningJobDetails({ job }: { job: ResearchJob }) {
             <span className="truncate text-xs font-semibold text-brand">
               {phaseLabel(job.activePhase, t)}
             </span>
-            <span className="shrink-0 text-[11px] font-medium tabular-nums text-muted-foreground">
+            <span className="shrink-0 t-meta-sm font-medium tabular-nums text-muted-foreground">
               {t.runCard.phase} {activeIndex + 1}/{phaseOrder.length}
             </span>
           </span>
-          <span className="shrink-0 text-[11px] font-medium tabular-nums text-muted-foreground">
+          <span className="shrink-0 t-meta-sm font-medium tabular-nums text-muted-foreground">
             {t.runCard.currentRound}&nbsp;
             <strong className="font-semibold text-foreground">{roundInfo.current}</strong>
             {roundInfo.max ? `/${roundInfo.max}` : ''}

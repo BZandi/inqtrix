@@ -48,3 +48,16 @@ export function phaseLabel(phase: JobPhase, t: TranslationDictionary) {
   if (phase === 'evaluation') return t.runCard.evaluation
   return t.runCard.answer
 }
+
+/**
+ * Compact a run id for the card metadata so it no longer eats a whole line.
+ * Keeps a recognizable prefix and suffix joined by a middle ellipsis
+ * (e.g. `run_2c4f53d6…fe3426`); the full id stays available via the span's
+ * tooltip. Ids short enough to fit are returned unchanged.
+ */
+export function shortRunId(id: string): string {
+  const head = 12
+  const tail = 6
+  if (id.length <= head + tail + 1) return id
+  return `${id.slice(0, head)}…${id.slice(-tail)}`
+}

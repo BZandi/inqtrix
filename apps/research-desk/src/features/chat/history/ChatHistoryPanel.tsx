@@ -330,7 +330,7 @@ export function ChatHistoryPanel({
       <div className="flex h-12 items-center justify-between gap-2 border-b border-border px-3">
         <div className="flex min-w-0 items-center gap-2">
           <MessagesSquare className="size-4 shrink-0 text-foreground/80" />
-          <h1 className="truncate text-sm font-semibold text-foreground">
+          <h1 className="truncate t-section text-foreground">
             {t.chat.history}
           </h1>
         </div>
@@ -597,7 +597,7 @@ function ChatHistorySectionView({
               {title}
             </button>
           )}
-          <span className="shrink-0 rounded-sm px-1 text-[10px] font-semibold tabular-nums text-muted-foreground">
+          <span className="shrink-0 rounded-sm px-1 t-hint font-semibold tabular-nums text-muted-foreground">
             {section.threads.length}
           </span>
           <Tooltip>
@@ -642,8 +642,8 @@ function ChatHistorySectionView({
       )}
 
       {section.kind === 'ungrouped' && showUngroupedHeader && (
-        <div className="flex min-h-7 items-center gap-2 rounded-md px-1.5 text-[11px] font-semibold uppercase text-foreground/65">
-          <SectionIcon className="size-3.5 shrink-0" />
+        <div className="flex min-h-7 items-center gap-2 rounded-md px-1.5 t-caption text-foreground/65">
+          <SectionIcon className="icon-sm shrink-0" />
           <span className="truncate">{t.chat.ungrouped}</span>
         </div>
       )}
@@ -699,17 +699,17 @@ function ChatHistorySectionView({
                 )
               })}
               {section.kind === 'group' && threads.length === 0 && !isCollapsed && (
-                <div className="rounded-md px-2 py-1.5 text-[11px] font-medium text-muted-foreground">
+                <div className="rounded-md px-2 py-1.5 t-meta-sm font-medium text-muted-foreground">
                   {t.chat.emptyGroup}
                 </div>
               )}
               {section.kind === 'group' && isCollapsed && showDropFrame && (
-                <div className="rounded-md border border-dashed border-brand/30 px-2 py-1.5 text-center text-[11px] font-semibold text-brand">
+                <div className="rounded-md border border-dashed border-brand/30 px-2 py-1.5 text-center t-meta-sm font-semibold text-brand">
                   {t.chat.dropIntoGroup}
                 </div>
               )}
               {section.kind === 'ungrouped' && threads.length === 0 && showDropFrame && (
-                <div className="rounded-md border border-dashed border-brand/30 px-2 py-1.5 text-center text-[11px] font-semibold text-brand">
+                <div className="rounded-md border border-dashed border-brand/30 px-2 py-1.5 text-center t-meta-sm font-semibold text-brand">
                   {t.chat.dropIntoGroup}
                 </div>
               )}
@@ -810,8 +810,7 @@ function ChatThreadHistoryItem({
             <input
               aria-label={t.chat.renameTitle}
               className={cn(
-                'min-w-0 flex-1 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 font-semibold text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                isNested ? 'text-[13px]' : 'text-sm',
+                'min-w-0 flex-1 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 t-list text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring',
               )}
               onBlur={commitHistoryThreadTitleEdit}
               onChange={(event) => onHistoryThreadTitleDraftChange(event.target.value)}
@@ -830,7 +829,7 @@ function ChatThreadHistoryItem({
             />
             {isThreadRunning && <RunningThreadDot label={t.chat.generating} />}
           </span>
-          <span className="shrink-0 text-[10px] font-medium text-muted-foreground">
+          <span className="shrink-0 t-hint text-muted-foreground">
             {displayRelativeDate(chatThreadHistoryTimeIso(thread), locale)}
           </span>
         </div>
@@ -848,8 +847,7 @@ function ChatThreadHistoryItem({
         >
           <span className="flex min-w-0 items-center gap-2">
             <span className={cn(
-              'block min-w-0 flex-1 truncate font-semibold',
-              isNested ? 'text-[13px]' : 'text-sm',
+              'block min-w-0 flex-1 truncate t-list',
               isNested ? 'text-foreground/85' : 'text-foreground',
               isActive && 'text-foreground',
             )}>
@@ -857,7 +855,7 @@ function ChatThreadHistoryItem({
             </span>
             {isThreadRunning && <RunningThreadDot label={t.chat.generating} />}
           </span>
-          <span className="shrink-0 text-[10px] font-medium text-muted-foreground">
+          <span className="shrink-0 t-hint text-muted-foreground">
             {displayRelativeDate(chatThreadHistoryTimeIso(thread), locale)}
           </span>
         </button>

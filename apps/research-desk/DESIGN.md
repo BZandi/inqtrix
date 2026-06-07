@@ -218,7 +218,7 @@ looks identical everywhere.
 | Button | `components/ui/button.tsx` — `sm` = `h-8 px-3 text-xs`; `default` = `h-9 px-4 py-2 text-sm`; `icon` = compact `size-7`/`size-8` | Never combine an explicit `h-9` with `size="sm"` — pick one height |
 | Pill / filter chip | **`components/ui/chip.tsx`** (`<Chip active dot count>`) — `h-6 px-2.5 rounded-full text-[11px] font-medium`, active = `bg-brand-subtle text-brand` | Use the component, not raw classes. Tone meaning via the optional `dot` (see §5) |
 | `kbd` key badge | **`components/ui/kbd.tsx`** (`<Kbd>`) — `h-4 min-w-4 px-1 text-[10px]`, bordered | keyboard hints (e.g. mention-menu footer) |
-| Segmented / tab control | `h-7 text-xs font-medium` (convention) | e.g. Editor "Offen/Erledigt", Report tabs, Prompt-Library category filter. Not yet one primitive (active treatments differ: `bg-background shadow` vs `bg-accent`); a `SegmentedControl` is a future extraction — keep `h-7`/`text-xs`. |
+| Segmented / tab control | `h-7 text-xs font-medium` (convention) | e.g. Editor "Offen/Erledigt", Report tabs, Prompt-Library category + visibility filters. Not yet one primitive (active treatments differ: `bg-background shadow` vs `bg-accent`); a `SegmentedControl` is a future extraction — keep `h-7`/`text-xs`. |
 | Toolbar row | all controls share one height (**`h-8`**) | buttons + selects + toggles must match within a row |
 | Composer-footer control text (chat-input model picker, effort) | `text-xs` (12) on the `<Button>` | a utility (not a `.t-*` role — it would be overridden, §0.7); sits one step below the 14px footer icons |
 | Dropdown / context-menu items | `text-sm` (14) — `components/ui/dropdown-menu.tsx` | every menu item, label, shortcut row (e.g. the model-picker pop-up options) |
@@ -273,6 +273,12 @@ Panel header        .t-section (14) + .icon-md (16)    e.g. "Gespräche", "Dokum
 **Depth is shown by indentation + an accent bar + the quieter group header — not by shrinking the
 entry text per level.** Per-level text-shrinking is the classic source of drift (same role, different
 size depending on nesting), so all entries stay `.t-list` (13) regardless of depth.
+
+**Category in a grouped list is the group header's job — not a per-row tag.** When rows sit under a
+category eyebrow (dot + label + count), do **not** repeat that category as a filled badge on every row
+(redundant noise). The allowed per-row cue is a quiet leading tone icon (`.icon-sm` in the category
+`toneText`); the colour identity already lives in the group header + the selected row's left accent bar.
+(Reference: the Prompt Library list.)
 
 ---
 

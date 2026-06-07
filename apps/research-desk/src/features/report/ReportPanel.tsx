@@ -5,7 +5,6 @@ import {
   Clock3,
   Download,
   FileText,
-  Folder,
   Info,
   LoaderCircle,
   Maximize2,
@@ -1026,17 +1025,19 @@ function EmptyReportPanel() {
   const { t } = useLocale()
 
   return (
-    <div className="flex flex-1 items-center justify-center p-8 text-center">
-      <div className="max-w-sm">
-        <div className="mx-auto flex size-16 items-center justify-center rounded-full bg-brand-subtle text-brand">
-          <Folder className="size-8" />
+    <div className="relative flex flex-1">
+      <div className="absolute inset-x-6 bottom-12 top-4 flex items-center justify-center text-center lg:bottom-40 lg:top-0">
+        <div className="flex max-w-64 flex-col items-center">
+          <span className="grid size-10 place-items-center rounded-xl border border-border bg-surface text-muted-foreground shadow-[0_1px_2px_var(--shadow-hairline)]">
+            <FileText className="icon-md" />
+          </span>
+          <h3 className="mt-3 t-section text-foreground">
+            {t.report.emptyTitle}
+          </h3>
+          <p className="mt-1 max-w-56 t-meta text-muted-foreground">
+            {t.report.emptyDescription}
+          </p>
         </div>
-        <h3 className="mt-5 text-lg font-semibold text-foreground">
-          {t.report.emptyTitle}
-        </h3>
-        <p className="mt-2 text-sm leading-6 text-muted-foreground">
-          {t.report.emptyDescription}
-        </p>
       </div>
     </div>
   )

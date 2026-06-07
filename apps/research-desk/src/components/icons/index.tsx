@@ -284,6 +284,60 @@ export const Heading1 = createIcon('Heading1', 'lucide-heading-1', (
   </>
 ))
 
+export const Heading2 = createIcon('Heading2', 'lucide-heading-2', (
+  <>
+    <path d="M4 12h8" />
+    <path d="M4 18V6" />
+    <path d="M12 18V6" />
+    <path d="M21 18h-4c0-4 4-3 4-6 0-1.5-2-2.5-4-1" />
+  </>
+))
+
+export const Heading3 = createIcon('Heading3', 'lucide-heading-3', (
+  <>
+    <path d="M4 12h8" />
+    <path d="M4 18V6" />
+    <path d="M12 18V6" />
+    <path d="M17.5 10.5c1.7-1 3.5 0 3.5 1.5a2 2 0 0 1-2 2" />
+    <path d="M17 17.5c2 1.5 4 .3 4-1.5a2 2 0 0 0-2-2" />
+  </>
+))
+
+export const Type = createIcon('Type', 'lucide-type', (
+  <>
+    <polyline points="4 7 4 4 20 4 20 7" />
+    <line x1="9" x2="15" y1="20" y2="20" />
+    <line x1="12" x2="12" y1="4" y2="20" />
+  </>
+))
+
+export const Quote = createIcon('Quote', 'lucide-text-quote', (
+  <>
+    <path d="M17 6H3" />
+    <path d="M21 12H8" />
+    <path d="M21 18H8" />
+    <path d="M3 12v6" />
+  </>
+))
+
+export const Minus = createIcon('Minus', 'lucide-minus', <path d="M5 12h14" />)
+
+export const MoreHorizontal = createIcon('MoreHorizontal', 'lucide-ellipsis', (
+  <>
+    <circle cx="12" cy="12" r="1" />
+    <circle cx="19" cy="12" r="1" />
+    <circle cx="5" cy="12" r="1" />
+  </>
+))
+
+export const MoreVertical = createIcon('MoreVertical', 'lucide-ellipsis-vertical', (
+  <>
+    <circle cx="12" cy="12" r="1" />
+    <circle cx="12" cy="5" r="1" />
+    <circle cx="12" cy="19" r="1" />
+  </>
+))
+
 export const GripVertical = createIcon('GripVertical', 'lucide-grip-vertical', (
   <>
     <circle cx="9" cy="12" r="1" />

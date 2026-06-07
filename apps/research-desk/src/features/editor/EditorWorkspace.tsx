@@ -31,12 +31,8 @@ import {
   FolderOpen,
   FolderPlus,
   GripVertical,
-  Highlighter,
-  Italic,
   Link,
-  List,
   ListFilter,
-  ListOrdered,
   LoaderCircle,
   MessageSquarePlus,
   MessageSquareText,
@@ -53,9 +49,7 @@ import {
   Scale,
   Sparkles,
   SquarePen,
-  Strikethrough,
   Trash2,
-  Underline,
   Undo2,
   X,
 } from '@/components/icons'
@@ -116,7 +110,11 @@ import type {
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
-import { commentDecorationPluginKey, createEditorExtensions, normalizeEditorMarkdownForTiptap, suggestionDecorationPluginKey } from './tiptap'
+import { commentDecorationPluginKey, createEditorExtensions, normalizeEditorMarkdownForTiptap, serializeEditorMarkdown, suggestionDecorationPluginKey } from './tiptap'
+import { BlockHandle } from './BlockHandle'
+import { TableControls } from './TableControls'
+import { SelectionToolbar } from './SelectionToolbar'
+import { promptSetLink } from './linkCommand'
 import { MarkdownSourceEditor } from './MarkdownSourceEditor'
 import { documentDiffPlan, suggestionDiffPlan, type DocumentDiffBlock, type SuggestionDiffSegment } from './suggestionDiff'
 import {
@@ -197,6 +195,57 @@ const editorCopy = {
     refiningSuggestion: 'Überarbeite Vorschlag …',
     revision: 'Revision',
     removeFromQueue: 'Aus Warteschlange entfernen',
+    removeFormatting: 'Formatierung entfernen',
+    placeholderEmpty: 'Schreibe, oder tippe / für Befehle …',
+    placeholderHeading: 'Überschrift',
+    slashTitle: 'Befehle',
+    slashEmpty: 'Keine Treffer',
+    slashNav: 'Navigieren',
+    slashSelect: 'Auswählen',
+    slashClose: 'Schließen',
+    slashGroupStyle: 'Stil',
+    slashGroupInsert: 'Einfügen',
+    slashText: 'Text',
+    slashHeading1: 'Überschrift 1',
+    slashHeading2: 'Überschrift 2',
+    slashHeading3: 'Überschrift 3',
+    slashBulletList: 'Aufzählung',
+    slashOrderedList: 'Nummerierte Liste',
+    slashTaskList: 'Aufgabenliste',
+    slashBlockquote: 'Zitat',
+    slashCodeBlock: 'Codeblock',
+    bubbleComment: 'Kommentar',
+    bubbleBold: 'Fett',
+    bubbleItalic: 'Kursiv',
+    bubbleUnderline: 'Unterstrichen',
+    bubbleStrike: 'Durchgestrichen',
+    bubbleCode: 'Code',
+    bubbleLink: 'Link',
+    bubbleHighlight: 'Hervorheben',
+    slashTable: 'Tabelle',
+    slashDivider: 'Trenner',
+    blockHandleAria: 'Block-Optionen',
+    blockTurnInto: 'Umwandeln in',
+    blockDuplicate: 'Block duplizieren',
+    blockDelete: 'Block löschen',
+    blockMoveUp: 'Nach oben verschieben',
+    blockMoveDown: 'Nach unten verschieben',
+    tableColumnOptions: 'Spalten-Optionen',
+    tableRowOptions: 'Zeilen-Optionen',
+    tableColInsertLeft: 'Spalte links einfügen',
+    tableColInsertRight: 'Spalte rechts einfügen',
+    tableColMoveLeft: 'Spalte nach links',
+    tableColMoveRight: 'Spalte nach rechts',
+    tableSortAsc: 'Sortieren A–Z',
+    tableSortDesc: 'Sortieren Z–A',
+    tableColDuplicate: 'Spalte duplizieren',
+    tableColClear: 'Spalteninhalt leeren',
+    tableToggleHeaderRow: 'Kopfzeile umschalten',
+    tableRowInsertAbove: 'Zeile oben einfügen',
+    tableRowInsertBelow: 'Zeile unten einfügen',
+    tableRowMoveUp: 'Zeile nach oben',
+    tableRowMoveDown: 'Zeile nach unten',
+    tableRowDuplicate: 'Zeile duplizieren',
     templates: 'Vorlagen',
     runSuggestion: 'Vorschlag erzeugen',
     runningSuggestion: 'Wird erzeugt …',
@@ -307,6 +356,57 @@ const editorCopy = {
     refiningSuggestion: 'Refining suggestion …',
     revision: 'Revision',
     removeFromQueue: 'Remove from queue',
+    removeFormatting: 'Remove formatting',
+    placeholderEmpty: 'Write, or type / for commands …',
+    placeholderHeading: 'Heading',
+    slashTitle: 'Commands',
+    slashEmpty: 'No matches',
+    slashNav: 'Navigate',
+    slashSelect: 'Select',
+    slashClose: 'Close',
+    slashGroupStyle: 'Style',
+    slashGroupInsert: 'Insert',
+    slashText: 'Text',
+    slashHeading1: 'Heading 1',
+    slashHeading2: 'Heading 2',
+    slashHeading3: 'Heading 3',
+    slashBulletList: 'Bullet list',
+    slashOrderedList: 'Numbered list',
+    slashTaskList: 'To-do list',
+    slashBlockquote: 'Quote',
+    slashCodeBlock: 'Code block',
+    bubbleComment: 'Comment',
+    bubbleBold: 'Bold',
+    bubbleItalic: 'Italic',
+    bubbleUnderline: 'Underline',
+    bubbleStrike: 'Strikethrough',
+    bubbleCode: 'Code',
+    bubbleLink: 'Link',
+    bubbleHighlight: 'Highlight',
+    slashTable: 'Table',
+    slashDivider: 'Divider',
+    blockHandleAria: 'Block options',
+    blockTurnInto: 'Turn into',
+    blockDuplicate: 'Duplicate block',
+    blockDelete: 'Delete block',
+    blockMoveUp: 'Move up',
+    blockMoveDown: 'Move down',
+    tableColumnOptions: 'Column options',
+    tableRowOptions: 'Row options',
+    tableColInsertLeft: 'Insert column left',
+    tableColInsertRight: 'Insert column right',
+    tableColMoveLeft: 'Move column left',
+    tableColMoveRight: 'Move column right',
+    tableSortAsc: 'Sort A–Z',
+    tableSortDesc: 'Sort Z–A',
+    tableColDuplicate: 'Duplicate column',
+    tableColClear: 'Clear column contents',
+    tableToggleHeaderRow: 'Toggle header row',
+    tableRowInsertAbove: 'Insert row above',
+    tableRowInsertBelow: 'Insert row below',
+    tableRowMoveUp: 'Move row up',
+    tableRowMoveDown: 'Move row down',
+    tableRowDuplicate: 'Duplicate row',
     templates: 'Templates',
     runSuggestion: 'Generate suggestion',
     runningSuggestion: 'Generating …',
@@ -1547,6 +1647,31 @@ function MarkdownLiveEditor({
       },
     },
     extensions: createEditorExtensions({
+      syntaxMarkerRemoveLabel: copy.removeFormatting,
+      placeholderEmpty: copy.placeholderEmpty,
+      placeholderHeading: copy.placeholderHeading,
+      slash: {
+        labels: {
+          title: copy.slashTitle,
+          empty: copy.slashEmpty,
+          navHint: copy.slashNav,
+          selectHint: copy.slashSelect,
+          closeHint: copy.slashClose,
+          groupStyle: copy.slashGroupStyle,
+          groupInsert: copy.slashGroupInsert,
+          text: copy.slashText,
+          heading1: copy.slashHeading1,
+          heading2: copy.slashHeading2,
+          heading3: copy.slashHeading3,
+          bulletList: copy.slashBulletList,
+          orderedList: copy.slashOrderedList,
+          taskList: copy.slashTaskList,
+          blockquote: copy.slashBlockquote,
+          codeBlock: copy.slashCodeBlock,
+          table: copy.slashTable,
+          divider: copy.slashDivider,
+        },
+      },
       onClick: (commentId) => onSelectCommentRef.current(commentId),
       onSuggestionAccept: (suggestionId) => {
         const suggestion = suggestionsRef.current.find((item) => item.id === suggestionId)
@@ -1572,7 +1697,7 @@ function MarkdownLiveEditor({
     },
     onUpdate: ({ editor: currentEditor }) => {
       if (isApplyingExternalContentRef.current || !currentEditor.isEditable) return
-      onChange(currentEditor.getMarkdown())
+      onChange(serializeEditorMarkdown(currentEditor))
     },
   })
 
@@ -1598,7 +1723,7 @@ function MarkdownLiveEditor({
     previousModeRef.current = mode
     if (mode !== 'live') return
     const shouldReparseMarkdown = previousMode === 'source'
-    if (!shouldReparseMarkdown && editor.getMarkdown() === tiptapContentMarkdown) return
+    if (!shouldReparseMarkdown && serializeEditorMarkdown(editor) === tiptapContentMarkdown) return
     isApplyingExternalContentRef.current = true
     editor.commands.setContent(tiptapContentMarkdown, {
       contentType: 'markdown',
@@ -1736,6 +1861,55 @@ function MarkdownLiveEditor({
               onCreateComment(comment)
             }}
             textImprovement={textImprovement}
+          />
+        ) : null}
+        {editor && mode === 'live' ? (
+          <BlockHandle
+            editor={editor}
+            labels={{
+              ariaLabel: copy.blockHandleAria,
+              turnInto: copy.blockTurnInto,
+              duplicate: copy.blockDuplicate,
+              deleteBlock: copy.blockDelete,
+              moveUp: copy.blockMoveUp,
+              moveDown: copy.blockMoveDown,
+              text: copy.slashText,
+              heading1: copy.slashHeading1,
+              heading2: copy.slashHeading2,
+              heading3: copy.slashHeading3,
+              bulletList: copy.slashBulletList,
+              orderedList: copy.slashOrderedList,
+              taskList: copy.slashTaskList,
+              blockquote: copy.slashBlockquote,
+              codeBlock: copy.slashCodeBlock,
+            }}
+          />
+        ) : null}
+        {editor && mode === 'live' ? (
+          <TableControls
+            editor={editor}
+            labels={{
+              columnOptions: copy.tableColumnOptions,
+              rowOptions: copy.tableRowOptions,
+              addColumn: copy.addColumn,
+              addRow: copy.addRow,
+              colInsertLeft: copy.tableColInsertLeft,
+              colInsertRight: copy.tableColInsertRight,
+              colMoveLeft: copy.tableColMoveLeft,
+              colMoveRight: copy.tableColMoveRight,
+              sortAsc: copy.tableSortAsc,
+              sortDesc: copy.tableSortDesc,
+              colDuplicate: copy.tableColDuplicate,
+              colClear: copy.tableColClear,
+              toggleHeaderRow: copy.tableToggleHeaderRow,
+              colDelete: copy.deleteColumn,
+              rowInsertAbove: copy.tableRowInsertAbove,
+              rowInsertBelow: copy.tableRowInsertBelow,
+              rowMoveUp: copy.tableRowMoveUp,
+              rowMoveDown: copy.tableRowMoveDown,
+              rowDuplicate: copy.tableRowDuplicate,
+              rowDelete: copy.deleteRow,
+            }}
           />
         ) : null}
         <EditorContent className="min-h-full" editor={editor} />
@@ -1930,27 +2104,21 @@ function EditorCommandToolbar({
   isSource: boolean
 }) {
   const disabled = !editor || isSource
-  const setLink = () => {
-    if (!editor) return
-    const previousUrl = editor.getAttributes('link').href as string | undefined
-    const url = window.prompt('URL', previousUrl ?? 'https://')
-    if (url === null) return
-    if (!url.trim()) {
-      editor.chain().focus().unsetLink().run()
-      return
-    }
-    editor.chain().focus().extendMarkRange('link').setLink({ href: url.trim() }).run()
-  }
 
   return (
     <div className="flex min-w-0 items-center justify-center gap-0.5 overflow-x-auto px-1 [scrollbar-width:none]">
       <ToolbarButton disabled={disabled} icon={Undo2} label="Undo" onClick={() => editor?.chain().focus().undo().run()} />
       <ToolbarButton disabled={disabled} icon={Redo2} label="Redo" onClick={() => editor?.chain().focus().redo().run()} />
       <Separator className="mx-0.5 h-5" orientation="vertical" />
-      <ToolbarButton active={editor?.isActive('bulletList')} disabled={disabled} icon={List} label="Bullet list" onClick={() => editor?.chain().focus().toggleBulletList().run()} />
-      <ToolbarButton active={editor?.isActive('orderedList')} disabled={disabled} icon={ListOrdered} label="Ordered list" onClick={() => editor?.chain().focus().toggleOrderedList().run()} />
-      <Separator className="mx-0.5 h-5" orientation="vertical" />
-      <ToolbarButton active={editor?.isActive('link')} disabled={disabled} icon={Link} label="Link" onClick={setLink} />
+      <ToolbarButton
+        active={editor?.isActive('link')}
+        disabled={disabled}
+        icon={Link}
+        label="Link"
+        onClick={() => {
+          if (editor) promptSetLink(editor)
+        }}
+      />
     </div>
   )
 }
@@ -1973,6 +2141,9 @@ function EditorBubbleMenu({
   const [commentKind, setCommentKind] = useState<EditorCommentKind>('collect')
   const [commentImproveError, setCommentImproveError] = useState<string | null>(null)
   const commentTextareaRef = useRef<HTMLTextAreaElement | null>(null)
+  // Keeps the bubble open while the "Turn into" dropdown is open (a transaction
+  // could otherwise re-run shouldShow and hide it mid-interaction).
+  const toolbarInteractingRef = useRef(false)
   const commentTextImprove = useTextImprovement({
     ...textImprovement,
     locale,
@@ -2047,7 +2218,7 @@ function EditorBubbleMenu({
       }}
       shouldShow={({ editor: currentEditor, state }) => {
         const { empty } = state.selection
-        return currentEditor.isEditable && !empty
+        return currentEditor.isEditable && (!empty || toolbarInteractingRef.current)
       }}
     >
       <div className="z-50 flex min-w-0 items-center gap-1 rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-lg">
@@ -2146,15 +2317,33 @@ function EditorBubbleMenu({
             </div>
           </form>
         ) : (
-          <>
-            <MiniToolbarButton active={editor.isActive('bold')} icon={Bold} label="Bold" onClick={() => editor.chain().focus().toggleBold().run()} />
-            <MiniToolbarButton active={editor.isActive('italic')} icon={Italic} label="Italic" onClick={() => editor.chain().focus().toggleItalic().run()} />
-            <MiniToolbarButton active={editor.isActive('strike')} icon={Strikethrough} label="Strike" onClick={() => editor.chain().focus().toggleStrike().run()} />
-            <MiniToolbarButton active={editor.isActive('underline')} icon={Underline} label="Underline" onClick={() => editor.chain().focus().toggleUnderline().run()} />
-            <MiniToolbarButton active={editor.isActive('highlight')} icon={Highlighter} label="Highlight" onClick={() => editor.chain().focus().toggleHighlight().run()} />
-            <Separator className="mx-1 h-6" orientation="vertical" />
-            <MiniToolbarButton icon={MessageSquarePlus} label="Comment" onClick={() => setIsCommenting(true)} />
-          </>
+          <SelectionToolbar
+            editor={editor}
+            labels={{
+              comment: copy.bubbleComment,
+              turnInto: copy.blockTurnInto,
+              bold: copy.bubbleBold,
+              italic: copy.bubbleItalic,
+              underline: copy.bubbleUnderline,
+              strike: copy.bubbleStrike,
+              code: copy.bubbleCode,
+              link: copy.bubbleLink,
+              highlight: copy.bubbleHighlight,
+              text: copy.slashText,
+              heading1: copy.slashHeading1,
+              heading2: copy.slashHeading2,
+              heading3: copy.slashHeading3,
+              bulletList: copy.slashBulletList,
+              orderedList: copy.slashOrderedList,
+              taskList: copy.slashTaskList,
+              blockquote: copy.slashBlockquote,
+              codeBlock: copy.slashCodeBlock,
+            }}
+            onInteractingChange={(interacting) => {
+              toolbarInteractingRef.current = interacting
+            }}
+            onStartComment={() => setIsCommenting(true)}
+          />
         )}
       </div>
     </BubbleMenu>
@@ -3154,32 +3343,6 @@ function EditorEmptyState({
         title={copy.emptyTitle}
       />
     </div>
-  )
-}
-
-function MiniToolbarButton({
-  active,
-  icon: Icon,
-  label,
-  onClick,
-}: {
-  active?: boolean
-  icon: typeof Bold
-  label: string
-  onClick: () => void
-}) {
-  return (
-    <Button
-      aria-label={label}
-      aria-pressed={active}
-      className={cn('size-8 rounded-md', active && 'bg-brand-subtle text-brand')}
-      onClick={onClick}
-      size="icon"
-      type="button"
-      variant="ghost"
-    >
-      <Icon className="size-4" />
-    </Button>
   )
 }
 

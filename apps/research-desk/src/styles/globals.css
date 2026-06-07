@@ -836,6 +836,41 @@
     background: color-mix(in oklab, var(--muted) 50%, transparent);
   }
 
+  /* Obsidian-style revealed markdown markers (click to remove formatting).
+     A new decoration class — leaves the .editor-prose reading styles untouched
+     (DESIGN.md §9), matching the comment/suggestion decoration precedent. */
+  .editor-prose .editor-syntax-marker {
+    display: inline;
+    font-family: var(--font-mono);
+    font-weight: 400;
+    font-style: normal;
+    text-decoration: none;
+    color: var(--muted-foreground);
+    background: color-mix(in oklab, var(--muted) 70%, transparent);
+    border-radius: 0.16rem;
+    padding: 0 0.1rem;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+
+  .editor-prose .editor-syntax-marker:hover {
+    background: color-mix(in oklab, var(--muted) 100%, transparent);
+    color: var(--foreground);
+  }
+
+  /* Placeholder hint on the current empty line (Tiptap Placeholder extension adds
+     the `is-empty` class + `data-placeholder` attr; muted, non-interactive). */
+  .editor-prose .is-empty::before {
+    content: attr(data-placeholder);
+    color: var(--muted-foreground);
+    opacity: 0.5;
+    float: left;
+    height: 0;
+    pointer-events: none;
+  }
+
   .editor-prose .suggestion-insert {
     border-radius: 0.2rem;
     padding: 0 0.12rem;

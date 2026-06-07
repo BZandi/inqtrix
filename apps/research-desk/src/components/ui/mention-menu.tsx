@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { ChevronLeft, ChevronRight, type LucideIcon } from '@/components/icons'
 import { Kbd } from '@/components/ui/kbd'
 import { cn } from '@/lib/utils'
@@ -73,6 +74,13 @@ export function MentionMenu({
     else groups.push({ items: [{ index, option }], label })
   })
 
+  // Keep the keyboard-highlighted row in the (`max-h-64 overflow-y-auto`)
+  // viewport — `activeIndex` moves on arrow keys but never scrolled on its own.
+  const activeRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    activeRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [activeIndex])
+
   return (
     <div className="absolute bottom-full left-0 z-30 mb-2 w-max min-w-[17rem] max-w-md overflow-hidden rounded-xl border border-border bg-popover shadow-lg animate-in fade-in slide-in-from-bottom-1 motion-reduce:animate-none">
       <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-1.5">
@@ -130,6 +138,7 @@ export function MentionMenu({
                     onSelect(index)
                   }}
                   onMouseEnter={() => onHover(index)}
+                  ref={active ? activeRef : undefined}
                   type="button"
                 >
                   {active ? (

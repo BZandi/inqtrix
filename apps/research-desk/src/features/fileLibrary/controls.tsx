@@ -20,6 +20,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { OptionMenuHeader, OptionMenuItem, optionMenuContentClassName } from '@/components/ui/option-menu'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
@@ -251,22 +252,37 @@ export function MoveMenu({
 
 export function SortSelect({ onChange, value }: { onChange: (value: SortMode) => void; value: SortMode }) {
   const { t } = useLocale()
+  const options: { label: string; value: SortMode }[] = [
+    { label: t.fileLibrary.sortRecent, value: 'recent' },
+    { label: t.fileLibrary.sortName, value: 'name' },
+    { label: t.fileLibrary.sortSize, value: 'size' },
+    { label: t.fileLibrary.sortPages, value: 'pages' },
+  ]
+  const current = options.find((option) => option.value === value) ?? options[0]
   return (
-    <div className="relative">
-      <ArrowUpDown className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-      <select
-        aria-label={t.fileLibrary.sortRecent}
-        className="h-8 cursor-pointer appearance-none rounded-md border border-border bg-background pl-7 pr-7 text-xs font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        onChange={(event) => onChange(event.target.value as SortMode)}
-        value={value}
-      >
-        <option value="recent">{t.fileLibrary.sortRecent}</option>
-        <option value="name">{t.fileLibrary.sortName}</option>
-        <option value="size">{t.fileLibrary.sortSize}</option>
-        <option value="pages">{t.fileLibrary.sortPages}</option>
-      </select>
-      <ChevronDown className="pointer-events-none absolute right-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-    </div>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button aria-label={t.fileLibrary.sortBy} className="h-8 gap-1.5 px-2.5" size="sm" type="button" variant="outline">
+          <ArrowUpDown className="text-muted-foreground" />
+          <span>{current.label}</span>
+          <ChevronDown className="text-muted-foreground" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className={optionMenuContentClassName} sideOffset={6}>
+        <OptionMenuHeader count={options.length} title={t.fileLibrary.sortBy} value={current.label} />
+        <div className="py-1">
+          {options.map((option) => (
+            <OptionMenuItem
+              active={option.value === value}
+              icon={ArrowUpDown}
+              key={option.value}
+              label={option.label}
+              onSelect={() => onChange(option.value)}
+            />
+          ))}
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 

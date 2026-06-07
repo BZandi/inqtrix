@@ -91,20 +91,11 @@ export function AddDocsPanel({
   const visible = (asset: FileAssetRecord) => !q || `${asset.label} ${asset.fileName}`.toLowerCase().includes(q)
 
   return (
-    <div className="rounded-lg border border-brand/30 bg-card shadow-[0_8px_24px_var(--shadow-soft)]">
-      <div className="flex items-center justify-between gap-3 border-b border-border px-3.5 py-2.5">
-        <div className="flex items-center gap-2">
-          <Plus className="size-4 text-brand" />
-          <h3 className="t-section text-foreground">{t.vectorIndex.addDocumentsTitle}</h3>
-        </div>
-        <Button aria-label={t.fileLibrary.cancel} className="size-7" onClick={onClose} size="icon" type="button" variant="ghost">
-          <X className="size-4" />
-        </Button>
-      </div>
-
-      <div className="flex items-center gap-2 border-b border-border px-3.5 py-2">
-        <label className="flex flex-1 items-center gap-2 rounded-md border border-border bg-background px-2 focus-within:ring-2 focus-within:ring-ring">
-          <Search className="size-4 shrink-0 text-muted-foreground" />
+    <div className="rounded-lg border border-border bg-card shadow-[0_8px_24px_var(--shadow-soft)]">
+      <div className="flex items-center gap-2.5 border-b border-border px-3.5 py-2.5">
+        <h3 className="shrink-0 t-section text-foreground">{t.vectorIndex.addDocumentsTitle}</h3>
+        <label className="ml-auto flex w-40 items-center gap-2 rounded-md border border-border bg-background px-2 focus-within:ring-2 focus-within:ring-ring sm:w-60">
+          <Search className="size-3.5 shrink-0 text-muted-foreground" />
           <input
             className="min-w-0 flex-1 border-0 bg-transparent py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground"
             onChange={(event) => setQuery(event.target.value)}
@@ -112,9 +103,8 @@ export function AddDocsPanel({
             value={query}
           />
         </label>
-        <Button className="h-8 gap-1.5" onClick={onUpload} size="sm" type="button" variant="outline">
-          <Upload className="size-3.5" />
-          {t.vectorIndex.uploadNew}
+        <Button aria-label={t.fileLibrary.cancel} className="size-7 shrink-0" onClick={onClose} size="icon" type="button" variant="ghost">
+          <X className="size-4" />
         </Button>
       </div>
 
@@ -177,9 +167,19 @@ export function AddDocsPanel({
       </div>
 
       <div className="flex items-center justify-between gap-3 border-t border-border px-3.5 py-2.5">
-        <span className="t-meta text-muted-foreground">
-          {t.vectorIndex.selectedCount.replace('{count}', String(selected.size))}
-        </span>
+        <div className="flex items-center gap-3">
+          <span className="t-meta text-muted-foreground">
+            {t.vectorIndex.selectedCount.replace('{count}', String(selected.size))}
+          </span>
+          <button
+            className="inline-flex items-center gap-1.5 t-meta text-muted-foreground transition-colors hover:text-foreground"
+            onClick={onUpload}
+            type="button"
+          >
+            <Upload className="size-3.5" />
+            {t.vectorIndex.uploadNew}
+          </button>
+        </div>
         <div className="flex items-center gap-2">
           <Button className="h-8" onClick={onClose} size="sm" type="button" variant="ghost">
             {t.fileLibrary.cancel}

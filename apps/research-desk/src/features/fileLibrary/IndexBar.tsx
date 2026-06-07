@@ -1,12 +1,14 @@
 import { AlertTriangle, ChevronDown, Info, Layers, Link, RotateCcw } from '@/components/icons'
 import { Button } from '@/components/ui/button'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { OptionMenuHeader, OptionMenuItem, optionMenuContentClassName } from '@/components/ui/option-menu'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useLocale } from '@/i18n/LocaleProvider'
 import type { Locale } from '@/i18n/translations'
 import { cn } from '@/lib/utils'
 import { EMBED_MODELS, type EmbedModelId, type VectorIndexRecord, type VectorIndexStatus } from '@/features/project/types'
 import type { VectorIndexMemberResolved } from '@/features/project/selectors'
-import { ConfirmDelete, InlineText } from './controls'
+import { ConfirmDelete } from './controls'
 import { indexVectorCount } from './helpers'
 
 const STATUS_STYLES: Record<VectorIndexStatus, { badge: string; dot: string; pulse: boolean }> = {
@@ -27,14 +29,12 @@ export function IndexBar({
   onDelete,
   onModel,
   onReindex,
-  onRename,
 }: {
   index: VectorIndexRecord
   members: VectorIndexMemberResolved[]
   onDelete: (indexId: string) => void
   onModel: (indexId: string, model: EmbedModelId) => void
   onReindex: (indexId: string) => void
-  onRename: (indexId: string, title: string) => void
 }) {
   const { locale, t } = useLocale()
   const indexing = index.status === 'indexing'
@@ -52,6 +52,7 @@ export function IndexBar({
     [t.vectorIndex.documents, members.length.toLocaleString(locale)],
     [t.vectorIndex.updated, formatUpdated(index.updatedAt, locale)],
   ]
+  const currentModel = EMBED_MODELS.find((model) => model.id === index.model) ?? EMBED_MODELS[0]
 
   return (
     <div className="rounded-lg border border-border bg-card p-3.5 shadow-[0_1px_2px_var(--shadow-hairline)]">
@@ -61,12 +62,7 @@ export function IndexBar({
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <InlineText
-              ariaLabel={t.vectorIndex.rename}
-              className="text-sm font-semibold text-foreground"
-              onCommit={(title) => onRename(index.id, title)}
-              value={index.title}
-            />
+            <h3 className="t-card text-foreground">{t.vectorIndex.title}</h3>
             <span className={cn('inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 t-meta-sm font-semibold', style.badge)}>
               <span className={cn('size-1.5 rounded-full', style.dot, style.pulse && 'inqtrix-running-dot')} />
               {statusLabel}
@@ -105,22 +101,38 @@ export function IndexBar({
         </div>
       ) : (
         <div className="mt-3 flex flex-wrap items-end gap-x-6 gap-y-2 border-t border-border/70 pt-3">
-          <label className="min-w-0">
+          <div className="min-w-0">
             <span className="block t-caption font-semibold text-muted-foreground/80">{t.vectorIndex.embeddingModel}</span>
-            <div className="relative mt-1">
-              <select
-                aria-label={t.vectorIndex.embeddingModel}
-                className="h-7 cursor-pointer appearance-none rounded-md border border-border bg-background pl-2 pr-7 font-mono t-meta font-semibold text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                onChange={(event) => onModel(index.id, event.target.value as EmbedModelId)}
-                value={index.model}
-              >
-                {EMBED_MODELS.map((model) => (
-                  <option key={model.id} value={model.id}>{model.label}</option>
-                ))}
-              </select>
-              <ChevronDown className="pointer-events-none absolute right-2 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
-            </div>
-          </label>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  aria-label={t.vectorIndex.embeddingModel}
+                  className="mt-1 h-7 gap-1.5 px-2 font-mono text-xs font-semibold"
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  <span className="truncate">{currentModel.label}</span>
+                  <ChevronDown className="text-muted-foreground" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className={optionMenuContentClassName} sideOffset={6}>
+                <OptionMenuHeader count={EMBED_MODELS.length} title={t.vectorIndex.embeddingModel} value={currentModel.label} />
+                <div className="py-1">
+                  {EMBED_MODELS.map((model) => (
+                    <OptionMenuItem
+                      active={model.id === index.model}
+                      description={`${model.provider} · ${model.dims.toLocaleString(locale)}`}
+                      icon={Layers}
+                      key={model.id}
+                      label={model.label}
+                      onSelect={() => onModel(index.id, model.id)}
+                    />
+                  ))}
+                </div>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
           {stats.map(([label, value]) => (
             <div className="min-w-0" key={label}>
               <p className="t-caption font-semibold text-muted-foreground/80">{label}</p>

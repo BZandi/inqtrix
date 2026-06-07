@@ -1,5 +1,5 @@
 import { type DragEvent } from 'react'
-import { Folder, GripVertical, Link, X } from '@/components/icons'
+import { Folder, Link, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useLocale } from '@/i18n/LocaleProvider'
@@ -14,11 +14,11 @@ import {
   TypeTile,
   type MoveTarget,
 } from './controls'
-import { chunkEstimate, formatBytes, typeMeta } from './helpers'
+import { chunkEstimate, formatAddedAt, formatAddedAtFull, formatBytes, typeMeta } from './helpers'
 import { FILE_DRAG_TYPE } from './constants'
 
-export const LIBRARY_GRID = 'grid grid-cols-[minmax(0,1fr)_4.5rem_3rem_5rem_3.5rem_4rem] items-center gap-3'
-export const INDEX_GRID = 'grid grid-cols-[minmax(0,1fr)_4.5rem_4rem_5rem_minmax(6rem,9rem)_2.5rem] items-center gap-3'
+export const LIBRARY_GRID = 'grid grid-cols-[minmax(0,1fr)_4.5rem_3rem_5rem_7rem_3.5rem_4rem] items-center gap-3'
+export const INDEX_GRID = 'grid grid-cols-[minmax(0,1fr)_4.5rem_4rem_5rem_7rem_minmax(6rem,9rem)_2.5rem] items-center gap-3'
 
 export type FileItemProps = {
   asset: FileAssetRecord
@@ -78,23 +78,36 @@ function UsedCell({ count }: { count: number }) {
   )
 }
 
+/** Date + time the file was added to the library (`createdAt`). The compact
+ * cell omits the year; the hover tooltip carries the full stamp. */
+function AddedCell({ asset }: { asset: FileAssetRecord }) {
+  const { locale, t } = useLocale()
+  return (
+    <div className="text-right t-meta-sm tabular-nums text-muted-foreground">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="cursor-help whitespace-nowrap">{formatAddedAt(asset.createdAt, locale)}</span>
+        </TooltipTrigger>
+        <TooltipContent side="top">
+          {t.fileLibrary.addedTooltip.replace('{date}', formatAddedAtFull(asset.createdAt, locale))}
+        </TooltipContent>
+      </Tooltip>
+    </div>
+  )
+}
+
 function NameCell({
   asset,
   breadcrumb,
-  draggable,
   onRename,
 }: {
   asset: FileAssetRecord
   breadcrumb?: string | null
-  draggable: boolean
   onRename?: (fileId: string, label: string) => void
 }) {
   const { t } = useLocale()
   return (
-    <div className="flex min-w-0 items-center gap-2.5">
-      {draggable ? (
-        <GripVertical className="size-3.5 shrink-0 text-transparent transition-colors group-hover:text-muted-foreground/50" />
-      ) : null}
+    <div className="flex min-w-0 items-center gap-2">
       <TypeTile asset={asset} size="sm" />
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-1.5">
@@ -179,12 +192,12 @@ export function FileRow(props: FileItemProps) {
     <div
       className={cn(
         isIndex ? INDEX_GRID : LIBRARY_GRID,
-        'group border-t border-border/60 px-3 py-2 transition-colors first:border-t-0 hover:bg-accent/40',
+        'group rounded-md px-2 py-2 transition-colors hover:bg-accent/45',
         !isIndex && 'cursor-grab active:cursor-grabbing',
       )}
       {...dragHandlers(props)}
     >
-      <NameCell asset={asset} breadcrumb={breadcrumb} draggable={!isIndex} onRename={props.onRename} />
+      <NameCell asset={asset} breadcrumb={breadcrumb} onRename={props.onRename} />
       <div className="min-w-0"><TypeBadge asset={asset} /></div>
       <div className="text-right t-meta tabular-nums text-muted-foreground">
         {isIndex ? (
@@ -196,6 +209,7 @@ export function FileRow(props: FileItemProps) {
         )}
       </div>
       <div className="text-right t-meta tabular-nums text-muted-foreground">{formatBytes(asset.sizeBytes, locale)}</div>
+      <AddedCell asset={asset} />
       {isIndex ? (
         <div className="flex min-w-0 items-center gap-1 t-meta-sm text-muted-foreground">
           <Folder className="size-3 shrink-0" />
@@ -225,7 +239,10 @@ export function FileCard(props: FileItemProps) {
       {...dragHandlers(props)}
     >
       <div className="flex items-start justify-between gap-2">
-        <TypeTile asset={asset} size="md" />
+        <div className="flex min-w-0 items-center gap-2">
+          <TypeTile asset={asset} size="md" />
+          <TypeBadge asset={asset} />
+        </div>
         <div className="flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
           <RowActions {...props} />
         </div>
@@ -249,18 +266,15 @@ export function FileCard(props: FileItemProps) {
           {asset.fileName}
           {breadcrumb ? ` · ${breadcrumb}` : ''}
         </p>
+        <p className="mt-1 t-hint tabular-nums text-muted-foreground">{formatAddedAt(asset.createdAt, locale)}</p>
       </div>
       <div className="mt-3 flex items-center justify-between gap-2 border-t border-border/60 pt-2 t-meta-sm text-muted-foreground">
-        <span className="inline-flex items-center gap-2">
-          <TypeBadge asset={asset} />
-          <span className="tabular-nums">{formatBytes(asset.sizeBytes, locale)}</span>
+        <span className="tabular-nums">
+          {formatBytes(asset.sizeBytes, locale)}
+          {meta.paged && asset.pageCount != null ? ` · ${asset.pageCount} ${t.fileLibrary.pagesUnit}` : ''}
         </span>
         {isIndex ? (
           <ChunkCell asset={asset} state={memberState ?? 'pending'} />
-        ) : meta.paged && asset.pageCount != null ? (
-          <span className="tabular-nums">
-            {asset.pageCount} {t.fileLibrary.pagesUnit}
-          </span>
         ) : (
           <UsedCell count={referenceCount ?? 0} />
         )}
@@ -269,22 +283,3 @@ export function FileCard(props: FileItemProps) {
   )
 }
 
-export function ListHeader({ mode }: { mode: 'library' | 'index' }) {
-  const { t } = useLocale()
-  const isIndex = mode === 'index'
-  return (
-    <div
-      className={cn(
-        isIndex ? INDEX_GRID : LIBRARY_GRID,
-        'px-3 pb-1.5 t-caption text-muted-foreground',
-      )}
-    >
-      <span>{t.fileLibrary.nameColumn}</span>
-      <span>{t.fileLibrary.typeColumn}</span>
-      <span className="text-right">{isIndex ? t.fileLibrary.chunksColumn : t.fileLibrary.pagesColumn}</span>
-      <span className="text-right">{t.fileLibrary.sizeColumn}</span>
-      <span className={isIndex ? '' : 'text-right'}>{isIndex ? t.fileLibrary.sourceColumn : t.fileLibrary.referencedColumn}</span>
-      <span />
-    </div>
-  )
-}

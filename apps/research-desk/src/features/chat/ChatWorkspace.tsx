@@ -96,8 +96,7 @@ import { ContextChipLegend } from '@/features/composer/ContextChipLegend'
 import { MentionComposer, type MentionComposerHandle } from '@/features/composer/MentionComposer'
 import { type LabelResolver } from '@/features/composer/mentionDoc'
 import { resizeTextareaToRows } from '@/features/composer/textareaAutosize'
-
-const chatComposerMenuContentClassName = 'w-max min-w-48 max-w-72 overflow-hidden rounded-xl p-0 shadow-lg'
+import { OptionMenuHeader, optionMenuContentClassName } from '@/components/ui/option-menu'
 
 type ChatWorkspaceProps = {
   activeAssistantMessageId: string | null
@@ -983,8 +982,8 @@ export default function ChatWorkspace({
                         <SlidersHorizontal />
                       </Button>
                     </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start" className={chatComposerMenuContentClassName} side="top" sideOffset={8}>
-                      <ChatComposerMenuHeader count={1} title={t.composer.moreSettings} />
+                    <DropdownMenuContent align="start" className={optionMenuContentClassName} side="top" sideOffset={8}>
+                      <OptionMenuHeader count={1} title={t.composer.moreSettings} />
                       <div className="py-1">
                       <ChatComposerToggleItem
                         checked={streamingEnabled}
@@ -1127,15 +1126,6 @@ function ChatToggleVisual({ checked }: { checked: boolean }) {
         )}
       />
     </span>
-  )
-}
-
-function ChatComposerMenuHeader({ count, title }: { count: number; title: string }) {
-  return (
-    <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-1.5">
-      <span className="t-meta-sm font-medium text-muted-foreground">{title}</span>
-      <span className="ml-auto t-hint tabular-nums text-muted-foreground/50">{count}</span>
-    </div>
   )
 }
 

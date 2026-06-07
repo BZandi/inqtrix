@@ -18,6 +18,31 @@ export function formatBytes(bytes: number, locale: Locale = 'en'): string {
   return `${locale === 'de' ? text.replace('.', ',') : text} ${units[unitIndex]}`
 }
 
+/** Compact, locale-aware "added at" stamp (date + time of day) for the file
+ * list's "Hinzugefügt" column, e.g. "06. Juni, 14:32" (de, 24h) /
+ * "Jun 06, 02:32 PM" (en, 12h). Returns an em dash for unparseable input so a
+ * malformed timestamp never renders as "Invalid Date". */
+export function formatAddedAt(iso: string, locale: Locale = 'en'): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return '—'
+  return date.toLocaleString(locale, { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+}
+
+/** Full "added at" stamp (weekday + year + time) for the column's hover
+ * tooltip, where the compact form omits the year and weekday. */
+export function formatAddedAtFull(iso: string, locale: Locale = 'en'): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return '—'
+  return date.toLocaleString(locale, {
+    weekday: 'short',
+    year: 'numeric',
+    month: 'long',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
 /** Lowercase file extension derived from the file name (there is no `ext`
  * field on FileAssetRecord). */
 export function fileExt(asset: Pick<FileAssetRecord, 'fileName'>): string {

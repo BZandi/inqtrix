@@ -28,6 +28,7 @@ import {
   FileDown,
   FileText,
   Folder,
+  FolderOpen,
   FolderPlus,
   GripVertical,
   Highlighter,
@@ -944,7 +945,7 @@ function EditorFileTree({
                   >
                     {isExpanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
                   </button>
-                  <Folder className="size-3.5 shrink-0" />
+                  {isExpanded ? <FolderOpen className="size-3.5 shrink-0" /> : <Folder className="size-3.5 shrink-0" />}
                   {editingFolderId === folder.id ? (
                     <input
                       aria-label={copy.renameFolder}

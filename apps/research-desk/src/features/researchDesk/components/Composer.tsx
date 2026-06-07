@@ -32,6 +32,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { OptionMenuHeader, OptionMenuItem, optionMenuContentClassName } from '@/components/ui/option-menu'
 import { Separator } from '@/components/ui/separator'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -83,8 +84,6 @@ type ComposerOption = {
   label: string
   value: string
 }
-
-const composerMenuContentClassName = 'w-max min-w-48 max-w-72 overflow-hidden rounded-xl p-0 shadow-lg'
 
 function switchComposerMenu(
   currentMenu: ComposerMenuKey | null,
@@ -366,8 +365,8 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
                   </DropdownMenuTrigger>
                   <TooltipContent>{t.composer.moreSettings}</TooltipContent>
                 </Tooltip>
-                <DropdownMenuContent align="end" className={composerMenuContentClassName} side="top" sideOffset={8}>
-                  <ComposerMenuHeader count={2} title={t.composer.moreSettings} />
+                <DropdownMenuContent align="end" className={optionMenuContentClassName} side="top" sideOffset={8}>
+                  <OptionMenuHeader count={2} title={t.composer.moreSettings} />
                   <div className="py-1">
                     <ComposerMenuToggle
                       checked={form.webSearch}
@@ -496,8 +495,8 @@ function ComposerStatusMenu({
         </DropdownMenuTrigger>
         <TooltipContent>{t.composer.settingsSummary}</TooltipContent>
       </Tooltip>
-      <DropdownMenuContent align="end" className={composerMenuContentClassName} side="top" sideOffset={8}>
-        <ComposerMenuHeader count={7} title={t.composer.settingsSummary} />
+      <DropdownMenuContent align="end" className={optionMenuContentClassName} side="top" sideOffset={8}>
+        <OptionMenuHeader count={7} title={t.composer.settingsSummary} />
         <div className="py-1">
           <SummaryGroup label={t.composer.summaryStrategy}>
             <StatusRow label={t.common.stack} value={selectedStack} />
@@ -667,11 +666,11 @@ function ComposerParameterMenu({
         </TooltipTrigger>
         <TooltipContent>{triggerLabel}</TooltipContent>
       </Tooltip>
-      <DropdownMenuContent align="start" className={composerMenuContentClassName} side="top" sideOffset={8}>
-        <ComposerMenuHeader count={options.length} title={label} value={valueLabel} />
+      <DropdownMenuContent align="start" className={optionMenuContentClassName} side="top" sideOffset={8}>
+        <OptionMenuHeader count={options.length} title={label} value={valueLabel} />
         <div className="py-1">
           {options.map((option) => (
-            <ComposerOptionRow
+            <OptionMenuItem
               active={option.value === value}
               description={option.description}
               icon={Icon}
@@ -683,69 +682,6 @@ function ComposerParameterMenu({
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
-  )
-}
-
-function ComposerMenuHeader({
-  count,
-  title,
-  value,
-}: {
-  count: number
-  title: string
-  value?: string
-}) {
-  return (
-    <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-1.5">
-      <span className="t-meta-sm font-medium text-muted-foreground">{title}</span>
-      <span className="ml-auto t-hint tabular-nums text-muted-foreground/50">{value ?? count}</span>
-    </div>
-  )
-}
-
-function ComposerOptionRow({
-  active,
-  description,
-  icon: Icon,
-  label,
-  onSelect,
-}: {
-  active: boolean
-  description: string
-  icon: LucideIcon
-  label: string
-  onSelect: () => void
-}) {
-  return (
-    <DropdownMenuItem
-      className={cn(
-        'group relative items-center gap-2.5 rounded-none px-2.5 py-1.5 pr-1.5 hover:bg-accent/50 focus:bg-accent/80 data-[highlighted]:bg-accent/80',
-        active && 'bg-accent',
-      )}
-      onSelect={onSelect}
-    >
-      <span
-        className={cn(
-          'absolute inset-y-1 left-0 w-0.5 rounded-full bg-brand transition-opacity group-hover:opacity-100 group-focus:opacity-100 group-data-[highlighted]:opacity-100',
-          active ? 'opacity-100' : 'opacity-0',
-        )}
-      />
-      <Icon
-        className={cn(
-          'icon-md shrink-0 transition-colors',
-          active
-            ? 'text-brand'
-            : 'text-muted-foreground/70 group-hover:text-brand group-focus:text-brand group-data-[highlighted]:text-brand',
-        )}
-      />
-      <span className="min-w-0 flex-1 text-left">
-        <span className="block truncate t-list text-foreground">{label}</span>
-        <span className="block truncate t-meta-sm text-muted-foreground">{description}</span>
-      </span>
-      <span className="flex size-4 shrink-0 items-center justify-center">
-        {active ? <Check className="size-3.5 text-brand" /> : null}
-      </span>
-    </DropdownMenuItem>
   )
 }
 

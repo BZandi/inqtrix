@@ -200,13 +200,13 @@ export function Rail({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
-        <p className="px-1.5 pb-1 pt-2 t-caption text-muted-foreground/80">{t.fileLibrary.sectionDocuments}</p>
+        <p className="px-1.5 pb-1 pt-2 t-caption text-muted-foreground/80">{t.fileLibrary.sectionCollections}</p>
         <div className="flex flex-col gap-0.5">
           <NavItem
             active={active.kind === 'all'}
             count={totalDocCount}
             icon={Inbox}
-            label={t.fileLibrary.allDocuments}
+            label={t.fileLibrary.allCollections}
             onClick={onSelectAll}
           />
           {collections.map((collection) => (

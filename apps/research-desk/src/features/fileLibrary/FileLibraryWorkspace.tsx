@@ -24,7 +24,7 @@ import type { ResearchDeskAction } from '../researchDesk/state'
 import { Rail } from './Rail'
 import { IndexBar } from './IndexBar'
 import { AddDocsPanel } from './AddDocsPanel'
-import { FileCard, FileRow, ListHeader } from './FileItem'
+import { FileCard, FileRow } from './FileItem'
 import { ConfirmDelete, InlineText, SortSelect, ViewToggle, type MoveTarget } from './controls'
 import { groupSlug } from './helpers'
 import { isInternalFileDrag, type ActiveTarget, type SortMode, type ViewMode } from './constants'
@@ -73,14 +73,17 @@ function BandHeader({
   return (
     <div
       className={cn(
-        'group/band mb-1.5 flex items-center gap-2 rounded-md px-1.5 py-1 transition-colors',
+        'group/band flex items-center gap-2 rounded-md px-2 py-1 transition-colors',
         dropOver && 'bg-brand-subtle/60 ring-1 ring-brand/30',
       )}
       onDragLeave={onDragLeave}
       onDragOver={onDragOver}
       onDrop={onDrop}
     >
-      {band.isGroup ? <FolderOpen className="size-3.5 shrink-0 text-file" /> : <Folder className="size-3.5 shrink-0 text-muted-foreground" />}
+      {/* 28px (w-7) slot so the folder glyph centers exactly over the rows' type tiles. */}
+      <span className="grid w-7 shrink-0 place-items-center">
+        {band.isGroup ? <FolderOpen className="size-3.5 text-file" /> : <Folder className="size-3.5 text-muted-foreground" />}
+      </span>
       {band.isGroup ? (
         <InlineText
           ariaLabel={t.fileLibrary.renameGroup}
@@ -342,11 +345,11 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
   const headerTitle = q
     ? t.fileLibrary.searchPlaceholderDocs
     : active.kind === 'all'
-      ? t.fileLibrary.allDocuments
+      ? t.fileLibrary.allCollections
       : active.kind === 'collection'
         ? activeCollection?.title ?? ''
         : activeIndex?.title ?? ''
-  const crumbRoot = active.kind === 'index' ? t.vectorIndex.title : t.fileLibrary.sectionDocuments
+  const crumbRoot = active.kind === 'index' ? t.vectorIndex.title : t.fileLibrary.sectionCollections
 
   return (
     <div className="grid h-[calc(100svh-var(--header-h))] grid-cols-1 bg-background lg:grid-cols-[17rem_minmax(0,1fr)]">
@@ -378,7 +381,9 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
       />
 
       <div className="flex min-h-0 min-w-0 flex-col">
-        <header className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border px-4 py-3 md:px-6">
+        {/* No bottom divider on the workspace header (deliberate, departs from DESIGN
+            §8): the only line per section is the hairline under its section title. */}
+        <header className="flex shrink-0 flex-wrap items-center gap-3 px-4 py-3 md:px-6">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5 t-meta text-muted-foreground">
               <span>{crumbRoot}</span>
@@ -391,6 +396,13 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
                 className="mt-0.5 t-section text-foreground"
                 onCommit={(title) => dispatch({ sectionId: activeCollection.id, title, type: 'renameFileLibrarySection' })}
                 value={activeCollection.title}
+              />
+            ) : active.kind === 'index' && activeIndex ? (
+              <InlineText
+                ariaLabel={t.vectorIndex.rename}
+                className="mt-0.5 t-section text-foreground"
+                onCommit={(title) => dispatch({ indexId: activeIndex.id, title, type: 'renameVectorIndex' })}
+                value={activeIndex.title}
               />
             ) : (
               <h1 className="mt-0.5 truncate t-section text-foreground">{headerTitle}</h1>
@@ -449,7 +461,7 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
         </header>
 
         <ScrollArea className="min-h-0 flex-1">
-          <div className="mx-auto flex max-w-[960px] flex-col gap-4 p-4 md:p-6">
+          <div className="flex flex-col gap-4 p-4 md:p-6">
             {active.kind === 'index' && activeIndex ? (
               <>
                 <IndexBar
@@ -458,7 +470,6 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
                   onDelete={(indexId) => dispatch({ indexId, type: 'deleteVectorIndex' })}
                   onModel={(indexId, model: EmbedModelId) => dispatch({ indexId, model, type: 'setVectorIndexModel' })}
                   onReindex={triggerReindex}
-                  onRename={(indexId, title) => dispatch({ indexId, title, type: 'renameVectorIndex' })}
                 />
                 {pickerIndexId === activeIndex.id ? (
                   <AddDocsPanel
@@ -477,8 +488,7 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
                 {indexMembers.length === 0 ? (
                   <IndexEmpty onAdd={() => setPickerIndexId(activeIndex.id)} />
                 ) : view === 'list' ? (
-                  <div className="overflow-hidden rounded-lg border border-border bg-card">
-                    <ListHeader mode="index" />
+                  <div className="flex flex-col">
                     {indexMembers.map(({ asset, member }) => (
                       <FileRow
                         asset={asset}
@@ -542,15 +552,15 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
                             />
                           ) : null}
                           {block.items.length === 0 ? (
-                            <p className="px-3 py-3 text-xs text-muted-foreground">{t.fileLibrary.emptyGroup}</p>
+                            <p className="px-2 py-3 text-xs text-muted-foreground">{t.fileLibrary.emptyGroup}</p>
                           ) : view === 'list' ? (
                             <div
-                              className={cn('overflow-hidden rounded-lg border border-border bg-card transition-colors', !block.band && drop?.dropOver && 'ring-1 ring-brand/30')}
+                              className={cn('flex flex-col transition-colors', !block.band && drop?.dropOver && 'rounded-md bg-brand-subtle/40 ring-1 ring-brand/25')}
                               onDragLeave={!block.band ? drop?.onDragLeave : undefined}
                               onDragOver={!block.band ? drop?.onDragOver : undefined}
                               onDrop={!block.band ? drop?.onDrop : undefined}
                             >
-                              <ListHeader mode="library" />
+                              {block.band ? <div className="mt-1.5 border-t border-border/70" /> : null}
                               {block.items.map((asset) => (
                                 <FileRow
                                   asset={asset}

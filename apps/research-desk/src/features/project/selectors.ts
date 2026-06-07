@@ -15,6 +15,8 @@ import type {
   FileLibrarySectionRecord,
   ProjectState,
   ResearchRunRecord,
+  VectorIndexMemberRecord,
+  VectorIndexRecord,
 } from './types'
 import { type JobPhase, type LocalizedText, type ResearchJob } from '@/features/researchDesk/types'
 import type { ReferenceDoc } from '@/features/files/referenceBlocks'
@@ -255,6 +257,59 @@ export function fileAssetsForSection(state: ProjectState, sectionId: string): Fi
 
 export function fileAssetsForGroup(state: ProjectState, groupId: string): FileAssetRecord[] {
   return projectFileAssets(state).filter((asset) => asset.groupId === groupId)
+}
+
+export function projectVectorIndexes(state: ProjectState): VectorIndexRecord[] {
+  return state.vectorIndexOrder
+    .map((indexId) => state.vectorIndexes[indexId])
+    .filter((index): index is VectorIndexRecord => Boolean(index))
+}
+
+export function vectorIndexById(state: ProjectState, indexId: string): VectorIndexRecord | null {
+  return state.vectorIndexes[indexId] ?? null
+}
+
+export type VectorIndexMemberResolved = {
+  asset: FileAssetRecord
+  member: VectorIndexMemberRecord
+}
+
+export function vectorIndexMembersResolved(state: ProjectState, indexId: string): VectorIndexMemberResolved[] {
+  const index = state.vectorIndexes[indexId]
+  if (!index) return []
+  return index.members.flatMap((member) => {
+    const asset = state.fileAssets[member.fileId]
+    return asset ? [{ asset, member }] : []
+  })
+}
+
+/** Durable reference count for the file-library "used in" column: vector-index
+ * memberships plus chat threads that attach the file directly (`file-asset`)
+ * or via a group it belongs to (`file-group`). Each thread counts once. Keys
+ * on ids, never labels (labels are deduped by withUniqueLabels). */
+export function fileAssetReferenceCount(state: ProjectState, fileId: string): number {
+  const asset = state.fileAssets[fileId]
+  if (!asset) return 0
+  const indexCount = Object.values(state.vectorIndexes).filter((index) =>
+    index.members.some((member) => member.fileId === fileId),
+  ).length
+  const groupId = asset.groupId
+  let threadCount = 0
+  for (const thread of Object.values(state.chatThreads)) {
+    const referenced = thread.messages.some((message) =>
+      (message.attachments ?? []).some((attachment) => {
+        if (attachment.kind === 'file-asset') return attachment.fileId === fileId
+        if (attachment.kind === 'file-group') return groupId != null && attachment.groupId === groupId
+        return false
+      }),
+    )
+    if (referenced) threadCount += 1
+  }
+  return indexCount + threadCount
+}
+
+export function projectStorageTotalBytes(state: ProjectState): number {
+  return projectFileAssets(state).reduce((total, asset) => total + asset.sizeBytes, 0)
 }
 
 export function fileMentionOptions(state: ProjectState): FileMentionOption[] {

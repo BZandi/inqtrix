@@ -1,0 +1,110 @@
+import { FileText, Paperclip, Table2, type LucideIcon } from '@/components/icons'
+import type { Locale } from '@/i18n/translations'
+import type { FileAssetRecord } from '@/features/project/types'
+import type { VectorIndexMemberResolved } from '@/features/project/selectors'
+
+/** Human-readable byte size. German locale uses a decimal comma to match the
+ * rest of the UI (e.g. "2,4 MB"). */
+export function formatBytes(bytes: number, locale: Locale = 'en'): string {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB']
+  let value = bytes / 1024
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  const text = value.toFixed(unitIndex === 0 || value >= 10 ? 0 : 1)
+  return `${locale === 'de' ? text.replace('.', ',') : text} ${units[unitIndex]}`
+}
+
+/** Compact, locale-aware "added at" stamp (date + time of day) for the file
+ * list's "Hinzugefügt" column, e.g. "06. Juni, 14:32" (de, 24h) /
+ * "Jun 06, 02:32 PM" (en, 12h). Returns an em dash for unparseable input so a
+ * malformed timestamp never renders as "Invalid Date". */
+export function formatAddedAt(iso: string, locale: Locale = 'en'): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return '—'
+  return date.toLocaleString(locale, { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+}
+
+/** Full "added at" stamp (weekday + year + time) for the column's hover
+ * tooltip, where the compact form omits the year and weekday. */
+export function formatAddedAtFull(iso: string, locale: Locale = 'en'): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return '—'
+  return date.toLocaleString(locale, {
+    weekday: 'short',
+    year: 'numeric',
+    month: 'long',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+/** Lowercase file extension derived from the file name (there is no `ext`
+ * field on FileAssetRecord). */
+export function fileExt(asset: Pick<FileAssetRecord, 'fileName'>): string {
+  const match = /\.([a-z0-9]+)$/i.exec(asset.fileName)
+  return match ? match[1].toLowerCase() : ''
+}
+
+export type FileTypeMeta = {
+  Icon: LucideIcon
+  label: string
+  paged: boolean
+}
+
+const TYPE_BY_EXT: Record<string, FileTypeMeta> = {
+  pdf: { Icon: FileText, label: 'PDF', paged: true },
+  doc: { Icon: FileText, label: 'DOC', paged: true },
+  docx: { Icon: FileText, label: 'DOCX', paged: true },
+  rtf: { Icon: FileText, label: 'RTF', paged: true },
+  xls: { Icon: Table2, label: 'XLS', paged: false },
+  xlsx: { Icon: Table2, label: 'XLSX', paged: false },
+  csv: { Icon: Table2, label: 'CSV', paged: false },
+  txt: { Icon: FileText, label: 'TXT', paged: false },
+  md: { Icon: FileText, label: 'MD', paged: false },
+}
+
+/** Type tile/badge metadata. Type is conveyed via a neutral tile + label, never
+ * via color — color stays reserved for parse status. */
+export function typeMeta(asset: Pick<FileAssetRecord, 'fileName'>): FileTypeMeta {
+  const ext = fileExt(asset)
+  return TYPE_BY_EXT[ext] ?? { Icon: Paperclip, label: ext.toUpperCase() || 'DATEI', paged: false }
+}
+
+export type FileStatusKind = 'ok' | 'truncated' | 'failed'
+
+/** Maps the parser's `parseStatus`/`textTruncated` onto the single colored
+ * status signal shown on files. `parsed` is neutral (no marker). */
+export function fileStatus(asset: FileAssetRecord): FileStatusKind {
+  if (asset.parseStatus === 'unsupported' || asset.parseStatus === 'error') return 'failed'
+  if (asset.parseStatus === 'partial') return asset.textTruncated ? 'truncated' : 'failed'
+  return 'ok'
+}
+
+/** Estimated embedding-chunk count for a document. Page-based when available
+ * (≈4.3 chunks/page), else size-based. This is a client-side estimate shown
+ * until a real embedding backend reports actual counts. */
+export function chunkEstimate(asset: FileAssetRecord): number {
+  return asset.pageCount != null
+    ? Math.max(40, Math.round(asset.pageCount * 4.3))
+    : Math.max(24, Math.round(asset.sizeBytes / 2600))
+}
+
+/** Display-only slug for a group's `@filegroups:` handle. ASCII-only (umlauts
+ * collapse to hyphens); the chat/editor resolver owns the authoritative label. */
+export function groupSlug(title: string): string {
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'group'
+}
+
+/** Total vectors an index serves = sum of chunk estimates over its embedded
+ * members (pending members are not yet embedded). */
+export function indexVectorCount(members: VectorIndexMemberResolved[]): number {
+  return members.reduce(
+    (total, { asset, member }) => (member.state === 'embedded' ? total + chunkEstimate(asset) : total),
+    0,
+  )
+}

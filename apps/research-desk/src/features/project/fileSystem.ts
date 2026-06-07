@@ -9,13 +9,17 @@ import {
   type ProjectFile,
 } from './markdown'
 import type {
+  EmbedModelId,
   FileAssetRecord,
   FileGroupRecord,
   FileLibrarySectionRecord,
   ProjectState,
   ProjectWriteResult,
+  VectorIndexMemberRecord,
+  VectorIndexRecord,
+  VectorIndexStatus,
 } from './types'
-import { PROJECT_SCHEMA_VERSION } from './types'
+import { DEFAULT_EMBED_MODEL_ID, EMBED_MODELS, PROJECT_SCHEMA_VERSION } from './types'
 import { createDefaultFileLibrarySections, FILE_SECTION_TEMP_ID } from '@/features/files/sections'
 import {
   getOrCreateBrowserWorkspaceId,
@@ -390,6 +394,7 @@ function buildProjectStateFromFiles({
   const workspaceId = workspaceIdOrDefault(manifest.workspace_id)
   rememberBrowserWorkspaceId(workspaceId)
   const fileLibrary = resolveFileLibraryFromManifest(manifest, fileAssets)
+  const { vectorIndexOrder, vectorIndexes } = resolveVectorIndexesFromManifest(manifest, fileLibrary.fileAssets)
 
   return {
     chatRuleOrder,
@@ -428,6 +433,8 @@ function buildProjectStateFromFiles({
     },
     researchRunOrder,
     researchRuns,
+    vectorIndexOrder,
+    vectorIndexes,
     workspaceId,
     ui: {
       activeFilter: filterOrDefault((ui as Record<string, unknown>).activeFilter),
@@ -920,6 +927,84 @@ function fileGroupsFromManifest(value: unknown): FileGroupRecord[] {
     })
   }
   return groups
+}
+
+function embedModelIdOrDefault(value: unknown): EmbedModelId {
+  return EMBED_MODELS.some((model) => model.id === value) ? (value as EmbedModelId) : DEFAULT_EMBED_MODEL_ID
+}
+
+function dimsForEmbedModelId(model: EmbedModelId): number {
+  return EMBED_MODELS.find((entry) => entry.id === model)?.dims ?? 3072
+}
+
+function vectorIndexStatusOrDefault(value: unknown): VectorIndexStatus {
+  return value === 'indexing' || value === 'stale' ? value : 'ready'
+}
+
+function vectorIndexMembersFromManifest(
+  value: unknown,
+  fileAssets: Record<string, FileAssetRecord>,
+): VectorIndexMemberRecord[] {
+  if (!Array.isArray(value)) return []
+  const members: VectorIndexMemberRecord[] = []
+  const seen = new Set<string>()
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const record = item as Record<string, unknown>
+    const fileId = typeof record.fileId === 'string'
+      ? record.fileId
+      : typeof record.file_id === 'string'
+        ? record.file_id
+        : ''
+    if (!fileId || seen.has(fileId) || !fileAssets[fileId]) continue
+    seen.add(fileId)
+    members.push({ fileId, state: record.state === 'embedded' ? 'embedded' : 'pending' })
+  }
+  return members
+}
+
+function vectorIndexesFromManifest(
+  value: unknown,
+  fileAssets: Record<string, FileAssetRecord>,
+): VectorIndexRecord[] {
+  if (!Array.isArray(value)) return []
+  const indexes: VectorIndexRecord[] = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const record = item as Record<string, unknown>
+    const id = typeof record.id === 'string' && record.id.trim() ? record.id : ''
+    const title = typeof record.title === 'string' && record.title.trim() ? record.title : ''
+    if (!id || !title) continue
+    const model = embedModelIdOrDefault(record.model)
+    const dims = typeof record.dims === 'number' ? record.dims : dimsForEmbedModelId(model)
+    indexes.push({
+      createdAt: stringOrNow(record.createdAt ?? record.created_at),
+      dims,
+      handle: typeof record.handle === 'string' && record.handle.trim() ? record.handle : id,
+      id,
+      members: vectorIndexMembersFromManifest(record.members, fileAssets),
+      model,
+      status: vectorIndexStatusOrDefault(record.status),
+      title,
+      updatedAt: stringOrNow(record.updatedAt ?? record.updated_at),
+    })
+  }
+  return indexes
+}
+
+/** Rebuilds the vector-index map + order from manifest frontmatter. Members
+ * whose source asset is missing are dropped; an old project without the
+ * `vector_indexes` key yields an empty map (no error). Exported for tests. */
+export function resolveVectorIndexesFromManifest(
+  manifest: Record<string, unknown>,
+  fileAssets: Record<string, FileAssetRecord>,
+): { vectorIndexOrder: string[]; vectorIndexes: Record<string, VectorIndexRecord> } {
+  const vectorIndexes: Record<string, VectorIndexRecord> = {}
+  for (const index of vectorIndexesFromManifest(manifest.vector_indexes, fileAssets)) {
+    vectorIndexes[index.id] = index
+  }
+  const vectorIndexOrder = orderFromManifest(manifest.vector_index_order, vectorIndexes)
+  return { vectorIndexOrder, vectorIndexes }
 }
 
 async function writeProjectFiles(

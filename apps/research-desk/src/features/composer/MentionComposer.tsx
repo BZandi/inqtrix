@@ -182,8 +182,21 @@ export const MentionComposer = forwardRef<MentionComposerHandle, MentionComposer
     setAutocomplete(EMPTY_AUTOCOMPLETE)
   }
 
+  function goToRoot() {
+    const { autocomplete: state } = live.current
+    if (!editor || !state.range) return
+    // Replace the typed `@kind:` token with a bare `@` so the root trigger
+    // re-fires. The trigger regex is anchored to the cursor, so otherwise the
+    // only way out of a category is to delete the whole token by hand.
+    editor.chain().focus().insertContentAt(state.range, '@').run()
+  }
+
   function handleEditorKeyDown(event: KeyboardEvent): boolean {
     const { activeIndex: index, autocomplete: state } = live.current
+    if (event.key === 'Backspace' && state.match && state.match.kind !== 'root' && state.match.query === '') {
+      goToRoot()
+      return true
+    }
     if (state.match && state.options.length > 0) {
       if (event.key === 'ArrowDown') {
         setActiveIndex((value) => (value + 1) % state.options.length)
@@ -273,6 +286,9 @@ export const MentionComposer = forwardRef<MentionComposerHandle, MentionComposer
       {autocomplete.match && autocomplete.options.length > 0 && (
         <MentionAutocomplete
           activeIndex={activeIndex}
+          match={autocomplete.match}
+          onBack={goToRoot}
+          onHover={setActiveIndex}
           onSelect={applyOption}
           options={autocomplete.options}
         />

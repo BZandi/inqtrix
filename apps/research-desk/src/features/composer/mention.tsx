@@ -1,6 +1,12 @@
-import { BookOpen, FileText, FolderOpen, Paperclip } from '@/components/icons'
+import { BookOpen, FileText, FolderOpen, Paperclip, type LucideIcon } from '@/components/icons'
+import {
+  MentionMenu,
+  type MentionMenuLabels,
+  type MentionMenuOption,
+  type MentionMenuScope,
+  type MentionTone,
+} from '@/components/ui/mention-menu'
 import { useLocale } from '@/i18n/LocaleProvider'
-import { cn } from '@/lib/utils'
 import type {
   ChatRuleOption,
   CompletedReportOption,
@@ -48,6 +54,18 @@ const CATEGORY_PREFIX: Record<MentionKind, MentionOption['prefix']> = {
   rules: '@rules:',
   files: '@files:',
   filegroups: '@filegroups:',
+}
+
+/**
+ * Display order for grouped rule items. Sorting rule options into this order at
+ * build time keeps the flat option list aligned with the grouped rendering, so
+ * the menu's active index and arrow navigation stay in visual order without a
+ * separate index-reconciliation step at render time.
+ */
+const RULE_CATEGORY_ORDER: Record<ChatRuleCategory, number> = {
+  instruction: 0,
+  function: 1,
+  context: 2,
 }
 
 /**
@@ -119,6 +137,7 @@ function mentionItemsForKind(
   }
   return sources.ruleOptions
     .filter((rule) => matchesMentionQuery(query, rule.label, rule.title))
+    .sort((a, b) => RULE_CATEGORY_ORDER[a.category] - RULE_CATEGORY_ORDER[b.category])
     .slice(0, 8)
     .map((rule) => ({
       category: rule.category,
@@ -214,93 +233,88 @@ function matchesMentionQuery(query: string, label: string, title: string) {
   return label.includes(query) || title.toLowerCase().includes(query)
 }
 
-const MENTION_ICON: Record<MentionKind, typeof BookOpen> = {
+const MENTION_ICON: Record<MentionKind, LucideIcon> = {
   research: FileText,
   rules: BookOpen,
   files: Paperclip,
   filegroups: FolderOpen,
 }
 
+const MENTION_TONE: Record<MentionKind, MentionTone> = {
+  research: 'brand',
+  rules: 'success',
+  files: 'file',
+  filegroups: 'warning',
+}
+
+/**
+ * Adapter between the mention domain model and the presentational `MentionMenu`.
+ * It maps `MentionOption`s to the menu's tone/icon/group vocabulary, derives the
+ * breadcrumb scope from the active trigger, and resolves the i18n labels. All
+ * trigger, keyboard, and selection logic stays in `MentionComposer`; this layer
+ * only translates data and forwards intents (select/hover/back).
+ */
 export function MentionAutocomplete({
   activeIndex,
+  match,
+  onBack,
+  onHover,
   onSelect,
   options,
 }: {
   activeIndex: number
+  match: MentionMatch
+  onBack: () => void
+  onHover: (index: number) => void
   onSelect: (option: MentionOption) => void
   options: MentionOption[]
 }) {
   const { t } = useLocale()
-  const groups = groupMentionOptions(options, {
+  const ruleGroupLabels: Record<ChatRuleCategory, string> = {
     context: t.promptLibrary.categoryContext,
     function: t.promptLibrary.categoryFunction,
     instruction: t.promptLibrary.categoryInstruction,
-  })
-  return (
-    <div className="absolute bottom-full left-0 z-30 mb-2 w-full max-w-lg overflow-hidden rounded-lg border border-border bg-popover shadow-lg">
-      <div className="border-b border-border px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-        <span>{t.chat.mentionResults}</span>
-        <span className="float-right normal-case tracking-normal text-muted-foreground/75">
-          {t.chat.mentionEscHint}
-        </span>
-      </div>
-      <div className="max-h-64 overflow-y-auto p-1">
-        {groups.map((group) => (
-          <div key={group.key}>
-            {group.label ? (
-              <div className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                {group.label}
-              </div>
-            ) : null}
-            {group.options.map(({ index, option }) => {
-              const Icon = MENTION_ICON[option.type]
-              return (
-                <button
-                  className={cn(
-                    'flex w-full min-w-0 items-start gap-2 rounded-md px-2 py-2 text-left transition-colors',
-                    index === activeIndex ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/70',
-                  )}
-                  key={`${option.type}-${option.label}`}
-                  onMouseDown={(event) => {
-                    event.preventDefault()
-                    onSelect(option)
-                  }}
-                  type="button"
-                >
-                  <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                  <span className="min-w-0">
-                    <span className="block truncate text-sm font-semibold">
-                      {option.prefix ? option.label : `@${option.type}:${option.label}`}
-                    </span>
-                    <span className="block truncate text-xs text-muted-foreground">
-                      {option.title}
-                    </span>
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function groupMentionOptions(options: MentionOption[], labels: Record<ChatRuleCategory, string>): Array<{
-  key: string
-  label: string | null
-  options: Array<{ index: number; option: MentionOption }>
-}> {
-  if (!options.some((option) => option.type === 'rules' && !option.prefix)) {
-    return [{ key: 'all', label: null, options: options.map((option, index) => ({ index, option })) }]
   }
-  const order: ChatRuleCategory[] = ['instruction', 'function', 'context']
-  return order.flatMap((category) => {
-    const grouped = options
-      .map((option, index) => ({ index, option }))
-      .filter(({ option }) => option.category === category)
-    return grouped.length > 0
-      ? [{ key: category, label: labels[category], options: grouped }]
-      : []
+  const labels: MentionMenuLabels = {
+    backHint: t.chat.mentionBackHint,
+    closeHint: t.chat.mentionCloseHint,
+    filterPlaceholder: t.chat.mentionFilterPlaceholder,
+    navHint: t.chat.mentionNavHint,
+    rootTitle: t.chat.mentionResults,
+    selectHint: t.chat.mentionSelectHint,
+  }
+  const menuOptions: MentionMenuOption[] = options.map((option) => {
+    const isCategory = Boolean(option.prefix)
+    return {
+      group: !isCategory && option.type === 'rules' && option.category ? ruleGroupLabels[option.category] : undefined,
+      icon: MENTION_ICON[option.type],
+      isCategory,
+      // Category rows lead with the `@kind:` token (the key info when picking a
+      // category); item rows lead with the human title and keep the token as a
+      // secondary hint. The token line is rendered in mono by MentionMenu.
+      primary: isCategory ? option.label : option.title,
+      secondary: isCategory ? option.title : `@${option.type}:${option.label}`,
+      tone: MENTION_TONE[option.type],
+    }
   })
+  const scope: MentionMenuScope =
+    match.kind === 'root'
+      ? { kind: null, query: '' }
+      : {
+          icon: MENTION_ICON[match.kind],
+          kind: `@${match.kind}:`,
+          query: match.query,
+          tone: MENTION_TONE[match.kind],
+        }
+  return (
+    <MentionMenu
+      activeIndex={activeIndex}
+      labels={labels}
+      onBack={onBack}
+      onHover={onHover}
+      onSelect={(index) => onSelect(options[index])}
+      options={menuOptions}
+      scope={scope}
+    />
+  )
 }

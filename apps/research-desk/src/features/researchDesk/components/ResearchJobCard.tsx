@@ -1,24 +1,19 @@
 import {
   AlertTriangle,
-  CheckCircle2,
   ChevronDown,
-  ChevronRight,
-  ChevronUp,
+  FileSearch,
   Globe2,
   Info,
-  Repeat2,
   Search,
   Trash2,
   XCircle,
   type LucideIcon,
 } from '@/components/icons'
 import {
-  Fragment,
   forwardRef,
   useEffect,
   useState,
   type MouseEvent,
-  type ReactNode,
 } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { Badge } from '@/components/ui/badge'
@@ -29,9 +24,9 @@ import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
 import { localizedText, phaseOrder, type JobPhase, type ResearchJob } from '../types'
 import {
-  phaseIcon,
   phaseLabel,
   queuedPhaseIcon,
+  shortRunId,
   statusBadgeClassName,
   statusIcon,
 } from './runDisplay'
@@ -65,31 +60,33 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
     const reduceMotion = useReducedMotion()
     const runningDuration = useRunningDuration(job.status, job.startedAtIso)
     const canCancel = job.status === 'running' || job.status === 'queued'
-    const metadata = [
-      `${t.runCard.jobId}: ${job.id}`,
-      job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled' || job.status === 'expired'
-        ? `${t.runCard.submitted}: ${job.submittedAt}`
-        : `${t.runCard.started}: ${job.startedAt ?? job.submittedAt}`,
+    const metadata: { text: string; title?: string }[] = [
+      { text: `${t.runCard.jobId}: ${shortRunId(job.id)}`, title: `${t.runCard.jobId}: ${job.id}` },
+      {
+        text: job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled' || job.status === 'expired'
+          ? `${t.runCard.submitted}: ${job.submittedAt}`
+          : `${t.runCard.started}: ${job.startedAt ?? job.submittedAt}`,
+      },
     ]
 
     if (job.duration) {
-      metadata.push(`${t.runCard.duration}: ${job.duration}`)
+      metadata.push({ text: `${t.runCard.duration}: ${job.duration}` })
     }
     if (job.status === 'queued' && job.queueNote) {
-      metadata.push(localizedText(job.queueNote, locale))
+      metadata.push({ text: localizedText(job.queueNote, locale) })
     }
     if (job.status === 'running') {
-      metadata.push(`${t.runCard.runtime}: ${runningDuration}`)
+      metadata.push({ text: `${t.runCard.runtime}: ${runningDuration}` })
     }
     if (isCancelSubmitting) {
-      metadata.push(t.runCard.cancelSubmitted)
+      metadata.push({ text: t.runCard.cancelSubmitted })
     } else if (canCancel && job.cancelRequested) {
-      metadata.push(t.runCard.cancelRequested)
+      metadata.push({ text: t.runCard.cancelRequested })
     } else if (cancelError) {
-      metadata.push(`${t.runCard.cancelFailed}: ${cancelError}`)
+      metadata.push({ text: `${t.runCard.cancelFailed}: ${cancelError}` })
     }
     if (job.error) {
-      metadata.push(job.error)
+      metadata.push({ text: job.error })
     }
 
     return (
@@ -112,7 +109,7 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
         <div className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-3 sm:grid-cols-[auto_minmax(0,1fr)_auto]">
           <StatusIcon
             className={cn(
-              'mt-1 size-5 shrink-0',
+              'mt-1 size-4 shrink-0',
               job.status === 'completed' && 'text-success',
               job.status === 'queued' && 'text-muted-foreground',
               job.status === 'running' && 'text-brand',
@@ -123,13 +120,13 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
             )}
           />
           <div className="min-w-0">
-            <h2 className="line-clamp-2 text-sm font-semibold leading-6 text-foreground md:text-base">
+            <h2 className="line-clamp-2 t-card text-foreground">
               {localizedText(job.title, locale)}
             </h2>
-            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 t-meta text-muted-foreground">
               {metadata.map((item) => (
-                <span className="min-w-0 truncate" key={item}>
-                  {item}
+                <span className="min-w-0 truncate" key={item.text} title={item.title}>
+                  {item.text}
                 </span>
               ))}
             </div>
@@ -175,15 +172,28 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
             >
               <Trash2 className="size-4" />
             </Button>
-            <Button
-              aria-label={t.runCard.open}
-              onClick={(event) => runCardAction(event, onSelect)}
-              size="icon"
-              type="button"
-              variant="ghost"
-            >
-              <ChevronRight className="size-5" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label={isSelected && isExpanded ? t.runCard.collapse : t.runCard.expand}
+                  className="text-muted-foreground hover:text-foreground"
+                  onClick={(event) => runCardAction(event, onToggleExpanded)}
+                  size="icon"
+                  type="button"
+                  variant="ghost"
+                >
+                  <ChevronDown
+                    className={cn(
+                      'size-4 transition-transform duration-300',
+                      isSelected && isExpanded ? '' : '-rotate-90',
+                    )}
+                  />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                {isSelected && isExpanded ? t.runCard.collapse : t.runCard.expand}
+              </TooltipContent>
+            </Tooltip>
           </div>
         </div>
 
@@ -209,29 +219,6 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
           </div>
         )}
 
-        {isSelected && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label={isExpanded ? t.runCard.collapse : t.runCard.expand}
-                className="absolute -bottom-3 left-1/2 h-5 w-12 -translate-x-1/2 rounded-b-md rounded-t-none border border-t-0 border-border bg-card text-muted-foreground shadow-[0_4px_10px_var(--shadow-hairline)] hover:bg-accent hover:text-foreground"
-                onClick={(event) => runCardAction(event, onToggleExpanded)}
-                size="icon"
-                type="button"
-                variant="ghost"
-              >
-                {isExpanded ? (
-                  <ChevronUp className="size-4" />
-                ) : (
-                  <ChevronDown className="size-4" />
-                )}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>
-              {isExpanded ? t.runCard.collapse : t.runCard.expand}
-            </TooltipContent>
-          </Tooltip>
-        )}
       </motion.article>
     )
   },
@@ -245,188 +232,192 @@ function runCardAction(
   action()
 }
 
+/**
+ * Five-segment phase bar shared by the minimized and expanded running views.
+ * Done segments are solid brand, the active one shows a calmly breathing fill
+ * (CSS `inqtrix-segment-breathe`), upcoming ones stay neutral. Decorative — the
+ * phase is conveyed textually next to it. `withLabels` adds the phase captions.
+ */
+function PhaseSegments({
+  activePhase,
+  completedPhases,
+  thin = false,
+  withLabels = false,
+}: {
+  activePhase: JobPhase
+  completedPhases: readonly JobPhase[]
+  thin?: boolean
+  withLabels?: boolean
+}) {
+  const { t } = useLocale()
+  const activeIndex = phaseOrder.indexOf(activePhase)
+
+  return (
+    <div aria-hidden="true" className="min-w-0 flex-1">
+      <div className="flex items-center gap-1">
+        {phaseOrder.map((phase, index) => {
+          const isDone = index < activeIndex || completedPhases.includes(phase)
+          const isActive = phase === activePhase
+          return (
+            <span
+              className={cn(
+                'relative flex-1 overflow-hidden rounded-full',
+                thin ? 'h-1' : 'h-1.5',
+                isDone ? 'bg-brand' : isActive ? 'bg-brand/15' : 'bg-muted',
+              )}
+              key={phase}
+            >
+              {isActive && (
+                <span className="inqtrix-segment-breathe absolute inset-0 rounded-full bg-brand" />
+              )}
+            </span>
+          )
+        })}
+      </div>
+      {withLabels && (
+        <div className="mt-1.5 flex items-center gap-1">
+          {phaseOrder.map((phase, index) => (
+            <span
+              className={cn(
+                'min-w-0 flex-1 truncate text-center t-caption font-semibold',
+                index === activeIndex
+                  ? 'text-brand'
+                  : index < activeIndex
+                    ? 'text-muted-foreground'
+                    : 'text-muted-foreground/45',
+              )}
+              key={phase}
+            >
+              {phaseLabel(phase, t)}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function RunningCompactStatus({ job }: { job: ResearchJob }) {
   const { locale, t } = useLocale()
   const reduceMotion = Boolean(useReducedMotion())
   const roundInfo = parseRoundMetric(job.metrics.rounds)
   const latestEvent = job.events.at(-1)
-  const PhaseIcon = phaseIcon[job.activePhase]
   const MessageIcon = latestEvent?.severity === 'warning' || latestEvent?.severity === 'error'
     ? AlertTriangle
     : Info
+  const hasMetrics = job.metrics.sources > 0 || job.metrics.queries > 0
 
   return (
     <div className="mt-2.5 min-w-0 rounded-md border border-border bg-surface/70 px-2.5 py-2">
-      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-        <span className="inline-flex h-7 min-w-0 items-center rounded-md border border-brand/20 bg-brand-subtle px-2 text-xs font-semibold text-brand">
+      <div className="flex items-center gap-3">
+        <span className="inline-flex min-w-0 shrink-0 items-center gap-1.5 text-xs font-semibold text-brand">
+          <span
+            aria-hidden="true"
+            className={cn(
+              'size-1.5 shrink-0 rounded-full bg-brand',
+              !reduceMotion && 'inqtrix-running-dot',
+            )}
+          />
           <AnimatePresence initial={false} mode="wait">
             <motion.span
               animate={{ opacity: 1, y: 0 }}
-              className="inline-flex min-w-0 items-center gap-1.5"
+              className="truncate"
               exit={reduceMotion ? undefined : { opacity: 0, y: -5 }}
               initial={reduceMotion ? false : { opacity: 0, y: 5 }}
               key={job.activePhase}
               transition={appMotion.list}
             >
-              <span className="relative flex size-5 shrink-0 items-center justify-center rounded-full bg-brand/10">
-                {!reduceMotion && (
-                  <span
-                    aria-hidden="true"
-                    className="absolute inset-0 rounded-full border border-brand/35 animate-pulse"
-                  />
-                )}
-                <PhaseIcon className="relative z-10 size-3.5" />
-              </span>
-              <span className="truncate">{phaseLabel(job.activePhase, t)}</span>
+              {phaseLabel(job.activePhase, t)}
             </motion.span>
           </AnimatePresence>
         </span>
-
-        <span className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-border bg-card px-2 text-xs font-semibold text-muted-foreground">
-          <Repeat2 className="size-3.5" aria-hidden="true" />
-          <span>{t.runCard.currentRound}</span>
-          <strong className="font-semibold text-foreground">{roundInfo.current}</strong>
-          {roundInfo.max && (
-            <span className="font-semibold text-muted-foreground">/ {roundInfo.max}</span>
-          )}
+        <PhaseSegments activePhase={job.activePhase} completedPhases={job.completedPhases} thin />
+        <span className="shrink-0 t-meta-sm font-medium tabular-nums text-muted-foreground">
+          {t.runCard.currentRound}&nbsp;{roundInfo.current}{roundInfo.max ? `/${roundInfo.max}` : ''}
         </span>
-
-        {job.metrics.sources > 0 && (
-          <span className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-border bg-card px-2 text-xs font-semibold text-muted-foreground">
-            <Globe2 className="size-3.5" aria-hidden="true" />
-            <strong className="font-semibold text-foreground">{job.metrics.sources}</strong>
-            <span>{t.runCard.sources}</span>
-          </span>
-        )}
       </div>
 
-      {latestEvent && (
-        <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-          <MessageIcon
-            className={cn(
-              'size-3.5 shrink-0',
-              latestEvent.severity === 'warning' && 'text-warning',
-              latestEvent.severity === 'error' && 'text-destructive',
+      {(latestEvent || hasMetrics) && (
+        <div className="mt-2 flex items-center gap-3 t-meta-sm text-muted-foreground">
+          {latestEvent && (
+            <span className="flex min-w-0 flex-1 items-center gap-1.5">
+              <MessageIcon
+                className={cn(
+                  'size-3 shrink-0',
+                  latestEvent.severity === 'warning' && 'text-warning',
+                  latestEvent.severity === 'error' && 'text-destructive',
+                  latestEvent.severity !== 'warning' && latestEvent.severity !== 'error' && 'text-muted-foreground/70',
+                )}
+              />
+              <span className="truncate">{localizedText(latestEvent.title, locale)}</span>
+            </span>
+          )}
+          <span className="ml-auto flex shrink-0 items-center gap-3 tabular-nums">
+            {job.metrics.sources > 0 && (
+              <span className="inline-flex items-center gap-1">
+                <Globe2 className="size-3" />
+                <strong className="font-semibold text-foreground">{job.metrics.sources}</strong> {t.runCard.sources}
+              </span>
             )}
-          />
-          <span className="truncate">
-            {localizedText(latestEvent.title, locale)}
+            {job.metrics.queries > 0 && (
+              <span className="inline-flex items-center gap-1">
+                <Search className="size-3" />
+                <strong className="font-semibold text-foreground">{job.metrics.queries}</strong> {t.runCard.queries}
+              </span>
+            )}
           </span>
         </div>
       )}
-      <CompactPhaseFlow
-        activePhase={job.activePhase}
-        completedPhases={job.completedPhases}
-        reduceMotion={reduceMotion}
-      />
     </div>
-  )
-}
-
-function CompactPhaseFlow({
-  activePhase,
-  completedPhases,
-  reduceMotion,
-}: {
-  activePhase: JobPhase
-  completedPhases: readonly JobPhase[]
-  reduceMotion: boolean
-}) {
-  return (
-    <div aria-hidden="true" className="mt-2 flex min-w-0 items-center px-0.5">
-      {phaseOrder.map((phase, index) => {
-        const isActive = phase === activePhase
-        const isDone = completedPhases.includes(phase)
-        const nextPhase = phaseOrder[index + 1]
-        const isConnectorActive = nextPhase === activePhase
-        const isConnectorDone = Boolean(nextPhase && isDone)
-
-        return (
-          <Fragment key={phase}>
-            <span
-              className={cn(
-                'relative flex size-4 shrink-0 items-center justify-center rounded-full border bg-card transition-colors',
-                isDone && 'border-success/30 bg-success-subtle',
-                isActive && 'border-brand/55 bg-brand-subtle shadow-[0_0_0_4px_var(--brand-subtle)]',
-                isActive && !reduceMotion && 'inqtrix-active-node-shell',
-                !isDone && !isActive && 'border-border bg-background',
-              )}
-            >
-              {isActive && !reduceMotion && (
-                <ActivePhasePulse compact />
-              )}
-              <span
-                className={cn(
-                  'relative z-10 size-1.5 rounded-full bg-muted-foreground/45',
-                  isDone && 'bg-success',
-                  isActive && 'bg-brand inqtrix-active-node-core',
-                )}
-              />
-            </span>
-            {index < phaseOrder.length - 1 && (
-              <CompactFlowConnector
-                isActive={isConnectorActive}
-                isDone={isConnectorDone}
-                reduceMotion={reduceMotion}
-              />
-            )}
-          </Fragment>
-        )
-      })}
-    </div>
-  )
-}
-
-function CompactFlowConnector({
-  isActive,
-  isDone,
-  reduceMotion,
-}: {
-  isActive: boolean
-  isDone: boolean
-  reduceMotion: boolean
-}) {
-  return (
-    <span
-      className={cn(
-        'relative mx-1 h-px min-w-4 flex-1 overflow-hidden rounded-full bg-border',
-        isDone && 'bg-brand/25',
-      )}
-    >
-      {isActive && !reduceMotion && (
-        <motion.span
-          animate={{ x: ['-80%', '180%'] }}
-          className="absolute inset-y-0 left-0 w-3/4 rounded-full bg-gradient-to-r from-transparent via-brand to-transparent shadow-[0_0_12px_var(--brand-shadow)]"
-          transition={{ duration: 1.18, ease: [0.45, 0, 0.2, 1], repeat: Infinity }}
-        />
-      )}
-      {isActive && reduceMotion && (
-        <span className="absolute inset-0 rounded-full bg-brand/60" />
-      )}
-    </span>
   )
 }
 
 function RunningJobDetails({ job }: { job: ResearchJob }) {
   const { locale, t } = useLocale()
+  const reduceMotion = Boolean(useReducedMotion())
+  const roundInfo = parseRoundMetric(job.metrics.rounds)
+  const activeIndex = phaseOrder.indexOf(job.activePhase)
   const visibleEvents = job.events.slice(-4)
 
   return (
     <div className="mt-3 space-y-3">
-      <RunningPhaseFlow
-        activePhase={job.activePhase}
-        completedPhases={job.completedPhases}
-        phaseVisitCounts={job.phaseVisitCounts}
-        rounds={job.metrics.rounds}
-      />
+      <div className="rounded-lg border border-border bg-surface px-3 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <span className="flex min-w-0 items-center gap-2">
+            <span
+              aria-hidden="true"
+              className={cn(
+                'size-2 shrink-0 rounded-full bg-brand',
+                !reduceMotion && 'inqtrix-running-dot',
+              )}
+            />
+            <span className="truncate text-xs font-semibold text-brand">
+              {phaseLabel(job.activePhase, t)}
+            </span>
+            <span className="shrink-0 t-meta-sm font-medium tabular-nums text-muted-foreground">
+              {t.runCard.phase} {activeIndex + 1}/{phaseOrder.length}
+            </span>
+          </span>
+          <span className="shrink-0 t-meta-sm font-medium tabular-nums text-muted-foreground">
+            {t.runCard.currentRound}&nbsp;
+            <strong className="font-semibold text-foreground">{roundInfo.current}</strong>
+            {roundInfo.max ? `/${roundInfo.max}` : ''}
+          </span>
+        </div>
+        <div className="mt-2.5">
+          <PhaseSegments activePhase={job.activePhase} completedPhases={job.completedPhases} withLabels />
+        </div>
+      </div>
+
       <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_270px]">
         <div className="rounded-lg border border-border bg-surface p-3">
           <div className="flex items-center justify-between gap-3">
-            <h3 className="text-xs font-semibold text-foreground">
-              {t.runCard.liveStatus}
-            </h3>
+            <h3 className="text-xs font-semibold text-foreground">{t.runCard.liveStatus}</h3>
             <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-success">
-              <span className="size-1.5 rounded-full bg-success" />
+              <span
+                aria-hidden="true"
+                className={cn('size-1.5 rounded-full bg-success', !reduceMotion && 'inqtrix-running-dot')}
+              />
               {t.runCard.live}
             </span>
           </div>
@@ -437,11 +428,14 @@ function RunningJobDetails({ job }: { job: ResearchJob }) {
                 : Info
 
               return (
-                <li
+                <motion.li
+                  animate={{ opacity: 1, y: 0 }}
                   className="grid min-w-0 grid-cols-[50px_14px_minmax(0,1fr)_auto] items-center gap-2 text-xs"
+                  initial={reduceMotion ? false : { opacity: 0, y: 4 }}
                   key={`${event.time}-${index}`}
+                  transition={{ ...appMotion.list, delay: reduceMotion ? 0 : index * 0.04 }}
                 >
-                  <span className="text-muted-foreground">{event.time}</span>
+                  <span className="tabular-nums text-muted-foreground">{event.time}</span>
                   <EventIcon
                     className={cn(
                       'size-3.5',
@@ -467,21 +461,17 @@ function RunningJobDetails({ job }: { job: ResearchJob }) {
                       <span className="size-1 rounded-full bg-brand animate-pulse [animation-delay:240ms]" />
                     </span>
                   )}
-                </li>
+                </motion.li>
               )
             })}
           </ol>
         </div>
 
         <div className="rounded-lg border border-border bg-card p-3">
-          <h3 className="mb-2 text-xs font-semibold text-foreground">
-            {t.runCard.metrics}
-          </h3>
-          <MetricRow icon={Globe2} label={t.runCard.sources} value={job.metrics.sources} />
-          <MetricRow icon={Search} label={t.runCard.queries} value={job.metrics.queries} />
-          {job.confidence && (
-            <MetricRow icon={CheckCircle2} label={t.common.confidence} value={job.confidence} />
-          )}
+          <h3 className="mb-2 text-xs font-semibold text-foreground">{t.runCard.metrics}</h3>
+          <MetricRow flash icon={Globe2} label={t.runCard.sources} value={job.metrics.sources} />
+          <MetricRow flash icon={Search} label={t.runCard.queries} value={job.metrics.queries} />
+          <MetricRow flash icon={FileSearch} label={t.runCard.claims} value={job.metrics.claims} />
         </div>
       </div>
     </div>
@@ -534,354 +524,6 @@ function CompactJobDetails({ job }: { job: ResearchJob }) {
   )
 }
 
-function RunningPhaseFlow({
-  activePhase,
-  completedPhases,
-  phaseVisitCounts,
-  rounds,
-}: {
-  activePhase: JobPhase
-  completedPhases: readonly JobPhase[]
-  phaseVisitCounts: Record<JobPhase, number>
-  rounds: number | string
-}) {
-  const { t } = useLocale()
-  const reduceMotion = Boolean(useReducedMotion())
-  const roundInfo = parseRoundMetric(rounds)
-
-  return (
-    <div className="rounded-lg border border-border bg-surface px-3 py-2.5">
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <h3 className="text-xs font-semibold text-foreground">
-          {t.runCard.flow}
-        </h3>
-        <div className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-brand/20 bg-brand-subtle px-2 text-xs text-brand">
-          <Repeat2 className="size-3.5" aria-hidden="true" />
-          <span className="font-medium">{t.runCard.currentRound}</span>
-          <strong className="font-semibold">{roundInfo.current}</strong>
-          {roundInfo.max && (
-            <span className="font-semibold text-brand/70">/ {roundInfo.max}</span>
-          )}
-        </div>
-      </div>
-      <div className="md:hidden">
-        <VerticalPhaseFlow
-          activePhase={activePhase}
-          completedPhases={completedPhases}
-          phaseVisitCounts={phaseVisitCounts}
-          reduceMotion={reduceMotion}
-        />
-      </div>
-      <div className="hidden overflow-hidden pb-1 md:block">
-        <div className="min-w-[560px]">
-          <div className="flex items-start pt-4">
-            {phaseOrder.map((phase, index) => {
-              const nextPhase = phaseOrder[index + 1]
-              return (
-                <FlowStepGroup
-                  activePhase={activePhase}
-                  completedPhases={completedPhases}
-                  key={phase}
-                  phase={phase}
-                  phaseVisitCounts={phaseVisitCounts}
-                  reduceMotion={reduceMotion}
-                  renderConnector={Boolean(nextPhase)}
-                />
-              )
-            })}
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function VerticalPhaseFlow({
-  activePhase,
-  completedPhases,
-  phaseVisitCounts,
-  reduceMotion,
-}: {
-  activePhase: JobPhase
-  completedPhases: readonly JobPhase[]
-  phaseVisitCounts: Record<JobPhase, number>
-  reduceMotion: boolean
-}) {
-  const { t } = useLocale()
-
-  return (
-    <div className="space-y-1">
-      {phaseOrder.map((phase, index) => {
-        const Icon = completedPhases.includes(phase) ? CheckCircle2 : phaseIcon[phase]
-        const isActive = phase === activePhase
-        const isDone = completedPhases.includes(phase)
-        const isConnectorActive = phaseOrder[index + 1] === activePhase
-        return (
-          <div key={phase}>
-            <div className="grid grid-cols-[32px_minmax(0,1fr)] items-center gap-2">
-              <PhaseSignal isActive={isActive} isDone={isDone} reduceMotion={reduceMotion}>
-                <PhaseVisitDots
-                  count={phaseVisitCounts[phase] ?? 0}
-                  isActive={isActive}
-                  isDone={isDone}
-                />
-                <Icon className="relative z-10 size-3.5" />
-              </PhaseSignal>
-              <span
-                className={cn(
-                  'truncate text-[11px] font-semibold leading-4 text-muted-foreground',
-                  (isActive || isDone) && 'text-foreground',
-                  isActive && 'text-brand',
-                )}
-              >
-                {phaseLabel(phase, t)}
-              </span>
-            </div>
-            {index < phaseOrder.length - 1 && (
-              <VerticalConnector isActive={isConnectorActive} reduceMotion={reduceMotion} />
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
-function PhaseSignal({
-  children,
-  isActive,
-  isDone,
-  reduceMotion,
-}: {
-  children: ReactNode
-  isActive: boolean
-  isDone: boolean
-  reduceMotion: boolean
-}) {
-  return (
-    <span
-      className={cn(
-        'relative flex size-8 items-center justify-center rounded-full border bg-card text-muted-foreground transition-colors',
-        isDone && 'border-success/25 bg-success-subtle text-success',
-        isActive && 'border-brand/50 bg-brand-subtle text-brand shadow-[0_0_0_5px_var(--brand-subtle),0_10px_30px_var(--brand-shadow)]',
-        isActive && !reduceMotion && 'inqtrix-active-node-shell',
-      )}
-    >
-      {isActive && !reduceMotion && (
-        <ActivePhasePulse />
-      )}
-      {children}
-    </span>
-  )
-}
-
-function ActivePhasePulse({ compact = false }: { compact?: boolean }) {
-  return (
-    <>
-      <span
-        aria-hidden="true"
-        className={cn(
-          'inqtrix-active-node-halo pointer-events-none absolute rounded-full',
-          compact ? '-inset-2' : '-inset-2.5',
-        )}
-      />
-      <span
-        aria-hidden="true"
-        className={cn(
-          'inqtrix-active-node-ring pointer-events-none absolute rounded-full',
-          compact ? '-inset-1' : '-inset-1.5',
-        )}
-      />
-      <span
-        aria-hidden="true"
-        className={cn(
-          'inqtrix-active-node-ring inqtrix-active-node-ring-delayed pointer-events-none absolute rounded-full',
-          compact ? '-inset-1' : '-inset-1.5',
-        )}
-      />
-    </>
-  )
-}
-
-function PhaseVisitDots({
-  count,
-  isActive,
-  isDone,
-}: {
-  count: number
-  isActive: boolean
-  isDone: boolean
-}) {
-  if (count <= 0) return null
-
-  if (count > 6) {
-    return (
-      <span
-        aria-hidden="true"
-        className={cn(
-          'absolute -top-4 left-1/2 z-20 flex h-3 min-w-4 -translate-x-1/2 items-center justify-center rounded-full px-1 text-[8px] font-semibold leading-none',
-          isActive && 'bg-brand text-brand-foreground shadow-[0_0_0_2px_var(--brand-subtle)]',
-          !isActive && isDone && 'bg-success-subtle text-success',
-          !isActive && !isDone && 'bg-muted text-muted-foreground',
-        )}
-      >
-        6+
-      </span>
-    )
-  }
-
-  return (
-    <span
-      aria-hidden="true"
-      className="absolute -top-3.5 left-1/2 z-20 flex h-1.5 -translate-x-1/2 items-center gap-0.5"
-    >
-      {Array.from({ length: count }).map((_, index) => (
-        <span
-          className={cn(
-            'size-1 rounded-full',
-            isActive && 'bg-brand shadow-[0_0_0_2px_var(--brand-subtle)]',
-            !isActive && isDone && 'bg-success/55',
-            !isActive && !isDone && 'bg-muted-foreground/45',
-          )}
-          key={index}
-        />
-      ))}
-    </span>
-  )
-}
-
-function VerticalConnector({
-  isActive,
-  reduceMotion,
-}: {
-  isActive: boolean
-  reduceMotion: boolean
-}) {
-  return (
-    <span className="relative ml-4 block h-4 w-px overflow-hidden rounded-full bg-border">
-      {isActive && !reduceMotion && (
-        <motion.span
-          aria-hidden="true"
-          animate={{ y: ['-80%', '180%'] }}
-          className="absolute left-0 top-0 h-3/4 w-px rounded-full bg-gradient-to-b from-transparent via-brand to-transparent shadow-[0_0_12px_var(--brand-shadow)]"
-          transition={{ duration: 1.18, ease: [0.45, 0, 0.2, 1], repeat: Infinity }}
-        />
-      )}
-      {isActive && reduceMotion && (
-        <span className="absolute inset-0 rounded-full bg-brand/50" />
-      )}
-    </span>
-  )
-}
-
-function FlowStepGroup({
-  activePhase,
-  completedPhases,
-  phase,
-  phaseVisitCounts,
-  reduceMotion,
-  renderConnector,
-}: {
-  activePhase: JobPhase
-  completedPhases: readonly JobPhase[]
-  phase: JobPhase
-  phaseVisitCounts: Record<JobPhase, number>
-  reduceMotion: boolean
-  renderConnector: boolean
-}) {
-  const phaseIndex = phaseOrder.indexOf(phase)
-  const nextPhase = phaseOrder[phaseIndex + 1]
-  const isActive = phase === activePhase
-  const isDone = completedPhases.includes(phase)
-  const isConnectorActive = nextPhase === activePhase
-  const isConnectorDone = Boolean(nextPhase && isDone)
-
-  return (
-    <>
-      <FlowNode
-        isActive={isActive}
-        isDone={isDone}
-        phase={phase}
-        visitCount={phaseVisitCounts[phase] ?? 0}
-        reduceMotion={reduceMotion}
-      />
-      {renderConnector && (
-        <FlowConnector
-          isActive={isConnectorActive}
-          isDone={isConnectorDone}
-          reduceMotion={reduceMotion}
-        />
-      )}
-    </>
-  )
-}
-
-function FlowNode({
-  isActive,
-  isDone,
-  phase,
-  reduceMotion,
-  visitCount,
-}: {
-  isActive: boolean
-  isDone: boolean
-  phase: JobPhase
-  reduceMotion: boolean
-  visitCount: number
-}) {
-  const { t } = useLocale()
-  const Icon = isDone ? CheckCircle2 : phaseIcon[phase]
-
-  return (
-    <div className="flex w-20 shrink-0 flex-col items-center gap-1.5 text-center">
-      <PhaseSignal isActive={isActive} isDone={isDone} reduceMotion={reduceMotion}>
-        <PhaseVisitDots count={visitCount} isActive={isActive} isDone={isDone} />
-        <Icon className="relative z-10 size-3.5" />
-      </PhaseSignal>
-      <span
-        className={cn(
-          'max-w-full truncate text-[11px] font-semibold leading-4 text-muted-foreground',
-          (isActive || isDone) && 'text-foreground',
-          isActive && 'text-brand',
-        )}
-      >
-        {phaseLabel(phase, t)}
-      </span>
-    </div>
-  )
-}
-
-function FlowConnector({
-  isActive,
-  isDone,
-  reduceMotion,
-}: {
-  isActive: boolean
-  isDone: boolean
-  reduceMotion: boolean
-}) {
-  return (
-    <span
-      className={cn(
-        'relative mx-1 mt-4 h-px w-8 shrink-0 overflow-hidden rounded-full bg-border',
-        isDone && 'bg-brand/25',
-      )}
-    >
-      {isActive && !reduceMotion && (
-        <motion.span
-          aria-hidden="true"
-          animate={{ x: ['-80%', '180%'] }}
-          className="absolute inset-y-0 left-0 w-3/4 rounded-full bg-gradient-to-r from-transparent via-brand to-transparent shadow-[0_0_12px_var(--brand-shadow)]"
-          transition={{ duration: 1.18, ease: [0.45, 0, 0.2, 1], repeat: Infinity }}
-        />
-      )}
-      {isActive && reduceMotion && (
-        <span className="absolute inset-0 rounded-full bg-brand/50" />
-      )}
-    </span>
-  )
-}
-
 function parseRoundMetric(rounds: number | string) {
   const value = String(rounds)
   const match = value.match(/^\s*(\d+)\s*\/\s*(\d+)\s*$/)
@@ -894,19 +536,27 @@ function parseRoundMetric(rounds: number | string) {
 }
 
 function MetricRow({
+  flash = false,
   icon: Icon,
   label,
   value,
 }: {
+  flash?: boolean
   icon: LucideIcon
   label: string
   value: number | string
 }) {
+  const reduceMotion = Boolean(useReducedMotion())
   return (
     <div className="grid grid-cols-[20px_minmax(0,1fr)_auto] items-center gap-1.5 py-1 text-xs">
       <Icon className="size-4 text-muted-foreground" />
       <span className="truncate text-muted-foreground">{label}</span>
-      <strong className="font-semibold text-foreground">{value}</strong>
+      <strong className="font-semibold tabular-nums text-foreground">
+        {/* key={value} re-mounts on each change, replaying the flash animation. */}
+        <span className={cn(flash && !reduceMotion && 'inqtrix-metric-flash')} key={String(value)}>
+          {value}
+        </span>
+      </strong>
     </div>
   )
 }

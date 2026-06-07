@@ -162,6 +162,77 @@ export function ResearchDesk() {
   const allJobs = projectResearchJobs(state)
   const visibleJobs = visibleResearchJobs(allJobs, state.ui.activeFilter)
   const isDemoMode = state.connection.kind === 'demo'
+
+  // Demo-only "live" simulator: while the seed run is running in demo mode, feed
+  // synthetic snapshot events through the real appendApiRunEvent pipeline so the
+  // running card visibly progresses (phases advance, metrics count up and flash,
+  // new live-status rows rise). No-op outside demo and for real API runs.
+  const researchRunsRef = useRef(state.researchRuns)
+  useEffect(() => {
+    researchRunsRef.current = state.researchRuns
+  }, [state.researchRuns])
+  useEffect(() => {
+    if (!isDemoMode) return undefined
+    const seedId = 'RO-0247'
+    const seed = researchRunsRef.current[seedId]
+    if (!seed || seed.status !== 'running') return undefined
+
+    const maxRounds = 5
+    const nodeOrder = ['classify', 'plan', 'search', 'evaluate', 'answer'] as const
+    let nodeIndex = nodeOrder.length - 1
+    let round = 2
+    let queries = seed.metrics.queries
+    let sources = seed.metrics.sources
+    let claims = seed.metrics.claims
+    let sequence = 1000
+
+    const intervalId = window.setInterval(() => {
+      if (researchRunsRef.current[seedId]?.status !== 'running') return
+      nodeIndex += 1
+      if (nodeIndex >= nodeOrder.length) {
+        nodeIndex = 0
+        round = round >= maxRounds ? 1 : round + 1
+      }
+      const node = nodeOrder[nodeIndex]
+      queries += 3
+      sources += 5
+      claims += node === 'search' || node === 'evaluate' ? 4 : 1
+      const message = node === 'plan'
+        ? `Planning search queries (round ${round}/${maxRounds})...`
+        : node === 'search'
+          ? `Searching ${4 + round} queries (round ${round}/${maxRounds})...`
+          : node === 'evaluate'
+            ? `Evaluating information quality (after round ${round}/${maxRounds})...`
+            : node === 'answer'
+              ? 'Synthesizing the answer from verified evidence...'
+              : 'Analyzing question and extracting required aspects...'
+
+      sequence += 1
+      dispatch({
+        event: {
+          created_at: Math.floor(Date.now() / 1000),
+          data: {
+            message,
+            snapshot: {
+              active_round: round,
+              consolidated_claim_count: claims,
+              current_node: node,
+              max_rounds: maxRounds,
+              total_queries: queries,
+              total_sources: sources,
+            },
+          },
+          run_id: seedId,
+          sequence,
+          type: 'inqtrix.progress.message',
+        },
+        type: 'appendApiRunEvent',
+      })
+    }, 3500)
+
+    return () => window.clearInterval(intervalId)
+  }, [isDemoMode, dispatch])
+
   const selectedRun = selectedResearchRun(state)
   const chatThreads = useMemo(
     () => projectChatThreads(state),

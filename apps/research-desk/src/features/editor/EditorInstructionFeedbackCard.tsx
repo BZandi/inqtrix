@@ -50,7 +50,7 @@ export function EditorInstructionFeedbackCard({
             ) : (
               <Sparkles className="size-3.5 text-brand" />
             )}
-            <span className="min-w-0 flex-1 truncate text-xs font-semibold text-foreground">
+            <span className="t-label min-w-0 flex-1 truncate text-foreground">
               {feedback.state === 'thinking' ? labels.assistantThinking : labels.assistantDone}
               {typeof feedback.editCount === 'number' ? ` · ${feedback.editCount}` : ''}
             </span>
@@ -80,11 +80,11 @@ export function EditorInstructionFeedbackCard({
                 initial={{ height: 0, opacity: 0 }}
                 transition={{ duration: 0.16 }}
               >
-                <p className="text-xs leading-5 text-muted-foreground">{feedback.message}</p>
+                <p className="t-meta text-muted-foreground">{feedback.message}</p>
                 {feedback.warnings?.length ? (
                   <ul className="mt-1.5 space-y-0.5">
                     {feedback.warnings.map((warning, index) => (
-                      <li className="text-[11px] leading-4 text-warning" key={`${index}-${warning}`}>
+                      <li className="t-meta-sm text-warning" key={`${index}-${warning}`}>
                         {warning}
                       </li>
                     ))}

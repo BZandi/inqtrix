@@ -114,7 +114,7 @@ export function TextImproveReviewPanel({
           >
             <Button
               aria-label={labels.accept}
-              className="size-7 bg-brand text-white shadow-sm hover:bg-brand/90 hover:text-white"
+              className="size-7 bg-brand text-brand-foreground shadow-sm hover:bg-brand/90 hover:text-brand-foreground"
               disabled={isAccepting}
               onClick={acceptProposal}
               size="icon"
@@ -136,7 +136,7 @@ export function TextImproveReviewPanel({
         <p
           className={cn(
             'whitespace-pre-wrap text-sm leading-6 text-foreground',
-            density === 'comfortable' && 'text-[15px] leading-7',
+            density === 'comfortable' && 't-body',
           )}
         >
           {diffTokens.map((token, index) => (
@@ -155,7 +155,7 @@ export function TextImproveReviewPanel({
           <div className="flex flex-wrap gap-1.5">
             {proposal.changeSummary.map((item) => (
               <span
-                className="inline-flex max-w-full items-center rounded-md border border-border/70 bg-background/80 px-2 py-1 text-[11px] font-medium leading-4 text-muted-foreground"
+                className="inline-flex max-w-full items-center rounded-md border border-border/70 bg-background/80 px-2 py-1 t-meta-sm font-medium leading-4 text-muted-foreground"
                 key={item}
               >
                 <span className="truncate">{item}</span>
@@ -163,14 +163,14 @@ export function TextImproveReviewPanel({
             ))}
           </div>
         ) : (
-          <p className="text-[11px] font-medium text-muted-foreground">
+          <p className="t-meta-sm font-medium text-muted-foreground">
             {proposal.originalText.trim() === proposal.improvedText.trim()
               ? labels.noChanges
               : labels.changes}
           </p>
         )}
         {(proposal.warnings.length > 0 || proposal.clarificationQuestions.length > 0) && (
-          <div className="rounded-md border border-warning/20 bg-background/80 px-2 py-1.5 text-[11px] leading-5 text-warning">
+          <div className="rounded-md border border-warning/20 bg-background/80 px-2 py-1.5 t-meta-sm leading-5 text-warning">
             <span className="font-semibold">{labels.warnings}</span>
             {' '}
             {[...proposal.warnings, ...proposal.clarificationQuestions].join(' ')}

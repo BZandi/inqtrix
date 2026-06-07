@@ -1,7 +1,7 @@
 import { createIcon } from './createIcon'
 
 export type { IconProps, LucideIcon } from './createIcon'
-export { FolderPlus, SquarePen } from 'lucide-react'
+export { AlignCenter, AlignLeft, AlignRight, FolderPlus, SquarePen, WrapText } from 'lucide-react'
 
 export const AlertTriangle = createIcon('AlertTriangle', 'lucide-alert-triangle', (
   <>
@@ -16,6 +16,55 @@ export const Anchor = createIcon('Anchor', 'lucide-anchor', (
     <path d="M12 22V8" />
     <path d="M5 12H2a10 10 0 0 0 20 0h-3" />
     <circle cx="12" cy="5" r="3" />
+  </>
+))
+
+export const ArrowUpDown = createIcon('ArrowUpDown', 'lucide-arrow-up-down', (
+  <>
+    <path d="m21 16-4 4-4-4" />
+    <path d="M17 20V4" />
+    <path d="m3 8 4-4 4 4" />
+    <path d="M7 4v16" />
+  </>
+))
+
+export const HardDrive = createIcon('HardDrive', 'lucide-hard-drive', (
+  <>
+    <line x1="22" x2="2" y1="12" y2="12" />
+    <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+    <line x1="6" x2="6.01" y1="16" y2="16" />
+    <line x1="10" x2="10.01" y1="16" y2="16" />
+  </>
+))
+
+export const Inbox = createIcon('Inbox', 'lucide-inbox', (
+  <>
+    <polyline points="22 12 16 12 14 15 10 15 8 12 2 12" />
+    <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+  </>
+))
+
+export const Layers = createIcon('Layers', 'lucide-layers', (
+  <>
+    <path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z" />
+    <path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12" />
+    <path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17" />
+  </>
+))
+
+export const LayoutGrid = createIcon('LayoutGrid', 'lucide-layout-grid', (
+  <>
+    <rect width="7" height="7" x="3" y="3" rx="1" />
+    <rect width="7" height="7" x="14" y="3" rx="1" />
+    <rect width="7" height="7" x="14" y="14" rx="1" />
+    <rect width="7" height="7" x="3" y="14" rx="1" />
+  </>
+))
+
+export const RotateCcw = createIcon('RotateCcw', 'lucide-rotate-ccw', (
+  <>
+    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+    <path d="M3 3v5h5" />
   </>
 ))
 
@@ -74,6 +123,12 @@ export const Code2 = createIcon('Code2', 'lucide-code-2', (
 export const ChevronDown = createIcon('ChevronDown', 'lucide-chevron-down', (
   <>
     <path d="m6 9 6 6 6-6" />
+  </>
+))
+
+export const ChevronLeft = createIcon('ChevronLeft', 'lucide-chevron-left', (
+  <>
+    <path d="m15 18-6-6 6-6" />
   </>
 ))
 
@@ -226,6 +281,60 @@ export const Heading1 = createIcon('Heading1', 'lucide-heading-1', (
     <path d="M4 18V6" />
     <path d="M12 18V6" />
     <path d="m17 12 3-2v8" />
+  </>
+))
+
+export const Heading2 = createIcon('Heading2', 'lucide-heading-2', (
+  <>
+    <path d="M4 12h8" />
+    <path d="M4 18V6" />
+    <path d="M12 18V6" />
+    <path d="M21 18h-4c0-4 4-3 4-6 0-1.5-2-2.5-4-1" />
+  </>
+))
+
+export const Heading3 = createIcon('Heading3', 'lucide-heading-3', (
+  <>
+    <path d="M4 12h8" />
+    <path d="M4 18V6" />
+    <path d="M12 18V6" />
+    <path d="M17.5 10.5c1.7-1 3.5 0 3.5 1.5a2 2 0 0 1-2 2" />
+    <path d="M17 17.5c2 1.5 4 .3 4-1.5a2 2 0 0 0-2-2" />
+  </>
+))
+
+export const Type = createIcon('Type', 'lucide-type', (
+  <>
+    <polyline points="4 7 4 4 20 4 20 7" />
+    <line x1="9" x2="15" y1="20" y2="20" />
+    <line x1="12" x2="12" y1="4" y2="20" />
+  </>
+))
+
+export const Quote = createIcon('Quote', 'lucide-text-quote', (
+  <>
+    <path d="M17 6H3" />
+    <path d="M21 12H8" />
+    <path d="M21 18H8" />
+    <path d="M3 12v6" />
+  </>
+))
+
+export const Minus = createIcon('Minus', 'lucide-minus', <path d="M5 12h14" />)
+
+export const MoreHorizontal = createIcon('MoreHorizontal', 'lucide-ellipsis', (
+  <>
+    <circle cx="12" cy="12" r="1" />
+    <circle cx="19" cy="12" r="1" />
+    <circle cx="5" cy="12" r="1" />
+  </>
+))
+
+export const MoreVertical = createIcon('MoreVertical', 'lucide-ellipsis-vertical', (
+  <>
+    <circle cx="12" cy="12" r="1" />
+    <circle cx="12" cy="5" r="1" />
+    <circle cx="12" cy="19" r="1" />
   </>
 ))
 

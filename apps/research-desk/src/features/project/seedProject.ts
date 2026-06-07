@@ -1,5 +1,5 @@
 import { phaseOrder } from '@/features/researchDesk/types'
-import { createDefaultFileLibrarySections, FILE_SECTION_LIBRARY_ID } from '@/features/files/sections'
+import { createDefaultFileLibrarySections } from '@/features/files/sections'
 import { reportReferencesFromMarkdown } from './reportReferences'
 import type {
   EditorCommentThreadRecord,
@@ -11,13 +11,20 @@ import type {
   ChatThreadRecord,
   FileAssetRecord,
   FileGroupRecord,
+  FileLibrarySectionRecord,
   ProjectState,
   ResearchRunRecord,
+  VectorIndexRecord,
 } from './types'
 import { PROJECT_SCHEMA_VERSION } from './types'
 import { getOrCreateBrowserWorkspaceId } from './workspaceId'
 
 const seedCreatedAt = '2026-05-15T06:00:00.000Z'
+
+const SEED_SECTION_LEGAL = 'file-section-legal'
+const SEED_SECTION_MARKET = 'file-section-market'
+const SEED_SECTION_OWN = 'file-section-own'
+const SEED_GROUP_EU_AI_ACT = 'file-group-eu-ai-act'
 
 const emptyEditorUi: EditorUiState = {
   activeDocumentId: null,
@@ -78,6 +85,8 @@ export function createEmptyProjectState(): ProjectState {
     },
     researchRunOrder: [],
     researchRuns: {},
+    vectorIndexOrder: [],
+    vectorIndexes: {},
     workspaceId: getOrCreateBrowserWorkspaceId(),
     ui: {
       activeFilter: 'all',
@@ -113,9 +122,10 @@ export function createSeedProjectState(): ProjectState {
   const editorDocumentOrder = editorDocuments.map((document) => document.id)
   const editorComments = seedEditorComments()
   const openDocumentIds = editorDocumentOrder.slice(0, 2)
-  const fileLibrarySections = createDefaultFileLibrarySections(seedCreatedAt)
+  const fileLibrarySections = seedFileLibrarySections()
   const fileGroups = seedFileGroups()
   const fileAssets = seedFileAssets()
+  const vectorIndexes = seedVectorIndexes()
 
   return {
     chatRuleOrder,
@@ -167,6 +177,8 @@ export function createSeedProjectState(): ProjectState {
     },
     researchRunOrder,
     researchRuns: Object.fromEntries(researchRuns.map((run) => [run.runId, run])),
+    vectorIndexOrder: vectorIndexes.map((index) => index.id),
+    vectorIndexes: Object.fromEntries(vectorIndexes.map((index) => [index.id, index])),
     workspaceId: 'ws_demo_research_desk',
     ui: {
       activeFilter: 'all',
@@ -222,6 +234,54 @@ function seedChatRules(): ChatRuleRecord[] {
       title: 'Evidence review',
       updatedAt: seedCreatedAt,
     },
+    {
+      category: 'instruction',
+      contentMarkdown: 'SYSTEM PROMPT:\nYour role is to assist the user by providing helpful, clear, and contextually relevant information. Respond in an informative, friendly, and neutral tone, adapting to the user\'s style and preferences based on the conversation history. Your purpose is to help solve problems, answer questions, generate ideas, write content, and support the user in a wide range of tasks.\n\nBEHAVIORAL GUIDELINES:\n1. Maintain a helpful, friendly, and professional demeanor.\n2. Avoid using jargon unless specifically requested by the user. Strive to communicate clearly, breaking down complex concepts into simple explanations.\n3. Respond accurately based on your training data, with knowledge defined training cutoff.\n4. Acknowledge uncertainties and suggest further ways to explore the topic if the answer is outside your knowledge.',
+      createdAt: seedCreatedAt,
+      id: 'rule-basis-prompt',
+      includeInAutocomplete: true,
+      label: 'base',
+      title: 'Basis Prompt',
+      updatedAt: seedCreatedAt,
+      visibility: { chat: true, editor: true },
+    },
+    {
+      category: 'function',
+      contentMarkdown: 'ROLLE: Du bist ein präziser zweisprachiger Lektor (Deutsch/Englisch).\n\nAUFGABE:\n- Korrigiere Grammatik, Rechtschreibung, Zeichensetzung und Stil.\n- Erhalte Tonalität und Fachbegriffe des Originals.\n- Gib nur den überarbeiteten Text zurück, ohne Kommentare.\n\nAUSGABE: ausschließlich der lektorierte Text.',
+      createdAt: seedCreatedAt,
+      id: 'rule-lektor-de-eng',
+      includeInAutocomplete: true,
+      label: 'lektor',
+      title: 'Lektor DE ENG',
+      updatedAt: seedCreatedAt,
+      visibility: { chat: true, editor: true },
+    },
+    {
+      category: 'context',
+      contentMarkdown: 'ROLLE: Professioneller Fachübersetzer Deutsch nach Englisch.\n\nKONTEXT:\n{{context}}\n\nVORGEHEN:\n- Übersetze sinngemäß, nicht wörtlich.\n- Übernimm Terminologie aus dem angehängten Glossar.\n- Behalte Formatierung und Absätze bei.',
+      createdAt: seedCreatedAt,
+      id: 'rule-uebersetzer-de-eng',
+      includeInAutocomplete: true,
+      label: 'translator',
+      linkedContextRefs: [{ fileId: 'file-asset-demo-1', kind: 'file-asset' }],
+      title: 'Übersetzer DE zu ENG',
+      updatedAt: seedCreatedAt,
+      visibility: { chat: true, editor: true },
+    },
+  ]
+}
+
+function seedFileLibrarySections(): FileLibrarySectionRecord[] {
+  // Keep the canonical temporary section (chat/editor uploads target it via
+  // FILE_SECTION_TEMP_ID); it stays empty in the demo and the rail hides it
+  // until it has documents. The three custom collections mirror the database
+  // design screenshots.
+  const temporary = createDefaultFileLibrarySections(seedCreatedAt).filter((section) => section.kind === 'temporary')
+  return [
+    ...temporary,
+    { createdAt: seedCreatedAt, id: SEED_SECTION_LEGAL, kind: 'custom', title: 'Rechtliche Grundlagen', updatedAt: seedCreatedAt },
+    { createdAt: seedCreatedAt, id: SEED_SECTION_MARKET, kind: 'custom', title: 'Anbieter & Markt', updatedAt: seedCreatedAt },
+    { createdAt: seedCreatedAt, id: SEED_SECTION_OWN, kind: 'custom', title: 'Eigene Dokumente', updatedAt: seedCreatedAt },
   ]
 }
 
@@ -229,33 +289,240 @@ function seedFileGroups(): FileGroupRecord[] {
   return [
     {
       createdAt: seedCreatedAt,
-      id: 'file-group-vendor-specs',
-      sectionId: FILE_SECTION_LIBRARY_ID,
-      title: 'Vendor specs',
+      id: SEED_GROUP_EU_AI_ACT,
+      sectionId: SEED_SECTION_LEGAL,
+      title: 'EU AI Act',
       updatedAt: seedCreatedAt,
     },
   ]
 }
 
+function seedFileAsset(
+  overrides: Partial<FileAssetRecord> & Pick<FileAssetRecord, 'fileName' | 'id' | 'label' | 'mimeType' | 'sectionId' | 'sizeBytes' | 'title'>,
+): FileAssetRecord {
+  return {
+    createdAt: seedCreatedAt,
+    extractedText: `${overrides.title} — Demo-Auszug für die Datenbank-Vorführung.`,
+    groupId: null,
+    origin: 'library',
+    pageCount: null,
+    parseStatus: 'parsed',
+    parseWarning: null,
+    textTruncated: false,
+    updatedAt: seedCreatedAt,
+    ...overrides,
+  }
+}
+
+const MIME_PDF = 'application/pdf'
+const MIME_DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+const MIME_XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+const MIME_TXT = 'text/plain'
+
 function seedFileAssets(): FileAssetRecord[] {
   return [
+    seedFileAsset({
+      fileName: 'BSI-Kriterienkatalog-KI.pdf',
+      id: 'file-asset-bsi-kriterien',
+      label: 'bsi-kriterien',
+      mimeType: MIME_PDF,
+      pageCount: 58,
+      sectionId: SEED_SECTION_LEGAL,
+      sizeBytes: 1153434,
+      title: 'BSI-Kriterienkatalog-KI.pdf',
+    }),
+    seedFileAsset({
+      fileName: 'DSGVO-Auszug-Art-22.pdf',
+      id: 'file-asset-dsgvo-art-22',
+      label: 'dsgvo-art-22',
+      mimeType: MIME_PDF,
+      pageCount: 4,
+      sectionId: SEED_SECTION_LEGAL,
+      sizeBytes: 88064,
+      title: 'DSGVO-Auszug-Art-22.pdf',
+    }),
+    seedFileAsset({
+      fileName: 'EU-AI-Act-Volltext.pdf',
+      groupId: SEED_GROUP_EU_AI_ACT,
+      id: 'file-asset-ai-act-volltext',
+      label: 'ai-act-volltext',
+      mimeType: MIME_PDF,
+      pageCount: 144,
+      sectionId: SEED_SECTION_LEGAL,
+      sizeBytes: 2516582,
+      title: 'EU-AI-Act-Volltext.pdf',
+    }),
+    seedFileAsset({
+      fileName: 'AI-Act-Annex-III.pdf',
+      groupId: SEED_GROUP_EU_AI_ACT,
+      id: 'file-asset-ai-act-annex-iii',
+      label: 'ai-act-annex-iii',
+      mimeType: MIME_PDF,
+      pageCount: 12,
+      sectionId: SEED_SECTION_LEGAL,
+      sizeBytes: 389120,
+      title: 'AI-Act-Annex-III.pdf',
+    }),
+    seedFileAsset({
+      fileName: 'Perplexity-Enterprise-Datenblatt.pdf',
+      id: 'file-asset-perplexity-db',
+      label: 'perplexity-db',
+      mimeType: MIME_PDF,
+      pageCount: 8,
+      sectionId: SEED_SECTION_MARKET,
+      sizeBytes: 621568,
+      title: 'Perplexity-Enterprise-Datenblatt.pdf',
+    }),
+    seedFileAsset({
+      fileName: 'Azure-Foundry-WebSearch.pdf',
+      id: 'file-asset-azure-foundry',
+      label: 'azure-foundry',
+      mimeType: MIME_PDF,
+      pageCount: 6,
+      sectionId: SEED_SECTION_MARKET,
+      sizeBytes: 539648,
+      title: 'Azure-Foundry-WebSearch.pdf',
+    }),
+    seedFileAsset({
+      fileName: 'Anbieter-Vergleich-2026.xlsx',
+      id: 'file-asset-anbieter-vergleich',
+      label: 'anbieter-vergleich',
+      mimeType: MIME_XLSX,
+      sectionId: SEED_SECTION_MARKET,
+      sizeBytes: 240640,
+      title: 'Anbieter-Vergleich-2026.xlsx',
+    }),
+    seedFileAsset({
+      fileName: 'Markt-Notizen.txt',
+      id: 'file-asset-markt-notizen',
+      label: 'markt-notizen',
+      mimeType: MIME_TXT,
+      sectionId: SEED_SECTION_MARKET,
+      sizeBytes: 12288,
+      title: 'Markt-Notizen.txt',
+    }),
     {
       createdAt: seedCreatedAt,
-      extractedText: 'Example vendor specification excerpt. EU data residency available in Frankfurt and Dublin. Audit logs retained for 365 days. Citation chains can be exported as Markdown.',
-      fileName: 'vendor-spec-eu.txt',
-      groupId: 'file-group-vendor-specs',
-      id: 'file-asset-vendor-spec',
-      label: 'vendor-spec-eu',
-      mimeType: 'text/plain',
+      extractedText: 'Demo-1.docx Beispieltext für die Prompt-Library-Vorführung. Enthält Überschriften, Absätze und Aufzählungen, an denen sich die Fachübersetzung demonstrieren lässt.',
+      fileName: 'Demo-1.docx',
+      groupId: null,
+      id: 'file-asset-demo-1',
+      label: 'demo-1',
+      mimeType: MIME_DOCX,
+      origin: 'library',
+      pageCount: 3,
+      parseStatus: 'parsed',
+      parseWarning: null,
+      sectionId: SEED_SECTION_OWN,
+      sizeBytes: 48128,
+      textTruncated: false,
+      title: 'Demo-1.docx',
+      updatedAt: seedCreatedAt,
+    },
+    {
+      createdAt: seedCreatedAt,
+      extractedText: 'Demo-2.docx Beispieltext mit weiteren Absätzen und einer Tabelle, um Formatierung und Terminologie in der Übersetzung zu prüfen.',
+      fileName: 'Demo-2.docx',
+      groupId: null,
+      id: 'file-asset-demo-2',
+      label: 'demo-2',
+      mimeType: MIME_DOCX,
+      origin: 'library',
+      pageCount: 22,
+      parseStatus: 'partial',
+      parseWarning: 'Textinhalt gekürzt — nur ein Teil des Dokuments wurde verarbeitet.',
+      sectionId: SEED_SECTION_OWN,
+      sizeBytes: 1887437,
+      textTruncated: true,
+      title: 'Demo-2.docx',
+      updatedAt: seedCreatedAt,
+    },
+    {
+      createdAt: seedCreatedAt,
+      extractedText: 'Glossar-DE-EN: zweispaltige Terminologieliste (Deutsch/Englisch) mit bevorzugten Fachbegriffen für die Übersetzung.',
+      fileName: 'Glossar-DE-EN.xlsx',
+      groupId: null,
+      id: 'file-asset-glossar',
+      label: 'glossar',
+      mimeType: MIME_XLSX,
       origin: 'library',
       pageCount: null,
       parseStatus: 'parsed',
       parseWarning: null,
-      sectionId: FILE_SECTION_LIBRARY_ID,
+      sectionId: SEED_SECTION_OWN,
+      sizeBytes: 9472,
+      textTruncated: false,
+      title: 'Glossar-DE-EN.xlsx',
+      updatedAt: seedCreatedAt,
+    },
+    seedFileAsset({
+      fileName: 'Rechtsgutachten-Entwurf.docx',
+      id: 'file-asset-rechtsgutachten',
+      label: 'rechtsgutachten',
+      mimeType: MIME_DOCX,
+      pageCount: 18,
+      sectionId: SEED_SECTION_OWN,
+      sizeBytes: 320512,
+      title: 'Rechtsgutachten-Entwurf.docx',
+    }),
+    {
+      createdAt: seedCreatedAt,
+      extractedText: 'Example vendor specification excerpt. EU data residency available in Frankfurt and Dublin. Audit logs retained for 365 days. Citation chains can be exported as Markdown.',
+      fileName: 'vendor-spec-eu.txt',
+      groupId: null,
+      id: 'file-asset-vendor-spec',
+      label: 'vendor-spec-eu',
+      mimeType: MIME_TXT,
+      origin: 'library',
+      pageCount: null,
+      parseStatus: 'parsed',
+      parseWarning: null,
+      sectionId: SEED_SECTION_OWN,
       sizeBytes: 184,
       textTruncated: false,
       title: 'vendor-spec-eu.txt',
       updatedAt: seedCreatedAt,
+    },
+  ]
+}
+
+function seedVectorIndexes(): VectorIndexRecord[] {
+  // Chunk/vector counts are derived in the UI from pageCount (helpers.ts);
+  // these members reproduce the design screenshots: EU-Recht 908 vectors
+  // (619 + 249 + 40, the embedded members), Anbieter-Wissen 329 (40 + 40 + 249).
+  // rechtsgutachten stays `pending` to show the "läuft" embedding state while
+  // the index already serves its embedded members.
+  return [
+    {
+      createdAt: seedCreatedAt,
+      dims: 3072,
+      handle: 'eu-recht',
+      id: 'vector-index-eu-recht',
+      members: [
+        { fileId: 'file-asset-ai-act-volltext', state: 'embedded' },
+        { fileId: 'file-asset-bsi-kriterien', state: 'embedded' },
+        { fileId: 'file-asset-dsgvo-art-22', state: 'embedded' },
+        { fileId: 'file-asset-rechtsgutachten', state: 'pending' },
+      ],
+      model: 'text-embedding-3-large',
+      status: 'ready',
+      title: 'EU-Recht',
+      updatedAt: '2026-05-15T04:00:00.000Z',
+    },
+    {
+      createdAt: seedCreatedAt,
+      dims: 1536,
+      handle: 'anbieter',
+      id: 'vector-index-anbieter',
+      members: [
+        { fileId: 'file-asset-perplexity-db', state: 'embedded' },
+        { fileId: 'file-asset-azure-foundry', state: 'embedded' },
+        { fileId: 'file-asset-bsi-kriterien', state: 'embedded' },
+      ],
+      model: 'text-embedding-3-small',
+      status: 'ready',
+      title: 'Anbieter-Wissen',
+      updatedAt: '2026-05-14T06:00:00.000Z',
     },
   ]
 }
@@ -347,6 +614,7 @@ function seedResearchRuns(): ResearchRunRecord[] {
         runEvent('RO-0247-15', '2026-05-15T08:21:00.000Z', 'Evaluating information quality (after round 2/5)...', true),
       ],
       metrics: {
+        claims: 41,
         queries: 13,
         rounds: '2 / 5',
         sources: 72,
@@ -370,6 +638,7 @@ function seedResearchRuns(): ResearchRunRecord[] {
       createdAt: '2026-05-15T08:18:00.000Z',
       events: [],
       metrics: {
+        claims: 0,
         queries: 0,
         rounds: '0 / 10',
         sources: 0,
@@ -475,6 +744,7 @@ function completedRun(
     events: completedRunEvents(runId, submittedAt, durationSeconds, queries, rounds, sources),
     finishedAt: addSeconds(submittedAt, durationSeconds),
     metrics: {
+      claims: 0,
       queries,
       rounds,
       sources,

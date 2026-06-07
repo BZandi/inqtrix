@@ -15,7 +15,6 @@ import {
   ListOrdered,
   MessageSquareText,
   MessageSquarePlus,
-  MessagesSquare,
   Paperclip,
   PencilLine,
   Plus,
@@ -24,6 +23,7 @@ import {
   SlidersHorizontal,
   Square,
   Trash2,
+  type LucideIcon,
   X,
 } from '@/components/icons'
 import { AnimatePresence, motion } from 'motion/react'
@@ -39,6 +39,7 @@ import {
 import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { WelcomeState } from '@/components/ui/welcome-state'
 import {
   ResizableHandle,
   ResizablePanel,
@@ -46,12 +47,8 @@ import {
 } from '@/components/ui/resizable'
 import {
   DropdownMenu,
-  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
@@ -80,6 +77,8 @@ import type {
   ChatModelTier,
   NodeModelResolution,
 } from '@/features/researchRuns/types'
+import { ModelTierPicker } from '@/features/researchRuns/ModelTierPicker'
+import { modelEffortLabelFromToken, modelNameLabel } from '@/features/researchRuns/modelLabels'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
@@ -97,6 +96,7 @@ import { ContextChipLegend } from '@/features/composer/ContextChipLegend'
 import { MentionComposer, type MentionComposerHandle } from '@/features/composer/MentionComposer'
 import { type LabelResolver } from '@/features/composer/mentionDoc'
 import { resizeTextareaToRows } from '@/features/composer/textareaAutosize'
+import { OptionMenuHeader, optionMenuContentClassName } from '@/components/ui/option-menu'
 
 type ChatWorkspaceProps = {
   activeAssistantMessageId: string | null
@@ -533,7 +533,7 @@ export default function ChatWorkspace({
                   {isEditingTitle && selectedThread ? (
                     <input
                       aria-label={t.chat.renameTitle}
-                      className="min-w-0 flex-1 rounded-sm border-0 bg-transparent px-0 text-sm font-semibold text-foreground outline-none focus-visible:ring-0"
+                      className="min-w-0 flex-1 rounded-sm border-0 bg-transparent px-0 t-section text-foreground outline-none focus-visible:ring-0"
                       onBlur={commitTitleEdit}
                       onChange={(event) => setTitleDraft(event.target.value)}
                       onKeyDown={(event) => {
@@ -552,7 +552,7 @@ export default function ChatWorkspace({
                     />
                   ) : (
                     <button
-                      className="min-w-0 flex-1 truncate rounded-sm text-left text-sm font-semibold text-foreground hover:text-brand focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      className="min-w-0 flex-1 truncate rounded-sm text-left t-section text-foreground hover:text-brand focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                       onClick={() => selectedThread && setIsEditingTitle(true)}
                       title={selectedThread ? t.chat.renameTitle : undefined}
                       type="button"
@@ -571,7 +571,7 @@ export default function ChatWorkspace({
                   )}
                 </div>
                 <p
-                  className="max-w-md truncate text-[11px] leading-4 text-muted-foreground"
+                  className="max-w-md truncate t-meta-sm text-muted-foreground"
                   title={selectedThread ? selectedThread.preview : undefined}
                 >
                   {selectedThread ? selectedThread.preview : t.chat.empty}
@@ -713,7 +713,17 @@ export default function ChatWorkspace({
 	            )}
 	          </AnimatePresence>
 
-	          <ScrollArea className="min-h-0 flex-1" ref={messagesScrollAreaRef}>
+	          <ScrollArea
+            className={cn(
+              'min-h-0 flex-1',
+              // When empty, let the Radix viewport wrapper fill its height so the
+              // inner `min-h-full` resolves and the hero can center vertically.
+              // Only in the empty case, so message scrolling stays unaffected.
+              !(selectedThread && selectedThread.messages.length > 0) &&
+                '[&_[data-scroll-area-viewport]>div]:h-full',
+            )}
+            ref={messagesScrollAreaRef}
+          >
 	            <div className="mx-auto flex min-h-full w-full max-w-5xl flex-col gap-5 px-4 py-6 md:px-8">
               {selectedThread && selectedThread.messages.length > 0 ? (
                 selectedThread.messages.map((message) => (
@@ -741,11 +751,11 @@ export default function ChatWorkspace({
                 ))
               ) : selectedThread ? (
                 <EmptyChatState
-                  label={pendingChips.length > 0 ? t.chat.emptyWithContext : t.chat.empty}
-                  type="thread"
+                  subtitle={pendingChips.length > 0 ? t.chat.emptyWithContext : t.chat.emptyHint}
+                  title={t.chat.emptyTitle}
                 />
               ) : (
-                <EmptyChatState label={t.chat.empty} type="all" />
+                <EmptyChatState subtitle={t.chat.emptyHint} title={t.chat.emptyTitle} />
               )}
               <div ref={chatEndRef} />
             </div>
@@ -768,9 +778,9 @@ export default function ChatWorkspace({
                 type="file"
               />
               <Dropzone disabled={isSending} label={t.chat.dropFiles} onFiles={onAttachFiles}>
-              <div className="relative overflow-visible rounded-xl border border-border bg-card px-2.5 py-2 shadow-[0_8px_28px_-12px_var(--shadow-soft)]">
+              <div className="relative overflow-visible rounded-xl border border-border bg-card px-2.5 py-2 shadow-[0_8px_28px_-12px_var(--shadow-soft)] transition-[border-color,box-shadow] duration-150 focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/15">
                 {attachmentBudgetNotice && (
-                  <div className="mb-2 flex items-center gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-2 py-1 text-[11px] font-medium text-warning">
+                  <div className="mb-2 flex items-center gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-2 py-1 t-meta-sm font-medium text-warning">
                     <AlertTriangle className="size-3.5 shrink-0" />
                     <span className="min-w-0">{attachmentBudgetNotice}</span>
                   </div>
@@ -863,71 +873,86 @@ export default function ChatWorkspace({
                     </DropdownMenuTrigger>
                     <DropdownMenuContent
                       align="start"
-                      className="w-72 max-w-[calc(100vw-2rem)]"
+                      className="w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl p-0 shadow-lg"
                       side="top"
                       sideOffset={8}
                     >
-                      <DropdownMenuLabel className="text-xs text-muted-foreground">
-                        {t.chat.research}
-                      </DropdownMenuLabel>
-                      <DropdownMenuSeparator />
-                      {reportOptions.length > 0 ? (
-                        reportOptions.map((report) => (
-                          <DropdownMenuItem
-                            className="w-full min-w-0 items-start gap-2 py-2"
-                            key={report.runId}
-                            onSelect={() => onAttachContext({ kind: 'research-report', runId: report.runId })}
-                          >
-                            <FileText className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                            <span className="min-w-0 flex-1">
-                              <span className="block max-w-full truncate text-sm font-medium">
-                                @research:{report.label}
+                      <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-1.5">
+                        <span className="t-meta-sm font-medium text-muted-foreground">{t.chat.attachContext}</span>
+                        <span className="ml-auto t-hint tabular-nums text-muted-foreground/50">
+                          {reportOptions.length + ruleOptions.length}
+                        </span>
+                      </div>
+                      <div className="py-1">
+                        <div className="px-2.5 pb-0.5 pt-1.5 t-caption text-muted-foreground/60">
+                          {t.chat.research}
+                        </div>
+                        {reportOptions.length > 0 ? (
+                          reportOptions.map((report) => (
+                            <DropdownMenuItem
+                              className="group relative w-full min-w-0 items-start gap-2.5 rounded-none px-2.5 py-1.5 hover:bg-accent/50 focus:bg-accent/80 data-[highlighted]:bg-accent/80"
+                              key={report.runId}
+                              onSelect={() => onAttachContext({ kind: 'research-report', runId: report.runId })}
+                            >
+                              <span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-brand opacity-0 transition-opacity group-hover:opacity-100 group-focus:opacity-100 group-data-[highlighted]:opacity-100" />
+                              <FileText className="mt-0.5 size-4 shrink-0 text-muted-foreground/70 transition-colors group-hover:text-brand group-focus:text-brand group-data-[highlighted]:text-brand" />
+                              <span className="min-w-0 flex-1">
+                                <span className="block max-w-full truncate t-list text-foreground">
+                                  @research:{report.label}
+                                </span>
+                                <span className="block max-w-full truncate t-meta-sm text-muted-foreground">
+                                  {report.title}
+                                </span>
                               </span>
-                              <span className="block max-w-full truncate text-xs text-muted-foreground">
-                                {report.title}
+                            </DropdownMenuItem>
+                          ))
+                        ) : (
+                          <div className="px-2.5 py-2 t-meta text-muted-foreground">
+                            {t.chat.noReports}
+                          </div>
+                        )}
+                        <DropdownMenuSeparator className="mx-0 my-1" />
+                        <div className="px-2.5 pb-0.5 pt-1.5 t-caption text-muted-foreground/60">
+                          {t.chat.rules}
+                        </div>
+                        {ruleOptions.length > 0 ? (
+                          ruleOptions.map((rule) => (
+                            <DropdownMenuItem
+                              className="group relative w-full min-w-0 items-start gap-2.5 rounded-none px-2.5 py-1.5 hover:bg-accent/50 focus:bg-accent/80 data-[highlighted]:bg-accent/80"
+                              key={rule.ruleId}
+                              onSelect={() => onAttachContext({ kind: 'chat-rule', ruleId: rule.ruleId })}
+                            >
+                              <span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-success opacity-0 transition-opacity group-hover:opacity-100 group-focus:opacity-100 group-data-[highlighted]:opacity-100" />
+                              <BookOpen className="mt-0.5 size-4 shrink-0 text-muted-foreground/70 transition-colors group-hover:text-success group-focus:text-success group-data-[highlighted]:text-success" />
+                              <span className="min-w-0 flex-1">
+                                <span className="block max-w-full truncate t-list text-foreground">
+                                  @rules:{rule.label}
+                                </span>
+                                <span className="block max-w-full truncate t-meta-sm text-muted-foreground">
+                                  {rule.title}
+                                </span>
                               </span>
-                            </span>
-                          </DropdownMenuItem>
-                        ))
-                      ) : (
-                        <DropdownMenuItem disabled>
-                          {t.chat.noReports}
-                        </DropdownMenuItem>
-                      )}
-                      <DropdownMenuSeparator />
-                      <DropdownMenuLabel className="text-xs text-muted-foreground">
-                        {t.chat.rules}
-                      </DropdownMenuLabel>
-                      {ruleOptions.length > 0 ? (
-                        ruleOptions.map((rule) => (
-                          <DropdownMenuItem
-                            className="w-full min-w-0 items-start gap-2 py-2"
-                            key={rule.ruleId}
-                            onSelect={() => onAttachContext({ kind: 'chat-rule', ruleId: rule.ruleId })}
-                          >
-                            <BookOpen className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                            <span className="min-w-0 flex-1">
-                              <span className="block max-w-full truncate text-sm font-medium">
-                                @rules:{rule.label}
-                              </span>
-                              <span className="block max-w-full truncate text-xs text-muted-foreground">
-                                {rule.title}
-                              </span>
-                            </span>
-                          </DropdownMenuItem>
-                        ))
-                      ) : (
-                        <DropdownMenuItem disabled>
-                          {t.chat.noRules}
-                        </DropdownMenuItem>
-                      )}
-                      <DropdownMenuSeparator />
+                            </DropdownMenuItem>
+                          ))
+                        ) : (
+                          <div className="px-2.5 py-2 t-meta text-muted-foreground">
+                            {t.chat.noRules}
+                          </div>
+                        )}
+                      </div>
+                      <DropdownMenuSeparator className="mx-0 my-0" />
                       <DropdownMenuItem
-                        className="gap-2"
+                        className="group relative items-start gap-2.5 rounded-none px-2.5 py-1.5 hover:bg-accent/50 focus:bg-accent/80 data-[highlighted]:bg-accent/80"
                         onSelect={onOpenPromptLibrary}
                       >
-                        <Library className="size-4 text-muted-foreground" />
-                        {t.chat.manageRules}
+                        <span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-success opacity-0 transition-opacity group-hover:opacity-100 group-focus:opacity-100 group-data-[highlighted]:opacity-100" />
+                        <Library className="mt-0.5 size-4 shrink-0 text-muted-foreground/70 transition-colors group-hover:text-success group-focus:text-success group-data-[highlighted]:text-success" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate t-list text-foreground">{t.chat.manageRules}</span>
+                          <span className="block truncate t-meta-sm text-muted-foreground">
+                            {t.chat.manageRulesDescription}
+                          </span>
+                        </span>
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
@@ -957,27 +982,23 @@ export default function ChatWorkspace({
                         <SlidersHorizontal />
                       </Button>
                     </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start" className="w-64" side="top" sideOffset={8}>
-                      <DropdownMenuLabel>{t.composer.moreSettings}</DropdownMenuLabel>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuCheckboxItem
+                    <DropdownMenuContent align="start" className={optionMenuContentClassName} side="top" sideOffset={8}>
+                      <OptionMenuHeader count={1} title={t.composer.moreSettings} />
+                      <div className="py-1">
+                      <ChatComposerToggleItem
                         checked={streamingEnabled}
-                        className="gap-3 py-2 pl-2 pr-2 [&>span:first-child]:hidden"
+                        description={t.chat.streamingDescription}
                         disabled={isSending}
+                        icon={MessageSquareText}
+                        label={t.chat.streaming}
+                        offLabel={t.chat.streamingOff}
                         onCheckedChange={onStreamingEnabledChange}
-                        onSelect={(event) => event.preventDefault()}
-                      >
-                        <span className="grid min-w-0 flex-1 text-left leading-tight">
-                          <span className="truncate text-sm font-medium">{t.chat.streaming}</span>
-                          <span className="truncate text-xs text-muted-foreground">
-                            {streamingEnabled ? t.chat.streamingOn : t.chat.streamingOff}
-                          </span>
-                        </span>
-                        <ChatToggleVisual checked={streamingEnabled} />
-                      </DropdownMenuCheckboxItem>
+                        onLabel={t.chat.streamingOn}
+                      />
+                      </div>
                     </DropdownMenuContent>
                   </DropdownMenu>
-                  <ChatModelPicker
+                  <ModelTierPicker
                     defaultModel={defaultChatModel}
                     disabled={isSending}
                     onChange={onSelectedModelTierChange}
@@ -1004,7 +1025,7 @@ export default function ChatWorkspace({
                         className={cn(
                           'size-7 rounded-md focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0',
                           canSend
-                            ? 'bg-brand text-white hover:bg-brand/90 hover:text-white'
+                            ? 'bg-brand text-brand-foreground hover:bg-brand/90 hover:text-brand-foreground'
                             : 'text-muted-foreground/45',
                         )}
                         disabled={!canSend}
@@ -1022,17 +1043,17 @@ export default function ChatWorkspace({
               {(requestError || requestNotice || composerNotice) && (
                 <div className="mt-1 flex min-h-6 flex-wrap items-center justify-end gap-2 border-t border-border/70 pt-1.5">
                   {requestError && (
-                    <span className="min-w-0 truncate text-[11px] font-medium text-destructive">
+                    <span className="min-w-0 truncate t-meta-sm font-medium text-destructive">
                       {requestError}
                     </span>
                   )}
                   {!requestError && requestNotice && (
-                    <span className="min-w-0 truncate text-[11px] font-medium text-warning">
+                    <span className="min-w-0 truncate t-meta-sm font-medium text-warning">
                       {requestNotice}
                     </span>
                   )}
                   {!requestError && !requestNotice && composerNotice && (
-                    <span className="min-w-0 truncate text-[11px] font-medium text-warning">
+                    <span className="min-w-0 truncate t-meta-sm font-medium text-warning">
                       {composerNotice}
                     </span>
                   )}
@@ -1095,7 +1116,7 @@ function ChatToggleVisual({ checked }: { checked: boolean }) {
       aria-hidden
       className={cn(
         'inline-flex h-5 w-9 shrink-0 items-center rounded-full border-2 border-transparent shadow-sm transition-colors',
-        checked ? 'bg-primary' : 'bg-input',
+        checked ? 'bg-brand' : 'bg-input',
       )}
     >
       <span
@@ -1108,160 +1129,74 @@ function ChatToggleVisual({ checked }: { checked: boolean }) {
   )
 }
 
-const chatModelTierOrder: ChatModelTier[] = ['high', 'mid', 'fast']
-
-function ChatModelPicker({
-  defaultModel,
+function ChatComposerToggleItem({
+  checked,
+  description,
   disabled,
-  onChange,
-  options,
-  optionsStatus,
-  selectedTier,
+  icon: Icon,
+  label,
+  offLabel,
+  onCheckedChange,
+  onLabel,
 }: {
-  defaultModel: NodeModelResolution | null
-  disabled: boolean
-  onChange: (tier: ChatModelTier | null) => void
-  options: ChatModelOption[]
-  optionsStatus: 'available' | 'missing' | 'unresolved'
-  selectedTier: ChatModelTier | null
+  checked: boolean
+  description: string
+  disabled?: boolean
+  icon: LucideIcon
+  label: string
+  offLabel: string
+  onCheckedChange: (checked: boolean) => void
+  onLabel: string
 }) {
-  const { t } = useLocale()
-  const selectedOption = selectedTier ? chatModelOptionForTier(options, selectedTier) : null
-  const activeModel = selectedOption ?? defaultModel ?? chatModelOptionForTier(options, 'mid') ?? null
-  const unavailableLabel = optionsStatus === 'unresolved'
-    ? t.chat.modelMetadataMissing
-    : t.chat.modelDiscoveryMissing
-  const activeLabel = selectedTier && optionsStatus !== 'available'
-    ? `${tierLabel(selectedTier, t)} · ${unavailableLabel}`
-    : `${modelNameLabel(activeModel, t.chat.modelUnknown)} · ${effortLabel(activeModel, t)}`
-  const pickerValue = selectedTier ?? 'default'
-
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          aria-label={t.chat.modelPicker}
-          className={cn(
-            'h-7 min-w-0 max-w-[min(48vw,17rem)] shrink rounded-md px-1.5 text-[11px] font-semibold text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0',
-            'data-[state=open]:bg-accent data-[state=open]:text-foreground',
-          )}
-          disabled={disabled}
-          type="button"
-          variant="ghost"
-        >
-          <span className="min-w-0 truncate">{activeLabel}</span>
-          <ChevronDown className="size-3 shrink-0 opacity-60" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="start"
-        className="w-80 max-w-[calc(100vw-2rem)]"
-        side="top"
-        sideOffset={8}
+    <DropdownMenuItem
+      className="group relative items-center gap-2.5 rounded-none px-2.5 py-1.5 hover:bg-accent/50 focus:bg-accent/80 data-[highlighted]:bg-accent/80"
+      disabled={disabled}
+      onSelect={(event) => {
+        event.preventDefault()
+        onCheckedChange(!checked)
+      }}
+    >
+      <span
+        className={cn(
+          'absolute inset-y-1 left-0 w-0.5 rounded-full opacity-0 transition-opacity group-hover:opacity-100 group-focus:opacity-100 group-data-[highlighted]:opacity-100',
+          checked ? 'bg-success' : 'bg-muted-foreground/50',
+        )}
+      />
+      <Icon
+        className={cn(
+          'icon-md shrink-0 transition-colors',
+          checked
+            ? 'text-success'
+            : 'text-muted-foreground/70 group-hover:text-foreground group-focus:text-foreground group-data-[highlighted]:text-foreground',
+        )}
+      />
+      <span className="min-w-0 flex-1 text-left">
+        <span className="block truncate t-list text-foreground">{label}</span>
+        <span className="block truncate t-meta-sm text-muted-foreground">{description}</span>
+      </span>
+      <span
+        className={cn(
+          'shrink-0 rounded-md px-1.5 py-0.5 t-hint font-medium',
+          checked ? 'bg-success-subtle text-success' : 'bg-surface text-muted-foreground',
+        )}
       >
-        <DropdownMenuLabel className="text-xs text-muted-foreground">
-          {t.chat.modelPicker}
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        <DropdownMenuRadioGroup
-          onValueChange={(value) => onChange(isChatModelTier(value) ? value : null)}
-          value={pickerValue}
-        >
-          <DropdownMenuRadioItem className="items-start py-2 pr-3" value="default">
-            <span className="grid min-w-0 flex-1 text-left leading-tight">
-              <span className="truncate text-sm font-medium">{t.chat.modelServerDefault}</span>
-              <span className="truncate text-xs text-muted-foreground">
-                {modelDetailLabel(defaultModel, t)}
-              </span>
-            </span>
-          </DropdownMenuRadioItem>
-          <DropdownMenuSeparator />
-          {optionsStatus === 'available' ? chatModelTierOrder.map((tier) => {
-            const option = chatModelOptionForTier(options, tier)
-            return (
-              <DropdownMenuRadioItem
-                className="items-start py-2 pr-3"
-                key={tier}
-                value={tier}
-              >
-                <span className="grid min-w-0 flex-1 text-left leading-tight">
-                  <span className="flex min-w-0 items-baseline gap-2">
-                    <span className="shrink-0 text-sm font-medium">
-                      {tierLabel(tier, t)}
-                    </span>
-                    <span className="min-w-0 truncate text-xs font-medium text-muted-foreground">
-                      {modelNameLabel(option, t.chat.modelUnknown)}
-                    </span>
-                  </span>
-                  <span className="truncate text-xs text-muted-foreground">
-                    {effortLabel(option, t)}
-                  </span>
-                </span>
-              </DropdownMenuRadioItem>
-            )
-          }) : (
-            <DropdownMenuItem disabled className="items-start py-2">
-              <span className="grid min-w-0 flex-1 text-left leading-tight">
-                <span className="truncate text-sm font-medium">{unavailableLabel}</span>
-                <span className="truncate text-xs text-muted-foreground">
-                  {t.chat.modelServerDefault}
-                </span>
-              </span>
-            </DropdownMenuItem>
-          )}
-        </DropdownMenuRadioGroup>
-      </DropdownMenuContent>
-    </DropdownMenu>
+        {checked ? onLabel : offLabel}
+      </span>
+      <button
+        aria-label={`${label}: ${checked ? onLabel : offLabel}`}
+        className="shrink-0 disabled:cursor-not-allowed disabled:opacity-40"
+        disabled={disabled}
+        onClick={(event) => {
+          event.stopPropagation()
+          onCheckedChange(!checked)
+        }}
+        type="button"
+      >
+        <ChatToggleVisual checked={checked} />
+      </button>
+    </DropdownMenuItem>
   )
-}
-
-function chatModelOptionForTier(
-  options: readonly ChatModelOption[],
-  tier: ChatModelTier,
-): ChatModelOption | null {
-  return options.find((option) => option.tier === tier) ?? null
-}
-
-function isChatModelTier(value: string): value is ChatModelTier {
-  return value === 'high' || value === 'mid' || value === 'fast'
-}
-
-function modelNameLabel(
-  option: Pick<NodeModelResolution, 'model'> | null | undefined,
-  fallback: string,
-) {
-  const model = option?.model?.trim()
-  if (!model) return fallback
-  return model.replace(/^.+\//, '')
-}
-
-function modelDetailLabel(
-  option: NodeModelResolution | null,
-  t: ReturnType<typeof useLocale>['t'],
-) {
-  return `${modelNameLabel(option, t.chat.modelUnknown)} · ${effortLabel(option, t)}`
-}
-
-function effortLabel(
-  option: Pick<NodeModelResolution, 'effort'> | null | undefined,
-  t: ReturnType<typeof useLocale>['t'],
-) {
-  const effort = option?.effort?.trim().toLowerCase()
-  if (!effort) return t.chat.modelEffortDefault
-  if (effort === 'none') return t.chat.modelThinkingOff
-  return `${t.chat.modelThinkingOn} ${shortEffort(effort)}`
-}
-
-function shortEffort(effort: string) {
-  if (effort === 'medium') return 'med'
-  if (effort === 'minimal') return 'min'
-  return effort
-}
-
-function tierLabel(tier: ChatModelTier, t: ReturnType<typeof useLocale>['t']) {
-  if (tier === 'high') return t.chat.modelTierHigh
-  if (tier === 'fast') return t.chat.modelTierFast
-  return t.chat.modelTierMid
 }
 
 function ChatMessageModelChip({
@@ -1271,10 +1206,10 @@ function ChatMessageModelChip({
 }) {
   const { t } = useLocale()
   if (!modelResolution?.model) return null
-  const label = `${modelNameLabel(modelResolution, t.chat.modelUnknown)} · ${effortLabelFromToken(modelResolution.effort, t)}`
+  const label = `${modelNameLabel(modelResolution, t.chat.modelUnknown)} · ${modelEffortLabelFromToken(modelResolution.effort, t.chat)}`
   return (
     <span
-      className="max-w-[min(42vw,16rem)] truncate rounded-md bg-muted/60 px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground"
+      className="max-w-[min(42vw,16rem)] truncate rounded-md bg-muted/60 px-1.5 py-0.5 t-hint font-semibold text-muted-foreground"
       title={label}
     >
       {label}
@@ -1282,34 +1217,38 @@ function ChatMessageModelChip({
   )
 }
 
-function effortLabelFromToken(
-  effortToken: string | undefined,
-  t: ReturnType<typeof useLocale>['t'],
-) {
-  const effort = effortToken?.trim().toLowerCase()
-  if (!effort) return t.chat.modelEffortDefault
-  if (effort === 'none') return t.chat.modelThinkingOff
-  return `${t.chat.modelThinkingOn} ${shortEffort(effort)}`
+/**
+ * Highlight the `@kind` context tokens in a hint sentence so they read as
+ * typeable handles (mono, slightly darker) without leaving the prose flow.
+ */
+function renderMentionHint(text: string) {
+  return text.split(/(@[a-z]+)/gi).map((part, index) =>
+    /^@[a-z]+$/i.test(part) ? (
+      <span className="font-mono text-foreground/75" key={index}>
+        {part}
+      </span>
+    ) : (
+      part
+    ),
+  )
 }
 
 function EmptyChatState({
-  label,
-  type,
+  subtitle,
+  title,
 }: {
-  label: string
-  type: 'all' | 'thread'
+  subtitle: string
+  title: string
 }) {
-  const Icon = type === 'thread' ? MessageSquareText : MessagesSquare
+  const { t } = useLocale()
+
   return (
-    <div className="flex flex-1 items-center justify-center p-8 text-center">
-      <div className="max-w-sm">
-        <div className="mx-auto flex size-14 items-center justify-center rounded-full border border-border bg-surface text-muted-foreground">
-          <Icon className="size-7" />
-        </div>
-        <p className="mt-4 text-sm font-medium text-muted-foreground">
-          {label}
-        </p>
-      </div>
+    <div className="flex flex-1 items-center justify-center px-6 py-8 text-center">
+      <WelcomeState
+        kicker={t.chat.title}
+        subtitle={renderMentionHint(subtitle)}
+        title={title}
+      />
     </div>
   )
 }
@@ -1404,7 +1343,7 @@ function ChatMessageBubble({
             <Icon className="size-4" />
           </span>
           <div className="min-w-0" aria-live={isStreaming ? 'polite' : undefined}>
-            <div className="mb-1 flex items-center gap-2 text-[11px] font-semibold text-muted-foreground">
+            <div className="mb-1 flex items-center gap-2 t-meta-sm font-semibold text-muted-foreground">
               <span>{t.chat.assistant}</span>
               <ChatMessageModelChip modelResolution={message.modelResolution} />
               <span>{formatTime(message.createdAt)}</span>
@@ -1434,7 +1373,7 @@ function ChatMessageBubble({
             {message.contentMarkdown ? (
               <div
                 className={cn(
-                  'chat-markdown max-w-4xl text-sm leading-[1.42] text-foreground',
+                  'chat-markdown max-w-4xl text-sm leading-snug text-foreground',
                   isStreaming && !reduceMotion && 'animate-in fade-in-0 duration-200',
                 )}
               >
@@ -1475,7 +1414,7 @@ function ChatMessageBubble({
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 justify-end">
             <div className="min-w-0 max-w-[min(72%,44rem)]">
-              <div className="mb-1 flex items-center justify-end gap-2 text-[11px] font-semibold text-muted-foreground">
+              <div className="mb-1 flex items-center justify-end gap-2 t-meta-sm font-semibold text-muted-foreground">
                 {!isSelectionMode && (
                   <>
                     <MessageActionButton
@@ -1543,7 +1482,7 @@ function MessageSelectionPill({
   return (
     <span
       className={cn(
-        'rounded-full border border-border bg-background px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground',
+        'rounded-full border border-border bg-background px-1.5 py-0.5 t-hint font-semibold text-muted-foreground',
         isSelected && 'border-brand/30 bg-brand-subtle text-brand',
       )}
     >
@@ -1705,7 +1644,7 @@ function ChatChainTrace({ steps }: { steps: ChatChainStepRecord[] }) {
     <div className="mb-2 max-w-4xl rounded-md border border-border/70 bg-surface/60">
       <button
         aria-expanded={expanded}
-        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] font-semibold text-muted-foreground transition hover:text-foreground"
+        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left t-meta-sm font-semibold text-muted-foreground transition hover:text-foreground"
         onClick={() => setExpanded((value) => !value)}
         type="button"
       >
@@ -1727,7 +1666,7 @@ function ChatChainTrace({ steps }: { steps: ChatChainStepRecord[] }) {
               <div className="border-b border-border/40 py-1 last:border-0" key={index}>
                 <button
                   className={cn(
-                    'flex w-full items-center gap-1.5 text-left text-[11px] font-medium transition',
+                    'flex w-full items-center gap-1.5 text-left t-meta-sm font-medium transition',
                     step.status === 'error'
                       ? 'text-destructive'
                       : step.status === 'stopped'
@@ -1741,7 +1680,7 @@ function ChatChainTrace({ steps }: { steps: ChatChainStepRecord[] }) {
                   <span className="min-w-0 flex-1 truncate">{label}</span>
                 </button>
                 {open && (
-                  <div className="chat-markdown mt-1 max-w-full pl-4 text-xs leading-[1.4] text-foreground/90">
+                  <div className="chat-markdown mt-1 max-w-full pl-4 text-xs leading-snug text-foreground/90">
                     <MarkdownRenderer markdown={step.output} variant="chat" />
                   </div>
                 )}
@@ -1770,7 +1709,7 @@ function GeneratingPlaceholder({ reduceMotion }: { reduceMotion: boolean | null 
         <span className="inqtrix-thinking-node" />
         <span className="inqtrix-thinking-node" />
       </span>
-      <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground/80">
+      <span className="t-caption tracking-[0.14em] text-muted-foreground/80">
         {t.chat.thinking}
       </span>
     </div>
@@ -1806,7 +1745,7 @@ function ChatMessageAttachments({
             <Icon className="size-3.5 shrink-0" />
             <span className="min-w-0 truncate">{chip.label}</span>
             {chip.fileCount !== null && (
-              <span className="shrink-0 text-[10px] font-bold tabular-nums opacity-75">{chip.fileCount}</span>
+              <span className="shrink-0 t-hint font-bold tabular-nums opacity-75">{chip.fileCount}</span>
             )}
           </span>
         )

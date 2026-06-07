@@ -18,7 +18,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import type { ProjectConnection } from '@/features/project/types'
 import type { AppView } from '@/features/researchDesk/types'
 import { useLocale } from '@/i18n/LocaleProvider'
-import type { TranslationDictionary } from '@/i18n/translations'
+import type { Locale, TranslationDictionary } from '@/i18n/translations'
 import { useTheme, type ThemeMode } from '@/theme/ThemeProvider'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
@@ -134,6 +134,7 @@ export function Topbar({
             />
           </div>
           <ThemeToggle />
+          <LanguageToggle />
           <RepoLink />
         </div>
       </div>
@@ -248,6 +249,52 @@ function ThemeToggle() {
             type="button"
           >
             <Icon className="size-4" />
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function LanguageToggle() {
+  const { locale, setLocale, t } = useLocale()
+  const reduceMotion = useReducedMotion()
+
+  const options: Array<{ label: string; value: Locale }> = [
+    { label: 'DE', value: 'de' },
+    { label: 'EN', value: 'en' },
+  ]
+
+  return (
+    <div
+      aria-label={t.common.language}
+      className="inline-flex h-9 items-center rounded-md border border-border bg-card p-0.5 shadow-[0_1px_2px_var(--shadow-hairline)]"
+      role="group"
+    >
+      {options.map((option) => {
+        const isActive = locale === option.value
+
+        return (
+          <button
+            aria-label={option.label}
+            aria-pressed={isActive}
+            className={cn(
+              'relative inline-flex h-8 items-center justify-center rounded-[6px] px-2.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+              isActive ? 'text-brand' : 'text-muted-foreground hover:text-foreground',
+            )}
+            key={option.value}
+            onClick={() => setLocale(option.value)}
+            type="button"
+          >
+            {isActive ? (
+              <motion.span
+                aria-hidden
+                className="absolute inset-0 rounded-[6px] bg-brand-subtle"
+                layoutId="topbar-locale-active"
+                transition={reduceMotion ? { duration: 0 } : appMotion.list}
+              />
+            ) : null}
+            <span className="relative z-10">{option.label}</span>
           </button>
         )
       })}

@@ -9,7 +9,7 @@ import {
   serializeFileAsset,
   serializeProjectManifest,
 } from './markdown'
-import type { ChatRuleRecord, FileAssetRecord, FileGroupRecord, ProjectState } from './types'
+import type { ChatRuleRecord, FileAssetRecord, FileGroupRecord, ProjectState, VectorIndexRecord } from './types'
 
 function makeAsset(id: string, label: string, overrides: Partial<FileAssetRecord> = {}): FileAssetRecord {
   return {
@@ -149,5 +149,40 @@ describe('project manifest file library', () => {
     expect((data.file_sections as unknown[]).length).toBe(3)
     expect(data.file_group_order).toEqual(['g1'])
     expect(data.file_asset_order).toEqual(['f1'])
+  })
+})
+
+describe('project manifest vector indexes', () => {
+  it('round-trips vector index order and pending/embedded members', () => {
+    const index: VectorIndexRecord = {
+      createdAt: '2026-01-01T00:00:00.000Z',
+      dims: 3072,
+      handle: 'eu-recht',
+      id: 'idx1',
+      members: [
+        { fileId: 'f1', state: 'embedded' },
+        { fileId: 'f2', state: 'pending' },
+      ],
+      model: 'text-embedding-3-large',
+      status: 'stale',
+      title: 'EU Recht',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    }
+    const state: ProjectState = {
+      ...createEmptyProjectState(),
+      vectorIndexOrder: ['idx1'],
+      vectorIndexes: { idx1: index },
+    }
+
+    const data = parseProjectManifest(serializeProjectManifest(state).contents)
+
+    expect(data.vector_index_order).toEqual(['idx1'])
+    const serialized = data.vector_indexes as Array<Record<string, unknown>>
+    expect(serialized).toHaveLength(1)
+    expect(serialized[0].handle).toBe('eu-recht')
+    expect(serialized[0].members).toEqual([
+      { fileId: 'f1', state: 'embedded' },
+      { fileId: 'f2', state: 'pending' },
+    ])
   })
 })

@@ -35,8 +35,8 @@ export function EditorDocumentChangesSection({
     <div className="space-y-2 rounded-md border border-brand/20 bg-brand-subtle/20 p-2.5">
       <div className="flex items-center gap-2">
         <Sparkles className="size-3.5 text-brand" />
-        <h3 className="min-w-0 flex-1 text-xs font-semibold text-foreground">{labels.documentChanges}</h3>
-        <span className="text-[11px] tabular-nums text-muted-foreground">{suggestions.length}</span>
+        <h3 className="t-label min-w-0 flex-1 text-foreground">{labels.documentChanges}</h3>
+        <span className="t-meta-sm tabular-nums text-muted-foreground">{suggestions.length}</span>
       </div>
       {groups.map((group) => {
         const pendingCount = group.suggestions.filter((suggestion) => suggestion.status === 'pending').length
@@ -55,7 +55,7 @@ export function EditorDocumentChangesSection({
                 {labels.rejectAll}
               </Button>
               <Button
-                className="h-7 bg-brand text-white hover:bg-brand/90 hover:text-white"
+                className="h-7 bg-brand text-brand-foreground hover:bg-brand/90 hover:text-brand-foreground"
                 disabled={pendingCount === 0}
                 onClick={() => onAcceptGroup(group.groupId)}
                 size="sm"
@@ -120,22 +120,22 @@ function DocumentChangeCard({
       tabIndex={0}
     >
       <div className="flex items-center gap-1.5">
-        <span className="grid size-5 shrink-0 place-items-center rounded-[5px] bg-brand-subtle text-[10px] font-semibold tabular-nums text-brand">
+        <span className="grid size-5 shrink-0 place-items-center rounded-[5px] bg-brand-subtle t-hint font-semibold tabular-nums text-brand">
           {index}
         </span>
-        <span className="min-w-0 flex-1 truncate text-xs font-semibold text-foreground">
+        <span className="t-list min-w-0 flex-1 truncate text-foreground">
           {suggestion.changeSummary?.[0] ?? labels.proposedChange}
         </span>
         {isStale ? <AlertTriangle className="size-3.5 text-warning" /> : null}
       </div>
       {anchorText ? (
-        <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">“{compactQuote(anchorText, 140)}”</p>
+        <p className="t-meta mt-1 line-clamp-2 text-muted-foreground">“{compactQuote(anchorText, 140)}”</p>
       ) : null}
-      <p className="mt-1 line-clamp-3 text-xs leading-5 text-foreground">
+      <p className="t-meta mt-1 line-clamp-3 text-foreground">
         {compactQuote(proposedPreview, 220)}
       </p>
       {suggestion.warnings?.length ? (
-        <p className="mt-1 text-[11px] leading-4 text-warning">{suggestion.warnings[0]}</p>
+        <p className="t-meta-sm mt-1 text-warning">{suggestion.warnings[0]}</p>
       ) : null}
       <div className="mt-2 flex items-center justify-end gap-1.5">
         <Button className="h-7" onClick={() => onReject(suggestion.id)} size="sm" type="button" variant="ghost">
@@ -143,7 +143,7 @@ function DocumentChangeCard({
           {labels.reject}
         </Button>
         <Button
-          className="h-7 bg-brand text-white hover:bg-brand/90 hover:text-white"
+          className="h-7 bg-brand text-brand-foreground hover:bg-brand/90 hover:text-brand-foreground"
           disabled={isStale}
           onClick={() => onAccept(suggestion)}
           size="sm"

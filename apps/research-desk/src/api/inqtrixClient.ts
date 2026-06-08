@@ -216,8 +216,8 @@ export type EditorSuggestRequest = {
   instruction?: string
   locale: 'de' | 'en'
   modelTier?: 'high' | 'mid' | 'fast' | null
-  model?: string
-  effort?: string
+  model?: string | null
+  effort?: string | null
   snippet?: string
   stack?: string
 }
@@ -268,8 +268,8 @@ export type EditorInstructRequest = {
   instruction: string
   locale: 'de' | 'en'
   modelTier?: 'high' | 'mid' | 'fast' | null
-  model?: string
-  effort?: string
+  model?: string | null
+  effort?: string | null
   stack?: string
 }
 
@@ -474,8 +474,8 @@ function serializeOverrides(overrides?: AgentOverrides) {
  *  the fallback. Returns undefined when nothing is selected. */
 function editorAgentOverrides(req: {
   modelTier?: 'high' | 'mid' | 'fast' | null
-  model?: string
-  effort?: string
+  model?: string | null
+  effort?: string | null
 }) {
   const overrides: Record<string, string> = {}
   if (req.model) overrides.model = req.model

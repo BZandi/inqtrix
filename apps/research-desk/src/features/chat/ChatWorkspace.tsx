@@ -74,6 +74,7 @@ import type {
 } from '@/features/project/types'
 import type {
   ChatModelOption,
+  ModelCatalogEntry,
   ChatModelTier,
   NodeModelResolution,
 } from '@/features/researchRuns/types'
@@ -142,6 +143,11 @@ type ChatWorkspaceProps = {
   ) => void
   onSelectThread: (threadId: string) => void
   onSelectedModelTierChange: (tier: ChatModelTier | null) => void
+  chatModelCatalog?: ModelCatalogEntry[]
+  selectedChatModel: string | null
+  selectedChatEffort: string | null
+  onSelectedChatModelChange: (model: string | null) => void
+  onSelectedChatEffortChange: (effort: string | null) => void
   onStopGenerating: () => void
   onStreamingEnabledChange: (enabled: boolean) => void
   attachmentBudgetNotice: string | null
@@ -162,6 +168,8 @@ type ChatWorkspaceProps = {
 
 type ChatSendOptions = {
   modelTier?: ChatModelTier
+  model?: string | null
+  effort?: string | null
 }
 
 export default function ChatWorkspace({
@@ -200,6 +208,11 @@ export default function ChatWorkspace({
   onSendMessage,
   onSelectThread,
   onSelectedModelTierChange,
+  chatModelCatalog = [],
+  selectedChatModel,
+  selectedChatEffort,
+  onSelectedChatModelChange,
+  onSelectedChatEffortChange,
   onStopGenerating,
   onStreamingEnabledChange,
   onAttachFiles,
@@ -480,7 +493,11 @@ export default function ChatWorkspace({
     onSendMessage(
       instruction,
       pillRefs,
-      selectedModelTier ? { modelTier: selectedModelTier } : undefined,
+      selectedChatModel
+        ? { model: selectedChatModel, effort: selectedChatEffort }
+        : selectedModelTier
+          ? { modelTier: selectedModelTier }
+          : undefined,
     )
     composerRef.current?.clear()
     setDraft('')
@@ -1005,6 +1022,11 @@ export default function ChatWorkspace({
                     options={chatModelOptions}
                     optionsStatus={chatModelOptionsStatus}
                     selectedTier={selectedModelTier}
+                    modelCatalog={chatModelCatalog}
+                    selectedModel={selectedChatModel}
+                    selectedEffort={selectedChatEffort}
+                    onModelChange={onSelectedChatModelChange}
+                    onEffortChange={onSelectedChatEffortChange}
                   />
                   </div>
                   <div className="shrink-0">

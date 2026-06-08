@@ -135,10 +135,14 @@ export function useEditorSuggestions({
   const [instructionFeedback, setInstructionFeedback] = useState<EditorInstructionFeedback | null>(null)
   const runAbortRef = useRef<AbortController | null>(null)
   const selectedModelTierRef = useRef(selectedModelTier)
+  const selectedModelRef = useRef(state.ui.selectedChatModel)
+  const selectedEffortRef = useRef(state.ui.selectedChatEffort)
 
   useEffect(() => {
     selectedModelTierRef.current = selectedModelTier
-  }, [selectedModelTier])
+    selectedModelRef.current = state.ui.selectedChatModel
+    selectedEffortRef.current = state.ui.selectedChatEffort
+  }, [selectedModelTier, state.ui.selectedChatModel, state.ui.selectedChatEffort])
 
   useEffect(() => () => runAbortRef.current?.abort(), [])
 
@@ -169,6 +173,8 @@ export function useEditorSuggestions({
     })
     try {
       const modelTier = selectedModelTierRef.current
+      const model = selectedModelRef.current
+      const effort = selectedEffortRef.current
       const proposal = await suggestionProducer.produce({
         anchor: liveComment.anchor,
         attachments,
@@ -176,6 +182,8 @@ export function useEditorSuggestions({
         documentMarkdown: activeDocument.contentMarkdown,
         instruction: liveComment.commentMarkdown,
         modelTier,
+        model,
+        effort,
         origin,
         originalMarkdown: liveComment.anchor.selectedMarkdown,
         originalText: liveComment.anchor.selectedText,
@@ -252,6 +260,8 @@ export function useEditorSuggestions({
     })
     try {
       const modelTier = selectedModelTierRef.current
+      const model = selectedModelRef.current
+      const effort = selectedEffortRef.current
       const originalInstruction = suggestion.origin.commentId
         ? state.editorComments[suggestion.origin.commentId]?.commentMarkdown
         : undefined
@@ -260,6 +270,8 @@ export function useEditorSuggestions({
         documentMarkdown: activeDocument.contentMarkdown,
         instruction: trimmedInstruction,
         modelTier,
+        model,
+        effort,
         originalInstruction,
         signal: controller.signal,
         suggestion,
@@ -340,6 +352,8 @@ export function useEditorSuggestions({
     const documentMarkdown = activeDocument.contentMarkdown
     const documentId = activeDocument.id
     const modelTier = selectedModelTierRef.current
+    const model = selectedModelRef.current
+    const effort = selectedEffortRef.current
     const now = new Date().toISOString()
     const groupId = createLocalId('editor-suggestion-group')
     const clearRunTimeout = startEditorRunTimeout(() => {
@@ -361,6 +375,8 @@ export function useEditorSuggestions({
         globalInstruction: draftInstruction || undefined,
         instruction: liveComment.commentMarkdown,
         modelTier,
+        model,
+        effort,
         origin,
         originalMarkdown: liveComment.anchor.selectedMarkdown,
         originalText: liveComment.anchor.selectedText,
@@ -442,11 +458,15 @@ export function useEditorSuggestions({
 
     try {
       const modelTier = selectedModelTierRef.current
+      const model = selectedModelRef.current
+      const effort = selectedEffortRef.current
       const proposal = await suggestionProducer.produceInstruction({
         attachments,
         documentMarkdown: activeDocument.contentMarkdown,
         instruction: draftInstruction,
         modelTier,
+        model,
+        effort,
         signal: controller.signal,
         snippet: snippet || undefined,
       })

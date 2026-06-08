@@ -93,6 +93,7 @@ import {
 } from '@/features/project/selectors'
 import type {
   ChatModelOption,
+  ModelCatalogEntry,
   ChatModelTier,
   NodeModelResolution,
 } from '@/features/researchRuns/types'
@@ -152,6 +153,7 @@ type EditorWorkspaceProps = {
   apiKey?: string
   chatModelOptions: ChatModelOption[]
   chatModelOptionsStatus: 'available' | 'missing' | 'unresolved'
+  chatModelCatalog?: ModelCatalogEntry[]
   defaultChatModel: NodeModelResolution | null
   dispatch: Dispatch<ResearchDeskAction>
   reportOptions: CompletedReportOption[]
@@ -496,6 +498,7 @@ export default function EditorWorkspace({
   apiKey,
   chatModelOptions,
   chatModelOptionsStatus,
+  chatModelCatalog,
   defaultChatModel,
   dispatch,
   reportOptions,
@@ -740,6 +743,9 @@ export default function EditorWorkspace({
                 onStop={handleStopRun}
                 ruleOptions={ruleOptions}
                 selectedModelTier={selectedModelTier}
+                chatModelCatalog={chatModelCatalog}
+                selectedModel={state.ui.selectedChatModel}
+                selectedEffort={state.ui.selectedChatEffort}
                 textImprovement={textImprovement}
               />
             </div>
@@ -2384,6 +2390,9 @@ function EditorAssistantComposer({
   onToggleAttach,
   ruleOptions,
   selectedModelTier,
+  chatModelCatalog,
+  selectedModel,
+  selectedEffort,
   textImprovement,
 }: {
   attachedCommentIds: string[]
@@ -2419,6 +2428,9 @@ function EditorAssistantComposer({
   onToggleAttach: () => void
   ruleOptions: ChatRuleOption[]
   selectedModelTier: ChatModelTier | null
+  chatModelCatalog?: ModelCatalogEntry[]
+  selectedModel: string | null
+  selectedEffort: string | null
   textImprovement: Omit<TextImprovementApiOptions, 'locale'>
 }) {
   const { locale, t } = useLocale()
@@ -2674,6 +2686,11 @@ function EditorAssistantComposer({
                 options={chatModelOptions}
                 optionsStatus={chatModelOptionsStatus}
                 selectedTier={selectedModelTier}
+                modelCatalog={chatModelCatalog}
+                selectedModel={selectedModel}
+                selectedEffort={selectedEffort}
+                onModelChange={(model) => dispatch({ model, type: 'setSelectedChatModel' })}
+                onEffortChange={(effort) => dispatch({ effort, type: 'setSelectedChatEffort' })}
               />
             </div>
             <Button

@@ -460,6 +460,10 @@ function buildProjectStateFromFiles({
       selectedChatModelTier: chatModelTierOrDefault(
         (ui as Record<string, unknown>).selectedChatModelTier,
       ),
+      selectedChatModel:
+        stringOrDefault((ui as Record<string, unknown>).selectedChatModel, '') || null,
+      selectedChatEffort:
+        stringOrDefault((ui as Record<string, unknown>).selectedChatEffort, '') || null,
       selectedChatThreadId: chatThreadOrder.includes((ui as Record<string, unknown>).selectedChatThreadId as string)
         ? (ui as Record<string, unknown>).selectedChatThreadId as string
         : chatThreadOrder[0] ?? null,

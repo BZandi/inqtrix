@@ -43,6 +43,8 @@ export type ProjectUiState = {
   isReportVisible: boolean
   pendingChatAttachmentRefs: ChatContextReferenceRecord[]
   pendingChatReportRunId: string | null
+  selectedChatModel: string | null
+  selectedChatEffort: string | null
   selectedChatModelTier: ChatModelTier | null
   selectedChatThreadId: string | null
   selectedJobId: string | null

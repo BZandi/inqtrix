@@ -90,14 +90,14 @@ describe('contentWithAttachmentContext', () => {
     expect(groupBlock).toContain('doc-b body')
   })
 
-  it('truncates each oversized member visibly and independently', () => {
+  it('sends each member in full without silent truncation', () => {
     const long = 'x'.repeat(MAX_DOC_CHARS_SOFT + 50)
     const result = contentWithAttachmentContext('Summarize.', [
       groupMember('g1', 'dossier', 'big', { contentMarkdown: long }),
       groupMember('g1', 'dossier', 'small', { contentMarkdown: 'short body' }),
     ])
-    expect(result).toContain('[Context truncated.]')
+    expect(result).not.toContain('[Context truncated.]')
     expect(result).toContain('short body')
-    expect(result).not.toContain('x'.repeat(MAX_DOC_CHARS_SOFT + 1))
+    expect(result).toContain(long)
   })
 })

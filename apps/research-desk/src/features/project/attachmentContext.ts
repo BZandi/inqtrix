@@ -1,4 +1,3 @@
-import { MAX_DOC_CHARS_SOFT } from '@/features/files/budget'
 import type { ChatMessageAttachmentRecord } from './types'
 
 /**
@@ -60,17 +59,15 @@ function groupAttachmentUnits(attachments: ChatMessageAttachmentRecord[]): Attac
 }
 
 /**
- * Render one member's body: a `Title:` line plus the ingest-capped excerpt.
+ * Render one member's body: a `Title:` line plus its full content.
  *
- * Truncation stays per member and visible via the marker, so a large document
- * never silently swallows the budget of the documents after it.
+ * No silent per-attachment truncation (Designprinzip 1): the whole content is
+ * sent. The composer token meter signals when the combined context exceeds the
+ * selected model's window, and the backend re-clamps visibly as the last
+ * resort.
  */
 function memberBlock(member: ChatMessageAttachmentRecord): string {
-  const excerpt = member.contentMarkdown.slice(0, MAX_DOC_CHARS_SOFT)
-  const truncatedNote = member.contentMarkdown.length > excerpt.length
-    ? '\n\n[Context truncated.]'
-    : ''
-  return [`Title: ${member.title}`, excerpt + truncatedNote].join('\n')
+  return [`Title: ${member.title}`, member.contentMarkdown].join('\n')
 }
 
 /**

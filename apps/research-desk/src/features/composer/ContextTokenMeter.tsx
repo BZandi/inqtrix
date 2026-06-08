@@ -133,11 +133,17 @@ export function ContextTokenMeter({
             ) : null}
           </ul>
 
-          <p className="mt-2 border-t border-border pt-1.5 t-hint text-muted-foreground/70">
-            {model.capacityTokens == null
-              ? t.chat.contextCapacityUnknown
-              : t.chat.contextEstimateHint}
-          </p>
+          {model.usedFraction != null && model.usedFraction > 1 ? (
+            <p className="mt-2 border-t border-border pt-1.5 t-hint font-medium text-destructive">
+              +{formatTokens(model.totalTokens - (model.capacityTokens ?? 0))} {t.chat.contextOverflow}
+            </p>
+          ) : (
+            <p className="mt-2 border-t border-border pt-1.5 t-hint text-muted-foreground/70">
+              {model.capacityTokens == null
+                ? t.chat.contextCapacityUnknown
+                : t.chat.contextEstimateHint}
+            </p>
+          )}
           {actualPromptTokens != null ? (
             <p className="t-hint text-muted-foreground/70">
               {t.chat.contextActual}: <span className="t-mono tabular-nums">{formatTokens(actualPromptTokens)}</span>

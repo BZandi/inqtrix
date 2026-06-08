@@ -28,8 +28,10 @@ import {
 } from '@/components/icons'
 import { AnimatePresence, motion } from 'motion/react'
 import {
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -79,6 +81,12 @@ import type {
   NodeModelResolution,
 } from '@/features/researchRuns/types'
 import { ModelTierPicker } from '@/features/researchRuns/ModelTierPicker'
+import { ContextTokenMeter } from '@/features/composer/ContextTokenMeter'
+import {
+  buildContextTokenModel,
+  estimateTokensFromText,
+  type ContextCategoryInput,
+} from '@/features/files/contextTokens'
 import { modelEffortLabelFromToken, modelNameLabel } from '@/features/researchRuns/modelLabels'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
@@ -148,6 +156,8 @@ type ChatWorkspaceProps = {
   selectedChatEffort: string | null
   onSelectedChatModelChange: (model: string | null) => void
   onSelectedChatEffortChange: (effort: string | null) => void
+  chatContextBase: { documents: number; reports: number; rules: number; conversation: number }
+  chatContextCapacity: { contextWindowTokens: number | null; reservedOutputTokens: number }
   onStopGenerating: () => void
   onStreamingEnabledChange: (enabled: boolean) => void
   attachmentBudgetNotice: string | null
@@ -213,6 +223,8 @@ export default function ChatWorkspace({
   selectedChatEffort,
   onSelectedChatModelChange,
   onSelectedChatEffortChange,
+  chatContextBase,
+  chatContextCapacity,
   onStopGenerating,
   onStreamingEnabledChange,
   onAttachFiles,
@@ -238,6 +250,18 @@ export default function ChatWorkspace({
   const [composerNotice, setComposerNotice] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [draftCommitPulseKey, setDraftCommitPulseKey] = useState(0)
+  const deferredDraft = useDeferredValue(draft)
+  const composerTokens = useMemo(() => estimateTokensFromText(deferredDraft), [deferredDraft])
+  const contextTokenModel = buildContextTokenModel(
+    [
+      { key: 'documents', tone: 'file', tokens: chatContextBase.documents },
+      { key: 'reports', tone: 'success', tokens: chatContextBase.reports },
+      { key: 'rules', tone: 'success', tokens: chatContextBase.rules },
+      { key: 'conversation', tone: 'warning', tokens: chatContextBase.conversation },
+      { key: 'composer', tone: 'brand', tokens: composerTokens },
+    ] satisfies ContextCategoryInput[],
+    chatContextCapacity,
+  )
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const [isMessageSelectionMode, setIsMessageSelectionMode] = useState(false)
@@ -1029,7 +1053,12 @@ export default function ChatWorkspace({
                     onEffortChange={onSelectedChatEffortChange}
                   />
                   </div>
-                  <div className="shrink-0">
+                  <div className="flex shrink-0 items-center gap-1">
+                    <ContextTokenMeter
+                      conversationLabel={t.chat.contextCatHistory}
+                      disabled={isSending}
+                      model={contextTokenModel}
+                    />
                     {isSending ? (
                       <Button
                         aria-label={t.chat.stopGenerating}

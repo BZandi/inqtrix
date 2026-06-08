@@ -67,6 +67,7 @@ import {
   evaluateBudget,
   shouldShowAttachmentBudgetNotice,
 } from '@/features/files/budget'
+import { estimateTokensFromText } from '@/features/files/contextTokens'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { useTheme } from '@/theme/ThemeProvider'
 import { contentWithAttachmentContext } from '@/features/project/attachmentContext'
@@ -363,6 +364,34 @@ export function ResearchDesk() {
     () => resolveDefaultChatModel(health, chatModelDiscoveryStack, apiStacks),
     [apiStacks, chatModelDiscoveryStack, health],
   )
+  const selectedChatCard = chatModelCatalog.find(
+    (entry) => entry.model_id === state.ui.selectedChatModel,
+  )?.card ?? null
+  // Per-category token estimate for the composer meter (the composer draft is
+  // added live inside ChatWorkspace). The attachment content is the same the
+  // request will carry; history mirrors buildChatMessages' last-20 window.
+  const chatContextBase = useMemo(() => {
+    const attachments = chatAttachmentsFromRefs(state, combinedChatRefs)
+    let documents = 0
+    let reports = 0
+    let rules = 0
+    for (const attachment of attachments) {
+      const tokens = estimateTokensFromText(attachment.contentMarkdown ?? '')
+      if (attachment.kind === 'research-report') reports += tokens
+      else if (attachment.kind === 'chat-rule') rules += tokens
+      else documents += tokens
+    }
+    const history = (displayedChatThread?.messages ?? []).slice(-20)
+    const conversation = history.reduce(
+      (sum, message) => sum + estimateTokensFromText(message.contentMarkdown ?? ''),
+      0,
+    )
+    return { documents, reports, rules, conversation }
+  }, [state, combinedChatRefs, displayedChatThread])
+  const chatContextCapacity = {
+    contextWindowTokens: selectedChatCard?.context_window_tokens ?? null,
+    reservedOutputTokens: selectedChatCard?.max_output_tokens ?? 0,
+  }
   const isAuthLocked = !isDemoMode && health?.auth_required === true && !apiKey.trim()
 
   const flushScheduledChatContent = useCallback((threadId: string) => {
@@ -1386,6 +1415,8 @@ export function ResearchDesk() {
               selectedChatEffort={state.ui.selectedChatEffort}
               onSelectedChatModelChange={(model) => dispatch({ model, type: 'setSelectedChatModel' })}
               onSelectedChatEffortChange={(effort) => dispatch({ effort, type: 'setSelectedChatEffort' })}
+              chatContextBase={chatContextBase}
+              chatContextCapacity={chatContextCapacity}
               onStopGenerating={handleStopChatGeneration}
               onStreamingEnabledChange={setChatStreamingEnabled}
               attachmentBudgetNotice={attachmentBudgetNotice}

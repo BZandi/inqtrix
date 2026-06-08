@@ -37,13 +37,18 @@ export function costTier(pricing: ModelCard['pricing']): { signs: string; value:
   return { signs, value: `$${output}/1M` }
 }
 
-/** Compact token count for the KONTEXT tile, e.g. 1_050_000 -> "1.05M", 200_000 -> "200k". */
+/** Compact token count: exact below 1k, "1.2k" in thousands, "1.05M" in
+ * millions. Used for both the small live meter number and the KONTEXT tile. */
 export function formatTokens(count: number): string {
   if (count >= 1_000_000) {
     const millions = count / 1_000_000
     return `${Number.isInteger(millions) ? millions : Number(millions.toFixed(2))}M`
   }
-  return `${Math.round(count / 1000)}k`
+  if (count >= 1000) {
+    const thousands = count / 1000
+    return `${Number.isInteger(thousands) ? thousands : Number(thousands.toFixed(1))}k`
+  }
+  return `${count}`
 }
 
 const CAPABILITY_LABELS: Record<string, string> = {

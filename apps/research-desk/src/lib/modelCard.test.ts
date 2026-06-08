@@ -37,6 +37,13 @@ describe('formatTokens', () => {
     expect(formatTokens(1_050_000)).toBe('1.05M')
     expect(formatTokens(200_000)).toBe('200k')
   })
+
+  it('shows exact counts below 1k and thousands above', () => {
+    expect(formatTokens(0)).toBe('0')
+    expect(formatTokens(20)).toBe('20')
+    expect(formatTokens(850)).toBe('850')
+    expect(formatTokens(1200)).toBe('1.2k')
+  })
 })
 
 describe('speedLabel', () => {

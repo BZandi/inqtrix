@@ -113,6 +113,14 @@ def _build_providers() -> ProviderContext:
         tier_high_model="gpt-5.4",       tier_high_effort="medium",
         tier_mid_model="gpt-5.4",        tier_mid_effort="none",
         tier_fast_model="gpt-5.4-mini",  tier_fast_effort="none",
+        # Optional: concrete models the chat/editor UI may offer for direct
+        # selection (besides the high/mid/fast tiers above). These are the Azure
+        # DEPLOYMENT names; naming each deployment after the canonical model id
+        # lets the built-in model-card catalogue resolve it (display name,
+        # context window, cost, reasoning levels) -- here gpt-5.4 / -mini /
+        # -nano map to their cards. Omit this argument to keep the plain tier
+        # picker; nothing else in the stack depends on it.
+        selectable_models=["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"],
     )
 
     # -- Option B: Service Principal — direct constructor args ----------------

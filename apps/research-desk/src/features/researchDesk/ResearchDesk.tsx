@@ -52,6 +52,7 @@ import type {
   CreateResearchRunRequest,
   InqtrixHealth,
   InqtrixStack,
+  ModelCatalogEntry,
   NodeModelResolution,
   ResearchRunEvent,
   ResearchRunResult,
@@ -66,6 +67,7 @@ import {
   evaluateBudget,
   shouldShowAttachmentBudgetNotice,
 } from '@/features/files/budget'
+import { estimateTokensFromText } from '@/features/files/contextTokens'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { useTheme } from '@/theme/ThemeProvider'
 import { contentWithAttachmentContext } from '@/features/project/attachmentContext'
@@ -94,6 +96,8 @@ type ScheduledChatContent = {
 
 type ChatSendOptions = {
   modelTier?: ChatModelTier
+  model?: string | null
+  effort?: string | null
 }
 
 type ChatModelOptionsState = {
@@ -352,10 +356,42 @@ export function ResearchDesk() {
     [apiStacks, chatModelDiscoveryStack, health],
   )
   const chatModelOptions = chatModelOptionsState.options
+  const chatModelCatalog = useMemo(
+    () => resolveModelCatalog(health, chatModelDiscoveryStack, apiStacks),
+    [apiStacks, chatModelDiscoveryStack, health],
+  )
   const defaultChatModel = useMemo(
     () => resolveDefaultChatModel(health, chatModelDiscoveryStack, apiStacks),
     [apiStacks, chatModelDiscoveryStack, health],
   )
+  const selectedChatCard = chatModelCatalog.find(
+    (entry) => entry.model_id === state.ui.selectedChatModel,
+  )?.card ?? null
+  // Per-category token estimate for the composer meter (the composer draft is
+  // added live inside ChatWorkspace). The attachment content is the same the
+  // request will carry; history mirrors buildChatMessages' last-20 window.
+  const chatContextBase = useMemo(() => {
+    const attachments = chatAttachmentsFromRefs(state, combinedChatRefs)
+    let documents = 0
+    let reports = 0
+    let rules = 0
+    for (const attachment of attachments) {
+      const tokens = estimateTokensFromText(attachment.contentMarkdown ?? '')
+      if (attachment.kind === 'research-report') reports += tokens
+      else if (attachment.kind === 'chat-rule') rules += tokens
+      else documents += tokens
+    }
+    const history = (displayedChatThread?.messages ?? []).slice(-20)
+    const conversation = history.reduce(
+      (sum, message) => sum + estimateTokensFromText(message.contentMarkdown ?? ''),
+      0,
+    )
+    return { documents, reports, rules, conversation }
+  }, [state, combinedChatRefs, displayedChatThread])
+  const chatContextCapacity = {
+    contextWindowTokens: selectedChatCard?.context_window_tokens ?? null,
+    reservedOutputTokens: selectedChatCard?.max_output_tokens ?? 0,
+  }
   const isAuthLocked = !isDemoMode && health?.auth_required === true && !apiKey.trim()
 
   const flushScheduledChatContent = useCallback((threadId: string) => {
@@ -526,12 +562,16 @@ export function ResearchDesk() {
     const createdAt = new Date().toISOString()
     const useStreaming = chatStreamingEnabled
     const modelTier = options.modelTier ?? state.ui.selectedChatModelTier
+    const explicitModel = options.model ?? state.ui.selectedChatModel
+    const explicitEffort = options.effort ?? state.ui.selectedChatEffort
     const chatStack = stackDiscoveryStatus === 'available' ? state.ui.selectedStack : undefined
-    const modelResolution = chatMessageModelResolutionForTier(
-      chatModelOptionsState,
-      defaultChatModel,
-      modelTier,
-    )
+    const modelResolution = explicitModel
+      ? explicitModelResolution(explicitModel, explicitEffort)
+      : chatMessageModelResolutionForTier(
+          chatModelOptionsState,
+          defaultChatModel,
+          modelTier,
+        )
     const messageAttachmentRefs = dedupeChatContextRefs([
       ...inlineAttachmentRefs,
       ...state.ui.pendingChatAttachmentRefs,
@@ -601,6 +641,8 @@ export function ResearchDesk() {
         controller,
         history: selectedThread?.messages ?? [],
         modelTier,
+        model: explicitModel,
+        effort: explicitEffort,
         sourceAttachments: chatAttachmentsFromRefs(
           state,
           messageAttachmentRefs.filter((ref) => isPillKind(ref.kind)),
@@ -617,6 +659,8 @@ export function ResearchDesk() {
         controller,
         requestMessages,
         modelTier,
+        model: explicitModel,
+        effort: explicitEffort,
         stack: chatStack,
         threadId,
         useStreaming,
@@ -629,6 +673,8 @@ export function ResearchDesk() {
     controller,
     history,
     modelTier,
+    model,
+    effort,
     sourceAttachments,
     stack,
     templates,
@@ -640,6 +686,8 @@ export function ResearchDesk() {
     controller: AbortController
     history: ChatMessageRecord[]
     modelTier: ChatModelTier | null
+    model: string | null
+    effort: string | null
     sourceAttachments: ChatMessageAttachmentRecord[]
     stack?: string
     templates: { instruction: string; label: string }[]
@@ -664,7 +712,7 @@ export function ResearchDesk() {
           index === 0 ? sourceAttachments : [],
         )
         const baseStepRequest = {
-          agentOverrides: modelTier ? { modelTier } : undefined,
+          agentOverrides: chatAgentOverrides(modelTier, model, effort),
           includeProgress: false,
           messages: stepMessages,
           mode: 'direct_llm' as const,
@@ -768,6 +816,8 @@ export function ResearchDesk() {
     assistantMessageId,
     controller,
     modelTier,
+    model,
+    effort,
     requestMessages,
     stack,
     threadId,
@@ -776,13 +826,15 @@ export function ResearchDesk() {
     assistantMessageId: string
     controller: AbortController
     modelTier: ChatModelTier | null
+    model: string | null
+    effort: string | null
     requestMessages: ChatCompletionMessage[]
     stack?: string
     threadId: string
     useStreaming: boolean
   }) {
     const baseChatRequest = {
-      agentOverrides: modelTier ? { modelTier } : undefined,
+      agentOverrides: chatAgentOverrides(modelTier, model, effort),
       includeProgress: false,
       messages: requestMessages,
       mode: 'direct_llm' as const,
@@ -938,11 +990,15 @@ export function ResearchDesk() {
     const createdAt = new Date().toISOString()
     const useStreaming = chatStreamingEnabled
     const modelTier = state.ui.selectedChatModelTier
-    const modelResolution = chatMessageModelResolutionForTier(
-      chatModelOptionsState,
-      defaultChatModel,
-      modelTier,
-    )
+    const explicitModel = state.ui.selectedChatModel
+    const explicitEffort = state.ui.selectedChatEffort
+    const modelResolution = explicitModel
+      ? explicitModelResolution(explicitModel, explicitEffort)
+      : chatMessageModelResolutionForTier(
+          chatModelOptionsState,
+          defaultChatModel,
+          modelTier,
+        )
     const requestMessages = buildChatMessages(
       selectedThread.messages.slice(0, -1),
       lastMessage.contentMarkdown,
@@ -996,6 +1052,8 @@ export function ResearchDesk() {
       assistantMessageId,
       controller,
       modelTier,
+      model: explicitModel,
+      effort: explicitEffort,
       requestMessages,
       stack: stackDiscoveryStatus === 'available' ? state.ui.selectedStack : undefined,
       threadId,
@@ -1352,6 +1410,13 @@ export function ResearchDesk() {
               onSendMessage={(contentMarkdown, refs, options) => void handleChatMessageSubmit(contentMarkdown, refs, options)}
               onSelectThread={handleSelectChatThread}
               onSelectedModelTierChange={(tier) => dispatch({ tier, type: 'setSelectedChatModelTier' })}
+              chatModelCatalog={chatModelCatalog}
+              selectedChatModel={state.ui.selectedChatModel}
+              selectedChatEffort={state.ui.selectedChatEffort}
+              onSelectedChatModelChange={(model) => dispatch({ model, type: 'setSelectedChatModel' })}
+              onSelectedChatEffortChange={(effort) => dispatch({ effort, type: 'setSelectedChatEffort' })}
+              chatContextBase={chatContextBase}
+              chatContextCapacity={chatContextCapacity}
               onStopGenerating={handleStopChatGeneration}
               onStreamingEnabledChange={setChatStreamingEnabled}
               attachmentBudgetNotice={attachmentBudgetNotice}
@@ -1385,6 +1450,7 @@ export function ResearchDesk() {
               apiKey={apiKey.trim() || undefined}
               chatModelOptions={chatModelOptions}
               chatModelOptionsStatus={chatModelOptionsState.status}
+              chatModelCatalog={chatModelCatalog}
               defaultChatModel={defaultChatModel}
               dispatch={dispatch}
               reportOptions={reportOptions}
@@ -1696,6 +1762,20 @@ function resolveChatModelOptions(
   return { options, status: 'available' }
 }
 
+function resolveModelCatalog(
+  health: InqtrixHealth | null,
+  selectedStackName: string | null,
+  stacks: InqtrixStack[],
+): ModelCatalogEntry[] {
+  const selectedStackModels = selectedStackName
+    ? stacks.find((stack) => stack.name === selectedStackName)?.models
+    : undefined
+  const catalog = selectedStackName
+    ? selectedStackModels?.models_catalog
+    : health?.models_catalog
+  return catalog ?? []
+}
+
 function resolveDefaultChatModel(
   health: InqtrixHealth | null,
   selectedStackName: string | null,
@@ -1711,6 +1791,32 @@ function resolveDefaultChatModel(
 }
 
 const chatModelTierOrder: ChatModelTier[] = ['high', 'mid', 'fast']
+
+function chatAgentOverrides(
+  modelTier: ChatModelTier | null,
+  model: string | null,
+  effort: string | null,
+) {
+  // An explicitly picked model wins over the tier (mirrors the backend's
+  // explicit_request resolution); empty effort inherits the provider default.
+  if (model) return effort ? { model, effort } : { model }
+  if (modelTier) return { modelTier }
+  return undefined
+}
+
+function explicitModelResolution(
+  model: string,
+  effort: string | null,
+): ChatMessageModelResolutionRecord {
+  return {
+    effort: effort ?? '',
+    effortSource: effort ? 'explicit_request' : '',
+    model,
+    modelSource: 'explicit_request',
+    requestedTier: '',
+    tier: '',
+  }
+}
 
 function chatMessageModelResolutionForTier(
   optionsState: ChatModelOptionsState,

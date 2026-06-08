@@ -983,6 +983,18 @@ class LLMProvider(ABC):
     """
 
     @property
+    def selectable_models(self) -> list[str]:
+        """Return the model ids the UI may offer for direct selection.
+
+        Empty (the default) keeps the chat/editor model picker on the
+        high/mid/fast tier choices. A provider that overrides this exposes a
+        curated list of concrete model ids the operator wants selectable; the
+        catalogue resolves each to a model card, and an unknown id degrades
+        visibly rather than silently (Designprinzip 1).
+        """
+        return []
+
+    @property
     def context_window_tokens(self) -> int | None:
         """Return the configured model context window, when known.
 
@@ -1350,6 +1362,14 @@ class ConfiguredLLMProvider(LLMProvider):
             select per-call model ids.
         """
         return self._models
+
+    @property
+    def selectable_models(self) -> list[str]:
+        """Delegate to the wrapped provider's selectable model ids, if any."""
+        value = getattr(self._provider, "selectable_models", None)
+        if isinstance(value, (list, tuple)):
+            return [str(model_id) for model_id in value]
+        return []
 
     @property
     def context_window_tokens(self) -> int | None:

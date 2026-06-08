@@ -426,6 +426,30 @@ class AgentSettings(BaseSettings):
         ),
     )
     """Optional per-run tier selection ('high', 'mid', or 'fast'). When set, it replaces the default per-node tier assignment for this run, for every LLM call site; an explicit per-node model override still wins. Empty string uses the default assignment. Primary use: the chat endpoint's ``model_tier`` override lets a caller pick the model class for a direct-chat answer."""
+    model: str = Field(
+        "",
+        alias="MODEL_OVERRIDE",
+        description=(
+            "Optional explicit model id for the direct-chat answer, set by the "
+            "chat/editor model picker selecting a concrete model instead of a "
+            "tier. When non-empty it bypasses tier routing for the direct-chat "
+            "call only; the research pipeline keeps tier routing. Empty string "
+            "uses the tier. Pair with ``effort`` for reasoning depth."
+        ),
+    )
+    """Optional explicit model id for the direct-chat answer, set by the chat/editor model picker selecting a concrete model instead of a tier. When non-empty it bypasses tier routing for the direct-chat call only; the research pipeline keeps tier routing. Empty string uses the tier. Pair with ``effort`` for reasoning depth."""
+    effort: str = Field(
+        "",
+        alias="EFFORT_OVERRIDE",
+        description=(
+            "Optional reasoning effort for the direct-chat answer, paired with "
+            "``model``. One of ``none``, ``minimal``, ``low``, ``medium``, "
+            "``high``, ``xhigh``, ``max`` (model-dependent). Empty string "
+            "inherits the provider default. Only consulted on the explicit-"
+            "model direct-chat path."
+        ),
+    )
+    """Optional reasoning effort for the direct-chat answer, paired with ``model``. One of ``none``, ``minimal``, ``low``, ``medium``, ``high``, ``xhigh``, ``max`` (model-dependent). Empty string inherits the provider default. Only consulted on the explicit-model direct-chat path."""
 
     @field_validator("model_tier")
     @classmethod

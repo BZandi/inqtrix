@@ -26,6 +26,7 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from inqtrix.model_cards import build_models_catalog
 from inqtrix.model_routing import describe_chat_model_options, describe_node_resolutions
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server.routes import create_router, register_routes
@@ -219,6 +220,12 @@ def _stack_models_payload(
         "search_model": search_model,
         "node_models": node_models,
         "chat_model_options": describe_chat_model_options(llm_models),
+        "models_catalog": build_models_catalog(
+            getattr(bundle.providers.llm, "selectable_models", []) or []
+        ),
+        "context_window_tokens": getattr(
+            bundle.providers.llm, "context_window_tokens", None
+        ),
     }
 
 

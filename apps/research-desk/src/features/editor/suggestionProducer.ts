@@ -17,6 +17,8 @@ export type SuggestionInput = {
   globalInstruction?: string
   instruction: string
   modelTier: ChatModelTier | null
+  model?: string | null
+  effort?: string | null
   origin: EditorSuggestionOrigin
   originalMarkdown?: string
   originalText: string
@@ -36,6 +38,8 @@ export type InstructionInput = {
   documentMarkdown: string
   instruction: string
   modelTier: ChatModelTier | null
+  model?: string | null
+  effort?: string | null
   signal?: AbortSignal
   snippet?: string
 }
@@ -51,6 +55,8 @@ export type RefinementInput = {
   documentMarkdown: string
   instruction: string
   modelTier: ChatModelTier | null
+  model?: string | null
+  effort?: string | null
   originalInstruction?: string
   signal?: AbortSignal
   suggestion: EditorSuggestionRecord
@@ -103,6 +109,8 @@ export class LlmSuggestionProducer implements SuggestionProducer {
         instruction: input.instruction,
         locale: this.config.locale,
         modelTier: input.modelTier,
+        model: input.model,
+        effort: input.effort,
         snippet: input.snippet,
         stack: this.config.stack,
       },
@@ -130,6 +138,8 @@ export class LlmSuggestionProducer implements SuggestionProducer {
         instruction: input.originalInstruction,
         locale: this.config.locale,
         modelTier: input.modelTier,
+        model: input.model,
+        effort: input.effort,
         refinementInstruction: input.instruction,
         stack: this.config.stack,
       },
@@ -156,6 +166,8 @@ export class LlmSuggestionProducer implements SuggestionProducer {
           : input.instruction,
         locale: this.config.locale,
         modelTier: input.modelTier,
+        model: input.model,
+        effort: input.effort,
         stack: this.config.stack,
       },
       {

@@ -214,6 +214,7 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         default_headers: Mapping[str, str] | None = None,
         request_params: Mapping[str, Any] | None = None,
         default_reasoning_effort: str | None = None,
+        selectable_models: list[str] | None = None,
     ) -> None:
         """Initialize the Azure OpenAI provider.
 
@@ -421,6 +422,7 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         self._claim_extract_model = claim_extract_model or default_model
         self._default_max_tokens = default_max_tokens
         self._context_window_tokens = context_window_tokens
+        self._selectable_models = list(selectable_models or [])
         self._temperature = temperature
         self._token_budget_parameter = token_budget_parameter
         self._request_params = dict(request_params or {})
@@ -640,6 +642,11 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             ModelSettings: Resolved deployment names used by graph nodes.
         """
         return self._models
+
+    @property
+    def selectable_models(self) -> list[str]:
+        """Return the operator-curated model ids offered for direct selection."""
+        return self._selectable_models
 
     @property
     def context_window_tokens(self) -> int | None:

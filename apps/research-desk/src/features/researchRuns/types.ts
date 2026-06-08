@@ -14,11 +14,37 @@ export type ChatModelOption = NodeModelResolution & {
   tier: ChatModelTier | string
 }
 
+export type ModelCardCategory = 'high' | 'mid' | 'fast'
+
+export type ModelCard = {
+  id: string
+  display_name: string
+  vendor: string
+  category: ModelCardCategory
+  speed: 'langsam' | 'mittel' | 'schnell'
+  description: string
+  context_window_tokens: number
+  max_output_tokens: number
+  reasoning_levels: string[]
+  capabilities: string[]
+  input_modalities: string[]
+  knowledge_cutoff?: string | null
+  pricing: { input_per_mtok: number; output_per_mtok: number }
+}
+
+export type ModelCatalogEntry = {
+  model_id: string
+  // null when the backend has no curated card for this id (degrade gracefully)
+  card: ModelCard | null
+}
+
 export type InqtrixHealth = {
   status: 'ok' | 'degraded'
   auth_required: boolean
   classify_model?: string
   chat_model_options?: ChatModelOption[]
+  models_catalog?: ModelCatalogEntry[]
+  context_window_tokens?: number | null
   evaluate_model?: string
   model_tier?: ChatModelTier | ''
   report_profile?: string
@@ -67,6 +93,8 @@ export type InqtrixStack = {
     summarize_model?: string
     node_models?: Record<string, NodeModelResolution>
     chat_model_options?: ChatModelOption[]
+    models_catalog?: ModelCatalogEntry[]
+    context_window_tokens?: number | null
   }
   llm_provider?: string
   search_provider?: string
@@ -83,6 +111,10 @@ export type AgentOverrides = {
   firstRoundQueries?: number
   skipSearch?: boolean
   modelTier?: ChatModelTier
+  /** Explicit model id from the model picker (bypasses tier for direct chat). */
+  model?: string
+  /** Reasoning effort for the picked model (model-dependent). */
+  effort?: string
 }
 
 export type CreateResearchRunRequest = {

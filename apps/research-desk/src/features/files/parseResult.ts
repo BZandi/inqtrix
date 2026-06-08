@@ -1,13 +1,15 @@
-import { MAX_DOC_CHARS_SOFT } from './budget'
-
-/** Visible warning when a document's extracted text is capped at ingest. */
+/** Visible warning when content is capped — retained for the backend's
+ * last-resort clamp; ingest itself no longer truncates. */
 export const truncationWarning = 'Textinhalt gekürzt (Dokument zu groß für das Modell-Kontextfenster).'
 
 /** Visible warning when a supported file yields no extractable text. */
 export const emptyTextWarning = 'Kein Text extrahierbar (evtl. gescanntes Dokument ohne Textebene).'
 
-/** Cap extracted text at the per-document soft limit, flagging truncation. */
+/** Keep the full extracted text at ingest — no silent per-document truncation
+ * (Designprinzip 1). The composer token meter shows what fits against the
+ * selected model's context window, and the backend re-clamps visibly as the
+ * last resort. The return shape is preserved for callers; ``textTruncated`` is
+ * always ``false`` now. */
 export function clampText(text: string): { extractedText: string; textTruncated: boolean } {
-  if (text.length <= MAX_DOC_CHARS_SOFT) return { extractedText: text, textTruncated: false }
-  return { extractedText: text.slice(0, MAX_DOC_CHARS_SOFT), textTruncated: true }
+  return { extractedText: text, textTruncated: false }
 }

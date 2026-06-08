@@ -1,6 +1,7 @@
 import {
   Fragment,
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -75,6 +76,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   chatAttachmentChipsFromRefs,
+  chatAttachmentsFromRefs,
   chatContextRefKey,
   chatRuleOptions,
   dedupeChatContextRefs,
@@ -93,10 +95,17 @@ import {
 } from '@/features/project/selectors'
 import type {
   ChatModelOption,
+  ModelCatalogEntry,
   ChatModelTier,
   NodeModelResolution,
 } from '@/features/researchRuns/types'
 import { ModelTierPicker } from '@/features/researchRuns/ModelTierPicker'
+import { ContextTokenMeter } from '@/features/composer/ContextTokenMeter'
+import {
+  buildContextTokenModel,
+  estimateTokensFromText,
+  type ContextCategoryInput,
+} from '@/features/files/contextTokens'
 import type {
   ChatContextReferenceRecord,
   EditorCommentKind,
@@ -152,6 +161,7 @@ type EditorWorkspaceProps = {
   apiKey?: string
   chatModelOptions: ChatModelOption[]
   chatModelOptionsStatus: 'available' | 'missing' | 'unresolved'
+  chatModelCatalog?: ModelCatalogEntry[]
   defaultChatModel: NodeModelResolution | null
   dispatch: Dispatch<ResearchDeskAction>
   reportOptions: CompletedReportOption[]
@@ -496,6 +506,7 @@ export default function EditorWorkspace({
   apiKey,
   chatModelOptions,
   chatModelOptionsStatus,
+  chatModelCatalog,
   defaultChatModel,
   dispatch,
   reportOptions,
@@ -530,6 +541,30 @@ export default function EditorWorkspace({
     () => chatAttachmentChipsFromRefs(state, attachedRefs),
     [state, attachedRefs],
   )
+  const editorSelectedCard = chatModelCatalog?.find(
+    (entry) => entry.model_id === state.ui.selectedChatModel,
+  )?.card ?? null
+  // Per-category token estimate for the editor composer meter. The whole
+  // document is always sent as context, so it is the `conversation` category;
+  // the composer draft is added live inside EditorAssistantComposer.
+  const editorContextBase = useMemo(() => {
+    const attachments = chatAttachmentsFromRefs(state, attachedRefs)
+    let documents = 0
+    let reports = 0
+    let rules = 0
+    for (const attachment of attachments) {
+      const tokens = estimateTokensFromText(attachment.contentMarkdown ?? '')
+      if (attachment.kind === 'research-report') reports += tokens
+      else if (attachment.kind === 'chat-rule') rules += tokens
+      else documents += tokens
+    }
+    const conversation = estimateTokensFromText(activeDocument?.contentMarkdown ?? '')
+    return { documents, reports, rules, conversation }
+  }, [state, attachedRefs, activeDocument])
+  const editorContextCapacity = {
+    contextWindowTokens: editorSelectedCard?.context_window_tokens ?? null,
+    reservedOutputTokens: editorSelectedCard?.max_output_tokens ?? 0,
+  }
   const composerRef = useRef<MentionComposerHandle | null>(null)
   const [isAttachActive, setIsAttachActive] = useState(false)
 
@@ -740,6 +775,11 @@ export default function EditorWorkspace({
                 onStop={handleStopRun}
                 ruleOptions={ruleOptions}
                 selectedModelTier={selectedModelTier}
+                chatModelCatalog={chatModelCatalog}
+                selectedModel={state.ui.selectedChatModel}
+                selectedEffort={state.ui.selectedChatEffort}
+                editorContextBase={editorContextBase}
+                editorContextCapacity={editorContextCapacity}
                 textImprovement={textImprovement}
               />
             </div>
@@ -2384,6 +2424,11 @@ function EditorAssistantComposer({
   onToggleAttach,
   ruleOptions,
   selectedModelTier,
+  chatModelCatalog,
+  selectedModel,
+  selectedEffort,
+  editorContextBase,
+  editorContextCapacity,
   textImprovement,
 }: {
   attachedCommentIds: string[]
@@ -2419,12 +2464,29 @@ function EditorAssistantComposer({
   onToggleAttach: () => void
   ruleOptions: ChatRuleOption[]
   selectedModelTier: ChatModelTier | null
+  chatModelCatalog?: ModelCatalogEntry[]
+  selectedModel: string | null
+  selectedEffort: string | null
+  editorContextBase: { documents: number; reports: number; rules: number; conversation: number }
+  editorContextCapacity: { contextWindowTokens: number | null; reservedOutputTokens: number }
   textImprovement: Omit<TextImprovementApiOptions, 'locale'>
 }) {
   const { locale, t } = useLocale()
   const reduceMotion = useReducedMotion()
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [improveError, setImproveError] = useState<string | null>(null)
+  const deferredDraft = useDeferredValue(draft)
+  const composerTokens = useMemo(() => estimateTokensFromText(deferredDraft), [deferredDraft])
+  const contextTokenModel = buildContextTokenModel(
+    [
+      { key: 'documents', tone: 'file', tokens: editorContextBase.documents },
+      { key: 'reports', tone: 'success', tokens: editorContextBase.reports },
+      { key: 'rules', tone: 'success', tokens: editorContextBase.rules },
+      { key: 'conversation', tone: 'warning', tokens: editorContextBase.conversation },
+      { key: 'composer', tone: 'brand', tokens: composerTokens },
+    ] satisfies ContextCategoryInput[],
+    editorContextCapacity,
+  )
   const assistantTextImprove = useTextImprovement({
     ...textImprovement,
     locale,
@@ -2674,8 +2736,19 @@ function EditorAssistantComposer({
                 options={chatModelOptions}
                 optionsStatus={chatModelOptionsStatus}
                 selectedTier={selectedModelTier}
+                modelCatalog={chatModelCatalog}
+                selectedModel={selectedModel}
+                selectedEffort={selectedEffort}
+                onModelChange={(model) => dispatch({ model, type: 'setSelectedChatModel' })}
+                onEffortChange={(effort) => dispatch({ effort, type: 'setSelectedChatEffort' })}
               />
             </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <ContextTokenMeter
+                conversationLabel={t.chat.contextCatDocument}
+                disabled={false}
+                model={contextTokenModel}
+              />
             <Button
               aria-label={isRunning ? copy.stopRun : copy.send}
               className={cn(
@@ -2696,6 +2769,7 @@ function EditorAssistantComposer({
                 <SendHorizontal className="size-4" />
               )}
             </Button>
+            </div>
           </div>
         </div>
         </Dropzone>

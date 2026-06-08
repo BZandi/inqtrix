@@ -167,6 +167,8 @@ export type ResearchDeskAction =
   | { type: 'setChatHistoryVisible'; isVisible: boolean }
   | { enabled: boolean; type: 'setChatChainingEnabled' }
   | { type: 'setSelectedChatModelTier'; tier: ChatModelTier | null }
+  | { type: 'setSelectedChatModel'; model: string | null }
+  | { type: 'setSelectedChatEffort'; effort: string | null }
   | { type: 'setSelectedStack'; stack: string }
   | { rule: ChatRuleRecord; type: 'upsertChatRule' }
   | { type: 'toggleJob'; jobId: string }
@@ -244,10 +246,37 @@ export function researchDeskReducer(
     }
   }
   if (action.type === 'setSelectedChatModelTier') {
+    // Picking a tier (the fallback picker) clears any explicit model choice.
     return {
       ...state,
       dirty: true,
-      ui: { ...state.ui, selectedChatModelTier: action.tier },
+      ui: {
+        ...state.ui,
+        selectedChatModelTier: action.tier,
+        selectedChatModel: null,
+        selectedChatEffort: null,
+      },
+    }
+  }
+  if (action.type === 'setSelectedChatModel') {
+    // Picking a concrete model clears the tier and resets effort to the
+    // model's provider default (the reasoning control re-sets it explicitly).
+    return {
+      ...state,
+      dirty: true,
+      ui: {
+        ...state.ui,
+        selectedChatModel: action.model,
+        selectedChatModelTier: null,
+        selectedChatEffort: null,
+      },
+    }
+  }
+  if (action.type === 'setSelectedChatEffort') {
+    return {
+      ...state,
+      dirty: true,
+      ui: { ...state.ui, selectedChatEffort: action.effort },
     }
   }
   if (action.type === 'setChatChainingEnabled') {

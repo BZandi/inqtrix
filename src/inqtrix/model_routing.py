@@ -117,6 +117,9 @@ def describe_resolution(
     node: str,
     models: "ModelSettings",
     requested_tier: str | None = None,
+    *,
+    requested_model: str = "",
+    requested_effort: str = "",
 ) -> dict[str, str]:
     """Resolve a call site's model and effort, and name where each came from.
 
@@ -139,11 +142,23 @@ def describe_resolution(
     ``effort_source="tier:<tier>"``; otherwise ``effort`` is ``""`` (inherit the
     provider constructor default) with ``effort_source="provider_default"``.
 
+    An explicit ``requested_model`` (the chat/editor model picker selecting a
+    concrete model rather than a tier) short-circuits the tier lookup entirely,
+    with ``model_source="explicit_request"``; a non-empty ``requested_effort``
+    overrides the effort the same way. This is how a directly-selected model
+    reaches the wire while staying visible in the forensic log.
+
     Args:
         node: Call-site name (e.g. ``"answer"``); see
             :data:`NODE_TIER_ASSIGNMENT`.
-        models: The provider's :class:`~inqtrix.settings.ModelSettings`.
+        models: The provider's :class:`~inqtrix.settings.ModelSettings`. Not
+            read when ``requested_model`` is set (the explicit path returns
+            first), so callers may pass ``None`` in that case.
         requested_tier: Optional per-run tier selection.
+        requested_model: Optional explicit model id from the UI picker. When
+            non-empty it wins over both tier and per-node resolution.
+        requested_effort: Optional explicit reasoning effort from the UI; only
+            consulted on the explicit-model path.
 
     Returns:
         A mapping with string values for ``node``, ``model``, ``tier``,
@@ -151,6 +166,20 @@ def describe_resolution(
         ``model="" `` only when ``reasoning_model`` itself is empty; callers
         that treat that as "no model resolved" surface it as a loud warning.
     """
+    explicit_model = (requested_model or "").strip()
+    if explicit_model:
+        explicit_effort = (requested_effort or "").strip()
+        return {
+            "node": node,
+            "model": explicit_model,
+            "tier": resolve_tier(node, requested_tier),
+            "effort": explicit_effort,
+            "model_source": "explicit_request",
+            "effort_source": (
+                "explicit_request" if explicit_effort else "provider_default"
+            ),
+            "requested_tier": requested_tier or "",
+        }
     tier = resolve_tier(node, requested_tier)
     per_node = (getattr(models, f"{node}_model", "") or "").strip()
     tier_model = (getattr(models, f"tier_{tier}_model", "") or "").strip()
@@ -269,26 +298,46 @@ def resolve_model(
     node: str,
     models: "ModelSettings",
     requested_tier: str | None = None,
+    *,
+    requested_model: str = "",
+    requested_effort: str = "",
 ) -> str:
     """Resolve the model id for a call site.
 
     Thin wrapper over :func:`describe_resolution`; see there for the resolution
-    order. Returns a model identifier string (never empty unless
-    ``reasoning_model`` itself is empty, which has a non-empty default).
+    order (incl. the explicit ``requested_model`` short-circuit). Returns a
+    model identifier string (never empty unless ``reasoning_model`` itself is
+    empty, which has a non-empty default).
     """
-    return describe_resolution(node, models, requested_tier)["model"]
+    return describe_resolution(
+        node,
+        models,
+        requested_tier,
+        requested_model=requested_model,
+        requested_effort=requested_effort,
+    )["model"]
 
 
 def resolve_effort(
     node: str,
     models: "ModelSettings",
     requested_tier: str | None = None,
+    *,
+    requested_model: str = "",
+    requested_effort: str = "",
 ) -> str:
     """Resolve the reasoning-effort token for a call site.
 
     Thin wrapper over :func:`describe_resolution`. Returns an effort token
     (``""``, ``"none"``, ``"minimal"``, ``"low"``, ``"medium"``, ``"high"``,
     or ``"xhigh"``). ``""`` means "inherit provider default"; ``"none"`` means
-    "force reasoning off".
+    "force reasoning off". An explicit ``requested_effort`` (with
+    ``requested_model``) overrides the tier choice.
     """
-    return describe_resolution(node, models, requested_tier)["effort"]
+    return describe_resolution(
+        node,
+        models,
+        requested_tier,
+        requested_model=requested_model,
+        requested_effort=requested_effort,
+    )["effort"]

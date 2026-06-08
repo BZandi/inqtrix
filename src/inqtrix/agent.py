@@ -342,6 +342,26 @@ class AgentConfig(BaseModel):
         ),
     )
     """Optional per-run tier selection ('high', 'mid', or 'fast'). When set, replaces the default per-node tier assignment for this run for every LLM call site; an explicit per-node model override still wins. Empty string uses the default assignment."""
+    model: str = Field(
+        default="",
+        description=(
+            "Optional explicit model id for the direct-chat answer (the UI "
+            "model picker selecting a concrete model instead of a tier). When "
+            "non-empty it bypasses tier routing for the direct-chat call only; "
+            "the research pipeline keeps tier routing. Empty string uses the "
+            "tier. Pair with ``effort``."
+        ),
+    )
+    """Optional explicit model id for the direct-chat answer (the UI model picker selecting a concrete model instead of a tier). When non-empty it bypasses tier routing for the direct-chat call only; the research pipeline keeps tier routing. Empty string uses the tier. Pair with ``effort``."""
+    effort: str = Field(
+        default="",
+        description=(
+            "Optional reasoning effort for the direct-chat answer, paired with "
+            "``model`` (``none``/``low``/``medium``/``high``/``xhigh``/``max``, "
+            "model-dependent). Empty string inherits the provider default."
+        ),
+    )
+    """Optional reasoning effort for the direct-chat answer, paired with ``model`` (``none``/``low``/``medium``/``high``/``xhigh``/``max``, model-dependent). Empty string inherits the provider default."""
 
     @field_validator("model_tier")
     @classmethod
@@ -750,6 +770,8 @@ class ResearchAgent:
             "claim_extract_timeout",
             "high_risk_score_threshold",
             "model_tier",
+            "model",
+            "effort",
             "search_cache_maxsize",
             "search_cache_ttl",
             "testing_mode",

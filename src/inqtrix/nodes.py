@@ -710,7 +710,14 @@ def _resolve_node_llm(
     """
     models = getattr(providers.llm, "models", None)
     requested_tier = (getattr(settings, "model_tier", "") or "").strip() or None
-    if models is None:
+    # The chat/editor model picker selects a concrete model for the direct-chat
+    # path only; research nodes always stay on tier routing (bewusste Grenze).
+    requested_model = ""
+    requested_effort = ""
+    if node == "direct_chat":
+        requested_model = (getattr(settings, "model", "") or "").strip()
+        requested_effort = (getattr(settings, "effort", "") or "").strip()
+    if models is None and not requested_model:
         desc = describe_unresolved_resolution(node, requested_tier)
         _remember_node_model_resolution(s, node, desc)
         emit_run_event(s, "inqtrix.node.model_resolution", dict(desc))
@@ -734,7 +741,13 @@ def _resolve_node_llm(
             ),
         )
         return "", ""
-    desc = describe_resolution(node, models, requested_tier)
+    desc = describe_resolution(
+        node,
+        models,
+        requested_tier,
+        requested_model=requested_model,
+        requested_effort=requested_effort,
+    )
     _remember_node_model_resolution(s, node, desc)
     emit_run_event(s, "inqtrix.node.model_resolution", dict(desc))
     _append_forensic_event(

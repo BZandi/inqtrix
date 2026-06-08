@@ -208,6 +208,7 @@ class BedrockLLM(
         temperature: float | None = None,
         thinking: dict[str, Any] | None = None,
         effort: str | None = None,
+        selectable_models: list[str] | None = None,
     ) -> None:
         """Initialize the Bedrock provider.
 
@@ -293,6 +294,7 @@ class BedrockLLM(
         self._claim_extract_model = claim_extract_model
         self._default_max_tokens = default_max_tokens
         self._context_window_tokens = context_window_tokens
+        self._selectable_models = list(selectable_models or [])
         self._temperature = temperature
         self._thinking = thinking
         self._effort = effort
@@ -400,6 +402,11 @@ class BedrockLLM(
             ModelSettings: Resolved Bedrock model IDs used by graph nodes.
         """
         return self._models
+
+    @property
+    def selectable_models(self) -> list[str]:
+        """Return the operator-curated model ids offered for direct selection."""
+        return self._selectable_models
 
     @property
     def context_window_tokens(self) -> int | None:

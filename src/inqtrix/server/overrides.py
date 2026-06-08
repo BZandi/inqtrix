@@ -137,6 +137,17 @@ class AgentOverridesRequest(BaseModel):
     default per-node tier assignment for the run. Primarily lets a caller pick
     the model class for a direct-chat answer (with ``skip_search=true``)."""
 
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    """Explicit model id for a direct-chat answer (the UI model picker choosing a
+    concrete model instead of a tier). Routed to :attr:`AgentSettings.model`; it
+    bypasses tier routing for the direct-chat call only. Pair with ``effort``."""
+
+    effort: (
+        Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
+    ) = Field(default=None)
+    """Reasoning effort for a direct-chat answer, paired with ``model``. Routed to
+    :attr:`AgentSettings.effort`; accepted levels are model-dependent."""
+
 
 def parse_overrides_payload(payload: Any) -> AgentOverridesRequest | None:
     """Validate the raw ``agent_overrides`` body slice into the model.

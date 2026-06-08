@@ -738,8 +738,15 @@ def register_routes(
         llm = resolved.providers.llm
         provider_models = getattr(llm, "models", None)
         requested_tier = resolved.agent_settings.model_tier or None
+        requested_model = (resolved.agent_settings.model or "").strip()
+        requested_effort = (resolved.agent_settings.effort or "").strip()
         warnings: list[str] = []
-        if provider_models is not None:
+        if requested_model:
+            # The UI picked a concrete model -> use it directly (surfaced as
+            # explicit_request); works even without published model metadata.
+            model = requested_model
+            effort = requested_effort or None
+        elif provider_models is not None:
             model = resolve_model("direct_chat", provider_models, requested_tier) or None
             effort = resolve_effort("direct_chat", provider_models, requested_tier) or None
         else:
@@ -916,8 +923,15 @@ def register_routes(
 
         provider_models = getattr(llm, "models", None)
         requested_tier = resolved.agent_settings.model_tier or None
+        requested_model = (resolved.agent_settings.model or "").strip()
+        requested_effort = (resolved.agent_settings.effort or "").strip()
         warnings: list[str] = []
-        if provider_models is not None:
+        if requested_model:
+            # The UI picked a concrete model -> use it directly (surfaced as
+            # explicit_request); works even without published model metadata.
+            model = requested_model
+            effort = requested_effort or None
+        elif provider_models is not None:
             model = resolve_model("direct_chat", provider_models, requested_tier) or None
             effort = resolve_effort("direct_chat", provider_models, requested_tier) or None
         else:

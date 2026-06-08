@@ -493,3 +493,28 @@ def resolve_model_card(model_id: str) -> ModelCard | None:
             if alias == needle or _normalize(alias) == normalized:
                 return card
     return None
+
+
+def build_models_catalog(selectable_models: list[str]) -> list[dict[str, object]]:
+    """Resolve selectable model ids to serialisable catalogue entries for the UI.
+
+    One ``{"model_id", "card"}`` entry per id, in order. ``card`` is the matching
+    :class:`ModelCard` as a plain dict, or ``None`` when no card matches -- the
+    UI then renders a visible "no model card" state and degrades gracefully
+    (Designprinzip 1) instead of receiving a fabricated default.
+
+    Args:
+        selectable_models: The provider's curated list of selectable model ids
+            (``LLMProvider.selectable_models``).
+
+    Returns:
+        A JSON-serialisable list of catalogue entries; empty when the provider
+        offers no selectable models (the UI falls back to the tier picker).
+    """
+    catalog: list[dict[str, object]] = []
+    for model_id in selectable_models:
+        card = resolve_model_card(model_id)
+        catalog.append(
+            {"model_id": model_id, "card": card.model_dump() if card else None}
+        )
+    return catalog

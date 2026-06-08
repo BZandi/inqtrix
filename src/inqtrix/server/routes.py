@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from inqtrix.exceptions import AgentStructuredOutputError
 from inqtrix.graph import run as agent_run, run_test as agent_run_test
 from inqtrix.legal import legal_metadata
+from inqtrix.model_cards import build_models_catalog
 from inqtrix.model_routing import (
     describe_chat_model_options,
     describe_node_resolutions,
@@ -312,6 +313,12 @@ def register_routes(
             "evaluate_model": _from_node("evaluate"),
             "node_models": node_models,
             "chat_model_options": describe_chat_model_options(provider_models),
+            "models_catalog": build_models_catalog(
+                getattr(llm_provider, "selectable_models", []) or []
+            ),
+            "context_window_tokens": getattr(
+                llm_provider, "context_window_tokens", None
+            ),
         }
 
     def _health_agent_settings() -> AgentSettings:

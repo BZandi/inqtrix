@@ -13,6 +13,7 @@ import pytest
 from inqtrix.model_cards import (
     MODEL_CARDS,
     ModelCard,
+    build_models_catalog,
     resolve_model_card,
 )
 
@@ -96,3 +97,16 @@ def test_catalogue_covers_the_seeded_models() -> None:
 def test_haiku_has_no_reasoning_levels() -> None:
     """Haiku rejects the effort parameter, so its card exposes no levels."""
     assert _card("claude-haiku-4-5").reasoning_levels == []
+
+
+def test_build_models_catalog_resolves_and_marks_unknown() -> None:
+    """The catalogue builder serialises known cards and flags unknown ids."""
+    catalog = build_models_catalog(["claude-opus-4-8", "totally-unknown"])
+    assert catalog[0]["model_id"] == "claude-opus-4-8"
+    assert catalog[0]["card"]["display_name"] == "Claude Opus 4.8"
+    assert catalog[1] == {"model_id": "totally-unknown", "card": None}
+
+
+def test_build_models_catalog_empty_for_no_selectable_models() -> None:
+    """No selectable models -> empty catalogue (UI falls back to tier picker)."""
+    assert build_models_catalog([]) == []

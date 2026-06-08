@@ -216,6 +216,8 @@ export type EditorSuggestRequest = {
   instruction?: string
   locale: 'de' | 'en'
   modelTier?: 'high' | 'mid' | 'fast' | null
+  model?: string
+  effort?: string
   snippet?: string
   stack?: string
 }
@@ -234,9 +236,7 @@ export async function suggestEditorBlock(
     ...options,
     method: 'POST',
     body: {
-      agent_overrides: suggestRequest.modelTier
-        ? { model_tier: suggestRequest.modelTier }
-        : undefined,
+      agent_overrides: editorAgentOverrides(suggestRequest),
       attachments: attachmentsPayload(suggestRequest.attachments),
       background: suggestRequest.background,
       block_markdown: suggestRequest.blockMarkdown,
@@ -268,6 +268,8 @@ export type EditorInstructRequest = {
   instruction: string
   locale: 'de' | 'en'
   modelTier?: 'high' | 'mid' | 'fast' | null
+  model?: string
+  effort?: string
   stack?: string
 }
 
@@ -285,9 +287,7 @@ export async function instructEditorDocument(
     ...options,
     method: 'POST',
     body: {
-      agent_overrides: instructRequest.modelTier
-        ? { model_tier: instructRequest.modelTier }
-        : undefined,
+      agent_overrides: editorAgentOverrides(instructRequest),
       attachments: attachmentsPayload(instructRequest.attachments),
       document_markdown: instructRequest.documentMarkdown,
       instruction: instructRequest.instruction,
@@ -464,7 +464,24 @@ function serializeOverrides(overrides?: AgentOverrides) {
     first_round_queries: overrides.firstRoundQueries,
     skip_search: overrides.skipSearch,
     model_tier: overrides.modelTier,
+    model: overrides.model,
+    effort: overrides.effort,
   }
+}
+
+/** Build the editor ``agent_overrides`` slice from picker selections.
+ *  An explicit model/effort (UI picker) takes precedence; modelTier remains
+ *  the fallback. Returns undefined when nothing is selected. */
+function editorAgentOverrides(req: {
+  modelTier?: 'high' | 'mid' | 'fast' | null
+  model?: string
+  effort?: string
+}) {
+  const overrides: Record<string, string> = {}
+  if (req.model) overrides.model = req.model
+  if (req.effort) overrides.effort = req.effort
+  if (req.modelTier) overrides.model_tier = req.modelTier
+  return Object.keys(overrides).length > 0 ? overrides : undefined
 }
 
 function serializeChatCompletionRequest(

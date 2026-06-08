@@ -19,11 +19,22 @@ type ContextTokenMeterProps = {
   disabled?: boolean
 }
 
-/** Threshold → text colour for the gauge + number. */
+/** Threshold → number/header colour. Stays calm (neutral) while usage is healthy
+ * and only takes a status hue once the budget gets tight. */
 function thresholdTextClass(threshold: ContextTokenModel['threshold']): string {
   if (threshold === 'critical') return 'text-destructive'
   if (threshold === 'warning') return 'text-warning'
   return 'text-muted-foreground'
+}
+
+/** Threshold → ring colour. The gauge ring always carries a status hue — green
+ * when healthy, amber when tight, red when critical — so the circle reads at a
+ * glance even at low usage (the number stays quiet, see {@link thresholdTextClass}). */
+function thresholdRingClass(threshold: ContextTokenModel['threshold']): string {
+  if (threshold === 'critical') return 'text-destructive'
+  if (threshold === 'warning') return 'text-warning'
+  if (threshold === 'unknown') return 'text-muted-foreground'
+  return 'text-success'
 }
 
 export function ContextTokenMeter({
@@ -41,6 +52,7 @@ export function ContextTokenMeter({
     rules: t.chat.contextCatRules,
   }
   const colour = thresholdTextClass(model.threshold)
+  const ringColour = thresholdRingClass(model.threshold)
   const pctDeg =
     model.usedFraction == null ? 0 : Math.min(100, model.usedFraction * 100) * 3.6
   // Scale segments by the full window (usable + reserved) when known, else by
@@ -49,6 +61,9 @@ export function ContextTokenMeter({
     model.capacityTokens == null
       ? Math.max(1, model.totalTokens)
       : model.capacityTokens + model.reservedOutputTokens
+  // Per-category breakdown bars are normalised to the largest category (widest =
+  // 100%) for a relative comparison, independent of the window-scaled total bar.
+  const maxCategoryTokens = model.categories.reduce((max, c) => Math.max(max, c.tokens), 0)
 
   return (
     <DropdownMenu>
@@ -69,7 +84,7 @@ export function ContextTokenMeter({
           ) : (
             <span className="size-3.5 rounded-full bg-muted" aria-hidden="true">
               <span
-                className="block size-full rounded-full"
+                className={cn('block size-full rounded-full', ringColour)}
                 style={{ background: `conic-gradient(currentColor ${pctDeg}deg, transparent 0)` }}
               />
             </span>
@@ -112,18 +127,32 @@ export function ContextTokenMeter({
             ) : null}
           </div>
 
-          <ul className="mt-2 grid gap-1">
-            {model.categories.map((category) => (
-              <li className="flex items-center gap-1.5" key={category.key}>
-                <span className={cn('size-1.5 shrink-0 rounded-full', toneBar[category.tone])} />
-                <span className="t-meta-sm text-muted-foreground">{labels[category.key]}</span>
-                <span className="ml-auto t-mono tabular-nums text-foreground">
-                  {formatTokens(category.tokens)}
-                </span>
-              </li>
-            ))}
+          <ul className="mt-2 grid gap-1.5">
+            {model.categories.map((category) => {
+              // Normalised to the largest category (widest = 100%); min width
+              // keeps a tiny category visible.
+              const width = maxCategoryTokens > 0
+                ? Math.max(3, (category.tokens / maxCategoryTokens) * 100)
+                : 0
+              return (
+                <li className="grid gap-0.5" key={category.key}>
+                  <div className="flex items-baseline gap-2">
+                    <span className="t-meta-sm text-muted-foreground">{labels[category.key]}</span>
+                    <span className="ml-auto t-mono tabular-nums text-foreground">
+                      {formatTokens(category.tokens)}
+                    </span>
+                  </div>
+                  <span className="block h-1 w-full overflow-hidden rounded-full bg-muted">
+                    <span
+                      className={cn('block h-full rounded-full', toneBar[category.tone])}
+                      style={{ width: `${width}%` }}
+                    />
+                  </span>
+                </li>
+              )
+            })}
             {model.capacityTokens != null && model.reservedOutputTokens > 0 ? (
-              <li className="flex items-center gap-1.5">
+              <li className="mt-0.5 flex items-center gap-1.5">
                 <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/30" />
                 <span className="t-meta-sm text-muted-foreground/80">{t.chat.contextReserved}</span>
                 <span className="ml-auto t-mono tabular-nums text-muted-foreground/80">

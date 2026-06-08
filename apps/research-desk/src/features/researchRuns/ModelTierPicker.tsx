@@ -13,11 +13,12 @@ import { useLocale } from '@/i18n/LocaleProvider'
 import {
   capabilityLabel,
   costTier,
+  effortLevelLabel,
   formatTokens,
-  reasoningPresets,
   speedLabel,
 } from '@/lib/modelCard'
 import { cn } from '@/lib/utils'
+import { ReasoningEffortControl } from './ReasoningEffortControl'
 import type {
   ChatModelOption,
   ChatModelTier,
@@ -196,10 +197,14 @@ function CatalogPicker({
   const { t } = useLocale()
   const selectedEntry = catalog.find((entry) => entry.model_id === selectedModel) ?? null
   const selectedCard = selectedEntry?.card ?? null
-  const triggerLabel = selectedModel == null
+  const baseTriggerLabel = selectedModel == null
     ? t.chat.modelServerDefault
     : selectedCard?.display_name ?? selectedModel
-  const presets = selectedCard ? reasoningPresets(selectedCard.reasoning_levels) : []
+  // Surface the picked reasoning level at the composer so it can be verified
+  // without re-opening the picker (only when an explicit effort is set).
+  const triggerLabel = selectedEffort
+    ? `${baseTriggerLabel} · ${effortLevelLabel(selectedEffort)}`
+    : baseTriggerLabel
 
   const uncategorized = catalog.filter((entry) => entry.card == null)
 
@@ -285,30 +290,14 @@ function CatalogPicker({
           ) : null}
         </div>
 
-        {presets.length > 0 ? (
-          <div className="flex items-center gap-2 border-t border-border bg-surface/40 px-2.5 py-1.5">
-            <span className="t-caption text-muted-foreground/65">{t.chat.modelReasoningLabel}</span>
-            <div className="ml-auto flex items-center gap-0.5 rounded-md bg-surface p-0.5">
-              {presets.map((preset) => {
-                const active = selectedEffort === preset.effort
-                return (
-                  <button
-                    className={cn(
-                      'h-6 rounded px-2 text-xs font-medium transition-colors',
-                      active
-                        ? 'bg-background text-foreground shadow-[0_1px_2px_var(--shadow-hairline)]'
-                        : 'text-muted-foreground hover:text-foreground',
-                    )}
-                    key={preset.effort}
-                    onClick={() => onEffortChange?.(active ? null : preset.effort)}
-                    type="button"
-                  >
-                    {preset.label}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
+        {selectedCard ? (
+          <ReasoningEffortControl
+            key={selectedModel ?? 'default'}
+            label={t.chat.modelReasoningLabel}
+            levels={selectedCard.reasoning_levels}
+            onEffortChange={(effort) => onEffortChange?.(effort)}
+            selectedEffort={selectedEffort}
+          />
         ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
@@ -339,7 +328,12 @@ function CatalogRow({
         'group relative flex w-full min-w-0 max-w-full items-center gap-2.5 rounded-none px-2.5 py-1.5 pr-1.5 text-left hover:bg-accent/50 focus:bg-accent/80 data-[highlighted]:bg-accent/80',
         active ? 'bg-accent' : 'hover:bg-accent/50',
       )}
-      onSelect={onSelect}
+      // Keep the menu open after picking a model so the reasoning effort can be
+      // set in the same pass (preventDefault stops Radix from closing it).
+      onSelect={(event) => {
+        event.preventDefault()
+        onSelect()
+      }}
     >
       <span
         className={cn(
@@ -363,7 +357,7 @@ function CatalogRow({
             </span>
           ) : null}
         </span>
-        <span className="block truncate t-meta-sm text-muted-foreground">{detail}</span>
+        <span className="block t-meta-sm text-muted-foreground line-clamp-2">{detail}</span>
       </span>
       <ModelInfoTooltip card={card} />
       <span className="flex size-4 shrink-0 items-center justify-center">
@@ -390,7 +384,7 @@ function ModelInfoTooltip({ card }: { card: ModelCard | null }) {
         </span>
       </TooltipTrigger>
       <TooltipContent
-        className="w-64 rounded-xl border border-border bg-card p-3 text-left shadow-lg"
+        className="w-80 rounded-xl border border-border bg-card p-3 text-left shadow-lg"
         side="right"
         sideOffset={8}
       >
@@ -434,7 +428,7 @@ function InfoTile({ label, value, hint }: { label: string; value: string; hint?:
   return (
     <div className="grid gap-0.5 rounded-md border border-border bg-surface/50 px-2 py-1.5 text-center">
       <span className="t-caption text-muted-foreground/65">{label}</span>
-      <span className="t-card tabular-nums text-foreground">{value}</span>
+      <span className="t-label tabular-nums text-foreground">{value}</span>
       {hint ? <span className="t-hint tabular-nums text-muted-foreground/70">{hint}</span> : null}
     </div>
   )

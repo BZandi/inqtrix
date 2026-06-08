@@ -262,6 +262,13 @@ export default function ChatWorkspace({
     ] satisfies ContextCategoryInput[],
     chatContextCapacity,
   )
+  // Send-guard only fires on a real estimated overflow (capacity already nets out
+  // reserved output + safety); the estimate is ~96% accurate so we confirm rather
+  // than hard-block.
+  const contextOverflow =
+    contextTokenModel.usedFraction != null && contextTokenModel.usedFraction > 1
+  const contextOverflowPct = Math.round((contextTokenModel.usedFraction ?? 0) * 100)
+  const [overflowConfirmOpen, setOverflowConfirmOpen] = useState(false)
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const [isMessageSelectionMode, setIsMessageSelectionMode] = useState(false)
@@ -484,6 +491,11 @@ export default function ChatWorkspace({
 
   function handleSendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    // Route an overflowing send through the confirm popover (Enter key path).
+    if (contextOverflow && canSend) {
+      setOverflowConfirmOpen(true)
+      return
+    }
     sendDraft()
   }
 
@@ -1070,6 +1082,54 @@ export default function ChatWorkspace({
                       >
                         <Square className="size-4 fill-current" />
                       </Button>
+                    ) : contextOverflow ? (
+                      <DropdownMenu onOpenChange={setOverflowConfirmOpen} open={overflowConfirmOpen}>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            aria-label={t.chat.send}
+                            className={cn(
+                              'size-7 rounded-md focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0',
+                              canSend
+                                ? 'bg-brand text-brand-foreground hover:bg-brand/90 hover:text-brand-foreground'
+                                : 'text-muted-foreground/45',
+                            )}
+                            disabled={!canSend}
+                            size="icon"
+                            type="button"
+                            variant={canSend ? 'default' : 'ghost'}
+                          >
+                            <SendHorizontal className="size-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-64 rounded-xl p-0 shadow-lg" side="top" sideOffset={8}>
+                          <div className="px-2.5 py-2">
+                            <p className="flex items-center gap-1.5 t-meta-sm font-medium text-warning">
+                              <AlertTriangle className="size-3.5 shrink-0" />
+                              {t.chat.contextOverflowConfirmTitle(contextOverflowPct)}
+                            </p>
+                            <p className="mt-1 t-hint text-muted-foreground/80">
+                              {t.chat.contextOverflowConfirmBody}
+                            </p>
+                          </div>
+                          <div className="flex items-center justify-end gap-1.5 border-t border-border px-2 py-1.5">
+                            <Button onClick={() => setOverflowConfirmOpen(false)} size="sm" type="button" variant="ghost">
+                              {t.chat.contextOverflowCancel}
+                            </Button>
+                            <Button
+                              className="bg-brand text-brand-foreground hover:bg-brand/90 hover:text-brand-foreground"
+                              onClick={() => {
+                                setOverflowConfirmOpen(false)
+                                sendDraft()
+                              }}
+                              size="sm"
+                              type="button"
+                              variant="default"
+                            >
+                              {t.chat.contextOverflowConfirmSend}
+                            </Button>
+                          </div>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     ) : (
                       <Button
                         aria-label={t.chat.send}

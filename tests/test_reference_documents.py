@@ -12,6 +12,8 @@ from __future__ import annotations
 import pytest
 
 from inqtrix.server.reference_documents import (
+    DEFAULT_MAX_REFERENCE_CHARS_PER_DOC,
+    DEFAULT_MAX_REFERENCE_TOKENS_PER_DOC,
     ReferenceDocument,
     clamp_reference_documents,
     parse_reference_documents,
@@ -88,6 +90,24 @@ def test_parse_oversized_content_is_truncated_with_warning() -> None:
     assert docs[0].content.startswith("x" * 10)
     assert "truncated" in docs[0].content
     assert any("exceeded" in warning for warning in warnings)
+
+
+def test_parse_default_per_doc_cap_is_token_based_128k() -> None:
+    """The default per-document cap is the 128k-token (char-equivalent) limit and
+    is reported in token terms (raised from the former 96k-character cap)."""
+    assert DEFAULT_MAX_REFERENCE_TOKENS_PER_DOC == 128_000
+    assert DEFAULT_MAX_REFERENCE_CHARS_PER_DOC == 512_000
+
+    # Just under the char-equivalent cap stays intact; just over is truncated.
+    under = "x" * DEFAULT_MAX_REFERENCE_CHARS_PER_DOC
+    docs, warnings = parse_reference_documents([{"label": "a", "content": under}])
+    assert docs[0].content == under
+    assert not any("exceeded" in warning for warning in warnings)
+
+    over = "x" * (DEFAULT_MAX_REFERENCE_CHARS_PER_DOC + 50)
+    docs, warnings = parse_reference_documents([{"label": "a", "content": over}])
+    assert "truncated" in docs[0].content
+    assert any("~128000 tokens" in warning for warning in warnings)
 
 
 def test_parse_drops_sensitive_document_without_failing_request() -> None:

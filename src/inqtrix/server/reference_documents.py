@@ -36,13 +36,32 @@ prompt-assembly cost; the aggregate context budget is enforced separately by
 :func:`clamp_reference_documents`.
 """
 
-DEFAULT_MAX_REFERENCE_CHARS_PER_DOC = 96_000
-"""Per-document character cap, aligned with the frontend ingest soft cap.
+DEFAULT_MAX_REFERENCE_TOKENS_PER_DOC = 128_000
+"""Per-document content cap, expressed in tokens.
 
-Mirrors ``MAX_DOC_CHARS_SOFT`` in ``features/files/budget.ts`` (24k tokens at the
-shared chars/4 heuristic) so a single attachment cannot dominate the prompt even
-before the aggregate budget clamp. Longer content is tail-truncated with a
-visible marker and a warning.
+Raised from the former 96k-*character* cap so a single large attachment is no
+longer cut prematurely: 128k tokens is a common context-window step, and the
+aggregate context-budget clamp (:func:`clamp_reference_documents`, tied to the
+live model ``context_window_tokens``) remains the real budget guard. This
+per-document cap is only a coarse upper bound; the authoritative, proactive guard
+is the frontend token meter. Longer content is tail-truncated with a visible
+marker and a warning (No Silent Fallbacks).
+"""
+
+_APPROX_CHARS_PER_TOKEN = 4
+"""Coarse chars-per-token heuristic, shared with the frontend ``tokenx`` estimate
+(``features/files/budget.ts``). Deliberately rough and dependency-free: the
+backend ships no tokenizer, and an exact count is unnecessary for a last-resort
+safety cap. (The aggregate clamp in ``routes.py`` independently uses its own
+conservative factor against the live context window.)"""
+
+DEFAULT_MAX_REFERENCE_CHARS_PER_DOC = (
+    DEFAULT_MAX_REFERENCE_TOKENS_PER_DOC * _APPROX_CHARS_PER_TOKEN
+)
+"""Backward-compatible character-equivalent of the per-document token cap.
+
+Kept as a named constant for any external importer; derived from
+:data:`DEFAULT_MAX_REFERENCE_TOKENS_PER_DOC` via :data:`_APPROX_CHARS_PER_TOKEN`.
 """
 
 _TRUNCATION_MARKER = "\n[... truncated]"
@@ -88,7 +107,8 @@ def parse_reference_documents(
     value: Any,
     *,
     max_docs: int = DEFAULT_MAX_REFERENCE_DOCS,
-    max_chars_per_doc: int = DEFAULT_MAX_REFERENCE_CHARS_PER_DOC,
+    max_tokens_per_doc: int = DEFAULT_MAX_REFERENCE_TOKENS_PER_DOC,
+    max_chars_per_doc: int | None = None,
 ) -> tuple[list[ReferenceDocument], list[str]]:
     """Validate the additive ``attachments`` request field.
 
@@ -98,8 +118,13 @@ def parse_reference_documents(
             stay byte-identical to before (backwards compatible).
         max_docs: Hard cap on accepted documents. Extra documents are dropped
             with a visible warning, not silently ignored.
-        max_chars_per_doc: Per-document character cap. Longer content is
-            tail-truncated and flagged with a visible warning.
+        max_tokens_per_doc: Per-document cap in tokens (default
+            :data:`DEFAULT_MAX_REFERENCE_TOKENS_PER_DOC`), enforced via the coarse
+            chars/token heuristic. Longer content is tail-truncated and flagged
+            with a visible warning.
+        max_chars_per_doc: Optional explicit per-document character cap. When
+            given it overrides ``max_tokens_per_doc`` (kept for backward
+            compatibility); ``None`` selects the token-based default.
 
     Returns:
         A tuple of the validated documents and human-readable warnings
@@ -116,6 +141,17 @@ def parse_reference_documents(
         return [], []
     if not isinstance(value, list):
         raise ValueError("attachments must be a list.")
+
+    char_cap = (
+        max_chars_per_doc
+        if max_chars_per_doc is not None
+        else max(0, max_tokens_per_doc) * _APPROX_CHARS_PER_TOKEN
+    )
+    limit_note = (
+        f"{max_chars_per_doc} characters"
+        if max_chars_per_doc is not None
+        else f"~{max_tokens_per_doc} tokens"
+    )
 
     warnings: list[str] = []
     documents: list[ReferenceDocument] = []
@@ -145,10 +181,10 @@ def parse_reference_documents(
             )
             log.warning("Dropped a reference document with sensitive-looking content.")
             continue
-        if len(content) > max_chars_per_doc:
-            content = content[:max_chars_per_doc].rstrip() + _TRUNCATION_MARKER
+        if len(content) > char_cap:
+            content = content[:char_cap].rstrip() + _TRUNCATION_MARKER
             warnings.append(
-                f"Reference document '{label}' exceeded {max_chars_per_doc} characters and was shortened."
+                f"Reference document '{label}' exceeded {limit_note} and was shortened."
             )
         documents.append(
             ReferenceDocument(

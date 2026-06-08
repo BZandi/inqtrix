@@ -5,29 +5,35 @@
  */
 import type { ModelCard } from '@/features/researchRuns/types'
 
-/** A reasoning option shown in the picker footer; `effort` is the wire token. */
-export type ReasoningPreset = { label: string; effort: string }
+/** A selectable reasoning level; `token` is the wire effort value. */
+export type ReasoningLevelOption = { token: string; label: string }
+
+/** Compact display labels for the known effort tokens. Kept short so they fit a
+ * segmented control cell and read cleanly as a trigger suffix. */
+const EFFORT_LABELS: Record<string, string> = {
+  none: 'Off',
+  minimal: 'Min',
+  low: 'Low',
+  medium: 'Med',
+  high: 'High',
+  xhigh: 'XHigh',
+  max: 'Max',
+}
+
+/** Short display label for one reasoning-effort token (falls back to a
+ * capitalised form of the raw token for any future level). */
+export function effortLevelLabel(token: string): string {
+  return EFFORT_LABELS[token] ?? token.charAt(0).toUpperCase() + token.slice(1)
+}
 
 /**
- * Map a model's accepted effort tokens to up to three picker buttons
- * (`No think` / `Think` / `Think hard`). `No think` (effort `none`) is offered
- * only when the model can disable reasoning. An empty input means the model has
- * no effort control, so the picker hides the reasoning selector entirely.
+ * Map a model's accepted effort tokens to one selectable option per level, in
+ * the model's own (increasing-depth) order — every level the model supports is
+ * selectable, model-dependent (no collapsing to fixed buckets). An empty input
+ * means the model has no effort control, so the picker hides the selector.
  */
-export function reasoningPresets(levels: string[]): ReasoningPreset[] {
-  if (levels.length === 0) return []
-  const canDisable = levels.includes('none')
-  const graded = levels.filter((level) => level !== 'none')
-  if (graded.length === 0) {
-    return canDisable ? [{ label: 'No think', effort: 'none' }] : []
-  }
-  const presets: ReasoningPreset[] = []
-  if (canDisable) presets.push({ label: 'No think', effort: 'none' })
-  presets.push({ label: 'Think', effort: graded[Math.floor((graded.length - 1) / 2)] })
-  if (graded.length > 1) {
-    presets.push({ label: 'Think hard', effort: graded[graded.length - 1] })
-  }
-  return presets
+export function reasoningLevelOptions(levels: string[]): ReasoningLevelOption[] {
+  return levels.map((token) => ({ token, label: effortLevelLabel(token) }))
 }
 
 /** Coarse `$`..`$$$$` cost tier (by output price) plus the exact value string. */

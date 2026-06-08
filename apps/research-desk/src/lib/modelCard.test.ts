@@ -1,23 +1,32 @@
 import { describe, expect, it } from 'vitest'
 
-import { costTier, formatTokens, reasoningPresets, speedLabel } from './modelCard'
+import { costTier, effortLevelLabel, formatTokens, reasoningLevelOptions, speedLabel } from './modelCard'
 
-describe('reasoningPresets', () => {
+describe('reasoningLevelOptions', () => {
   it('hides the selector when a model has no effort control (Haiku)', () => {
-    expect(reasoningPresets([])).toEqual([])
+    expect(reasoningLevelOptions([])).toEqual([])
   })
 
-  it('offers No think / Think / Think hard when reasoning can be disabled', () => {
-    const presets = reasoningPresets(['none', 'low', 'medium', 'high', 'xhigh', 'max'])
-    expect(presets.map((p) => p.label)).toEqual(['No think', 'Think', 'Think hard'])
-    expect(presets[0].effort).toBe('none')
-    expect(presets[2].effort).toBe('max') // top graded level
+  it('keeps every supported level selectable in the model order', () => {
+    const options = reasoningLevelOptions(['none', 'low', 'medium', 'high', 'xhigh', 'max'])
+    expect(options.map((o) => o.token)).toEqual(['none', 'low', 'medium', 'high', 'xhigh', 'max'])
+    expect(options.map((o) => o.label)).toEqual(['Off', 'Low', 'Med', 'High', 'XHigh', 'Max'])
   })
 
-  it('omits No think for a Pro model that cannot disable reasoning', () => {
-    const presets = reasoningPresets(['medium', 'high', 'xhigh'])
-    expect(presets.map((p) => p.label)).toEqual(['Think', 'Think hard'])
-    expect(presets.some((p) => p.effort === 'none')).toBe(false)
+  it('preserves a Pro model order without inventing an off level', () => {
+    const options = reasoningLevelOptions(['medium', 'high', 'xhigh'])
+    expect(options.map((o) => o.token)).toEqual(['medium', 'high', 'xhigh'])
+    expect(options.some((o) => o.token === 'none')).toBe(false)
+  })
+})
+
+describe('effortLevelLabel', () => {
+  it('maps known tokens to compact labels and falls back capitalised', () => {
+    expect(effortLevelLabel('none')).toBe('Off')
+    expect(effortLevelLabel('minimal')).toBe('Min')
+    expect(effortLevelLabel('medium')).toBe('Med')
+    expect(effortLevelLabel('xhigh')).toBe('XHigh')
+    expect(effortLevelLabel('ultra')).toBe('Ultra')
   })
 })
 

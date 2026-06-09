@@ -288,10 +288,24 @@ Library streaming yields plain text chunks (see [Library mode](library-mode.md))
 Native browser UIs should prefer `/v1/runs/{run_id}/events` when they need structured state for progress cards. That stream uses named SSE events such as `inqtrix.run.queued`, `inqtrix.run.snapshot`, `inqtrix.node.started`, `inqtrix.progress.message`, `inqtrix.output_text.delta`, and `inqtrix.run.completed`. See [Run events](../observability/run-events.md).
 
 The React Research Desk in `apps/research-desk/` consumes this native run API
-directly. In local Vite development it can use the same-origin `/health` and
-`/v1` proxy, or it can target a separately deployed API with
-`VITE_INQTRIX_API_BASE_URL=http://127.0.0.1:5100` or another complete origin.
-Do not put `INQTRIX_SERVER_API_KEY` into a `VITE_*` variable; when the server's
+directly. In local Vite development it uses the same-origin `/health` and `/v1`
+proxy by default, or it can target a separately deployed API by setting
+`VITE_INQTRIX_API_BASE_URL` to a complete origin (scheme + host + optional port).
+The same variable bakes the backend origin into a production build:
+
+```bash
+# Dev server against a non-default backend:
+VITE_INQTRIX_API_BASE_URL=http://127.0.0.1:5100 pnpm run ui:dev
+# or: VITE_INQTRIX_API_BASE_URL=http://127.0.0.1:5100 npm run ui:dev
+
+# Production bundle with a fixed backend origin (split-origin hosting; backend needs CORS):
+VITE_INQTRIX_API_BASE_URL=https://inqtrix-api.example.com pnpm run ui:build
+# or: VITE_INQTRIX_API_BASE_URL=https://inqtrix-api.example.com npm run ui:build
+```
+
+For same-origin production serving (no baked origin, no CORS), see
+[React UI](react-ui.md), which also covers the nginx two-pod topology and the
+Python launcher. Do not put `INQTRIX_SERVER_API_KEY` into a `VITE_*` variable; when the server's
 health payload reports `auth_required: true`, the React app passes a
 runtime-entered Bearer token to protected `/v1/*` requests and to the
 fetch-based run-event stream.

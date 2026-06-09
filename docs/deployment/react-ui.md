@@ -388,12 +388,17 @@ the backend, so the same `dist/` artifact deploys to every environment.
 
 ### When to use which
 
+Paths A and B below keep the browser on one origin and need no
+`VITE_INQTRIX_API_BASE_URL`. The last row is the split-origin alternative from
+[Deployment options](#deployment-options) above, for hosts that cannot proxy.
+
 | Situation | Recommendation |
 |---|---|
 | Production with Kubernetes / separate frontend and backend pods | nginx reverse-proxy (path A) |
 | Server without container runtime, only Python available | Python launcher (path B) |
 | Local verification of the production build | Python launcher (path B) |
 | Build in CI, deploy to cluster | nginx reverse-proxy (path A) |
+| Static host that cannot proxy (plain CDN), split origin | Separately served static build with a build-time `VITE_INQTRIX_API_BASE_URL`; backend needs CORS |
 
 ### Path A: nginx reverse-proxy in the frontend pod
 
@@ -578,6 +583,11 @@ to an existing directory.
 
 ### Backend notes (apply to both paths)
 
+- Build the bundle with `VITE_INQTRIX_API_BASE_URL` left **unset**. A baked
+  absolute origin makes the browser call that backend directly and bypass the
+  proxy, which reintroduces the cross-origin requirement and defeats the
+  single-origin setup. The backend origin belongs in `proxy_pass` (nginx) or
+  `INQTRIX_BACKEND_URL` (launcher), set at runtime.
 - `INQTRIX_SERVER_CORS_ORIGINS` can stay unset. The browser sees a
   single origin, so cross-origin preflight never happens.
 - Terminate TLS at the frontend pod, ingress, or sidecar. Backend

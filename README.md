@@ -143,13 +143,59 @@ The planned UI focuses on:
 The app talks to the native `/v1/runs` API: submitted questions become queued
 run resources, live event snapshots update the cards and agent protocol, and
 completed runs fetch `/v1/runs/{run_id}/result` for the Markdown report,
-sources, claims, metrics, and usage data. Install with
-`corepack pnpm install --frozen-lockfile` or `npm ci`, run locally with
-`pnpm run ui:dev` or `npm run ui:dev`, build with `pnpm run ui:build` or
-`npm run ui:build`, and preview that production build locally with
-`pnpm run ui:prod`; the generated `apps/research-desk/dist/` directory is
-intentionally not committed. See [React UI](docs/deployment/react-ui.md) for
-setup, API-origin configuration, security, build, and deployment notes. The
+sources, claims, metrics, and usage data. The frontend supports two package
+managers; pick one and stay on it for a given `node_modules` tree (run all
+commands from the repository root).
+
+pnpm (reference path, via Corepack):
+
+```bash
+corepack pnpm install --frozen-lockfile
+pnpm run ui:dev     # local dev server
+pnpm run ui:build   # production bundle -> apps/research-desk/dist/
+pnpm run ui:prod    # build, then preview the bundle locally
+```
+
+npm (fallback when Corepack/pnpm is unavailable):
+
+```bash
+npm ci
+npm run ui:dev
+npm run ui:build
+npm run ui:prod
+```
+
+**Run the production build.** The bundle's backend origin is fixed at *build*
+time, so how you point the frontend at a backend depends on how you serve it:
+
+- **Same origin via the Python launcher (recommended).** Build with
+  `VITE_INQTRIX_API_BASE_URL` left unset (the bundle then issues relative `/v1`
+  calls), and serve `dist/` plus the API from one process. The backend origin is
+  a *runtime* argument, so the same `dist/` deploys everywhere — no rebuild to
+  repoint it:
+
+  ```bash
+  pnpm run ui:build            # or: npm run ui:build
+  uv run python scripts/run_research_desk.py            # serves dist/, proxies /v1 + /health -> http://localhost:5100
+  # backend on another host or pod -- set at runtime, no rebuild:
+  INQTRIX_BACKEND_URL=https://inqtrix-api.example.com uv run python scripts/run_research_desk.py
+  ```
+
+- **Static hosting with a baked backend origin.** When the host cannot proxy
+  (a plain CDN, for example), bake the origin into the bundle at build time and
+  serve `dist/` as-is; the backend then needs CORS for that origin:
+
+  ```bash
+  VITE_INQTRIX_API_BASE_URL=https://inqtrix-api.example.com pnpm run ui:build   # or: npm run ui:build
+  ```
+
+Do not combine the two: a baked `VITE_INQTRIX_API_BASE_URL` makes the browser
+call that absolute origin directly and bypass the launcher/nginx proxy.
+
+The generated `apps/research-desk/dist/` directory is build output and is
+intentionally not committed. See [React UI](docs/deployment/react-ui.md) for the
+nginx two-pod (separate frontend and backend pods) topology, Kubernetes details,
+API-origin configuration, security, and full build/deployment notes. The
 Streamlit UI remains available for local operation, demos, and integration
 testing.
 

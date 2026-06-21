@@ -1,7 +1,6 @@
 <div align="center">
   <a name="readme-top"></a>
-  <img src="assets/inqtrix-png-logo-kit-v5/inqtrix-hero-lockup-light-transparent.png#gh-light-mode-only" alt="Inqtrix: iterative AI research agent" width="460">
-  <img src="assets/inqtrix-png-logo-kit-v5/inqtrix-hero-lockup-dark-transparent.png#gh-dark-mode-only" alt="Inqtrix: iterative AI research agent" width="460">
+  <img src="assets/inqtrix-png-logo-kit-v5/inqtrix-github-hero-compact-fullwidth.png" alt="Inqtrix: iterative AI research agent" width="100%">
 
   <p></p>
 

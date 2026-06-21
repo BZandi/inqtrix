@@ -4,7 +4,7 @@ Lets a single FastAPI process host multiple ``(providers, strategies,
 agent_settings)`` triples side by side. UIs pick one per request via a
 new ``body["stack"]`` top-level field, and a ``GET /v1/stacks``
 discovery endpoint exposes the available bundles plus a cached health
-flag so a Streamlit/React app can render a selection box without
+flag so a frontend can render a selection box without
 DDoSing the upstream providers.
 
 Single-stack ``create_app(...)`` is unaffected — multi-stack lives in
@@ -30,11 +30,10 @@ from inqtrix.model_cards import build_models_catalog
 from inqtrix.model_routing import describe_chat_model_options, describe_node_resolutions
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server.routes import create_router, register_routes
-from inqtrix.server.security import (
-    make_api_key_dependency,
-    make_cors_middleware_kwargs,
-)
+from inqtrix.auth.api_key import build_auth_provider
+from inqtrix.server.security import make_cors_middleware_kwargs
 from inqtrix.server.runs import RunStore
+from inqtrix.services.health_service import provider_label, provider_ready
 from inqtrix.settings import AgentSettings, Settings
 from inqtrix.strategies import StrategyContext, create_default_strategies, resolve_claim_extract_model
 
@@ -91,32 +90,10 @@ def _validate_stacks(
         )
 
 
-def _provider_label(provider: object) -> str:
-    """Mirror the helper in app.py — extract the public class name."""
-    wrapped = getattr(provider, "_provider", None)
-    if wrapped is not None:
-        return type(wrapped).__name__
-    return type(provider).__name__
-
-
-def _provider_ready(provider: object) -> bool:
-    """Probe the provider's is_available without raising."""
-    try:
-        checker = getattr(provider, "is_available", None)
-        return bool(checker()) if callable(checker) else False
-    except Exception as exc:  # noqa: BLE001
-        log.warning(
-            "Stack-Discovery-Health-Probe fuer %s fehlgeschlagen: %s",
-            _provider_label(provider),
-            exc,
-        )
-        return False
-
-
 class _DiscoveryCache:
     """Time-bound cache for the ``/v1/stacks`` payload.
 
-    ``is_available()`` may touch the network; callers (Streamlit
+    ``is_available()`` may touch the network; callers (a frontend
     polling every second) must not be allowed to fan out into a
     provider-call storm. The cache holds the rendered payload for
     ``_DISCOVERY_CACHE_TTL_SECONDS`` and re-renders thereafter.
@@ -158,10 +135,10 @@ class _DiscoveryCache:
             rendered.append(
                 {
                     "name": name,
-                    "llm": _provider_label(bundle.providers.llm),
-                    "search": _provider_label(bundle.providers.search),
-                    "ready": _provider_ready(bundle.providers.llm)
-                    and _provider_ready(bundle.providers.search),
+                    "llm": provider_label(bundle.providers.llm),
+                    "search": provider_label(bundle.providers.search),
+                    "ready": provider_ready(bundle.providers.llm, label=provider_label(bundle.providers.llm))
+                    and provider_ready(bundle.providers.search, label=provider_label(bundle.providers.search)),
                     "description": bundle.description,
                     "models": _stack_models_payload(bundle, default_agent_settings),
                 }
@@ -249,7 +226,7 @@ def create_multi_stack_app(
 
     The opt-in security layers (TLS, Bearer-API-key, CORS) come from
     ``settings.server`` exactly as in single-stack ``create_app``;
-    discovery stays unauthenticated by design (Streamlit/React UIs
+    discovery stays unauthenticated by design (frontends
     need to read the stack list before they have the API key form
     rendered).
 
@@ -315,9 +292,9 @@ def create_multi_stack_app(
 
     run_store = RunStore.from_settings(settings.server)
 
-    api_key_dependency = make_api_key_dependency(settings.server)
+    auth_provider = build_auth_provider(settings)
     cors_kwargs = make_cors_middleware_kwargs(settings.server)
-    api_key_active = api_key_dependency is not None
+    api_key_active = auth_provider.mode == "apikey"
     cors_active = cors_kwargs is not None
 
     discovery_cache = _DiscoveryCache()
@@ -338,8 +315,8 @@ def create_multi_stack_app(
             "on" if cors_active else "off",
         )
         for name, bundle in resolved_stacks.items():
-            llm_label = _provider_label(bundle.providers.llm)
-            search_label = _provider_label(bundle.providers.search)
+            llm_label = provider_label(bundle.providers.llm)
+            search_label = provider_label(bundle.providers.search)
             log.info(
                 "  stack=%s | llm=%s | search=%s | description=%s",
                 name,
@@ -381,7 +358,7 @@ def create_multi_stack_app(
         ),
         settings=settings,
         semaphore_factory=semaphore_factory,
-        api_key_dependency=api_key_dependency,
+        auth_provider=auth_provider,
         stacks=resolved_stacks,
         default_stack=default_stack,
         run_store=run_store,
@@ -396,11 +373,12 @@ def create_multi_stack_app(
             default_agent_settings=settings.agent,
         )
 
+    enable_openapi = settings.server.enable_openapi
     app = FastAPI(
         title="Inqtrix Research Agent (multi-stack)",
-        docs_url=None,
-        redoc_url=None,
-        openapi_url=None,
+        docs_url="/docs" if enable_openapi else None,
+        redoc_url="/redoc" if enable_openapi else None,
+        openapi_url="/openapi.json" if enable_openapi else None,
         lifespan=_lifespan,
     )
     if cors_kwargs is not None:

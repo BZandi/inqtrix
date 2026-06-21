@@ -5,6 +5,7 @@ import {
   FolderPlus,
   FolderOpen,
   GripVertical,
+  LoaderCircle,
   MessagesSquare,
   PanelLeftClose,
   SquarePen,
@@ -51,6 +52,12 @@ type ChatHistoryPanelProps = {
   onRenameThread: (threadId: string, title: string) => void
   onRenameThreadGroup: (groupId: string, title: string) => void
   onSelectThread: (threadId: string) => void
+  /** Server has older thread pages not yet loaded (on-demand history). */
+  hasMoreThreads?: boolean
+  /** A load-older page request is in flight (disables the button + shows busy). */
+  isLoadingMoreThreads?: boolean
+  /** Load the next page of older threads. */
+  onLoadMoreThreads?: () => void
   reduceMotion: boolean | null
   runningThreadIds: ReadonlySet<string>
   selectedThreadId: string | null
@@ -73,6 +80,9 @@ export function ChatHistoryPanel({
   onRenameThread,
   onRenameThreadGroup,
   onSelectThread,
+  hasMoreThreads,
+  isLoadingMoreThreads,
+  onLoadMoreThreads,
   reduceMotion,
   runningThreadIds,
   selectedThreadId,
@@ -433,6 +443,23 @@ export function ChatHistoryPanel({
               {t.chat.noThreads}
             </div>
           )}
+          {hasMoreThreads && onLoadMoreThreads ? (
+            <button
+              className="flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1.5 t-meta-sm text-muted-foreground hover:bg-accent/60 hover:text-foreground disabled:cursor-default disabled:opacity-60 disabled:hover:bg-transparent"
+              disabled={isLoadingMoreThreads}
+              onClick={() => onLoadMoreThreads()}
+              type="button"
+            >
+              {isLoadingMoreThreads ? (
+                <>
+                  <LoaderCircle className="icon-xs animate-spin" />
+                  {t.chat.loadingOlder}
+                </>
+              ) : (
+                t.chat.loadOlder
+              )}
+            </button>
+          ) : null}
         </div>
       </ScrollArea>
     </aside>

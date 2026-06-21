@@ -1,10 +1,14 @@
+import { Button } from '@/components/ui/button'
 import {
   AlertTriangle,
   BookOpen,
   Check,
   CircleUserRound,
   ExternalLink,
+  Gauge,
   Github,
+  KeyRound,
+  LayoutGrid,
   Monitor,
   Moon,
   Palette,
@@ -14,25 +18,73 @@ import {
   Shield,
   SlidersHorizontal,
   Sun,
+  Users,
   type LucideIcon,
 } from '@/components/icons'
 import { motion } from 'motion/react'
-import { useState, type ReactNode } from 'react'
+import { type FormEvent, useEffect, useState, type ReactNode } from 'react'
+import { changePassword, hasHttpStatus } from '@/api/inqtrixClient'
+import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
+import { isPasswordAcceptable } from '@/features/auth/passwordPolicy'
+import { AccessTokensPanel } from '@/features/admin/AccessTokensPanel'
+import { SystemStatusPanel } from '@/features/admin/SystemStatusPanel'
+import { AdminWorkspacesPanel } from '@/features/admin/AdminWorkspacesPanel'
+import { UsersPanel } from '@/features/admin/UsersPanel'
+import { seedSystemCapabilities, seedSystemHealth } from '@/features/admin/demo'
+import { useAdminSystemRuntime } from '@/features/admin/useAdminSystemRuntime'
+import { useAdminUsers } from '@/features/admin/useAdminUsers'
+import { useAdminWorkspaces } from '@/features/admin/useAdminWorkspaces'
+import { usePatTokens } from '@/features/admin/usePatTokens'
+import { type AuthMode, isCookieSessionMode } from '@/features/auth/authMode'
+import { isAdminRole } from '@/features/auth/roleAccess'
+import { QuotaAdminPanel } from '@/features/quota/QuotaAdminPanel'
+import { useQuotaAdmin } from '@/features/quota/useQuotaAdmin'
+import { DEMO_OWNER } from '@/features/sharing/demoShares'
+import {
+  SettingsRow,
+  SettingsRowBlock,
+  SettingsSection,
+  StatusBadge,
+} from '@/features/settings/parts'
 import { useLocale } from '@/i18n/LocaleProvider'
-import type { InqtrixHealth, StackDiscoveryStatus } from '@/features/researchRuns/types'
+import type {
+  InqtrixCapabilities,
+  InqtrixHealth,
+  StackDiscoveryStatus,
+} from '@/features/researchRuns/types'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
 import { useTheme, type ThemeMode, type ThemePreset } from '@/theme/ThemeProvider'
 
 type SettingsWorkspaceProps = {
+  apiCapabilities?: InqtrixCapabilities | null
   apiError: string | null
   apiHealth: InqtrixHealth | null
   apiKey: string
+  /** Active auth mode resolved by the desk (demo forces `none`). */
+  authMode?: AuthMode
+  /** Cookie-session facts; `role`/`sub` drive the instance-admin surface. */
+  authSession?: {
+    status: string
+    displayName: string | null
+    email: string | null
+    role?: string | null
+    sub?: string | null
+  }
   isDemoMode: boolean
+  /** Whether the server offers personal access tokens (auth-config
+   * discovery). `false` hides the access-tokens panel; `undefined`
+   * degrades open (treated as available). */
+  patAvailable?: boolean
   onApiKeyChange: (apiKey: string) => void
   onDemoModeChange: (enabled: boolean) => void
+  onSsoLogin?: () => void
+  onSsoLogout?: () => void
   onStackChange: (stack: string) => void
+  /** One-shot deep link: when set, the workspace focuses this
+   * section on mount/changes (the avatar menu's settings entry). */
+  requestedSection?: 'security' | null
   reduceMotion: boolean | null
   selectedStack: string
   stackDiscoveryStatus: StackDiscoveryStatus
@@ -40,10 +92,15 @@ type SettingsWorkspaceProps = {
 }
 
 type SettingsSectionId =
+  | 'access-tokens'
+  | 'admin-system'
+  | 'admin-users'
+  | 'admin-workspaces'
   | 'appearance'
   | 'connection'
   | 'licensing'
   | 'preferences'
+  | 'quotas'
   | 'security'
 
 type SettingsNavItem = {
@@ -55,27 +112,69 @@ type SettingsNavItem = {
 
 type SettingsNavGroup = {
   icon: LucideIcon
-  id: 'account' | 'application'
+  id: 'account' | 'application' | 'admin'
   items: SettingsNavItem[]
   label: string
 }
 
+const ADMIN_DATA_SECTION_IDS = new Set<SettingsSectionId>([
+  'admin-system',
+  'admin-users',
+  'admin-workspaces',
+  'quotas',
+])
+
 export default function SettingsWorkspace({
+  apiCapabilities,
   apiError,
   apiHealth,
   apiKey,
+  authMode = 'none',
+  authSession,
   isDemoMode,
+  patAvailable,
   onApiKeyChange,
   onDemoModeChange,
+  onSsoLogin,
+  onSsoLogout,
   onStackChange,
   reduceMotion,
+  requestedSection = null,
   selectedStack,
   stackDiscoveryStatus,
   stackOptions,
 }: SettingsWorkspaceProps) {
   const { contrastMode, preset, setContrastMode, setPreset, setTheme, theme } = useTheme()
   const { t } = useLocale()
+  // Instance administration is gated on the instance role (default-closed,
+  // [[roleAccess]]) or demo — the single platform-admin axis.
+  const instanceAdmin = isAdminRole(authSession?.role) || isDemoMode
+  // Quota administration is instance-admin power (tenant-wide); resolved once
+  // here so the nav gate and the panel share one hook instance.
+  const quotaAdmin = useQuotaAdmin({ instanceAdmin })
+  // Personal access tokens are per-user (session-scoped server-side), so they
+  // are available to ANY authenticated cookie session (or demo), independent
+  // of the admin role — not gated behind instance administration.
+  const tokensAvailable =
+    isDemoMode
+    || (authSession?.status === 'authenticated' && patAvailable !== false)
+  // The self row in demo is the seeded owner (the real session is anonymous
+  // in demo); otherwise the live session subject.
+  const sessionSub = isDemoMode ? DEMO_OWNER.subject : authSession?.sub ?? null
+  const adminSystemRuntime = useAdminSystemRuntime({
+    demo: isDemoMode,
+    enabled: instanceAdmin,
+  })
+  const adminUsers = useAdminUsers({ demo: isDemoMode, enabled: instanceAdmin })
+  const adminWorkspaces = useAdminWorkspaces({
+    demo: isDemoMode,
+    enabled: instanceAdmin,
+  })
+  const patTokens = usePatTokens({ demo: isDemoMode, enabled: tokensAvailable })
   const [activeSection, setActiveSection] = useState<SettingsSectionId>('preferences')
+  useEffect(() => {
+    if (requestedSection) setActiveSection(requestedSection)
+  }, [requestedSection])
   const modeOptions: Array<{
     icon: LucideIcon
     label: string
@@ -149,6 +248,19 @@ export default function SettingsWorkspace({
           id: 'security',
           label: t.settings.security,
         },
+        // Personal access tokens are per-user (session-scoped server-side),
+        // not an admin feature: any authenticated cookie-session user manages
+        // their OWN tokens, so this lives in the account group.
+        ...(tokensAvailable
+          ? [
+              {
+                description: t.adminTokens.navDescription,
+                icon: KeyRound,
+                id: 'access-tokens' as const,
+                label: t.adminTokens.navLabel,
+              },
+            ]
+          : []),
       ],
     },
     {
@@ -170,6 +282,58 @@ export default function SettingsWorkspace({
         },
       ],
     },
+    // Admin section: the single platform-admin axis (instance role, or demo).
+    // Each item is independently gated — Users/System on the admin role,
+    // Quotas additionally on the quota capability being enabled — so a
+    // non-admin never sees the group, and an admin without quotas enabled
+    // sees Users/System but not Quotas.
+    ...(instanceAdmin
+      ? [
+          {
+            icon: Shield,
+            id: 'admin' as const,
+            label: t.settings.admin,
+            items: [
+              ...(instanceAdmin
+                ? [
+                    {
+                      description: t.adminUsers.navDescription,
+                      icon: Users,
+                      id: 'admin-users' as const,
+                      label: t.adminUsers.navLabel,
+                    },
+                    {
+                      description: t.adminWorkspaces.navDescription,
+                      icon: LayoutGrid,
+                      id: 'admin-workspaces' as const,
+                      label: t.adminWorkspaces.navLabel,
+                    },
+                  ]
+                : []),
+              ...(quotaAdmin.state.available
+                ? [
+                    {
+                      description: t.quotaAdmin.navDescription,
+                      icon: Gauge,
+                      id: 'quotas' as const,
+                      label: t.quotaAdmin.navLabel,
+                    },
+                  ]
+                : []),
+              ...(instanceAdmin
+                ? [
+                    {
+                      description: t.adminSystem.navDescription,
+                      icon: Server,
+                      id: 'admin-system' as const,
+                      label: t.adminSystem.navLabel,
+                    },
+                  ]
+                : []),
+            ],
+          },
+        ]
+      : []),
   ]
   const standaloneItems: SettingsNavItem[] = [
     {
@@ -195,10 +359,18 @@ export default function SettingsWorkspace({
       />
       <SettingsPanel
         activeItem={activeItem}
+        adminUsers={adminUsers}
+        adminSystemRuntime={adminSystemRuntime}
+        adminWorkspaces={adminWorkspaces}
         apiBaseUrl={apiBaseUrl}
+        apiCapabilities={apiCapabilities ?? null}
         apiError={apiError}
         apiHealth={apiHealth}
         apiKey={apiKey}
+        authMode={authMode}
+        authSession={authSession}
+        onSsoLogin={onSsoLogin}
+        onSsoLogout={onSsoLogout}
         contrastMode={contrastMode}
         hasMultiStackSelection={hasMultiStackSelection}
         isDemoMode={isDemoMode}
@@ -207,10 +379,13 @@ export default function SettingsWorkspace({
         onApiKeyChange={onApiKeyChange}
         onDemoModeChange={onDemoModeChange}
         onStackChange={onStackChange}
+        patTokens={patTokens}
         preset={preset}
         presetOptions={presetOptions}
         projectSourceUrl={projectSourceUrl}
+        quotaAdmin={quotaAdmin}
         selectedStack={selectedStack}
+        sessionSub={sessionSub}
         setContrastMode={setContrastMode}
         setPreset={setPreset}
         setTheme={setTheme}
@@ -234,7 +409,7 @@ function SettingsShell({
     <div className="flex min-h-0 w-full bg-canvas lg:h-full">
       <motion.section
         animate={{ opacity: 1, y: 0 }}
-        className="grid min-h-[calc(100svh-var(--header-h))] w-full grid-rows-[auto_minmax(0,1fr)] lg:h-full lg:min-h-0 lg:grid-cols-[240px_minmax(0,1fr)] lg:grid-rows-1"
+        className="grid min-h-[calc(100svh-var(--header-h))] w-full grid-rows-[auto_minmax(0,1fr)] lg:h-full lg:min-h-0 lg:grid-cols-[224px_minmax(0,1fr)] lg:grid-rows-1"
         initial={reduceMotion ? false : { opacity: 0, y: 8 }}
         transition={appMotion.panel}
       >
@@ -260,42 +435,33 @@ function SettingsSidebar({
   const { t } = useLocale()
 
   return (
-    <aside className="min-w-0 border-b border-border bg-background/95 backdrop-blur lg:border-b-0 lg:border-r">
-      <div className="flex items-start justify-between gap-4 px-4 py-4 md:px-5 lg:block lg:px-5 lg:pb-4 lg:pt-5">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <Settings className="icon-md text-muted-foreground" />
-            <h1 className="t-title text-foreground">{t.settings.title}</h1>
-          </div>
-          <p className="mt-1 hidden max-w-48 t-meta text-muted-foreground lg:block">
-            {t.settings.settingsDescription}
-          </p>
+    <aside className="flex min-w-0 flex-col border-b border-border bg-surface/50 backdrop-blur lg:border-b-0 lg:border-r">
+      <div className="h-[60px] border-b border-border px-2">
+        <div className="flex h-full min-w-0 items-center gap-2 border-l-2 border-transparent px-2">
+          <Settings className="icon-sm shrink-0 text-foreground/80" />
+          <h1 className="truncate t-section text-foreground">{t.settings.title}</h1>
         </div>
-        <StatusBadge
-          className="lg:mt-4"
-          label={isDemoMode ? t.common.demoMode : t.settings.localWorkspace}
-          tone={isDemoMode ? 'brand' : 'neutral'}
-        />
       </div>
       <nav
         aria-label={t.settings.sectionsLabel}
-        className="flex gap-2 overflow-x-auto px-4 pb-3 [scrollbar-width:none] md:px-5 lg:block lg:space-y-4 lg:overflow-visible lg:px-3 lg:pb-5 [&::-webkit-scrollbar]:hidden"
+        className="flex gap-2 overflow-x-auto px-3 py-2 [scrollbar-width:none] lg:block lg:min-h-0 lg:flex-1 lg:space-y-3 lg:overflow-y-auto lg:px-2 lg:pb-3 [&::-webkit-scrollbar]:hidden"
       >
         {groups.map((group) => {
           const GroupIcon = group.icon
 
           return (
             <div className="flex shrink-0 items-center gap-1.5 lg:block" key={group.id}>
-              <p className="hidden h-8 items-center gap-2 rounded-md px-2 t-label text-foreground lg:flex">
-                <GroupIcon className="icon-md text-muted-foreground" />
+              <p className="hidden h-6 items-center gap-1.5 px-2 t-caption text-foreground lg:flex">
+                <GroupIcon className="icon-sm text-foreground/70" />
                 {group.label}
               </p>
-              <div className="flex gap-1.5 lg:ml-6 lg:flex-col lg:gap-1">
+              <div className="flex gap-1.5 lg:relative lg:flex-col lg:gap-0.5 lg:pl-6 lg:before:absolute lg:before:bottom-1 lg:before:left-3 lg:before:top-1 lg:before:w-px lg:before:bg-muted-foreground/25 lg:before:content-['']">
                 {group.items.map((item) => (
                   <SettingsNavButton
                     item={item}
                     isActive={activeSection === item.id}
                     key={item.id}
+                    nested
                     onClick={() => onSectionChange(item.id)}
                   />
                 ))}
@@ -305,7 +471,7 @@ function SettingsSidebar({
         })}
         {standaloneItems.length > 0 ? (
           <div className="flex shrink-0 items-center gap-1.5 lg:block">
-            <div className="flex gap-1.5 lg:flex-col lg:gap-1">
+            <div className="flex gap-1.5 lg:flex-col lg:gap-0.5">
               {standaloneItems.map((item) => (
                 <SettingsNavButton
                   item={item}
@@ -318,6 +484,14 @@ function SettingsSidebar({
           </div>
         ) : null}
       </nav>
+      <footer className="hidden border-t border-border px-3 py-2 lg:flex lg:items-center lg:justify-between lg:gap-2">
+        <span className="t-caption text-muted-foreground">{t.settings.mode}</span>
+        <StatusBadge
+          density="table"
+          label={isDemoMode ? t.common.demoMode : t.settings.localWorkspace}
+          tone={isDemoMode ? 'brand' : 'neutral'}
+        />
+      </footer>
     </aside>
   )
 }
@@ -325,10 +499,12 @@ function SettingsSidebar({
 function SettingsNavButton({
   isActive,
   item,
+  nested = false,
   onClick,
 }: {
   isActive: boolean
   item: SettingsNavItem
+  nested?: boolean
   onClick: () => void
 }) {
   const Icon = item.icon
@@ -337,21 +513,16 @@ function SettingsNavButton({
     <button
       aria-current={isActive ? 'page' : undefined}
       className={cn(
-        'relative flex h-9 shrink-0 items-center gap-2 rounded-md border border-transparent px-3 text-muted-foreground transition hover:border-border hover:bg-card hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:h-8 lg:w-full lg:justify-start lg:px-2',
-        isActive && 'border-brand/20 bg-brand-subtle text-brand shadow-[0_1px_2px_var(--shadow-hairline)] hover:border-brand/20 hover:bg-brand-subtle hover:text-brand',
+        'relative flex h-8 shrink-0 items-center gap-2 rounded-md border-l-2 border-transparent px-2 text-muted-foreground transition-colors hover:bg-accent/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:h-7 lg:w-full lg:justify-start',
+        nested && 'lg:-ml-6 lg:w-[calc(100%+1.5rem)] lg:pl-8 lg:before:absolute lg:before:left-[9.5px] lg:before:top-1/2 lg:before:size-1.5 lg:before:-translate-y-1/2 lg:before:rounded-full lg:before:bg-muted-foreground/60 lg:before:content-[""] lg:hover:before:bg-muted-foreground/80',
+        isActive && 'border-brand bg-brand-subtle text-brand hover:bg-brand-subtle hover:text-brand',
+        nested && isActive && 'lg:before:bg-brand',
       )}
       onClick={onClick}
       title={item.description}
       type="button"
     >
-      <span
-        aria-hidden
-        className={cn(
-          'absolute left-0 top-1/2 hidden h-4 w-0.5 -translate-y-1/2 rounded-full bg-transparent lg:block',
-          isActive && 'bg-brand',
-        )}
-      />
-      <Icon className="icon-md shrink-0" />
+      <Icon className="icon-sm shrink-0" />
       <span className="t-list whitespace-nowrap">{item.label}</span>
     </button>
   )
@@ -359,10 +530,18 @@ function SettingsNavButton({
 
 function SettingsPanel({
   activeItem,
+  adminUsers,
+  adminSystemRuntime,
+  adminWorkspaces,
   apiBaseUrl,
+  apiCapabilities,
   apiError,
   apiHealth,
   apiKey,
+  authMode,
+  authSession,
+  onSsoLogin,
+  onSsoLogout,
   contrastMode,
   hasMultiStackSelection,
   isDemoMode,
@@ -371,10 +550,13 @@ function SettingsPanel({
   onApiKeyChange,
   onDemoModeChange,
   onStackChange,
+  patTokens,
   preset,
   presetOptions,
   projectSourceUrl,
+  quotaAdmin,
   selectedStack,
+  sessionSub,
   setContrastMode,
   setPreset,
   setTheme,
@@ -384,10 +566,24 @@ function SettingsPanel({
   theme,
 }: {
   activeItem: SettingsNavItem
+  adminUsers: ReturnType<typeof useAdminUsers>
+  adminSystemRuntime: ReturnType<typeof useAdminSystemRuntime>
+  adminWorkspaces: ReturnType<typeof useAdminWorkspaces>
   apiBaseUrl: string
+  apiCapabilities: InqtrixCapabilities | null
   apiError: string | null
   apiHealth: InqtrixHealth | null
   apiKey: string
+  authMode?: AuthMode
+  authSession?: {
+    status: string
+    displayName: string | null
+    email: string | null
+    role?: string | null
+    sub?: string | null
+  }
+  onSsoLogin?: () => void
+  onSsoLogout?: () => void
   contrastMode: 'high' | 'standard'
   hasMultiStackSelection: boolean
   isDemoMode: boolean
@@ -400,6 +596,7 @@ function SettingsPanel({
   onApiKeyChange: (apiKey: string) => void
   onDemoModeChange: (enabled: boolean) => void
   onStackChange: (stack: string) => void
+  patTokens: ReturnType<typeof usePatTokens>
   preset: ThemePreset
   presetOptions: Array<{
     accent: string
@@ -409,7 +606,9 @@ function SettingsPanel({
     value: ThemePreset
   }>
   projectSourceUrl: string
+  quotaAdmin: ReturnType<typeof useQuotaAdmin>
   selectedStack: string
+  sessionSub: string | null
   setContrastMode: (mode: 'high' | 'standard') => void
   setPreset: (preset: ThemePreset) => void
   setTheme: (theme: ThemeMode) => void
@@ -418,9 +617,16 @@ function SettingsPanel({
   stackOptions: string[]
   theme: ThemeMode
 }) {
+  const isAdminDataSection = ADMIN_DATA_SECTION_IDS.has(activeItem.id)
+
   return (
-    <main className="min-h-0 overflow-y-auto overscroll-contain px-4 py-5 [scrollbar-gutter:stable] [scrollbar-width:thin] md:px-6 lg:px-8 xl:px-10">
-      <div className="flex max-w-[920px] flex-col gap-6 pb-8">
+    <main className="min-h-0 overflow-y-auto overscroll-contain px-4 py-4 [scrollbar-gutter:stable] [scrollbar-width:thin] md:px-6 lg:px-8 lg:py-0 xl:px-10">
+      <div
+        className={cn(
+          'flex w-full flex-col gap-4 pb-8',
+          isAdminDataSection ? 'max-w-none' : 'max-w-[920px]',
+        )}
+      >
         <SettingsPanelHeader item={activeItem} />
         {activeItem.id === 'preferences' ? (
           <PreferencesPanel
@@ -431,7 +637,11 @@ function SettingsPanel({
           <SecurityPanel
             apiHealth={apiHealth}
             apiKey={apiKey}
+            authMode={authMode}
+            authSession={authSession}
             onApiKeyChange={onApiKeyChange}
+            onSsoLogin={onSsoLogin}
+            onSsoLogout={onSsoLogout}
           />
         ) : activeItem.id === 'appearance' ? (
           <AppearancePanel
@@ -456,6 +666,29 @@ function SettingsPanel({
             stackModeLabel={stackModeLabel}
             stackOptions={stackOptions}
           />
+        ) : activeItem.id === 'admin-users' ? (
+          <UsersPanel
+            admin={adminUsers}
+            mode={authMode ?? 'none'}
+            sessionSub={sessionSub}
+          />
+        ) : activeItem.id === 'admin-workspaces' ? (
+          <AdminWorkspacesPanel
+            admin={adminWorkspaces}
+            users={adminUsers.state.users}
+          />
+        ) : activeItem.id === 'access-tokens' ? (
+          <AccessTokensPanel tokens={patTokens} />
+        ) : activeItem.id === 'admin-system' ? (
+          <SystemStatusPanel
+            capabilities={isDemoMode ? seedSystemCapabilities() : apiCapabilities}
+            health={isDemoMode ? seedSystemHealth() : apiHealth}
+            runtime={adminSystemRuntime.state.runtime}
+            runtimeError={adminSystemRuntime.state.error}
+            runtimeStatus={adminSystemRuntime.state.status}
+          />
+        ) : activeItem.id === 'quotas' ? (
+          <QuotaAdminPanel admin={quotaAdmin} />
         ) : (
           <LicensingPanel
             legal={legal}
@@ -469,9 +702,9 @@ function SettingsPanel({
 
 function SettingsPanelHeader({ item }: { item: SettingsNavItem }) {
   return (
-    <header className="min-w-0 border-b border-border pb-4">
+    <header className="flex h-[60px] min-w-0 flex-col justify-center border-b border-border">
       <h2 className="t-section text-foreground">{item.label}</h2>
-      <p className="mt-1 max-w-2xl t-body text-muted-foreground">
+      <p className="mt-0.5 max-w-2xl truncate t-meta text-muted-foreground">
         {item.description}
       </p>
     </header>
@@ -489,9 +722,9 @@ function PreferencesPanel({
 
   return (
     <SettingsSection>
-      <div className="flex flex-col gap-3 px-4 py-3.5 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
+      <div className="flex flex-col gap-2.5 px-3 py-3 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
         <div className="min-w-0 sm:flex-1">
-          <h4 className="t-card text-foreground">{t.settings.demoMode}</h4>
+          <h4 className="t-list text-foreground">{t.settings.demoMode}</h4>
           <p className="mt-0.5 t-meta text-muted-foreground">{t.settings.demoModeDescription}</p>
           <div
             className="mt-2 flex gap-2 rounded-md border border-warning/25 bg-warning-subtle/35 p-2.5 t-meta text-foreground"
@@ -540,14 +773,63 @@ function PreferencesPanel({
 function SecurityPanel({
   apiHealth,
   apiKey,
+  authMode = 'none',
+  authSession,
   onApiKeyChange,
+  onSsoLogin,
+  onSsoLogout,
 }: {
   apiHealth: InqtrixHealth | null
   apiKey: string
+  authMode?: AuthMode
+  authSession?: { status: string; displayName: string | null; email: string | null }
   onApiKeyChange: (apiKey: string) => void
+  onSsoLogin?: () => void
+  onSsoLogout?: () => void
 }) {
   const { t } = useLocale()
   const shouldShowTokenInput = apiHealth?.auth_required || apiKey
+
+  // Every cookie-session mode (oidc/local/ldap) shows the identity + a
+  // sign-out row, NOT the inert Bearer-token input — auth rides the session
+  // cookie there, so a token field would do nothing and offer no logout.
+  if (isCookieSessionMode(authMode)) {
+    const signedIn = authSession?.status === 'authenticated'
+    return (
+      <div className="flex flex-col gap-6">
+        <SettingsSection>
+          <SettingsRow
+            description={
+              signedIn
+                ? authSession?.email ?? t.settings.ssoSignedInDescription
+                : t.settings.ssoSignedOutDescription
+            }
+            title={
+              signedIn
+                ? t.settings.ssoSignedInAs.replace(
+                    '{name}',
+                    authSession?.displayName ?? authSession?.email ?? '?',
+                  )
+                : t.settings.ssoTitle
+            }
+          >
+            {signedIn ? (
+              <Button onClick={onSsoLogout} size="sm" variant="outline">
+                {t.settings.ssoLogout}
+              </Button>
+            ) : (
+              <Button onClick={onSsoLogin} size="sm">
+                {t.settings.ssoLogin}
+              </Button>
+            )}
+          </SettingsRow>
+        </SettingsSection>
+        {/* Only local accounts have a password Inqtrix owns; ldap/oidc
+            passwords live upstream. */}
+        {authMode === 'local' && signedIn ? <ChangePasswordSection /> : null}
+      </div>
+    )
+  }
 
   return (
     <SettingsSection>
@@ -575,6 +857,131 @@ function SecurityPanel({
         </SettingsRow>
       )}
     </SettingsSection>
+  )
+}
+
+function ChangePasswordSection() {
+  const { t } = useLocale()
+  const [current, setCurrent] = useState('')
+  const [next, setNext] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [status, setStatus] = useState<'idle' | 'saving' | 'done'>('idle')
+  const [error, setError] = useState<string | null>(null)
+
+  const canSubmit =
+    current.length > 0 &&
+    isPasswordAcceptable(next) &&
+    next === confirm &&
+    status !== 'saving'
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setError(null)
+    if (next !== confirm) {
+      setError(t.changePassword.mismatch)
+      return
+    }
+    setStatus('saving')
+    try {
+      await changePassword({ currentPassword: current, newPassword: next })
+      setStatus('done')
+      setCurrent('')
+      setNext('')
+      setConfirm('')
+    } catch (caught) {
+      setError(
+        hasHttpStatus(caught, 401)
+          ? t.changePassword.wrongCurrent
+          : t.changePassword.failed,
+      )
+      setStatus('idle')
+    }
+  }
+
+  return (
+    <SettingsSection
+      description={t.changePassword.description}
+      title={t.changePassword.title}
+    >
+      <form className="space-y-4 px-3 py-3" onSubmit={handleSubmit}>
+        <PasswordField
+          autoComplete="current-password"
+          id="cp-current"
+          label={t.changePassword.current}
+          onChange={(value) => {
+            setCurrent(value)
+            setStatus('idle')
+          }}
+          value={current}
+        />
+        <PasswordField
+          autoComplete="new-password"
+          id="cp-next"
+          label={t.changePassword.next}
+          onChange={setNext}
+          value={next}
+        />
+        <PasswordField
+          autoComplete="new-password"
+          id="cp-confirm"
+          label={t.changePassword.confirm}
+          onChange={setConfirm}
+          value={confirm}
+        />
+        {error ? (
+          <p className="t-meta text-destructive" role="alert">
+            {error}
+          </p>
+        ) : null}
+        {status === 'done' ? (
+          <p className="t-meta text-success" role="status">
+            {t.changePassword.success}
+          </p>
+        ) : null}
+        <div className="flex justify-end">
+          <Button
+            className="bg-brand text-brand-foreground hover:bg-brand/90"
+            disabled={!canSubmit}
+            size="sm"
+            type="submit"
+          >
+            {status === 'saving'
+              ? t.changePassword.submitting
+              : t.changePassword.submit}
+          </Button>
+        </div>
+      </form>
+    </SettingsSection>
+  )
+}
+
+function PasswordField({
+  autoComplete,
+  id,
+  label,
+  onChange,
+  value,
+}: {
+  autoComplete: string
+  id: string
+  label: string
+  onChange: (value: string) => void
+  value: string
+}) {
+  return (
+    <div>
+      <label className="t-label mb-1.5 block text-foreground" htmlFor={id}>
+        {label}
+      </label>
+      <Input
+        autoComplete={autoComplete}
+        className="sm:max-w-sm"
+        id={id}
+        onChange={(event) => onChange(event.target.value)}
+        type="password"
+        value={value}
+      />
+    </div>
   )
 }
 
@@ -714,7 +1121,7 @@ function ConnectionPanel({
         description={t.settings.apiStatusDescription}
         title={t.settings.apiConnection}
       >
-        <div className="grid gap-2 px-4 py-3.5">
+        <div className="grid gap-2 px-3 py-3">
           <div className="flex flex-wrap items-center gap-2">
             <StatusBadge
               label={apiHealth?.status ?? t.settings.notConnected}
@@ -738,7 +1145,7 @@ function ConnectionPanel({
           description={t.settings.providerMetadataDescription}
           title={t.settings.providerMetadata}
         >
-          <div className="grid gap-1 px-4 py-3.5 t-meta text-muted-foreground sm:grid-cols-2">
+          <div className="grid gap-1 px-3 py-3 t-meta text-muted-foreground sm:grid-cols-2">
             <span className="min-w-0 truncate">
               {t.settings.llmProvider}: <strong className="font-semibold text-foreground">{apiHealth.llm.provider}</strong>
             </span>
@@ -778,7 +1185,7 @@ function ConnectionPanel({
           description={t.settings.activeModelsDescription}
           title={t.settings.activeModels}
         >
-          <div className="grid gap-x-6 gap-y-1.5 px-4 py-3.5 t-meta sm:grid-cols-2">
+          <div className="grid gap-x-6 gap-y-1.5 px-3 py-3 t-meta sm:grid-cols-2">
             {modelRows.map((row) => (
               <span className="min-w-0 truncate text-muted-foreground" key={row.label}>
                 {row.label}: <strong className="font-semibold text-foreground">{row.value}</strong>
@@ -814,10 +1221,11 @@ function LicensingPanel({
   projectSourceUrl: string
 }) {
   const { t } = useLocale()
+  const warrantyLines = splitWarrantyNotice(legal?.warranty_notice ?? t.authLock.warrantyNotice)
 
   return (
     <SettingsSection>
-      <SettingsRow
+      <LicensingInfoRow
         description={legal?.copyright ?? t.authLock.copyright}
         title={legal?.project ?? t.appName}
       >
@@ -825,116 +1233,101 @@ function LicensingPanel({
           label={legal?.license ?? t.authLock.licenseLabel}
           tone="brand"
         />
-      </SettingsRow>
-      <SettingsRow title={t.settings.projectSource}>
-        <span className="block min-w-0 break-words t-meta text-foreground sm:text-right">
+      </LicensingInfoRow>
+      <LicensingInfoRow title={t.settings.projectSource}>
+        <span className="block min-w-0 break-words t-meta text-foreground">
           {projectSourceUrl}
         </span>
-      </SettingsRow>
-      <SettingsRow title={t.settings.legalNotice}>
-        <span className="block min-w-0 break-words t-meta text-foreground sm:text-right">
+      </LicensingInfoRow>
+      <LicensingInfoRow title={t.settings.legalNotice}>
+        <span className="block min-w-0 break-words t-meta text-foreground">
           {legal?.notice ?? t.settings.attributionNotice}
         </span>
-      </SettingsRow>
-      <SettingsRow title={t.settings.warranty}>
-        <span className="block min-w-0 break-words t-meta text-foreground sm:text-right">
-          {legal?.warranty_notice ?? t.authLock.warrantyNotice}
+      </LicensingInfoRow>
+      <LicensingInfoRow title={t.settings.warranty}>
+        <span className="block min-w-0 t-meta text-foreground">
+          {warrantyLines.map((line) => (
+            <span className="block" key={line}>{line}</span>
+          ))}
         </span>
-      </SettingsRow>
-      <SettingsRow
-        description={t.settings.commercialLicensing}
-        title={t.settings.legalResources}
-      >
-        <div className="flex flex-wrap gap-2 sm:justify-end">
-          <SettingsLink
-            href={projectSourceUrl}
-            icon={Github}
-            label={t.authLock.repositoryLabel}
-          />
-          <SettingsLink
-            href={t.authLock.documentationUrl}
-            icon={BookOpen}
-            label={t.authLock.documentationLabel}
-          />
-          <SettingsLink
-            href={t.authLock.licenseUrl}
-            icon={Scale}
-            label={t.authLock.licenseLabel}
-          />
+      </LicensingInfoRow>
+
+      <div className="bg-surface/30 px-3 py-3">
+        <div className="flex items-center gap-1.5 t-caption text-foreground">
+          <Scale className="icon-sm" />
+          {t.authLock.noticeTitle}
         </div>
-      </SettingsRow>
+        <ul className="mt-2 grid gap-x-5 gap-y-1.5 sm:grid-cols-2">
+          {t.authLock.notices.map((notice) => (
+            <li className="flex gap-2 t-meta-sm text-muted-foreground" key={notice}>
+              <span className="mt-1.5 size-1 shrink-0 rounded-full bg-muted-foreground/60" />
+              <span>{notice}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <footer className="bg-surface/45 px-3 py-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <h3 className="t-list text-foreground">{t.settings.legalResources}</h3>
+            <p className="mt-0.5 max-w-xl t-meta text-muted-foreground">
+              {t.settings.legalResourcesDescription}
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 sm:justify-end">
+            <SettingsLink
+              href={projectSourceUrl}
+              icon={Github}
+              label={t.authLock.repositoryLabel}
+            />
+            <SettingsLink
+              href={t.authLock.documentationUrl}
+              icon={BookOpen}
+              label={t.authLock.documentationLabel}
+            />
+            <SettingsLink
+              href={t.authLock.licenseUrl}
+              icon={Scale}
+              label={t.authLock.licenseLabel}
+            />
+          </div>
+        </div>
+      </footer>
     </SettingsSection>
   )
 }
 
-function SettingsSection({
+function LicensingInfoRow({
   children,
   description,
   title,
 }: {
   children: ReactNode
   description?: string
-  title?: string
-}) {
-  return (
-    <section className="overflow-hidden rounded-lg border border-border bg-card shadow-[0_1px_2px_var(--shadow-hairline)]">
-      {title ? (
-        <div className="border-b border-border px-4 py-3">
-          <h3 className="t-section text-foreground">{title}</h3>
-          {description ? (
-            <p className="mt-0.5 t-meta text-muted-foreground">{description}</p>
-          ) : null}
-        </div>
-      ) : null}
-      <div className="divide-y divide-border">{children}</div>
-    </section>
-  )
-}
-
-function SettingsRow({
-  children,
-  description,
-  descriptionId,
-  title,
-}: {
-  children: ReactNode
-  description?: string
-  descriptionId?: string
   title: string
 }) {
   return (
-    <div className="flex flex-col gap-3 px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
-      <div className="min-w-0 sm:flex-1">
-        <h4 className="t-card text-foreground">{title}</h4>
+    <div className="grid gap-2 px-3 py-3 sm:grid-cols-[220px_minmax(0,1fr)] sm:gap-6">
+      <div className="min-w-0">
+        <h3 className="t-list text-foreground">{title}</h3>
         {description ? (
-          <p className="mt-0.5 t-meta text-muted-foreground" id={descriptionId}>
-            {description}
-          </p>
+          <p className="mt-0.5 t-meta text-muted-foreground">{description}</p>
         ) : null}
       </div>
-      <div className="min-w-0 shrink-0 sm:max-w-[60%] sm:text-right">{children}</div>
+      <div className="flex min-w-0 items-start sm:justify-end">
+        <div className="min-w-0 sm:text-right">{children}</div>
+      </div>
     </div>
   )
 }
 
-function SettingsRowBlock({
-  children,
-  description,
-  title,
-}: {
-  children: ReactNode
-  description?: string
-  title: string
-}) {
-  return (
-    <div className="px-4 py-3.5">
-      <h4 className="t-card text-foreground">{title}</h4>
-      {description ? (
-        <p className="mt-0.5 t-meta text-muted-foreground">{description}</p>
-      ) : null}
-      <div className="mt-3">{children}</div>
-    </div>
-  )
+function splitWarrantyNotice(notice: string): string[] {
+  const lines = notice.split(/;\s+/).map((line) => line.trim()).filter(Boolean)
+
+  return lines.map((line, index) => (
+    index < lines.length - 1 && !/[.!?]$/.test(line) ? `${line}.` : line
+  ))
 }
 
 function SettingsSegmented<T extends string>({
@@ -983,30 +1376,6 @@ function SettingsSegmented<T extends string>({
   )
 }
 
-function StatusBadge({
-  className,
-  label,
-  tone,
-}: {
-  className?: string
-  label: string
-  tone: 'brand' | 'neutral' | 'success' | 'warning'
-}) {
-  return (
-    <span
-      className={cn(
-        'inline-flex h-7 shrink-0 items-center rounded-md border px-2 text-xs font-semibold',
-        tone === 'brand' && 'border-brand/25 bg-brand-subtle text-brand',
-        tone === 'neutral' && 'border-border bg-background text-muted-foreground',
-        tone === 'success' && 'border-success/20 bg-success-subtle text-success',
-        tone === 'warning' && 'border-warning/25 bg-warning/10 text-warning',
-        className,
-      )}
-    >
-      {label}
-    </span>
-  )
-}
 
 function SettingsLink({
   href,

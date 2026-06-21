@@ -35,30 +35,17 @@ See [Result schema](../architecture/result-schema.md) and [Parity tooling](../de
 
 The default user base is German-speaking. Prompt strings in `src/inqtrix/prompts.py` are the single exception to the English-only convention (the other exceptions are UI-facing HTTP error strings and demo questions in `examples/`). There is no public prompt-dictionary field on `AgentConfig` today; to switch to English, fork or edit the prompt templates, or wrap the relevant provider/strategy in your application.
 
-## Is there a Streamlit UI?
-
-Yes, `webapp.py` at the repository root is a Streamlit chat interface that talks to the HTTP server. It is a useful prototype frontend, not a hardened multi-user product surface. Start it with `streamlit run webapp.py` after the server is running. See [Streamlit UI](../deployment/streamlit-ui.md).
-
 ## Can I build a React UI with live research cards?
 
 Yes. The repository now includes the foundation for a React + Vite + shadcn app in `apps/research-desk`. Use the native `/v1/runs` API instead of `/v1/chat/completions`: `POST /v1/runs` creates a queued run, `GET /v1/runs/{run_id}/events` streams structured progress snapshots, and `GET /v1/runs/{run_id}/result` returns the final markdown report plus metrics/sources/claims. See [React UI](../deployment/react-ui.md) and [Run events](../observability/run-events.md).
 
 Completed run records are intentionally short-lived in memory (`RUN_COMPLETED_TTL_SECONDS`, default 300). They do not survive server restart and are not a durable report archive. Persist the result payload in your application database if the UI must restore completed reports after refresh.
 
-## How do I point the Streamlit UI to a server IP?
-
-Set `INQTRIX_WEBAPP_BASE_URL` before starting Streamlit, for example:
-
-```bash
-INQTRIX_WEBAPP_BASE_URL=http://192.168.1.42:5100 \
-  uv run streamlit run webapp.py
-```
-
-If that variable is not set, the UI does not auto-probe localhost. Enter the URL manually in the sidebar and click **Apply**.
-
 ## Can I ship Inqtrix as a service to end-users?
 
-The repository is explicitly experimental (see the disclaimer in the root `README.md`). The `examples/webserver_stacks/` bundle ships opt-in TLS, API-key, and CORS hardening, but there is no rate limiter, OAuth2/OIDC layer, per-IP throttling, or multi-worker run-result sharing. Deploying to external users requires a reverse proxy and additional hardening that is explicitly out of scope.
+The repository is explicitly experimental (see the disclaimer in the root `README.md`), but Stack mode ships real multi-user authentication: native email/password (`local`), LDAP/AD bind (`ldap`), and OIDC SSO (`oidc`), each with per-user access tokens and login brute-force throttling (`INQTRIX_LOGIN_RATE_LIMIT_*`). See [Auth modes](../deployment/auth-modes.md) and [Deploy to production](../how-to/deploy-to-production.md).
+
+Still out of scope, and what a reverse proxy / WAF in front must add: general per-request (per-IP) rate limiting beyond the login throttle, and durable cross-worker sharing of completed native run results — finished runs live in memory with a TTL (`RUN_COMPLETED_TTL_SECONDS`), so persist the result payload yourself if a UI must restore reports after a restart. Always terminate TLS in front for remote exposure.
 
 See [Security hardening](../deployment/security-hardening.md).
 

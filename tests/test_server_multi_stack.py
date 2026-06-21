@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-import inqtrix.server.routes as routes_module
+import inqtrix.research.web_research as web_research_module
 from inqtrix.providers.base import ProviderContext
 from inqtrix.search_result import GroundedSearchResult
 from inqtrix.server.stacks import (
@@ -324,7 +324,7 @@ def _patched_agent_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},
         }
 
-    monkeypatch.setattr(routes_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
     return captured
 
 

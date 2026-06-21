@@ -242,6 +242,33 @@ in CI.
 6. **Run the full suite.** `uv run pytest tests/ -v` should stay
    fully green.
 
+## Retrieval evaluation (tests/eval/)
+
+A fifth, quality-focused layer gates retrieval changes (embedding
+models, store backends, chunking): a committed German golden set
+(10 corpus documents, 50 labeled queries under
+[`tests/eval/golden/`](../../tests/eval/golden/)) graded with
+document-level recall@k, MRR, and nDCG@5.
+
+| Suite | Runs | Purpose |
+|---|---|---|
+| `test_metrics.py` | always (offline) | Metric math against hand-computed values; golden-set label integrity. |
+| `test_retrieval_smoke.py` | always (offline) | The harness end to end with stub embeddings — proves ingestion/search/report wiring, NOT quality. |
+| `test_retrieval_eval.py` | only with `INQTRIX_EVAL_EMBEDDING_BASE_URL` (+ `_API_KEY`, `_MODEL`) | Real-embedding quality against the committed per-model baseline in `tests/eval/baselines/`. |
+
+Baseline workflow: the first gated run for a model writes a JSON
+artifact (`tests/eval/artifacts/`, gitignored) and skips with a
+pointer; establishing the baseline is a deliberate commit of the
+aggregate metrics. Later runs fail when any gated metric drops more
+than 0.05 below the baseline. Before switching retrieval backends
+(memory to Qdrant hybrid) or locking an embedding model, run the
+gated suite per candidate and compare artifacts.
+
+`no_evidence` queries are excluded from retrieval metrics; they feed
+the answer-side faithfulness judge that lands together with the
+sufficiency check (the judge model must be pinned — swapping it
+silently re-baselines every threshold).
+
 ## Known limitations
 
 - **Bedrock-runtime mocking** uses `botocore.stub.Stubber` because

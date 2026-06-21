@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-import inqtrix.server.routes as routes_module
+import inqtrix.research.web_research as web_research_module
 from inqtrix.providers.base import LLMResponse
 from inqtrix.report_profiles import ReportProfile
 from inqtrix.search_result import GroundedSearchResult
@@ -289,7 +289,7 @@ def _make_routing_app(llm: _RoutingLLM) -> TestClient:
 
 def test_chat_completions_with_overrides_routes_through_agent_run(monkeypatch):
     client, captured, fake_run = _make_app()
-    monkeypatch.setattr(routes_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
 
     response = client.post(
         "/v1/chat/completions",
@@ -309,7 +309,7 @@ def test_chat_completions_with_overrides_routes_through_agent_run(monkeypatch):
 def test_chat_completions_with_profile_switch_routes_deep_settings(monkeypatch):
     """End-to-end Scenario B: pure COMPACT base + DEEP override."""
     client, captured, fake_run = _make_app()
-    monkeypatch.setattr(routes_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
 
     response = client.post(
         "/v1/chat/completions",
@@ -331,7 +331,7 @@ def test_chat_completions_with_profile_switch_routes_deep_settings(monkeypatch):
 
 def test_chat_completions_invalid_override_returns_400(monkeypatch):
     client, captured, fake_run = _make_app()
-    monkeypatch.setattr(routes_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
 
     response = client.post(
         "/v1/chat/completions",
@@ -351,7 +351,7 @@ def test_chat_completions_invalid_override_returns_400(monkeypatch):
 def test_chat_completions_without_overrides_uses_server_defaults(monkeypatch):
     """No agent_overrides field → server-default AgentSettings reaches agent_run."""
     client, captured, fake_run = _make_app()
-    monkeypatch.setattr(routes_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
 
     response = client.post(
         "/v1/chat/completions",
@@ -372,7 +372,7 @@ def test_chat_completions_direct_mode_sets_skip_search(
 ) -> None:
     """Top-level mode=direct_llm maps to the existing skip_search bypass."""
     client, captured, fake_run = _make_app()
-    monkeypatch.setattr(routes_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
 
     response = client.post(
         "/v1/chat/completions",
@@ -394,7 +394,7 @@ def test_chat_completions_research_mode_overrides_global_skip_search(
     client, captured, fake_run = _make_app(
         agent_settings=AgentSettings(skip_search=True)
     )
-    monkeypatch.setattr(routes_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
 
     response = client.post(
         "/v1/chat/completions",
@@ -414,7 +414,7 @@ def test_chat_completions_rejects_conflicting_direct_mode_flag(
 ) -> None:
     """Conflicting mode and legacy skip_search override should fail loudly."""
     client, captured, fake_run = _make_app()
-    monkeypatch.setattr(routes_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
 
     response = client.post(
         "/v1/chat/completions",
@@ -436,7 +436,7 @@ def test_chat_completions_legacy_skip_search_still_works(
 ) -> None:
     """Existing clients can keep using agent_overrides.skip_search."""
     client, captured, fake_run = _make_app()
-    monkeypatch.setattr(routes_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
 
     response = client.post(
         "/v1/chat/completions",
@@ -514,7 +514,7 @@ def test_chat_completions_rejects_invalid_mode(
 ) -> None:
     """Unknown mode values should not silently fall back to research."""
     client, captured, fake_run = _make_app()
-    monkeypatch.setattr(routes_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
 
     response = client.post(
         "/v1/chat/completions",
@@ -561,7 +561,7 @@ def test_native_runs_direct_mode_returns_mode_summary(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1},
         }
 
-    monkeypatch.setattr(routes_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
 
     response = client.post(
         "/v1/runs",

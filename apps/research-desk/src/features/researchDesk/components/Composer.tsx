@@ -38,6 +38,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { CreateResearchRunRequest } from '@/features/researchRuns/types'
 import { ComposerIconButton, composerIconButtonClassName } from '@/features/composer/ComposerIconButton'
+import { QuotaMeter } from '@/features/quota/QuotaMeter'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
@@ -327,6 +328,7 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
               />
             </div>
             <div className="flex shrink-0 items-center gap-1">
+              <QuotaMeter />
               <ComposerStatusMenu
                 confidenceStop={form.confidenceStop}
                 firstRoundQueries={form.firstRoundQueries}

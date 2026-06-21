@@ -1,0 +1,361 @@
+import { useCallback, useEffect, useRef, useState, type MouseEvent, type SyntheticEvent } from 'react'
+import { createPortal } from 'react-dom'
+import { motion, useReducedMotion } from 'motion/react'
+import { BadgeCheck, BookOpenCheck, Check, Copy, FileSearch, Info, ListChecks } from '@/components/icons'
+import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer'
+import { useLocale } from '@/i18n/LocaleProvider'
+import { cn } from '@/lib/utils'
+import { appMotion } from '@/motion/transitions'
+import type { KnowledgeAnswerRecord, KnowledgeReferenceRecord } from '@/features/project/types'
+import { citationLabelFromHref, linkifyCitationLabels } from './answer'
+import { citationViews, groupCitationsByDocument } from './citations'
+import { CitationGroupList } from './CitationRow'
+import { excerptHighlightRanges, HighlightedExcerpt, previewWindow } from './CitationExcerpt'
+import { profileDisplayName } from './stepLines'
+
+type CitationPreview = {
+  title: string
+  excerpt: string
+  highlightTargets: string[]
+  verified: boolean
+  anchor: { top: number; bottom: number; left: number }
+}
+
+/**
+ * Completed knowledge answer, rendered as an assistant bubble (avatar + body +
+ * actions) so the Wissen view reads like the chat view. The markdown body has
+ * clickable `[K#]`/bare-`K#` citations, the source list from the report
+ * references, and a quiet meta line (profile, degraded stages, grounding).
+ * Citation interception happens on a capture-phase click handler so the
+ * off-limits Markdown renderer stays untouched.
+ */
+export function AnswerCard({
+  answer,
+  highlightEntry = false,
+  onOpenReference,
+  onOpenSteps,
+}: {
+  answer: KnowledgeAnswerRecord
+  /** One-shot arrival choreography for the answer that just replaced a live run. */
+  highlightEntry?: boolean
+  onOpenReference: (reference: KnowledgeReferenceRecord) => void
+  /** Opens the right panel's "Schritte" tab to review this answer's agent run.
+   * Absent when the run kept no steps. */
+  onOpenSteps?: () => void
+}) {
+  const { t } = useLocale()
+  const reduceMotion = Boolean(useReducedMotion())
+  const [copied, setCopied] = useState(false)
+  const [preview, setPreview] = useState<CitationPreview | null>(null)
+  const hideTimerRef = useRef<number | null>(null)
+
+  useEffect(() => () => {
+    if (hideTimerRef.current) window.clearTimeout(hideTimerRef.current)
+  }, [])
+
+  async function copyAnswer() {
+    try {
+      await navigator.clipboard.writeText(answer.answerMarkdown)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1200)
+    } catch (error) {
+      console.warn('Inqtrix knowledge answer copy failed.', error)
+    }
+  }
+
+  function handleCitationClick(event: MouseEvent<HTMLDivElement>) {
+    const target = event.target as HTMLElement | null
+    const anchor = target?.closest('a')
+    const label = citationLabelFromHref(anchor?.getAttribute('href'))
+    if (!label) return
+    event.preventDefault()
+    event.stopPropagation()
+    const reference = answer.references.find((entry) => entry.label === label)
+    if (reference) onOpenReference(reference)
+  }
+
+  function cancelHide() {
+    if (hideTimerRef.current) {
+      window.clearTimeout(hideTimerRef.current)
+      hideTimerRef.current = null
+    }
+  }
+
+  function scheduleHide() {
+    cancelHide()
+    hideTimerRef.current = window.setTimeout(() => setPreview(null), 140)
+  }
+
+  const dismissPreview = useCallback(() => setPreview(null), [])
+
+  // Hovering or focusing a `[K#]` citation surfaces a quick-glance preview of
+  // the cited passage (highlighted) — only for citations that carry an excerpt.
+  // Bubbling mouseover/focusin retarget to the anchor; non-citation targets are
+  // ignored without disturbing an open preview.
+  function handleCitationHover(event: SyntheticEvent<HTMLDivElement>) {
+    const anchor = (event.target as HTMLElement | null)?.closest('a')
+    const label = citationLabelFromHref(anchor?.getAttribute('href'))
+    if (!label || !anchor) return
+    const reference = answer.references.find((entry) => entry.label === label)
+    if (!reference?.excerpt) return
+    cancelHide()
+    const rect = anchor.getBoundingClientRect()
+    const quote = answer.quotes.find((entry) => entry.label === label)
+    setPreview({
+      anchor: { bottom: rect.bottom, left: rect.left, top: rect.top },
+      excerpt: reference.excerpt,
+      highlightTargets: quote ? [quote.text] : reference.sourceText ? [reference.sourceText] : [],
+      title: reference.title ?? reference.url,
+      verified: quote?.verified ?? false,
+    })
+  }
+
+  return (
+    <motion.div
+      animate={{ filter: 'blur(0px)', opacity: 1, y: 0 }}
+      className={cn(
+        'group/answer grid min-w-0 grid-cols-[32px_minmax(0,1fr)] gap-3',
+        highlightEntry && 'inqtrix-knowledge-answer-entry',
+      )}
+      data-knowledge-answer-entry={highlightEntry ? 'true' : undefined}
+      initial={highlightEntry && !reduceMotion ? { filter: 'blur(3px)', opacity: 0, y: 14 } : false}
+      transition={highlightEntry ? appMotion.panel : undefined}
+    >
+      <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md border border-border bg-surface text-muted-foreground">
+        <BookOpenCheck className="size-4" />
+      </span>
+      <div className="min-w-0">
+        <div className="mb-1 flex items-center gap-2 t-meta-sm font-semibold text-muted-foreground">
+          <span>{answer.refusal ? t.knowledge.refusalTitle : t.knowledge.answerLabel}</span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                aria-label={copied ? t.knowledge.answerCopied : t.knowledge.answerCopy}
+                className={cn(
+                  'size-6 text-foreground/65 opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/answer:opacity-100',
+                  copied && 'text-success opacity-100 hover:text-success',
+                )}
+                onClick={() => void copyAnswer()}
+                size="icon"
+                type="button"
+                variant="ghost"
+              >
+                {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{copied ? t.knowledge.answerCopied : t.knowledge.answerCopy}</TooltipContent>
+          </Tooltip>
+          {onOpenSteps && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label={t.knowledge.answerSteps}
+                  className="h-6 gap-1 px-1.5 text-foreground/65 opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/answer:opacity-100"
+                  onClick={onOpenSteps}
+                  size="sm"
+                  type="button"
+                  variant="ghost"
+                >
+                  <ListChecks className="size-3" />
+                  <span className="t-meta-sm">{t.knowledge.answerSteps}</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{t.knowledge.answerStepsHint}</TooltipContent>
+            </Tooltip>
+          )}
+        </div>
+
+        {answer.refusal ? (
+          <div className="flex items-start gap-2.5 rounded-lg border border-border/70 bg-surface/60 p-3">
+            <Info className="icon-sm mt-0.5 shrink-0 text-muted-foreground/70" />
+            <p className="min-w-0 t-body text-muted-foreground">{answer.answerMarkdown}</p>
+          </div>
+        ) : (
+          /* Capture-phase interception of the synthetic #kref-* citation links;
+             mouseover/focus open the quick-glance preview, container exit
+             (mouseleave/blur) schedules its dismissal. mouseleave fires ONCE on
+             real exit (not per child), so hovering prose never flickers it. */
+          <div
+            className="chat-markdown text-sm leading-snug text-foreground"
+            onBlur={scheduleHide}
+            onClickCapture={handleCitationClick}
+            onFocus={handleCitationHover}
+            onMouseLeave={scheduleHide}
+            onMouseOver={handleCitationHover}
+          >
+            <MarkdownRenderer
+              markdown={linkifyCitationLabels(
+                answer.answerMarkdown,
+                new Set(answer.references.map((reference) => reference.label)),
+              )}
+              variant="chat"
+            />
+          </div>
+        )}
+
+        {preview && (
+          <CitationHoverPreview
+            onDismiss={dismissPreview}
+            onEnter={cancelHide}
+            onLeave={scheduleHide}
+            preview={preview}
+          />
+        )}
+
+        {answer.references.length > 0 && (
+          <div className="mt-4 border-t border-border/70 pt-3">
+            <h4 className="t-caption text-muted-foreground/60">{t.knowledge.sources}</h4>
+            <div className="mt-1.5">
+              <CitationGroupList
+                activeKey={null}
+                groups={groupCitationsByDocument(
+                  citationViews(answer.references, answer.quotes, t.knowledge.viewerSection),
+                )}
+                onOpen={(picked) => onOpenReference(picked.reference)}
+              />
+            </div>
+          </div>
+        )}
+
+        <MetaLine answer={answer} />
+      </div>
+    </motion.div>
+  )
+}
+
+function MetaLine({ answer }: { answer: KnowledgeAnswerRecord }) {
+  const { t } = useLocale()
+  const parts: string[] = []
+  if (answer.profileId) {
+    const profile = profileDisplayName(answer.profileId, t.knowledge)
+    parts.push(
+      answer.autoSelected
+        ? `${t.knowledge.profileRanLabel.replace('{profile}', profile)} (${t.knowledge.autoSelectedSuffix})`
+        : t.knowledge.profileRanLabel.replace('{profile}', profile),
+    )
+  }
+  if (typeof answer.evidenceUsed === 'number' && answer.evidenceUsed > 0) {
+    // Makes the deep profile's wider evidence breadth perceivable: how many
+    // passages were grounded in, and across how many distinct documents (so a
+    // multi-document answer is visibly multi-document).
+    const distinctDocs = new Set(
+      answer.references.map((reference) => reference.documentId).filter(Boolean),
+    ).size
+    parts.push(
+      distinctDocs > 1
+        ? t.knowledge.evidenceUsedDocsMeta
+            .replace('{chunks}', String(answer.evidenceUsed))
+            .replace('{docs}', String(distinctDocs))
+        : t.knowledge.evidenceUsedMeta.replace('{count}', String(answer.evidenceUsed)),
+    )
+  }
+  if (answer.degradedStages.length > 0) {
+    parts.push(t.knowledge.profileDegradedHint.replace('{stages}', answer.degradedStages.join(', ')))
+  }
+  if (answer.grounding && answer.grounding.total > 0) {
+    parts.push(
+      t.knowledge.groundingMeta
+        .replace('{verified}', String(answer.grounding.verified))
+        .replace('{total}', String(answer.grounding.total)),
+    )
+  }
+  // Surface the evidence gate on the completed answer (the live step ledger
+  // shows it during the run) — but only when it is informative: more than one
+  // judgement round, or it answered without full sufficiency (early-stop /
+  // partial coverage).
+  if (answer.gate && answer.gate.maxRounds > 0 && (answer.gate.roundsUsed > 1 || !answer.gate.sufficient)) {
+    const stoppedEarly = !answer.gate.sufficient && answer.gate.roundsUsed < answer.gate.maxRounds
+    const rounds = t.knowledge.gateRoundsMeta
+      .replace('{used}', String(answer.gate.roundsUsed))
+      .replace('{max}', String(answer.gate.maxRounds))
+    parts.push(stoppedEarly ? `${rounds} · ${t.knowledge.gateStoppedEarly}` : rounds)
+  }
+  if (parts.length === 0) return null
+  return (
+    <p className="mt-3 t-meta text-muted-foreground/80">{parts.join(' · ')}</p>
+  )
+}
+
+const PREVIEW_WIDTH = 340
+const PREVIEW_MAX_HEIGHT = 280
+
+/**
+ * Quick-glance preview of a cited passage, portaled to the body so it escapes
+ * the answer bubble's transform/overflow context, and pinned beside the hovered
+ * `[K#]` (above the anchor when there's no room below). Shows the cited span
+ * highlighted in its immediate context — the same two-level highlight as the
+ * "Beleg" panel, for visual continuity. Clicking the marker opens the full panel.
+ */
+function CitationHoverPreview({
+  onDismiss,
+  onEnter,
+  onLeave,
+  preview,
+}: {
+  onDismiss: () => void
+  onEnter: () => void
+  onLeave: () => void
+  preview: CitationPreview
+}) {
+  const { t } = useLocale()
+  const { anchor, excerpt, highlightTargets, title, verified } = preview
+  const windowed = previewWindow(excerpt, excerptHighlightRanges(excerpt, highlightTargets))
+  const popoverRef = useRef<HTMLDivElement | null>(null)
+
+  // The popover is position:fixed against the captured anchor rect, so a page
+  // scroll moves the `[K#]` out from under it — dismiss then. But scrolling the
+  // popover's OWN content (reading a long excerpt) also fires a capture-phase
+  // scroll event; ignore those, or the popover vanishes the moment the user
+  // scrolls it.
+  useEffect(() => {
+    const onScroll = (event: Event) => {
+      const target = event.target
+      if (popoverRef.current && target instanceof Node && popoverRef.current.contains(target)) {
+        return
+      }
+      onDismiss()
+    }
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', onDismiss)
+    return () => {
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', onDismiss)
+    }
+  }, [onDismiss])
+
+  const left = Math.max(8, Math.min(anchor.left, window.innerWidth - PREVIEW_WIDTH - 8))
+  const spaceBelow = window.innerHeight - anchor.bottom
+  const placeBelow = spaceBelow > 220
+  // Bound the box to a fixed ceiling (scroll within) instead of letting it grow
+  // to the full available viewport height for a short excerpt near the top.
+  const position: { left: number; maxHeight: number; top?: number; bottom?: number } = placeBelow
+    ? { left, maxHeight: Math.min(PREVIEW_MAX_HEIGHT, Math.max(120, spaceBelow - 16)), top: anchor.bottom + 6 }
+    : { bottom: window.innerHeight - anchor.top + 6, left, maxHeight: Math.min(PREVIEW_MAX_HEIGHT, Math.max(120, anchor.top - 16)) }
+
+  return createPortal(
+    <div
+      className="fixed z-50 w-[340px] overflow-y-auto rounded-lg border border-border bg-popover p-3 text-popover-foreground shadow-md"
+      onMouseEnter={onEnter}
+      onMouseLeave={onLeave}
+      ref={popoverRef}
+      style={position}
+    >
+      <div className="mb-1.5 flex items-center gap-1.5">
+        <FileSearch className="icon-xs shrink-0 text-muted-foreground/70" />
+        <span className="min-w-0 flex-1 truncate t-meta-sm font-medium text-foreground">{title}</span>
+        {verified && (
+          <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-success-subtle px-1 py-0.5 t-hint font-medium text-success">
+            <BadgeCheck className="icon-xs" />
+            {t.knowledge.viewerVerified}
+          </span>
+        )}
+      </div>
+      <blockquote className="border-l-2 border-brand/40 pl-2.5 t-meta leading-6 text-foreground/90">
+        <HighlightedExcerpt ranges={windowed.ranges} text={windowed.text} />
+      </blockquote>
+    </div>,
+    document.body,
+  )
+}

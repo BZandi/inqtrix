@@ -83,7 +83,7 @@ def test_reasoning_levels_use_known_tokens(card: ModelCard) -> None:
 
 
 def test_catalogue_covers_the_seeded_models() -> None:
-    """The seeded models the product ships with are all present."""
+    """The seeded models the deployment ships with are all present."""
     ids = {card.id for card in MODEL_CARDS}
     expected = {
         "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",

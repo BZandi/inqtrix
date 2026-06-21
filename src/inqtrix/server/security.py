@@ -22,12 +22,12 @@ only env-coupled surface; library callers may construct a
 
 from __future__ import annotations
 
-import hmac
 import logging
 from typing import Any, Callable
 
-from fastapi import HTTPException, Request, status
+from fastapi import Request
 
+from inqtrix.auth.api_key import build_bearer_guard
 from inqtrix.settings import ServerSettings
 
 log = logging.getLogger("inqtrix")
@@ -81,36 +81,7 @@ def make_api_key_dependency(
     expected = (server.api_key or "").strip()
     if not expected:
         return None
-    expected_bytes = expected.encode("utf-8")
-
-    def require_api_key(request: Request) -> None:
-        header = request.headers.get("Authorization", "").strip()
-        if not header.lower().startswith("bearer "):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={
-                    "error": {
-                        "message": "Missing or malformed Authorization header",
-                        "type": "unauthorized",
-                    }
-                },
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        candidate = header[len("Bearer ") :].strip().encode("utf-8")
-        # Constant-time compare to deny timing side channels.
-        if not hmac.compare_digest(candidate, expected_bytes):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={
-                    "error": {
-                        "message": "Invalid API key",
-                        "type": "unauthorized",
-                    }
-                },
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-
-    return require_api_key
+    return build_bearer_guard(expected)
 
 
 def make_cors_middleware_kwargs(server: ServerSettings) -> dict[str, Any] | None:

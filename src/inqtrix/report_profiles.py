@@ -254,6 +254,7 @@ _DEEP_TUNING = ReportProfileTuning(
         "first_round_queries": 10,
         "answer_prompt_citations_max": 500,
         "reasoning_timeout": 900,
+        "editor_assistant_timeout": 900,
         "claim_extract_timeout": 600,
         "search_timeout": 300,
         "max_total_seconds": 1800,

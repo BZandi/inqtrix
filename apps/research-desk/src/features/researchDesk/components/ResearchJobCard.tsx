@@ -6,21 +6,23 @@ import {
   Info,
   Search,
   Trash2,
+  Users,
   XCircle,
   type LucideIcon,
 } from '@/components/icons'
 import {
   forwardRef,
-  useEffect,
-  useState,
   type MouseEvent,
 } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { SharedBadge } from '@/features/sharing/SharedBadge'
+import { canCancelWithAccess } from '@/features/sharing/shareModel'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
+import { useRunningDuration } from '@/features/researchRuns/useRunningDuration'
 import { appMotion } from '@/motion/transitions'
 import { localizedText, phaseOrder, type JobPhase, type ResearchJob } from '../types'
 import {
@@ -40,7 +42,10 @@ type ResearchJobCardProps = {
   onCancel: () => void
   onDelete: () => void
   onSelect: () => void
+  onShare?: () => void
   onToggleExpanded: () => void
+  shareCount?: number
+  sharedByLabel?: string
 }
 
 export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
@@ -53,13 +58,23 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
     onCancel,
     onDelete,
     onSelect,
+    onShare,
     onToggleExpanded,
+    shareCount,
+    sharedByLabel,
   }, ref) {
     const { locale, t } = useLocale()
     const StatusIcon = statusIcon[job.status]
     const reduceMotion = useReducedMotion()
     const runningDuration = useRunningDuration(job.status, job.startedAtIso)
-    const canCancel = job.status === 'running' || job.status === 'queued'
+    const isSharedIn = job.access !== undefined
+    // An active run is cancellable, not deletable: the server delete is
+    // terminal-only (409 while active), so the trash button is hidden for
+    // running/queued runs and cancel is the action instead.
+    const isActive = job.status === 'running' || job.status === 'queued'
+    // Mirrors the server rule: cancelling a shared-in run needs at
+    // least an edit grant — a view grantee would only earn a 404.
+    const canCancel = isActive && canCancelWithAccess(job.access)
     const metadata: { text: string; title?: string }[] = [
       { text: `${t.runCard.jobId}: ${shortRunId(job.id)}`, title: `${t.runCard.jobId}: ${job.id}` },
       {
@@ -135,6 +150,11 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
             )}
           </div>
           <div className="col-span-2 ml-8 flex items-center gap-1 sm:col-span-1 sm:ml-0">
+            <SharedBadge
+              count={isSharedIn ? undefined : shareCount}
+              onClick={isSharedIn ? undefined : onShare}
+              sharedByLabel={sharedByLabel}
+            />
             <Badge className={statusBadgeClassName[job.status]} variant="outline">
               {t.status[job.status]}
             </Badge>
@@ -162,16 +182,35 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
                 </TooltipContent>
               </Tooltip>
             )}
-            <Button
-              aria-label={t.runCard.delete}
-              className="text-muted-foreground hover:text-destructive"
-              onClick={(event) => runCardAction(event, onDelete)}
-              size="icon"
-              type="button"
-              variant="ghost"
-            >
-              <Trash2 className="size-4" />
-            </Button>
+            {!isSharedIn && onShare && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    aria-label={t.sharing.share}
+                    className="text-muted-foreground hover:text-foreground"
+                    onClick={(event) => runCardAction(event, onShare)}
+                    size="icon"
+                    type="button"
+                    variant="ghost"
+                  >
+                    <Users className="size-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{t.sharing.share}</TooltipContent>
+              </Tooltip>
+            )}
+            {!isSharedIn && !isActive && (
+              <Button
+                aria-label={t.runCard.delete}
+                className="text-muted-foreground hover:text-destructive"
+                onClick={(event) => runCardAction(event, onDelete)}
+                size="icon"
+                type="button"
+                variant="ghost"
+              >
+                <Trash2 className="size-4" />
+              </Button>
+            )}
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -478,20 +517,6 @@ function RunningJobDetails({ job }: { job: ResearchJob }) {
   )
 }
 
-function useRunningDuration(status: ResearchJob['status'], startedAtIso?: string) {
-  const [now, setNow] = useState(() => Date.now())
-
-  useEffect(() => {
-    if (status !== 'running') return undefined
-
-    const intervalId = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(intervalId)
-  }, [status])
-
-  if (status !== 'running' || !startedAtIso) return '00:00:00'
-  return formatDuration((now - new Date(startedAtIso).getTime()) / 1000)
-}
-
 function CompactJobDetails({ job }: { job: ResearchJob }) {
   const { t } = useLocale()
   const QueuedIcon = queuedPhaseIcon
@@ -561,13 +586,3 @@ function MetricRow({
   )
 }
 
-function formatDuration(seconds: number) {
-  const wholeSeconds = Math.max(0, Math.round(seconds))
-  const hours = Math.floor(wholeSeconds / 3600)
-  const minutes = Math.floor((wholeSeconds % 3600) / 60)
-  const remainingSeconds = wholeSeconds % 60
-
-  return [hours, minutes, remainingSeconds]
-    .map((part) => part.toString().padStart(2, '0'))
-    .join(':')
-}

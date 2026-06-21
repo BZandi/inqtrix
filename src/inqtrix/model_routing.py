@@ -43,6 +43,11 @@ NODE_TIER_ASSIGNMENT: dict[str, str] = {
     "plan": "mid",
     "answer": "high",
     "direct_chat": "mid",
+    "knowledge_answer": "high",
+    "knowledge_gate": "fast",
+    "knowledge_contextualize": "fast",
+    "knowledge_decompose": "fast",
+    "knowledge_rerank": "fast",
 }
 """Maps each LLM call site to its default tier.
 

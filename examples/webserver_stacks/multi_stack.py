@@ -2,8 +2,8 @@
 
 Mounts the OpenAI-compatible Inqtrix server with a registry of named
 ``StackBundle`` entries — one per provider combination from
-``examples/provider_stacks/``. UIs (Streamlit, web frontends, etc.)
-discover the available stacks via ``GET /v1/stacks`` and pick one per
+``examples/provider_stacks/``. Frontends (the React research desk, custom
+web UIs, etc.) discover the available stacks via ``GET /v1/stacks`` and pick one per
 request via the new ``"stack"`` top-level body field on
 ``POST /v1/chat/completions``.
 

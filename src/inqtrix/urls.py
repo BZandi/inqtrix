@@ -129,6 +129,14 @@ def _scrub_credentials(msg: str) -> str:
         lambda m: _redact_credential_url(m.group(0)),
         msg,
     )
+    # URL userinfo credentials (redis://:pw@..., postgresql+asyncpg://
+    # user:pw@host/db) — connection strings travel inside driver
+    # exceptions and would otherwise leak broker/database passwords.
+    msg = re.sub(
+        r"(\b[a-zA-Z][a-zA-Z0-9+.-]*://)[^@/\s\"'<>]*@",
+        r"\1[REDACTED]@",
+        msg,
+    )
     msg = re.sub(r"(sk-|pplx-)[a-zA-Z0-9_\-]{16,}", "[KEY]", msg)
     msg = re.sub(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*", "Bearer [REDACTED]", msg)
     msg = re.sub(r"AKIA[A-Z0-9]{16}", "[AWS_KEY]", msg)

@@ -12,7 +12,10 @@ import {
 } from '@/components/icons'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useLocale } from '@/i18n/LocaleProvider'
+import { formatTokens } from '@/lib/modelCard'
 import { cn } from '@/lib/utils'
+import { quotaBarFractionClass, quotaBarWidth } from '@/features/quota/model'
+import type { EmbeddingQuota } from '@/features/quota/useEmbeddingQuota'
 import type { VectorIndexStatus } from '@/features/project/types'
 import { formatBytes } from './helpers'
 import { FILE_QUOTA_BYTES, isInternalFileDrag, type ActiveTarget } from './constants'
@@ -24,6 +27,7 @@ const INDEX_DOT: Record<VectorIndexStatus, { className: string; pulse: boolean }
   ready: { className: 'bg-success', pulse: false },
   indexing: { className: 'bg-brand', pulse: true },
   stale: { className: 'bg-warning', pulse: false },
+  error: { className: 'bg-destructive', pulse: false },
 }
 
 type DropProps = {
@@ -88,14 +92,16 @@ function AddButton({ label, onClick }: { label: string; onClick: () => void }) {
   )
 }
 
-function StorageCard({
+function UsageMeters({
   collectionCount,
   docCount,
+  embeddingQuota,
   indexCount,
   usedBytes,
 }: {
   collectionCount: number
   docCount: number
+  embeddingQuota: EmbeddingQuota | null
   indexCount: number
   usedBytes: number
 }) {
@@ -104,23 +110,74 @@ function StorageCard({
   const usage = t.fileLibrary.storageUsage
     .replace('{used}', formatBytes(usedBytes, locale))
     .replace('{total}', formatBytes(FILE_QUOTA_BYTES, locale))
+  const quotaLimit = embeddingQuota?.limit ?? null
+  const quotaLimited = quotaLimit != null && quotaLimit > 0
+  const quotaFraction =
+    embeddingQuota && quotaLimited && quotaLimit != null
+      ? embeddingQuota.used / quotaLimit
+      : null
+  const quotaMonth =
+    embeddingQuota && embeddingQuota.periodStart > 0
+      ? new Date(embeddingQuota.periodStart * 1000).toLocaleDateString(locale, {
+          month: 'long',
+          timeZone: 'UTC',
+        })
+      : ''
+  const quotaValue = embeddingQuota
+    ? quotaLimited && quotaLimit != null
+      ? `${formatTokens(embeddingQuota.used)} / ${formatTokens(quotaLimit)} ${t.vectorIndex.tokensUnit}`
+      : `${formatTokens(embeddingQuota.used)} · ${t.quota.unlimited}`
+    : ''
+  const quotaWidth = quotaBarWidth(quotaFraction)
+
   return (
-    <div className="rounded-lg border border-border bg-card p-3">
-      <div className="flex items-center justify-between gap-2">
-        <span className="inline-flex items-center gap-1.5 t-label text-foreground">
-          <HardDrive className="size-3.5 text-muted-foreground" />
-          {t.fileLibrary.storageTitle}
-        </span>
-        <span className="t-meta-sm tabular-nums text-muted-foreground">{usage}</span>
-      </div>
-      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
-        <div className="h-full rounded-full bg-brand" style={{ width: `${pct}%` }} />
-      </div>
-      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 t-meta-sm text-muted-foreground">
-        <span>{t.fileLibrary.countDocuments.replace('{count}', String(docCount))}</span>
-        <span>{t.fileLibrary.countCollections.replace('{count}', String(collectionCount))}</span>
-        <span>{t.fileLibrary.countIndexes.replace('{count}', String(indexCount))}</span>
-      </div>
+    <div className="space-y-3 px-1 py-0.5">
+      <section>
+        <div className="flex items-center justify-between gap-2">
+          <span className="inline-flex items-center gap-1.5 t-label text-foreground">
+            <HardDrive className="size-3.5 text-muted-foreground" />
+            {t.fileLibrary.storageTitle}
+          </span>
+          <span className="t-meta-sm tabular-nums text-muted-foreground">{usage}</span>
+        </div>
+        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
+          <div className="h-full rounded-full bg-brand" style={{ width: `${pct}%` }} />
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 t-meta-sm text-muted-foreground">
+          <span>{t.fileLibrary.countDocuments.replace('{count}', String(docCount))}</span>
+          <span>{t.fileLibrary.countCollections.replace('{count}', String(collectionCount))}</span>
+          <span>{t.fileLibrary.countIndexes.replace('{count}', String(indexCount))}</span>
+        </div>
+      </section>
+      {embeddingQuota ? (
+        <section className="border-t border-border/70 pt-3">
+          <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5">
+            <span className="inline-flex items-center gap-1.5 t-label text-foreground">
+              <Layers className="size-3.5 shrink-0 text-muted-foreground" />
+              <span>{t.vectorIndex.embeddingQuota}</span>
+            </span>
+            {quotaMonth ? (
+              <span className="shrink-0 t-meta-sm text-muted-foreground">{quotaMonth}</span>
+            ) : null}
+          </div>
+          <p
+            className={cn(
+              'mt-1 t-meta-sm tabular-nums',
+              embeddingQuota.exhausted ? 'text-destructive' : 'text-muted-foreground',
+            )}
+          >
+            {quotaValue}
+          </p>
+          {quotaLimited ? (
+            <span className="mt-2 block h-1.5 overflow-hidden rounded-full bg-muted">
+              <span
+                className={cn('block h-full rounded-full', quotaBarFractionClass(quotaFraction))}
+                style={{ width: `${quotaWidth}%` }}
+              />
+            </span>
+          ) : null}
+        </section>
+      ) : null}
     </div>
   )
 }
@@ -138,10 +195,12 @@ export function Rail({
   onSelectIndex,
   query,
   storage,
+  embeddingQuota,
   totalDocCount,
 }: {
   active: ActiveTarget
   collections: RailCollection[]
+  embeddingQuota: EmbeddingQuota | null
   indexes: RailIndex[]
   onDropToCollection: (sectionId: string, fileId: string) => void
   onNewCollection: () => void
@@ -251,9 +310,10 @@ export function Rail({
       </div>
 
       <div className="border-t border-border p-3">
-        <StorageCard
+        <UsageMeters
           collectionCount={storage.collectionCount}
           docCount={storage.docCount}
+          embeddingQuota={embeddingQuota}
           indexCount={storage.indexCount}
           usedBytes={storage.usedBytes}
         />

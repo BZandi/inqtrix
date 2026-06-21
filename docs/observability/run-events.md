@@ -18,6 +18,7 @@ Native runs are short-lived server resources addressed by an opaque `run_id`:
 | `/v1/runs/{run_id}/events` | GET | Stream buffered and live events as Server-Sent Events. |
 | `/v1/runs/{run_id}/result` | GET | Fetch the final `ResearchResult.to_export_payload()` report after completion. |
 | `/v1/runs/{run_id}/cancel` | POST | Cancel a queued run or request cancellation for a running run. |
+| `/v1/runs/{run_id}` | DELETE | Permanently delete a terminal run (owner-only); returns 409 while the run is still active. Revokes any shares on the run. |
 
 The `run_id` identifies the job, not a user. Future authentication can add a user or tenant owner beside it; clients should still address work by `run_id`.
 
@@ -38,7 +39,7 @@ stateDiagram
     cancelled --> [*]: TTL cleanup
 ```
 
-The important transition is `queued -> running`: it is driven by the in-memory `RunStore`, not by the client polling loop. Active jobs do not count against `RUN_QUEUE_MAX_SIZE`.
+The important transition is `queued -> running`: it is driven by the run store (in-memory by default; Postgres-backed with worker dispatch when the durable backends are configured), not by the client polling loop. Active jobs do not count against `RUN_QUEUE_MAX_SIZE`.
 
 ## Run summary
 
@@ -126,6 +127,8 @@ Event payloads are sanitized through the same recursive drop-list used by runtim
 | `inqtrix.run.failed` | Worker failed. | `status`, `error`, `snapshot` |
 
 Terminal events are `inqtrix.run.completed`, `inqtrix.run.failed`, and `inqtrix.run.cancelled`. A browser can close its SSE connection after receiving one of those.
+
+Background knowledge reindex jobs use the same endpoint and event model on a parallel surface: `GET /v1/knowledge/indexing-jobs/{job_id}/events` streams `inqtrix.index.{queued,started,progress,cancel_requested,completed,failed,cancelled}` (the progress event carries a `snapshot` with `completed_documents`/`total_documents`), and in the durable backend they run over a separate Valkey stream consumed by the same `inqtrix-worker` — see [Web server mode](../deployment/webserver-mode.md).
 
 Cancellation is a two-step lifecycle for running jobs. `POST
 /v1/runs/{run_id}/cancel` returns the current summary, but a running summary can

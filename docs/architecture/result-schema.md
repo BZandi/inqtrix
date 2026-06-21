@@ -141,7 +141,7 @@ payload = result.to_export_payload(ResearchResultExportOptions(
 - `max_references: int | None` — cap the number of report references in this export only. `None` keeps every report reference.
 - `max_sources: int | None` — cap the number of sources in the export.
 
-The native run API stores this export payload only for `RUN_COMPLETED_TTL_SECONDS` in process memory. A durable product UI should persist the payload in an application database after reading `/v1/runs/{run_id}/result`.
+The native run API stores this export payload only for `RUN_COMPLETED_TTL_SECONDS` in process memory. A durable application UI should persist the payload in an application database after reading `/v1/runs/{run_id}/result`.
 
 ## Full JSON serialisation
 

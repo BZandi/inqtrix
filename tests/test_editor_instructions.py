@@ -99,11 +99,12 @@ def _make_client(
     *,
     llm: _CapturingLLM | None = None,
     server_settings: ServerSettings | None = None,
+    agent_settings: AgentSettings | None = None,
 ) -> tuple[TestClient, _CapturingLLM]:
     active_llm = llm or _CapturingLLM()
     settings = Settings(
         models=ModelSettings(),
-        agent=AgentSettings(),
+        agent=agent_settings or AgentSettings(),
         server=server_settings or ServerSettings(),
     )
     app = create_app(
@@ -238,6 +239,30 @@ def test_route_uses_structured_output_schema_when_available() -> None:
     assert response.status_code == 200
     assert llm.structured_called is True
     assert llm.kwargs["schema_name"] == EDITOR_INSTRUCT_SCHEMA_NAME
+
+
+def test_route_editor_call_uses_editor_assistant_timeout() -> None:
+    # Editor work runs under editor_assistant_timeout, decoupled from the
+    # research reasoning budget. With the two set distinct, the per-call
+    # timeout handed to the provider must track the EDITOR field, not
+    # reasoning_timeout. Goes red if the route reverts to reasoning_timeout.
+    client, llm = _make_client(
+        agent_settings=AgentSettings(
+            reasoning_timeout=77, editor_assistant_timeout=200
+        )
+    )
+
+    response = client.post(
+        "/v1/editor/instruct",
+        json={
+            "document_markdown": "# Bericht\n\nDieser Absatz ist zu lang.",
+            "instruction": "Straffe den Absatz.",
+            "locale": "de",
+        },
+    )
+
+    assert response.status_code == 200
+    assert llm.kwargs["timeout"] == 200
 
 
 def test_route_allows_document_against_modern_editor_budget_floor() -> None:

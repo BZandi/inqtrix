@@ -7,22 +7,17 @@ import {
 import {
   cancelResearchRun,
   createResearchRun,
-  fetchHealth,
+  deleteResearchRun,
   fetchResearchRunResult,
-  fetchStacks,
   hasHttpStatus,
   listResearchRuns,
   streamResearchRunEvents,
 } from '@/api/inqtrixClient'
 import type {
   CreateResearchRunRequest,
-  InqtrixHealth,
-  InqtrixStack,
-  InqtrixStackList,
   ResearchRunEvent,
   ResearchRunResult,
   ResearchRunSummary,
-  StackDiscoveryStatus,
 } from './types'
 
 type LiveRunCallbacks = {
@@ -35,20 +30,31 @@ type LiveRunCallbacks = {
 type UseResearchRunApiOptions = LiveRunCallbacks & {
   apiKey?: string
   enabled: boolean
+  /** Whether the caller is admitted to list/run (the single auth gate the
+   * parent already resolves: anonymous `none`, `apikey` with a key, or a live
+   * cookie session). Flipping false->true (e.g. an in-app local/ldap login)
+   * re-runs run-list hydration without a remount; false aborts live streams. */
+  canList: boolean
+  /** The workspace namespace every run operation scopes to -- the per-user
+   * project namespace when authenticated, the browser-local id otherwise.
+   * Resolved by the parent (after server discovery + the auth session), so a run
+   * is created/listed/cancelled under the same namespace the project data uses
+   * and reports follow the user across devices. Flips to the namespace in
+   * lockstep with `canList`, so the first list/submit already uses it. */
   workspaceId: string
 }
 
-type StackDiscoveryCacheEntry = {
-  payload?: InqtrixStackList
-  promise?: Promise<InqtrixStackList | null>
-  status: StackDiscoveryStatus
-}
-
-const stackDiscoveryCache = new Map<string, StackDiscoveryCacheEntry>()
-const STACK_DISCOVERY_CACHE_KEY = 'default'
-
+/**
+ * Run operations (list/create/cancel/result/stream) for the research desk,
+ * scoped to a workspace namespace the PARENT resolves. Server discovery
+ * (health/capabilities/stacks) lives in {@link useServerDiscovery}; splitting it
+ * out lets the parent resolve the auth session and the per-user namespace before
+ * this hook runs, so the run scope is the namespace from the first list/submit
+ * with no in-hook session re-probe and no browser-id window.
+ */
 export function useResearchRunApi({
   apiKey,
+  canList,
   enabled,
   onEvent,
   onResult,
@@ -56,11 +62,6 @@ export function useResearchRunApi({
   onSummary,
   workspaceId,
 }: UseResearchRunApiOptions) {
-  const [health, setHealth] = useState<InqtrixHealth | null>(null)
-  const [defaultStackName, setDefaultStackName] = useState<string | null>(null)
-  const [stackNames, setStackNames] = useState<string[]>([])
-  const [stackDiscoveryStatus, setStackDiscoveryStatus] = useState<StackDiscoveryStatus>('unknown')
-  const [stacks, setStacks] = useState<InqtrixStack[]>([])
   const [lastError, setLastError] = useState<string | null>(null)
   const streamsRef = useRef(new Map<string, AbortController>())
   const callbacksRef = useRef<LiveRunCallbacks>({
@@ -117,16 +118,30 @@ export function useResearchRunApi({
     })
   }, [apiKey, loadResult, workspaceId])
 
-  const submitRun = useCallback(async (request: CreateResearchRunRequest) => {
+  const submitRun = useCallback(async (
+    request: CreateResearchRunRequest,
+    options?: {
+      /** Select the new run in the research workspace (default true);
+       * knowledge asks pass false — their surface is the Wissen thread. */
+      select?: boolean
+      /** Invoked with the accepted summary BEFORE the event stream
+       * starts, so callers can register run-id-keyed state without
+       * racing the first SSE event. */
+      onCreated?: (summary: ResearchRunSummary) => void
+    },
+  ): Promise<ResearchRunSummary | null> => {
     try {
       setLastError(null)
       const summary = await createResearchRun(request, { apiKey, workspaceId })
-      callbacksRef.current.onSummary(summary, { select: true })
+      callbacksRef.current.onSummary(summary, { select: options?.select ?? true })
+      options?.onCreated?.(summary)
       startStream(summary)
+      return summary
     } catch (error) {
       const message = messageFromError(error)
       setLastError(message)
       console.warn('Inqtrix run creation failed.', error)
+      return null
     }
   }, [apiKey, startStream, workspaceId])
 
@@ -143,13 +158,34 @@ export function useResearchRunApi({
     }
   }, [apiKey, startStream, workspaceId])
 
+  const deleteRun = useCallback(async (runId: string) => {
+    // Stop any live stream first, then delete durably on the server. The
+    // caller removes it from local state only after this resolves, so a
+    // failed delete never leaves the UI claiming a run is gone while the
+    // store still has it (it would re-appear on the next reload).
+    const controller = streamsRef.current.get(runId)
+    if (controller) {
+      controller.abort()
+      streamsRef.current.delete(runId)
+    }
+    try {
+      setLastError(null)
+      await deleteResearchRun(runId, { apiKey, workspaceId })
+    } catch (error) {
+      // A 404 means the run is already absent server-side; for a delete that
+      // is idempotent success, not a failure to surface. Anything else (e.g.
+      // 409 while still active) is a real error the caller must see.
+      if (hasHttpStatus(error, 404)) return
+      const message = messageFromError(error)
+      setLastError(message)
+      throw new Error(message, { cause: error })
+    }
+  }, [apiKey, workspaceId])
+
   useEffect(() => {
-    if (!enabled) {
-      setHealth(null)
-      setDefaultStackName(null)
-      setStackNames([])
-      setStackDiscoveryStatus('unknown')
-      setStacks([])
+    if (!enabled || !canList) {
+      // Not admitted (disabled, no apikey, or no/lost session): abort any live
+      // streams and list nothing. Re-running with canList true re-hydrates.
       for (const controller of streamsRef.current.values()) {
         controller.abort()
       }
@@ -164,43 +200,6 @@ export function useResearchRunApi({
     streamsRef.current.clear()
 
     async function hydrate() {
-      let healthPayload: InqtrixHealth | null = null
-      try {
-        healthPayload = await fetchHealth()
-        if (!ignore) setHealth(healthPayload)
-      } catch (error) {
-        if (!ignore) setLastError(messageFromError(error))
-      }
-
-      try {
-        const stackPayload = await discoverStacks()
-        if (!ignore) {
-          if (stackPayload) {
-            setDefaultStackName(stackPayload.default)
-            setStackNames(stackPayload.stacks.map((stack) => stack.name))
-            setStackDiscoveryStatus('available')
-            setStacks(stackPayload.stacks)
-          } else {
-            setDefaultStackName(null)
-            setStackNames([])
-            setStackDiscoveryStatus('unsupported')
-            setStacks([])
-          }
-        }
-      } catch (error) {
-        if (!ignore) {
-          setDefaultStackName(null)
-          setStackNames([])
-          setStackDiscoveryStatus('unknown')
-          setStacks([])
-          setLastError(messageFromError(error))
-        }
-      }
-
-      if (healthPayload?.auth_required && !apiKey) {
-        return
-      }
-
       try {
         const summaries = await listResearchRuns({ apiKey, workspaceId })
         if (ignore) return
@@ -218,7 +217,7 @@ export function useResearchRunApi({
     return () => {
       ignore = true
     }
-  }, [apiKey, enabled, startStream, workspaceId])
+  }, [apiKey, canList, enabled, startStream, workspaceId])
 
   useEffect(() => {
     return () => {
@@ -231,44 +230,10 @@ export function useResearchRunApi({
 
   return {
     cancelRun,
-    defaultStackName,
-    health,
+    deleteRun,
     lastError,
-    stackDiscoveryStatus,
-    stackNames,
-    stacks,
     submitRun,
   }
-}
-
-async function discoverStacks() {
-  const cached = stackDiscoveryCache.get(STACK_DISCOVERY_CACHE_KEY)
-  if (cached?.status === 'unsupported') return null
-  if (cached?.payload) return cached.payload
-  if (cached?.promise) return cached.promise
-
-  const entry: StackDiscoveryCacheEntry = {
-    status: 'unknown',
-  }
-  entry.promise = fetchStacks()
-    .then((payload) => {
-      entry.payload = payload
-      entry.status = 'available'
-      return payload
-    })
-    .catch((error) => {
-      if (hasHttpStatus(error, 404)) {
-        entry.status = 'unsupported'
-        return null
-      }
-      stackDiscoveryCache.delete(STACK_DISCOVERY_CACHE_KEY)
-      throw error
-    })
-    .finally(() => {
-      entry.promise = undefined
-    })
-  stackDiscoveryCache.set(STACK_DISCOVERY_CACHE_KEY, entry)
-  return entry.promise
 }
 
 function terminalStatus(status: ResearchRunSummary['status']) {

@@ -246,7 +246,7 @@ def _run_direct_chat(
     """Execute the skip-search short-circuit: LLM-only, no graph.
 
     Emits two progress markers (``chat_only.start`` / ``chat_only.done``)
-    so the Streamlit progress expander still has something to show. The
+    so a progress UI still has something to show. The
     returned ``result_state`` mimics the shape of the research path so
     downstream callers behave identically, minus the research-specific
     fields.
@@ -383,6 +383,7 @@ def run(
     cancel_event: threading.Event | None = None,
     run_id: str | None = None,
     run_event_sink: Callable[[str, dict[str, Any]], None] | None = None,
+    token_budget: int = 0,
 ) -> dict[str, Any]:
     """Execute the research agent and return answer + usage + state.
 
@@ -443,6 +444,7 @@ def run(
         max_rounds=settings.max_rounds,
         run_id=run_id,
         run_event_sink=run_event_sink,
+        token_budget=token_budget,
     )
     log_run_start(
         question=question,

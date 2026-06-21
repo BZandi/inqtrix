@@ -76,21 +76,60 @@ def _report_references_from_state(
         return []
 
     report_references: list[ReportReference] = []
-    seen_urls: set[str] = set()
+    seen: set[str] = set()
     for index, reference in enumerate(references, 1):
         if not isinstance(reference, dict):
             continue
         url = normalize_url(str(reference.get("url", "") or ""))
-        if not url or url in seen_urls:
+        if not url:
             continue
-        seen_urls.add(url)
+        document_id_raw = reference.get("document_id")
+        document_id = str(document_id_raw) if document_id_raw else None
+        chunk_index_raw = reference.get("chunk_index")
+        chunk_index = (
+            int(chunk_index_raw)
+            if isinstance(chunk_index_raw, (int, float))
+            else None
+        )
+        # Knowledge citations are identified by (document_id, chunk_index):
+        # distinct chunks of the SAME document must NOT collapse, but the
+        # default `inqtrix://documents/{id}#chunk-{n}` URL loses its fragment to
+        # ``normalize_url`` — so de-duping by URL would silently drop every
+        # cited chunk after the first. Web references (no document id) keep the
+        # URL-dedup that conflates the same source cited twice.
+        dedup_key = f"doc:{document_id}#{chunk_index}" if document_id else url
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
         label = str(reference.get("label", "") or f"Quelle {index}")
         tier = str(
             reference.get("tier", "")
             or tier_by_url.get(url)
             or tiering.tier_for_url(url)
         )
-        report_references.append(ReportReference(label=label, url=url, tier=tier))
+        title_raw = reference.get("title")
+        title = str(title_raw) if title_raw else None
+        excerpt_raw = reference.get("excerpt")
+        source_text_raw = reference.get("source_text")
+        page_number_raw = reference.get("page_number")
+        report_references.append(
+            ReportReference(
+                label=label,
+                url=url,
+                tier=tier,
+                title=title,
+                document_id=document_id,
+                chunk_index=chunk_index,
+                excerpt=str(excerpt_raw) if excerpt_raw else None,
+                source_text=str(source_text_raw) if source_text_raw else None,
+                page_number=(
+                    int(page_number_raw)
+                    if isinstance(page_number_raw, (int, float))
+                    and not isinstance(page_number_raw, bool)
+                    else None
+                ),
+            )
+        )
     return report_references
 
 
@@ -161,6 +200,61 @@ class ReportReference(BaseModel):
         ),
     )
     """Quality tier assigned to this reference URL by the active source-tiering strategy. Uses the same labels as :class:`Source.tier`."""
+    title: str | None = Field(
+        None,
+        description=(
+            "Human-readable title of the cited source, e.g. the original "
+            "document filename for a knowledge citation. ``None`` when the "
+            "producer supplied no title; clients then fall back to the URL. "
+            "Additive field — older payloads without it still validate."
+        ),
+    )
+    """Human-readable title of the cited source, e.g. the original document filename for a knowledge citation. ``None`` when the producer supplied no title; clients then fall back to the URL. Additive field — older payloads without it still validate."""
+    document_id: str | None = Field(
+        None,
+        description=(
+            "Knowledge-document id this citation points into. Lets clients "
+            "open the exact source reliably (not only by parsing the URL). "
+            "``None`` for web references."
+        ),
+    )
+    """Knowledge-document id this citation points into; lets clients open the exact source reliably. ``None`` for web references."""
+    chunk_index: int | None = Field(
+        None,
+        description=(
+            "0-based index of the cited chunk within its document, so the UI "
+            "can label/locate the passage. ``None`` for web references."
+        ),
+    )
+    """0-based index of the cited chunk within its document. ``None`` for web references."""
+    excerpt: str | None = Field(
+        None,
+        description=(
+            "The exact retrieved chunk text the answer was grounded in — the "
+            "passage shown (with the cited span highlighted) when the user "
+            "verifies a knowledge citation. ``None`` for web references."
+        ),
+    )
+    """The exact retrieved chunk text the answer was grounded in — shown as the verifiable source passage. ``None`` for web references."""
+    source_text: str | None = Field(
+        None,
+        description=(
+            "The chunk's ORIGINAL source text (without any contextualization "
+            "prefix the retrieval added), used to verify a quoted span against "
+            "the real document. Falls back to ``excerpt`` when absent."
+        ),
+    )
+    """The chunk's original source text (sans contextualization prefix), for verifying a quoted span. ``None`` for web references."""
+    page_number: int | None = Field(
+        None,
+        description=(
+            "Best-effort 1-based source page of the cited chunk (PDF knowledge "
+            "sources only), for a page-level 'open PDF at page N' jump. ``None`` "
+            "when the source has no pages, the mapping was inconclusive, or for "
+            "web references."
+        ),
+    )
+    """Best-effort 1-based source page of the cited chunk (PDF knowledge sources only). ``None`` when unmapped or for web references."""
 
 
 class Claim(BaseModel):

@@ -10,21 +10,27 @@ import time
 import uuid
 from functools import partial
 from queue import Empty, Queue
-from typing import Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from fastapi import Request
 
+from inqtrix.core.constants import MODEL_NAME
 from inqtrix.graph import run as agent_run
 from inqtrix.i18n import detect_ui_language, t
 from inqtrix.providers.base import ProviderContext
+from inqtrix.quota.models import QuotaDimension, consumed_tokens
+from inqtrix.services.request_parsing import request_timeout_seconds
 from inqtrix.settings import AgentSettings
 from inqtrix.strategies import StrategyContext
 from inqtrix.text import iter_word_chunks
 from inqtrix.urls import sanitize_error
 
+if TYPE_CHECKING:
+    from inqtrix.auth.principal import Principal
+    from inqtrix.services.quota_service import QuotaService
+
 log = logging.getLogger("inqtrix")
 
-MODEL_NAME = "research-agent"
 
 
 def make_chunk(
@@ -121,6 +127,8 @@ async def stream_response(
     cancel_event: threading.Event | None = None,
     stack_name: str = "",
     workspace_id: str = "",
+    quota_service: "QuotaService | None" = None,
+    principal: "Principal | None" = None,
 ) -> AsyncIterator[str]:
     """Execute the agent and yield progress updates + answer as SSE chunks.
 
@@ -140,7 +148,7 @@ async def stream_response(
     — they just need to expose ``receive()`` as well.
     """
     chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-    request_deadline = time.monotonic() + settings.max_total_seconds + 30
+    request_deadline = time.monotonic() + request_timeout_seconds(settings)
     if cancel_event is None:
         cancel_event = threading.Event()
 
@@ -249,6 +257,15 @@ async def stream_response(
         answer_text = result["answer"]
     except asyncio.TimeoutError:
         await _shutdown_watcher()
+        # The agent thread keeps running to completion (it cannot be
+        # cancelled mid-call), but its usage is never read here, so the
+        # spend goes unbilled. Make that visible rather than silent
+        # (Designprinzip 1) — only relevant when metering is active.
+        if quota_service is not None:
+            log.warning(
+                "Streamed run timed out; abandoned token spend not "
+                "booked toward quota."
+            )
         yield make_chunk(chat_id, t(ui_state, "sse_request_timeout"))
         yield make_chunk(chat_id, "", finish_reason="stop")
         yield "data: [DONE]\n\n"
@@ -263,6 +280,18 @@ async def stream_response(
         yield make_chunk(chat_id, "", finish_reason="stop")
         yield "data: [DONE]\n\n"
         return
+
+    # Book the real token spend now that the agent has finished —
+    # before the cancel short-circuit below, so a run the client
+    # abandoned still counts what it consumed toward the monthly quota.
+    # Recording is non-fatal (the service swallows store errors), so it
+    # never breaks the stream.
+    if quota_service is not None:
+        await quota_service.record(
+            principal,
+            QuotaDimension.LLM_TOKENS,
+            consumed_tokens(result.get("usage")),
+        )
 
     # Cancel-on-disconnect path: graph.run returns cancelled=True with an
     # empty answer. Stop emitting because the client is gone.
@@ -321,13 +350,17 @@ async def guarded_stream(
     cancel_event: threading.Event | None = None,
     stack_name: str = "",
     workspace_id: str = "",
+    quota_service: "QuotaService | None" = None,
+    principal: "Principal | None" = None,
 ) -> AsyncIterator[str]:
     """Stream with semaphore guard for correct concurrency limiting.
 
     The semaphore is held INSIDE the generator so it is only released
     after the streaming is complete. ``request`` and ``cancel_event``
     are forwarded to :func:`stream_response` so the disconnect probe
-    and the implicit cancel pathway take effect.
+    and the implicit cancel pathway take effect; ``quota_service`` and
+    ``principal`` let the inner generator book the streamed run's token
+    spend once it knows the usage.
     """
     async with sem:
         async for chunk in stream_response(
@@ -342,5 +375,7 @@ async def guarded_stream(
             cancel_event=cancel_event,
             stack_name=stack_name,
             workspace_id=workspace_id,
+            quota_service=quota_service,
+            principal=principal,
         ):
             yield chunk

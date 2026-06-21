@@ -1,0 +1,27 @@
+apiVersion: v2
+name: inqtrix
+description: >-
+  Inqtrix research agent for Kubernetes and OpenShift. Deploys the FastAPI API,
+  the nginx-served Research Desk web UI, an optional durable worker, and a
+  one-shot database migration that runs as a Helm hook (pre-install for an
+  external database, post-install when the database is bundled; always pre-upgrade).
+  Backing services (PostgreSQL, Qdrant, Valkey, and an S3 object store via MinIO)
+  are external by default and can be bundled for a turnkey demo via the
+  postgres.enabled / qdrant.enabled / valkey.enabled / s3.enabled flags.
+type: application
+
+# Chart version: bump on any chart change (independent of the app version).
+version: 0.1.2
+
+# Application version: tracks src/inqtrix/__init__.py. Used as the default image
+# tag when image.<component>.tag is left empty.
+appVersion: "0.2.0"
+
+home: https://github.com/BZandi/inqtrix
+sources:
+  - https://github.com/BZandi/inqtrix
+keywords:
+  - research-agent
+  - llm
+  - rag
+  - fastapi

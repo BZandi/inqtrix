@@ -13,6 +13,8 @@ import type {
   FileAssetRecord,
   FileGroupRecord,
   FileLibrarySectionRecord,
+  KnowledgeSessionGroupRecord,
+  KnowledgeSessionRecord,
   ProjectState,
   ResearchRunRecord,
   VectorIndexMemberRecord,
@@ -22,6 +24,7 @@ import { type JobPhase, type LocalizedText, type ResearchJob } from '@/features/
 import type { ReferenceDoc } from '@/features/files/referenceBlocks'
 import {
   normalizeChatRule,
+  normalizeLinkedContextRefs,
 } from './chatRules'
 import {
   renderChatRuleAttachmentContent,
@@ -60,11 +63,100 @@ export type ChatHistorySection =
     threads: ChatThreadRecord[]
   }
 
+export type KnowledgeSessionHistorySection =
+  | {
+    group: KnowledgeSessionGroupRecord
+    groupId: string
+    kind: 'group'
+    sessions: KnowledgeSessionRecord[]
+  }
+  | {
+    groupId: null
+    kind: 'ungrouped'
+    sessions: KnowledgeSessionRecord[]
+  }
+
+/**
+ * Whether a run belongs to the research-desk surface — its job cards, the
+ * editor "import report" picker, and the chat `@research` mentions. That is
+ * every mode EXCEPT the "Wissen" thread: knowledge-mode runs ride the same
+ * run pipeline but belong to the knowledge workspace and must not appear as
+ * importable reports. A missing `mode` is a legacy run and counts as research
+ * (so older reports stay visible). This is the SINGLE definition shared by
+ * `projectResearchJobs` and `completedReportOptions`, so the desk list and the
+ * editor/chat lists can never drift apart again.
+ */
+export function isResearchDeskRun(run: ResearchRunRecord): boolean {
+  return (run.mode ?? 'research') !== 'knowledge'
+}
+
 export function projectResearchJobs(state: ProjectState): ResearchJob[] {
   return state.researchRunOrder
     .map((runId) => state.researchRuns[runId])
     .filter((run): run is ResearchRunRecord => Boolean(run))
+    .filter(isResearchDeskRun)
     .map(researchRunToJob)
+}
+
+export function projectKnowledgeItems(state: ProjectState) {
+  const selectedSessionId = state.selectedKnowledgeSessionId
+  return projectAllKnowledgeItems(state)
+    .filter((item) => selectedSessionId === null || item.sessionId === selectedSessionId)
+}
+
+export function projectAllKnowledgeItems(state: ProjectState) {
+  return state.knowledgeItemOrder
+    .map((itemId) => state.knowledgeItems[itemId])
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+}
+
+export function projectKnowledgeSessions(state: ProjectState): KnowledgeSessionRecord[] {
+  return state.knowledgeSessionOrder
+    .map((sessionId) => state.knowledgeSessions[sessionId])
+    .filter((session): session is KnowledgeSessionRecord => Boolean(session))
+}
+
+export function projectKnowledgeSessionSections(state: ProjectState): KnowledgeSessionHistorySection[] {
+  const groupOrder = state.knowledgeSessionGroupOrder ?? []
+  const groups = state.knowledgeSessionGroups ?? {}
+  const memberships = state.knowledgeSessionGroupMemberships ?? {}
+  const validGroupIds = new Set(groupOrder.filter((groupId) => Boolean(groups[groupId])))
+  const groupedSessions = new Map<string, KnowledgeSessionRecord[]>()
+  const ungroupedSessions: KnowledgeSessionRecord[] = []
+
+  for (const groupId of validGroupIds) {
+    groupedSessions.set(groupId, [])
+  }
+
+  for (const session of projectKnowledgeSessions(state)) {
+    const groupId = memberships[session.id]
+    if (groupId && validGroupIds.has(groupId)) {
+      groupedSessions.get(groupId)?.push(session)
+    } else {
+      ungroupedSessions.push(session)
+    }
+  }
+
+  const sections: KnowledgeSessionHistorySection[] = groupOrder.flatMap((groupId) => {
+    const group = groups[groupId]
+    if (!group) return []
+    return [{
+      group,
+      groupId,
+      kind: 'group' as const,
+      sessions: groupedSessions.get(groupId) ?? [],
+    }]
+  })
+
+  if (ungroupedSessions.length > 0 || sections.length === 0 || groupOrder.length > 0) {
+    sections.push({
+      groupId: null,
+      kind: 'ungrouped',
+      sessions: ungroupedSessions,
+    })
+  }
+
+  return sections
 }
 
 export function selectedResearchRun(state: ProjectState) {
@@ -170,7 +262,9 @@ export function completedReportOptions(state: ProjectState): CompletedReportOpti
   const reports = state.researchRunOrder
     .map((runId) => state.researchRuns[runId])
     .filter((run): run is ResearchRunRecord & { result: { markdown: string } } => {
-      return run?.status === 'completed' && Boolean(run.result?.markdown)
+      return run?.status === 'completed'
+        && Boolean(run.result?.markdown)
+        && isResearchDeskRun(run)
     })
     .map((run) => ({
       label: slugLabel(run.summary.title, run.runId, 'report'),
@@ -259,6 +353,40 @@ export function fileAssetsForGroup(state: ProjectState, groupId: string): FileAs
   return projectFileAssets(state).filter((asset) => asset.groupId === groupId)
 }
 
+/** The asset ids referenced by chat-context refs, including those reached
+ * indirectly through a context chat-rule's linked refs (a file-group expands
+ * to its member assets). Used to prefetch/await asset bodies (M6c) before any
+ * of them is read synchronously into an attachment — at chat send, an editor
+ * AI run, or a context-rule render. Must stay exhaustive: any ref shape that
+ * resolves to an asset body downstream has to be covered here, or that body
+ * can be sent empty on a fresh (server-hydrated, body-less) device. */
+export function assetIdsFromChatRefs(
+  state: ProjectState,
+  refs: readonly ChatContextReferenceRecord[],
+): string[] {
+  const ids = new Set<string>()
+  const addContextRef = (ref: ChatContextReferenceRecord) => {
+    if (ref.kind === 'file-asset') ids.add(ref.fileId)
+    else if (ref.kind === 'file-group') {
+      for (const asset of fileAssetsForGroup(state, ref.groupId)) ids.add(asset.id)
+    }
+  }
+  for (const ref of refs) {
+    if (ref.kind === 'file-asset' || ref.kind === 'file-group') {
+      addContextRef(ref)
+    } else if (ref.kind === 'chat-rule') {
+      const rule = state.chatRules[ref.ruleId]
+      if (!rule) continue
+      const normalized = normalizeChatRule(rule)
+      if (normalized.category !== 'context') continue
+      for (const linked of normalizeLinkedContextRefs(normalized.linkedContextRefs ?? [])) {
+        addContextRef(linked)
+      }
+    }
+  }
+  return [...ids]
+}
+
 export function projectVectorIndexes(state: ProjectState): VectorIndexRecord[] {
   return state.vectorIndexOrder
     .map((indexId) => state.vectorIndexes[indexId])
@@ -342,11 +470,19 @@ export function pendingChatReportAttachment(state: ProjectState) {
 export function chatAttachmentsFromRefs(
   state: ProjectState,
   refs: readonly ChatContextReferenceRecord[],
+  /** Freshly fetched asset bodies (id -> extractedText) that override the
+   * state copy. Used at chat send when the bodies were just loaded on demand
+   * (M6c): the dispatched bodies have not yet reached this state snapshot, so
+   * the awaited fetch results are passed in directly to avoid empty
+   * attachments. Absent in the common case (bodies already in state). */
+  assetBodyOverride?: ReadonlyMap<string, string>,
 ): ChatMessageAttachmentRecord[] {
   const attachedAt = new Date().toISOString()
   const reports = completedReportOptions(state)
   const rules = projectChatRules(state)
   const seen = new Set<string>()
+  const bodyOf = (asset: { id: string; extractedText: string }): string =>
+    assetBodyOverride?.get(asset.id) ?? asset.extractedText
 
   return refs.flatMap<ChatMessageAttachmentRecord>((ref) => {
     if (ref.kind === 'file-group') {
@@ -358,7 +494,7 @@ export function chatAttachmentsFromRefs(
         seen.add(memberKey)
         return [{
           attachedAt,
-          contentMarkdown: asset.extractedText,
+          contentMarkdown: bodyOf(asset),
           fileId: asset.id,
           groupId: group.id,
           groupLabel: group.title,
@@ -393,7 +529,7 @@ export function chatAttachmentsFromRefs(
       if (!asset) return []
       return [{
         attachedAt,
-        contentMarkdown: asset.extractedText,
+        contentMarkdown: bodyOf(asset),
         fileId: asset.id,
         kind: 'file-asset' as const,
         label: asset.label,
@@ -407,7 +543,7 @@ export function chatAttachmentsFromRefs(
     if (!rule) return []
     return [{
       attachedAt,
-      contentMarkdown: renderChatRuleAttachmentContent(state, rule, attachedAt),
+      contentMarkdown: renderChatRuleAttachmentContent(state, rule, attachedAt, assetBodyOverride),
       kind: 'chat-rule' as const,
       label: rule.label,
       ruleId: rule.id,
@@ -469,8 +605,11 @@ export function dedupeChatContextRefs(
 export function referenceDocsFromRefs(
   state: ProjectState,
   refs: readonly ChatContextReferenceRecord[],
+  /** Freshly fetched asset bodies (id -> extractedText) loaded on demand
+   * before an editor AI run (M6c), overriding the stale state snapshot. */
+  assetBodyOverride?: ReadonlyMap<string, string>,
 ): ReferenceDoc[] {
-  return chatAttachmentsFromRefs(state, refs)
+  return chatAttachmentsFromRefs(state, refs, assetBodyOverride)
     .filter((
       attachment,
     ): attachment is Extract<ChatMessageAttachmentRecord, { kind: 'file-asset' | 'file-group' | 'research-report' }> =>
@@ -578,6 +717,7 @@ export function chatAttachmentChipsFromAttachments(
 
 export function researchRunToJob(run: ResearchRunRecord): ResearchJob {
   return {
+    access: run.access,
     activePhase: run.phaseState.activePhase,
     cancelRequested: run.events.some((event) => event.title === 'Cancellation requested'),
     confidence: run.snapshot?.confidence ? `${run.snapshot.confidence} / 10` : undefined,

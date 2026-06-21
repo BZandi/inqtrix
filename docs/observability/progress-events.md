@@ -26,7 +26,7 @@ Every node calls `emit_progress(state, message)` at meaningful boundaries:
 - `"Formuliere Antwort (nach N Runden)..."` — start of answer.
 - `"done"` — terminal marker at the end of `answer`.
 
-The function writes a queue entry for the legacy streaming generator and, when a native run event sink is attached, an `inqtrix.progress.message` event with a compact `snapshot`. The string is German by default because the user-facing UI is German-first (see the conventions note on product strings).
+The function writes a queue entry for the legacy streaming generator and, when a native run event sink is attached, an `inqtrix.progress.message` event with a compact `snapshot`. The string is German by default because the user-facing UI is German-first (see the conventions note on user-facing strings).
 
 ## Library streaming
 

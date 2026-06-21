@@ -1,0 +1,51 @@
+"""SQLAlchemy Core definition of the account-preferences schema (M6c).
+
+The account tier of the project-persistence work — and the one piece that is
+NOT project data: a user's UI preferences (theme, locale, contrast) follow the
+USER, not the (user, workspace) project. So this is a singleton row per
+``(tenant_id, sub)``, keyed on the principal's subject directly (always
+non-null: ``__anonymous__`` / ``__static__`` / the OIDC or PAT subject), with
+no workspace dimension and no keyset list — there is exactly one row per user.
+It is deliberately excluded from the project import/sync (which is
+per-(user, workspace)).
+
+Only the genuinely account-level preferences live here. The device-local UI
+state (``editorUi`` / ``ui`` — panel widths, scroll, drafts) stays in the
+browser's localStorage per the storage matrix and is never sent to the server.
+
+Type decisions match the sibling ORMs: composite PK, unix-seconds ``Float``
+``updated_at``, ``tenant_id`` for the RLS layering. CHECK constraints pin each
+preference to its frontend union (``ContrastMode`` / ``Locale`` / ``ThemeMode``
+/ ``ThemePreset``) so an out-of-domain write fails loudly at the DB boundary.
+"""
+
+from __future__ import annotations
+
+from sqlalchemy import (
+    Column,
+    Float,
+    MetaData,
+    Table,
+    Text,
+    text,
+)
+
+account_metadata = MetaData()
+
+account_preferences = Table(
+    "account_preferences",
+    account_metadata,
+    # COMPOSITE primary key (tenant_id, sub): one preferences row per user.
+    # ``sub`` is the principal subject, never a URL/body value, so a caller can
+    # only ever address their own row — per-user isolation is structural.
+    Column("tenant_id", Text, primary_key=True, server_default=text("'default'")),
+    Column("sub", Text, primary_key=True),
+    Column("contrast_mode", Text, nullable=False, server_default=text("'standard'")),
+    Column("locale", Text, nullable=False, server_default=text("'en'")),
+    Column("theme", Text, nullable=False, server_default=text("'system'")),
+    Column("theme_preset", Text, nullable=False, server_default=text("'standard'")),
+    Column("updated_at", Float, nullable=False),
+)
+"""One user's account-level UI preferences (theme/locale/contrast), following
+the user across workspaces and devices. Upserted as a whole on change; there
+is no create/delete lifecycle — the first PUT creates the singleton row."""

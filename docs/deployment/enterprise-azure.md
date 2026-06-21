@@ -54,9 +54,9 @@ For production, terminate TLS at a reverse proxy (nginx, Traefik, Azure Applicat
 
 `INQTRIX_SERVER_API_KEY` gates `/v1/chat/completions` and `/v1/test/run` with a static Bearer token (`hmac.compare_digest`, timing-safe). `/health` and `/v1/models` stay public for liveness and discovery. Rotate the key via a container restart; there is no hot-reload path today, and multi-key lists are an open follow-up.
 
-## CORS with Streamlit / browser UIs
+## CORS with browser UIs
 
-For Streamlit or a browser UI served from a different origin:
+For a browser UI served from a different origin:
 
 - Use explicit origins, not `*`, if you send credentials.
 - Allow `Authorization` and `Content-Type` on preflight.

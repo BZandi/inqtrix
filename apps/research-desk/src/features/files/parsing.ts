@@ -1,5 +1,6 @@
 import type { FileParseStatus } from '@/features/project/types'
 import { clampText, emptyTextWarning, truncationWarning } from './parseResult'
+import { configurePdfWorker } from './pdfWorker'
 
 export type ParsedFile = {
   extractedText: string
@@ -70,8 +71,7 @@ function finalizeText(rawText: string, pageCount: number | null): ParsedFile {
 
 async function parsePdf(file: File): Promise<ParsedFile> {
   const pdfjs = await import('pdfjs-dist')
-  const workerUrl = (await import('pdfjs-dist/build/pdf.worker.min.mjs?url')).default
-  pdfjs.GlobalWorkerOptions.workerSrc = workerUrl
+  configurePdfWorker(pdfjs)
   const data = new Uint8Array(await file.arrayBuffer())
   const doc = await pdfjs.getDocument({ data }).promise
   const pageCount = doc.numPages

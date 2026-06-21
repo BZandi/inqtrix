@@ -19,11 +19,17 @@ changes, and why the next transition happens. The internal runtime is a mutable
 `AgentState` dict passed through a LangGraph state machine; most named data
 objects in the docs are either fields on that state or derived public views.
 
-The current product has one default research procedure: an iterative
+Inqtrix currently has one default research procedure: an iterative
 `classify -> plan -> search -> evaluate -> answer` loop. `AgentConfig` lets you
 swap providers, strategies, budgets, and thresholds for that procedure. It does
 not yet select a completely different algorithm or graph topology from the
 public API.
+
+The HTTP serving layer adds a second procedure on top of this loop: `mode=knowledge`
+is dispatched by the algorithm registry to a separate `KnowledgeAlgorithm` (retrieval
+over the deployment's own documents), not the five-node graph. It returns the same raw
+result shape, so run serialization and the SSE stream are shared. See
+[Knowledge retrieval](knowledge-retrieval.md).
 
 ## How to read the diagrams
 
@@ -219,7 +225,7 @@ Key takeaways:
   step implementations.
 - Providers and strategies are injected into nodes, so the default algorithm can
   use different backends without changing graph wiring.
-- Native browser clients use `server/runs.py` as an in-memory queue and event
+- Native browser clients use the run store (`server/runs.py` in-memory by default; `runs/postgres_store.py` + Valkey worker dispatch opt-in) as queue and event
   registry around the same `graph.run()` path; OpenAI-compatible chat clients
   continue to use `server/streaming.py`.
 
@@ -256,6 +262,8 @@ All strategy and provider customisations are passed via `AgentConfig`; no subcla
 ## Related docs
 
 - [Public API layer](public-api.md)
+- [Data architecture](data-architecture.md) -- where each kind of data lives and why (Postgres source of truth, lean Qdrant, object store, Valkey, browser), the storage matrix, the local-first vs server-persistent split, and the project-persistence tier.
+- [Knowledge retrieval](knowledge-retrieval.md) -- the second engine (`mode=knowledge`): hybrid retrieval, RRF, the gate loop, and grounding.
 - [State and iteration](state-and-iteration.md)
 - [Nodes](nodes.md)
 - [Run events](../observability/run-events.md)

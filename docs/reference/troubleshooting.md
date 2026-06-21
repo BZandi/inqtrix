@@ -55,6 +55,17 @@ curl -N http://localhost:5100/v1/chat/completions \
   -d '{"model":"research-agent","messages":[{"role":"user","content":"hi"}],"stream":true}'
 ```
 
+## Authentication and Stack mode
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| Fresh `local` deploy never shows the owner-setup screen (`GET /api/setup/status` returns `needs_owner: false`) | Not in `local` mode, an owner already exists, or the DB is not migrated | Confirm `INQTRIX_AUTH_MODE=local` — the gate is inert in every other mode. On a fresh DB run the `migrate` step first. See [Create and manage users](../how-to/create-and-manage-users.md). |
+| `POST /api/setup/owner` returns 409 | The instance owner already exists (the gate is one-shot) | Sign in with `POST /api/auth/login/local` instead; the owner is created exactly once. |
+| Login suddenly returns 429, even with the correct password | Login brute-force lockout tripped (`INQTRIX_LOGIN_RATE_LIMIT_*`), keyed per identifier + client IP | Wait `INQTRIX_LOGIN_RATE_LIMIT_LOCKOUT_SECONDS` (60) or raise the thresholds. Behind a proxy, ensure it overwrites `X-Forwarded-For` (the limiter trusts the left-most hop). See [Auth modes](../deployment/auth-modes.md). |
+| `ldap` login always 401 | Wrong bind DN/password, search base, or user filter — search-then-bind cannot locate or re-bind the user | Verify `INQTRIX_LDAP_BIND_DN`/`_PASSWORD`, `INQTRIX_LDAP_USER_SEARCH_BASE`, `INQTRIX_LDAP_USER_SEARCH_FILTER` against the directory; the 401 is uniform by design (no enumeration oracle). See [Connect to an existing LDAP](../how-to/connect-to-existing-ldap.md). |
+| 401 on a `Bearer ipat_...` request that worked before | Token revoked/expired, or the memory storage backend lost it on restart | PATs persist only with `INQTRIX_STORAGE_BACKEND=postgres`; the memory default WARNs at startup that tokens vanish on restart. Mint a new one under Settings → Account. |
+| `docker compose ... up` exits at the `migrate` step, or `api` never turns healthy | Missing secret / bad `INQTRIX_DATABASE_URL`, or a migration error | Read `docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack logs migrate api`; a missing variable surfaces as a loud named error. Confirm the four secrets are set. See [Stack quickstart](../getting-started/stack-quickstart.md). |
+
 ## Tests and local development
 
 | Symptom | Likely cause | Fix |

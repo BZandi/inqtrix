@@ -1,0 +1,45 @@
+{{- /*
+Non-secret app config. Bundled backing services auto-wire their non-secret
+connection settings; anything set explicitly in config/extraConfig wins (merge
+precedence: config > extraConfig > derived).
+*/}}
+{{- /* Fail fast: postgres storage backend with no database configured would
+       render an empty INQTRIX_DATABASE_URL and break migrate + api at runtime. */}}
+{{- if and (eq (.Values.config.INQTRIX_STORAGE_BACKEND | toString) "postgres") (not .Values.postgres.enabled) (not .Values.secret.existingSecret) (not (hasKey .Values.secret.data "INQTRIX_DATABASE_URL")) }}
+{{- fail "INQTRIX_STORAGE_BACKEND is \"postgres\" but no database is configured. Set ONE of: --set postgres.enabled=true (bundled demo DB), --set secret.existingSecret=<name> (a Secret carrying INQTRIX_DATABASE_URL), or --set-string secret.data.INQTRIX_DATABASE_URL=<url>. For a stateless trial: --set config.INQTRIX_STORAGE_BACKEND=memory --set migrations.enabled=false." }}
+{{- end }}
+{{- /* Object-store backend default lives in the derived layer (not the config
+       defaults) so s3.enabled can flip it to "s3" -- a baked-in config default would
+       always win over the derived value. The app default is "local" too. An explicit
+       config/extraConfig value still wins (e.g. to point at an external S3). */}}
+{{- $derived := dict "INQTRIX_OBJECT_STORE_BACKEND" "local" }}
+{{- if .Values.qdrant.enabled }}
+{{- $_ := set $derived "INQTRIX_KNOWLEDGE_ENABLED" "true" }}
+{{- $_ := set $derived "INQTRIX_VECTOR_BACKEND" "qdrant" }}
+{{- $_ := set $derived "INQTRIX_QDRANT_URL" (printf "http://%s-qdrant:6333" (include "inqtrix.fullname" .)) }}
+{{- end }}
+{{- /* Only switch to the Valkey queue when a worker exists to drain it; otherwise
+       a bundled Valkey without a worker would leave runs queued forever. With no
+       worker the app keeps the in-process queue (fine for a single-pod demo). */}}
+{{- if and .Values.valkey.enabled .Values.worker.enabled }}
+{{- $_ := set $derived "INQTRIX_QUEUE_BACKEND" "valkey" }}
+{{- end }}
+{{- /* Bundled MinIO: point the object store at the in-cluster S3 endpoint. The
+       bucket is created on first write by the app, so only backend/endpoint/bucket
+       are wired here; the access/secret keys are derived into the Secret. */}}
+{{- if .Values.s3.enabled }}
+{{- $_ := set $derived "INQTRIX_OBJECT_STORE_BACKEND" "s3" }}
+{{- $_ := set $derived "INQTRIX_S3_ENDPOINT_URL" (printf "http://%s-minio:9000" (include "inqtrix.fullname" .)) }}
+{{- $_ := set $derived "INQTRIX_S3_BUCKET" .Values.s3.bucket }}
+{{- end }}
+{{- $merged := merge (deepCopy .Values.config) .Values.extraConfig $derived }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "inqtrix.fullname" . }}
+  labels:
+    {{- include "inqtrix.labels" (dict "root" .) | nindent 4 }}
+data:
+  {{- range $key, $value := $merged }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}

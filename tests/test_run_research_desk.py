@@ -133,6 +133,66 @@ def test_health_proxies_to_backend(fake_dist: Path) -> None:
     assert response.json() == {"status": "ok"}
 
 
+def test_api_proxies_to_backend(fake_dist: Path) -> None:
+    """``GET /api/auth/session`` reaches the upstream ``/api/*`` path.
+
+    Without this the same-origin production login (auth BFF, local-auth
+    setup wizard, admin routes) is unreachable behind the launcher.
+    """
+    received: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received["url"] = str(request.url)
+        received["method"] = request.method
+        return _json_response(200, {"authenticated": False})
+
+    transport = httpx.MockTransport(handler)
+    app = launcher.build_app(
+        fake_dist, "http://backend.invalid", transport=transport
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/auth/session")
+
+    assert response.status_code == 200
+    assert response.json() == {"authenticated": False}
+    assert received["url"] == "http://backend.invalid/api/auth/session"
+    assert received["method"] == "GET"
+
+
+def test_api_proxy_forwards_csrf_and_cookie(fake_dist: Path) -> None:
+    """Unsafe ``/api`` calls forward the session cookie + CSRF header.
+
+    The OIDC/local double-submit CSRF check needs both the ``__Host-``
+    cookie and the ``X-CSRF-Token`` header to survive the proxy hop.
+    """
+    received: dict[str, str | None] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received["csrf"] = request.headers.get("x-csrf-token")
+        received["cookie"] = request.headers.get("cookie")
+        received["url"] = str(request.url)
+        return _json_response(200, {})
+
+    transport = httpx.MockTransport(handler)
+    app = launcher.build_app(
+        fake_dist, "http://backend.invalid", transport=transport
+    )
+
+    with TestClient(app) as client:
+        client.post(
+            "/api/auth/logout",
+            headers={
+                "X-CSRF-Token": "csrf-abc",
+                "Cookie": "__Host-inqtrix_session=sid; __Host-inqtrix_csrf=csrf-abc",
+            },
+        )
+
+    assert received["url"] == "http://backend.invalid/api/auth/logout"
+    assert received["csrf"] == "csrf-abc"
+    assert received["cookie"] == "__Host-inqtrix_session=sid; __Host-inqtrix_csrf=csrf-abc"
+
+
 def test_proxy_forwards_workspace_header(fake_dist: Path) -> None:
     """The X-Inqtrix-Workspace-Id header is passed through verbatim."""
     received: dict[str, str | None] = {}

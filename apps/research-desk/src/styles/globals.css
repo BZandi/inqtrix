@@ -58,7 +58,7 @@
   --radius: 0.5rem;
   /* Single source for the sticky Topbar height; AppRail's offset and the
      full-height workspaces subtract it, so it must only change here. */
-  --header-h: 3rem;
+  --header-h: 2.75rem;
   --background: oklch(0.985 0 0);
   --brand: oklch(0.5 0.18 262);
   --brand-foreground: oklch(0.99 0 0);
@@ -281,6 +281,12 @@
 
   html {
     color-scheme: light;
+    /* Anchor the app shell to the viewport and stop the whole page from
+       rubber-band/overscroll scrolling (notably Safari) — the inner panes are
+       the real scroll containers. This is overscroll containment, NOT a global
+       overflow lock, so fixed auth/onboarding overlays still scroll. */
+    height: 100%;
+    overscroll-behavior: none;
   }
 
   html.dark {
@@ -290,6 +296,8 @@
   body {
     @apply bg-background text-foreground;
     margin: 0;
+    height: 100%;
+    overscroll-behavior: none;
     font-family: var(--font-sans);
   }
 
@@ -359,6 +367,28 @@
   .dark .report-markdown code[data-theme*=" "] span {
     color: var(--shiki-dark);
     background-color: transparent;
+  }
+
+  /* Inline citation markers (#kref-K#) emitted by linkifyCitationLabels: small
+     superscript brand chips with their own horizontal rhythm, so a glued cluster
+     like K6K15 reads as two discrete badges instead of one run-together
+     underlined link. Element style on the markdown surface (DESIGN.md §9), NOT a
+     .t-* role. line-height:0 keeps the raised chip from growing the line box. */
+  :where(.chat-markdown, .report-markdown) a[href^="#kref-"] {
+    font-size: 0.72em;
+    font-weight: 600;
+    line-height: 0;
+    vertical-align: super;
+    margin-inline: 0.14em 0.04em;
+    padding: 0.12em 0.34em;
+    border-radius: 4px;
+    text-decoration: none;
+    color: var(--brand);
+    background-color: color-mix(in oklab, var(--brand) 12%, transparent);
+    transition: background-color 0.12s ease;
+  }
+  :where(.chat-markdown, .report-markdown) a[href^="#kref-"]:hover {
+    background-color: color-mix(in oklab, var(--brand) 22%, transparent);
   }
 
   html[data-contrast-mode="high"] .chat-markdown pre[data-theme*=" "],
@@ -1594,6 +1624,151 @@
     animation: inqtrix-metric-flash 600ms ease-out;
   }
 
+  .inqtrix-rag-island::before {
+    animation: inqtrix-rag-island-sheen 900ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+    background:
+      linear-gradient(
+        112deg,
+        transparent 0%,
+        transparent 38%,
+        color-mix(in oklab, var(--brand) 12%, transparent) 50%,
+        color-mix(in oklab, var(--foreground) 5%, transparent) 54%,
+        transparent 68%,
+        transparent 100%
+      );
+    content: "";
+    inset: 0;
+    opacity: 0.46;
+    pointer-events: none;
+    position: absolute;
+    transform: translateX(-112%);
+  }
+
+  .inqtrix-step-viewport-shell {
+    position: relative;
+  }
+
+  .inqtrix-step-viewport-shell-overflowing::before,
+  .inqtrix-step-viewport-shell-overflowing::after {
+    content: "";
+    left: 0;
+    pointer-events: none;
+    position: absolute;
+    right: 0;
+    z-index: 20;
+  }
+
+  .inqtrix-step-viewport-shell-overflowing::before {
+    backdrop-filter: blur(2px);
+    background: linear-gradient(
+      to bottom,
+      color-mix(in oklab, var(--card) 86%, transparent),
+      color-mix(in oklab, var(--card) 42%, transparent) 56%,
+      transparent
+    );
+    height: 2.1rem;
+    top: 0;
+  }
+
+  .inqtrix-step-viewport-shell-overflowing::after {
+    background: linear-gradient(
+      to top,
+      color-mix(in oklab, var(--card) 72%, transparent),
+      transparent
+    );
+    bottom: 0;
+    height: 1.2rem;
+  }
+
+  .inqtrix-step-viewport {
+    max-height: min(18rem, 38vh);
+    overflow: hidden;
+    will-change: height;
+  }
+
+  .inqtrix-step-viewport-shell-overflowing .inqtrix-step-viewport {
+    mask-image: linear-gradient(
+      to bottom,
+      transparent,
+      black 1.45rem,
+      black calc(100% - 1.1rem),
+      transparent
+    );
+  }
+
+  .inqtrix-step-list-live {
+    --inqtrix-step-marker-col: 1.5rem;
+    --inqtrix-step-axis: calc(var(--inqtrix-step-marker-col) / 2);
+    --inqtrix-step-safe-bottom: 1.75rem;
+    list-style: none;
+    will-change: transform;
+  }
+
+  .inqtrix-step-tail {
+    height: var(--inqtrix-step-safe-bottom);
+  }
+
+  .inqtrix-step-row-live {
+    grid-template-columns: var(--inqtrix-step-marker-col) minmax(0, 1fr);
+  }
+
+  .inqtrix-step-spine {
+    background: color-mix(in oklab, var(--border) 82%, transparent);
+    bottom: calc(var(--inqtrix-step-safe-bottom) + 0.85rem);
+    left: var(--inqtrix-step-axis);
+    position: absolute;
+    top: 0.85rem;
+    transform: translateX(-0.5px);
+    width: 1px;
+  }
+
+  .inqtrix-step-running-shell {
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--brand) 8%, transparent),
+      0 0 14px color-mix(in oklab, var(--brand) 13%, transparent);
+  }
+
+  .inqtrix-step-complete {
+    background: color-mix(in oklab, var(--brand-subtle) 78%, var(--card));
+    border-color: color-mix(in oklab, var(--brand) 42%, transparent);
+    box-shadow:
+      inset 0 0 0 1px color-mix(in oklab, var(--brand) 8%, transparent),
+      0 0 10px color-mix(in oklab, var(--brand) 8%, transparent);
+    color: var(--brand);
+    position: relative;
+  }
+
+  .inqtrix-step-complete-motion {
+    animation: inqtrix-step-complete-shell 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    position: relative;
+  }
+
+  .inqtrix-step-complete-motion::before {
+    animation: inqtrix-step-complete-glint 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    border-radius: inherit;
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--brand) 28%, transparent);
+    content: "";
+    inset: -0.125rem;
+    opacity: 0;
+    position: absolute;
+  }
+
+  .inqtrix-step-complete-check {
+    color: var(--brand);
+  }
+
+  .inqtrix-step-complete-check-motion path {
+    animation: inqtrix-step-check-draw 380ms cubic-bezier(0.22, 1, 0.36, 1) 100ms both;
+    stroke-dasharray: 22;
+    stroke-dashoffset: 22;
+  }
+
+  .inqtrix-knowledge-answer-entry {
+    animation: inqtrix-knowledge-answer-entry 920ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    border-radius: 0.5rem;
+    position: relative;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .inqtrix-thinking-mark::after,
     .inqtrix-thinking-node,
@@ -1603,8 +1778,17 @@
     .inqtrix-active-node-core,
     .inqtrix-segment-breathe,
     .inqtrix-running-dot,
-    .inqtrix-metric-flash {
+    .inqtrix-metric-flash,
+    .inqtrix-step-complete-motion,
+    .inqtrix-step-complete-motion::before,
+    .inqtrix-step-complete-check-motion path,
+    .inqtrix-knowledge-answer-entry,
+    .inqtrix-rag-island::before {
       animation: none;
+    }
+
+    .inqtrix-step-complete-check-motion path {
+      stroke-dashoffset: 0;
     }
 
     .inqtrix-segment-breathe {
@@ -1746,6 +1930,92 @@
 
   100% {
     color: var(--foreground);
+  }
+}
+
+@keyframes inqtrix-rag-island-sheen {
+  0%,
+  36% {
+    transform: translateX(-112%);
+  }
+
+  66%,
+  100% {
+    transform: translateX(112%);
+  }
+}
+
+@keyframes inqtrix-step-complete-shell {
+  0% {
+    border-color: color-mix(in oklab, var(--brand) 18%, transparent);
+    transform: scale(0.82);
+  }
+
+  46% {
+    border-color: color-mix(in oklab, var(--brand) 46%, transparent);
+    color: var(--brand);
+    transform: scale(1.05);
+  }
+
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes inqtrix-step-complete-glint {
+  0%,
+  28% {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+
+  52% {
+    opacity: 0.72;
+    transform: scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.28);
+  }
+}
+
+@keyframes inqtrix-step-check-draw {
+  0% {
+    opacity: 0;
+    stroke-dashoffset: 22;
+  }
+
+  34% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 1;
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes inqtrix-knowledge-answer-entry {
+  0% {
+    background: color-mix(in oklab, var(--brand-subtle) 58%, transparent);
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--brand) 22%, transparent),
+      0 18px 34px -28px var(--brand);
+  }
+
+  42% {
+    background: color-mix(in oklab, var(--brand-subtle) 34%, transparent);
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--brand) 14%, transparent),
+      0 16px 30px -28px var(--brand);
+  }
+
+  100% {
+    background: transparent;
+    box-shadow:
+      0 0 0 0 color-mix(in oklab, var(--brand) 0%, transparent),
+      0 0 0 0 color-mix(in oklab, var(--brand) 0%, transparent);
   }
 }
 

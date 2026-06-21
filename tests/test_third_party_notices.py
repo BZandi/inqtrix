@@ -148,7 +148,7 @@ def test_notice_documents_are_deterministic(tmp_path):
     } == {
         ("fastapi", "python"),
         ("starlette", "python"),
-        ("pytest", "python-dev/ui"),
+        ("pytest", "python-dev"),
         ("react", "react-prod"),
         ("loose-envify", "react-prod"),
         ("vite", "react-dev"),

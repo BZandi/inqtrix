@@ -414,6 +414,7 @@ first.
 
 - [Nodes](nodes.md) -- the answer node at a glance, plus citation allowlist.
 - [Evidence pipeline](evidence-pipeline.md) -- how `EvidenceOverview` and the system-prompt blocks are built.
+- [Knowledge retrieval](knowledge-retrieval.md) -- the single quote-then-answer prompt for `mode=knowledge`, contrasted with this per-section composer.
 - [Confidence pipeline](../scoring-and-stopping/confidence.md) -- triggers for the conditional CLAIM-KALIBRIERUNG / EVIDENZTIEFE / TRANSPARENZPFLICHT blocks.
 - [Report profiles](../configuration/report-profiles.md) -- where `AnswerSectionSpec` lists and char budgets live.
 - [Worked example](../reference/worked-example.md) -- one concrete run end-to-end, including all six section LLM calls.

@@ -1,0 +1,97 @@
+# Product-mode frontend: serve the React bundle and reverse-proxy the Inqtrix
+# API on a single origin (no CORS, no build-time API base URL). Rendered by the
+# nginx-unprivileged entrypoint from /etc/nginx/templates/default.conf.template
+# to /etc/nginx/conf.d/default.conf: envsubst replaces ONLY defined environment
+# variables, so ${INQTRIX_API_UPSTREAM} (set per deployment -- compose service
+# name `api:5100` by default, the API Service DNS name under Helm) is filled in
+# while nginx runtime variables ($host, $remote_addr, ...) are left untouched.
+
+upstream inqtrix_api {
+    server ${INQTRIX_API_UPSTREAM};
+}
+
+server {
+    listen 8080;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # File uploads (POST /v1/files) are bounded by the API at
+    # INQTRIX_MAX_FILE_BYTES (default 100 MiB). nginx's own default cap is 1 MB,
+    # which would reject any larger upload with 413 before it reaches the API,
+    # so the proxy limit must track the app limit. Configurable per deployment;
+    # the Dockerfile sets the default that keeps the bundled app working.
+    client_max_body_size ${INQTRIX_CLIENT_MAX_BODY_SIZE};
+
+    # Shared proxy behaviour for every API surface: SSE-safe (no buffering,
+    # long read/send timeouts) and pass through the auth headers/cookies.
+    # --- /api/ : auth BFF (/api/auth/*), local-auth setup (/api/setup/*),
+    #     admin (/api/admin/*). Without this, same-origin login is unreachable.
+    location /api/ {
+        proxy_pass http://inqtrix_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Inqtrix-Workspace-Id $http_x_inqtrix_workspace_id;
+        proxy_set_header X-CSRF-Token $http_x_csrf_token;
+        proxy_set_header Cookie $http_cookie;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # --- /v1/ : OpenAI-compatible + native runs; /v1/runs/{id}/events is SSE.
+    location /v1/ {
+        proxy_pass http://inqtrix_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Inqtrix-Workspace-Id $http_x_inqtrix_workspace_id;
+        proxy_set_header X-CSRF-Token $http_x_csrf_token;
+        proxy_set_header Cookie $http_cookie;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    location = /health {
+        proxy_pass http://inqtrix_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+    }
+
+    # Hashed build assets: long, immutable cache.
+    location /assets/ {
+        access_log off;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        # ES module assets use the .mjs extension (e.g. the bundled pdf.js
+        # worker). The base image's mime.types has no .mjs entry, so without
+        # this it would fall to the octet-stream default and browsers reject
+        # the module ("Failed to fetch dynamically imported module"). Other
+        # asset extensions are typed by mime.types; default_type only governs
+        # the otherwise-untyped .mjs files here.
+        default_type application/javascript;
+        try_files $uri =404;
+    }
+
+    # SPA fallback: unknown paths resolve to index.html for client routing.
+    # index.html must NOT be cached: it is the only unhashed entry point and
+    # names the current hashed /assets bundle. With heuristic caching a browser
+    # would keep an old index.html after a redeploy and request now-deleted
+    # asset hashes (404 "Importing a module script failed"). no-cache forces a
+    # cheap ETag revalidation each load, so a new bundle is picked up
+    # immediately; the hashed assets above stay immutably cached.
+    location / {
+        add_header Cache-Control "no-cache";
+        try_files $uri $uri/ /index.html;
+    }
+}

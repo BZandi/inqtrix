@@ -24,16 +24,21 @@ type ResearchWorkspaceProps = {
   onCancelJob: (jobId: string) => void
   onComposerSubmit: (request: CreateResearchRunRequest) => void
   onComposerVisibleChange: (isComposerVisible: boolean) => void
+  onResearchQuestionChange: (question: string) => void
+  researchQuestion: string
   onDeleteJob: (jobId: string) => void
   onReportExpandedChange: (isExpanded: boolean) => void
   onReportVisibleChange: (isVisible: boolean) => void
   onSelectJob: (jobId: string) => void
+  onShareJob?: (jobId: string) => void
   onToggleJob: (jobId: string) => void
   onUseReportInChat: (runId: string) => void
   reduceMotion: boolean | null
   selectedJobId: string | null
   selectedRun: ResearchRunRecord | null
   selectedStack: string
+  shareCountByRunId?: Record<string, number>
+  sharedByLabelByRunId?: ReadonlyMap<string, string>
 }
 
 export function ResearchWorkspace({
@@ -51,16 +56,21 @@ export function ResearchWorkspace({
   onCancelJob,
   onComposerSubmit,
   onComposerVisibleChange,
+  onResearchQuestionChange,
+  researchQuestion,
   onDeleteJob,
   onReportExpandedChange,
   onReportVisibleChange,
   onSelectJob,
+  onShareJob,
   onToggleJob,
   onUseReportInChat,
   reduceMotion,
   selectedJobId,
   selectedRun,
   selectedStack,
+  shareCountByRunId,
+  sharedByLabelByRunId,
 }: ResearchWorkspaceProps) {
   const runColumn = (
     <ResearchRunColumn
@@ -75,12 +85,17 @@ export function ResearchWorkspace({
       onCancelJob={onCancelJob}
       onComposerSubmit={onComposerSubmit}
       onComposerVisibleChange={onComposerVisibleChange}
+      onResearchQuestionChange={onResearchQuestionChange}
+      researchQuestion={researchQuestion}
       onDeleteJob={onDeleteJob}
       onSelectJob={onSelectJob}
+      onShareJob={onShareJob}
       onToggleJob={onToggleJob}
       reduceMotion={reduceMotion}
       selectedJobId={selectedJobId}
       selectedStack={selectedStack}
+      shareCountByRunId={shareCountByRunId}
+      sharedByLabelByRunId={sharedByLabelByRunId}
     />
   )
 

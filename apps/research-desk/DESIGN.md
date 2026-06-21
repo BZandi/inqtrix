@@ -205,6 +205,22 @@ Three tiers. One role = one size; the same UI function must never render two ico
 Decorative status dots smaller than 12px (e.g. `size-1.5` running dots) and large empty-state hero
 glyphs (`size-6`+ inside a big tile) are deliberate special cases, **not** icon roles.
 
+**Adding a new icon glyph is welcome — this is not a closed set.** `lucide-react` is a real
+dependency, kept precisely so you can reach for any of its glyphs when nothing in the current set
+fits. Adding one is a normal, lightweight change (no design review, no `globals.css` edit, no role
+change — the `.icon-*` roles in the table above are what stays fixed, the *list of available glyphs*
+is open). Route every icon through the single barrel `src/components/icons/index.tsx`, so feature
+code always imports `from '@/components/icons'` (never directly from `lucide-react`). Two ways to add
+one, both fine:
+
+- **Re-export** straight from `lucide-react` (the `export { ... } from 'lucide-react'` line near the
+  top of the barrel) — quickest, pulls the glyph from the package at build time.
+- **Vendor** it via `createIcon('Name', 'lucide-name', <svg paths>)` (the dominant pattern in the
+  barrel) — copies the SVG paths in so the glyph is independent of the package version.
+
+Prefer reusing an existing export before adding a near-duplicate; otherwise just add it. (Distinct
+from §0's "new size/role" rule, which *does* gate adding a new `.icon-*` tier.)
+
 ---
 
 ## 4. Control primitives & their canonical sizes
@@ -216,6 +232,9 @@ looks identical everywhere.
 | Control | Component / canonical | Notes |
 |---|---|---|
 | Button | `components/ui/button.tsx` — `sm` = `h-8 px-3 text-xs`; `default` = `h-9 px-4 py-2 text-sm`; `icon` = compact `size-7`/`size-8` | Never combine an explicit `h-9` with `size="sm"` — pick one height |
+| Select trigger | `components/ui/select.tsx` — `default` = `h-9 text-sm`; `toolbar` = `h-8 text-xs`; `table` = `h-7 text-xs shadow-none` | Use `table` only inside dense data rows/management grids where the select edits a row value rather than acting as a form field |
+| Switch | `components/ui/switch.tsx` — `default` = `h-5 w-9`; `table` = `h-4 w-7` | Use `table` for boolean actions inside dense table rows; keep default for Settings rows and larger forms |
+| Status badge | `features/settings/parts.tsx` — `default` = `h-7 text-xs`; `table` = `h-5 .t-hint` | Use `table` for scan labels in data rows so status chips match the Quota admin table |
 | Pill / filter chip | **`components/ui/chip.tsx`** (`<Chip active dot count>`) — `h-6 px-2.5 rounded-full text-[11px] font-medium`, active = `bg-brand-subtle text-brand` | Use the component, not raw classes. Tone meaning via the optional `dot` (see §5) |
 | `kbd` key badge | **`components/ui/kbd.tsx`** (`<Kbd>`) — `h-4 min-w-4 px-1 text-[10px]`, bordered | keyboard hints (e.g. mention-menu footer) |
 | Segmented / tab control | `h-7 text-xs font-medium` (convention) | e.g. Editor "Offen/Erledigt", Report tabs, Prompt-Library category + visibility filters. Not yet one primitive (active treatments differ: `bg-background shadow` vs `bg-accent`); a `SegmentedControl` is a future extraction — keep `h-7`/`text-xs`. |
@@ -251,7 +270,8 @@ Colours are OKLCH tokens in `globals.css` (4 presets + dark + high-contrast). Us
 | Tier | Radius | Shadow | Use |
 |---|---|---|---|
 | Control / input | `rounded-md` | — | buttons, inputs, chips |
-| Card / panel | `rounded-lg` | `shadow-[0_1px_2px_var(--shadow-hairline)]` | cards, list rows, sections |
+| Card / panel | `rounded-lg` | `shadow-[0_1px_2px_var(--shadow-hairline)]` | cards, list rows, isolated panels |
+| Fluid settings/data surface | no extra radius when already inside a page surface | — | Settings sections, admin/database-style tables and workspace management grids; avoid nested card chrome. Use a single column-header or section-header hairline, then rely on alignment, spacing, muted surfaces, and hover states; fluid tables do not add default row-by-row separators |
 | Floating | `rounded-xl` | `shadow-[0_8px_28px_-12px_var(--shadow-soft)]` | composer, chat bubbles |
 | Overlay / menu | `rounded-xl` | `shadow-lg` | popovers, mention menu, dropdowns |
 
@@ -287,9 +307,13 @@ category eyebrow (dot + label + count), do **not** repeat that category as a fil
 | Element | Convention |
 |---|---|
 | Top panel header bar | `h-12` tall, `px-3` horizontal, title `.t-section` (a whole-page header is `.t-title`) |
-| `--header-h` | `3rem` — the sticky topbar height (single source; AppRail offset subtracts it) |
+| `--header-h` | `2.75rem` — the compact sticky app topbar height (single source; AppRail offset subtracts it) |
+| Workspace sidebars | compact `bg-surface/50` navigation rails with `border-r`, dense list rows, and content descriptions in the main panel, not repeated as large sidebar intro blocks; secondary workspace headers align to the app rail's first icon center, sidebar header icons share the same leading icon column as nav rows, and the main panel header hairline aligns with the sidebar header hairline; group anchors use dark `t-caption` text plus outline icons; grouped Settings-nav items may use a subtle indented rail with item nodes on desktop, with the selected row spanning the full group width and the selected node using the brand accent; runtime/status badges belong in the sidebar footer, not beside the title |
 | Toolbar row | one shared control height `h-8`; gap `gap-2`; **one** brand CTA |
 | Content padding | base `p-4`, wider screens `md:p-6` |
+| Settings rows | row title `.t-list`, helper `.t-meta`, section title `.t-section`; rows sit in quiet structured-list sections with optional section-header hairlines, rounded row hover, and no default outer `border-y` frame |
+| Admin data sections | full available content width with the page's fixed horizontal padding; do not cap data tables/grids at the Settings form max-width |
+| Read-only status surfaces | compact structured sections with `min-h-9` rows, `.t-list` labels, one section-header hairline, table-density status badges, and optional info hover-cards using the model-picker card treatment |
 | Spacing rhythm | 4/8px grid — primary gap `gap-2`, tight `gap-1.5`; padding `px-2/3 py-1.5/2` |
 
 ---
@@ -303,6 +327,11 @@ difference):
 
 - [`src/components/markdown/MarkdownRenderer.tsx`](src/components/markdown/MarkdownRenderer.tsx)
 - the CSS classes `.editor-prose`, `.report-markdown`, `.chat-markdown` in `globals.css`
+
+Knowledge citation markers (`a[href^="#kref-"]` inside `.chat-markdown`/`.report-markdown`) carry a
+dedicated micro-chip style in `globals.css` (small superscript brand pill with built-in inter-chip gap)
+so glued clusters like `K6K15` read as discrete badges. This is an **element style on the Markdown
+surface**, not a `.t-*` role — no §2/§3 row; keep it in sync with `globals.css`.
 
 The `.t-*` roles apply to **non-Markdown UI text only**.
 

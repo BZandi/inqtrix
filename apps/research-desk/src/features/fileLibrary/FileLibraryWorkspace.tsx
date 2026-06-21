@@ -15,16 +15,27 @@ import {
   vectorIndexById,
   vectorIndexMembersResolved,
 } from '@/features/project/selectors'
-import type { EmbedModelId, FileAssetRecord, ProjectState } from '@/features/project/types'
+import type { EmbedModelDescriptor, EmbedModelId, FileAssetRecord, ProjectState } from '@/features/project/types'
 import { createDefaultFileParser } from '@/features/files/parsing'
-import { ingestFiles } from '@/features/files/ingest'
+import { ingestFiles, type ServerFileUpload } from '@/features/files/ingest'
 import { Dropzone } from '@/features/files/Dropzone'
 import { FILE_SECTION_TEMP_ID } from '@/features/files/sections'
 import type { ResearchDeskAction } from '../researchDesk/state'
+import {
+  ingestNewVectorIndexMembers,
+  reindexVectorIndexOnServer,
+  type KnowledgeReindexResult,
+  type KnowledgeSyncOptions,
+  type MemberProgress,
+} from './knowledgeSync'
+import { useIndexingJobApi } from './useIndexingJobApi'
 import { Rail } from './Rail'
+import { useEmbeddingQuota } from '@/features/quota/useEmbeddingQuota'
 import { IndexBar } from './IndexBar'
 import { AddDocsPanel } from './AddDocsPanel'
 import { FileCard, FileRow } from './FileItem'
+import { FilePreviewPanel } from './FilePreviewPanel'
+import { deleteKnowledgeDocument, type ClientOptions } from '@/api/inqtrixClient'
 import { ConfirmDelete, InlineText, SortSelect, ViewToggle, type MoveTarget } from './controls'
 import { groupSlug } from './helpers'
 import { isInternalFileDrag, type ActiveTarget, type SortMode, type ViewMode } from './constants'
@@ -163,14 +174,52 @@ function IndexEmpty({ onAdd }: { onAdd: () => void }) {
   )
 }
 
-export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<ResearchDeskAction>; state: ProjectState }) {
+export function FileLibraryWorkspace({
+  dispatch,
+  embedModels,
+  ensureAssetBodiesLoaded,
+  fileApiOptions,
+  knowledgeSync,
+  onAssetsIngested,
+  serverFeatureLabels = null,
+  serverFileUpload,
+  state,
+}: {
+  dispatch: Dispatch<ResearchDeskAction>
+  /** Active embedding catalog: server-provided when the knowledge engine
+   * is enabled, the EMBED_MODELS fallback in demo/offline modes. */
+  embedModels: readonly EmbedModelDescriptor[]
+  /** Loads asset bodies on demand before a first-build reindex reads them
+   * (M6c load-on-use). Absent in demo/offline — bodies are always local then. */
+  ensureAssetBodiesLoaded?: (assetIds: readonly string[]) => Promise<Map<string, string>>
+  /** Server options for the file preview (asset body + original download),
+   * gated on the FILES/persistence tier (not knowledge); `null` in demo/offline.
+   * Whether the Original tab is usable is then `serverFileId && fileApiOptions`. */
+  fileApiOptions: ClientOptions | null
+  /** Connection facts for real server-side embedding runs; `null` keeps
+   * the historical client-side simulation (demo/offline). */
+  knowledgeSync: KnowledgeSyncOptions | null
+  /** Kicks off the non-blocking background server (MarkItDown) parse for
+   * just-ingested assets, upgrading the instant client parse. No-op without
+   * a server parser. */
+  onAssetsIngested?: (assets: FileAssetRecord[]) => void
+  /** Labels of active server features for the visible mode indicator;
+   * `null` hides the line (demo or no server connected). */
+  serverFeatureLabels?: string[] | null
+  /** Uploads the ORIGINAL file to the server file store when the
+   * backend advertises `features.files`; absent = local-only mode. */
+  serverFileUpload?: ServerFileUpload
+  state: ProjectState
+}) {
   const { locale, t } = useLocale()
+  const embeddingQuota = useEmbeddingQuota()
   const [active, setActive] = useState<ActiveTarget>({ kind: 'all' })
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<SortMode>('recent')
   const [view, setView] = useState<ViewMode>('list')
   const [dropKey, setDropKey] = useState<string | null>(null)
   const [pickerIndexId, setPickerIndexId] = useState<string | null>(null)
+  const [previewAssetId, setPreviewAssetId] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const targetRef = useRef<UploadTarget>({ groupId: null, sectionId: FILE_SECTION_TEMP_ID })
   const reindexTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
@@ -179,7 +228,7 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
   useEffect(() => {
     const timers = reindexTimers.current
     return () => {
-      timers.forEach((timer) => clearTimeout(timer))
+      timers.forEach((timer) => clearInterval(timer))
       timers.clear()
     }
   }, [])
@@ -266,6 +315,24 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
 
   const activeIndex = active.kind === 'index' ? vectorIndexById(state, active.indexId) : null
   const indexMembers = activeIndex ? sortMembersForSort(vectorIndexMembersResolved(state, activeIndex.id)) : []
+  const activeIndexJob = activeIndex ? state.indexingJobs[activeIndex.id] : null
+  // The per-file "Index this file" action only makes sense when the click can
+  // actually run the INCREMENTAL path (existing collection, same model). On a
+  // first build or a model change a single file forces a full rebuild — so the
+  // per-row action is hidden there and the top button (which honestly says it
+  // touches the whole index) takes over.
+  const activeIndexCanIncrementalIndex =
+    !!activeIndex
+    && Boolean(activeIndex.serverCollectionId)
+    && activeIndex.serverCollectionModel === activeIndex.model
+  // A member's server-confirmed live outcome during an active client-build run
+  // (the live job carries the per-file sets; absent → not yet processed).
+  const memberLiveProgress = (fileId: string): 'embedded' | 'skipped' | undefined =>
+    activeIndexJob?.embeddedFileIds?.includes(fileId)
+      ? 'embedded'
+      : activeIndexJob?.skippedFileIds?.includes(fileId)
+        ? 'skipped'
+        : undefined
   function sortMembersForSort(members: ReturnType<typeof vectorIndexMembersResolved>) {
     if (sort === 'recent') return members
     const ordered = [...members]
@@ -281,9 +348,16 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
   async function ingestInto(files: File[], target: UploadTarget) {
     if (files.length === 0) return
     const existingLabels = assets.map((asset) => asset.label)
-    const created = await ingestFiles(files, { groupId: target.groupId, kind: 'library', sectionId: target.sectionId }, parser, existingLabels)
+    const created = await ingestFiles(
+      files,
+      { groupId: target.groupId, kind: 'library', sectionId: target.sectionId },
+      parser,
+      existingLabels,
+      serverFileUpload,
+    )
     if (created.length === 0) return
     dispatch({ assets: created, type: 'ingestFileAssets' })
+    onAssetsIngested?.(created)
     if (target.indexId) dispatch({ fileIds: created.map((asset) => asset.id), indexId: target.indexId, type: 'addDocsToVectorIndex' })
   }
   const openUpload = (target: UploadTarget) => {
@@ -295,21 +369,279 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
   const renameFile = (fileId: string, label: string) => dispatch({ fileId, label, type: 'renameFileAsset' })
   const deleteFile = (fileId: string) => dispatch({ fileId, type: 'deleteFileAsset' })
 
-  const triggerReindex = (indexId: string) => {
-    dispatch({ indexId, type: 'markVectorIndexIndexing' })
-    const previous = reindexTimers.current.get(indexId)
-    if (previous) clearTimeout(previous)
-    const memberCount = vectorIndexById(state, indexId)?.members.length ?? 0
-    const timer = setTimeout(() => {
-      dispatch({ indexId, type: 'completeVectorIndexReindex' })
-      reindexTimers.current.delete(indexId)
-    }, 1400 + memberCount * 120)
-    reindexTimers.current.set(indexId, timer)
+  const { cancelReindex, startReindex } = useIndexingJobApi({
+    apiKey: knowledgeSync?.apiKey,
+    enabled: knowledgeSync !== null,
+    onCancelled: (indexId) => dispatch({ indexId, type: 'markVectorIndexCancelled' }),
+    onComplete: (indexId) => dispatch({ indexId, type: 'completeVectorIndexReindex' }),
+    onError: (indexId, message) => dispatch({ indexId, message, type: 'markVectorIndexError' }),
+    onProgress: (indexId, completedDocuments, totalDocuments, currentDocumentTitle) =>
+      dispatch({ completedDocuments, currentDocumentTitle, indexId, totalDocuments, type: 'markVectorIndexProgress' }),
+    onQueued: (indexId, queuePosition) =>
+      dispatch({ indexId, queuePosition, type: 'markVectorIndexQueued' }),
+    onStart: (indexId, jobId, totalDocuments) =>
+      dispatch({ indexId, jobId, source: 'server', totalDocuments, type: 'startVectorIndexReindex' }),
+    workspaceId: knowledgeSync?.workspaceId ?? '',
+  })
+
+  // `onlyFileId` scopes the run to a SINGLE pending member (the per-row "Index
+  // this file" action) — it filters the pending set to that one document so the
+  // incremental path ingests just it. Omitted = the whole index (top button).
+  // `forceRebuild` (the "Neu aufbauen" action) bypasses the cheap incremental /
+  // re-embed paths and re-ingests every member from its original file, so an OLD
+  // collection picks up ingest-time provenance (page numbers, file_id, parser
+  // upgrades) it predates — at the cost of re-embedding all + a brief churn.
+  const triggerReindex = (indexId: string, onlyFileId?: string, forceRebuild = false) => {
+    const index = vectorIndexById(state, indexId)
+    // One job per index at a time (the per-row action must not race the top run).
+    if (!index || index.status === 'indexing') return
+    if (!knowledgeSync) {
+      // Demo: the local simulator (effect below) drives progress to done.
+      dispatch({
+        indexId,
+        jobId: `demo-${indexId}-${Date.now()}`,
+        source: 'demo',
+        totalDocuments: index.members.length,
+        type: 'startVectorIndexReindex',
+      })
+      return
+    }
+    const sync = knowledgeSync
+    const memberEntries = vectorIndexMembersResolved(state, indexId)
+    const pendingEntries = memberEntries.filter(
+      (entry) =>
+        entry.member.state === 'pending' && (!onlyFileId || entry.asset.id === onlyFileId),
+    )
+    // Single-file action on a non-pending member: nothing to do (never fall
+    // through to a full re-embed of the whole collection).
+    if (onlyFileId && pendingEntries.length === 0) return
+    // serverCollectionModel is absent on indexes built before the field existed
+    // -> reads as a mismatch, so the next reindex heals via a full rebuild.
+    const sameModel = index.serverCollectionModel === index.model
+
+    // Resolve member bodies (a server-synced project hydrates them empty, M6c
+    // load-on-use), run a client-driven ingest, back-fill re-parsed text, and
+    // report the embedded set so the reducer marks ONLY what actually landed
+    // (skipped/text-less members stay pending -> the index reads honestly
+    // stale). Shared by the incremental-add and full-rebuild branches.
+    const runClientIngest = (
+      assets: FileAssetRecord[],
+      ingest: (
+        resolved: FileAssetRecord[],
+        onMemberDone: MemberProgress,
+      ) => Promise<KnowledgeReindexResult>,
+    ) => {
+      const titleByFileId = new Map(
+        assets.map((asset) => [asset.id, asset.title || asset.label]),
+      )
+      // Server-confirmed per-member progress → advance the bar + flip each
+      // file row live (no cosmetic guessing; fires only after the await).
+      const onMemberDone: MemberProgress = ({ fileId, done, total, embedded }) => {
+        dispatch({
+          completedDocuments: done,
+          currentDocumentTitle: titleByFileId.get(fileId),
+          embedded,
+          fileId,
+          indexId,
+          totalDocuments: total,
+          type: 'markVectorIndexProgress',
+        })
+      }
+      void (async () => {
+        try {
+          const bodies = ensureAssetBodiesLoaded
+            ? await ensureAssetBodiesLoaded(assets.map((asset) => asset.id))
+            : null
+          const resolved = bodies
+            ? assets.map((asset) => ({
+                ...asset,
+                extractedText: bodies.get(asset.id) ?? asset.extractedText,
+              }))
+            : assets
+          const result = await ingest(resolved, onMemberDone)
+          // Upgrade each member the server re-parsed (MarkItDown) from the fast
+          // client parse to the higher-fidelity text + 'markitdown' provenance.
+          for (const { assetId, text } of result.reparsed) {
+            dispatch({ assetId, extractedText: text, type: 'upgradeFileAssetParse' })
+          }
+          dispatch({
+            embeddedFileIds: result.embeddedFileIds,
+            skippedFileIds: result.skippedFileIds,
+            indexId,
+            serverCollectionId: result.collectionId,
+            serverCollectionModel: result.serverCollectionModel,
+            serverDocumentIds: result.serverDocumentIds,
+            type: 'completeVectorIndexReindex',
+          })
+        } catch (error: unknown) {
+          dispatch({
+            indexId,
+            message: error instanceof Error ? error.message : String(error),
+            type: 'markVectorIndexError',
+          })
+        }
+      })()
+    }
+
+    // Incremental add: a built collection, SAME embedding model, and only new
+    // (pending) members — ingest just those into the existing collection. No
+    // full rebuild, no re-embedding of documents already present. (This closes
+    // the bug where docs added after the first build were never ingested.)
+    if (!forceRebuild && index.serverCollectionId && sameModel && pendingEntries.length > 0) {
+      const pendingAssets = pendingEntries.map((entry) => entry.asset)
+      // The complete embedded set after this run = members already embedded
+      // plus whatever of the pending set actually ingests.
+      const alreadyEmbedded = memberEntries
+        .filter((entry) => entry.member.state === 'embedded')
+        .map((entry) => entry.asset.id)
+      dispatch({
+        indexId,
+        jobId: `ingest-${indexId}-${Date.now()}`,
+        source: 'build',
+        totalDocuments: pendingAssets.length,
+        type: 'startVectorIndexReindex',
+      })
+      runClientIngest(pendingAssets, async (resolved, onMemberDone) => {
+        const result = await ingestNewVectorIndexMembers(index, resolved, sync, onMemberDone)
+        return {
+          ...result,
+          embeddedFileIds: [...alreadyEmbedded, ...result.embeddedFileIds],
+        }
+      })
+      return
+    }
+
+    // Re-embed in place: a built collection, SAME model, nothing new pending —
+    // the durable server job re-vectorizes the stored text in place (real
+    // per-document progress, cancellable, the collection stays online and is
+    // never deleted/recreated). It preserves per-chunk page numbers via the
+    // document's stored `_chunk_pages` (reembed_document re-aligns by index), so
+    // a refresh keeps the PDF page-jump. NEW documents get their pages captured
+    // at ingest (the incremental-add + file paths), not here — so this stays the
+    // cheap, churn-free refresh rather than a delete+recreate that risks
+    // orphaning the prior collection.
+    if (!forceRebuild && index.serverCollectionId && sameModel) {
+      void startReindex(index).catch((error: unknown) => {
+        dispatch({
+          indexId,
+          message: error instanceof Error ? error.message : String(error),
+          type: 'markVectorIndexError',
+        })
+      })
+      return
+    }
+
+    // Full rebuild: first build (no collection yet), the embedding model changed
+    // (a new vector dimension needs a fresh collection), OR an explicit "Neu
+    // aufbauen" (forceRebuild) to re-read the original files. Client-driven
+    // re-ingest of all current members (captures page numbers + file_id via the
+    // ingest paths); deletes any stale prior collection.
+    const memberAssets = memberEntries.map((entry) => entry.asset)
+    dispatch({
+      indexId,
+      jobId: `build-${indexId}-${Date.now()}`,
+      source: 'build',
+      totalDocuments: memberAssets.length,
+      type: 'startVectorIndexReindex',
+    })
+    runClientIngest(memberAssets, (resolved, onMemberDone) =>
+      reindexVectorIndexOnServer(index, resolved, sync, onMemberDone),
+    )
   }
+
+  // "X" on a member: delete the exact document from the searchable collection
+  // first (so removal is immediately effective, no full rebuild), THEN drop it
+  // locally. Requires a tracked serverDocumentId — every member gets one after
+  // a (re)index with this build. A member from an OLDER index (no tracked id)
+  // or an offline session falls back to local-only removal: its server document
+  // stays searchable until the index is rebuilt (or an admin runs the manual
+  // reconcile sweep). Re-indexing such an index gives every member an id and
+  // makes "X" exact. The remove control is disabled while a run is in flight.
+  const removeMember = (fileId: string) => {
+    if (!activeIndex) return
+    const indexId = activeIndex.id
+    const serverDocumentId = activeIndex.members.find(
+      (member) => member.fileId === fileId,
+    )?.serverDocumentId
+    if (knowledgeSync && serverDocumentId) {
+      void deleteKnowledgeDocument(serverDocumentId, knowledgeSync)
+        .then(() => dispatch({ fileId, indexId, type: 'removeDocFromVectorIndex' }))
+        .catch((error: unknown) => {
+          // On failure DON'T dispatch the local removal: the member stays in the
+          // list, which is the visible, honest signal that it did not leave the
+          // searchable index (the user can re-click to retry). The index-level
+          // error channel (markVectorIndexError) is gated on a run in flight, so
+          // it cannot carry a removal failure; the member-stays signal is the
+          // right-sized one. Console for diagnostics.
+          console.error('Knowledge-Dokument konnte nicht geloescht werden', serverDocumentId, error)
+        })
+      return
+    }
+    dispatch({ fileId, indexId, type: 'removeDocFromVectorIndex' })
+  }
+
+  const handleCancelReindex = (indexId: string) => {
+    const job = state.indexingJobs[indexId]
+    if (!job) return
+    // Only a durable server job can be cancelled server-side; demo and
+    // first-build runs cancel locally. The decision reads the authoritative
+    // `source` fact, never the job-id format (No-Silent-Fallbacks).
+    if (knowledgeSync && job.source === 'server') {
+      void cancelReindex(job.jobId).catch((error: unknown) => {
+        // Server cancel failed (network/5xx): fall back to a local cancel
+        // but surface why, so a still-running server job is not silent.
+        console.warn('Inqtrix reindex cancel failed; cancelling locally.', error)
+        dispatch({ indexId, type: 'markVectorIndexCancelled' })
+      })
+      return
+    }
+    dispatch({ indexId, type: 'markVectorIndexCancelled' })
+  }
+
+  useEffect(() => {
+    // Demo-only reindex simulator: step each demo job's progress to done
+    // (mount picks up a seeded mid-reindex too — demo "resume"). Server
+    // jobs are driven by the hook's SSE stream instead.
+    if (knowledgeSync) return undefined
+    const timers = reindexTimers.current
+    for (const [indexId, job] of Object.entries(state.indexingJobs)) {
+      if (job.source !== 'demo' || timers.has(indexId)) continue
+      const total = Math.max(1, job.totalDocuments)
+      let done = job.completedDocuments
+      const interval = setInterval(() => {
+        done += 1
+        if (done >= total) {
+          dispatch({ completedDocuments: total, indexId, totalDocuments: total, type: 'markVectorIndexProgress' })
+          dispatch({ indexId, type: 'completeVectorIndexReindex' })
+          const handle = timers.get(indexId)
+          if (handle) clearInterval(handle)
+          timers.delete(indexId)
+          return
+        }
+        dispatch({ completedDocuments: done, indexId, totalDocuments: total, type: 'markVectorIndexProgress' })
+      }, 850)
+      timers.set(indexId, interval)
+    }
+    for (const indexId of Array.from(timers.keys())) {
+      if (!state.indexingJobs[indexId]) {
+        const handle = timers.get(indexId)
+        if (handle) clearInterval(handle)
+        timers.delete(indexId)
+      }
+    }
+    return undefined
+  }, [dispatch, knowledgeSync, state.indexingJobs])
 
   const handleNewIndex = () => {
     selectNewestIndex.current = true
-    dispatch({ fileIds: [], title: t.vectorIndex.newIndexTitle, type: 'createVectorIndex' })
+    const defaultModel = embedModels[0]
+    dispatch({
+      dims: defaultModel?.dims,
+      fileIds: [],
+      model: defaultModel?.id,
+      title: t.vectorIndex.newIndexTitle,
+      type: 'createVectorIndex',
+    })
   }
   const handleNewCollection = () => dispatch({ sectionId: '', title: t.fileLibrary.newCollectionTitle, type: 'createFileLibrarySection' })
 
@@ -337,8 +669,17 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
     moveTargets,
     onDelete: deleteFile,
     onMove: moveFile,
+    onPreview: setPreviewAssetId,
     onRename: renameFile,
   }
+
+  // File preview overlay: the local record always carries the markdown for a
+  // local asset; the Original (PDF) tab needs a connected files server, so the
+  // options are null in demo/offline and the tab disables itself. Gated on the
+  // FILES/persistence tier (fileApiOptions) — NOT on knowledge, so an uploaded
+  // original stays viewable even when vector/knowledge is off.
+  const previewAsset = previewAssetId ? state.fileAssets[previewAssetId] ?? null : null
+  const previewOptions = fileApiOptions
 
   // ---- header bits ----
   const activeCollection = active.kind === 'collection' ? sections.find((section) => section.id === active.sectionId) ?? null : null
@@ -367,6 +708,7 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
       <Rail
         active={active}
         collections={railCollections.map((collection) => ({ count: assetsInSection(collection.id).length, id: collection.id, title: collection.title }))}
+        embeddingQuota={embeddingQuota}
         indexes={indexes.map((index) => ({ count: index.members.length, id: index.id, status: index.status, title: index.title }))}
         onDropToCollection={(sectionId, fileId) => moveFile(fileId, sectionId, null)}
         onNewCollection={handleNewCollection}
@@ -465,11 +807,21 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
             {active.kind === 'index' && activeIndex ? (
               <>
                 <IndexBar
+                  embedModels={embedModels}
+                  embeddingQuota={embeddingQuota}
                   index={activeIndex}
+                  live={state.indexingJobs[activeIndex.id] ?? null}
                   members={indexMembers}
+                  onCancel={handleCancelReindex}
                   onDelete={(indexId) => dispatch({ indexId, type: 'deleteVectorIndex' })}
-                  onModel={(indexId, model: EmbedModelId) => dispatch({ indexId, model, type: 'setVectorIndexModel' })}
+                  onModel={(indexId, model: EmbedModelId) => {
+                    const descriptor = embedModels.find((entry) => entry.id === model)
+                    dispatch({ dims: descriptor?.dims, indexId, model, type: 'setVectorIndexModel' })
+                  }}
                   onReindex={triggerReindex}
+                  onRebuild={(indexId) => triggerReindex(indexId, undefined, true)}
+                  serverBacked={knowledgeSync !== null}
+                  serverFeatureLabels={serverFeatureLabels}
                 />
                 {pickerIndexId === activeIndex.id ? (
                   <AddDocsPanel
@@ -492,10 +844,13 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
                     {indexMembers.map(({ asset, member }) => (
                       <FileRow
                         asset={asset}
+                        indexing={activeIndex.status === 'indexing'}
                         key={asset.id}
+                        liveProgress={memberLiveProgress(asset.id)}
                         memberState={member.state}
                         mode="index"
-                        onRemoveFromIndex={(fileId) => dispatch({ fileId, indexId: activeIndex.id, type: 'removeDocFromVectorIndex' })}
+                        onIndexMember={activeIndexCanIncrementalIndex ? (fileId) => triggerReindex(activeIndex.id, fileId) : undefined}
+                        onRemoveFromIndex={removeMember}
                         source={sectionTitle(asset.sectionId)}
                       />
                     ))}
@@ -505,10 +860,13 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
                     {indexMembers.map(({ asset, member }) => (
                       <FileCard
                         asset={asset}
+                        indexing={activeIndex.status === 'indexing'}
                         key={asset.id}
+                        liveProgress={memberLiveProgress(asset.id)}
                         memberState={member.state}
                         mode="index"
-                        onRemoveFromIndex={(fileId) => dispatch({ fileId, indexId: activeIndex.id, type: 'removeDocFromVectorIndex' })}
+                        onIndexMember={activeIndexCanIncrementalIndex ? (fileId) => triggerReindex(activeIndex.id, fileId) : undefined}
+                        onRemoveFromIndex={removeMember}
                         source={sectionTitle(asset.sectionId)}
                       />
                     ))}
@@ -601,6 +959,13 @@ export function FileLibraryWorkspace({ dispatch, state }: { dispatch: Dispatch<R
           </div>
         </ScrollArea>
       </div>
+      {previewAsset ? (
+        <FilePreviewPanel
+          asset={previewAsset}
+          onClose={() => setPreviewAssetId(null)}
+          options={previewOptions}
+        />
+      ) : null}
     </div>
   )
 }

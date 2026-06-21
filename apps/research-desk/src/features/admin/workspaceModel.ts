@@ -1,0 +1,53 @@
+import type { AdminUser, WorkspaceMember } from '@/api/inqtrixClient'
+
+/**
+ * Whether removing or demoting *sub* would strip the workspace's only OWNER.
+ *
+ * The server enforces this (409 ``last_owner``); the same pure rule lives here
+ * so the UI can pre-empt it (disable the control) and the demo twin can show
+ * the guard offline. *keepsOwner* is ``true`` when the operation leaves *sub*
+ * an owner (a role change that stays ``owner``), which is never an orphan.
+ */
+export function wouldOrphanLastOwner(
+  members: ReadonlyArray<WorkspaceMember>,
+  sub: string,
+  keepsOwner: boolean,
+): boolean {
+  if (keepsOwner) return false
+  const owners = members.filter((member) => member.role === 'owner')
+  return owners.length === 1 && owners[0]?.sub === sub
+}
+
+/**
+ * The add-member typeahead candidate pool: users not yet in the workspace that
+ * match *query* (a case-insensitive substring of display name, email, or sub),
+ * name-sorted. An empty query returns the full (member/disabled-filtered) list.
+ *
+ * Source is the loaded ADMIN user list, deliberately NOT ``/v1/users/search``:
+ * that endpoint is narrowed to the caller's co-members when workspace-scoped
+ * sharing is on, which is wrong for workspace ADMINISTRATION (an admin must be
+ * able to position any tenant user). Disabled users are excluded — the server's
+ * ``has_subject`` gate on the assign endpoint rejects them (404) — keeping the
+ * picker truthful (and the demo twin faithful to the backend).
+ */
+export function candidateUsers(
+  users: ReadonlyArray<AdminUser>,
+  memberSubs: ReadonlySet<string>,
+  query = '',
+): AdminUser[] {
+  const needle = query.trim().toLowerCase()
+  return users
+    .filter((user) => !user.disabled && !memberSubs.has(user.subject))
+    .filter(
+      (user) =>
+        needle === '' ||
+        (user.display_name ?? '').toLowerCase().includes(needle) ||
+        (user.email ?? '').toLowerCase().includes(needle) ||
+        user.subject.toLowerCase().includes(needle),
+    )
+    .sort((a, b) =>
+      (a.display_name ?? a.email ?? a.subject).localeCompare(
+        b.display_name ?? b.email ?? b.subject,
+      ),
+    )
+}

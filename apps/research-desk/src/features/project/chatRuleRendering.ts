@@ -17,8 +17,14 @@ export function databaseContextAttachmentsFromRefs(
   state: ProjectState,
   refs: readonly ChatContextReferenceRecord[],
   attachedAt: string,
+  /** Freshly fetched asset bodies (id -> extractedText) that override the
+   * state copy, used when bodies were just loaded on demand at send (M6c).
+   * Absent in the common case (bodies already in state). */
+  assetBodyOverride?: ReadonlyMap<string, string>,
 ): ChatMessageAttachmentRecord[] {
   const seen = new Set<string>()
+  const bodyOf = (asset: { id: string; extractedText: string }): string =>
+    assetBodyOverride?.get(asset.id) ?? asset.extractedText
   return normalizeLinkedContextRefs(refs).flatMap<ChatMessageAttachmentRecord>((ref) => {
     if (ref.kind === 'file-group') {
       const group = state.fileGroups[ref.groupId]
@@ -29,7 +35,7 @@ export function databaseContextAttachmentsFromRefs(
         seen.add(memberKey)
         return [{
           attachedAt,
-          contentMarkdown: asset.extractedText,
+          contentMarkdown: bodyOf(asset),
           fileId: asset.id,
           groupId: group.id,
           groupLabel: group.title,
@@ -49,7 +55,7 @@ export function databaseContextAttachmentsFromRefs(
     seen.add(key)
     return [{
       attachedAt,
-      contentMarkdown: asset.extractedText,
+      contentMarkdown: bodyOf(asset),
       fileId: asset.id,
       kind: 'file-asset' as const,
       label: asset.label,
@@ -64,6 +70,7 @@ export function renderChatRuleAttachmentContent(
   state: ProjectState,
   rule: ChatRuleRecord,
   attachedAt: string,
+  assetBodyOverride?: ReadonlyMap<string, string>,
 ): string {
   const normalized = normalizeChatRule(rule)
   if (normalized.category !== 'context') return normalized.contentMarkdown
@@ -71,6 +78,7 @@ export function renderChatRuleAttachmentContent(
     state,
     normalized.linkedContextRefs ?? [],
     attachedAt,
+    assetBodyOverride,
   )
   if (contextAttachments.length === 0) return normalized.contentMarkdown
   const contextBlocks = renderAttachmentContextBlocks(contextAttachments)

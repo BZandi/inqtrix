@@ -7,11 +7,16 @@ Every script in this folder mirrors a sibling under
 same defaults, same model names — but exposes the agent over HTTP
 instead of running it once in-process.
 
+> Every environment variable these scripts read — with defaults and allowed
+> values — is documented in
+> [`docs/configuration/settings-and-env.md`](../../docs/configuration/settings-and-env.md),
+> the single source of truth for env vars.
+>
 > See also [`docs/deployment/webserver-mode.md`](../../docs/deployment/webserver-mode.md)
 > for the conceptual overview (endpoints, lifespan, concurrency,
 > cancel-on-disconnect, per-request overrides). This README
-> remains the authoritative reference for operational details, the full
-> env-variable matrix, and per-stack run commands.
+> remains the authoritative reference for operational details and per-stack
+> run commands.
 
 > Inqtrix remains explicitly experimental. These examples ship
 > minimum-viable hardening options (TLS, Bearer API key, CORS) as
@@ -49,7 +54,24 @@ to the run block.
 | [`bedrock_perplexity.py`](bedrock_perplexity.py) | BedrockLLM | PerplexitySearch |
 | [`azure_openai_perplexity.py`](azure_openai_perplexity.py) | AzureOpenAILLM | PerplexitySearch |
 | [`azure_foundry_web_search.py`](azure_foundry_web_search.py) | AzureOpenAILLM | AzureFoundryWebSearch |
+| [`azure_knowledge_quickstart.py`](azure_knowledge_quickstart.py) | AzureOpenAILLM | PerplexitySearch |
 | [`multi_stack.py`](multi_stack.py) | mix of all above | mix of all above |
+
+`azure_knowledge_quickstart.py` additionally enables the knowledge
+engine (in-memory vector store, Azure deployment-based embeddings via
+`INQTRIX_EMBEDDING_*` env vars): it registers the `/v1/knowledge/*`
+routes and the `mode=knowledge` run algorithm, and its module
+docstring walks the full curl sequence (create collection, ingest
+text, knowledge run with a retrieval profile, SSE events, result).
+Retrieval profiles are documented in
+[`docs/configuration/knowledge-profiles.md`](../../docs/configuration/knowledge-profiles.md).
+
+For browser SSO (`INQTRIX_AUTH_MODE=oidc` with the Dex reference IdP
+from the dev compose stack) see the walkthrough
+[`oidc_stack.md`](oidc_stack.md); for directory login
+(`INQTRIX_AUTH_MODE=ldap` with the LLDAP reference directory) see
+[`ldap_stack.md`](ldap_stack.md). Both apply to every script in this
+folder, since the auth provider is wired through `create_app(...)`.
 
 The `multi_stack.py` example mounts every stack from the table above
 into a single FastAPI process. Each stack is opt-in: only stacks
@@ -69,7 +91,7 @@ resolution. The dotted box highlights the multi-stack-only branch.
 
 ```mermaid
 flowchart LR
-    Caller["HTTP Client\n(Streamlit / curl / SDK)"] --> TLS["TLS Termination\n(opt-in via uvicorn ssl_*)"]
+    Caller["HTTP Client\n(React desk / curl / SDK)"] --> TLS["TLS Termination\n(opt-in via uvicorn ssl_*)"]
     TLS --> CORS["CORSMiddleware\n(opt-in, whitelist)"]
     CORS --> FastAPI["FastAPI App\n(create_app or\ncreate_multi_stack_app)"]
     FastAPI --> Lifespan["lifespan ctx\n- startup health probe\n- log active security layers\n- log per-stack registration (multi)\n- shutdown log"]
@@ -247,7 +269,7 @@ curl -X POST http://localhost:5100/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"Was ist der Stand der GKV-Reform?"}]}'
 
-# With per-request override (Streamlit UI pattern)
+# With per-request override (browser UI pattern)
 curl -X POST http://localhost:5100/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"..."}],
@@ -289,10 +311,13 @@ INQTRIX_SERVER_TLS_CERTFILE=./cert.pem
 ```
 
 `create_app()` activates the gate automatically through
-`make_api_key_dependency(settings.server)`; each script forwards
+`build_auth_provider(settings)`, honouring `INQTRIX_AUTH_MODE`
+(unset infers the mode from `INQTRIX_SERVER_API_KEY`; the legacy
+`make_api_key_dependency` helper remains for direct `register_routes`
+injection); each script forwards
 `resolve_tls_paths(settings.server)` to `uvicorn.run(...)` for HTTPS.
 The startup log records the active layers (`api_key_gate=on/off`,
-`cors=...`); use it as the smoke test.
+`auth_mode=...`, `cors=...`); use it as the smoke test.
 
 > The `python -m inqtrix` entry point activates the API key gate the
 > same way, but it does **not** wire TLS into uvicorn. Use one of the
@@ -302,8 +327,7 @@ The startup log records the active layers (`api_key_gate=on/off`,
 See
 [`docs/deployment/webserver-mode.md`](../../docs/deployment/webserver-mode.md#authentication-and-tls)
 for the end-to-end walkthrough including bash, Python `httpx`, and
-`requests` client examples, plus the Streamlit UI side
-(`INQTRIX_WEBAPP_API_KEY`).
+`requests` client examples.
 
 ### Per-request overrides
 
@@ -328,7 +352,7 @@ module docstring of that same file.
 
 ## Parallel requests (concurrency)
 
-The server serves multiple clients (e.g. several Streamlit UIs) in
+The server serves multiple clients (e.g. several browser UIs) in
 parallel through an `asyncio.Semaphore`. The default cap is
 `MAX_CONCURRENT=3`. The OpenAI-compatible `/v1/chat/completions`
 endpoint keeps the historical behaviour: the fourth concurrent request
@@ -377,7 +401,7 @@ Scaling notes:
 - **Foundry token caveat**: `AzureFoundryWebSearch` mints its bearer in the constructor (~60–75 min lifetime, auto-refresh through `azure.identity`). Edge case: within the last 10 s before expiry the cache may hand out a stale token and the next call sees a transient 401 — restart the process to mitigate. Multi-key rotation and a refresh endpoint are explicitly out of scope.
 - **Graceful shutdown**: The ASGI `lifespan` handler emits an `Inqtrix server stopping` log line on stop. Uvicorn drains in-flight streams on `SIGTERM`; `--timeout-graceful-shutdown` controls how long uvicorn waits for in-flight responses.
 - **Health probe**: `GET /health` calls `is_available()` on both providers and returns `200` (all ready) or `503` (degraded). Suitable for a Kubernetes liveness probe; splitting liveness from readiness is a follow-up task.
-- **Multi-stack discovery cache**: `GET /v1/stacks` caches its rendered payload for ~5 seconds before re-probing each stack's `is_available()`. A Streamlit poll loop calling the endpoint every second therefore triggers at most one provider-readiness probe per 5 s.
+- **Multi-stack discovery cache**: `GET /v1/stacks` caches its rendered payload for ~5 seconds before re-probing each stack's `is_available()`. A polling client calling the endpoint every second therefore triggers at most one provider-readiness probe per 5 s.
 - **Per-stack strategy defaults**: When a `StackBundle` is registered without an explicit `strategies=...`, `create_multi_stack_app` derives them from `bundle.providers.llm` via `create_default_strategies(...)`. Per-stack `agent_settings` (when supplied) override the global `settings.agent` for requests routed to that stack, but per-request `agent_overrides` always win on top.
 - **Cancel on disconnect**: Both factories install the SSE-disconnect probe described in [Cancel on disconnect](#cancel-on-disconnect). Token spend is bounded by the in-flight provider call when the client goes away.
 
@@ -479,7 +503,7 @@ Response shape:
 Discovery is **unauthenticated** even when `INQTRIX_SERVER_API_KEY` is
 set, so a UI can render its stack-selection box before prompting for
 credentials. The endpoint is cached in-memory for ~5 seconds so a
-Streamlit poll loop does not turn into a provider-call storm.
+polling client does not turn into a provider-call storm.
 
 ### Picking a stack per request
 
@@ -521,7 +545,7 @@ Surface that to your users when you build the selection box.
 
 Both the single-stack and multi-stack servers implicitly cancel a
 streaming run when the client disconnects (browser tab closed,
-Streamlit "Stop" pressed and SSE connection torn down). Detection
+"Stop" pressed and SSE connection torn down). Detection
 runs in a dedicated background watcher task that blocks on
 `await request.receive()` and acts on the first `http.disconnect`
 ASGI message. Polling `request.is_disconnected()` was insufficient:

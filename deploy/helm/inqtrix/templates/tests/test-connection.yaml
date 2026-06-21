@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-test-health
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "test") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    {{- include "inqtrix.podSecurityContext" . | nindent 4 }}
+  containers:
+    - name: health
+      image: {{ include "inqtrix.image.api" . }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        capabilities:
+          drop:
+            - ALL
+      command:
+        - python
+        - -c
+        - |
+          import sys, urllib.request
+          url = "http://{{ include "inqtrix.fullname" . }}-api:{{ .Values.service.apiPort }}/health"
+          with urllib.request.urlopen(url, timeout=10) as response:
+              sys.exit(0 if response.status == 200 else 1)

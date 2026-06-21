@@ -11,22 +11,27 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 
 | Surface | Packages |
 |---|---:|
-| python | 67 |
-| python-dev/ui | 29 |
-| react-prod | 265 |
-| react-dev | 120 |
+| python | 88 |
+| python-dev | 14 |
+| react-prod | 333 |
+| react-dev | 143 |
 
 ## Python Dependencies
 
 | Surface | Package | Version | License | Metadata source |
 |---|---|---:|---|---|
+| python | `alembic` | 1.18.4 | MIT | python package metadata: License-Expression |
 | python | `annotated-doc` | 0.0.4 | MIT | python package metadata: License-Expression |
 | python | `annotated-types` | 0.7.0 | MIT License | python package metadata: classifiers |
 | python | `anyio` | 4.13.0 | MIT | python package metadata: License-Expression |
+| python | `argon2-cffi` | 23.1.0 | MIT | python package metadata: License-Expression |
+| python | `argon2-cffi-bindings` | 25.1.0 | MIT | python package metadata: License-Expression |
+| python | `asyncpg` | 0.31.0 | Apache-2.0 | python package metadata: License-Expression |
 | python | `azure-ai-projects` | 2.1.0 | MIT | manual override: Azure SDK for Python repository license |
 | python | `azure-core` | 1.39.0 | MIT | manual override: Azure SDK for Python repository license |
 | python | `azure-identity` | 1.25.3 | MIT | manual override: Azure SDK for Python repository license |
 | python | `azure-storage-blob` | 12.29.0 | MIT License | python package metadata: classifiers |
+| python | `beautifulsoup4` | 4.15.0 | MIT License | python package metadata: classifiers |
 | python | `boto3` | 1.42.85 | Apache-2.0 | python package metadata: License |
 | python | `botocore` | 1.42.85 | Apache-2.0 | python package metadata: License |
 | python | `cachetools` | 5.5.2 | MIT License | python package metadata: classifiers |
@@ -35,8 +40,10 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | python | `charset-normalizer` | 3.4.6 | MIT | python package metadata: License |
 | python | `click` | 8.3.1 | BSD-3-Clause | python package metadata: License-Expression |
 | python | `cryptography` | 46.0.7 | Apache-2.0 OR BSD-3-Clause | python package metadata: License-Expression |
+| python | `defusedxml` | 0.7.1 | Python Software Foundation License | python package metadata: classifiers |
 | python | `distro` | 1.9.0 | Apache Software License | python package metadata: classifiers |
 | python | `fastapi` | 0.135.2 | MIT | python package metadata: License-Expression |
+| python | `flatbuffers` | 25.12.19 | Apache Software License | python package metadata: classifiers |
 | python | `h11` | 0.16.0 | MIT License | python package metadata: classifiers |
 | python | `httpcore` | 1.0.9 | BSD-3-Clause | python package metadata: License-Expression |
 | python | `httpx` | 0.28.1 | BSD License | python package metadata: classifiers |
@@ -44,6 +51,7 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | python | `isodate` | 0.7.2 | BSD License | python package metadata: classifiers |
 | python | `jiter` | 0.13.0 | MIT License | python package metadata: classifiers |
 | python | `jmespath` | 1.1.0 | MIT License | python package metadata: classifiers |
+| python | `joserfc` | 1.7.1 | BSD License | python package metadata: classifiers |
 | python | `jsonpatch` | 1.33 | BSD License | python package metadata: classifiers |
 | python | `jsonpointer` | 3.1.1 | BSD License | python package metadata: classifiers |
 | python | `langchain-core` | 1.3.2 | MIT License | python package metadata: classifiers |
@@ -53,15 +61,25 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | python | `langgraph-prebuilt` | 1.0.10 | MIT | python package metadata: License-Expression |
 | python | `langgraph-sdk` | 0.3.13 | MIT | python package metadata: License-Expression |
 | python | `langsmith` | 0.7.22 | MIT | python package metadata: License |
+| python | `ldap3` | 2.9.1 | GNU Lesser General Public License v3 (LGPLv3) | python package metadata: classifiers |
+| python | `magika` | 0.6.2 | Apache Software License | python package metadata: classifiers |
+| python | `mako` | 1.3.12 | MIT License | python package metadata: classifiers |
 | python | `markdown-it-py` | 4.0.0 | MIT License | python package metadata: classifiers |
+| python | `markdownify` | 1.2.2 | MIT License | python package metadata: classifiers |
+| python | `markitdown` | 0.1.6 | MIT | python package metadata: License-Expression |
+| python | `markupsafe` | 3.0.3 | BSD-3-Clause | python package metadata: License-Expression |
 | python | `mdurl` | 0.1.2 | MIT License | python package metadata: classifiers |
 | python | `msal` | 1.35.1 | MIT License | python package metadata: classifiers |
 | python | `msal-extensions` | 1.3.1 | MIT License | python package metadata: classifiers |
+| python | `numpy` | 2.4.4 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | python package metadata: License-Expression |
+| python | `onnxruntime` | 1.26.0 | MIT License | python package metadata: classifiers |
 | python | `openai` | 2.32.0 | Apache Software License | python package metadata: classifiers |
 | python | `orjson` | 3.11.7 | MPL-2.0 AND (Apache-2.0 OR MIT) | python package metadata: License-Expression |
 | python | `ormsgpack` | 1.12.2 | Apache-2.0 OR MIT | python package metadata: License-Expression |
 | python | `packaging` | 26.0 | Apache-2.0 OR BSD-2-Clause | python package metadata: License-Expression |
 | python | `perplexityai` | 0.34.0 | Apache Software License | python package metadata: classifiers |
+| python | `protobuf` | 7.34.1 | 3-Clause BSD License | python package metadata: License |
+| python | `pyasn1` | 0.6.3 | BSD-2-Clause | python package metadata: License |
 | python | `pycparser` | 3.0 | BSD-3-Clause | python package metadata: License-Expression |
 | python | `pydantic` | 2.12.5 | MIT | python package metadata: License-Expression |
 | python | `pydantic-core` | 2.41.5 | MIT | python package metadata: License-Expression |
@@ -70,6 +88,7 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | python | `pyjwt` | 2.12.1 | MIT | python package metadata: License-Expression |
 | python | `python-dateutil` | 2.9.0.post0 | Apache Software License / BSD License | python package metadata: classifiers |
 | python | `python-dotenv` | 1.2.2 | BSD-3-Clause | python package metadata: License |
+| python | `python-multipart` | 0.0.32 | Apache-2.0 | python package metadata: License-Expression |
 | python | `pyyaml` | 6.0.3 | MIT License | python package metadata: classifiers |
 | python | `requests` | 2.33.0 | Apache Software License | python package metadata: classifiers |
 | python | `requests-toolbelt` | 1.0.0 | Apache Software License | python package metadata: classifiers |
@@ -77,6 +96,8 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | python | `s3transfer` | 0.16.0 | Apache Software License | python package metadata: classifiers |
 | python | `six` | 1.17.0 | MIT License | python package metadata: classifiers |
 | python | `sniffio` | 1.3.1 | Apache Software License / MIT License | python package metadata: classifiers |
+| python | `soupsieve` | 2.8.4 | MIT | python package metadata: License-Expression |
+| python | `sqlalchemy` | 2.0.50 | MIT | python package metadata: License |
 | python | `starlette` | 1.0.0 | BSD-3-Clause | python package metadata: License-Expression |
 | python | `tenacity` | 9.1.4 | Apache Software License | python package metadata: classifiers |
 | python | `tqdm` | 4.67.3 | MPL-2.0 AND MIT | python package metadata: License |
@@ -87,44 +108,51 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | python | `uvicorn` | 0.42.0 | BSD-3-Clause | python package metadata: License-Expression |
 | python | `xxhash` | 3.6.0 | BSD License | python package metadata: classifiers |
 | python | `zstandard` | 0.25.0 | BSD-3-Clause | python package metadata: License-Expression |
-| python-dev/ui | `altair` | 6.1.0 | BSD License | python package metadata: classifiers |
-| python-dev/ui | `attrs` | 26.1.0 | MIT | python package metadata: License-Expression |
-| python-dev/ui | `blinker` | 1.9.0 | MIT License | python package metadata: classifiers |
-| python-dev/ui | `gitdb` | 4.0.12 | BSD License | python package metadata: classifiers |
-| python-dev/ui | `gitpython` | 3.1.47 | BSD-3-Clause | python package metadata: License |
-| python-dev/ui | `iniconfig` | 2.3.0 | MIT | python package metadata: License-Expression |
-| python-dev/ui | `jinja2` | 3.1.6 | BSD License | python package metadata: classifiers |
-| python-dev/ui | `jsonschema` | 4.26.0 | MIT | python package metadata: License-Expression |
-| python-dev/ui | `jsonschema-specifications` | 2025.9.1 | MIT | python package metadata: License-Expression |
-| python-dev/ui | `markupsafe` | 3.0.3 | BSD-3-Clause | python package metadata: License-Expression |
-| python-dev/ui | `narwhals` | 2.20.0 | MIT License | python package metadata: classifiers |
-| python-dev/ui | `numpy` | 2.4.4 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | python package metadata: License-Expression |
-| python-dev/ui | `pandas` | 3.0.2 | BSD License | python package metadata: classifiers |
-| python-dev/ui | `pillow` | 12.2.0 | MIT-CMU | python package metadata: License-Expression |
-| python-dev/ui | `pluggy` | 1.6.0 | MIT License | python package metadata: classifiers |
-| python-dev/ui | `protobuf` | 7.34.1 | 3-Clause BSD License | python package metadata: License |
-| python-dev/ui | `pyarrow` | 24.0.0 | Apache-2.0 | python package metadata: License-Expression |
-| python-dev/ui | `pydeck` | 0.9.2 | Apache License 2.0 | python package metadata: License |
-| python-dev/ui | `pytest` | 9.0.2 | MIT | python package metadata: License-Expression |
-| python-dev/ui | `pytest-asyncio` | 1.3.0 | Apache-2.0 | python package metadata: License-Expression |
-| python-dev/ui | `pytest-recording` | 0.13.4 | MIT | python package metadata: License-Expression |
-| python-dev/ui | `referencing` | 0.37.0 | MIT | python package metadata: License-Expression |
-| python-dev/ui | `rpds-py` | 0.30.0 | MIT | python package metadata: License-Expression |
-| python-dev/ui | `smmap` | 5.0.3 | BSD License | python package metadata: classifiers |
-| python-dev/ui | `streamlit` | 1.56.0 | Apache-2.0 | python package metadata: License-Expression |
-| python-dev/ui | `toml` | 0.10.2 | MIT License | python package metadata: classifiers |
-| python-dev/ui | `tornado` | 6.5.5 | Apache Software License | python package metadata: classifiers |
-| python-dev/ui | `vcrpy` | 8.1.1 | MIT License | python package metadata: classifiers |
-| python-dev/ui | `wrapt` | 2.1.2 | BSD-2-Clause | python package metadata: License-Expression |
+| python-dev | `fakeredis` | 2.36.1 | BSD-3-Clause | python package metadata: License-Expression |
+| python-dev | `grpcio` | 1.81.1 | Apache-2.0 | python package metadata: License-Expression |
+| python-dev | `iniconfig` | 2.3.0 | MIT | python package metadata: License-Expression |
+| python-dev | `pluggy` | 1.6.0 | MIT License | python package metadata: classifiers |
+| python-dev | `portalocker` | 3.2.0 | BSD-3-Clause | python package metadata: License-Expression |
+| python-dev | `pytest` | 9.0.2 | MIT | python package metadata: License-Expression |
+| python-dev | `pytest-asyncio` | 1.3.0 | Apache-2.0 | python package metadata: License-Expression |
+| python-dev | `pytest-recording` | 0.13.4 | MIT | python package metadata: License-Expression |
+| python-dev | `qdrant-client` | 1.18.0 | Apache Software License | python package metadata: classifiers |
+| python-dev | `redis` | 8.0.0 | MIT | python package metadata: License-Expression |
+| python-dev | `sortedcontainers` | 2.4.0 | Apache Software License | python package metadata: classifiers |
+| python-dev | `valkey` | 6.1.1 | MIT License | python package metadata: classifiers |
+| python-dev | `vcrpy` | 8.1.1 | MIT License | python package metadata: classifiers |
+| python-dev | `wrapt` | 2.1.2 | BSD-2-Clause | python package metadata: License-Expression |
 
 ## React Dependencies
 
 | Surface | Package | Version | License | Metadata source |
 |---|---|---:|---|---|
+| react-prod | `@codemirror/autocomplete` | 6.20.3 | MIT | pnpm package metadata |
+| react-prod | `@codemirror/commands` | 6.10.3 | MIT | pnpm package metadata |
+| react-prod | `@codemirror/lang-css` | 6.3.1 | MIT | pnpm package metadata |
+| react-prod | `@codemirror/lang-html` | 6.4.11 | MIT | pnpm package metadata |
+| react-prod | `@codemirror/lang-javascript` | 6.2.5 | MIT | pnpm package metadata |
+| react-prod | `@codemirror/lang-markdown` | 6.5.0 | MIT | pnpm package metadata |
+| react-prod | `@codemirror/language` | 6.12.3 | MIT | pnpm package metadata |
+| react-prod | `@codemirror/lint` | 6.9.6 | MIT | pnpm package metadata |
+| react-prod | `@codemirror/search` | 6.7.0 | MIT | pnpm package metadata |
+| react-prod | `@codemirror/state` | 6.6.0 | MIT | pnpm package metadata |
+| react-prod | `@codemirror/view` | 6.43.0 | MIT | pnpm package metadata |
 | react-prod | `@floating-ui/core` | 1.7.5 | MIT | pnpm package metadata |
 | react-prod | `@floating-ui/dom` | 1.7.6 | MIT | pnpm package metadata |
 | react-prod | `@floating-ui/react-dom` | 2.1.8 | MIT | pnpm package metadata |
 | react-prod | `@floating-ui/utils` | 0.2.11 | MIT | pnpm package metadata |
+| react-prod | `@fontsource-variable/inter` | 5.2.8 | OFL-1.1 | pnpm package metadata |
+| react-prod | `@lezer/common` | 1.5.2 | MIT | pnpm package metadata |
+| react-prod | `@lezer/css` | 1.3.3 | MIT | pnpm package metadata |
+| react-prod | `@lezer/highlight` | 1.2.3 | MIT | pnpm package metadata |
+| react-prod | `@lezer/html` | 1.3.13 | MIT | pnpm package metadata |
+| react-prod | `@lezer/javascript` | 1.5.4 | MIT | pnpm package metadata |
+| react-prod | `@lezer/lr` | 1.4.10 | MIT | pnpm package metadata |
+| react-prod | `@lezer/markdown` | 1.6.4 | MIT | pnpm package metadata |
+| react-prod | `@marijn/find-cluster-break` | 1.0.2 | MIT | pnpm package metadata |
+| react-prod | `@napi-rs/canvas` | 0.1.100 | MIT | pnpm package metadata |
+| react-prod | `@napi-rs/canvas-darwin-arm64` | 0.1.100 | MIT | pnpm package metadata |
 | react-prod | `@radix-ui/number` | 1.1.1 | MIT | pnpm package metadata |
 | react-prod | `@radix-ui/primitive` | 1.1.3 | MIT | pnpm package metadata |
 | react-prod | `@radix-ui/react-arrow` | 1.1.7 | MIT | pnpm package metadata |
@@ -180,6 +208,7 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `@tiptap/extension-code` | 3.23.6 | MIT | pnpm package metadata |
 | react-prod | `@tiptap/extension-code-block` | 3.23.6 | MIT | pnpm package metadata |
 | react-prod | `@tiptap/extension-document` | 3.23.6 | MIT | pnpm package metadata |
+| react-prod | `@tiptap/extension-drag-handle-react` | 3.23.6 | MIT | pnpm package metadata |
 | react-prod | `@tiptap/extension-dropcursor` | 3.23.6 | MIT | pnpm package metadata |
 | react-prod | `@tiptap/extension-floating-menu` | 3.23.6 | MIT | pnpm package metadata |
 | react-prod | `@tiptap/extension-gapcursor` | 3.23.6 | MIT | pnpm package metadata |
@@ -210,6 +239,7 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `@tiptap/pm` | 3.23.6 | MIT | pnpm package metadata |
 | react-prod | `@tiptap/react` | 3.23.6 | MIT | pnpm package metadata |
 | react-prod | `@tiptap/starter-kit` | 3.23.6 | MIT | pnpm package metadata |
+| react-prod | `@tiptap/suggestion` | 3.23.6 | MIT | pnpm package metadata |
 | react-prod | `@types/debug` | 4.1.13 | MIT | pnpm package metadata |
 | react-prod | `@types/estree` | 1.0.9 | MIT | pnpm package metadata |
 | react-prod | `@types/estree-jsx` | 1.0.5 | MIT | pnpm package metadata |
@@ -217,12 +247,18 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `@types/katex` | 0.16.8 | MIT | pnpm package metadata |
 | react-prod | `@types/mdast` | 4.0.4 | MIT | pnpm package metadata |
 | react-prod | `@types/ms` | 2.1.0 | MIT | pnpm package metadata |
+| react-prod | `@types/node` | 24.12.4 | MIT | pnpm package metadata |
+| react-prod | `@types/node` | 25.9.1 | MIT | pnpm package metadata |
 | react-prod | `@types/unist` | 2.0.11 | MIT | pnpm package metadata |
 | react-prod | `@types/unist` | 3.0.3 | MIT | pnpm package metadata |
 | react-prod | `@types/use-sync-external-store` | 0.0.6 | MIT | pnpm package metadata |
 | react-prod | `@ungap/structured-clone` | 1.3.1 | ISC | pnpm package metadata |
+| react-prod | `@xmldom/xmldom` | 0.8.13 | MIT | pnpm package metadata |
+| react-prod | `argparse` | 1.0.10 | MIT | pnpm package metadata |
 | react-prod | `aria-hidden` | 1.2.6 | MIT | pnpm package metadata |
 | react-prod | `bail` | 2.0.2 | MIT | pnpm package metadata |
+| react-prod | `base64-js` | 1.5.1 | MIT | pnpm package metadata |
+| react-prod | `bluebird` | 3.4.7 | MIT | pnpm package metadata |
 | react-prod | `ccount` | 2.0.1 | MIT | pnpm package metadata |
 | react-prod | `character-entities` | 2.0.2 | MIT | pnpm package metadata |
 | react-prod | `character-entities-html4` | 2.1.0 | MIT | pnpm package metadata |
@@ -230,14 +266,20 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `character-reference-invalid` | 2.0.1 | MIT | pnpm package metadata |
 | react-prod | `class-variance-authority` | 0.7.1 | Apache-2.0 | pnpm package metadata |
 | react-prod | `clsx` | 2.1.1 | MIT | pnpm package metadata |
+| react-prod | `codemirror` | 6.0.2 | MIT | pnpm package metadata |
 | react-prod | `comma-separated-tokens` | 2.0.3 | MIT | pnpm package metadata |
 | react-prod | `commander` | 8.3.0 | MIT | pnpm package metadata |
+| react-prod | `core-util-is` | 1.0.3 | MIT | pnpm package metadata |
+| react-prod | `crelt` | 1.0.6 | MIT | pnpm package metadata |
 | react-prod | `debug` | 4.4.3 | MIT | pnpm package metadata |
 | react-prod | `decode-named-character-reference` | 1.3.0 | MIT | pnpm package metadata |
 | react-prod | `dequal` | 2.0.3 | MIT | pnpm package metadata |
 | react-prod | `detect-node-es` | 1.1.0 | MIT | pnpm package metadata |
 | react-prod | `devlop` | 1.1.0 | MIT | pnpm package metadata |
 | react-prod | `diff` | 9.0.0 | BSD-3-Clause | pnpm package metadata |
+| react-prod | `dingbat-to-unicode` | 1.0.1 | BSD-2-Clause | pnpm package metadata |
+| react-prod | `docx` | 9.7.1 | MIT | pnpm package metadata |
+| react-prod | `duck` | 0.1.12 | BSD | pnpm package metadata |
 | react-prod | `entities` | 6.0.1 | BSD-2-Clause | pnpm package metadata |
 | react-prod | `escape-string-regexp` | 4.0.0 | MIT | pnpm package metadata |
 | react-prod | `escape-string-regexp` | 5.0.0 | MIT | pnpm package metadata |
@@ -246,6 +288,7 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `fast-equals` | 5.4.0 | MIT | pnpm package metadata |
 | react-prod | `framer-motion` | 12.38.0 | MIT | pnpm package metadata |
 | react-prod | `get-nonce` | 1.0.1 | MIT | pnpm package metadata |
+| react-prod | `hash.js` | 1.1.7 | MIT | pnpm package metadata |
 | react-prod | `hast-util-from-dom` | 5.0.1 | ISC | pnpm package metadata |
 | react-prod | `hast-util-from-html` | 2.0.3 | MIT | pnpm package metadata |
 | react-prod | `hast-util-from-html-isomorphic` | 2.0.0 | MIT | pnpm package metadata |
@@ -260,15 +303,23 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `hastscript` | 9.0.1 | MIT | pnpm package metadata |
 | react-prod | `html-url-attributes` | 3.0.1 | MIT | pnpm package metadata |
 | react-prod | `html-void-elements` | 3.0.0 | MIT | pnpm package metadata |
+| react-prod | `immediate` | 3.0.6 | MIT | pnpm package metadata |
+| react-prod | `inherits` | 2.0.4 | ISC | pnpm package metadata |
 | react-prod | `inline-style-parser` | 0.2.7 | MIT | pnpm package metadata |
 | react-prod | `is-alphabetical` | 2.0.1 | MIT | pnpm package metadata |
 | react-prod | `is-alphanumerical` | 2.0.1 | MIT | pnpm package metadata |
 | react-prod | `is-decimal` | 2.0.1 | MIT | pnpm package metadata |
 | react-prod | `is-hexadecimal` | 2.0.1 | MIT | pnpm package metadata |
 | react-prod | `is-plain-obj` | 4.1.0 | MIT | pnpm package metadata |
+| react-prod | `isarray` | 1.0.0 | MIT | pnpm package metadata |
+| react-prod | `jszip` | 3.10.1 | (MIT OR GPL-3.0-or-later) | pnpm package metadata |
 | react-prod | `katex` | 0.16.46 | MIT | pnpm package metadata |
+| react-prod | `lie` | 3.3.0 | MIT | pnpm package metadata |
 | react-prod | `linkifyjs` | 4.3.3 | MIT | pnpm package metadata |
 | react-prod | `longest-streak` | 3.1.0 | MIT | pnpm package metadata |
+| react-prod | `lop` | 0.4.2 | BSD-2-Clause | pnpm package metadata |
+| react-prod | `lucide-react` | 1.17.0 | ISC | pnpm package metadata |
+| react-prod | `mammoth` | 1.12.0 | BSD-2-Clause | pnpm package metadata |
 | react-prod | `markdown-table` | 3.0.4 | MIT | pnpm package metadata |
 | react-prod | `marked` | 17.0.6 | MIT | pnpm package metadata |
 | react-prod | `mdast-util-find-and-replace` | 3.0.2 | MIT | pnpm package metadata |
@@ -316,16 +367,24 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `micromark-util-subtokenize` | 2.1.0 | MIT | pnpm package metadata |
 | react-prod | `micromark-util-symbol` | 2.0.1 | MIT | pnpm package metadata |
 | react-prod | `micromark-util-types` | 2.0.2 | MIT | pnpm package metadata |
+| react-prod | `minimalistic-assert` | 1.0.1 | ISC | pnpm package metadata |
 | react-prod | `motion` | 12.38.0 | MIT | pnpm package metadata |
 | react-prod | `motion-dom` | 12.38.0 | MIT | pnpm package metadata |
 | react-prod | `motion-utils` | 12.36.0 | MIT | pnpm package metadata |
 | react-prod | `ms` | 2.1.3 | MIT | pnpm package metadata |
+| react-prod | `nanoid` | 3.3.12 | MIT | pnpm package metadata |
+| react-prod | `nanoid` | 5.1.11 | MIT | pnpm package metadata |
 | react-prod | `oniguruma-parser` | 0.12.2 | MIT | pnpm package metadata |
 | react-prod | `oniguruma-to-es` | 4.3.6 | MIT | pnpm package metadata |
+| react-prod | `option` | 0.2.4 | BSD-2-Clause | pnpm package metadata |
 | react-prod | `orderedmap` | 2.1.1 | MIT | pnpm package metadata |
+| react-prod | `pako` | 1.0.11 | (MIT AND Zlib) | pnpm package metadata |
 | react-prod | `parse-entities` | 4.0.2 | MIT | pnpm package metadata |
 | react-prod | `parse-numeric-range` | 1.3.0 | ISC | pnpm package metadata |
 | react-prod | `parse5` | 7.3.0 | MIT | pnpm package metadata |
+| react-prod | `path-is-absolute` | 1.0.1 | MIT | pnpm package metadata |
+| react-prod | `pdfjs-dist` | 5.7.284 | Apache-2.0 | pnpm package metadata |
+| react-prod | `process-nextick-args` | 2.0.1 | MIT | pnpm package metadata |
 | react-prod | `property-information` | 7.1.0 | MIT | pnpm package metadata |
 | react-prod | `prosemirror-changeset` | 2.4.1 | MIT | pnpm package metadata |
 | react-prod | `prosemirror-commands` | 1.7.1 | MIT | pnpm package metadata |
@@ -346,6 +405,7 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `react-remove-scroll-bar` | 2.3.8 | MIT | pnpm package metadata |
 | react-prod | `react-resizable-panels` | 4.11.0 | MIT | pnpm package metadata |
 | react-prod | `react-style-singleton` | 2.2.3 | MIT | pnpm package metadata |
+| react-prod | `readable-stream` | 2.3.8 | MIT | pnpm package metadata |
 | react-prod | `regex` | 6.1.0 | MIT | pnpm package metadata |
 | react-prod | `regex-recursion` | 6.0.2 | MIT | pnpm package metadata |
 | react-prod | `regex-utilities` | 2.3.0 | MIT | pnpm package metadata |
@@ -358,17 +418,27 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `remark-rehype` | 11.1.2 | MIT | pnpm package metadata |
 | react-prod | `remark-stringify` | 11.0.0 | MIT | pnpm package metadata |
 | react-prod | `rope-sequence` | 1.3.4 | MIT | pnpm package metadata |
+| react-prod | `safe-buffer` | 5.1.2 | MIT | pnpm package metadata |
+| react-prod | `sax` | 1.6.0 | BlueOak-1.0.0 | pnpm package metadata |
 | react-prod | `scheduler` | 0.27.0 | MIT | pnpm package metadata |
+| react-prod | `setimmediate` | 1.0.5 | MIT | pnpm package metadata |
 | react-prod | `shiki` | 4.0.2 | MIT | pnpm package metadata |
 | react-prod | `space-separated-tokens` | 2.0.2 | MIT | pnpm package metadata |
+| react-prod | `sprintf-js` | 1.0.3 | BSD-3-Clause | pnpm package metadata |
+| react-prod | `string_decoder` | 1.1.1 | MIT | pnpm package metadata |
 | react-prod | `stringify-entities` | 4.0.4 | MIT | pnpm package metadata |
+| react-prod | `style-mod` | 4.1.3 | MIT | pnpm package metadata |
 | react-prod | `style-to-js` | 1.1.21 | MIT | pnpm package metadata |
 | react-prod | `style-to-object` | 1.0.14 | MIT | pnpm package metadata |
 | react-prod | `tailwind-merge` | 3.6.0 | MIT | pnpm package metadata |
+| react-prod | `tokenx` | 1.3.0 | MIT | pnpm package metadata |
 | react-prod | `trim-lines` | 3.0.1 | MIT | pnpm package metadata |
 | react-prod | `trough` | 2.2.0 | MIT | pnpm package metadata |
 | react-prod | `tslib` | 2.8.1 | 0BSD | pnpm package metadata |
 | react-prod | `tw-animate-css` | 1.4.0 | MIT | pnpm package metadata |
+| react-prod | `underscore` | 1.13.8 | MIT | pnpm package metadata |
+| react-prod | `undici-types` | 7.16.0 | MIT | pnpm package metadata |
+| react-prod | `undici-types` | 7.24.6 | MIT | pnpm package metadata |
 | react-prod | `unified` | 11.0.5 | MIT | pnpm package metadata |
 | react-prod | `unist-util-find-after` | 5.0.0 | MIT | pnpm package metadata |
 | react-prod | `unist-util-is` | 6.0.1 | MIT | pnpm package metadata |
@@ -380,11 +450,15 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `use-callback-ref` | 1.3.3 | MIT | pnpm package metadata |
 | react-prod | `use-sidecar` | 1.1.3 | MIT | pnpm package metadata |
 | react-prod | `use-sync-external-store` | 1.6.0 | MIT | pnpm package metadata |
+| react-prod | `util-deprecate` | 1.0.2 | MIT | pnpm package metadata |
 | react-prod | `vfile` | 6.0.3 | MIT | pnpm package metadata |
 | react-prod | `vfile-location` | 5.0.3 | MIT | pnpm package metadata |
 | react-prod | `vfile-message` | 4.0.3 | MIT | pnpm package metadata |
 | react-prod | `w3c-keyname` | 2.2.8 | MIT | pnpm package metadata |
 | react-prod | `web-namespaces` | 2.0.1 | MIT | pnpm package metadata |
+| react-prod | `xml` | 1.0.1 | MIT | pnpm package metadata |
+| react-prod | `xml-js` | 1.6.11 | MIT | pnpm package metadata |
+| react-prod | `xmlbuilder` | 10.1.1 | MIT | pnpm package metadata |
 | react-prod | `zwitch` | 2.0.4 | MIT | pnpm package metadata |
 | react-dev | `@eslint-community/eslint-utils` | 4.9.1 | MIT | pnpm package metadata |
 | react-dev | `@eslint-community/regexpp` | 4.12.2 | MIT | pnpm package metadata |
@@ -408,13 +482,15 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-dev | `@rolldown/binding-darwin-arm64` | 1.0.0 | MIT | pnpm package metadata |
 | react-dev | `@rolldown/pluginutils` | 1.0.0 | MIT | pnpm package metadata |
 | react-dev | `@rolldown/pluginutils` | 1.0.0-rc.7 | MIT | pnpm package metadata |
+| react-dev | `@standard-schema/spec` | 1.1.0 | MIT | pnpm package metadata |
 | react-dev | `@tailwindcss/node` | 4.3.0 | MIT | pnpm package metadata |
 | react-dev | `@tailwindcss/oxide` | 4.3.0 | MIT | pnpm package metadata |
 | react-dev | `@tailwindcss/oxide-darwin-arm64` | 4.3.0 | MIT | pnpm package metadata |
 | react-dev | `@tailwindcss/vite` | 4.3.0 | MIT | pnpm package metadata |
+| react-dev | `@types/chai` | 5.2.3 | MIT | pnpm package metadata |
+| react-dev | `@types/deep-eql` | 4.0.2 | MIT | pnpm package metadata |
 | react-dev | `@types/esrecurse` | 4.3.1 | MIT | pnpm package metadata |
 | react-dev | `@types/json-schema` | 7.0.15 | MIT | pnpm package metadata |
-| react-dev | `@types/node` | 24.12.4 | MIT | pnpm package metadata |
 | react-dev | `@types/react` | 19.2.14 | MIT | pnpm package metadata |
 | react-dev | `@types/react-dom` | 19.2.3 | MIT | pnpm package metadata |
 | react-dev | `@typescript-eslint/eslint-plugin` | 8.59.3 | MIT | pnpm package metadata |
@@ -428,16 +504,27 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-dev | `@typescript-eslint/utils` | 8.59.3 | MIT | pnpm package metadata |
 | react-dev | `@typescript-eslint/visitor-keys` | 8.59.3 | MIT | pnpm package metadata |
 | react-dev | `@vitejs/plugin-react` | 6.0.1 | MIT | pnpm package metadata |
+| react-dev | `@vitest/expect` | 4.1.7 | MIT | pnpm package metadata |
+| react-dev | `@vitest/mocker` | 4.1.7 | MIT | pnpm package metadata |
+| react-dev | `@vitest/pretty-format` | 4.1.7 | MIT | pnpm package metadata |
+| react-dev | `@vitest/runner` | 4.1.7 | MIT | pnpm package metadata |
+| react-dev | `@vitest/snapshot` | 4.1.7 | MIT | pnpm package metadata |
+| react-dev | `@vitest/spy` | 4.1.7 | MIT | pnpm package metadata |
+| react-dev | `@vitest/utils` | 4.1.7 | MIT | pnpm package metadata |
 | react-dev | `acorn` | 8.16.0 | MIT | pnpm package metadata |
 | react-dev | `acorn-jsx` | 5.3.2 | MIT | pnpm package metadata |
 | react-dev | `ajv` | 6.15.0 | MIT | pnpm package metadata |
+| react-dev | `assertion-error` | 2.0.1 | MIT | pnpm package metadata |
 | react-dev | `balanced-match` | 4.0.4 | MIT | pnpm package metadata |
 | react-dev | `brace-expansion` | 5.0.6 | MIT | pnpm package metadata |
+| react-dev | `chai` | 6.2.2 | MIT | pnpm package metadata |
+| react-dev | `convert-source-map` | 2.0.0 | MIT | pnpm package metadata |
 | react-dev | `cross-spawn` | 7.0.6 | MIT | pnpm package metadata |
 | react-dev | `csstype` | 3.2.3 | MIT | pnpm package metadata |
 | react-dev | `deep-is` | 0.1.4 | MIT | pnpm package metadata |
 | react-dev | `detect-libc` | 2.1.2 | Apache-2.0 | pnpm package metadata |
 | react-dev | `enhanced-resolve` | 5.21.3 | MIT | pnpm package metadata |
+| react-dev | `es-module-lexer` | 2.1.0 | MIT | pnpm package metadata |
 | react-dev | `eslint` | 10.3.0 | MIT | pnpm package metadata |
 | react-dev | `eslint-scope` | 9.1.2 | BSD-2-Clause | pnpm package metadata |
 | react-dev | `eslint-visitor-keys` | 3.4.3 | Apache-2.0 | pnpm package metadata |
@@ -446,7 +533,9 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-dev | `esquery` | 1.7.0 | BSD-3-Clause | pnpm package metadata |
 | react-dev | `esrecurse` | 4.3.0 | BSD-2-Clause | pnpm package metadata |
 | react-dev | `estraverse` | 5.3.0 | BSD-2-Clause | pnpm package metadata |
+| react-dev | `estree-walker` | 3.0.3 | MIT | pnpm package metadata |
 | react-dev | `esutils` | 2.0.3 | BSD-2-Clause | pnpm package metadata |
+| react-dev | `expect-type` | 1.3.0 | Apache-2.0 | pnpm package metadata |
 | react-dev | `fast-deep-equal` | 3.1.3 | MIT | pnpm package metadata |
 | react-dev | `fast-json-stable-stringify` | 2.1.0 | MIT | pnpm package metadata |
 | react-dev | `fast-levenshtein` | 2.0.6 | MIT | pnpm package metadata |
@@ -476,13 +565,14 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-dev | `locate-path` | 6.0.0 | MIT | pnpm package metadata |
 | react-dev | `magic-string` | 0.30.21 | MIT | pnpm package metadata |
 | react-dev | `minimatch` | 10.2.5 | BlueOak-1.0.0 | pnpm package metadata |
-| react-dev | `nanoid` | 3.3.12 | MIT | pnpm package metadata |
 | react-dev | `natural-compare` | 1.4.0 | MIT | pnpm package metadata |
+| react-dev | `obug` | 2.1.1 | MIT | pnpm package metadata |
 | react-dev | `optionator` | 0.9.4 | MIT | pnpm package metadata |
 | react-dev | `p-limit` | 3.1.0 | MIT | pnpm package metadata |
 | react-dev | `p-locate` | 5.0.0 | MIT | pnpm package metadata |
 | react-dev | `path-exists` | 4.0.0 | MIT | pnpm package metadata |
 | react-dev | `path-key` | 3.1.1 | MIT | pnpm package metadata |
+| react-dev | `pathe` | 2.0.3 | MIT | pnpm package metadata |
 | react-dev | `picocolors` | 1.1.1 | ISC | pnpm package metadata |
 | react-dev | `picomatch` | 4.0.4 | MIT | pnpm package metadata |
 | react-dev | `postcss` | 8.5.14 | MIT | pnpm package metadata |
@@ -492,17 +582,24 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-dev | `semver` | 7.8.0 | ISC | pnpm package metadata |
 | react-dev | `shebang-command` | 2.0.0 | MIT | pnpm package metadata |
 | react-dev | `shebang-regex` | 3.0.0 | MIT | pnpm package metadata |
+| react-dev | `siginfo` | 2.0.0 | ISC | pnpm package metadata |
 | react-dev | `source-map-js` | 1.2.1 | BSD-3-Clause | pnpm package metadata |
+| react-dev | `stackback` | 0.0.2 | MIT | pnpm package metadata |
+| react-dev | `std-env` | 4.1.0 | MIT | pnpm package metadata |
 | react-dev | `tailwindcss` | 4.3.0 | MIT | pnpm package metadata |
 | react-dev | `tapable` | 2.3.3 | MIT | pnpm package metadata |
+| react-dev | `tinybench` | 2.9.0 | MIT | pnpm package metadata |
+| react-dev | `tinyexec` | 1.2.3 | MIT | pnpm package metadata |
 | react-dev | `tinyglobby` | 0.2.16 | MIT | pnpm package metadata |
+| react-dev | `tinyrainbow` | 3.1.0 | MIT | pnpm package metadata |
 | react-dev | `ts-api-utils` | 2.5.0 | MIT | pnpm package metadata |
 | react-dev | `type-check` | 0.4.0 | MIT | pnpm package metadata |
 | react-dev | `typescript` | 6.0.3 | Apache-2.0 | pnpm package metadata |
 | react-dev | `typescript-eslint` | 8.59.3 | MIT | pnpm package metadata |
-| react-dev | `undici-types` | 7.16.0 | MIT | pnpm package metadata |
 | react-dev | `uri-js` | 4.4.1 | BSD-2-Clause | pnpm package metadata |
 | react-dev | `vite` | 8.0.12 | MIT | pnpm package metadata |
+| react-dev | `vitest` | 4.1.7 | MIT | pnpm package metadata |
 | react-dev | `which` | 2.0.2 | ISC | pnpm package metadata |
+| react-dev | `why-is-node-running` | 2.3.0 | MIT | pnpm package metadata |
 | react-dev | `word-wrap` | 1.2.5 | MIT | pnpm package metadata |
 | react-dev | `yocto-queue` | 0.1.0 | MIT | pnpm package metadata |

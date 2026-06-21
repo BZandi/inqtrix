@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch } from 'react'
 import type { Editor } from '@tiptap/react'
-import type { ChatModelTier } from '@/features/researchRuns/types'
+import type { ChatModelTier, InqtrixCapabilities } from '@/features/researchRuns/types'
+import { deriveEditorAbortMs } from '@/features/researchRuns/clientTimeouts'
 import type {
   ChatContextReferenceRecord,
   EditorCommentAnchorRecord,
@@ -12,7 +13,7 @@ import type {
   EditorSuggestionRecord,
   ProjectState,
 } from '@/features/project/types'
-import { referenceDocsFromRefs } from '@/features/project/selectors'
+import { assetIdsFromChatRefs, referenceDocsFromRefs } from '@/features/project/selectors'
 import { renderChatRuleAttachmentContent } from '@/features/project/chatRuleRendering'
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
 import {
@@ -47,8 +48,17 @@ export type UseEditorSuggestionsArgs = {
   apiKey?: string
   attachedCommentIds: string[]
   attachedRefs: ChatContextReferenceRecord[]
+  /** Server capability manifest. Its `timeouts.editor_wait_seconds` sets the
+   * client abort budget so a server-side EDITOR_ASSISTANT_TIMEOUT raise is not
+   * silently capped by the browser. Null offline / pre-discovery -> a fixed
+   * fallback (logged once). */
+  capabilities: InqtrixCapabilities | null
   comments: EditorCommentThreadRecord[]
   dispatch: Dispatch<ResearchDeskAction>
+  /** Loads attached file-asset bodies on demand before an AI run reads them
+   * (M6c load-on-use). Absent offline / when assets are not server-synced —
+   * bodies are local then and resolveRunContext is a no-op pass-through. */
+  ensureAssetBodiesLoaded?: (assetIds: readonly string[]) => Promise<Map<string, string>>
   locale: 'de' | 'en'
   onGlobalSuccess: () => void
   selectedModelTier: ChatModelTier | null
@@ -85,16 +95,16 @@ export type EditorInstructionFeedback = {
   warnings?: string[]
 }
 
-const EDITOR_ASSISTANT_TIMEOUT_MS = 120_000
-
 export function useEditorSuggestions({
   activeDocument,
   activeEditor,
   apiKey,
   attachedCommentIds,
   attachedRefs,
+  capabilities,
   comments,
   dispatch,
+  ensureAssetBodiesLoaded,
   locale,
   onGlobalSuccess,
   selectedModelTier,
@@ -109,22 +119,44 @@ export function useEditorSuggestions({
     }),
     [apiKey, locale, state.ui.selectedStack, state.workspaceId],
   )
-  const ruleSnippet = useMemo(
-    () => attachedRefs
+  // Read the latest derived abort via a ref so run-start handlers pick up the
+  // current value without threading it through every useCallback dependency.
+  // The fallback path's visibility (No Silent Fallbacks) is surfaced centrally
+  // in ResearchDesk via isMissingServerTimeouts, not per hook.
+  const editorAbortMsRef = useRef(deriveEditorAbortMs(capabilities))
+  editorAbortMsRef.current = deriveEditorAbortMs(capabilities)
+  // The reference docs + chat-rule snippet an AI run carries. Both read each
+  // attached file's extractedText, which on a server-synced project may be
+  // hydrated empty (M6c load-on-use). resolveRunContext fetches those bodies
+  // ON USE (deduped, via ensureAssetBodiesLoaded) and rebuilds both with the
+  // fetched bodies overriding the stale state snapshot, so an AI run never
+  // sends an empty attachment. Called at the start of each run handler (inside
+  // its try, so a load failure surfaces on that run's error channel). When
+  // ensureAssetBodiesLoaded is absent (offline / not synced) it is a no-op
+  // pass-through and the bodies come straight from state, as before.
+  const buildRuleSnippet = (bodies?: ReadonlyMap<string, string>): string =>
+    attachedRefs
       .filter((ref) => ref.kind === 'chat-rule')
       .map((ref) => {
         if (ref.kind !== 'chat-rule') return ''
         const rule = state.chatRules[ref.ruleId]
-        return rule ? renderChatRuleAttachmentContent(state, rule, new Date().toISOString()) : ''
+        return rule
+          ? renderChatRuleAttachmentContent(state, rule, new Date().toISOString(), bodies)
+          : ''
       })
       .filter(Boolean)
-      .join('\n\n'),
-    [attachedRefs, state],
-  )
-  const attachments = useMemo(
-    () => referenceDocsFromRefs(state, attachedRefs),
-    [attachedRefs, state.fileAssets, state.fileAssetOrder, state.fileGroups],
-  )
+      .join('\n\n')
+
+  const resolveRunContext = async () => {
+    const bodies = ensureAssetBodiesLoaded
+      ? await ensureAssetBodiesLoaded(assetIdsFromChatRefs(state, attachedRefs))
+      : undefined
+    return {
+      attachments: referenceDocsFromRefs(state, attachedRefs, bodies),
+      ruleSnippet: buildRuleSnippet(bodies),
+    }
+  }
+
   const [commentRuns, setCommentRuns] = useState<EditorRunStateMap>({})
   const [suggestionRuns, setSuggestionRuns] = useState<EditorRunStateMap>({})
   const runningCommentIds = useMemo(() => runningIdsOf(commentRuns), [commentRuns])
@@ -134,6 +166,7 @@ export function useEditorSuggestions({
   const [isGlobalRunning, setIsGlobalRunning] = useState(false)
   const [instructionFeedback, setInstructionFeedback] = useState<EditorInstructionFeedback | null>(null)
   const runAbortRef = useRef<AbortController | null>(null)
+  const mountedRef = useRef(true)
   const selectedModelTierRef = useRef(selectedModelTier)
   const selectedModelRef = useRef(state.ui.selectedChatModel)
   const selectedEffortRef = useRef(state.ui.selectedChatEffort)
@@ -144,7 +177,19 @@ export function useEditorSuggestions({
     selectedEffortRef.current = state.ui.selectedChatEffort
   }, [selectedModelTier, state.ui.selectedChatModel, state.ui.selectedChatEffort])
 
-  useEffect(() => () => runAbortRef.current?.abort(), [])
+  useEffect(() => {
+    mountedRef.current = true
+    // A view switch unmounts the editor mid-run. We deliberately do NOT abort the
+    // in-flight request here: the run finishes and its result dispatches into the
+    // project reducer (owned by the still-mounted parent), so the suggestion is
+    // there when the user returns. mountedRef lets the result builder fall back to
+    // null-editor anchoring (re-anchored on return via quotes) instead of touching
+    // the now-destroyed Tiptap instance. The client-side run timeout still bounds
+    // the request, so nothing leaks indefinitely.
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   const documentSuggestions = useMemo(
     () => Object.values(state.editorSuggestions).filter((suggestion) => suggestion.documentId === activeDocument?.id),
@@ -167,11 +212,12 @@ export function useEditorSuggestions({
     const controller = new AbortController()
     runAbortRef.current = controller
     setCommentRuns((map) => markRunning(map, comment.id))
-    const clearRunTimeout = startEditorRunTimeout(() => {
+    const clearRunTimeout = startEditorRunTimeout(editorAbortMsRef.current, () => {
       controller.abort()
       setCommentRuns((map) => markError(map, comment.id, editorTimeoutMessage(locale)))
     })
     try {
+      const { attachments } = await resolveRunContext()
       const modelTier = selectedModelTierRef.current
       const model = selectedModelRef.current
       const effort = selectedEffortRef.current
@@ -254,11 +300,12 @@ export function useEditorSuggestions({
     const controller = new AbortController()
     runAbortRef.current = controller
     setSuggestionRuns((map) => markRunning(map, suggestionId))
-    const clearRunTimeout = startEditorRunTimeout(() => {
+    const clearRunTimeout = startEditorRunTimeout(editorAbortMsRef.current, () => {
       controller.abort()
       setSuggestionRuns((map) => markError(map, suggestionId, editorTimeoutMessage(locale)))
     })
     try {
+      const { attachments } = await resolveRunContext()
       const modelTier = selectedModelTierRef.current
       const model = selectedModelRef.current
       const effort = selectedEffortRef.current
@@ -342,7 +389,6 @@ export function useEditorSuggestions({
       comment.status === 'open' && comment.kind === 'collect' && attachedCommentIds.includes(comment.id))
     if (targets.length === 0) return
     const draftInstruction = globalInstruction.trim()
-    const snippet = ruleSnippet
     runAbortRef.current?.abort()
     const controller = new AbortController()
     runAbortRef.current = controller
@@ -356,20 +402,42 @@ export function useEditorSuggestions({
     const effort = selectedEffortRef.current
     const now = new Date().toISOString()
     const groupId = createLocalId('editor-suggestion-group')
-    const clearRunTimeout = startEditorRunTimeout(() => {
+    const clearRunTimeout = startEditorRunTimeout(editorAbortMsRef.current, () => {
       controller.abort()
       const timeoutErrors = Object.fromEntries(targets.map((comment) => [comment.id, editorTimeoutMessage(locale)]))
       setCommentRuns((map) => markErrors(map, timeoutErrors))
       setIsGlobalRunning(false)
     })
 
+    // Load attached file bodies once before the parallel run (M6c load-on-use);
+    // on failure mark all targets errored and bail (handleGlobalRun has no
+    // outer try). A no-op pass-through when assets are not server-synced.
+    const runContext = await resolveRunContext().catch((error: unknown) => {
+      if (!controller.signal.aborted) {
+        setCommentRuns((map) =>
+          markErrors(map, Object.fromEntries(targets.map((c) => [c.id, messageFromError(error)]))),
+        )
+      }
+      clearRunTimeout()
+      setIsGlobalRunning(false)
+      return null
+    })
+    if (!runContext) return
+
     const produceForComment = async (comment: EditorCommentThreadRecord) => {
-      const liveComment = activeEditor ? materializeCommentThread(activeEditor, comment) : comment
+      // Runs after awaits (per-batch), so the editor may have unmounted on a
+      // view switch — same survival path as handleInstructionRun: don't touch a
+      // destroyed editor, fall back to the comment's stored anchor (quotes
+      // re-anchor on return); the suggestion record below is built from `comment`
+      // regardless, and the group dispatch lands in the project reducer.
+      const liveComment = mountedRef.current && activeEditor
+        ? materializeCommentThread(activeEditor, comment)
+        : comment
       if (!liveComment) throw new Error(staleAnchorMessage(locale))
       const origin: EditorSuggestionOrigin = { commentId: comment.id, kind: 'global_run' }
       const proposal = await suggestionProducer.produce({
         anchor: liveComment.anchor,
-        attachments,
+        attachments: runContext.attachments,
         documentId,
         documentMarkdown,
         globalInstruction: draftInstruction || undefined,
@@ -381,7 +449,7 @@ export function useEditorSuggestions({
         originalMarkdown: liveComment.anchor.selectedMarkdown,
         originalText: liveComment.anchor.selectedText,
         signal: controller.signal,
-        snippet: snippet || undefined,
+        snippet: runContext.ruleSnippet || undefined,
       })
       return { comment: liveComment, origin, proposal }
     }
@@ -438,7 +506,6 @@ export function useEditorSuggestions({
     if (!activeDocument || isGlobalRunning) return
     const draftInstruction = instruction.trim()
     if (!draftInstruction) return
-    const snippet = ruleSnippet
     runAbortRef.current?.abort()
     const controller = new AbortController()
     runAbortRef.current = controller
@@ -447,7 +514,7 @@ export function useEditorSuggestions({
       message: locale === 'de' ? 'Dokument-Anweisung wird verarbeitet …' : 'Processing document instruction …',
       state: 'thinking',
     })
-    const clearRunTimeout = startEditorRunTimeout(() => {
+    const clearRunTimeout = startEditorRunTimeout(editorAbortMsRef.current, () => {
       controller.abort()
       setInstructionFeedback({
         message: editorTimeoutMessage(locale),
@@ -457,6 +524,7 @@ export function useEditorSuggestions({
     })
 
     try {
+      const { attachments, ruleSnippet: snippet } = await resolveRunContext()
       const modelTier = selectedModelTierRef.current
       const model = selectedModelRef.current
       const effort = selectedEffortRef.current
@@ -474,7 +542,11 @@ export function useEditorSuggestions({
       const now = new Date().toISOString()
       const groupId = createLocalId('editor-suggestion-group')
       const suggestions = createInstructionSuggestionRecords({
-        activeEditor,
+        // If the editor unmounted during the run (a view switch), the Tiptap
+        // instance is destroyed — anchor via quotes (null editor) instead, and
+        // the suggestion re-anchors when the user returns. The dispatch below
+        // still lands in the project reducer, so the result is never lost.
+        activeEditor: mountedRef.current ? activeEditor : null,
         document: activeDocument,
         groupId,
         now,
@@ -687,16 +759,16 @@ function messageFromError(error: unknown): string {
   return String(error)
 }
 
-function startEditorRunTimeout(onTimeout: () => void): () => void {
-  const timeoutId = globalThis.setTimeout(onTimeout, EDITOR_ASSISTANT_TIMEOUT_MS)
+function startEditorRunTimeout(timeoutMs: number, onTimeout: () => void): () => void {
+  const timeoutId = globalThis.setTimeout(onTimeout, timeoutMs)
   return () => globalThis.clearTimeout(timeoutId)
 }
 
 function editorTimeoutMessage(locale: 'de' | 'en'): string {
   if (locale === 'de') {
-    return 'Keine Modellantwort nach 120 Sekunden. Der Lauf wurde abgebrochen; bitte erneut versuchen oder ein schnelleres Modell wählen.'
+    return 'Keine Modellantwort innerhalb der Zeitgrenze. Der Lauf wurde abgebrochen; bitte erneut versuchen oder ein schnelleres Modell wählen.'
   }
-  return 'No model response after 120 seconds. The run was cancelled; retry or choose a faster model.'
+  return 'No model response within the time limit. The run was cancelled; retry or choose a faster model.'
 }
 
 function defaultInstructionResultMessage(locale: 'de' | 'en', editCount: number): string {

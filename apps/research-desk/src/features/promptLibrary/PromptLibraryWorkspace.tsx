@@ -18,6 +18,7 @@ import {
   Trash2,
   X,
   type LucideIcon,
+  Users,
 } from '@/components/icons'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -55,6 +56,8 @@ import type {
   ProjectState,
 } from '@/features/project/types'
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
+import { TemplateConflictError, canDeleteRule, canEditRule } from './templateSync'
+import type { TemplateSyncHandle } from './useTemplateSync'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import {
@@ -108,11 +111,15 @@ const emptyDraft: PromptDraft = {
 
 export function PromptLibraryWorkspace({
   dispatch,
+  sharing = null,
   state,
+  templateSync = null,
   textImprovement,
 }: {
   dispatch: Dispatch<ResearchDeskAction>
+  sharing?: { onShareRule: (rule: ChatRuleRecord) => void } | null
   state: ProjectState
+  templateSync?: TemplateSyncHandle | null
   textImprovement: Omit<TextImprovementApiOptions, 'locale'>
 }) {
   const { locale, t } = useLocale()
@@ -129,6 +136,7 @@ export function PromptLibraryWorkspace({
   const [promptImproveError, setPromptImproveError] = useState<string | null>(null)
   const [draft, setDraft] = useState<PromptDraft>(() => draftFromRule(rules[0] ?? null))
   const [pendingNav, setPendingNav] = useState<(() => void) | null>(null)
+  const [isSaving, setIsSaving] = useState(false)
   const promptTextImprove = useTextImprovement({
     ...textImprovement,
     locale,
@@ -247,7 +255,7 @@ export function PromptLibraryWorkspace({
     })
   }
 
-  function savePrompt(): boolean {
+  async function savePrompt(): Promise<boolean> {
     const label = normalizeRuleLabel(draft.label)
     const title = draft.title.trim() || label
     const contentMarkdown = draft.contentMarkdown.trim()
@@ -264,7 +272,8 @@ export function PromptLibraryWorkspace({
       return false
     }
     const now = new Date().toISOString()
-    const rule = normalizeChatRule({
+    let rule = normalizeChatRule({
+      access: selectedRule?.access,
       category: draft.category,
       contentMarkdown,
       createdAt: selectedRule?.createdAt ?? now,
@@ -274,17 +283,70 @@ export function PromptLibraryWorkspace({
       linkedContextRefs: draft.category === 'context'
         ? normalizeLinkedContextRefs(draft.linkedContextRefs)
         : [],
+      serverTemplateId: selectedRule?.serverTemplateId,
+      // The exact server timestamp of the loaded version travels as the
+      // optimistic-concurrency precondition for this save.
+      serverUpdatedAt: selectedRule?.serverUpdatedAt,
       title,
       updatedAt: now,
       visibility: draft.visibility,
     })
+    if (templateSync) {
+      // Server-first write-through: the local dispatch happens only
+      // after the server accepted the write (no silent divergence).
+      // The isSaving guard blocks double-submits — two concurrent
+      // POSTs would mint two server templates.
+      if (isSaving) return false
+      setIsSaving(true)
+      try {
+        rule = await templateSync.saveRule(rule)
+      } catch (error) {
+        // A conflict re-hydrated the latest version into state; keep
+        // the user's draft and tell them to re-save against it. If the
+        // refresh fetch failed, the latest is NOT in hand — soften the
+        // message so it does not falsely claim a reload happened.
+        updateDraft({
+          error: error instanceof TemplateConflictError
+            ? error.refreshed
+              ? t.promptLibrary.syncConflict
+              : t.promptLibrary.syncConflictStale
+            : `${t.promptLibrary.syncFailed}: ${messageFromUnknown(error)}`,
+          isDirty: draft.isDirty,
+        })
+        return false
+      } finally {
+        setIsSaving(false)
+      }
+      // Adoption re-keying: a first save keeps the browser-local id
+      // while the server minted `pt_...`. Re-key the record to the
+      // server id so the next hydrate upserts ONTO it instead of
+      // inserting a duplicate twin.
+      if (rule.serverTemplateId && rule.id !== rule.serverTemplateId) {
+        const previousId = rule.id
+        rule = normalizeChatRule({ ...rule, id: rule.serverTemplateId })
+        if (draft.selectedRuleId === previousId) {
+          dispatch({ ruleId: previousId, type: 'deleteChatRule' })
+        }
+      }
+    }
     dispatch({ rule, type: 'upsertChatRule' })
     setDraft(draftFromRule(rule))
     return true
   }
 
-  function deletePrompt() {
+  async function deletePrompt() {
     if (!selectedRule) return
+    if (templateSync) {
+      try {
+        await templateSync.deleteRule(selectedRule)
+      } catch (error) {
+        updateDraft({
+          error: `${t.promptLibrary.syncFailed}: ${messageFromUnknown(error)}`,
+          isDirty: draft.isDirty,
+        })
+        return
+      }
+    }
     dispatch({ ruleId: selectedRule.id, type: 'deleteChatRule' })
     const next = rules.find((rule) => rule.id !== selectedRule.id) ?? null
     loadRule(next)
@@ -432,12 +494,31 @@ export function PromptLibraryWorkspace({
                 {draft.isDirty ? (
                   <p className="t-meta text-warning">{t.promptLibrary.unsaved}</p>
                 ) : null}
+                {selectedRule?.access ? (
+                  <p className="t-meta text-muted-foreground">
+                    {selectedRule.access.permission === 'edit'
+                      ? t.sharing.sharedCanEdit
+                      : t.sharing.sharedViewOnly}
+                  </p>
+                ) : null}
               </div>
               <div className="flex shrink-0 items-center gap-2">
+                {sharing && selectedRule?.serverTemplateId && !selectedRule.access ? (
+                  <Button
+                    className="gap-1.5"
+                    onClick={() => sharing.onShareRule(selectedRule)}
+                    size="sm"
+                    type="button"
+                    variant="ghost"
+                  >
+                    <Users className="size-4" />
+                    {t.sharing.share}
+                  </Button>
+                ) : null}
                 <Button
                   className="gap-1.5 text-destructive hover:text-destructive"
-                  disabled={!selectedRule}
-                  onClick={deletePrompt}
+                  disabled={!selectedRule || !canDeleteRule(selectedRule)}
+                  onClick={() => void deletePrompt()}
                   size="sm"
                   type="button"
                   variant="ghost"
@@ -447,7 +528,8 @@ export function PromptLibraryWorkspace({
                 </Button>
                 <Button
                   className="gap-1.5 bg-brand text-brand-foreground hover:bg-brand/90"
-                  onClick={savePrompt}
+                  disabled={!canEditRule(selectedRule) || isSaving}
+                  onClick={() => void savePrompt()}
                   size="sm"
                   type="button"
                 >
@@ -608,10 +690,12 @@ export function PromptLibraryWorkspace({
             run?.()
           }}
           onSave={() => {
-            const ok = savePrompt()
-            const run = pendingNav
-            setPendingNav(null)
-            if (ok) run?.()
+            void (async () => {
+              const ok = await savePrompt()
+              const run = pendingNav
+              setPendingNav(null)
+              if (ok) run?.()
+            })()
           }}
         />
       ) : null}

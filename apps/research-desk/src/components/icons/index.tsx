@@ -1,7 +1,7 @@
 import { createIcon } from './createIcon'
 
 export type { IconProps, LucideIcon } from './createIcon'
-export { AlignCenter, AlignLeft, AlignRight, FolderPlus, SquarePen, WrapText } from 'lucide-react'
+export { AlignCenter, AlignLeft, AlignRight, CalendarDays, FolderPlus, Gauge, SquarePen, WrapText, ZoomIn, ZoomOut } from 'lucide-react'
 
 export const AlertTriangle = createIcon('AlertTriangle', 'lucide-alert-triangle', (
   <>
@@ -68,6 +68,13 @@ export const RotateCcw = createIcon('RotateCcw', 'lucide-rotate-ccw', (
   </>
 ))
 
+export const AtSign = createIcon('AtSign', 'lucide-at-sign', (
+  <>
+    <circle cx="12" cy="12" r="4" />
+    <path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8" />
+  </>
+))
+
 export const BadgeCheck = createIcon('BadgeCheck', 'lucide-badge-check', (
   <>
     <path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.77 4.78 4 4 0 0 1-6.75 0 4 4 0 0 1-4.78-4.77 4 4 0 0 1 0-6.76Z" />
@@ -78,6 +85,14 @@ export const BadgeCheck = createIcon('BadgeCheck', 'lucide-badge-check', (
 export const Bold = createIcon('Bold', 'lucide-bold', (
   <>
     <path d="M6 12h9a4 4 0 0 0 0-8H6v16h10a4 4 0 0 0 0-8" />
+  </>
+))
+
+export const BookOpenCheck = createIcon('BookOpenCheck', 'lucide-book-open-check', (
+  <>
+    <path d="M12 21V7" />
+    <path d="m16 12 2 2 4-4" />
+    <path d="M22 6V4a1 1 0 0 0-1-1h-5a4 4 0 0 0-4 4 4 4 0 0 0-4-4H3a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h6a3 3 0 0 1 3 3 3 3 0 0 1 3-3h6a1 1 0 0 0 1-1v-1.3" />
   </>
 ))
 
@@ -785,6 +800,15 @@ export const Undo2 = createIcon('Undo2', 'lucide-undo-2', (
   <>
     <path d="M9 14 4 9l5-5" />
     <path d="M4 9h10.5A5.5 5.5 0 0 1 20 14.5V20" />
+  </>
+))
+
+export const Users = createIcon('Users', 'lucide-users', (
+  <>
+    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+    <circle cx="9" cy="7" r="4" />
+    <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+    <path d="M16 3.13a4 4 0 0 1 0 7.75" />
   </>
 ))
 

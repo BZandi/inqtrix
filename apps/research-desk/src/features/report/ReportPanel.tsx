@@ -26,6 +26,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { ResearchRunRecord } from '@/features/project/types'
+import { useRunningDuration } from '@/features/researchRuns/useRunningDuration'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
@@ -190,7 +191,7 @@ export function ReportPanel({
           {selectedRun && (
             <div className="border-b border-border px-4 py-2.5">
               <div className="min-w-0">
-                <p className="t-meta truncate text-muted-foreground">
+                <p className="t-meta line-clamp-3 break-words text-muted-foreground">
                   {selectedRun.summary.title}
                 </p>
                 {isRunningRun ? (
@@ -482,11 +483,13 @@ function LiveRunPanel({ run }: { run: ResearchRunRecord }) {
 function LiveRunOverview({ run }: { run: ResearchRunRecord }) {
   const { t } = useLocale()
   const snapshot = run.snapshot
+  const runningDuration = useRunningDuration(run.status, run.startedAt)
 
   return (
     <section className="border-b border-border px-4 py-3">
       <div className="grid gap-2 sm:grid-cols-2">
         <LiveRunMetric label={t.report.currentPhase} value={phaseLabel(run.phaseState.activePhase, t)} />
+        <LiveRunMetric label={t.runCard.duration} value={runningDuration} />
         <LiveRunMetric label={t.runCard.rounds} value={run.metrics.rounds} />
         <LiveRunMetric label={t.runCard.sources} value={run.metrics.sources} />
         <LiveRunMetric label={t.runCard.queries} value={run.metrics.queries} />

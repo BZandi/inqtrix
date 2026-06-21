@@ -8,6 +8,7 @@ import {
   parseResearchRun,
   type ProjectFile,
 } from './markdown'
+import { DEFAULT_KNOWLEDGE_SESSION_ID, DEFAULT_KNOWLEDGE_SESSION_TITLE } from './knowledgeSessionDefaults'
 import type {
   EmbedModelId,
   FileAssetRecord,
@@ -17,9 +18,10 @@ import type {
   ProjectWriteResult,
   VectorIndexMemberRecord,
   VectorIndexRecord,
+  VectorIndexRunHistoryEntry,
   VectorIndexStatus,
 } from './types'
-import { DEFAULT_EMBED_MODEL_ID, EMBED_MODELS, PROJECT_SCHEMA_VERSION } from './types'
+import { DEFAULT_EMBED_MODEL_ID, EMBED_MODELS, PROJECT_SCHEMA_VERSION, VECTOR_INDEX_HISTORY_LIMIT } from './types'
 import { createDefaultFileLibrarySections, FILE_SECTION_TEMP_ID } from '@/features/files/sections'
 import {
   getOrCreateBrowserWorkspaceId,
@@ -395,6 +397,13 @@ function buildProjectStateFromFiles({
   rememberBrowserWorkspaceId(workspaceId)
   const fileLibrary = resolveFileLibraryFromManifest(manifest, fileAssets)
   const { vectorIndexOrder, vectorIndexes } = resolveVectorIndexesFromManifest(manifest, fileLibrary.fileAssets)
+  const knowledgeSessionCreatedAt = stringOrNow((project as Record<string, unknown>).updatedAt)
+  const defaultKnowledgeSession = {
+    createdAt: knowledgeSessionCreatedAt,
+    id: DEFAULT_KNOWLEDGE_SESSION_ID,
+    title: DEFAULT_KNOWLEDGE_SESSION_TITLE,
+    updatedAt: knowledgeSessionCreatedAt,
+  }
 
   return {
     chatRuleOrder,
@@ -414,6 +423,19 @@ function buildProjectStateFromFiles({
     fileGroups: fileLibrary.fileGroups,
     fileLibrarySectionOrder: fileLibrary.sectionOrder,
     fileLibrarySections: fileLibrary.sections,
+    // Live reindex progress is ephemeral — a freshly loaded project has
+    // no in-flight jobs (a running server job is re-attached by the hook).
+    indexingJobs: {},
+    // The knowledge Q&A thread is session-scoped (it references
+    // short-lived server runs) and is not part of project files.
+    knowledgeItemOrder: [],
+    knowledgeItems: {},
+    knowledgeSessionGroupMemberships: {},
+    knowledgeSessionGroupOrder: [],
+    knowledgeSessionGroups: {},
+    knowledgeSessionOrder: [defaultKnowledgeSession.id],
+    knowledgeSessions: { [defaultKnowledgeSession.id]: defaultKnowledgeSession },
+    selectedKnowledgeSessionId: defaultKnowledgeSession.id,
     dirty: false,
     editorComments: filteredEditorComments,
     editorDocumentOrder,
@@ -433,6 +455,10 @@ function buildProjectStateFromFiles({
     },
     researchRunOrder,
     researchRuns,
+    serverSyncEnabled: booleanOrDefault(manifest.server_sync_enabled, false),
+    // Ephemeral; the reducer's hydrateProject bumps it on dispatch. The loaded
+    // literal just needs a seed (never read from the manifest).
+    projectEpoch: 0,
     vectorIndexOrder,
     vectorIndexes,
     workspaceId,
@@ -444,6 +470,7 @@ function buildProjectStateFromFiles({
         ? (ui as Record<string, unknown>).expandedJobId as string
         : researchRunOrder[0] ?? null,
       isChatHistoryVisible: booleanOrDefault((ui as Record<string, unknown>).isChatHistoryVisible, true),
+      isKnowledgeHistoryVisible: booleanOrDefault((ui as Record<string, unknown>).isKnowledgeHistoryVisible, true),
       isComposerVisible: booleanOrDefault((ui as Record<string, unknown>).isComposerVisible, true),
       isReportExpanded: booleanOrDefault((ui as Record<string, unknown>).isReportExpanded, false),
       isReportVisible: booleanOrDefault((ui as Record<string, unknown>).isReportVisible, true),
@@ -941,8 +968,48 @@ function dimsForEmbedModelId(model: EmbedModelId): number {
   return EMBED_MODELS.find((entry) => entry.id === model)?.dims ?? 3072
 }
 
-function vectorIndexStatusOrDefault(value: unknown): VectorIndexStatus {
-  return value === 'indexing' || value === 'stale' ? value : 'ready'
+function vectorIndexStatusOrDefault(
+  value: unknown,
+  members: readonly VectorIndexMemberRecord[],
+): VectorIndexStatus {
+  // A persisted 'indexing' is ALWAYS stale on load: no reindex run survives a
+  // reload (the live `indexingJobs` map is never serialized), so an index
+  // restored at 'indexing' has no job to finish it — the UI would show a
+  // frozen spinner with Reindex disabled and Cancel a no-op, and (M6c) its
+  // server autosave would be deferred forever (vectorIndexChanged skips an
+  // indexing record), silently stranding later membership/title edits.
+  // Reconcile to the pre-run status (stale if any member still needs
+  // embedding, else ready), exactly like markVectorIndexCancelled. A durable
+  // server job, if one is still running, is re-attached by the indexing-job
+  // resume sweep, which sets 'indexing' again.
+  if (value === 'indexing') {
+    return members.some((member) => member.state === 'pending') ? 'stale' : 'ready'
+  }
+  return value === 'stale' || value === 'error' ? value : 'ready'
+}
+
+function vectorIndexHistoryFromManifest(
+  value: unknown,
+): VectorIndexRunHistoryEntry[] {
+  if (!Array.isArray(value)) return []
+  const entries: VectorIndexRunHistoryEntry[] = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const record = item as Record<string, unknown>
+    const result =
+      record.result === 'error' || record.result === 'cancelled'
+        ? record.result
+        : 'ok'
+    entries.push({
+      documents: typeof record.documents === 'number' ? record.documents : 0,
+      durationMs: typeof record.durationMs === 'number' ? record.durationMs : 0,
+      error: typeof record.error === 'string' ? record.error : undefined,
+      finishedAt: stringOrNow(record.finishedAt ?? record.finished_at),
+      result,
+      startedAt: stringOrNow(record.startedAt ?? record.started_at),
+    })
+  }
+  return entries.slice(0, VECTOR_INDEX_HISTORY_LIMIT)
 }
 
 function vectorIndexMembersFromManifest(
@@ -962,7 +1029,15 @@ function vectorIndexMembersFromManifest(
         : ''
     if (!fileId || seen.has(fileId) || !fileAssets[fileId]) continue
     seen.add(fileId)
-    members.push({ fileId, state: record.state === 'embedded' ? 'embedded' : 'pending' })
+    const state: VectorIndexMemberRecord['state'] =
+      record.state === 'embedded' || record.state === 'skipped' ? record.state : 'pending'
+    const serverDocumentId =
+      typeof record.serverDocumentId === 'string' && record.serverDocumentId
+        ? record.serverDocumentId
+        : typeof record.server_document_id === 'string' && record.server_document_id
+          ? record.server_document_id
+          : undefined
+    members.push({ fileId, state, ...(serverDocumentId ? { serverDocumentId } : {}) })
   }
   return members
 }
@@ -981,14 +1056,32 @@ function vectorIndexesFromManifest(
     if (!id || !title) continue
     const model = embedModelIdOrDefault(record.model)
     const dims = typeof record.dims === 'number' ? record.dims : dimsForEmbedModelId(model)
+    const history = vectorIndexHistoryFromManifest(record.history)
+    const serverCollectionId =
+      typeof record.serverCollectionId === 'string'
+        ? record.serverCollectionId
+        : typeof record.server_collection_id === 'string'
+          ? record.server_collection_id
+          : null
+    const serverCollectionModel =
+      typeof record.serverCollectionModel === 'string'
+        ? record.serverCollectionModel
+        : typeof record.server_collection_model === 'string'
+          ? record.server_collection_model
+          : null
+    const members = vectorIndexMembersFromManifest(record.members, fileAssets)
     indexes.push({
       createdAt: stringOrNow(record.createdAt ?? record.created_at),
       dims,
       handle: typeof record.handle === 'string' && record.handle.trim() ? record.handle : id,
+      ...(history.length > 0 ? { history } : {}),
       id,
-      members: vectorIndexMembersFromManifest(record.members, fileAssets),
+      ...(typeof record.lastError === 'string' ? { lastError: record.lastError } : {}),
+      members,
       model,
-      status: vectorIndexStatusOrDefault(record.status),
+      ...(serverCollectionId ? { serverCollectionId } : {}),
+      ...(serverCollectionModel ? { serverCollectionModel } : {}),
+      status: vectorIndexStatusOrDefault(record.status, members),
       title,
       updatedAt: stringOrNow(record.updatedAt ?? record.updated_at),
     })
@@ -1143,6 +1236,7 @@ function viewOrDefault(value: unknown) {
     value === 'chat'
     || value === 'database'
     || value === 'editor'
+    || value === 'knowledge'
     || value === 'prompt-library'
     || value === 'settings'
   ) return value

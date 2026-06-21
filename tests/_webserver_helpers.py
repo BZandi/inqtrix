@@ -136,6 +136,12 @@ _MIN_ENV_BY_STACK: dict[str, dict[str, str]] = {
         "AZURE_OPENAI_DEPLOYMENT_NAME": "test-deployment",
         "PERPLEXITY_API_KEY": "test-perplexity-key",
     },
+    "azure_knowledge_quickstart": {
+        "AZURE_OPENAI_API_KEY": "test-aoai-key",
+        "AZURE_OPENAI_ENDPOINT": "https://example.openai.azure.com/",
+        "AZURE_OPENAI_DEPLOYMENT_NAME": "test-deployment",
+        "PERPLEXITY_API_KEY": "test-perplexity-key",
+    },
     "azure_foundry_web_search": {
         "AZURE_OPENAI_API_KEY": "test-aoai-key",
         "AZURE_OPENAI_ENDPOINT": "https://example.openai.azure.com/",

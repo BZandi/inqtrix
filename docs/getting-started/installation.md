@@ -1,14 +1,17 @@
 # Installation
 
+> Files: `pyproject.toml`, `package.json`, `apps/research-desk/package.json`
+
 ## Scope
 
-How to install Inqtrix for local development and for consumer-style use, including the `src/` layout gotcha and the dev-extras.
+How to install Inqtrix for local development and for consumer-style use, including the `src/` layout gotcha, the optional extras, and the frontend toolchain.
 
 ## Requirements
 
 - Python 3.11 or newer.
 - A package manager: [`uv`](https://github.com/astral-sh/uv) is recommended; `conda` and plain `pip` also work.
 - Credentials for at least one LLM and one search provider if you intend to run real research.
+- For the Research Desk UI only: Node.js 22.12+ with pnpm via Corepack.
 
 ## From a fresh clone
 
@@ -35,6 +38,32 @@ Editable install is the recommended workflow for local development and testing:
 - `uv sync --extra dev` — equivalent for `uv` users.
 
 Code changes under `src/inqtrix/` are picked up immediately without re-installing after every edit.
+
+## Optional extras
+
+Two platform backends pull optional dependencies; install them only when you use the matching env switch (see [Full stack](full-stack.md)):
+
+| Extra | Enables | Env switch |
+|-------|---------|------------|
+| `knowledge-qdrant` | Qdrant vector store with hybrid (dense + BM25) retrieval | `INQTRIX_VECTOR_BACKEND=qdrant` |
+| `queue-valkey` | Valkey-Streams job queue for durable run dispatch | `INQTRIX_QUEUE_BACKEND=valkey` |
+
+```bash
+uv sync --extra knowledge-qdrant --extra queue-valkey
+# pip equivalent:
+pip install -e ".[knowledge-qdrant,queue-valkey]"
+```
+
+## Frontend toolchain (optional)
+
+The Research Desk UI under `apps/research-desk/` needs Node.js 22.12+ and pnpm pinned via Corepack (`"packageManager": "pnpm@11.1.1"` in the root `package.json`):
+
+```bash
+corepack enable                              # one-time per machine
+corepack pnpm install --frozen-lockfile      # from the repository root
+```
+
+`npm ci` works as a fallback; see [`apps/research-desk/README.md`](../../apps/research-desk/README.md) for the supply-chain trade-offs and build commands.
 
 ## The `src/` layout caveat
 
@@ -69,6 +98,7 @@ pip install -e ".[dev]"
 ## Next steps
 
 - [First research run](first-research-run.md) — run a live question against your own providers.
+- [Full stack](full-stack.md) — add Postgres, object store, Qdrant, workers, OIDC.
 - [Library mode](../deployment/library-mode.md) — embed in your own script.
 - [Web server mode](../deployment/webserver-mode.md) — run as an HTTP service.
 

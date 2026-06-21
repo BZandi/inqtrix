@@ -1,0 +1,59 @@
+# Stage-1 CI: offline test suite + frontend build sanity.
+#
+# Deliberately scoped:
+#   * push triggers ONLY on main — local working branches (local/*,
+#     wip/*, private/*) are never built and must never appear here.
+#   * No deploy/publish stages yet; image build + deploy arrive as a
+#     later, separately reviewed stage.
+#   * The Python suite is fully offline (stubs/cassettes, no API keys).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-tests:
+    name: backend (uv run pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Run offline test suite
+        run: uv run pytest tests/ -q
+
+  frontend-build:
+    name: frontend (research-desk build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/research-desk
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable corepack (pnpm)
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm build

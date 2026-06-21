@@ -4,7 +4,7 @@ This changelog follows the spirit of [Keep a Changelog](https://keepachangelog.c
 
 ## Unreleased
 
-No released artefacts yet. The repository is marked experimental (see the disclaimer in the root `README.md`); version numbers in `pyproject.toml` (`0.1.0`) are placeholders and will be tagged formally with the first release.
+No released artefacts yet. The repository is marked experimental (see the disclaimer in the root `README.md`); the version (`0.2.0`, defined once as `__version__` in `src/inqtrix/__init__.py`) is a placeholder and will be tagged formally with the first release.
 
 ### Added
 

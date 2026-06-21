@@ -229,6 +229,7 @@ venv/
 .env.*
 *.env
 !.env.example
+!deploy/.env.stack.example
 inqtrix.yaml
 inqtrix.yml
 .inqtrix.yaml
@@ -261,3 +262,11 @@ apps/*/.vite/
 apps/*/node_modules/
 !apps/research-desk/src/lib/
 !apps/research-desk/src/lib/**
+# Local object store (default INQTRIX_OBJECT_STORE_PATH) and eval artifacts
+data/
+tests/eval/artifacts/
+tests/eval/golden_hard/corpus/
+tests/eval/golden_bsi/corpus/
+tests/eval/golden_dora/corpus/
+tests/eval/golden_gquad/corpus/
+tests/eval/golden_gquad/queries.json

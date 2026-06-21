@@ -1,0 +1,416 @@
+import type { AdminSystemRuntime } from '@/api/inqtrixClient'
+import { Info } from '@/components/icons'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import type {
+  InqtrixCapabilities,
+  InqtrixHealth,
+} from '@/features/researchRuns/types'
+import { StatusBadge } from '@/features/settings/parts'
+import { useLocale } from '@/i18n/LocaleProvider'
+import type { TranslationDictionary } from '@/i18n/translations'
+import type { ReactNode } from 'react'
+import { deriveSystemFeatureRows } from './adminModel'
+
+type FeatureDetail = {
+  description: string
+  disabled: string
+  enabled: string
+  label: string
+}
+
+type RuntimeStatus = 'idle' | 'loading' | 'ready' | 'error'
+
+/** "knowledge" -> "Knowledge", "hybrid_retrieval" -> "Hybrid Retrieval". */
+function humanizeFeature(key: string): string {
+  return key
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (character) => character.toUpperCase())
+}
+
+function featureDetailFor(
+  key: string,
+  t: TranslationDictionary,
+): FeatureDetail {
+  const details = t.adminSystem.featureDetails as Record<string, FeatureDetail>
+  const known = details[key]
+  if (known) return known
+
+  const label = humanizeFeature(key)
+  return {
+    description: t.adminSystem.unknownFeatureDescription(label),
+    disabled: t.adminSystem.unknownFeatureDisabled,
+    enabled: t.adminSystem.unknownFeatureEnabled,
+    label,
+  }
+}
+
+/**
+ * Read-only system view. Health/capabilities stay the public discovery
+ * surfaces; runtime details come from the admin-gated system endpoint so the
+ * UI does not infer infrastructure from feature flags.
+ */
+export function SystemStatusPanel({
+  capabilities,
+  health,
+  runtime,
+  runtimeError,
+  runtimeStatus,
+}: {
+  capabilities: InqtrixCapabilities | null
+  health: InqtrixHealth | null
+  runtime: AdminSystemRuntime | null
+  runtimeError: string | null
+  runtimeStatus: RuntimeStatus
+}) {
+  const { locale, t } = useLocale()
+  const features = deriveSystemFeatureRows(capabilities?.features, runtime).filter(
+    (feature) => feature.key !== 'openapi',
+  )
+  const modelCount = health?.models_catalog?.length ?? 0
+  const openapiOn = runtime?.api.openapi ?? capabilities?.features.openapi ?? false
+
+  return (
+    <div className="flex min-w-0 flex-col gap-4">
+      <SystemStatusSection title={t.adminSystem.identityTitle}>
+        <SystemValueRow title={t.adminSystem.authMode}>
+          <StatusBadge
+            density="table"
+            label={health?.auth_mode ?? t.adminSystem.none}
+            tone="neutral"
+          />
+        </SystemValueRow>
+        <SystemValueRow title={t.adminSystem.llmProvider}>
+          <RuntimeCode value={health?.llm?.provider} />
+        </SystemValueRow>
+        <SystemValueRow title={t.adminSystem.searchProvider}>
+          <RuntimeCode value={health?.search?.provider} />
+        </SystemValueRow>
+        <SystemValueRow title={t.adminSystem.modelPicker}>
+          <span className="t-meta text-muted-foreground">
+            {t.adminSystem.modelPickerCount(modelCount)}
+          </span>
+        </SystemValueRow>
+      </SystemStatusSection>
+
+      <SystemStatusSection title={t.adminSystem.runtimeTitle}>
+        {runtime ? (
+          <>
+            <SystemValueRow title={t.adminSystem.storageBackend}>
+              <RuntimeValueGroup>
+                <RuntimeCode value={runtime.storage.backend} />
+                <StatusBadge
+                  density="table"
+                  label={
+                    runtime.storage.durable
+                      ? t.adminSystem.durableStorage
+                      : t.adminSystem.volatileStorage
+                  }
+                  tone={runtime.storage.durable ? 'success' : 'neutral'}
+                />
+              </RuntimeValueGroup>
+            </SystemValueRow>
+            <SystemValueRow title={t.adminSystem.runStore}>
+              <RuntimeCode value={runtime.runs.store} />
+            </SystemValueRow>
+            <SystemValueRow title={t.adminSystem.runQueue}>
+              <RuntimeValueGroup>
+                <RuntimeCode value={runtime.runs.queue} />
+                <AvailabilityBadge available={runtime.runs.queue_available} />
+                <StatusBadge
+                  density="table"
+                  label={
+                    runtime.runs.worker_dispatch
+                      ? t.adminSystem.workerDispatch
+                      : t.adminSystem.inProcessExecution
+                  }
+                  tone={runtime.runs.worker_dispatch ? 'brand' : 'neutral'}
+                />
+              </RuntimeValueGroup>
+            </SystemValueRow>
+          </>
+        ) : (
+          <RuntimeUnavailable error={runtimeError} status={runtimeStatus} />
+        )}
+      </SystemStatusSection>
+
+      <SystemStatusSection title={t.adminSystem.filesKnowledgeTitle}>
+        {runtime ? (
+          <>
+            <SystemValueRow title={t.adminSystem.fileStorage}>
+              <RuntimeValueGroup>
+                <RuntimeCode value={runtime.files.object_store} />
+                <AvailabilityBadge available={runtime.files.object_store_available} />
+                <span className="t-meta text-muted-foreground">
+                  {runtime.files.enabled
+                    ? t.adminSystem.fileStorageDetail(
+                        runtimeLabel(runtime.files.blob_storage, t),
+                        formatBytes(runtime.files.max_file_bytes, locale),
+                      )
+                    : t.adminSystem.notConfigured}
+                </span>
+              </RuntimeValueGroup>
+            </SystemValueRow>
+            <SystemValueRow title={t.adminSystem.embeddingProvider}>
+              <RuntimeValueGroup>
+                <RuntimeCode value={runtime.knowledge.embedding_provider} />
+                <span className="t-meta text-muted-foreground">
+                  {runtime.knowledge.embedding_model ?? t.adminSystem.notConfigured}
+                </span>
+              </RuntimeValueGroup>
+            </SystemValueRow>
+            <SystemValueRow title={t.adminSystem.vectorStore}>
+              <RuntimeValueGroup>
+                <RuntimeCode value={runtime.knowledge.vector_store} />
+                <AvailabilityBadge
+                  available={runtime.knowledge.vector_store_available}
+                />
+                <StatusBadge
+                  density="table"
+                  label={
+                    runtime.knowledge.hybrid_retrieval
+                      ? t.adminSystem.hybridOn
+                      : t.adminSystem.hybridOff
+                  }
+                  tone={runtime.knowledge.hybrid_retrieval ? 'success' : 'neutral'}
+                />
+                {runtime.knowledge.sparse ? (
+                  <span className="t-meta text-muted-foreground">
+                    {runtimeLabel(runtime.knowledge.sparse, t)}
+                  </span>
+                ) : null}
+              </RuntimeValueGroup>
+            </SystemValueRow>
+            <SystemValueRow title={t.adminSystem.documentParser}>
+              <RuntimeCode value={runtime.knowledge.document_parser} />
+            </SystemValueRow>
+            <SystemValueRow title={t.adminSystem.reranker}>
+              <RuntimeCode value={runtime.knowledge.reranker} />
+            </SystemValueRow>
+          </>
+        ) : (
+          <RuntimeUnavailable error={runtimeError} status={runtimeStatus} />
+        )}
+      </SystemStatusSection>
+
+      <section className="min-w-0 bg-transparent">
+        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-border/65 px-3 py-2">
+          <h3 className="t-section text-foreground">
+            {t.adminSystem.featuresTitle}
+          </h3>
+          <span className="t-caption text-muted-foreground">
+            {t.adminUsers.colStatus}
+          </span>
+        </div>
+        <div className="grid gap-1 py-1">
+          <FeatureGateRow
+            detail={featureDetailFor('openapi', t)}
+            featureKey="openapi"
+            isOn={openapiOn}
+          />
+          {features.length === 0 ? (
+            <div className="px-3 py-6 text-center">
+              <p className="t-section text-foreground">
+                {t.adminSystem.unavailable}
+              </p>
+            </div>
+          ) : (
+            features.map((feature) => (
+              <FeatureGateRow
+                detail={featureDetailFor(feature.key, t)}
+                featureKey={feature.key}
+                isOn={feature.on}
+                key={feature.key}
+              />
+            ))
+          )}
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function SystemStatusSection({
+  children,
+  title,
+}: {
+  children: ReactNode
+  title: string
+}) {
+  return (
+    <section className="min-w-0 bg-transparent">
+      <div className="border-b border-border/65 px-3 py-2">
+        <h3 className="t-section text-foreground">{title}</h3>
+      </div>
+      <div className="grid gap-1 py-1">{children}</div>
+    </section>
+  )
+}
+
+function SystemValueRow({
+  children,
+  title,
+}: {
+  children: ReactNode
+  title: string
+}) {
+  return (
+    <div className="grid min-h-9 gap-2 rounded-md px-3 py-2 transition-colors hover:bg-surface/45 sm:grid-cols-[220px_minmax(0,1fr)] sm:items-center sm:gap-6">
+      <h4 className="t-list text-foreground">{title}</h4>
+      <div className="min-w-0 sm:text-right">{children}</div>
+    </div>
+  )
+}
+
+function RuntimeValueGroup({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5 sm:justify-end">
+      {children}
+    </div>
+  )
+}
+
+function RuntimeCode({ value }: { value: string | null | undefined }) {
+  const { t } = useLocale()
+  const displayValue = value && value.trim() ? runtimeLabel(value, t) : t.adminSystem.none
+
+  return (
+    <span className="t-mono text-foreground">
+      {displayValue}
+    </span>
+  )
+}
+
+function AvailabilityBadge({ available }: { available: boolean }) {
+  const { t } = useLocale()
+
+  return (
+    <StatusBadge
+      density="table"
+      label={available ? t.adminSystem.reachable : t.adminSystem.unreachable}
+      tone={available ? 'success' : 'destructive'}
+    />
+  )
+}
+
+function RuntimeUnavailable({
+  error,
+  status,
+}: {
+  error: string | null
+  status: RuntimeStatus
+}) {
+  const { t } = useLocale()
+  const message =
+    status === 'loading'
+      ? t.adminSystem.runtimeLoading
+      : error ?? t.adminSystem.runtimeUnavailable
+
+  return (
+    <div className="rounded-md px-3 py-3">
+      <p className="t-meta text-muted-foreground">{message}</p>
+    </div>
+  )
+}
+
+function FeatureGateRow({
+  detail,
+  featureKey,
+  isOn,
+}: {
+  detail: FeatureDetail
+  featureKey: string
+  isOn: boolean
+}) {
+  const { t } = useLocale()
+
+  return (
+    <div className="grid min-h-9 grid-cols-[minmax(7rem,13rem)_1.25rem_minmax(0,1fr)_2rem] items-center gap-2 rounded-md px-3 py-2 transition-colors hover:bg-surface/45">
+      <span className="truncate t-list text-foreground">{detail.label}</span>
+      <FeatureInfoTooltip detail={detail} featureKey={featureKey} isOn={isOn} />
+      <span aria-hidden="true" />
+      <StatusBadge
+        className="w-8 justify-center"
+        density="table"
+        label={isOn ? t.adminSystem.featureOn : t.adminSystem.featureOff}
+        tone={isOn ? 'success' : 'neutral'}
+      />
+    </div>
+  )
+}
+
+function FeatureInfoTooltip({
+  detail,
+  featureKey,
+  isOn,
+}: {
+  detail: FeatureDetail
+  featureKey: string
+  isOn: boolean
+}) {
+  const { t } = useLocale()
+  const statusLabel = isOn ? t.adminSystem.featureOn : t.adminSystem.featureOff
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          aria-label={t.adminSystem.featureInfoLabel(detail.label)}
+          className="inline-flex size-5 shrink-0 items-center justify-center rounded-full text-muted-foreground/45 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          type="button"
+        >
+          <Info className="icon-sm" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent
+        className="w-80 rounded-md border border-border bg-card p-3 text-left shadow-lg"
+        side="right"
+        sideOffset={8}
+      >
+        <div className="grid gap-2.5">
+          <div>
+            <p className="t-card text-foreground">{detail.label}</p>
+            <p className="t-meta-sm text-muted-foreground">
+              {t.adminSystem.featureManifestKey(featureKey)}
+            </p>
+          </div>
+          <p className="t-meta-sm leading-relaxed text-muted-foreground">
+            {detail.description}
+          </p>
+          <div className="grid gap-1.5">
+            <FeatureInfoLine
+              label={t.adminSystem.featureStatus}
+              value={statusLabel}
+            />
+            <FeatureInfoLine
+              label={t.adminSystem.featureEffect}
+              value={isOn ? detail.enabled : detail.disabled}
+            />
+          </div>
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+function FeatureInfoLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid gap-0.5 rounded-md border border-border bg-surface/50 px-2 py-1.5">
+      <span className="t-caption text-muted-foreground/65">{label}</span>
+      <span className="t-meta-sm text-foreground">{value}</span>
+    </div>
+  )
+}
+
+function runtimeLabel(value: string, t: TranslationDictionary): string {
+  const labels = t.adminSystem.runtimeLabels as Record<string, string>
+  return labels[value] ?? value
+}
+
+function formatBytes(bytes: number | null, locale: string): string | null {
+  if (bytes == null) return null
+  if (bytes >= 1_048_576) {
+    const mb = bytes / 1_048_576
+    return `${new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(mb)} MB`
+  }
+  return `${new Intl.NumberFormat(locale).format(bytes)} B`
+}

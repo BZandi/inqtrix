@@ -1,5 +1,5 @@
 import { type DragEvent } from 'react'
-import { Folder, Link, X } from '@/components/icons'
+import { Eye, Folder, Link, Sparkles, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useLocale } from '@/i18n/LocaleProvider'
@@ -9,6 +9,7 @@ import {
   ConfirmDelete,
   InlineText,
   MoveMenu,
+  ParserBadge,
   StatusMark,
   TypeBadge,
   TypeTile,
@@ -27,18 +28,48 @@ export type FileItemProps = {
   referenceCount?: number
   moveTargets?: MoveTarget[]
   memberState?: VectorIndexMemberState
+  /** Whether the member's index is CURRENTLY running an embed job — so a
+   * `pending` member only reads "embedding…" while a job actually runs, never
+   * forever (the prior bug). */
+  indexing?: boolean
+  /** This file's server-confirmed live outcome during an active run. */
+  liveProgress?: 'embedded' | 'skipped'
   source?: string | null
   onRename?: (fileId: string, label: string) => void
   onMove?: (fileId: string, sectionId: string, groupId: string | null) => void
   onDelete?: (fileId: string) => void
   onRemoveFromIndex?: (fileId: string) => void
+  /** Index just THIS file (per-row action), shown for a not-yet-indexed
+   * member when no run is in flight. */
+  onIndexMember?: (fileId: string) => void
   onDragStart?: (fileId: string) => void
   onDragEnd?: () => void
+  onPreview?: (fileId: string) => void
 }
 
-function ChunkCell({ asset, state }: { asset: FileAssetRecord; state: VectorIndexMemberState }) {
+function ChunkCell({
+  asset,
+  state,
+  indexing = false,
+  liveProgress,
+}: {
+  asset: FileAssetRecord
+  state: VectorIndexMemberState
+  indexing?: boolean
+  /** During an active run, this file's server-CONFIRMED outcome so far:
+   * `embedded` (done), `skipped` (no text), or undefined (not yet processed →
+   * still running). Drives the live, per-file feedback. */
+  liveProgress?: 'embedded' | 'skipped'
+}) {
   const { locale, t } = useLocale()
-  if (state === 'pending') {
+  // While a run is in flight the live per-file outcome wins (each row flips as
+  // the server confirms it); once it completes the persisted state takes over.
+  // A still-unprocessed file shows the pulsing dot ONLY during an active run,
+  // never forever (No-Silent-Fallbacks).
+  const effective: 'embedded' | 'skipped' | 'running' | 'pending' = indexing
+    ? (liveProgress ?? 'running')
+    : state
+  if (effective === 'running') {
     return (
       <Tooltip>
         <TooltipTrigger asChild>
@@ -51,13 +82,35 @@ function ChunkCell({ asset, state }: { asset: FileAssetRecord; state: VectorInde
       </Tooltip>
     )
   }
-  const chunks = chunkEstimate(asset)
+  if (effective === 'embedded') {
+    const chunks = chunkEstimate(asset)
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="cursor-help tabular-nums">{chunks.toLocaleString(locale)}</span>
+        </TooltipTrigger>
+        <TooltipContent side="top">{t.vectorIndex.chunks.replace('{count}', chunks.toLocaleString(locale))}</TooltipContent>
+      </Tooltip>
+    )
+  }
+  // 'skipped' (live, no text) or 'pending' (queued / unembeddable, not running).
+  const noText =
+    effective === 'skipped' ||
+    (asset.extractedText.trim().length === 0 && !asset.serverFileId)
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="cursor-help tabular-nums">{chunks.toLocaleString(locale)}</span>
+        <span className="inline-flex cursor-help items-center justify-end gap-1 text-muted-foreground">
+          <span className="t-meta-sm font-medium">
+            {noText ? t.vectorIndex.embeddingNoText : t.vectorIndex.embeddingPending}
+          </span>
+        </span>
       </TooltipTrigger>
-      <TooltipContent side="top">{t.vectorIndex.chunks.replace('{count}', chunks.toLocaleString(locale))}</TooltipContent>
+      <TooltipContent side="top">
+        {noText
+          ? t.vectorIndex.embeddingNoTextTooltip
+          : t.vectorIndex.embeddingPendingTooltip}
+      </TooltipContent>
     </Tooltip>
   )
 }
@@ -123,6 +176,7 @@ function NameCell({
             <span className="min-w-0 truncate t-list text-foreground">{asset.label}</span>
           )}
           <StatusMark asset={asset} />
+          <ParserBadge asset={asset} />
         </div>
         <div className="flex min-w-0 items-center gap-1.5 t-meta-sm text-muted-foreground">
           <span className="min-w-0 flex-1 truncate" title={asset.fileName}>{asset.fileName}</span>
@@ -135,28 +189,70 @@ function NameCell({
 
 function RowActions(props: FileItemProps) {
   const { t } = useLocale()
-  const { asset, mode, moveTargets, onDelete, onMove, onRemoveFromIndex } = props
+  const { asset, indexing, memberState, mode, moveTargets, onDelete, onIndexMember, onMove, onRemoveFromIndex } = props
   if (mode === 'index') {
+    // A not-yet-indexed member gets its own "index this file" action (no run in
+    // flight) — indexing just it, no full rebuild.
+    const canIndex = memberState === 'pending' && !indexing && Boolean(onIndexMember)
     return (
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            aria-label={t.vectorIndex.removeDoc}
-            className="size-7 text-muted-foreground hover:text-foreground"
-            onClick={() => onRemoveFromIndex?.(asset.id)}
-            size="icon"
-            type="button"
-            variant="ghost"
-          >
-            <X className="size-3.5" />
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent side="top">{t.vectorIndex.removeDoc}</TooltipContent>
-      </Tooltip>
+      <>
+        {canIndex ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                aria-label={t.vectorIndex.indexMember}
+                className="size-7 text-brand hover:text-brand"
+                onClick={() => onIndexMember?.(asset.id)}
+                size="icon"
+                type="button"
+                variant="ghost"
+              >
+                <Sparkles className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top">{t.vectorIndex.indexMember}</TooltipContent>
+          </Tooltip>
+        ) : null}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              aria-label={t.vectorIndex.removeDoc}
+              className="size-7 text-muted-foreground hover:text-foreground"
+              // Disabled mid-run: removing a still-building member would strand
+              // its server document (its id isn't tracked until the run lands).
+              disabled={indexing}
+              onClick={() => onRemoveFromIndex?.(asset.id)}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              <X className="size-3.5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="top">{t.vectorIndex.removeDoc}</TooltipContent>
+        </Tooltip>
+      </>
     )
   }
   return (
     <>
+      {props.onPreview ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              aria-label={t.filePreview.open}
+              className="size-7 text-muted-foreground hover:text-foreground"
+              onClick={() => props.onPreview?.(asset.id)}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              <Eye className="size-3.5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="top">{t.filePreview.open}</TooltipContent>
+        </Tooltip>
+      ) : null}
       {moveTargets && onMove ? <MoveMenu asset={asset} onMove={onMove} targets={moveTargets} /> : null}
       {onDelete ? (
         <ConfirmDelete
@@ -185,9 +281,10 @@ function dragHandlers(props: FileItemProps) {
 
 export function FileRow(props: FileItemProps) {
   const { locale, t } = useLocale()
-  const { asset, breadcrumb, memberState, mode, referenceCount, source } = props
+  const { asset, breadcrumb, indexing, liveProgress, memberState, mode, referenceCount, source } = props
   const isIndex = mode === 'index'
   const meta = typeMeta(asset)
+  const canPreview = mode === 'library' && Boolean(props.onPreview)
   return (
     <div
       className={cn(
@@ -195,13 +292,14 @@ export function FileRow(props: FileItemProps) {
         'group rounded-md px-2 py-2 transition-colors hover:bg-accent/45',
         !isIndex && 'cursor-grab active:cursor-grabbing',
       )}
+      onClick={canPreview ? () => props.onPreview?.(asset.id) : undefined}
       {...dragHandlers(props)}
     >
       <NameCell asset={asset} breadcrumb={breadcrumb} onRename={props.onRename} />
       <div className="min-w-0"><TypeBadge asset={asset} /></div>
       <div className="text-right t-meta tabular-nums text-muted-foreground">
         {isIndex ? (
-          <ChunkCell asset={asset} state={memberState ?? 'pending'} />
+          <ChunkCell asset={asset} indexing={indexing} liveProgress={liveProgress} state={memberState ?? 'pending'} />
         ) : meta.paged && asset.pageCount != null ? (
           asset.pageCount
         ) : (
@@ -218,7 +316,10 @@ export function FileRow(props: FileItemProps) {
       ) : (
         <div className="flex justify-end t-meta-sm"><UsedCell count={referenceCount ?? 0} /></div>
       )}
-      <div className="flex items-center justify-end gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+      <div
+        className="flex items-center justify-end gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100"
+        onClick={(event) => event.stopPropagation()}
+      >
         <RowActions {...props} />
       </div>
     </div>
@@ -227,15 +328,17 @@ export function FileRow(props: FileItemProps) {
 
 export function FileCard(props: FileItemProps) {
   const { locale, t } = useLocale()
-  const { asset, breadcrumb, memberState, mode, referenceCount } = props
+  const { asset, breadcrumb, indexing, liveProgress, memberState, mode, referenceCount } = props
   const isIndex = mode === 'index'
   const meta = typeMeta(asset)
+  const canPreview = mode === 'library' && Boolean(props.onPreview)
   return (
     <div
       className={cn(
         'group flex flex-col rounded-lg border border-border bg-card p-3 shadow-[0_1px_2px_var(--shadow-hairline)] transition-colors hover:bg-accent/30',
         !isIndex && 'cursor-grab active:cursor-grabbing',
       )}
+      onClick={canPreview ? () => props.onPreview?.(asset.id) : undefined}
       {...dragHandlers(props)}
     >
       <div className="flex items-start justify-between gap-2">
@@ -243,7 +346,10 @@ export function FileCard(props: FileItemProps) {
           <TypeTile asset={asset} size="md" />
           <TypeBadge asset={asset} />
         </div>
-        <div className="flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+        <div
+          className="flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100"
+          onClick={(event) => event.stopPropagation()}
+        >
           <RowActions {...props} />
         </div>
       </div>
@@ -261,6 +367,7 @@ export function FileCard(props: FileItemProps) {
             <span className="min-w-0 truncate t-list text-foreground">{asset.label}</span>
           )}
           <StatusMark asset={asset} />
+          <ParserBadge asset={asset} />
         </div>
         <p className="mt-0.5 truncate t-meta-sm text-muted-foreground" title={asset.fileName}>
           {asset.fileName}
@@ -274,7 +381,7 @@ export function FileCard(props: FileItemProps) {
           {meta.paged && asset.pageCount != null ? ` · ${asset.pageCount} ${t.fileLibrary.pagesUnit}` : ''}
         </span>
         {isIndex ? (
-          <ChunkCell asset={asset} state={memberState ?? 'pending'} />
+          <ChunkCell asset={asset} indexing={indexing} liveProgress={liveProgress} state={memberState ?? 'pending'} />
         ) : (
           <UsedCell count={referenceCount ?? 0} />
         )}

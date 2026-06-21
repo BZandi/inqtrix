@@ -2,7 +2,7 @@
 
 Standalone Python launcher: serves the pre-built React frontend at
 ``apps/research-desk/dist/`` plus a streaming reverse-proxy for the
-Inqtrix backend (``/v1/*`` and ``/health``). The browser sees a single
+Inqtrix backend (``/v1/*``, ``/api/*`` and ``/health``). The browser sees a single
 origin, so the React bundle works without ``VITE_INQTRIX_API_BASE_URL``
 and without CORS on the backend.
 
@@ -157,7 +157,7 @@ def build_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         log.info(
-            "Serving %s and proxying /v1, /health to %s",
+            "Serving %s and proxying /v1, /api, /health to %s",
             dist_dir,
             backend_url,
         )
@@ -197,6 +197,17 @@ def build_app(
     @app.api_route("/v1/{full_path:path}", methods=_PROXY_METHODS)
     async def proxy_v1(full_path: str, request: Request) -> StreamingResponse:
         return await _proxy(request, f"/v1/{full_path}")
+
+    @app.api_route("/api/{full_path:path}", methods=_PROXY_METHODS)
+    async def proxy_api(full_path: str, request: Request) -> StreamingResponse:
+        """Forward the ``/api/*`` surface to the backend.
+
+        Covers the auth BFF (``/api/auth/*``), the local-auth setup wizard
+        (``/api/setup/*``), and admin routes (``/api/admin/*``). Without this
+        the same-origin production path cannot log in. Session cookies and the
+        ``X-CSRF-Token`` header pass through unchanged via ``_filter_headers``.
+        """
+        return await _proxy(request, f"/api/{full_path}")
 
     app.mount("/", StaticFiles(directory=str(dist_dir), html=True), name="frontend")
 

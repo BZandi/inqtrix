@@ -1,0 +1,9 @@
+{
+  "_established": "2026-01-01 ratchet: qdrant hybrid + Cohere-rerank-v4.0-pro + contextual retrieval (batched per-doc, gpt-5.4 as contextualizer). Without context: recall@1 0.9375 (within tolerance). Remaining rank-1 miss: h20 (Art. 53 vs 55 GPAI). multi_complete unchanged 0.6667.",
+  "recall_at_1": 0.9688,
+  "recall_at_3": 1.0,
+  "recall_at_5": 1.0,
+  "mrr": 0.9844,
+  "ndcg_at_5": 0.9739,
+  "multi_complete_at_5": 0.6667
+}

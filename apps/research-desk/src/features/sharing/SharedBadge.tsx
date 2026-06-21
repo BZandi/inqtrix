@@ -1,0 +1,61 @@
+import { Users } from '@/components/icons'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { useLocale } from '@/i18n/LocaleProvider'
+
+/**
+ * Quiet sharing indicator — muted, never a status colour (sharing is
+ * identity, not state). Owner variant carries the recipient count and
+ * opens the dialog; recipient variant names the grantor.
+ */
+export function SharedBadge({
+  count,
+  onClick,
+  sharedByLabel,
+}: {
+  count?: number
+  onClick?: () => void
+  sharedByLabel?: string
+}) {
+  const { t } = useLocale()
+  const isRecipient = sharedByLabel !== undefined
+  if (!isRecipient && (count === undefined || count === 0)) return null
+  const tooltip = isRecipient
+    ? sharedByLabel
+      ? t.sharing.sharedBy.replace('{name}', sharedByLabel)
+      : t.sharing.sharedBadge
+    : t.sharing.sharedCount.replace('{count}', String(count))
+
+  const body = (
+    <span className="inline-flex items-center gap-1 text-muted-foreground">
+      <Users className="size-3" />
+      {!isRecipient && (
+        <span className="t-hint tabular-nums">{count}</span>
+      )}
+    </span>
+  )
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        {onClick ? (
+          <button
+            aria-label={tooltip}
+            className="grid h-6 place-items-center rounded-md px-1 hover:bg-accent"
+            onClick={(event) => {
+              event.stopPropagation()
+              onClick()
+            }}
+            type="button"
+          >
+            {body}
+          </button>
+        ) : (
+          <span aria-label={tooltip} className="grid h-6 place-items-center px-1">
+            {body}
+          </span>
+        )}
+      </TooltipTrigger>
+      <TooltipContent>{tooltip}</TooltipContent>
+    </Tooltip>
+  )
+}

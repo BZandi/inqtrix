@@ -9,6 +9,7 @@ import type {
   ResearchRunEvent,
   ResearchRunMode,
   ResearchRunResult,
+  ResearchRunAccess,
   ResearchRunSummary,
   ResearchRunSnapshot,
   ResearchSource,
@@ -38,6 +39,7 @@ export type ProjectUiState = {
   chatChainingEnabled: boolean
   expandedJobId: string | null
   isChatHistoryVisible: boolean
+  isKnowledgeHistoryVisible: boolean
   isComposerVisible: boolean
   isReportExpanded: boolean
   isReportVisible: boolean
@@ -229,6 +231,7 @@ export type ResearchRunResultRecord = {
 }
 
 export type ResearchRunRecord = {
+  access?: ResearchRunAccess
   agentOverrides: Record<string, unknown>
   createdAt: string
   durationSeconds?: number
@@ -260,6 +263,8 @@ export type ChatRuleVisibility = {
 }
 
 export type ChatRuleRecord = {
+  /** Shared-in annotation from the server (recipients of a share). */
+  access?: ResearchRunAccess
   category?: ChatRuleCategory
   contentMarkdown: string
   createdAt: string
@@ -267,6 +272,11 @@ export type ChatRuleRecord = {
   includeInAutocomplete?: boolean
   label: string
   linkedContextRefs?: ChatContextReferenceRecord[]
+  /** Server template id once synced; absent = browser-local rule. */
+  serverTemplateId?: string
+  /** Exact server `updated_at` (unix seconds) of the loaded version —
+   * the optimistic-concurrency precondition for the next save. */
+  serverUpdatedAt?: number
   title: string
   updatedAt: string
   visibility?: ChatRuleVisibility
@@ -336,13 +346,34 @@ export type FileAssetRecord = {
   textTruncated: boolean
   title: string
   updatedAt: string
+  /**
+   * Server file id (`fl_...`) when the original was uploaded to the
+   * connected backend (`features.files`). `null`/absent = local-only
+   * asset — every feature keeps working from `extractedText`.
+   */
+  serverFileId?: string | null
+  /**
+   * Which parser produced `extractedText`: `'markitdown'` (the server
+   * parser ladder, used when `features.document_parser` is on) or
+   * `'client'` (the in-browser parser). `null`/absent = unknown (e.g.
+   * loaded from a local `.md` save, which omits this like `serverFileId`).
+   * Display-only provenance for the file card badge.
+   */
+  parserId?: string | null
+  /**
+   * Transient, client-only: a background server (MarkItDown) parse is in
+   * flight, kicked off right after upload to upgrade the instant client parse.
+   * Drives the "Parsing…" badge. Never persisted/synced (no server column);
+   * absent after a reload, at which point the upgrade happens at index time.
+   */
+  parsePending?: boolean
 }
 
-export type EmbedModelId =
-  | 'text-embedding-3-large'
-  | 'text-embedding-3-small'
-  | 'voyage-3-large'
-  | 'e5-mistral-7b'
+/** Embedding model identifier. Open string: the authoritative catalog
+ * comes from the backend (`GET /v1/capabilities` -> embedding_catalog)
+ * when the knowledge engine is enabled; the literals in EMBED_MODELS
+ * below are only the demo/offline fallback. */
+export type EmbedModelId = string
 
 export type EmbedModelDescriptor = {
   dims: number
@@ -351,9 +382,10 @@ export type EmbedModelDescriptor = {
   provider: string
 }
 
-/** Selectable embedding models for vector indexes. `dims` is the reported
- * vector dimensionality; the actual embedding run is simulated client-side
- * until a backend exists (see VectorIndexRecord.status). */
+/** FALLBACK embedding catalog for demo and offline modes only. Connected
+ * deployments with the knowledge engine enabled replace this with the
+ * server-provided catalog from `GET /v1/capabilities`; entries here are
+ * never sent to a live backend. */
 export const EMBED_MODELS: readonly EmbedModelDescriptor[] = [
   { dims: 3072, id: 'text-embedding-3-large', label: 'text-embedding-3-large', provider: 'OpenAI' },
   { dims: 1536, id: 'text-embedding-3-small', label: 'text-embedding-3-small', provider: 'OpenAI' },
@@ -363,9 +395,13 @@ export const EMBED_MODELS: readonly EmbedModelDescriptor[] = [
 
 export const DEFAULT_EMBED_MODEL_ID: EmbedModelId = 'text-embedding-3-large'
 
-export type VectorIndexStatus = 'ready' | 'indexing' | 'stale'
+export type VectorIndexStatus = 'error' | 'indexing' | 'ready' | 'stale'
 
-export type VectorIndexMemberState = 'pending' | 'embedded'
+// 'skipped' is TERMINAL: the document carried no extractable text, so it can
+// never embed — distinct from 'pending' (queued, will embed) so the UI stops
+// prompting a futile re-index and the index reads 'ready' once nothing is
+// genuinely pending.
+export type VectorIndexMemberState = 'pending' | 'embedded' | 'skipped'
 
 /** A document referenced by a vector index (n:m). The asset stays in its
  * collection; only `state` is persisted lifecycle data — chunk/vector counts
@@ -373,15 +409,80 @@ export type VectorIndexMemberState = 'pending' | 'embedded'
 export type VectorIndexMemberRecord = {
   fileId: string
   state: VectorIndexMemberState
+  /** The backend knowledge-document id this member was ingested as, once known.
+   * Lets "remove from index" delete the exact document from the searchable
+   * collection (no full rebuild). Absent for members built before this was
+   * tracked → removal falls back to local-only + the reconcile sweep. */
+  serverDocumentId?: string
+}
+
+/** Outcome of one finished reindex run, shown in the inline history. */
+export type VectorIndexRunResult = 'cancelled' | 'error' | 'ok'
+
+/** One past reindex run (durable; serialized with the index, capped at
+ * {@link VECTOR_INDEX_HISTORY_LIMIT}). */
+export type VectorIndexRunHistoryEntry = {
+  documents: number
+  durationMs: number
+  error?: string | null
+  finishedAt: string
+  result: VectorIndexRunResult
+  startedAt: string
+}
+
+/** Max retained history entries per index (newest first). */
+export const VECTOR_INDEX_HISTORY_LIMIT = 10
+
+/** Ephemeral live state of a running reindex — high-frequency progress
+ * kept OUT of the serialized project (never marks the project dirty). */
+export type IndexingJobLive = {
+  completedDocuments: number
+  currentDocumentTitle?: string
+  /** Client-build live per-file progress (the durable server-job path leaves
+   * these absent): asset ids the server has CONFIRMED embedded / skipped so
+   * far this run, so each file row flips to its real outcome as it lands.
+   * Ephemeral — the persisted member states take over on completion. */
+  embeddedFileIds?: string[]
+  skippedFileIds?: string[]
+  jobId: string
+  /** 0..100 whole percent, derived from completed/total. */
+  percent: number
+  /** 1-based FIFO slot while the job waits for a free slot; `null`/absent
+   * once it is running. Drives the "In Warteschlange" indicator, matching
+   * the research-run queue display. */
+  queuePosition?: number | null
+  /** How the run is driven, and therefore how it cancels:
+   * `demo` = local simulator; `build` = client-orchestrated first build
+   * (no cancellable server job — cancels locally); `server` = durable
+   * server job streamed over SSE (cancels server-side via the job id).
+   * Cancellability is read off this fact, never parsed from the job id. */
+  source: 'demo' | 'build' | 'server'
+  startedAt: string
+  totalDocuments: number
 }
 
 export type VectorIndexRecord = {
   createdAt: string
   dims: number
   handle: string
+  /** Past reindex runs, newest first (capped). Absent until the first run. */
+  history?: VectorIndexRunHistoryEntry[]
   id: string
+  /** Visible failure message of the last server reindex attempt;
+   * cleared when a new run starts (No-Silent-Fallbacks: a failed
+   * embedding run must never look like a stale index). */
+  lastError?: string | null
   members: VectorIndexMemberRecord[]
   model: EmbedModelId
+  /** Backend knowledge-collection id once the index was embedded on a
+   * connected server; null/absent for simulated (demo/offline) runs. */
+  serverCollectionId?: string | null
+  /** Embedding model the server collection was BUILT with. Lets a reindex
+   * tell "documents added" (same model -> incremental ingest of the new
+   * members) from "model changed" (different -> full rebuild with a fresh
+   * dimension). Absent on indexes built before this field existed -> read as
+   * a mismatch, so the next reindex heals via a full rebuild. */
+  serverCollectionModel?: string | null
   status: VectorIndexStatus
   title: string
   updatedAt: string
@@ -460,6 +561,149 @@ export type ChatThreadRecord = {
   updatedAt: string
 }
 
+// ---------------------------------------------------------------------------
+// Knowledge workspace ("Wissen") — Q&A thread over knowledge collections.
+// Session-scoped state: it lives in ProjectState so it survives view
+// switches, but it is deliberately NOT written to project files (the
+// thread references short-lived server runs).
+// ---------------------------------------------------------------------------
+
+/** Step kinds shown on the live knowledge run card, in pipeline order. */
+export type KnowledgeStepKind =
+  | 'profile'
+  | 'decompose'
+  | 'vocabulary'
+  | 'retrieval'
+  | 'evidence'
+  | 'gate'
+  | 'gate-exhausted'
+  | 'answer'
+  | 'grounding'
+
+/** Numeric/string facts captured from one knowledge SSE event. The
+ * i18n step-line builder turns these into German/English lines, so the
+ * record itself stays language-free. */
+export type KnowledgeStepFacts = {
+  autoSelected?: boolean
+  candidateCount?: number
+  /** Total documents in the searched collection scope (all are eligible) —
+   * confirms coverage in the retrieval step line. */
+  collectionDocumentCount?: number
+  degradedStages?: string[]
+  dropped?: number
+  kept?: number
+  profile?: string
+  quotesTotal?: number
+  quotesVerified?: number
+  rewritten?: boolean
+  round?: number
+  roundsTotal?: number
+  subQueryCount?: number
+  sufficient?: boolean
+  topK?: number
+}
+
+export type KnowledgeRunStepRecord = {
+  id: string
+  kind: KnowledgeStepKind
+  status: 'running' | 'done'
+  facts: KnowledgeStepFacts
+}
+
+/** Resolved run-plan facts from `inqtrix.knowledge.profile.resolved`;
+ * needed to number gate rounds and to know which steps will appear. */
+export type KnowledgeRunPlanRecord = {
+  autoReason?: string | null
+  autoSelected: boolean
+  decompose: boolean
+  degradedStages: string[]
+  gateRounds: number
+  grounding: boolean
+  profile: string
+  requestedProfile?: string | null
+  vocabularyBridge: boolean
+}
+
+export type KnowledgeRunProgressRecord = {
+  plan?: KnowledgeRunPlanRecord
+  steps: KnowledgeRunStepRecord[]
+}
+
+export type KnowledgeQuoteRecord = {
+  label: string
+  text: string
+  verified: boolean
+}
+
+export type KnowledgeReferenceRecord = {
+  /** Citation label exactly as used in the answer text, e.g. `K1`. */
+  label: string
+  url: string
+  tier: string
+  title?: string
+  /** The cited document id — the explicit backend field when present
+   * (reliable open), else parsed from the citation URL; null only when
+   * neither is available. */
+  documentId?: string | null
+  chunkIndex?: number | null
+  /** The exact retrieved chunk text the answer was grounded in — shown as the
+   * highlighted "Beleg" passage when the citation is opened. */
+  excerpt?: string | null
+  /** The chunk's original source text (sans contextualization prefix), used to
+   * locate/verify the quoted span. */
+  sourceText?: string | null
+  /** Best-effort 1-based source page of the cited chunk (PDF sources only);
+   * null when unmapped. Enables a page-level "open PDF at page N" jump. */
+  pageNumber?: number | null
+}
+
+export type KnowledgeAnswerRecord = {
+  answerMarkdown: string
+  /** True for the honest no-evidence answer — rendered in a quiet style. */
+  refusal: boolean
+  references: KnowledgeReferenceRecord[]
+  quotes: KnowledgeQuoteRecord[]
+  profileId?: string | null
+  autoSelected?: boolean
+  degradedStages: string[]
+  gate?: { sufficient: boolean; roundsUsed: number; maxRounds: number } | null
+  grounding?: { total: number; verified: number } | null
+  candidateCount?: number | null
+  evidenceUsed?: number | null
+}
+
+export type KnowledgeItemStatus = 'running' | 'completed' | 'failed'
+
+export type KnowledgeThreadItemRecord = {
+  answer?: KnowledgeAnswerRecord
+  collectionTitles: string[]
+  createdAt: string
+  error?: string
+  id: string
+  progress: KnowledgeRunProgressRecord
+  question: string
+  requestedProfile: string | null
+  /** Server run id once the native run was accepted; demo items carry a
+   * synthetic id so the same event pipeline addresses them. */
+  runId: string | null
+  sessionId: string
+  status: KnowledgeItemStatus
+}
+
+export type KnowledgeSessionRecord = {
+  createdAt: string
+  id: string
+  title: string
+  updatedAt: string
+}
+
+export type KnowledgeSessionGroupRecord = {
+  createdAt: string
+  id: string
+  title: string
+  updatedAt: string
+}
+
 export type ProjectState = {
   chatRuleOrder: string[]
   chatRules: Record<string, ChatRuleRecord>
@@ -484,11 +728,41 @@ export type ProjectState = {
   fileGroups: Record<string, FileGroupRecord>
   fileLibrarySectionOrder: string[]
   fileLibrarySections: Record<string, FileLibrarySectionRecord>
+  /** Live reindex progress per vector-index id. Ephemeral: never
+   * serialized, never marks the project dirty (high-frequency updates). */
+  indexingJobs: Record<string, IndexingJobLive>
+  knowledgeItemOrder: string[]
+  knowledgeItems: Record<string, KnowledgeThreadItemRecord>
+  knowledgeSessionGroupMemberships: Record<string, string | null>
+  knowledgeSessionGroupOrder: string[]
+  knowledgeSessionGroups: Record<string, KnowledgeSessionGroupRecord>
+  knowledgeSessionOrder: string[]
+  knowledgeSessions: Record<string, KnowledgeSessionRecord>
+  selectedKnowledgeSessionId: string | null
   localRunCounter: number
   preferences: ProjectPreferences
   project: ProjectMetadata
   researchRunOrder: string[]
   researchRuns: Record<string, ResearchRunRecord>
+  /** Opt-in to the server-persistence tier (M6). `false` keeps the
+   * project local-first; the explicit "move to server" import sets it
+   * `true`, after which a server with the `project_persistence`
+   * capability hydrates and autosaves the project (chat first; editor
+   * and assets follow). Persisted in the project manifest so a re-opened
+   * server project re-hydrates. Never forces a non-durable server. */
+  serverSyncEnabled: boolean
+  /** Monotonic in-session counter, bumped every time the whole project state
+   * is replaced (project load, demo toggle). It is the identity signal the
+   * project-scoped server-sync hooks re-arm on: a switch to a DIFFERENT project
+   * that is also server-synced keeps ``serverSyncEnabled`` (and possibly the
+   * ``workspaceId``) unchanged, so the boolean alone cannot tell the hooks the
+   * underlying project changed -- they would keep the prior project's ``synced``
+   * fingerprint map and delete its server rows on the next autosave. Bumping
+   * this on every wholesale replace forces each project to re-hydrate from its
+   * OWN server state. Deliberately EPHEMERAL: never serialized to the manifest
+   * (a restored counter would defeat the purpose), so it resets to 0 on reload
+   * and is overwritten by the reducer on hydrate. */
+  projectEpoch: number
   ui: ProjectUiState
   vectorIndexOrder: string[]
   vectorIndexes: Record<string, VectorIndexRecord>
@@ -514,6 +788,7 @@ export function fromRunSummary(
   const title = summary.question.trim() || summary.run_id
 
   return {
+    access: summary.access,
     agentOverrides: summary.agent_overrides,
     createdAt: submittedAt,
     durationSeconds: terminalStatus(summary.status)

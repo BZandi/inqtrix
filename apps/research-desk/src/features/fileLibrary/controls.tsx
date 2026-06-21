@@ -5,8 +5,11 @@ import {
   Check,
   ChevronDown,
   FolderOpen,
+  Info,
   LayoutGrid,
   List,
+  Monitor,
+  Server,
   Trash2,
   XCircle,
   type LucideIcon,
@@ -121,8 +124,30 @@ export function TypeBadge({ asset }: { asset: FileAssetRecord }) {
  * for cleanly parsed documents. */
 export function StatusMark({ asset }: { asset: FileAssetRecord }) {
   const { t } = useLocale()
+  // While a background server parse runs, suppress any client-parse error
+  // marker (e.g. pdf.js failing on Safari): it is about to be superseded by
+  // the server text, so a red alarm here would be misleading. The ParserBadge
+  // shows the "Parsing…" state instead; a real error only surfaces if the
+  // server parse also fails (which clears parsePending).
+  if (asset.parsePending) return null
   const status = fileStatus(asset)
-  if (status === 'ok') return null
+  if (status === 'ok') {
+    // A clean parse can still carry a note — e.g. the server parser declined
+    // and the browser parsed instead. Surface it as neutral info (not the
+    // failed/truncated alarm color) so the fallback is never silent
+    // (Designprinzip 1); a genuinely clean parse has no note and no marker.
+    if (!asset.parseWarning) return null
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex shrink-0 cursor-help items-center text-muted-foreground">
+            <Info className="size-3.5" />
+          </span>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-[260px]" side="top">{asset.parseWarning}</TooltipContent>
+      </Tooltip>
+    )
+  }
   const isFailed = status === 'failed'
   const Icon = isFailed ? XCircle : AlertTriangle
   const label = isFailed ? t.fileLibrary.statusFailedLabel : t.fileLibrary.statusTruncatedLabel
@@ -137,6 +162,46 @@ export function StatusMark({ asset }: { asset: FileAssetRecord }) {
       <TooltipContent className="max-w-[260px]" side="top">
         <span className="font-semibold">{label}.</span> {note}
       </TooltipContent>
+    </Tooltip>
+  )
+}
+
+/** Provenance badge: which parser produced the extracted text — the
+ * server-side ladder (MarkItDown) or the in-browser parser. Renders nothing
+ * when unknown (legacy rows / a local `.md` save that omits the field), the
+ * same graceful absence as a missing `serverFileId`. */
+export function ParserBadge({ asset }: { asset: FileAssetRecord }) {
+  const { t } = useLocale()
+  if (asset.parsePending) {
+    // A background server (MarkItDown) parse is in flight — make it visible
+    // (pulsing dot) so the upgrade is not silent magic; it resolves to the
+    // MarkItDown badge (or back to the client state) when it lands.
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex shrink-0 cursor-help items-center gap-1 rounded border border-brand/30 bg-brand-subtle px-1 t-hint font-medium text-brand">
+            <span className="inqtrix-running-dot size-1.5 rounded-full bg-brand" />
+            {t.fileLibrary.parserRunning}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-[260px]" side="top">{t.fileLibrary.parserRunningNote}</TooltipContent>
+      </Tooltip>
+    )
+  }
+  if (asset.parserId !== 'markitdown' && asset.parserId !== 'client') return null
+  const isServer = asset.parserId === 'markitdown'
+  const Icon = isServer ? Server : Monitor
+  const label = isServer ? t.fileLibrary.parserMarkitdown : t.fileLibrary.parserClient
+  const note = isServer ? t.fileLibrary.parserMarkitdownNote : t.fileLibrary.parserClientNote
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex shrink-0 cursor-help items-center gap-1 rounded border border-border bg-surface px-1 t-hint font-medium text-muted-foreground">
+          <Icon className="size-3" />
+          {label}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-[260px]" side="top">{note}</TooltipContent>
     </Tooltip>
   )
 }

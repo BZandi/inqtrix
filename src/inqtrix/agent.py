@@ -301,6 +301,17 @@ class AgentConfig(BaseModel):
         ),
     )
     """Per-call timeout (seconds) for reasoning LLM calls (classify, plan, evaluate, answer). The provider raises ``AgentTimeout`` if a single call exceeds this. Increase for slow extended-thinking deployments; decrease to fail fast against unhealthy upstreams."""
+    editor_assistant_timeout: int = Field(
+        default=120,
+        description=(
+            "Per-call timeout (seconds) for editor suggest/instruct calls. "
+            "Decoupled from ``reasoning_timeout`` so editor work (a full "
+            "generation over large attached context) can be given a longer "
+            "budget without lengthening every research reasoning call. "
+            "Defaults to the ``reasoning_timeout`` default; ``900`` under DEEP."
+        ),
+    )
+    """Per-call timeout (seconds) for editor suggest/instruct calls. Decoupled from ``reasoning_timeout`` so editor work (a full generation over large attached context) can be given a longer budget without lengthening every research reasoning call. Defaults to the ``reasoning_timeout`` default; ``900`` under DEEP."""
     search_timeout: int = Field(
         default=60,
         description=(
@@ -766,6 +777,7 @@ class ResearchAgent:
             "max_total_seconds",
             "max_question_length",
             "reasoning_timeout",
+            "editor_assistant_timeout",
             "search_timeout",
             "claim_extract_timeout",
             "high_risk_score_threshold",

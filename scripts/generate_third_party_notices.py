@@ -17,7 +17,7 @@ DEFAULT_MARKDOWN_PATH = REPO_ROOT / "THIRD_PARTY_NOTICES.md"
 DEFAULT_JSON_PATH = REPO_ROOT / "THIRD_PARTY_NOTICES.json"
 SURFACE_ORDER = {
     "python": 0,
-    "python-dev/ui": 1,
+    "python-dev": 1,
     "react-prod": 2,
     "react-dev": 3,
 }
@@ -224,7 +224,7 @@ def collect_python_entries(
                 name=name,
                 version=version,
                 license=license_id,
-                dependency_surface="python" if key in runtime else "python-dev/ui",
+                dependency_surface="python" if key in runtime else "python-dev",
                 metadata_source=source,
             )
         )

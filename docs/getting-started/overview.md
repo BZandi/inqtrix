@@ -17,10 +17,12 @@ Inqtrix is an iterative AI research agent. Given a question, it:
 
 Everything above is **bounded** — wall-clock deadline, max rounds, max citations, max context blocks. Runs cannot accidentally explode in cost.
 
+Around the agent sits a platform layer (v0.2.0): an HTTP server with native runs (`/v1/runs` + SSE events) next to the OpenAI-compatible chat surface, an optional knowledge engine that answers with verified quotes from your own document collections (`mode=knowledge`, see [Retrieval profiles](../configuration/knowledge-profiles.md)), a files API, and the Research Desk browser UI. All of it defaults to zero infrastructure (in-memory storage and queue) and scales up to Postgres, S3, Qdrant, Valkey workers, and OIDC login — see [Platform components](platform-components.md).
+
 ## Who it is for
 
 - Developers who need structured, auditable research answers inside a larger Python application.
-- Teams that want a pluggable, typed backend for a research-UI product.
+- Teams that want a pluggable, typed backend for a research UI.
 - Operators who need to stay inside a specific tenancy (Azure, AWS Bedrock) for compliance reasons and who value Constructor-First provider wiring.
 
 Inqtrix is **not** a general-purpose agent framework; the graph topology, strategy ABCs, and stopping cascade are opinionated.
@@ -32,6 +34,9 @@ Inqtrix is **not** a general-purpose agent framework; the graph topology, strate
 | Python library via `.env` or process env | `.env` | environment variables | `uv run python main.py` |
 | Python library via `AgentConfig` | none | Python code | `uv run python main.py` |
 | HTTP server in env-only mode | `.env` | environment variables | `uv run python -m inqtrix` |
+| Research Desk UI (against a running server) | none | on the server | `pnpm run ui:dev` |
+| Stack mode (one command: API + web + Postgres) | `deploy/.env.stack` | environment variables | [Stack quickstart](stack-quickstart.md) |
+| Platform components (S3, Qdrant, Valkey, Dex profiles) | `.env` + compose | environment variables | [Platform components](platform-components.md) |
 
 `main.py` only exists when you author a library script yourself. The HTTP server boots directly via `python -m inqtrix`; no user-supplied `main.py` is required.
 
@@ -61,8 +66,15 @@ application.
 
 ## Next steps
 
-- [Installation](installation.md) — set up the editable install.
-- [First research run](first-research-run.md) — run a live question against your own providers.
+The getting-started pages chain from clone to a first cited knowledge answer:
+
+1. [Installation](installation.md) — set up the editable install and the optional frontend toolchain.
+2. [First research run](first-research-run.md) — a live web-research answer with zero infrastructure.
+3. [Stack quickstart](stack-quickstart.md) — run the whole stack (API + web + Postgres) with one `docker compose up`; [Platform components](platform-components.md) explains which extras you need.
+4. [First knowledge answer](first-knowledge-answer.md) — a cited answer over your own documents.
+
+Then go deeper:
+
 - [Architecture overview](../architecture/overview.md) — understand the pipeline in depth.
 - [Providers overview](../providers/overview.md) — pick a provider combination.
 

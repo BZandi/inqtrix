@@ -104,6 +104,10 @@ class AgentState(TypedDict):
     # untouched: state["_cancel_event"] is only present when the server
     # explicitly seeded it via initial_state(cancel_event=...).
     _cancel_event: NotRequired[threading.Event | None]
+    # Optional hard per-run LLM-token budget (the opt-in quota cap).
+    # ``0`` / absent = off; a positive value makes check_cancel_event
+    # raise AgentCancelled once cumulative tokens reach it.
+    _token_budget: NotRequired[int]
 
 
 def initial_state(
@@ -116,6 +120,7 @@ def initial_state(
     max_rounds: int | None = None,
     run_id: str | None = None,
     run_event_sink: Callable[[str, dict[str, Any]], None] | None = None,
+    token_budget: int = 0,
 ) -> dict[str, Any]:
     """Create the initial AgentState for a run.
 
@@ -201,30 +206,55 @@ def initial_state(
         state["_run_event_sink"] = run_event_sink
     if cancel_event is not None:
         state["_cancel_event"] = cancel_event
+    if token_budget > 0:
+        state["_token_budget"] = int(token_budget)
     return state
 
 
 def check_cancel_event(state: dict[str, Any]) -> None:
-    """Raise :class:`AgentCancelled` if the per-run cancel event is set.
+    """Abort the run at a node boundary for either stop reason.
 
-    No-op when the state has no ``_cancel_event`` (single-stack /
-    library mode) or when the event exists but has not been set.
-    Used by every LangGraph node at its entry point so that a client
-    disconnect aborts the run between nodes (best-effort, in-flight
-    provider HTTP calls are not interrupted).
+    Called by every LangGraph node at its entry point, so this is the
+    one place that decides whether the loop continues. Two reasons,
+    both best-effort (in-flight provider HTTP calls are not
+    interrupted):
+
+    * the per-run cancel event was set (client disconnect / native run
+      cancellation), or
+    * the optional hard per-run token budget (``_token_budget``, the
+      opt-in quota cap) has been reached by the cumulative token total.
+
+    No-op when neither is configured (single-stack / library mode keep
+    both absent).
 
     Args:
         state: The current :class:`AgentState`.
 
     Raises:
-        AgentCancelled: When ``state["_cancel_event"]`` exists and
-            ``is_set() == True``.
+        AgentCancelled: When the cancel event is set, or when the token
+            budget is configured and the cumulative token total reaches
+            it.
     """
     event = state.get("_cancel_event")
     if event is not None and event.is_set():
         raise AgentCancelled(
             "Lauf vom Client abgebrochen (SSE-Disconnect)."
         )
+    budget = state.get("_token_budget", 0)
+    if budget:
+        used = int(state.get("total_prompt_tokens", 0) or 0) + int(
+            state.get("total_completion_tokens", 0) or 0
+        )
+        if used >= budget:
+            log.warning(
+                "Lauf wegen Token-Budget gestoppt: %d/%d Tokens "
+                "(INQTRIX_QUOTA_MAX_TOKENS_PER_RUN).",
+                used,
+                budget,
+            )
+            raise AgentCancelled(
+                "Lauf wegen Token-Budget (max_tokens_per_run) gestoppt."
+            )
 
 
 _VALID_PROGRESS_SEVERITIES = frozenset({"info", "warning", "success", "error"})

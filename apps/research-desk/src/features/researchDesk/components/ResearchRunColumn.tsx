@@ -1,10 +1,11 @@
-import { PanelBottomOpen } from '@/components/icons'
+import { PanelBottomOpen, Users } from '@/components/icons'
 import { AnimatePresence, motion } from 'motion/react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { WelcomeState } from '@/components/ui/welcome-state'
 import type { CreateResearchRunRequest } from '@/features/researchRuns/types'
+import { partitionJobsByAccess } from '@/features/sharing/shareModel'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { appMotion } from '@/motion/transitions'
 import type { JobFilter, ResearchJob } from '../types'
@@ -28,12 +29,17 @@ type ResearchRunColumnProps = {
   onCancelJob: (jobId: string) => void
   onComposerSubmit: (request: CreateResearchRunRequest) => void
   onComposerVisibleChange: (isComposerVisible: boolean) => void
+  onResearchQuestionChange: (question: string) => void
+  researchQuestion: string
   onDeleteJob: (jobId: string) => void
   onSelectJob: (jobId: string) => void
+  onShareJob?: (jobId: string) => void
   onToggleJob: (jobId: string) => void
   reduceMotion: boolean | null
   selectedJobId: string | null
   selectedStack: string
+  shareCountByRunId?: Record<string, number>
+  sharedByLabelByRunId?: ReadonlyMap<string, string>
 }
 
 export function ResearchRunColumn({
@@ -48,15 +54,32 @@ export function ResearchRunColumn({
   onCancelJob,
   onComposerSubmit,
   onComposerVisibleChange,
+  onResearchQuestionChange,
+  researchQuestion,
   onDeleteJob,
   onSelectJob,
+  onShareJob,
   onToggleJob,
   reduceMotion,
   selectedJobId,
   selectedStack,
+  shareCountByRunId,
+  sharedByLabelByRunId,
 }: ResearchRunColumnProps) {
   const { t } = useLocale()
-  const [composerForm, setComposerForm] = useState(defaultComposerFormState)
+  // Seed the question from the session-scoped shell draft so it survives a view
+  // switch (this column unmounts on switch); the lazy initializer restores it on
+  // remount. Form settings stay ephemeral by design -- only the typed question is
+  // worth preserving.
+  const [composerForm, setComposerForm] = useState(() => ({
+    ...defaultComposerFormState,
+    question: researchQuestion,
+  }))
+  // Mirror question edits (and the submit-time clear) back up to the shell.
+  useEffect(() => {
+    onResearchQuestionChange(composerForm.question)
+  }, [composerForm.question, onResearchQuestionChange])
+  const { own: ownJobs, shared: sharedJobs } = partitionJobsByAccess(jobs)
 
   return (
     <section className="relative flex min-h-[calc(100svh-var(--header-h))] min-w-0 flex-col overflow-hidden bg-background lg:h-full lg:min-h-0">
@@ -83,7 +106,36 @@ export function ResearchRunColumn({
               transition={appMotion.list}
             >
               <AnimatePresence initial={false} mode={reduceMotion ? 'sync' : 'popLayout'}>
-                {jobs.map((job) => (
+                {ownJobs.map((job) => (
+                  <ResearchJobCard
+                    isExpanded={expandedJobId === job.id}
+                    isSelected={selectedJobId === job.id}
+                    job={job}
+                    key={job.id}
+                    cancelError={cancelErrorByRunId[job.id]}
+                    isCancelSubmitting={cancelSubmittingRunIds.has(job.id)}
+                    onCancel={() => onCancelJob(job.id)}
+                    onDelete={() => onDeleteJob(job.id)}
+                    onSelect={() => onSelectJob(job.id)}
+                    onShare={onShareJob ? () => onShareJob(job.id) : undefined}
+                    onToggleExpanded={() => onToggleJob(job.id)}
+                    shareCount={shareCountByRunId?.[job.id]}
+                  />
+                ))}
+                {sharedJobs.length > 0 && (
+                  <motion.div
+                    animate={{ opacity: 1 }}
+                    className="flex items-center gap-1.5 pt-1.5 text-muted-foreground"
+                    exit={{ opacity: 0 }}
+                    initial={reduceMotion ? false : { opacity: 0 }}
+                    key="shared-with-me-divider"
+                    transition={appMotion.list}
+                  >
+                    <Users className="size-3.5" />
+                    <span className="t-caption">{t.sharing.sharedWithMe}</span>
+                  </motion.div>
+                )}
+                {sharedJobs.map((job) => (
                   <ResearchJobCard
                     isExpanded={expandedJobId === job.id}
                     isSelected={selectedJobId === job.id}
@@ -95,6 +147,7 @@ export function ResearchRunColumn({
                     onDelete={() => onDeleteJob(job.id)}
                     onSelect={() => onSelectJob(job.id)}
                     onToggleExpanded={() => onToggleJob(job.id)}
+                    sharedByLabel={sharedByLabelByRunId?.get(job.id) ?? ''}
                   />
                 ))}
               </AnimatePresence>

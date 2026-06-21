@@ -1,0 +1,467 @@
+"""Profile behaviour of the knowledge algorithm, fully offline.
+
+Pins the contracts WP-A2 introduced: exact LLM call counts per
+profile (`schnell` = one answer call, nothing else), the capped
+rewrite loop, ceiling degradation visible in the result state, the
+vocabulary-bridge prompt variant, per-profile rerank wiring, and —
+because the algorithm instance is a shared singleton — that two
+concurrent runs with different profiles do not interfere.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import threading
+from typing import Any
+
+import pytest
+
+from inqtrix.core.context import RunContext, RuntimeContext
+from inqtrix.core.results import RunRequest
+from inqtrix.knowledge.algorithm import KnowledgeAlgorithm
+from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
+from inqtrix.knowledge.stores.ports import (
+    DocumentChunk,
+    KnowledgeProviderContext,
+    RetrievalCandidate,
+)
+from inqtrix.providers.base import LLMResponse, ProviderContext
+from inqtrix.providers.rerankers import RerankResult
+from inqtrix.services.knowledge_service import KnowledgeService
+from inqtrix.settings import AgentSettings, Settings
+
+from tests.contract._app import StubSearch
+from tests.test_knowledge_engine import StubEmbeddings
+
+
+class ScriptedLLM:
+    """Queued gate verdicts; answer prompts get a fixed cited reply."""
+
+    def __init__(self, gate_verdicts: list[dict[str, Any]] | None = None) -> None:
+        self._gate_verdicts = list(gate_verdicts or [])
+        self.gate_prompts: list[str] = []
+        self.answer_prompts: list[str] = []
+
+    def complete_with_metadata(self, prompt: str, **kwargs: Any) -> LLMResponse:
+        if "AUSSCHLIESSLICH mit einem JSON-Objekt" in prompt:
+            self.gate_prompts.append(prompt)
+            verdict = self._gate_verdicts.pop(0)
+            return LLMResponse(
+                content=json.dumps(verdict),
+                prompt_tokens=5,
+                completion_tokens=3,
+                model="stub-gate",
+                finish_reason="stop",
+            )
+        self.answer_prompts.append(prompt)
+        return LLMResponse(
+            content="Antwort mit Beleg [K1].",
+            prompt_tokens=42,
+            completion_tokens=11,
+            model="stub-answer",
+            finish_reason="stop",
+        )
+
+    def is_available(self) -> bool:
+        return True
+
+
+class RecordingStore(MemoryKnowledgeStore):
+    """Memory store recording the top_k of every search call.
+
+    With ``grow=True`` each search also surfaces one FRESH candidate, so a
+    rewrite round adds new evidence and the rewrite loop runs to its round
+    budget (the multi-round tests). With ``grow=False`` (the small fixed
+    corpus) a rewrite surfaces nothing new — exercising the no-new-evidence
+    early-stop.
+    """
+
+    def __init__(self, *, grow: bool = False) -> None:
+        super().__init__()
+        self.search_top_ks: list[int] = []
+        self._grow = grow
+        self._calls = 0
+
+    async def search(self, **kwargs):
+        self.search_top_ks.append(kwargs["top_k"])
+        results = list(await super().search(**kwargs))
+        if self._grow:
+            self._calls += 1
+            results.append(
+                RetrievalCandidate(
+                    chunk=DocumentChunk(
+                        id=f"grow-{self._calls}",
+                        document_id=f"kd_grow_{self._calls}",
+                        collection_id="kc_grow",
+                        chunk_index=0,
+                        text=f"Zusatzbeleg {self._calls}",
+                        source_text=f"Zusatzbeleg {self._calls}",
+                    ),
+                    score=0.05,
+                    document_title=f"Zusatz {self._calls}",
+                )
+            )
+        return results
+
+
+class RecordingReranker:
+    """Identity reranker recording invocations."""
+
+    default_model = "stub-rerank"
+
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    def rerank(self, query, documents, *, top_n, model=None):
+        self.calls.append(len(documents))
+        return [
+            RerankResult(index=index, relevance_score=1.0 - index * 0.01)
+            for index in range(min(top_n, len(documents)))
+        ]
+
+
+def make_algorithm(
+    llm: ScriptedLLM,
+    *,
+    gate_enabled: bool = True,
+    grounding_enabled: bool = False,
+    gate_max_rounds: int = 3,
+    reranker: RecordingReranker | None = None,
+    grow: bool = False,
+    default_top_k: int = 4,
+):
+    store = RecordingStore(grow=grow)
+    knowledge = KnowledgeProviderContext(
+        embeddings=StubEmbeddings(),
+        store=store,
+        default_top_k=default_top_k,
+        reranker=reranker,
+        rerank_candidate_depth=10,
+    )
+    service = KnowledgeService(
+        knowledge=knowledge, chunk_max_chars=2_000, max_document_chars=100_000
+    )
+    async def _seed() -> None:
+        collection = await service.create_collection(name="K")
+        await service.add_document(
+            collection_id=collection.id,
+            title="Rahmenvertrag",
+            text="Die Haftung ist auf den Auftragswert begrenzt.",
+        )
+        # A second document keeps the rerank stage reachable (the
+        # pipeline skips reranking single-candidate result sets).
+        await service.add_document(
+            collection_id=collection.id,
+            title="Anlage Vergueetung",
+            text="Die Verguetung richtet sich nach dem Auftragswert.",
+        )
+
+    asyncio.run(_seed())
+    algorithm = KnowledgeAlgorithm(
+        knowledge=knowledge,
+        gate_enabled=gate_enabled,
+        grounding_enabled=grounding_enabled,
+        gate_max_rounds=gate_max_rounds,
+    )
+    settings = Settings(agent=AgentSettings())
+    runtime = RuntimeContext(
+        settings=settings,
+        registry=None,
+        providers=ProviderContext(llm=llm, search=StubSearch()),
+        strategies=None,
+    )
+    context = RunContext(
+        providers=runtime.providers,
+        strategies=None,
+        agent_settings=settings.agent,
+    )
+    return algorithm, store, context, runtime
+
+
+def run_with_profile(algorithm, runtime, context, profile=None, events=None):
+    filters: dict[str, Any] = {}
+    if profile is not None:
+        filters["profile"] = profile
+    if events is not None:
+        context = RunContext(
+            providers=context.providers,
+            strategies=None,
+            agent_settings=context.agent_settings,
+            event_sink=lambda event, payload: events.append((event, payload)),
+        )
+    return algorithm.run(
+        RunRequest(
+            mode="knowledge",
+            question="Wie ist die Haftung geregelt?",
+            knowledge_filters=filters,
+        ),
+        runtime=runtime,
+        context=context,
+    )
+
+
+SUFFICIENT = {"sufficient": True, "rewritten_query": None, "reason": "ok"}
+REWRITE = {
+    "sufficient": False,
+    "rewritten_query": "Haftungsbegrenzung Auftragswert",
+    "reason": "zu duenn",
+}
+
+
+class TestCallCounts:
+    def test_schnell_makes_exactly_one_llm_call(self):
+        llm = ScriptedLLM()
+        algorithm, store, context, runtime = make_algorithm(llm)
+        result = run_with_profile(algorithm, runtime, context, "schnell")
+        assert llm.gate_prompts == []
+        assert len(llm.answer_prompts) == 1
+        assert len(store.search_top_ks) == 1
+        state = result.raw["result_state"]
+        assert state["knowledge_profile"]["id"] == "schnell"
+        assert state["knowledge_gate"]["enabled"] is False
+
+    def test_no_profile_runs_the_legacy_standard_flow(self):
+        llm = ScriptedLLM([SUFFICIENT])
+        algorithm, store, context, runtime = make_algorithm(llm)
+        result = run_with_profile(algorithm, runtime, context, None)
+        assert len(llm.gate_prompts) == 1
+        assert len(llm.answer_prompts) == 1
+        state = result.raw["result_state"]
+        assert state["knowledge_profile"]["id"] == "standard"
+        assert state["knowledge_profile"]["requested"] is None
+        assert state["knowledge_gate"]["rounds_used"] == 0
+        assert state["knowledge_gate"]["max_rounds"] == 1
+        assert "second_pass" not in state["knowledge_gate"]
+
+    def test_standard_stops_after_one_rewrite_round(self):
+        llm = ScriptedLLM([REWRITE, REWRITE])
+        algorithm, store, context, runtime = make_algorithm(llm, grow=True, default_top_k=20)
+        result = run_with_profile(algorithm, runtime, context, "standard")
+        # Initial gate + exactly one re-gate; the second insufficient
+        # verdict must NOT trigger a third retrieval.
+        assert len(llm.gate_prompts) == 2
+        assert len(store.search_top_ks) == 2
+        state = result.raw["result_state"]
+        assert state["knowledge_gate"]["rounds_used"] == 1
+        assert state["knowledge_gate"]["second_pass"] is True
+        # Persistently insufficient -> honest refusal.
+        assert state["knowledge_evidence_used"] == 0
+        assert "keine relevanten Inhalte" in result.answer
+
+    def test_gruendlich_loops_up_to_two_rounds(self):
+        llm = ScriptedLLM([REWRITE, REWRITE, SUFFICIENT])
+        algorithm, store, context, runtime = make_algorithm(llm, grow=True, default_top_k=20)
+        result = run_with_profile(algorithm, runtime, context, "gruendlich")
+        assert len(llm.gate_prompts) == 3
+        assert len(store.search_top_ks) == 3
+        state = result.raw["result_state"]
+        assert state["knowledge_gate"]["rounds_used"] == 2
+        assert state["knowledge_gate"]["sufficient"] is True
+        assert len(state["queries"]) == 3
+
+    def test_gate_stops_early_when_a_rewrite_adds_no_new_evidence(self):
+        # Gruendlich allows two rewrite rounds, but the small seeded corpus is
+        # exhausted after the first rewrite returns nothing new — the loop must
+        # stop without spending a re-gate call, and say so (no silent spin).
+        llm = ScriptedLLM([REWRITE, REWRITE, REWRITE])
+        events: list[tuple[str, dict]] = []
+        algorithm, _store, context, runtime = make_algorithm(llm)
+        result = run_with_profile(
+            algorithm, runtime, context, "gruendlich", events=events
+        )
+        state = result.raw["result_state"]
+        assert state["knowledge_gate"]["exhausted"] is True
+        assert state["knowledge_gate"]["rounds_used"] == 1
+        # Only the INITIAL gate ran; the no-new-evidence round skipped its re-gate.
+        assert len(llm.gate_prompts) == 1
+        assert any(
+            event == "inqtrix.knowledge.gate.exhausted" for event, _ in events
+        )
+
+    def test_tief_round_budget_tracks_the_ceiling_cap(self):
+        llm = ScriptedLLM([REWRITE, REWRITE, REWRITE, SUFFICIENT])
+        algorithm, store, context, runtime = make_algorithm(llm, gate_max_rounds=3, grow=True, default_top_k=20)
+        result = run_with_profile(algorithm, runtime, context, "tief")
+        state = result.raw["result_state"]
+        assert state["knowledge_gate"]["rounds_used"] == 3
+        assert state["knowledge_gate"]["max_rounds"] == 3
+
+
+class TestVocabularyBridge:
+    def test_gruendlich_uses_the_bridge_prompt(self):
+        llm = ScriptedLLM([SUFFICIENT])
+        algorithm, _store, context, runtime = make_algorithm(llm)
+        run_with_profile(algorithm, runtime, context, "gruendlich")
+        assert "Fachsprache" in llm.gate_prompts[0]
+
+    def test_standard_keeps_the_pre_profile_prompt(self):
+        llm = ScriptedLLM([SUFFICIENT])
+        algorithm, _store, context, runtime = make_algorithm(llm)
+        run_with_profile(algorithm, runtime, context, "standard")
+        assert "Fachsprache" not in llm.gate_prompts[0]
+        assert "andere Begriffe, Synonyme" in llm.gate_prompts[0]
+
+
+class TestRerankWiring:
+    def test_schnell_skips_a_wired_reranker(self):
+        reranker = RecordingReranker()
+        llm = ScriptedLLM()
+        algorithm, store, context, runtime = make_algorithm(
+            llm, reranker=reranker
+        )
+        run_with_profile(algorithm, runtime, context, "schnell")
+        assert reranker.calls == []
+        # Without the rerank stage the store is queried at plain top_k.
+        assert store.search_top_ks == [4]
+
+    def test_gruendlich_scales_the_candidate_depth(self):
+        reranker = RecordingReranker()
+        llm = ScriptedLLM([SUFFICIENT])
+        algorithm, store, context, runtime = make_algorithm(
+            llm, reranker=reranker
+        )
+        run_with_profile(algorithm, runtime, context, "gruendlich")
+        # Configured depth 10 x 1.5 = 15.
+        assert store.search_top_ks == [15]
+        assert len(reranker.calls) == 1
+
+
+class TestCeilingDegradation:
+    def test_gate_off_env_degrades_gruendlich_visibly(self):
+        llm = ScriptedLLM()
+        algorithm, _store, context, runtime = make_algorithm(
+            llm, gate_enabled=False
+        )
+        result = run_with_profile(algorithm, runtime, context, "gruendlich")
+        assert llm.gate_prompts == []
+        state = result.raw["result_state"]
+        assert state["knowledge_gate"]["enabled"] is False
+        assert "gate" in state["knowledge_profile"]["degraded_stages"]
+
+    def test_invalid_profile_fails_loudly(self):
+        llm = ScriptedLLM()
+        algorithm, _store, context, runtime = make_algorithm(llm)
+        with pytest.raises(ValueError, match="schnell"):
+            run_with_profile(algorithm, runtime, context, "turbo")
+
+
+class TestProfileEvent:
+    def test_profile_resolved_event_carries_the_plan(self):
+        events: list[tuple[str, dict]] = []
+        llm = ScriptedLLM()
+        algorithm, _store, context, runtime = make_algorithm(llm)
+        run_with_profile(
+            algorithm, runtime, context, "auto", events=events
+        )
+        payloads = dict(events)
+        resolved = payloads["inqtrix.knowledge.profile.resolved"]
+        assert resolved["requested_profile"] == "auto"
+        assert resolved["auto_selected"] is True
+        assert resolved["profile"] in ("schnell", "standard", "gruendlich")
+        assert resolved["auto_reason"]
+
+    def test_gate_events_carry_the_round_index(self):
+        events: list[tuple[str, dict]] = []
+        llm = ScriptedLLM([REWRITE, SUFFICIENT])
+        algorithm, _store, context, runtime = make_algorithm(llm, grow=True, default_top_k=20)
+        run_with_profile(
+            algorithm, runtime, context, "standard", events=events
+        )
+        rounds = [
+            payload["round"]
+            for event, payload in events
+            if event == "inqtrix.knowledge.gate.evaluated"
+        ]
+        assert rounds == [0, 1]
+
+
+class TestEvidenceBreadth:
+    def test_retrieval_event_carries_final_k(self):
+        """The retrieval event exposes both the per-query width (top_k) and
+        the profile's wider final evidence budget (final_k) — visibility."""
+        events: list[tuple[str, dict]] = []
+        llm = ScriptedLLM([SUFFICIENT])
+        algorithm, _store, context, runtime = make_algorithm(llm)
+        run_with_profile(algorithm, runtime, context, "standard", events=events)
+        retrieval = dict(events)["inqtrix.knowledge.retrieval.completed"]
+        # STANDARD keeps final_k == top_k (factor 1.0); default_top_k is 4 here.
+        assert retrieval["top_k"] == 4
+        assert retrieval["final_k"] == 4
+        # Coverage: the harness seeds 2 documents in the single collection, all
+        # eligible for retrieval — surfaced so the UI can confirm the scope.
+        assert retrieval["collection_document_count"] == 2
+
+    def test_deep_widens_final_k_beyond_top_k(self):
+        """Deep (TIEF, factor 2.0) raises the final evidence budget above the
+        per-query top_k, so its fan-out can surface a broader evidence set."""
+        events: list[tuple[str, dict]] = []
+        # Decompose + gate both hit the scripted LLM; SUFFICIENT keeps the gate
+        # from looping. final_k is computed regardless of decomposition.
+        llm = ScriptedLLM([SUFFICIENT])
+        algorithm, _store, context, runtime = make_algorithm(llm)
+        run_with_profile(algorithm, runtime, context, "tief", events=events)
+        retrieval = dict(events)["inqtrix.knowledge.retrieval.completed"]
+        assert retrieval["top_k"] == 4
+        assert retrieval["final_k"] == 8  # 4 * 2.0
+
+
+class TestCitationProvenance:
+    def test_references_carry_the_retrieved_excerpt_and_explicit_ids(self):
+        """Each citation ships the exact retrieved chunk + explicit document/
+        chunk ids, so the client can show the cited passage and open the source
+        reliably (not by parsing the URL)."""
+        llm = ScriptedLLM([SUFFICIENT])
+        algorithm, _store, context, runtime = make_algorithm(llm)
+        result = run_with_profile(algorithm, runtime, context, "standard")
+        references = result.raw["result_state"]["report_references"]
+        assert references, "a grounded answer must carry references"
+        first = references[0]
+        assert first["label"] == "K1"
+        assert first["document_id"]  # explicit id → reliable open
+        assert isinstance(first["chunk_index"], int)
+        assert first["excerpt"]  # the exact retrieved passage travels along
+        assert "source_text" in first
+
+
+class TestSingletonConcurrency:
+    def test_parallel_runs_with_different_profiles_do_not_interfere(self):
+        """The shared instance must keep all per-request state local:
+        a `schnell` run and a `standard` run overlap mid-flight and
+        each result must reflect its own plan."""
+        barrier = threading.Barrier(2, timeout=5)
+
+        class BarrierLLM(ScriptedLLM):
+            def complete_with_metadata(self, prompt: str, **kwargs):
+                if prompt and "AUSSCHLIESSLICH" not in prompt:
+                    barrier.wait()
+                return super().complete_with_metadata(prompt, **kwargs)
+
+        llm = BarrierLLM([SUFFICIENT])
+        algorithm, _store, context, runtime = make_algorithm(llm)
+        results: dict[str, Any] = {}
+        errors: list[BaseException] = []
+
+        def worker(profile: str) -> None:
+            try:
+                results[profile] = run_with_profile(
+                    algorithm, runtime, context, profile
+                )
+            except BaseException as exc:  # noqa: BLE001 - reraised below
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=("schnell",)),
+            threading.Thread(target=worker, args=("standard",)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert not errors
+        schnell_state = results["schnell"].raw["result_state"]
+        standard_state = results["standard"].raw["result_state"]
+        assert schnell_state["knowledge_profile"]["id"] == "schnell"
+        assert schnell_state["knowledge_gate"]["enabled"] is False
+        assert standard_state["knowledge_profile"]["id"] == "standard"
+        assert standard_state["knowledge_gate"]["enabled"] is True

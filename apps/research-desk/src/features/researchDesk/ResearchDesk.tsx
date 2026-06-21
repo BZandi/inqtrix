@@ -8,17 +8,35 @@ import {
 } from 'react'
 import { useReducedMotion } from 'motion/react'
 import {
+  uploadServerFile,
   createChatCompletion,
+  fetchKnowledgeDocumentText,
+  fetchServerFileContent,
+  fetchServerFileText,
   hasHttpStatus,
   listResearchRuns,
+  loginLdap,
+  loginLocal,
+  searchKnowledge,
   streamChatCompletion,
+  type AuthConfig,
   type ChatCompletionMessage,
+  type ClientOptions,
 } from '@/api/inqtrixClient'
+import { type AuthMode, isCookieSessionMode } from '@/features/auth/authMode'
 import { AuthLockScreen } from './components/AuthLockScreen'
 import ChatWorkspace from '@/features/chat/ChatWorkspace'
+import type { KnowledgeIndexOption } from '@/features/chat/ChatWorkspace'
+import { useChatHistoryApi } from '@/features/chat/useChatHistoryApi'
+import { useEditorHistoryApi } from '@/features/editor/useEditorHistoryApi'
+import { useAssetHistoryApi } from '@/features/fileLibrary/useAssetHistoryApi'
+import { useVectorIndexHistoryApi } from '@/features/fileLibrary/useVectorIndexHistoryApi'
+import { useAccountPreferences } from '@/features/account/useAccountPreferences'
+import { useProjectServerImport } from '@/features/project/useProjectServerImport'
 import EditorWorkspace from '@/features/editor/EditorWorkspace'
 import { exportProject, loadProject, saveProject } from '@/features/project/fileSystem'
 import {
+  assetIdsFromChatRefs,
   chatAttachmentsFromRefs,
   projectChatHistorySections,
   chatRuleOptionsFromRules,
@@ -28,10 +46,15 @@ import {
   dedupeChatContextRefs,
   fileGroupMentionOptions,
   fileMentionOptions,
+  projectAllKnowledgeItems,
   projectChatThreads,
   projectChatRules,
   projectFileAssets,
+  projectKnowledgeItems,
+  projectKnowledgeSessionSections,
+  projectKnowledgeSessions,
   projectResearchJobs,
+  projectVectorIndexes,
   selectedResearchRun,
 } from '@/features/project/selectors'
 import { chatFunctionChainTemplatesFromRefs } from '@/features/project/chatRules'
@@ -42,10 +65,17 @@ import type {
   ChatMessageModelResolutionRecord,
   ChatMessageRecord,
   ChatThreadRecord,
+  EmbedModelDescriptor,
+  KnowledgeSessionRecord,
+  KnowledgeThreadItemRecord,
   ProjectPreferences,
 } from '@/features/project/types'
+import { EMBED_MODELS, type FileAssetRecord } from '@/features/project/types'
 import { isPillKind } from '@/features/composer/mentionDoc'
 import { useResearchRunApi } from '@/features/researchRuns/useResearchRunApi'
+import { useResearchRunImport } from '@/features/researchRuns/useResearchRunImport'
+import { useServerDiscovery } from '@/features/researchRuns/useServerDiscovery'
+import { deriveChatStepTimeoutMs, isMissingServerTimeouts } from '@/features/researchRuns/clientTimeouts'
 import type {
   ChatModelOption,
   ChatModelTier,
@@ -55,13 +85,36 @@ import type {
   ModelCatalogEntry,
   NodeModelResolution,
   ResearchRunEvent,
+  ResearchRunMode,
   ResearchRunResult,
   ResearchRunSummary,
 } from '@/features/researchRuns/types'
 import SettingsWorkspace from '@/features/settings/SettingsWorkspace'
+import { KnowledgeWorkspace, type KnowledgeMode } from '@/features/knowledge/KnowledgeWorkspace'
+import { useKnowledgeSessionsApi } from '@/features/knowledge/useKnowledgeSessionsApi'
+import {
+  buildDemoAskScript,
+  createDemoKnowledgeDataSource,
+  DEMO_KNOWLEDGE_DEFAULT_PROFILE,
+  DEMO_KNOWLEDGE_DEFAULT_TOP_K,
+  DEMO_KNOWLEDGE_PROFILE_MANIFEST,
+} from '@/features/knowledge/demo'
+import { knowledgeProfileOptionsFromManifest } from '@/features/knowledge/profileOptions'
+import type { KnowledgeCollectionOption, KnowledgeDataSource } from '@/features/knowledge/types'
+import { useAuthSession } from '@/features/auth/useAuthSession'
+import { QuotaMeterProvider } from '@/features/quota/QuotaMeterContext'
+import { ShareDialog } from '@/features/sharing/ShareDialog'
+import { DEMO_OWNER } from '@/features/sharing/demoShares'
+import {
+  DEMO_RUNNING_MAX_ROUNDS,
+  DEMO_RUNNING_RUN_ID,
+} from '@/features/project/seedProject'
+import { personLabel } from '@/features/sharing/shareModel'
+import { useOutgoingShareCounts, useSharedWithMe } from '@/features/sharing/useShareSignals'
+import { useTemplateSync } from '@/features/promptLibrary/useTemplateSync'
 import { FileLibraryWorkspace } from '@/features/fileLibrary/FileLibraryWorkspace'
 import { PromptLibraryWorkspace } from '@/features/promptLibrary/PromptLibraryWorkspace'
-import { ingestFiles } from '@/features/files/ingest'
+import { ingestFiles, scheduleServerParse, type ServerFileUpload } from '@/features/files/ingest'
 import { FILE_SECTION_TEMP_ID } from '@/features/files/sections'
 import {
   evaluateBudget,
@@ -72,6 +125,7 @@ import { useLocale } from '@/i18n/LocaleProvider'
 import { useTheme } from '@/theme/ThemeProvider'
 import { contentWithAttachmentContext } from '@/features/project/attachmentContext'
 import { AppRail } from './components/AppRail'
+import { ProfileAvatar } from './components/ProfileAvatar'
 import { ResearchWorkspace } from './components/ResearchWorkspace'
 import { Topbar } from './components/Topbar'
 import { useMediaQuery } from './hooks/useMediaQuery'
@@ -98,6 +152,7 @@ type ChatSendOptions = {
   modelTier?: ChatModelTier
   model?: string | null
   effort?: string | null
+  knowledgeCollectionIds?: string[]
 }
 
 type ChatModelOptionsState = {
@@ -107,8 +162,6 @@ type ChatModelOptionsState = {
 
 const INCOGNITO_THREAD_ID = 'chat-incognito-session'
 
-/** Per-step timeout for a prompt-chaining run; exceeding it aborts the chain. */
-const CHAT_CHAIN_STEP_TIMEOUT_MS = 120_000
 const MAX_PARALLEL_CHAT_REQUESTS = 3
 
 function removeChatRequest(
@@ -125,7 +178,9 @@ function removeChatRequest(
   return next
 }
 
-export function ResearchDesk() {
+export function ResearchDesk({
+  authConfig = null,
+}: { authConfig?: AuthConfig | null } = {}) {
   const { locale, setLocale, t } = useLocale()
   const {
     contrastMode,
@@ -148,6 +203,15 @@ export function ResearchDesk() {
   const [apiKeyDraft, setApiKeyDraft] = useState('')
   const [authLockError, setAuthLockError] = useState<string | null>(null)
   const [isAuthSubmitting, setIsAuthSubmitting] = useState(false)
+  // Credential-mode (local/ldap) login fields; the password never persists
+  // beyond a successful submit.
+  const [authIdentifier, setAuthIdentifier] = useState('')
+  const [authPassword, setAuthPassword] = useState('')
+  // Mirrors the cookie session's authenticated state for the run-list hook
+  // (declared before it; the session itself resolves later from health). An
+  // anonymous->authenticated flip re-hydrates the run list after an in-app
+  // local/ldap login, which mints no remount.
+  const [cookieAuthed, setCookieAuthed] = useState(false)
   const [cancelSubmittingRunIds, setCancelSubmittingRunIds] = useState<ReadonlySet<string>>(() => new Set())
   const [cancelErrorByRunId, setCancelErrorByRunId] = useState<Record<string, string>>({})
   const [activeChatRequestsByThreadId, setActiveChatRequestsByThreadId] = useState<Record<string, ActiveChatRequest>>({})
@@ -177,14 +241,17 @@ export function ResearchDesk() {
   }, [state.researchRuns])
   useEffect(() => {
     if (!isDemoMode) return undefined
-    const seedId = 'RO-0247'
+    // The seed run id is shared with seedProject so the two never drift.
+    const seedId = DEMO_RUNNING_RUN_ID
     const seed = researchRunsRef.current[seedId]
     if (!seed || seed.status !== 'running') return undefined
 
-    const maxRounds = 5
+    const maxRounds = DEMO_RUNNING_MAX_ROUNDS
     const nodeOrder = ['classify', 'plan', 'search', 'evaluate', 'answer'] as const
-    let nodeIndex = nodeOrder.length - 1
-    let round = 2
+    // Resume from the seed's active phase (evaluation, round 1) so the streamed
+    // counter continues the card's static metrics rather than contradicting them.
+    let nodeIndex = nodeOrder.indexOf('evaluate')
+    let round = 1
     let queries = seed.metrics.queries
     let sources = seed.metrics.sources
     let claims = seed.metrics.claims
@@ -202,14 +269,14 @@ export function ResearchDesk() {
       sources += 5
       claims += node === 'search' || node === 'evaluate' ? 4 : 1
       const message = node === 'plan'
-        ? `Planning search queries (round ${round}/${maxRounds})...`
+        ? `Plane Suchanfragen (Runde ${round}/${maxRounds})...`
         : node === 'search'
-          ? `Searching ${4 + round} queries (round ${round}/${maxRounds})...`
+          ? `Durchsuche ${4 + round} Suchanfragen (Runde ${round}/${maxRounds})...`
           : node === 'evaluate'
-            ? `Evaluating information quality (after round ${round}/${maxRounds})...`
+            ? `Bewerte Informationsqualitaet (nach Runde ${round}/${maxRounds})...`
             : node === 'answer'
-              ? 'Synthesizing the answer from verified evidence...'
-              : 'Analyzing question and extracting required aspects...'
+              ? 'Formuliere Antwort aus verifizierter Evidenz...'
+              : 'Analysiere Frage und extrahiere Pflichtaspekte...'
 
       sequence += 1
       dispatch({
@@ -262,6 +329,11 @@ export function ResearchDesk() {
   )
   const reportOptions = completedReportOptions(state)
   const [chatPillRefs, setChatPillRefs] = useState<ChatContextReferenceRecord[]>([])
+  // Session-scoped composer drafts held in the shell (which never unmounts on a view
+  // switch) so unsent text survives navigation. Intentionally NOT in the reducer:
+  // these must not outlive a full reload (per the "page-switch only" decision).
+  const [chatDraft, setChatDraft] = useState('')
+  const [researchQuestion, setResearchQuestion] = useState('')
   const combinedChatRefs = dedupeChatContextRefs([...chatPillRefs, ...state.ui.pendingChatAttachmentRefs])
   const pendingChips = chatAttachmentChipsFromRefs(state, combinedChatRefs)
   const fileOptions = fileMentionOptions(state)
@@ -269,9 +341,16 @@ export function ResearchDesk() {
 
   const handleAttachChatFiles = async (files: File[]) => {
     const existingLabels = projectFileAssets(state).map((asset) => asset.label)
-    const assets = await ingestFiles(files, { kind: 'chat', sectionId: FILE_SECTION_TEMP_ID }, undefined, existingLabels)
+    const assets = await ingestFiles(
+      files,
+      { kind: 'chat', sectionId: FILE_SECTION_TEMP_ID },
+      undefined,
+      existingLabels,
+      serverFileUpload,
+    )
     if (assets.length === 0) return
     dispatch({ assets, type: 'ingestFileAssets' })
+    runServerParse(assets)
     for (const asset of assets) {
       dispatch({ ref: { fileId: asset.id, kind: 'file-asset' }, type: 'attachChatContextToDraft' })
     }
@@ -299,12 +378,14 @@ export function ResearchDesk() {
     () => new Set(Object.keys(activeChatRequestsByThreadId)),
     [activeChatRequestsByThreadId],
   )
-  const currentPreferences: ProjectPreferences = {
-    contrastMode,
-    locale,
-    theme,
-    themePreset,
-  }
+  // Memoized so the reference is stable across unrelated re-renders (chat
+  // streaming re-renders ~every frame): the account-preferences autosave
+  // effect then re-arms only on a genuine preference change, matching the
+  // stable-reference contract the sibling sync hooks rely on (M6c).
+  const currentPreferences = useMemo<ProjectPreferences>(
+    () => ({ contrastMode, locale, theme, themePreset }),
+    [contrastMode, locale, theme, themePreset],
+  )
   const handleApiSummary = useCallback((summary: ResearchRunSummary, options?: { select?: boolean }) => {
     dispatch({ select: options?.select, summary, type: 'upsertApiRunSummary' })
   }, [])
@@ -317,25 +398,505 @@ export function ResearchDesk() {
   const handleApiRunError = useCallback((runId: string, message: string) => {
     dispatch({ message, runId, type: 'markApiRunError' })
   }, [])
+  // Server discovery (health/capabilities/stacks) is workspace-INDEPENDENT and
+  // resolved first, because `health` gates cookie mode and `capabilities` gates
+  // the persistence tier -- both feeding the auth + namespace resolution below.
   const {
+    capabilities,
     defaultStackName,
     health,
-    lastError: apiError,
+    lastError: discoveryError,
+    ready: discoveryReady,
     stackDiscoveryStatus,
     stackNames: apiStackNames,
     stacks: apiStacks,
+  } = useServerDiscovery({ enabled: !isDemoMode })
+  // Client AI-request aborts are derived from the server's published HTTP waits
+  // (the /v1/capabilities timeouts block) so a raised server-side timeout is not
+  // silently capped by the browser. A ref keeps run-start handlers on the
+  // current value without re-threading it through their dependency lists.
+  const chatStepTimeoutMsRef = useRef(deriveChatStepTimeoutMs(capabilities))
+  chatStepTimeoutMsRef.current = deriveChatStepTimeoutMs(capabilities)
+  // No Silent Fallbacks: warn once when a real backend exposes no timeouts block
+  // (older server) so the editor/chat fixed-fallback aborts are never silent.
+  const clientTimeoutsWarnedRef = useRef(false)
+  useEffect(() => {
+    if (isMissingServerTimeouts(capabilities) && !clientTimeoutsWarnedRef.current) {
+      clientTimeoutsWarnedRef.current = true
+      console.warn(
+        '/v1/capabilities exposed no timeouts block; editor and chat client '
+        + 'aborts are using fixed fallbacks. Update the backend so client '
+        + 'timeouts track the server waits.',
+      )
+    }
+  }, [capabilities])
+  // Auth + the per-user project namespace are resolved here, after discovery and
+  // before the run-API hook, so the run hook and every project-data call scope to
+  // the SAME namespace from one resolved session (no in-hook re-probe).
+  const authMode: AuthMode = isDemoMode
+    ? 'none'
+    : health?.auth_mode
+      ?? (health?.auth_required ? 'apikey' : 'none')
+  const isCookieMode = isCookieSessionMode(authMode)
+  const {
+    session: authSession,
+    login: ssoLogin,
+    logout: ssoLogout,
+    refresh: refreshAuthSession,
+  } = useAuthSession(isCookieMode, state.workspaceId)
+  // Project-persistence tier (M6): durable server persistence is offered only
+  // by a Postgres backend (not demo). For an authenticated cookie-session user
+  // (local/oidc/ldap) it is AUTOMATIC -- serverSyncEnabled is derived from the
+  // session below, so the project auto-hydrates on boot and auto-saves with no
+  // opt-in. The apikey / local-first tiers keep the explicit import opt-in.
+  const projectPersistenceAvailable =
+    !isDemoMode && capabilities?.features.project_persistence === true
+  // The single auth gate: admitted to list/run when anonymous (`none`), apikey
+  // with a key, or a live cookie session. Drives the run list, the auth-lock
+  // screen (below), and the namespace flip -- all from the one resolved session.
+  const authUnlocked =
+    authMode === 'none'
+    || (authMode === 'apikey' && apiKey.trim() !== '')
+    || (isCookieMode && authSession.status === 'authenticated')
+  // The workspace namespace every project-data + run server call scopes to. For
+  // an authenticated cookie-session user it is the per-user namespace resolved
+  // from the session (adopted once on first boot, identical on every device, so
+  // the project follows the user); otherwise (anonymous / apikey / local-first /
+  // demo) it stays the browser-local id. Gated on the SAME signal as authUnlocked
+  // (authSession.status), so the namespace is in hand the instant the desk is
+  // usable: a run created the moment the composer unlocks already scopes to the
+  // namespace (no browser-id window). serverSyncEnabled (which activates the
+  // project-data sync hooks) lags one render behind via cookieAuthed, by which
+  // point this is already the namespace -- so the sync lifecycle keys on the
+  // per-user namespace from its first hydrate and never re-keys from the browser id.
+  const effectiveWorkspaceId =
+    projectPersistenceAvailable
+    && authSession.status === 'authenticated'
+    && authSession.projectNamespace
+      ? authSession.projectNamespace
+      : state.workspaceId
+  const {
     cancelRun,
+    deleteRun,
+    lastError: runError,
     submitRun,
   } = useResearchRunApi({
     apiKey: apiKey.trim() || undefined,
+    // Gate on discoveryReady so listing waits for the real auth mode: until
+    // health settles, authMode reads as `none` (authUnlocked true) and would
+    // list prematurely under the browser id before the namespace resolves.
+    canList: discoveryReady && authUnlocked,
     enabled: !isDemoMode,
     onEvent: handleApiEvent,
     onResult: handleApiResult,
     onRunError: handleApiRunError,
     onSummary: handleApiSummary,
-    workspaceId: state.workspaceId,
+    workspaceId: effectiveWorkspaceId,
   })
+  // One badge for any API error: discovery probes or run operations.
+  const apiError = discoveryError ?? runError
   const singleStackLabel = useMemo(() => resolveSingleStackLabel(health), [health])
+  const knowledgeAvailable = !isDemoMode && capabilities?.features.knowledge === true
+  const embedCatalog = useMemo<readonly EmbedModelDescriptor[]>(() => {
+    const serverCatalog = capabilities?.knowledge?.embedding_catalog
+    if (!knowledgeAvailable || !serverCatalog || serverCatalog.length === 0) {
+      return EMBED_MODELS
+    }
+    return serverCatalog.map((entry) => ({
+      dims: entry.card?.dims ?? 0,
+      id: entry.model_id,
+      label: entry.card?.display_name ?? entry.model_id,
+      provider: entry.card?.vendor ?? '',
+    }))
+  }, [capabilities, knowledgeAvailable])
+  const serverFilesAvailable = !isDemoMode && capabilities?.features.files === true
+  const serverParserAvailable =
+    serverFilesAvailable && capabilities?.features.document_parser === true
+  const knowledgeSyncOptions = useMemo(
+    () => (knowledgeAvailable
+      ? {
+          apiKey: apiKey.trim() || undefined,
+          useFileIngestion: serverParserAvailable,
+          workspaceId: effectiveWorkspaceId,
+        }
+      : null),
+    [apiKey, knowledgeAvailable, serverParserAvailable, effectiveWorkspaceId],
+  )
+  const serverFileUpload = useMemo<ServerFileUpload | undefined>(() => {
+    if (!serverFilesAvailable) return undefined
+    const options = { apiKey: apiKey.trim() || undefined, workspaceId: effectiveWorkspaceId }
+    // Upload the ORIGINAL bytes only — the file appears instantly from the
+    // client parse; the MarkItDown upgrade runs in the background (see
+    // runServerParse) and again at index time as a fallback.
+    return async (file: File) => (await uploadServerFile(file, options)).id
+  }, [apiKey, serverFilesAvailable, effectiveWorkspaceId])
+  // Client options for the file-library preview (getAsset body + original file
+  // download). Gated on the FILES/persistence tier — NOT on knowledge: an
+  // original exists whenever it was uploaded to the files server, independent of
+  // whether vector/knowledge is enabled. `serverFileId` is the per-asset gate.
+  const fileApiOptions = useMemo<ClientOptions | null>(
+    () => (!isDemoMode && (serverFilesAvailable || projectPersistenceAvailable)
+      ? { apiKey: apiKey.trim() || undefined, workspaceId: effectiveWorkspaceId }
+      : null),
+    [apiKey, isDemoMode, serverFilesAvailable, projectPersistenceAvailable, effectiveWorkspaceId],
+  )
+  // Kick off the non-blocking background server parse for freshly-uploaded
+  // assets (upgrades the instant client parse to browser-independent MarkItDown
+  // text). A no-op without a server parser — assets then stay client-parsed
+  // until indexed. Bound once here so chat and library ingest share the wiring.
+  const runServerParse = useCallback(
+    (assets: FileAssetRecord[]) => {
+      if (!serverParserAvailable) return
+      const options = { apiKey: apiKey.trim() || undefined, workspaceId: effectiveWorkspaceId }
+      scheduleServerParse(assets, {
+        fetchText: (fileId) => fetchServerFileText(fileId, options).then((r) => r.text),
+        onPending: (assetId) => dispatch({ assetId, pending: true, type: 'setFileAssetParsePending' }),
+        onParsed: (assetId, text) => dispatch({ assetId, extractedText: text, type: 'upgradeFileAssetParse' }),
+        onFailed: (assetId) => dispatch({ assetId, pending: false, type: 'setFileAssetParsePending' }),
+      })
+    },
+    [apiKey, serverParserAvailable, effectiveWorkspaceId, dispatch],
+  )
+  const serverFeatureLabels = useMemo<string[] | null>(() => {
+    if (isDemoMode || !capabilities) return null
+    const features = capabilities.features
+    const labels: string[] = []
+    if (features.knowledge) labels.push(t.vectorIndex.featureKnowledge)
+    if (features.hybrid_retrieval) labels.push(t.vectorIndex.featureHybrid)
+    if (features.reranker) labels.push(t.vectorIndex.featureReranker)
+    if (features.contextual_retrieval) labels.push(t.vectorIndex.featureContextual)
+    if (features.document_parser) labels.push(t.vectorIndex.featureParser)
+    if (features.files) labels.push(t.vectorIndex.featureFiles)
+    return labels
+  }, [capabilities, isDemoMode, t])
+  const projectSyncActive = projectPersistenceAvailable && state.serverSyncEnabled
+  const {
+    error: chatSyncError,
+    hasMoreThreads: chatHistoryHasMore,
+    isLoadingMore: chatHistoryLoadingMore,
+    loadMoreThreads: loadMoreChatHistory,
+  } = useChatHistoryApi({
+    apiKey: apiKey.trim() || undefined,
+    chatThreadGroupMemberships: state.chatThreadGroupMemberships,
+    chatThreadGroups: state.chatThreadGroups,
+    chatThreads: state.chatThreads,
+    dispatch,
+    projectEpoch: state.projectEpoch,
+    selectedThreadId: state.ui.selectedChatThreadId,
+    syncActive: projectSyncActive,
+    workspaceId: effectiveWorkspaceId,
+  })
+  const { error: editorSyncError } = useEditorHistoryApi({
+    apiKey: apiKey.trim() || undefined,
+    dispatch,
+    editorComments: state.editorComments,
+    editorDocuments: state.editorDocuments,
+    editorFolders: state.editorFolders,
+    projectEpoch: state.projectEpoch,
+    selectedDocumentId: state.editorUi.activeDocumentId,
+    syncActive: projectSyncActive,
+    workspaceId: effectiveWorkspaceId,
+  })
+  const { error: assetSyncError, ensureAssetBodiesLoaded } = useAssetHistoryApi({
+    apiKey: apiKey.trim() || undefined,
+    dispatch,
+    fileAssets: state.fileAssets,
+    fileGroups: state.fileGroups,
+    fileLibrarySections: state.fileLibrarySections,
+    projectEpoch: state.projectEpoch,
+    syncActive: projectSyncActive,
+    workspaceId: effectiveWorkspaceId,
+  })
+  const { error: vectorIndexSyncError } = useVectorIndexHistoryApi({
+    apiKey: apiKey.trim() || undefined,
+    dispatch,
+    vectorIndexes: state.vectorIndexes,
+    projectEpoch: state.projectEpoch,
+    syncActive: projectSyncActive,
+    workspaceId: effectiveWorkspaceId,
+  })
+  const { error: knowledgeSessionSyncError } = useKnowledgeSessionsApi({
+    apiKey: apiKey.trim() || undefined,
+    dispatch,
+    itemOrder: state.knowledgeItemOrder,
+    items: state.knowledgeItems,
+    projectEpoch: state.projectEpoch,
+    selectedSessionId: state.selectedKnowledgeSessionId,
+    sessionGroupMemberships: state.knowledgeSessionGroupMemberships,
+    sessionGroups: state.knowledgeSessionGroups,
+    sessionOrder: state.knowledgeSessionOrder,
+    sessions: state.knowledgeSessions,
+    syncActive: projectSyncActive,
+    workspaceId: effectiveWorkspaceId,
+  })
+  // Account preferences (theme/locale/contrast) are an ACCOUNT tier, not
+  // project data: they sync on a real per-user session (cookieAuthed) + the
+  // durable capability, independent of the project's server-sync opt-in, and
+  // are NOT part of the project import. "Account wins on login".
+  const accountSyncActive = projectPersistenceAvailable && cookieAuthed
+  const { error: accountPreferencesError } = useAccountPreferences({
+    apiKey: apiKey.trim() || undefined,
+    applyPreferences: applyProjectPreferences,
+    preferences: currentPreferences,
+    syncActive: accountSyncActive,
+    workspaceId: effectiveWorkspaceId,
+  })
+  const { importPending: projectImportPending, importToServer } =
+    useProjectServerImport({
+      apiKey: apiKey.trim() || undefined,
+      canPersist: projectPersistenceAvailable,
+      dispatch,
+      state,
+      workspaceId: effectiveWorkspaceId,
+    })
+  // Reports loaded from a project file are pushed to the durable run tier so
+  // they survive reload + follow the user (the runs analogue of the project
+  // import-up), gated on the same server-sync activation as the project hooks.
+  const { error: runImportError } = useResearchRunImport({
+    apiKey: apiKey.trim() || undefined,
+    enabled: projectSyncActive,
+    researchRuns: state.researchRuns,
+    researchRunOrder: state.researchRunOrder,
+    workspaceId: effectiveWorkspaceId,
+  })
+  // Any entity's background autosave failure surfaces on the one badge.
+  const serverSyncError =
+    chatSyncError ?? editorSyncError ?? assetSyncError ?? vectorIndexSyncError
+    ?? knowledgeSessionSyncError ?? accountPreferencesError ?? runImportError
+  const [selectedKnowledgeIndexIds, setSelectedKnowledgeIndexIds] = useState<string[]>([])
+  const knowledgeIndexOptions = useMemo<KnowledgeIndexOption[] | null>(() => {
+    if (!knowledgeAvailable) return null
+    return projectVectorIndexes(state)
+      .filter((index) => index.status === 'ready' && index.serverCollectionId)
+      .map((index) => ({
+        collectionId: index.serverCollectionId as string,
+        id: index.id,
+        title: index.title,
+      }))
+  }, [knowledgeAvailable, state.vectorIndexOrder, state.vectorIndexes])
+  useEffect(() => {
+    if (!knowledgeIndexOptions) {
+      if (selectedKnowledgeIndexIds.length > 0) setSelectedKnowledgeIndexIds([])
+      return
+    }
+    const available = new Set(knowledgeIndexOptions.map((option) => option.id))
+    if (selectedKnowledgeIndexIds.some((id) => !available.has(id))) {
+      setSelectedKnowledgeIndexIds((current) => current.filter((id) => available.has(id)))
+    }
+  }, [knowledgeIndexOptions, selectedKnowledgeIndexIds])
+
+  // --- "Wissen" workspace (knowledge Q&A + Finden + reader) ----------------
+  // Run-tracking wiring choice: knowledge asks are native runs submitted
+  // through the EXISTING useResearchRunApi machinery (createResearchRun +
+  // SSE stream + result fetch). The reducer routes the same
+  // appendApiRunEvent / attachApiRunResult / markApiRunError actions into
+  // the knowledgeItems thread slice by run id, so no second event pipeline
+  // exists; the only additions are `select: false` (a knowledge ask must
+  // not hijack the research workspace selection) and the knowledge-mode
+  // filter in projectResearchJobs (the thread is its surface, not a job
+  // card). Demo asks reuse the identical event path with synthetic events.
+  const knowledgeWorkspaceVisible = isDemoMode || capabilities?.features.knowledge === true
+  const [knowledgeMode, setKnowledgeMode] = useState<KnowledgeMode>('ask')
+  const [knowledgeQuestion, setKnowledgeQuestion] = useState('')
+  const [knowledgeCollectionIds, setKnowledgeCollectionIds] = useState<string[]>([])
+  const [knowledgeProfileId, setKnowledgeProfileId] = useState<string | null>(null)
+  const [knowledgeTopK, setKnowledgeTopK] = useState<number | null>(null)
+  const [knowledgeAskError, setKnowledgeAskError] = useState<string | null>(null)
+  const knowledgeDemoTimeoutsRef = useRef<number[]>([])
+  const knowledgeCollections = useMemo<KnowledgeCollectionOption[]>(() => {
+    if (!knowledgeWorkspaceVisible) return []
+    return projectVectorIndexes(state)
+      .filter((index) => isDemoMode || index.status === 'ready')
+      .filter((index) => isDemoMode || Boolean(index.serverCollectionId))
+      .map((index) => ({
+        collectionId: isDemoMode ? index.id : (index.serverCollectionId as string),
+        id: index.id,
+        title: index.title,
+      }))
+  }, [isDemoMode, knowledgeWorkspaceVisible, state])
+  useEffect(() => {
+    const available = new Set(knowledgeCollections.map((option) => option.id))
+    setKnowledgeCollectionIds((current) => (
+      current.some((id) => !available.has(id))
+        ? current.filter((id) => available.has(id))
+        : current
+    ))
+  }, [knowledgeCollections])
+  const knowledgeProfileOptions = useMemo(
+    () => knowledgeProfileOptionsFromManifest(
+      isDemoMode ? DEMO_KNOWLEDGE_PROFILE_MANIFEST : capabilities?.knowledge?.profiles,
+    ),
+    [capabilities, isDemoMode],
+  )
+  const knowledgeDefaultProfileId = isDemoMode
+    ? DEMO_KNOWLEDGE_DEFAULT_PROFILE
+    : capabilities?.knowledge?.default_profile ?? null
+  const knowledgeDefaultTopK = isDemoMode
+    ? DEMO_KNOWLEDGE_DEFAULT_TOP_K
+    : capabilities?.knowledge?.default_top_k ?? DEMO_KNOWLEDGE_DEFAULT_TOP_K
+  const knowledgeItems = useMemo(
+    () => projectKnowledgeItems(state),
+    [state.knowledgeItemOrder, state.knowledgeItems, state.selectedKnowledgeSessionId],
+  )
+  const knowledgeAllItems = useMemo(
+    () => projectAllKnowledgeItems(state),
+    [state.knowledgeItemOrder, state.knowledgeItems],
+  )
+  const knowledgeSessions = useMemo(
+    () => projectKnowledgeSessions(state),
+    [state.knowledgeSessionOrder, state.knowledgeSessions],
+  )
+  const knowledgeSessionSections = useMemo(
+    () => projectKnowledgeSessionSections(state),
+    [
+      state.knowledgeSessionGroupMemberships,
+      state.knowledgeSessionGroupOrder,
+      state.knowledgeSessionGroups,
+      state.knowledgeSessionOrder,
+      state.knowledgeSessions,
+    ],
+  )
+  const isKnowledgeAskRunning = knowledgeAllItems.some((item) => item.status === 'running')
+  const knowledgeDataSource = useMemo<KnowledgeDataSource>(() => {
+    if (isDemoMode) return createDemoKnowledgeDataSource()
+    const clientOptions = { apiKey: apiKey.trim() || undefined, workspaceId: effectiveWorkspaceId }
+    return {
+      loadDocumentText: (documentId) => fetchKnowledgeDocumentText(documentId, clientOptions),
+      // An original file exists whenever it was uploaded to the files server —
+      // independent of the knowledge `features.files` flag — so gate this the
+      // SAME way as the file-library preview (which works on the persistence
+      // tier). Gating on serverFilesAvailable alone hid the "Quelle" PDF tab on
+      // deployments that have persistence but not the files capability.
+      loadFileContent: serverFilesAvailable || projectPersistenceAvailable
+        ? (fileId) => fetchServerFileContent(fileId, clientOptions)
+        : null,
+      search: (query, collectionIds, topK) =>
+        searchKnowledge({ collectionIds, query, topK }, clientOptions),
+    }
+  }, [apiKey, isDemoMode, serverFilesAvailable, projectPersistenceAvailable, effectiveWorkspaceId])
+
+  // Falls back to research when the knowledge capability disappears
+  // (e.g. backend switch) while the view is active.
+  useEffect(() => {
+    if (state.ui.activeView === 'knowledge' && !knowledgeWorkspaceVisible) {
+      dispatch({ type: 'setActiveView', view: 'research' })
+    }
+  }, [knowledgeWorkspaceVisible, state.ui.activeView])
+
+  useEffect(() => {
+    const timeouts = knowledgeDemoTimeoutsRef.current
+    return () => {
+      for (const timeoutId of timeouts) window.clearTimeout(timeoutId)
+    }
+  }, [])
+
+  async function handleKnowledgeAsk(
+    question: string,
+    options: {
+      collectionIds?: string[]
+      profileId?: string | null
+      topK?: number | null
+    } = {},
+  ) {
+    if (isKnowledgeAskRunning) return
+    if (!isDemoMode && !authUnlocked) return
+    const selectedIds = options.collectionIds ?? knowledgeCollectionIds
+    const selectedProfileId = options.profileId ?? knowledgeProfileId
+    const selectedTopK = options.topK ?? knowledgeTopK
+    const selected = knowledgeCollections.filter((collection) =>
+      selectedIds.includes(collection.id))
+    if (selected.length === 0) {
+      setKnowledgeAskError(t.knowledge.collectionsRequired)
+      return
+    }
+    setKnowledgeAskError(null)
+
+    const collectionTitles = selected.map((collection) => collection.title)
+    const backendCollectionIds = selected.map((collection) => collection.collectionId)
+    const sessionId =
+      state.selectedKnowledgeSessionId
+      ?? state.knowledgeSessionOrder[0]
+      ?? createClientId('ks')
+    const buildItem = (runId: string): KnowledgeThreadItemRecord => ({
+      collectionTitles,
+      createdAt: new Date().toISOString(),
+      id: createClientId('kn'),
+      progress: { steps: [] },
+      question,
+      requestedProfile: selectedProfileId,
+      runId,
+      sessionId,
+      status: 'running',
+    })
+
+    if (isDemoMode) {
+      const runId = createClientId('kn-demo')
+      dispatch({ item: buildItem(runId), type: 'startKnowledgeAsk' })
+      const script = buildDemoAskScript(runId)
+      let elapsed = 0
+      for (const step of script.steps) {
+        elapsed += step.delayMs
+        knowledgeDemoTimeoutsRef.current.push(window.setTimeout(() => {
+          dispatch({ event: step.event, type: 'appendApiRunEvent' })
+        }, elapsed))
+      }
+      knowledgeDemoTimeoutsRef.current.push(window.setTimeout(() => {
+        dispatch({ answer: script.answer, runId, type: 'completeKnowledgeItem' })
+      }, elapsed + script.completeAfterMs))
+      return
+    }
+
+    const summary = await submitRun(
+      {
+        knowledgeFilters: {
+          collectionIds: backendCollectionIds,
+          ...(selectedProfileId ? { profile: selectedProfileId } : {}),
+          ...(selectedTopK ? { topK: selectedTopK } : {}),
+        },
+        mode: 'knowledge',
+        question,
+      },
+      {
+        onCreated: (created) => {
+          dispatch({ item: buildItem(created.run_id), type: 'startKnowledgeAsk' })
+        },
+        select: false,
+      },
+    )
+    if (!summary) {
+      setKnowledgeAskError(t.knowledge.askFailed)
+    }
+  }
+
+  function handleKnowledgeDemoAsk() {
+    if (!isDemoMode || isKnowledgeAskRunning) return
+    const demoCollection =
+      knowledgeCollections.find((collection) => collection.id === 'vector-index-eu-recht')
+      ?? knowledgeCollections[0]
+      ?? null
+    if (!demoCollection) {
+      setKnowledgeAskError(t.knowledge.collectionsRequired)
+      return
+    }
+    setKnowledgeCollectionIds([demoCollection.id])
+    setKnowledgeProfileId('tief')
+    setKnowledgeTopK(DEMO_KNOWLEDGE_DEFAULT_TOP_K)
+    void handleKnowledgeAsk(t.knowledge.demoSearchQuestion, {
+      collectionIds: [demoCollection.id],
+      profileId: 'tief',
+      topK: DEMO_KNOWLEDGE_DEFAULT_TOP_K,
+    })
+  }
+
+  function createKnowledgeSession(title = t.knowledge.newSession): KnowledgeSessionRecord {
+    const now = new Date().toISOString()
+    return {
+      createdAt: now,
+      id: createClientId('ks'),
+      title,
+      updatedAt: now,
+    }
+  }
   const effectiveStackOptions = isDemoMode
     ? stackOptions
     : stackDiscoveryStatus === 'available'
@@ -347,7 +908,6 @@ export function ResearchDesk() {
   const textImprovementStack = !isDemoMode && stackDiscoveryStatus === 'available'
     ? state.ui.selectedStack
     : undefined
-  const canImproveText = !isDemoMode && !(health?.auth_required && !apiKey.trim())
   const chatModelDiscoveryStack = stackDiscoveryStatus === 'available'
     ? state.ui.selectedStack
     : defaultStackName
@@ -392,7 +952,89 @@ export function ResearchDesk() {
     contextWindowTokens: selectedChatCard?.context_window_tokens ?? null,
     reservedOutputTokens: selectedChatCard?.max_output_tokens ?? 0,
   }
-  const isAuthLocked = !isDemoMode && health?.auth_required === true && !apiKey.trim()
+  const [settingsRequestedSection, setSettingsRequestedSection] =
+    useState<'security' | null>(null)
+  // Feed the cookie session's authenticated state back to the run-list hook
+  // (declared above) so an in-app local/ldap login re-hydrates prior runs.
+  useEffect(() => {
+    setCookieAuthed(isCookieMode && authSession.status === 'authenticated')
+  }, [isCookieMode, authSession.status])
+  // Server-first persistence for an authenticated (cookie-session) user: derive
+  // serverSyncEnabled from the live session + durable capability instead of the
+  // manual import button, so the project auto-hydrates on every boot/reload and
+  // auto-saves with no opt-in. Drives the flag both ways: a login enables sync
+  // (the empty boot state then hydrates from the server), a logout disables it
+  // (the hooks reset to empty so the prior user's data is not shown). persistLocal
+  // is false: the flag is session-derived, never written to the local manifest or
+  // marked dirty. ONLY the cookie tier (local/oidc/ldap = a real per-user
+  // identity); the apikey / local-first / demo tiers keep the manual opt-in
+  // (this effect no-ops outside cookie mode), so their behaviour is unchanged.
+  useEffect(() => {
+    if (!isCookieMode) return
+    const shouldSync = projectPersistenceAvailable && cookieAuthed
+    if (state.serverSyncEnabled !== shouldSync) {
+      dispatch({ enabled: shouldSync, persistLocal: false, type: 'setServerSyncEnabled' })
+    }
+  }, [isCookieMode, projectPersistenceAvailable, cookieAuthed, state.serverSyncEnabled])
+  // No lock flash while the very first session probe is in flight.
+  const isAuthLocked =
+    !isDemoMode
+    && !authUnlocked
+    && (!isCookieMode || authSession.status !== 'unknown')
+  const canImproveText = !isDemoMode && authUnlocked
+  // Sharing exists on the oidc surface with a live session; the capability
+  // flag keeps none/apikey deployments byte-identical. Demo mode simulates it
+  // from seeded data so the feature is visible offline (like the quota meter).
+  const sharingEnabled =
+    isDemoMode
+    || (capabilities?.features.sharing === true
+      && isCookieMode
+      && authSession.status === 'authenticated')
+  // The quota meter follows the same cookie-session + capability gate;
+  // demo mode shows seeded figures so the feature is visible offline.
+  const quotaMeterEnabled =
+    isDemoMode
+    || (capabilities?.features.quota === true
+      && isCookieMode
+      && authSession.status === 'authenticated')
+  const [shareTarget, setShareTarget] = useState<
+    { resourceId: string; resourceType: string; title: string } | null
+  >(null)
+  const ownApiRunIds = useMemo(
+    () => (sharingEnabled
+      ? allJobs.filter((job) => !job.access).map((job) => job.id)
+      : []),
+    [allJobs, sharingEnabled],
+  )
+  const { counts: shareCountByRunId, refresh: refreshShareCounts } =
+    useOutgoingShareCounts('run', ownApiRunIds, sharingEnabled, isDemoMode)
+  const { byResourceId: sharedWithMeByRunId } = useSharedWithMe(
+    'run',
+    sharingEnabled,
+    isDemoMode,
+  )
+  // Prompt templates persist server-side whenever the capability is
+  // live and the caller is unlocked (works in apikey/none too);
+  // demo mode stays browser-local.
+  const templatesEnabled =
+    !isDemoMode
+    && capabilities?.features.prompt_templates === true
+    && authUnlocked
+  const templateSync = useTemplateSync({
+    dispatch,
+    enabled: templatesEnabled,
+    localRules: chatRules,
+  })
+  const sharedByLabelByRunId = useMemo(() => {
+    const labels = new Map<string, string>()
+    for (const [runId, entry] of sharedWithMeByRunId) {
+      labels.set(
+        runId,
+        personLabel(entry.granted_by_display_name, null, entry.granted_by_sub),
+      )
+    }
+    return labels
+  }, [sharedWithMeByRunId])
 
   const flushScheduledChatContent = useCallback((threadId: string) => {
     const scheduled = scheduledChatContentByThreadIdRef.current.get(threadId)
@@ -462,12 +1104,31 @@ export function ResearchDesk() {
     setProjectActionError(`${t.topbar.projectActionFailed}: ${messageFromError(error)}`)
   }
 
+  async function handleImportProjectToServer() {
+    // The import is the one user-facing chat-sync action that runs BEFORE
+    // the project is server-synced, so the "Synced" badge (which carries
+    // sync errors) is not yet mounted to show a failure. Surface it through
+    // the same red banner as the other project actions (No Silent Fallbacks).
+    setProjectActionError(null)
+    try {
+      await importToServer()
+    } catch (error) {
+      reportProjectActionError(error)
+    }
+  }
+
   async function handleLoadProject() {
     setProjectActionError(null)
     try {
       const nextState = await loadProject({ onWorkStart: () => setProjectAction('load') })
       abortAllChatRequests()
-      applyProjectPreferences(nextState.preferences)
+      // Account preferences (theme/locale/contrast) are an account tier, not
+      // project data: while a real per-user session drives them, a loaded
+      // project file must NOT bleed its embedded prefs into the live theme
+      // (which the account autosave would then PUT, clobbering the account
+      // from an unrelated file). Project-embedded prefs apply only offline /
+      // when there is no account sync (the local-first case). M6c.
+      if (!accountSyncActive) applyProjectPreferences(nextState.preferences)
       setIsIncognitoChat(false)
       setIncognitoThread(createIncognitoThread(t.chat.incognitoTitle, t.chat.incognitoPreview))
       setActiveChatRequestsByThreadId({})
@@ -524,7 +1185,7 @@ export function ResearchDesk() {
       dispatch({ request, type: 'createLocalRun' })
       return
     }
-    if (health?.auth_required && !apiKey.trim()) return
+    if (!isDemoMode && !authUnlocked) return
 
     void submitRun(stackDiscoveryStatus === 'unsupported'
       ? { ...request, stack: undefined }
@@ -538,7 +1199,7 @@ export function ResearchDesk() {
   ) {
     const trimmedContent = contentMarkdown.trim()
     if (!trimmedContent) return
-    if (health?.auth_required && !apiKey.trim()) return
+    if (!isDemoMode && !authUnlocked) return
 
     const selectedThread = isIncognitoChat
       ? incognitoThread
@@ -576,7 +1237,30 @@ export function ResearchDesk() {
       ...inlineAttachmentRefs,
       ...state.ui.pendingChatAttachmentRefs,
     ])
-    const messageAttachments = chatAttachmentsFromRefs(state, messageAttachmentRefs)
+    // Guarantee any attached file-asset bodies are loaded before they are read
+    // synchronously into the outgoing attachments (M6c load-on-use). The
+    // prefetch on attach usually made this instant; the returned map overrides
+    // the state snapshot, which the just-dispatched bodies have not reached. A
+    // failed fetch must surface (No-Silent-Fallbacks) and abort the send rather
+    // than ship an empty attachment — nothing has been mutated yet, so the
+    // draft is preserved and the user can retry.
+    let assetBodies: Map<string, string>
+    try {
+      assetBodies = await ensureAssetBodiesLoaded(
+        assetIdsFromChatRefs(state, messageAttachmentRefs),
+      )
+    } catch (error) {
+      setChatErrorByThreadId((current) => ({
+        ...current,
+        [threadId]: `${t.chat.requestFailed}: ${messageFromError(error)}`,
+      }))
+      return
+    }
+    const messageAttachments = chatAttachmentsFromRefs(
+      state,
+      messageAttachmentRefs,
+      assetBodies,
+    )
     const requestMessages = buildChatMessages(
       selectedThread?.messages ?? [],
       trimmedContent,
@@ -631,7 +1315,8 @@ export function ResearchDesk() {
       },
     }))
 
-    const chainTemplates = state.ui.chatChainingEnabled
+    const knowledgeCollectionIds = options.knowledgeCollectionIds ?? []
+    const chainTemplates = state.ui.chatChainingEnabled && knowledgeCollectionIds.length === 0
       ? chatFunctionChainTemplatesFromRefs(state.chatRules, messageAttachmentRefs)
       : []
 
@@ -646,6 +1331,7 @@ export function ResearchDesk() {
         sourceAttachments: chatAttachmentsFromRefs(
           state,
           messageAttachmentRefs.filter((ref) => isPillKind(ref.kind)),
+          assetBodies,
         ),
         stack: chatStack,
         templates: chainTemplates,
@@ -661,6 +1347,7 @@ export function ResearchDesk() {
         modelTier,
         model: explicitModel,
         effort: explicitEffort,
+        knowledgeCollectionIds,
         stack: chatStack,
         threadId,
         useStreaming,
@@ -718,7 +1405,7 @@ export function ResearchDesk() {
           mode: 'direct_llm' as const,
           stack,
         }
-        const stepTimeout = globalThis.setTimeout(() => controller.abort(), CHAT_CHAIN_STEP_TIMEOUT_MS)
+        const stepTimeout = globalThis.setTimeout(() => controller.abort(), chatStepTimeoutMsRef.current)
         try {
           if (isFinal && useStreaming) {
             chatStreamContentByThreadIdRef.current.set(threadId, '')
@@ -727,7 +1414,7 @@ export function ResearchDesk() {
               {
                 apiKey: apiKey.trim() || undefined,
                 signal: controller.signal,
-                workspaceId: state.workspaceId,
+                workspaceId: effectiveWorkspaceId,
                 onDelta: (delta) => {
                   const nextContent = `${chatStreamContentByThreadIdRef.current.get(threadId) ?? ''}${delta}`
                   chatStreamContentByThreadIdRef.current.set(threadId, nextContent)
@@ -752,7 +1439,7 @@ export function ResearchDesk() {
               {
                 apiKey: apiKey.trim() || undefined,
                 signal: controller.signal,
-                workspaceId: state.workspaceId,
+                workspaceId: effectiveWorkspaceId,
               },
             )
             running = response.choices[0]?.message.content.trim() || t.chat.emptyResponse
@@ -818,6 +1505,7 @@ export function ResearchDesk() {
     modelTier,
     model,
     effort,
+    knowledgeCollectionIds = [],
     requestMessages,
     stack,
     threadId,
@@ -828,16 +1516,21 @@ export function ResearchDesk() {
     modelTier: ChatModelTier | null
     model: string | null
     effort: string | null
+    knowledgeCollectionIds?: string[]
     requestMessages: ChatCompletionMessage[]
     stack?: string
     threadId: string
     useStreaming: boolean
   }) {
+    const knowledgeMode = knowledgeCollectionIds.length > 0
     const baseChatRequest = {
       agentOverrides: chatAgentOverrides(modelTier, model, effort),
       includeProgress: false,
+      ...(knowledgeMode
+        ? { knowledgeFilters: { collectionIds: knowledgeCollectionIds } }
+        : {}),
       messages: requestMessages,
-      mode: 'direct_llm' as const,
+      mode: (knowledgeMode ? 'knowledge' : 'direct_llm') as ResearchRunMode,
       stack,
     }
 
@@ -850,7 +1543,7 @@ export function ResearchDesk() {
         {
           apiKey: apiKey.trim() || undefined,
           signal: controller.signal,
-          workspaceId: state.workspaceId,
+          workspaceId: effectiveWorkspaceId,
         },
       )
       const answer = response.choices[0]?.message.content.trim() || t.chat.emptyResponse
@@ -867,7 +1560,10 @@ export function ResearchDesk() {
         throw new Error(t.chat.demoModeDisabled)
       }
 
-      if (useStreaming) {
+      // Knowledge mode answers non-streaming: the backend rejects
+      // stream=true for retrieval algorithms until streaming
+      // dispatches through the registry.
+      if (useStreaming && !knowledgeMode) {
         await streamChatCompletion(
           {
             ...baseChatRequest,
@@ -876,7 +1572,7 @@ export function ResearchDesk() {
           {
             apiKey: apiKey.trim() || undefined,
             signal: controller.signal,
-            workspaceId: state.workspaceId,
+            workspaceId: effectiveWorkspaceId,
             onDelta: (delta) => {
               const nextContent = `${chatStreamContentByThreadIdRef.current.get(threadId) ?? ''}${delta}`
               chatStreamContentByThreadIdRef.current.set(threadId, nextContent)
@@ -962,7 +1658,7 @@ export function ResearchDesk() {
   }
 
   async function handleAnswerLastUserMessage(threadId: string, messageId: string) {
-    if (health?.auth_required && !apiKey.trim()) return
+    if (!isDemoMode && !authUnlocked) return
 
     const selectedThread = threadId === INCOGNITO_THREAD_ID
       ? incognitoThread
@@ -1264,6 +1960,35 @@ export function ResearchDesk() {
     setAuthLockError(null)
   }
 
+  async function handleCredentialLogin() {
+    const identifier = authIdentifier.trim()
+    if (!identifier || !authPassword) {
+      setAuthLockError(t.authLock.credentialRequired)
+      return
+    }
+    setIsAuthSubmitting(true)
+    setAuthLockError(null)
+    try {
+      const credentials = { identifier, password: authPassword }
+      await (authMode === 'ldap'
+        ? loginLdap(credentials)
+        : loginLocal(credentials))
+      setAuthPassword('')
+      // The login set the session cookie; re-probe so the lock lifts.
+      await refreshAuthSession()
+    } catch (error) {
+      setAuthLockError(
+        hasHttpStatus(error, 429)
+          ? t.authLock.credentialRateLimited
+          : hasHttpStatus(error, 401) || hasHttpStatus(error, 403)
+            ? t.authLock.credentialRejected
+            : t.authLock.credentialCheckFailed,
+      )
+    } finally {
+      setIsAuthSubmitting(false)
+    }
+  }
+
   function applyProjectPreferences(preferences: ProjectPreferences) {
     setContrastMode(preferences.contrastMode)
     setLocale(preferences.locale)
@@ -1303,24 +2028,73 @@ export function ResearchDesk() {
     }
   }
 
+  async function handleDeleteJob(runId: string) {
+    const run = state.researchRuns[runId]
+    if (!run) return
+    // API and imported runs are durable on the server; deleting them locally
+    // alone lets a reload re-hydrate them from the store (the "deleted report
+    // comes back" bug). Mock/demo runs and the no-server case have no durable
+    // record, so they delete locally only. The server delete must succeed
+    // BEFORE the local removal — except a 404, which deleteRun treats as
+    // already-gone, so it resolves and the local removal proceeds.
+    const serverBacked = !isDemoMode
+      && (run.source === 'api' || run.source === 'imported')
+      && discoveryReady
+      && authUnlocked
+    if (!serverBacked) {
+      dispatch({ jobId: runId, type: 'deleteJob' })
+      return
+    }
+    try {
+      await deleteRun(runId)
+      dispatch({ jobId: runId, type: 'deleteJob' })
+    } catch {
+      // A real failure (e.g. 409 while still active) is surfaced via runError
+      // -> the apiError banner; keep the run in the list so it stays visible.
+    }
+  }
+
   return (
+    <QuotaMeterProvider demo={isDemoMode} enabled={Boolean(quotaMeterEnabled)}>
     <main className="min-h-svh bg-canvas text-foreground lg:flex lg:h-svh lg:flex-col lg:overflow-hidden">
       <Topbar
         activeView={state.ui.activeView}
+        canPersistProject={projectPersistenceAvailable}
         dirty={state.dirty}
+        importPending={projectImportPending}
         isProjectActionPending={projectAction !== null}
         onDismissProjectActionError={() => setProjectActionError(null)}
         onExportProject={() => void handleExportProject()}
+        onImportProjectToServer={() => void handleImportProjectToServer()}
         onLoadProject={() => void handleLoadProject()}
         onSaveProject={() => void handleSaveProject()}
         projectActionError={projectActionError}
         projectConnection={state.connection}
         projectName={state.project.name}
+        serverSyncEnabled={state.serverSyncEnabled}
+        serverSyncError={serverSyncError}
       />
       <div className="flex min-h-0 w-full flex-1">
         <AppRail
           activeView={state.ui.activeView}
-          onViewChange={(view) => dispatch({ type: 'setActiveView', view })}
+          onViewChange={(view) => {
+            setSettingsRequestedSection(null)
+            dispatch({ type: 'setActiveView', view })
+          }}
+          showKnowledge={knowledgeWorkspaceVisible}
+          profileSlot={
+            <ProfileAvatar
+              authMode={authMode}
+              isDemo={isDemoMode}
+              session={authSession}
+              onLogin={ssoLogin}
+              onLogout={() => void ssoLogout()}
+              onOpenSecuritySettings={() => {
+                setSettingsRequestedSection('security')
+                dispatch({ type: 'setActiveView', view: 'settings' })
+              }}
+            />
+          }
         />
         <div className="min-h-0 min-w-0 flex-1">
           {state.ui.activeView === 'research' ? (
@@ -1337,11 +2111,13 @@ export function ResearchDesk() {
               cancelSubmittingRunIds={cancelSubmittingRunIds}
               onActiveFilterChange={(filter) => dispatch({ filter, type: 'setActiveFilter' })}
               onComposerSubmit={handleComposerSubmit}
+              researchQuestion={researchQuestion}
+              onResearchQuestionChange={setResearchQuestion}
               onComposerVisibleChange={(isVisible) => dispatch({
                 isVisible,
                 type: 'setComposerVisible',
               })}
-              onDeleteJob={(jobId) => dispatch({ jobId, type: 'deleteJob' })}
+              onDeleteJob={(jobId) => void handleDeleteJob(jobId)}
               onCancelJob={(jobId) => void handleCancelJob(jobId)}
               onReportExpandedChange={(isExpanded) => dispatch({
                 isExpanded,
@@ -1354,10 +2130,19 @@ export function ResearchDesk() {
               onSelectJob={(jobId) => dispatch({ jobId, type: 'selectJob' })}
               onToggleJob={(jobId) => dispatch({ jobId, type: 'toggleJob' })}
               onUseReportInChat={(runId) => dispatch({ runId, type: 'attachReportToNewChat' })}
+              onShareJob={sharingEnabled
+                ? (jobId) => setShareTarget({
+                  resourceId: jobId,
+                  resourceType: 'run',
+                  title: state.researchRuns[jobId]?.summary.title ?? '',
+                })
+                : undefined}
               reduceMotion={reduceMotion}
               selectedJobId={state.ui.selectedJobId}
               selectedRun={selectedRun}
               selectedStack={displayedSelectedStack}
+              shareCountByRunId={shareCountByRunId}
+              sharedByLabelByRunId={sharedByLabelByRunId}
             />
           ) : state.ui.activeView === 'chat' ? (
             <ChatWorkspace
@@ -1365,14 +2150,26 @@ export function ResearchDesk() {
               chatModelOptions={chatModelOptions}
               chatModelOptionsStatus={chatModelOptionsState.status}
               chatHistorySections={chatHistorySections}
+              chatHistoryHasMore={chatHistoryHasMore}
+              chatHistoryLoadingMore={chatHistoryLoadingMore}
+              onLoadMoreChatHistory={loadMoreChatHistory}
               defaultChatModel={defaultChatModel}
               isDesktop={isDesktop}
               isHistoryVisible={state.ui.isChatHistoryVisible}
               isIncognito={isIncognitoChat}
               isSending={activeChatRequest !== null}
-              onAttachContext={(ref) => dispatch({ ref, type: 'attachChatContextToDraft' })}
+              onAttachContext={(ref) => {
+                dispatch({ ref, type: 'attachChatContextToDraft' })
+                // Prefetch the file body in the background so it is already in
+                // hand when the message is sent (M6c load-on-use); the send
+                // guard awaits it regardless if this has not finished, so a
+                // prefetch failure here is intentionally best-effort.
+                void ensureAssetBodiesLoaded(assetIdsFromChatRefs(state, [ref])).catch(() => {})
+              }}
               onAttachFiles={(files) => void handleAttachChatFiles(files)}
               onPillRefsChange={setChatPillRefs}
+              chatDraft={chatDraft}
+              onChatDraftChange={setChatDraft}
               onAnswerLastUserMessage={(threadId, messageId) => void handleAnswerLastUserMessage(threadId, messageId)}
               onClearThread={handleClearChatThread}
               onCreateThread={handleCreateChatThread}
@@ -1417,6 +2214,9 @@ export function ResearchDesk() {
               onSelectedChatEffortChange={(effort) => dispatch({ effort, type: 'setSelectedChatEffort' })}
               chatContextBase={chatContextBase}
               chatContextCapacity={chatContextCapacity}
+              knowledgeIndexOptions={knowledgeIndexOptions}
+              selectedKnowledgeIndexIds={selectedKnowledgeIndexIds}
+              onSelectedKnowledgeIndexIdsChange={setSelectedKnowledgeIndexIds}
               onStopGenerating={handleStopChatGeneration}
               onStreamingEnabledChange={setChatStreamingEnabled}
               attachmentBudgetNotice={attachmentBudgetNotice}
@@ -1441,18 +2241,20 @@ export function ResearchDesk() {
                 apiKey: apiKey.trim() || undefined,
                 enabled: canImproveText,
                 selectedStack: textImprovementStack,
-                workspaceId: state.workspaceId,
+                workspaceId: effectiveWorkspaceId,
               }}
               threads={chatThreads}
             />
           ) : state.ui.activeView === 'editor' ? (
             <EditorWorkspace
               apiKey={apiKey.trim() || undefined}
+              capabilities={capabilities}
               chatModelOptions={chatModelOptions}
               chatModelOptionsStatus={chatModelOptionsState.status}
               chatModelCatalog={chatModelCatalog}
               defaultChatModel={defaultChatModel}
               dispatch={dispatch}
+              ensureAssetBodiesLoaded={ensureAssetBodiesLoaded}
               reportOptions={reportOptions}
               selectedModelTier={state.ui.selectedChatModelTier}
               state={state}
@@ -1460,53 +2262,164 @@ export function ResearchDesk() {
                 apiKey: apiKey.trim() || undefined,
                 enabled: canImproveText,
                 selectedStack: textImprovementStack,
-                workspaceId: state.workspaceId,
+                workspaceId: effectiveWorkspaceId,
               }}
+            />
+          ) : state.ui.activeView === 'knowledge' ? (
+            <KnowledgeWorkspace
+              collections={knowledgeCollections}
+              composerNotice={knowledgeAskError}
+              dataSource={knowledgeDataSource}
+              defaultProfileId={knowledgeDefaultProfileId}
+              defaultTopK={knowledgeDefaultTopK}
+              historyItems={knowledgeAllItems}
+              isAskDisabled={!isDemoMode && !authUnlocked}
+              isAskRunning={isKnowledgeAskRunning}
+              isHistoryVisible={state.ui.isKnowledgeHistoryVisible}
+              items={knowledgeItems}
+              sessionSections={knowledgeSessionSections}
+              sessions={knowledgeSessions}
+              mode={knowledgeMode}
+              onCreateSession={(groupId) => {
+                const session = createKnowledgeSession()
+                dispatch({ session, type: 'createKnowledgeSession' })
+                if (groupId) {
+                  dispatch({ groupId, sessionId: session.id, targetIndex: 0, type: 'moveKnowledgeSessionToGroup' })
+                }
+              }}
+              onCreateSessionGroup={() => dispatch({ title: t.knowledge.newFolder, type: 'createKnowledgeSessionGroup' })}
+              onDeleteSessionGroup={(groupId) => dispatch({ groupId, type: 'deleteKnowledgeSessionGroup' })}
+              onDeleteSession={(sessionId) => dispatch({ sessionId, type: 'deleteKnowledgeSession' })}
+              onDemoAsk={isDemoMode ? handleKnowledgeDemoAsk : undefined}
+              onHistoryVisibleChange={(isVisible) => dispatch({ isVisible, type: 'setKnowledgeHistoryVisible' })}
+              onAsk={(question) => void handleKnowledgeAsk(question)}
+              knowledgeQuestion={knowledgeQuestion}
+              onKnowledgeQuestionChange={setKnowledgeQuestion}
+              onModeChange={setKnowledgeMode}
+              onMoveSessionGroup={(groupId, targetIndex) => dispatch({ groupId, targetIndex, type: 'moveKnowledgeSessionGroup' })}
+              onMoveSessionToGroup={(sessionId, groupId, targetIndex) =>
+                dispatch({ groupId, sessionId, targetIndex, type: 'moveKnowledgeSessionToGroup' })}
+              onProfileChange={setKnowledgeProfileId}
+              onRenameSessionGroup={(groupId, title) => dispatch({ groupId, title, type: 'renameKnowledgeSessionGroup' })}
+              onRenameSession={(sessionId, title) => dispatch({ sessionId, title, type: 'renameKnowledgeSession' })}
+              onSelectSession={(sessionId) => dispatch({ sessionId, type: 'selectKnowledgeSession' })}
+              onSelectedCollectionIdsChange={setKnowledgeCollectionIds}
+              onTopKChange={setKnowledgeTopK}
+              profileId={knowledgeProfileId}
+              profileOptions={knowledgeProfileOptions}
+              selectedCollectionIds={knowledgeCollectionIds}
+              selectedSessionId={state.selectedKnowledgeSessionId}
+              topK={knowledgeTopK}
             />
           ) : state.ui.activeView === 'prompt-library' ? (
             <PromptLibraryWorkspace
               dispatch={dispatch}
+              sharing={sharingEnabled
+                ? {
+                  onShareRule: (rule) => {
+                    if (!rule.serverTemplateId) return
+                    setShareTarget({
+                      resourceId: rule.serverTemplateId,
+                      resourceType: 'prompt_template',
+                      title: rule.title,
+                    })
+                  },
+                }
+                : null}
               state={state}
+              templateSync={templateSync}
               textImprovement={{
                 apiKey: apiKey.trim() || undefined,
                 enabled: canImproveText,
                 selectedStack: textImprovementStack,
-                workspaceId: state.workspaceId,
+                workspaceId: effectiveWorkspaceId,
               }}
             />
           ) : state.ui.activeView === 'database' ? (
-            <FileLibraryWorkspace dispatch={dispatch} state={state} />
+            <FileLibraryWorkspace
+              dispatch={dispatch}
+              embedModels={embedCatalog}
+              ensureAssetBodiesLoaded={ensureAssetBodiesLoaded}
+              fileApiOptions={fileApiOptions}
+              knowledgeSync={knowledgeSyncOptions}
+              onAssetsIngested={runServerParse}
+              serverFeatureLabels={serverFeatureLabels}
+              serverFileUpload={serverFileUpload}
+              state={state}
+            />
           ) : (
             <SettingsWorkspace
+              apiCapabilities={capabilities}
               apiError={apiError}
               apiHealth={health}
               apiKey={apiKeyDraft}
+              authMode={authMode}
+              authSession={authSession}
+              patAvailable={authConfig?.pat_available}
+              onSsoLogin={ssoLogin}
+              onSsoLogout={() => void ssoLogout()}
               isDemoMode={isDemoMode}
               onApiKeyChange={handleSettingsApiKeyChange}
               onDemoModeChange={(enabled) => dispatch({ enabled, type: 'setDemoMode' })}
               onStackChange={(stack) => dispatch({ stack, type: 'setSelectedStack' })}
               reduceMotion={reduceMotion}
               selectedStack={displayedSelectedStack}
+              requestedSection={settingsRequestedSection}
               stackDiscoveryStatus={stackDiscoveryStatus}
               stackOptions={effectiveStackOptions}
             />
           )}
         </div>
       </div>
+      {sharingEnabled && shareTarget && (
+        <ShareDialog
+          demo={isDemoMode}
+          onChanged={() => void refreshShareCounts()}
+          onClose={() => setShareTarget(null)}
+          ownerEmail={isDemoMode ? DEMO_OWNER.email : authSession.email}
+          ownerName={isDemoMode ? DEMO_OWNER.displayName : authSession.displayName}
+          resourceId={shareTarget.resourceId}
+          resourceTitle={shareTarget.title}
+          resourceType={shareTarget.resourceType}
+        />
+      )}
       {isAuthLocked && (
         <AuthLockScreen
           error={authLockError}
+          identifier={authIdentifier}
           isSubmitting={isAuthSubmitting}
+          mode={
+            authMode === 'oidc'
+              ? 'sso'
+              : authMode === 'local'
+                ? 'local'
+                : authMode === 'ldap'
+                  ? 'ldap'
+                  : 'apikey'
+          }
+          onCredentialSubmit={() => void handleCredentialLogin()}
+          onIdentifierChange={(value) => {
+            setAuthIdentifier(value)
+            setAuthLockError(null)
+          }}
+          onPasswordChange={(value) => {
+            setAuthPassword(value)
+            setAuthLockError(null)
+          }}
+          onSsoLogin={ssoLogin}
+          providerName={authConfig?.provider_name}
           onSubmit={(token) => void handleAuthUnlock(token)}
           onTokenChange={(token) => {
             setApiKeyDraft(token)
             setAuthLockError(null)
           }}
+          password={authPassword}
           reduceMotion={reduceMotion}
           token={apiKeyDraft}
         />
       )}
     </main>
+    </QuotaMeterProvider>
   )
 }
 

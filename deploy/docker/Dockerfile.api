@@ -1,0 +1,61 @@
+# Inqtrix API image: the FastAPI server (python -m inqtrix).
+# Also serves the migrate and worker services via a `command:` override
+# (the inqtrix-migrate / inqtrix-worker console scripts are on PATH).
+#
+# Build context is the repository root:
+#   docker build -f deploy/docker/Dockerfile.api -t inqtrix-api .
+
+# --- Stage 1: resolve deps + install the project with uv ---
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS build
+WORKDIR /app
+ENV UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1
+
+# Lockfile + manifest first for layer caching, then the source.
+COPY pyproject.toml uv.lock ./
+COPY README.md LICENSE NOTICE ./
+COPY src ./src
+
+# Install into /app/.venv against the frozen lock. The knowledge/queue extras
+# are baked in so the `knowledge` and `workers` compose profiles work without
+# rebuilding the image; the default (memory/local) paths never import them.
+RUN uv sync --frozen --no-dev --extra knowledge-qdrant --extra queue-valkey
+
+# --- Stage 2: slim runtime ---
+FROM python:3.12-slim-bookworm
+WORKDIR /app
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    HOME=/app \
+    XDG_CACHE_HOME=/app/.cache \
+    INQTRIX_SERVER_HOST=0.0.0.0 \
+    INQTRIX_SERVER_PORT=5100
+
+# The editable project install points the venv at /app/src; keep the same
+# path so the .pth resolves. Migrations ship inside the package
+# (src/inqtrix/storage/migrations) so inqtrix-migrate finds them.
+COPY --from=build /app/.venv /app/.venv
+COPY --from=build /app/src /app/src
+
+# OpenShift (and any hardened Kubernetes) runs the container as an arbitrary
+# non-root UID that is a member of group 0, not as the image's USER. Such a UID
+# owns no files, so every path the process writes is made group-0 owned and
+# group-writable (chgrp 0 + chmod g=u): /app for HOME, logs and the image-default
+# object store (data/object-store), the fastembed/qdrant-client model cache
+# (XDG_CACHE_HOME), and /var/lib/inqtrix/objects -- the conventional object-store
+# mount point pre-created so a mounted volume/PVC inherits these writable perms
+# for the random UID (a fresh Docker named volume copies the image dir's perms;
+# a Kubernetes PVC needs the same group-0 ownership via fsGroup). USER 1001 keeps
+# the container non-root: vanilla Kubernetes honours 1001, OpenShift substitutes
+# its own range UID.
+RUN mkdir -p /app/.cache /app/data /var/lib/inqtrix/objects \
+    && chgrp -R 0 /app /var/lib/inqtrix \
+    && chmod -R g=u /app /var/lib/inqtrix
+USER 1001
+
+EXPOSE 5100
+# CMD (not ENTRYPOINT) so the compose `command:` override REPLACES it cleanly:
+# the api service runs this default, while migrate/worker override it with the
+# inqtrix-migrate / inqtrix-worker console scripts. With an exec-form ENTRYPOINT
+# the override would instead be appended as args (python -m inqtrix <arg>).
+CMD ["python", "-m", "inqtrix"]

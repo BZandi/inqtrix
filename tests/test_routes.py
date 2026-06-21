@@ -11,7 +11,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import inqtrix.server.app as app_module
-import inqtrix.server.routes as routes_module
+import inqtrix.research.web_research as web_research_module
+import inqtrix.server.routers.chat as chat_router_module
 from inqtrix.legal import legal_metadata
 from inqtrix.providers.base import ProviderContext
 from inqtrix.search_result import GroundedSearchResult
@@ -122,7 +123,7 @@ def test_chat_completions_returns_timeout_response(monkeypatch):
         time.sleep(1.2)
         return {"answer": "Zu spaet", "result_state": {}}
 
-    monkeypatch.setattr(routes_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
 
     response = client.post(
         "/v1/chat/completions",
@@ -186,7 +187,7 @@ def test_native_runs_endpoint_returns_events_and_result(monkeypatch):
             },
         }
 
-    monkeypatch.setattr(routes_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
 
     response = client.post(
         "/v1/runs",
@@ -216,7 +217,11 @@ def test_native_runs_endpoint_returns_events_and_result(monkeypatch):
     assert payload["metrics"]["rounds"] == 1
     assert payload["metrics"]["total_queries"] == 1
     assert payload["references"] == [
-        {"label": "E1", "url": "https://example.com/source", "tier": "unknown"}
+        {
+            "label": "E1", "url": "https://example.com/source", "tier": "unknown",
+            "title": None, "document_id": None, "chunk_index": None,
+            "excerpt": None, "source_text": None, "page_number": None,
+        }
     ]
     assert payload["usage"]["total_tokens"] == 18
     summary = client.get(f"/v1/runs/{run_id}").json()
@@ -255,7 +260,7 @@ def test_native_runs_are_filterable_by_workspace_id(monkeypatch):
             },
         }
 
-    monkeypatch.setattr(routes_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
 
     response_a = client.post(
         "/v1/runs",
@@ -681,7 +686,7 @@ def test_chat_completions_direct_llm_allows_large_embedded_context(monkeypatch):
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},
         }
 
-    monkeypatch.setattr(routes_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
 
     client = _make_app(agent_settings=AgentSettings(max_question_length=1_000))
     large_chat_context = "x" * 5_000
@@ -709,8 +714,8 @@ def test_chat_completions_research_mode_keeps_question_length_limit(monkeypatch)
         raise AssertionError("agent_run must not be called")
 
     monkeypatch.setattr(
-        routes_module,
-        "agent_run",
+        web_research_module,
+        "run_web_graph",
         fail_run,
     )
 
@@ -760,7 +765,7 @@ def test_chat_completions_streaming_direct_llm_uses_expanded_limit(monkeypatch):
         captured["skip_search"] = settings.skip_search
         yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr(routes_module, "guarded_stream", fake_guarded_stream)
+    monkeypatch.setattr(chat_router_module, "guarded_stream", fake_guarded_stream)
 
     client = _make_app(agent_settings=AgentSettings(max_question_length=1_000))
     large_chat_context = "x" * 5_000
@@ -788,8 +793,8 @@ def test_chat_completions_streaming_direct_llm_uses_expanded_limit(monkeypatch):
 def test_chat_completions_accepts_typical_payload(monkeypatch):
     """Realistic multi-turn payloads pass the cap unchanged."""
     monkeypatch.setattr(
-        routes_module,
-        "agent_run",
+        web_research_module,
+        "run_web_graph",
         lambda *args, **kwargs: {
             "answer": "ok",
             "result_state": {},

@@ -24,6 +24,14 @@ Start with [Stop criteria](../scoring-and-stopping/stop-criteria.md) and [Confid
 
 Read [Web server mode](../deployment/webserver-mode.md) and [Security hardening](../deployment/security-hardening.md). For log and iteration-log workflows, add [Debugging runs](../observability/debugging-runs.md) and [Forensic cookbook](../observability/forensic-cookbook.md).
 
+### I want to pick the LLM / search provider via `.env` (Azure, Anthropic, Bedrock, Foundry)
+
+Two independent axes — `INQTRIX_LLM_PROVIDER` and `INQTRIX_SEARCH_PROVIDER` — choose the stack without Python. Copy the matching block from [Provider recipes](../getting-started/provider-recipes.md); the per-provider credentials and the model knobs (`INQTRIX_SELECTABLE_CHAT_MODELS`, `INQTRIX_TEMPERATURE`, `INQTRIX_SEARCH_PRESET`, …) live in the Providers block of [Settings and env](settings-and-env.md).
+
+### I want real accounts: email/password or my existing LDAP
+
+Set `INQTRIX_AUTH_MODE=local` for native email/password (the first visit creates the owner) or `ldap` to bind a directory you already run; both need `INQTRIX_SESSION_SECRET` + `INQTRIX_PAT_PEPPER` and the postgres backend. Conceptual overview in [Auth modes](../deployment/auth-modes.md); end-to-end procedures (owner setup, adding users, access tokens) in [Create and manage users](../how-to/create-and-manage-users.md) and [Connect to an existing LDAP](../how-to/connect-to-existing-ldap.md).
+
 ## Related docs
 
 - [Settings and env](settings-and-env.md) — full env reference with behaviour notes where applicable.

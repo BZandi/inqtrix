@@ -1,0 +1,179 @@
+import { describe, expect, it } from 'vitest'
+
+import type { AdminSystemRuntime, AdminUser } from '@/api/inqtrixClient'
+import {
+  activeAdminCount,
+  canDisable,
+  canSetRole,
+  deriveFeatureRows,
+  deriveSystemFeatureRows,
+  isLastActiveAdmin,
+  isSelf,
+  patRevealReducer,
+  sortUsers,
+} from './adminModel'
+
+function user(partial: Partial<AdminUser> & { subject: string }): AdminUser {
+  return {
+    disabled: false,
+    display_name: partial.subject,
+    email: `${partial.subject}@example.com`,
+    instance_role: 'user',
+    last_login_at: null,
+    ...partial,
+  }
+}
+
+const owner = user({ subject: 'owner', instance_role: 'admin' })
+const admin2 = user({ subject: 'admin2', instance_role: 'admin' })
+const bob = user({ subject: 'bob' })
+const disabledAdmin = user({
+  subject: 'old',
+  instance_role: 'admin',
+  disabled: true,
+})
+
+describe('isSelf / activeAdminCount / isLastActiveAdmin', () => {
+  it('detects the caller and counts only active admins', () => {
+    expect(isSelf(owner, 'owner')).toBe(true)
+    expect(isSelf(owner, 'bob')).toBe(false)
+    expect(isSelf(owner, null)).toBe(false)
+    expect(activeAdminCount([owner, admin2, bob, disabledAdmin])).toBe(2)
+    expect(isLastActiveAdmin([owner, bob, disabledAdmin], owner)).toBe(true)
+    expect(isLastActiveAdmin([owner, admin2], owner)).toBe(false)
+  })
+})
+
+describe('canSetRole', () => {
+  it('allows no-op and promotion, locks self-demote and last-admin demote', () => {
+    // No-op (same role) is always fine.
+    expect(canSetRole([owner], owner, 'owner', 'admin')).toEqual({ allowed: true })
+    // Promote a plain user.
+    expect(canSetRole([owner, bob], bob, 'owner', 'admin')).toEqual({
+      allowed: true,
+    })
+    // Self-demote is locked even if another admin exists.
+    expect(canSetRole([owner, admin2], owner, 'owner', 'user')).toEqual({
+      allowed: false,
+      reason: 'self',
+    })
+    // Demoting the last active admin is locked.
+    expect(canSetRole([owner, bob], owner, 'someone-else', 'user')).toEqual({
+      allowed: false,
+      reason: 'last_admin',
+    })
+    // Demoting a non-last admin (caller is a third admin) is allowed.
+    expect(canSetRole([owner, admin2], admin2, 'owner', 'user')).toEqual({
+      allowed: true,
+    })
+  })
+})
+
+describe('canDisable', () => {
+  it('locks self and the last active admin, allows everyone else', () => {
+    expect(canDisable([owner, admin2], owner, 'owner')).toEqual({
+      allowed: false,
+      reason: 'self',
+    })
+    expect(canDisable([owner, bob], owner, 'someone-else')).toEqual({
+      allowed: false,
+      reason: 'last_admin',
+    })
+    expect(canDisable([owner, admin2], admin2, 'owner')).toEqual({
+      allowed: true,
+    })
+    expect(canDisable([owner, bob], bob, 'owner')).toEqual({ allowed: true })
+  })
+})
+
+describe('sortUsers', () => {
+  it('puts admins first, then orders by email', () => {
+    expect(sortUsers([bob, admin2, owner]).map((u) => u.subject)).toEqual([
+      'admin2',
+      'owner',
+      'bob',
+    ])
+  })
+})
+
+describe('deriveFeatureRows', () => {
+  it('derives sorted rows from the open features map (never hardcoded)', () => {
+    expect(deriveFeatureRows(undefined)).toEqual([])
+    expect(
+      deriveFeatureRows({ sharing: true, knowledge: false, files: true }),
+    ).toEqual([
+      { key: 'files', on: true },
+      { key: 'knowledge', on: false },
+      { key: 'sharing', on: true },
+    ])
+  })
+
+  it('folds runtime availability into infrastructure-backed feature rows', () => {
+    const runtime: AdminSystemRuntime = {
+      api: { openapi: true },
+      files: {
+        blob_storage: 's3',
+        enabled: true,
+        max_file_bytes: 100,
+        object_store: 's3',
+        object_store_available: false,
+      },
+      knowledge: {
+        contextual_retrieval: false,
+        default_top_k: 8,
+        document_parser: 'markitdown',
+        embedding_model: 'text-embedding-3-large',
+        embedding_provider: 'azure',
+        enabled: true,
+        hybrid_retrieval: true,
+        reranker: 'none',
+        sparse: 'bm25_german',
+        vector_store: 'qdrant',
+        vector_store_available: false,
+      },
+      runs: {
+        execution: 'worker_dispatch',
+        queue: 'valkey',
+        queue_available: false,
+        store: 'postgres',
+        worker_dispatch: true,
+      },
+      storage: { backend: 'postgres', durable: true },
+    }
+
+    expect(
+      deriveSystemFeatureRows(
+        {
+          files: true,
+          hybrid_retrieval: true,
+          knowledge: true,
+          project_persistence: true,
+        },
+        runtime,
+      ),
+    ).toEqual([
+      { key: 'files', on: false },
+      { key: 'hybrid_retrieval', on: false },
+      { key: 'knowledge', on: false },
+      { key: 'project_persistence', on: true },
+    ])
+  })
+})
+
+describe('patRevealReducer', () => {
+  it('reveals the plaintext once and drops it on dismiss', () => {
+    const revealed = patRevealReducer(
+      { phase: 'idle' },
+      { name: 'CI', token: 'inq_secret', tokenId: 't1', type: 'reveal' },
+    )
+    expect(revealed).toEqual({
+      phase: 'revealed',
+      name: 'CI',
+      token: 'inq_secret',
+      tokenId: 't1',
+    })
+    expect(patRevealReducer(revealed, { type: 'dismiss' })).toEqual({
+      phase: 'idle',
+    })
+  })
+})

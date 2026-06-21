@@ -12,7 +12,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import inqtrix.server.routes as routes_module
+import inqtrix.research.web_research as web_research_module
 import inqtrix.server.streaming as streaming_module
 from inqtrix.exceptions import AgentCancelled
 from inqtrix.providers.base import ProviderContext
@@ -298,7 +298,7 @@ def test_chat_completions_blocking_path_unaffected(monkeypatch):
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},
         }
 
-    monkeypatch.setattr(routes_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
 
     providers = ProviderContext(llm=_DummyLLM(), search=_DummySearch())
     app = create_app(settings=Settings(), providers=providers)

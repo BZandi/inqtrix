@@ -28,7 +28,19 @@ from inqtrix.model_routing import (
 )
 from inqtrix.settings import AgentSettings, ModelSettings
 
-ALL_NODES = ("classify", "plan", "evaluate", "answer", "claim_extract", "direct_chat")
+ALL_NODES = (
+    "classify",
+    "plan",
+    "evaluate",
+    "answer",
+    "claim_extract",
+    "direct_chat",
+    "knowledge_answer",
+    "knowledge_gate",
+    "knowledge_contextualize",
+    "knowledge_decompose",
+    "knowledge_rerank",
+)
 
 
 def _models(**kwargs: str) -> SimpleNamespace:

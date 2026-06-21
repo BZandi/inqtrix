@@ -6,6 +6,8 @@
 
 The provider package is the Baukasten surface. Every LLM backend and every search backend is an implementation of one of two ABCs and can be swapped independently. This page lists the built-ins, the contracts they satisfy, and the conventions custom providers must follow.
 
+For the **server/Stack-mode path**, pick a combination purely via `.env` (`INQTRIX_LLM_PROVIDER` × `INQTRIX_SEARCH_PROVIDER`) — copy-paste recipes for every combo are in [Provider recipes](../getting-started/provider-recipes.md). This page is the deeper per-provider reference behind those recipes.
+
 ## Provider matrix
 
 | Role | Provider class | Module | Backend |

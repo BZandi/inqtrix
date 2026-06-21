@@ -1,5 +1,5 @@
 import type { Locale } from '@/i18n/translations'
-import type { ResearchRunStatus } from '@/features/researchRuns/types'
+import type { ResearchRunAccess, ResearchRunStatus } from '@/features/researchRuns/types'
 
 export type LocalizedText = Record<Locale, string>
 
@@ -16,6 +16,7 @@ export const phaseOrder = [
 export type JobPhase = (typeof phaseOrder)[number]
 
 export type ResearchJob = {
+  access?: ResearchRunAccess
   activePhase: JobPhase
   cancelRequested?: boolean
   completedPhases: readonly JobPhase[]
@@ -49,7 +50,7 @@ export type ResearchJob = {
 
 export type JobFilter = Extract<JobStatus, 'cancelled' | 'completed' | 'queued' | 'running'> | 'all'
 
-export type AppView = 'research' | 'chat' | 'editor' | 'prompt-library' | 'database' | 'settings'
+export type AppView = 'research' | 'chat' | 'editor' | 'knowledge' | 'prompt-library' | 'database' | 'settings'
 
 export function localizedText(value: LocalizedText, locale: Locale) {
   return value[locale]

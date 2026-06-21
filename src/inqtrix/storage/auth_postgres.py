@@ -1,0 +1,689 @@
+"""Postgres backends for OIDC sessions, login flows, and the user mirror.
+
+Same conventions as the other storage backends: every operation runs
+inside :func:`~inqtrix.storage.db.tenant_session` (restricted role +
+tenant GUC, forced RLS as the second defense layer). Used from the
+HTTP server's event loop only — these stores share the identity
+bundle's engine, never the run store's background-loop engine
+(asyncpg pools are loop-affine).
+"""
+
+from __future__ import annotations
+
+import time
+from typing import TYPE_CHECKING
+
+from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+from inqtrix.auth.sessions import AuthSession, LoginFlow
+from inqtrix.storage.auth_orm import auth_flows, auth_sessions
+from inqtrix.storage.db import tenant_session
+from inqtrix.storage.identity_orm import users
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+DEFAULT_TENANT = "default"
+
+
+class PostgresSessionStore:
+    """Durable session store (login survives restarts and replicas).
+
+    Args:
+        session_factory: Async session factory on the HTTP loop's
+            engine.
+        app_role: Restricted role assumed per transaction.
+    """
+
+    def __init__(
+        self,
+        *,
+        session_factory: "async_sessionmaker[AsyncSession]",
+        app_role: str,
+    ) -> None:
+        self._session_factory = session_factory
+        self._app_role = app_role
+
+    def _scope(self):
+        return tenant_session(
+            self._session_factory,
+            tenant_id=DEFAULT_TENANT,
+            app_role=self._app_role,
+        )
+
+    async def create(self, session: AuthSession) -> None:
+        """Persist one session and lazily evict expired rows."""
+        async with self._scope() as db:
+            await db.execute(
+                delete(auth_sessions).where(
+                    auth_sessions.c.expires_at <= time.time()
+                )
+            )
+            await db.execute(
+                auth_sessions.insert().values(
+                    id=session.id,
+                    tenant_id=DEFAULT_TENANT,
+                    sub=session.sub,
+                    issuer=session.issuer,
+                    email=session.email,
+                    display_name=session.display_name,
+                    groups=list(session.groups),
+                    csrf_random=session.csrf_random,
+                    created_at=session.created_at,
+                    expires_at=session.expires_at,
+                )
+            )
+
+    async def get(self, session_id: str) -> AuthSession | None:
+        """Return the live session or ``None`` (absent or expired)."""
+        async with self._scope() as db:
+            row = (
+                await db.execute(
+                    select(auth_sessions).where(
+                        auth_sessions.c.id == session_id
+                    )
+                )
+            ).mappings().first()
+        if row is None or row["expires_at"] <= time.time():
+            return None
+        return AuthSession(
+            id=row["id"],
+            sub=row["sub"],
+            issuer=row["issuer"],
+            email=row["email"],
+            display_name=row["display_name"],
+            groups=tuple(row["groups"] or []),
+            csrf_random=row["csrf_random"],
+            created_at=row["created_at"],
+            expires_at=row["expires_at"],
+        )
+
+    async def delete(self, session_id: str) -> None:
+        """Remove one session; missing ids are a no-op."""
+        async with self._scope() as db:
+            await db.execute(
+                delete(auth_sessions).where(
+                    auth_sessions.c.id == session_id
+                )
+            )
+
+    async def delete_for_owner(self, *, issuer: str, sub: str) -> int:
+        """Purge every session of one identity (admin disable cut-off)."""
+        async with self._scope() as db:
+            result = await db.execute(
+                delete(auth_sessions).where(
+                    auth_sessions.c.sub == sub,
+                    auth_sessions.c.issuer == issuer,
+                )
+            )
+        return int(result.rowcount or 0)
+
+
+class PostgresFlowStore:
+    """Durable flow store — logins survive replica switches mid-flow."""
+
+    def __init__(
+        self,
+        *,
+        session_factory: "async_sessionmaker[AsyncSession]",
+        app_role: str,
+    ) -> None:
+        self._session_factory = session_factory
+        self._app_role = app_role
+
+    def _scope(self):
+        return tenant_session(
+            self._session_factory,
+            tenant_id=DEFAULT_TENANT,
+            app_role=self._app_role,
+        )
+
+    async def put(self, flow: LoginFlow) -> None:
+        """Persist one flow and lazily evict expired rows."""
+        async with self._scope() as db:
+            await db.execute(
+                delete(auth_flows).where(
+                    auth_flows.c.expires_at <= time.time()
+                )
+            )
+            await db.execute(
+                auth_flows.insert().values(
+                    state=flow.state,
+                    tenant_id=DEFAULT_TENANT,
+                    code_verifier=flow.code_verifier,
+                    nonce=flow.nonce,
+                    next_path=flow.next_path,
+                    expires_at=flow.expires_at,
+                )
+            )
+
+    async def consume(self, state: str) -> LoginFlow | None:
+        """One-time take via a guarded flip — replays lose atomically."""
+        async with self._scope() as db:
+            row = (
+                await db.execute(
+                    update(auth_flows)
+                    .where(
+                        auth_flows.c.state == state,
+                        auth_flows.c.consumed.is_(False),
+                        auth_flows.c.expires_at > time.time(),
+                    )
+                    .values(consumed=True)
+                    .returning(
+                        auth_flows.c.code_verifier,
+                        auth_flows.c.nonce,
+                        auth_flows.c.next_path,
+                        auth_flows.c.expires_at,
+                    )
+                )
+            ).first()
+        if row is None:
+            return None
+        return LoginFlow(
+            state=state,
+            code_verifier=row[0],
+            nonce=row[1],
+            next_path=row[2],
+            expires_at=row[3],
+        )
+
+
+class PostgresUserDirectory:
+    """JIT user mirror keyed on ``(issuer, subject)``."""
+
+    def __init__(
+        self,
+        *,
+        session_factory: "async_sessionmaker[AsyncSession]",
+        app_role: str,
+    ) -> None:
+        self._session_factory = session_factory
+        self._app_role = app_role
+
+    async def record_login(
+        self,
+        *,
+        tenant_id: str,
+        issuer: str,
+        subject: str,
+        email: str,
+        email_verified: bool,
+        display_name: str | None,
+    ) -> None:
+        """Upsert the mirror row; the unique pair is the identity."""
+        async with tenant_session(
+            self._session_factory,
+            tenant_id=tenant_id,
+            app_role=self._app_role,
+        ) as db:
+            statement = pg_insert(users).values(
+                tenant_id=tenant_id,
+                issuer=issuer,
+                subject=subject,
+                email=email,
+                email_verified=email_verified,
+                display_name=display_name,
+                # Set on the initial INSERT too (not only the re-login
+                # UPDATE below) so a first-ever login records its timestamp,
+                # matching the memory backend.
+                last_login_at=func.now(),
+            )
+            await db.execute(
+                statement.on_conflict_do_update(
+                    constraint="uq_users_issuer_subject",
+                    set_={
+                        "email": statement.excluded.email,
+                        "email_verified": statement.excluded.email_verified,
+                        "display_name": statement.excluded.display_name,
+                        "last_login_at": func.now(),
+                    },
+                )
+            )
+
+    async def find_user(
+        self, *, tenant_id: str, issuer: str, subject: str
+    ) -> "MirroredUser | None":
+        """Admission lookup (:class:`~inqtrix.auth.directory.UserLookup`)."""
+        from inqtrix.auth.directory import MirroredUser
+
+        async with tenant_session(
+            self._session_factory,
+            tenant_id=tenant_id,
+            app_role=self._app_role,
+        ) as db:
+            row = (
+                await db.execute(
+                    select(users).where(
+                        users.c.issuer == issuer,
+                        users.c.subject == subject,
+                    )
+                )
+            ).first()
+        if row is None:
+            return None
+        return MirroredUser(
+            issuer=row.issuer,
+            subject=row.subject,
+            email=row.email,
+            email_verified=row.email_verified,
+            display_name=row.display_name,
+            disabled_at=(
+                row.disabled_at.timestamp()
+                if row.disabled_at is not None
+                else None
+            ),
+            instance_role=row.instance_role,
+            last_login_at=(
+                row.last_login_at.timestamp()
+                if row.last_login_at is not None
+                else None
+            ),
+            default_workspace_id=row.default_workspace_id,
+        )
+
+    async def profiles_for_subjects(
+        self, *, tenant_id: str, subs: tuple[str, ...]
+    ) -> dict[str, "MirroredUser"]:
+        """``sub -> profile`` for share-listing enrichment (one query)."""
+        from inqtrix.auth.directory import MirroredUser
+
+        if not subs:
+            return {}
+        async with tenant_session(
+            self._session_factory,
+            tenant_id=tenant_id,
+            app_role=self._app_role,
+        ) as db:
+            rows = (
+                await db.execute(
+                    select(users).where(
+                        users.c.tenant_id == tenant_id,
+                        users.c.subject.in_(list(subs)),
+                    )
+                )
+            ).all()
+        return {
+            row.subject: MirroredUser(
+                issuer=row.issuer,
+                subject=row.subject,
+                email=row.email,
+                email_verified=row.email_verified,
+                display_name=row.display_name,
+                disabled_at=(
+                    row.disabled_at.timestamp()
+                    if row.disabled_at is not None
+                    else None
+                ),
+            )
+            for row in rows
+        }
+
+    async def has_subject(self, *, tenant_id: str, sub: str) -> bool:
+        """Active mirrored identity with this subject exists."""
+        async with tenant_session(
+            self._session_factory,
+            tenant_id=tenant_id,
+            app_role=self._app_role,
+        ) as db:
+            row = (
+                await db.execute(
+                    select(users.c.subject)
+                    .where(
+                        users.c.tenant_id == tenant_id,
+                        users.c.subject == sub,
+                        users.c.disabled_at.is_(None),
+                    )
+                    .limit(1)
+                )
+            ).first()
+        return row is not None
+
+    async def search(
+        self,
+        *,
+        tenant_id: str,
+        query: str,
+        limit: int = 10,
+        exclude_subject: str = "",
+    ) -> tuple["MirroredUser", ...]:
+        """Prefix search over email and display name (share typeahead)."""
+        from inqtrix.auth.directory import MirroredUser
+
+        needle = query.strip()
+        if not needle:
+            return ()
+        pattern = needle.replace("%", "\\%").replace("_", "\\_") + "%"
+        async with tenant_session(
+            self._session_factory,
+            tenant_id=tenant_id,
+            app_role=self._app_role,
+        ) as db:
+            rows = (
+                await db.execute(
+                    select(users)
+                    .where(
+                        users.c.tenant_id == tenant_id,
+                        users.c.disabled_at.is_(None),
+                        users.c.subject != exclude_subject,
+                        or_(
+                            users.c.email.ilike(pattern),
+                            users.c.display_name.ilike(pattern),
+                        ),
+                    )
+                    .order_by(users.c.email)
+                    .limit(limit)
+                )
+            ).all()
+        return tuple(
+            MirroredUser(
+                issuer=row.issuer,
+                subject=row.subject,
+                email=row.email,
+                email_verified=row.email_verified,
+                display_name=row.display_name,
+                disabled_at=None,
+            )
+            for row in rows
+        )
+
+    async def disable_user(
+        self, *, tenant_id: str, issuer: str, subject: str, now: float
+    ) -> bool:
+        """Disable cascade in ONE transaction: mirror flag, session
+        purge, and PAT revocation land together or not at all — a
+        half-disabled user (flag set, sessions alive) would be a
+        security hole disguised as success.
+        """
+        import datetime as dt
+
+        from inqtrix.storage.pat_orm import personal_access_tokens as pats
+
+        disabled_at = dt.datetime.fromtimestamp(now, tz=dt.timezone.utc)
+        async with tenant_session(
+            self._session_factory,
+            tenant_id=tenant_id,
+            app_role=self._app_role,
+        ) as db:
+            result = await db.execute(
+                update(users)
+                .where(
+                    users.c.issuer == issuer,
+                    users.c.subject == subject,
+                    users.c.disabled_at.is_(None),
+                )
+                .values(disabled_at=disabled_at)
+            )
+            if not result.rowcount:
+                return False
+            await db.execute(
+                delete(auth_sessions).where(
+                    auth_sessions.c.sub == subject,
+                    auth_sessions.c.issuer == issuer,
+                )
+            )
+            await db.execute(
+                update(pats)
+                .where(
+                    pats.c.tenant_id == tenant_id,
+                    pats.c.owner_issuer == issuer,
+                    pats.c.owner_sub == subject,
+                    pats.c.revoked_at.is_(None),
+                )
+                .values(revoked_at=now)
+            )
+        return True
+
+    async def set_instance_role(
+        self, *, tenant_id: str, issuer: str, subject: str, role: str
+    ) -> bool:
+        """Set the instance role; ``True`` when a row changed."""
+        async with tenant_session(
+            self._session_factory,
+            tenant_id=tenant_id,
+            app_role=self._app_role,
+        ) as db:
+            result = await db.execute(
+                update(users)
+                .where(users.c.issuer == issuer, users.c.subject == subject)
+                .values(instance_role=role)
+            )
+        return bool(result.rowcount)
+
+    async def resolve_default_workspace(
+        self, *, tenant_id: str, issuer: str, subject: str, candidate: str
+    ) -> str | None:
+        """Return the user's project namespace, claiming ``candidate`` if unset.
+
+        The ``default_workspace_id IS NULL`` predicate makes the claim a single
+        set-only-once write under the row lock, so two concurrent first-logins
+        converge on one namespace; the re-read in the same transaction then
+        returns the canonical value (the just-claimed candidate, or one an
+        earlier login already set). ``None`` only when the user row is absent
+        (an un-mirrored identity)."""
+        async with tenant_session(
+            self._session_factory,
+            tenant_id=tenant_id,
+            app_role=self._app_role,
+        ) as db:
+            await db.execute(
+                update(users)
+                .where(
+                    users.c.issuer == issuer,
+                    users.c.subject == subject,
+                    users.c.default_workspace_id.is_(None),
+                )
+                .values(default_workspace_id=candidate)
+            )
+            row = (
+                await db.execute(
+                    select(users.c.default_workspace_id).where(
+                        users.c.issuer == issuer,
+                        users.c.subject == subject,
+                    )
+                )
+            ).first()
+        return row.default_workspace_id if row is not None else None
+
+    async def set_disabled(
+        self,
+        *,
+        tenant_id: str,
+        issuer: str,
+        subject: str,
+        disabled_at: float | None,
+    ) -> bool:
+        """Set/clear the mirror disable flag; ``True`` when a row changed.
+
+        The full cut-off cascade (session purge + PAT revoke) is
+        orchestrated by the admin router; this is the durable mirror flag
+        that denies oidc/ldap re-admission. ``None`` re-enables.
+        """
+        import datetime as dt
+
+        value = (
+            dt.datetime.fromtimestamp(disabled_at, tz=dt.timezone.utc)
+            if disabled_at is not None
+            else None
+        )
+        async with tenant_session(
+            self._session_factory,
+            tenant_id=tenant_id,
+            app_role=self._app_role,
+        ) as db:
+            result = await db.execute(
+                update(users)
+                .where(users.c.issuer == issuer, users.c.subject == subject)
+                .values(disabled_at=value)
+            )
+        return bool(result.rowcount)
+
+    async def list_users(
+        self, *, tenant_id: str
+    ) -> tuple["MirroredUser", ...]:
+        """All mirrored identities in the tenant (admin listing)."""
+        from inqtrix.auth.directory import MirroredUser
+
+        async with tenant_session(
+            self._session_factory,
+            tenant_id=tenant_id,
+            app_role=self._app_role,
+        ) as db:
+            rows = (
+                await db.execute(
+                    select(users)
+                    .where(users.c.tenant_id == tenant_id)
+                    .order_by(users.c.email)
+                )
+            ).all()
+        return tuple(
+            MirroredUser(
+                issuer=row.issuer,
+                subject=row.subject,
+                email=row.email,
+                email_verified=row.email_verified,
+                display_name=row.display_name,
+                disabled_at=(
+                    row.disabled_at.timestamp()
+                    if row.disabled_at is not None
+                    else None
+                ),
+                instance_role=row.instance_role,
+                last_login_at=(
+                    row.last_login_at.timestamp()
+                    if row.last_login_at is not None
+                    else None
+                ),
+            )
+            for row in rows
+        )
+
+    async def count_admins(self, *, tenant_id: str) -> int:
+        """Active instance-admins (the last-admin guard reads this)."""
+        async with tenant_session(
+            self._session_factory,
+            tenant_id=tenant_id,
+            app_role=self._app_role,
+        ) as db:
+            result = await db.execute(
+                select(func.count())
+                .select_from(users)
+                .where(
+                    users.c.tenant_id == tenant_id,
+                    users.c.instance_role == "admin",
+                    users.c.disabled_at.is_(None),
+                )
+            )
+        return int(result.scalar_one())
+
+    async def promote_if_no_admin(
+        self, *, tenant_id: str, issuer: str, subject: str
+    ) -> bool:
+        """Promote this user to admin IFF no active admin exists yet.
+
+        The first-login-owner bootstrap as ONE guarded statement: the
+        ``NOT EXISTS`` is evaluated inside the UPDATE, so concurrent first
+        logins across replicas promote exactly one user.
+        """
+        async with tenant_session(
+            self._session_factory,
+            tenant_id=tenant_id,
+            app_role=self._app_role,
+        ) as db:
+            has_admin = (
+                select(users.c.id)
+                .where(
+                    users.c.tenant_id == tenant_id,
+                    users.c.instance_role == "admin",
+                    users.c.disabled_at.is_(None),
+                )
+                .limit(1)
+                .exists()
+            )
+            result = await db.execute(
+                update(users)
+                .where(
+                    users.c.issuer == issuer,
+                    users.c.subject == subject,
+                    ~has_admin,
+                )
+                .values(instance_role="admin")
+            )
+        return bool(result.rowcount)
+
+    def _other_active_admin_exists(self, *, tenant_id: str, issuer: str, subject: str):
+        """``EXISTS`` clause: an active admin OTHER than ``(issuer, subject)``.
+
+        The guard at the heart of the atomic last-admin operations — folded
+        into the same statement as the write so the check-and-act cannot be
+        split by a concurrent transaction (the racy alternative was a separate
+        ``count_admins`` read in the router).
+        """
+        return (
+            select(users.c.id)
+            .where(
+                users.c.tenant_id == tenant_id,
+                users.c.instance_role == "admin",
+                users.c.disabled_at.is_(None),
+                or_(users.c.issuer != issuer, users.c.subject != subject),
+            )
+            .limit(1)
+            .exists()
+        )
+
+    async def demote_if_not_last_admin(
+        self, *, tenant_id: str, issuer: str, subject: str
+    ) -> bool:
+        """Demote to ``user`` unless this is the last active admin (atomic)."""
+        async with tenant_session(
+            self._session_factory,
+            tenant_id=tenant_id,
+            app_role=self._app_role,
+        ) as db:
+            other_admin = self._other_active_admin_exists(
+                tenant_id=tenant_id, issuer=issuer, subject=subject
+            )
+            result = await db.execute(
+                update(users)
+                .where(
+                    users.c.issuer == issuer,
+                    users.c.subject == subject,
+                    or_(
+                        users.c.instance_role != "admin",
+                        users.c.disabled_at.is_not(None),
+                        other_admin,
+                    ),
+                )
+                .values(instance_role="user")
+            )
+        return bool(result.rowcount)
+
+    async def disable_if_not_last_admin(
+        self, *, tenant_id: str, issuer: str, subject: str, disabled_at: float
+    ) -> bool:
+        """Set the disable flag unless this is the last active admin (atomic)."""
+        import datetime as dt
+
+        value = dt.datetime.fromtimestamp(disabled_at, tz=dt.timezone.utc)
+        async with tenant_session(
+            self._session_factory,
+            tenant_id=tenant_id,
+            app_role=self._app_role,
+        ) as db:
+            other_admin = self._other_active_admin_exists(
+                tenant_id=tenant_id, issuer=issuer, subject=subject
+            )
+            result = await db.execute(
+                update(users)
+                .where(
+                    users.c.issuer == issuer,
+                    users.c.subject == subject,
+                    or_(
+                        users.c.instance_role != "admin",
+                        users.c.disabled_at.is_not(None),
+                        other_admin,
+                    ),
+                )
+                .values(disabled_at=value)
+            )
+        return bool(result.rowcount)

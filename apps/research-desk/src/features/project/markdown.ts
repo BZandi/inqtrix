@@ -129,6 +129,9 @@ export function serializeProjectManifest(
     }),
     rule_order: state.chatRuleOrder,
     schema_version: PROJECT_SCHEMA_VERSION,
+    // The server-persistence opt-in (M6): survives a reload so a re-opened
+    // server project re-hydrates instead of reverting to local-first.
+    server_sync_enabled: state.serverSyncEnabled,
     ui: savedUi,
     workspace_id: state.workspaceId,
   }
@@ -164,6 +167,9 @@ export function serializeResearchRun(
     status: run.status,
     submitted_at: run.submittedAt,
     summary: run.summary,
+    // Additive shared-in marker — dropping it on round-trip would
+    // silently relabel shared-in runs as owned after a reload.
+    access: run.access ?? null,
     top_claims: run.result?.topClaims ?? [],
     top_sources: run.result?.topSources ?? [],
     usage: run.result?.usage ?? null,
@@ -211,6 +217,14 @@ export function serializeChatRule(
     linked_context_refs: linkedContextRefsToFrontmatter(normalized.linkedContextRefs ?? []),
     rule_id: rule.id,
     schema_version: PROJECT_SCHEMA_VERSION,
+    // The sync link, the precondition anchor, and the shared-in marker
+    // must survive the round-trip — losing serverTemplateId re-uploads
+    // the rule as a brand-new server template on its next save, and
+    // losing serverUpdatedAt would silently drop the stale-write guard
+    // until the next hydrate.
+    server_template_id: rule.serverTemplateId ?? null,
+    server_updated_at: rule.serverUpdatedAt ?? null,
+    access: rule.access ?? null,
     title: rule.title,
     updated_at: rule.updatedAt,
     visibility: normalized.visibility,
@@ -480,7 +494,18 @@ export function parseResearchRun(markdown: string): ResearchRunRecord {
     status: researchRunStatusOrDefault(data.status),
     submittedAt,
     summary: objectValue(data.summary),
+    ...(isRunAccess(data.access) ? { access: data.access } : {}),
   }
+}
+
+/** Frontmatter guard for the additive shared-in annotation. */
+function isRunAccess(value: unknown): value is { permission: 'edit' | 'view'; via: 'share' } {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as { permission?: unknown; via?: unknown }
+  return (
+    candidate.via === 'share'
+    && (candidate.permission === 'view' || candidate.permission === 'edit')
+  )
 }
 
 export function parseChatThread(markdown: string): ChatThreadRecord {
@@ -518,6 +543,13 @@ export function parseChatRule(markdown: string): ChatRuleRecord {
     title: stringValue(data.title),
     updatedAt: stringValue(data.updated_at),
     visibility: chatRuleVisibilityOrDefault(data.visibility),
+    ...(typeof data.server_template_id === 'string' && data.server_template_id
+      ? { serverTemplateId: data.server_template_id }
+      : {}),
+    ...(typeof data.server_updated_at === 'number'
+      ? { serverUpdatedAt: data.server_updated_at }
+      : {}),
+    ...(isRunAccess(data.access) ? { access: data.access } : {}),
   }
 }
 

@@ -561,6 +561,7 @@ downstream consumer needs them. There is no second truth.
 ## Related docs
 
 - [Answer composition](answer-composition.md) -- per-section LLM call flow, prompt templates, write-last summary.
+- [Knowledge retrieval](knowledge-retrieval.md) -- the parallel evidence and grounding flow for `mode=knowledge` (`[K#]` instead of `[E#]`).
 - [Nodes](nodes.md) -- the five LangGraph nodes that own the pipeline.
 - [State and iteration](state-and-iteration.md) -- AgentState fields and per-node read/write.
 - [Score ledger](../scoring-and-stopping/score-ledger.md) -- diagnostic snapshots over this pipeline.

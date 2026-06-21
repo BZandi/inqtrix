@@ -45,6 +45,7 @@ import {
   Paperclip,
   PencilLine,
   Redo2,
+  Search,
   SearchCheck,
   SendHorizontal,
   Scale,
@@ -97,10 +98,12 @@ import type {
   ChatModelOption,
   ModelCatalogEntry,
   ChatModelTier,
+  InqtrixCapabilities,
   NodeModelResolution,
 } from '@/features/researchRuns/types'
 import { ModelTierPicker } from '@/features/researchRuns/ModelTierPicker'
 import { ContextTokenMeter } from '@/features/composer/ContextTokenMeter'
+import { QuotaMeter } from '@/features/quota/QuotaMeter'
 import {
   buildContextTokenModel,
   estimateTokensFromText,
@@ -159,11 +162,17 @@ import { FILE_SECTION_TEMP_ID } from '@/features/files/sections'
 
 type EditorWorkspaceProps = {
   apiKey?: string
+  /** Server capability manifest; forwarded to useEditorSuggestions so the
+   * client editor-run abort tracks the server wait. */
+  capabilities: InqtrixCapabilities | null
   chatModelOptions: ChatModelOption[]
   chatModelOptionsStatus: 'available' | 'missing' | 'unresolved'
   chatModelCatalog?: ModelCatalogEntry[]
   defaultChatModel: NodeModelResolution | null
   dispatch: Dispatch<ResearchDeskAction>
+  /** Loads attached file-asset bodies on demand before an AI run reads them
+   * (M6c load-on-use); forwarded to useEditorSuggestions. */
+  ensureAssetBodiesLoaded?: (assetIds: readonly string[]) => Promise<Map<string, string>>
   reportOptions: CompletedReportOption[]
   selectedModelTier: ChatModelTier | null
   state: ProjectState
@@ -326,6 +335,9 @@ const editorCopy = {
     noComments: 'Noch keine Kommentare in diesem Dokument.',
     noDocuments: 'Noch keine Dokumente.',
     noReports: 'Keine abgeschlossenen Reports verfügbar.',
+    searchDocuments: 'Dokumente suchen',
+    searchClear: 'Suche zurücksetzen',
+    searchNoResults: 'Keine passenden Dokumente.',
     moveDocument: 'Dokument verschieben',
     moveFolder: 'Ordner verschieben',
     renameDocument: 'Dokument umbenennen',
@@ -487,6 +499,9 @@ const editorCopy = {
     noComments: 'No comments in this document yet.',
     noDocuments: 'No documents yet.',
     noReports: 'No completed reports available.',
+    searchDocuments: 'Search documents',
+    searchClear: 'Clear search',
+    searchNoResults: 'No matching documents.',
     moveDocument: 'Move document',
     moveFolder: 'Move folder',
     renameDocument: 'Rename document',
@@ -504,11 +519,13 @@ const editorCopy = {
 
 export default function EditorWorkspace({
   apiKey,
+  capabilities,
   chatModelOptions,
   chatModelOptionsStatus,
   chatModelCatalog,
   defaultChatModel,
   dispatch,
+  ensureAssetBodiesLoaded,
   reportOptions,
   selectedModelTier,
   state,
@@ -634,8 +651,10 @@ export default function EditorWorkspace({
     apiKey,
     attachedCommentIds,
     attachedRefs,
+    capabilities,
     comments,
     dispatch,
+    ensureAssetBodiesLoaded,
     locale,
     onGlobalSuccess: () => {
       setAttachedCommentIds([])
@@ -844,6 +863,19 @@ function EditorFileTree({
   const listRef = useRef<HTMLDivElement | null>(null)
   const ungroupedDocuments = documents.filter((document) => !document.folderId || !folders.some((folder) => folder.id === document.folderId))
   const hasFolders = folders.length > 0
+  const [searchQuery, setSearchQuery] = useState('')
+  const trimmedQuery = searchQuery.trim().toLowerCase()
+  const isSearching = trimmedQuery.length > 0
+  // Title search runs over the already-loaded documents (the tree hydrates all
+  // document metadata up front; only bodies are lazy), so it is a client-side
+  // filter across every folder — no server round-trip. Matches keep the
+  // document order so the result list reads top-to-bottom like the tree.
+  const searchResults = useMemo(
+    () => (isSearching
+      ? documents.filter((document) => document.title.toLowerCase().includes(trimmedQuery))
+      : []),
+    [documents, isSearching, trimmedQuery],
+  )
 
   useEffect(() => {
     setExpandedFolderIds((current) => new Set([...current, ...folders.map((folder) => folder.id)]))
@@ -1052,8 +1084,68 @@ function EditorFileTree({
           </TooltipButton>
         </div>
       </div>
+      <div className="border-b border-border px-2 py-1.5">
+        <div className="flex items-center gap-1.5 rounded-md bg-background/80 px-2 py-1">
+          <Search className="size-3.5 shrink-0 text-muted-foreground" />
+          <input
+            aria-label={copy.searchDocuments}
+            className="t-label min-w-0 flex-1 border-0 bg-transparent text-foreground outline-none placeholder:text-muted-foreground"
+            onChange={(event) => setSearchQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape' && searchQuery) {
+                event.preventDefault()
+                setSearchQuery('')
+              }
+            }}
+            placeholder={copy.searchDocuments}
+            type="search"
+            value={searchQuery}
+          />
+          {searchQuery ? (
+            <button
+              aria-label={copy.searchClear}
+              className="grid size-5 shrink-0 place-items-center rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              onClick={() => setSearchQuery('')}
+              type="button"
+            >
+              <X className="size-3.5" />
+            </button>
+          ) : null}
+        </div>
+      </div>
       <ScrollArea className="min-h-0 flex-1">
         <div className="space-y-1 p-2" ref={listRef}>
+          {isSearching ? (
+            searchResults.length > 0 ? (
+              <div className="space-y-0.5">
+                {searchResults.map((document) => (
+                  <EditorDocumentTreeItem
+                    beginDocumentDrag={beginDocumentDrag}
+                    cancelTitleEdit={cancelDocumentTitleEdit}
+                    commitTitleEdit={commitDocumentTitleEdit}
+                    copy={copy}
+                    document={document}
+                    isActive={activeDocumentId === document.id}
+                    isDragging={false}
+                    isEditing={editingDocumentId === document.id}
+                    isNested={false}
+                    key={document.id}
+                    onDelete={() => dispatch({ documentId: document.id, type: 'deleteEditorDocument' })}
+                    onDraftChange={setDocumentTitleDraft}
+                    onOpen={() => dispatch({ documentId: document.id, type: 'openEditorDocument' })}
+                    showAfterIndicator={false}
+                    showBeforeIndicator={false}
+                    startTitleEdit={startDocumentTitleEdit}
+                    titleDraft={documentTitleDraft}
+                    titleInputRef={documentTitleInputRef}
+                  />
+                ))}
+              </div>
+            ) : (
+              <p className="px-2 py-6 text-center t-meta-sm text-muted-foreground">{copy.searchNoResults}</p>
+            )
+          ) : (
+          <>
           {folders.map((folder, folderIndex) => {
             const isExpanded = expandedFolderIds.has(folder.id)
             const isDraggingFolder = draggedFolderId === folder.id
@@ -1210,6 +1302,8 @@ function EditorFileTree({
               ) : null}
             </section>
           ) : null}
+          </>
+          )}
         </div>
       </ScrollArea>
     </aside>
@@ -2758,6 +2852,7 @@ function EditorAssistantComposer({
               />
             </div>
             <div className="flex shrink-0 items-center gap-1">
+              <QuotaMeter />
               <ContextTokenMeter
                 conversationLabel={t.chat.contextCatDocument}
                 disabled={false}

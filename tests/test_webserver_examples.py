@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 
-import inqtrix.server.routes as routes_module
+import inqtrix.research.web_research as web_research_module
 from tests._webserver_helpers import (
     import_stack_module,
     make_test_client,
@@ -38,7 +38,7 @@ _STACKS = [
     "anthropic_perplexity",
     "bedrock_perplexity",
     "azure_openai_perplexity",
-    "azure_foundry_web_search",
+    "azure_foundry_web_search",    "azure_knowledge_quickstart",
 ]
 
 
@@ -73,7 +73,7 @@ def fake_agent_run(monkeypatch: pytest.MonkeyPatch):
             "usage": {"prompt_tokens": 1, "completion_tokens": 1},
         }
 
-    monkeypatch.setattr(routes_module, "agent_run", _fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", _fake_run)
     return _fake_run
 
 

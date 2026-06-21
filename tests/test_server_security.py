@@ -108,7 +108,7 @@ def _make_app_with_api_key(api_key: str = "secret-token-123") -> TestClient:
 
 
 def test_api_key_dependency_accepts_correct_bearer(monkeypatch):
-    import inqtrix.server.routes as routes_module
+    import inqtrix.research.web_research as web_research_module
 
     def fake_run(*args, **kwargs):
         return {
@@ -117,7 +117,7 @@ def test_api_key_dependency_accepts_correct_bearer(monkeypatch):
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},
         }
 
-    monkeypatch.setattr(routes_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
     with _make_app_with_api_key() as client:
         response = client.post(
             "/v1/chat/completions",
@@ -172,7 +172,7 @@ def test_api_key_dependency_rejects_malformed_authorization():
 
 def test_api_key_dependency_uses_constant_time_compare():
     """Verify hmac.compare_digest is the comparison primitive (timing safety)."""
-    with patch("inqtrix.server.security.hmac.compare_digest") as mock_cmp:
+    with patch("inqtrix.auth.api_key.hmac.compare_digest") as mock_cmp:
         mock_cmp.return_value = True
         with _make_app_with_api_key() as client:
             client.post(

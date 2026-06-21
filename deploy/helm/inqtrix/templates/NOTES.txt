@@ -1,0 +1,59 @@
+Inqtrix release "{{ .Release.Name }}" deployed to namespace "{{ .Release.Namespace }}".
+
+Components:
+  - API:    {{ include "inqtrix.fullname" . }}-api  (port {{ .Values.service.apiPort }})
+  - Web UI: {{ include "inqtrix.fullname" . }}-web  (port {{ .Values.service.webPort }})
+{{- if .Values.worker.enabled }}
+  - Worker: {{ include "inqtrix.fullname" . }}-worker
+{{- end }}
+{{- if .Values.s3.enabled }}
+  - Object store (MinIO): {{ include "inqtrix.fullname" . }}-minio:9000 (bundled S3)
+{{- end }}
+{{- if .Values.migrations.enabled }}
+  - Schema migrations ran as a {{ if .Values.postgres.enabled }}post-install{{ else }}pre-install{{ end }}/pre-upgrade hook (inqtrix-migrate).
+{{- end }}
+
+Open the Research Desk:
+{{- if and .Values.openshift.enabled .Values.route.enabled }}
+  oc -n {{ .Release.Namespace }} get route {{ include "inqtrix.fullname" . }} -o jsonpath='{.spec.host}{"\n"}'
+  then browse to https://<that-host>/
+{{- else if .Values.ingress.enabled }}
+  http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}/
+{{- else }}
+  No Ingress or Route is enabled. Port-forward to try it locally:
+    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "inqtrix.fullname" . }}-web {{ .Values.service.webPort }}:{{ .Values.service.webPort }}
+    then browse to http://127.0.0.1:{{ .Values.service.webPort }}/
+{{- end }}
+
+{{- if and .Values.valkey.enabled (not .Values.worker.enabled) }}
+
+NOTE: valkey.enabled is set but worker.enabled is not, so the bundled Valkey is
+not used -- runs execute in-process (single-pod). Set worker.enabled=true to
+dispatch runs to a worker via the queue.
+{{- end }}
+{{- if and .Values.worker.enabled (not .Values.s3.enabled) (ne (.Values.config.INQTRIX_OBJECT_STORE_BACKEND | toString) "s3") }}
+
+WARNING: the worker does NOT share the object store with the api here. With the
+local backend each pod gets its own emptyDir, so artifacts written by one are
+invisible to the other (a silent partition); a ReadWriteOnce PVC
+(persistence.enabled) only works if both pods land on the same node, else one
+stays Pending (Multi-Attach). Give the worker shared storage: --set s3.enabled=true
+(bundled MinIO) or --set config.INQTRIX_OBJECT_STORE_BACKEND=s3 plus the S3 credentials.
+{{- end }}
+{{- if and .Values.openshift.enabled .Values.postgres.enabled }}
+
+WARNING: openshift.enabled with a bundled postgres. The official postgres image needs
+a fixed UID (its initdb looks up the UID in /etc/passwd) and will NOT start under the
+default restricted-v2 SCC (the pod is rejected and the auto-wired INQTRIX_DATABASE_URL
+points at a Service with no endpoints). Use an external/managed database on OpenShift
+(set INQTRIX_DATABASE_URL), or a permissive SCC. Bundled qdrant/valkey/s3 are fine on
+OpenShift (they run under the arbitrary UID).
+{{- end }}
+
+Verify the deployment:
+  kubectl -n {{ .Release.Namespace }} wait --for=condition=ready pod -l app.kubernetes.io/instance={{ .Release.Name }} --timeout=5m
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+Scaling note: more than one API replica requires the postgres storage backend,
+a Valkey queue with worker.enabled, and the S3 object-store backend (a local
+PVC is ReadWriteOnce and not shared across pods). See docs/deployment/kubernetes.md.

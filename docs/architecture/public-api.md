@@ -65,7 +65,7 @@ The agent is reusable across runs. A typical web server keeps a single `Research
 | Method | Purpose |
 |--------|---------|
 | `research(question, history=None, deadline=None)` | Blocking run; returns a typed `ResearchResult`. |
-| `stream(question, *, include_progress=True, history=None, deadline=None)` | Generator that yields progress messages (optional) followed by answer chunks. Used for CLIs, SSE servers, and Streamlit UIs. |
+| `stream(question, *, include_progress=True, history=None, deadline=None)` | Generator that yields progress messages (optional) followed by answer chunks. Used for CLIs, SSE servers, and browser UIs. |
 
 Both methods are thread-safe as long as a single agent instance is not invoked concurrently against the same cancel event. The HTTP server uses a semaphore for concurrency (see [Web server mode](../deployment/webserver-mode.md)).
 

@@ -1,0 +1,357 @@
+# Default values for the Inqtrix chart.
+#
+# This file is the single source of truth for every knob; the deployment guide
+# (docs/deployment/kubernetes.md) references these keys rather than repeating
+# them. Defaults target a PRODUCTION posture: external PostgreSQL, no bundled
+# backing services, a restricted-v2-compatible security context. Flip the
+# *.enabled flags below for a self-contained turnkey demo.
+
+# -- Container images. Set image.registry to your registry prefix (e.g.
+# ghcr.io/your-org) and push inqtrix-api / inqtrix-web there first; see the
+# "build & publish" section of the deployment guide. Tag defaults to the chart
+# appVersion when left empty.
+image:
+  registry: ""
+  pullPolicy: IfNotPresent
+  api:
+    repository: inqtrix-api
+    tag: ""
+  web:
+    repository: inqtrix-web
+    tag: ""
+# -- Names of image-pull Secrets when the registry is private
+# (kubectl create secret docker-registry ...).
+imagePullSecrets: []
+
+# -- OpenShift mode. When true: a Route is rendered instead of an Ingress, and
+# runAsUser/runAsGroup/fsGroup are OMITTED so the restricted-v2 SCC can assign
+# its own arbitrary UID and supplemental GID 0. Leave false for vanilla
+# Kubernetes (where a fixed non-root UID and fsGroup are set for PVC ownership).
+openshift:
+  enabled: false
+
+nameOverride: ""
+fullnameOverride: ""
+
+# -- Non-secret application configuration. Every key here is rendered verbatim
+# into a ConfigMap and injected into the api/worker/migrate pods via envFrom, so
+# the names must match Inqtrix settings exactly (see src/inqtrix/settings.py and
+# docs/configuration/settings-and-env.md). Secrets do NOT belong here -- use the
+# `secret` block below.
+config:
+  INQTRIX_STORAGE_BACKEND: postgres
+  INQTRIX_AUTH_MODE: infer
+  INQTRIX_SERVER_HOST: "0.0.0.0"
+  INQTRIX_SERVER_PORT: "5100"
+  # INQTRIX_OBJECT_STORE_BACKEND is derived, not baked here: local by default, s3 when
+  # s3.enabled bundles MinIO (see configmap.yaml). Set it here explicitly ONLY to point
+  # at an external S3 endpoint (an explicit config value still wins over the derived one).
+  INQTRIX_OBJECT_STORE_PATH: /var/lib/inqtrix/objects
+# -- Free-form extra non-secret env merged into the ConfigMap (provider models,
+# feature flags, OIDC issuer/client-id, LDAP DNs, tuning -- anything non-secret).
+extraConfig: {}
+
+# -- Secret values (DB URL, session/PAT secrets, OIDC client secret, LDAP bind
+# password, S3/Qdrant/LLM keys -- the fields settings.py marks secret).
+secret:
+  # When create=true and existingSecret is empty, the chart renders a Secret
+  # from `data` below. For PRODUCTION bring your own Secret instead and set
+  # existingSecret to its name (the chart-managed path is a dev convenience).
+  create: true
+  existingSecret: ""
+  # key: value pairs placed into the chart-managed Secret. Provide via
+  # --set-string secret.data.INQTRIX_DATABASE_URL=... or a values override; do
+  # NOT commit real secrets into a values file.
+  data: {}
+
+# -- API server (FastAPI, python -m inqtrix). Stateless; scale via replicaCount
+# or autoscaling. Note: more than one replica requires the postgres storage
+# backend (the in-memory run store is per-pod) -- see the guide's scaling note.
+api:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 60
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# -- Web UI (nginx-unprivileged serving the React bundle, reverse-proxying the
+# API on a single origin). Stateless.
+web:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 60
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# -- Durable worker (inqtrix-worker). Requires INQTRIX_STORAGE_BACKEND=postgres
+# AND a Valkey queue (INQTRIX_QUEUE_BACKEND=valkey + INQTRIX_VALKEY_URL); it
+# fails loudly at startup otherwise. The worker shares the object store with the
+# api, so when enabled use the S3 object-store backend -- a local-object-store
+# PVC is ReadWriteOnce and cannot be shared with the api pod across nodes. Keep
+# disabled for single-node setups.
+worker:
+  enabled: false
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# -- One-shot DB migration as a Helm hook running `inqtrix-migrate`; Helm blocks
+# until it succeeds, so a failed migration fails the release. Hook phase depends
+# on where the DB comes from: pre-install for an external DB (exists before the
+# app), post-install when Postgres is bundled (created during install); always
+# pre-upgrade. Only meaningful with the postgres storage backend. Disable to run
+# migrations out-of-band.
+migrations:
+  enabled: true
+  backoffLimit: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+# -- Kubernetes Service in front of the api/web Deployments.
+service:
+  type: ClusterIP
+  apiPort: 5100
+  webPort: 8080
+
+# -- Ingress (vanilla Kubernetes). Ignored when openshift.enabled=true (a Route
+# is used there). The web Service is the single ingress target.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: inqtrix.example.com
+  path: /
+  pathType: Prefix
+  tls:
+    enabled: false
+    secretName: ""
+
+# -- OpenShift Route. Rendered only when openshift.enabled=true AND route.enabled.
+# The stock web container serves PLAIN HTTP on 8080, so `edge` (router terminates
+# TLS, plaintext to the pod) is the only termination that works out of the box.
+# `reencrypt`/`passthrough` require the web container to serve TLS itself (not the
+# default); for `reencrypt` also set tls.destinationCACertificate below.
+route:
+  enabled: true
+  host: ""
+  tls:
+    enabled: true
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+    # PEM CA bundle for reencrypt (required by OpenShift to validate the pod's
+    # TLS cert). Leave empty for edge.
+    destinationCACertificate: ""
+
+# -- Object-store persistence for the local backend (single-replica / demo). When
+# enabled a PVC is created and mounted at config.INQTRIX_OBJECT_STORE_PATH (the
+# exact path the app writes to, so the mount and the app can never drift). A
+# ReadWriteOnce PVC is not shared across nodes, so do NOT combine persistence with
+# worker.enabled or more than one api replica unless they are co-located -- use
+# the S3 object-store backend (config.INQTRIX_OBJECT_STORE_BACKEND=s3) for those.
+# When disabled, an emptyDir is used (object-store data is lost on pod restart).
+persistence:
+  enabled: false
+  size: 5Gi
+  storageClass: ""
+  accessMode: ReadWriteOnce
+
+# -- Pod-level security context. seccompProfile is always RuntimeDefault. On
+# vanilla Kubernetes a fixed non-root UID and fsGroup are applied (see
+# nonRootUid/fsGroup); on OpenShift (openshift.enabled=true) these are omitted so
+# the SCC assigns an arbitrary UID with supplemental GID 0.
+podSecurityContext: {}
+nonRootUid: 1001
+fsGroup: 1001
+
+# -- Container-level security context (restricted-v2 compatible). The images run
+# non-root, bind only ports >1024 (5100 / 8080) and write only to mounted
+# emptyDir/PVC volumes, so a read-only root filesystem and dropping all
+# capabilities are safe.
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# ---------------------------------------------------------------------------
+# Optional bundled backing services (turnkey demo). Default OFF -> the app uses
+# the external connections from `config` + `secret`. When enabled, the chart
+# starts a minimal single-pod instance AND auto-wires the matching connection
+# into the app (INQTRIX_DATABASE_URL / INQTRIX_QDRANT_URL+VECTOR_BACKEND+
+# KNOWLEDGE_ENABLED / INQTRIX_QUEUE_BACKEND+VALKEY_URL / INQTRIX_OBJECT_STORE_BACKEND+
+# S3_ENDPOINT_URL+S3_BUCKET+S3 keys) so a turnkey demo is one command. Any value you
+# set explicitly in `config`/`secret` wins over the auto-wired default.
+#
+# All bundled services are single-pod, demo/dev ONLY (not highly available); for
+# production on any platform prefer managed instances and leave these disabled.
+#
+# OpenShift: qdrant, valkey and s3 (minio) ARE OpenShift-compatible -- their
+# podSecurityContext below is omitted automatically under openshift.enabled so the
+# restricted-v2 SCC assigns an arbitrary UID + GID 0 (they write only to their data
+# dir and need no /etc/passwd entry). The bundled POSTGRES is the exception: the
+# official image's initdb needs the UID in /etc/passwd, so it keeps a fixed UID and
+# runs on VANILLA Kubernetes only -- on OpenShift use an external/managed database
+# (set INQTRIX_DATABASE_URL).
+postgres:
+  enabled: false
+  image: postgres:18.4-trixie
+  imagePullPolicy: IfNotPresent
+  auth:
+    username: inqtrix
+    # Embedded verbatim into INQTRIX_DATABASE_URL, so use only URL-unreserved
+    # characters [A-Za-z0-9._~-] (the chart fails the render otherwise). For an
+    # arbitrary password, use an external database with secret.data.INQTRIX_DATABASE_URL.
+    password: change-me-postgres
+    database: inqtrix
+  persistence:
+    enabled: true
+    size: 8Gi
+    storageClass: ""
+  # Vanilla-k8s security context (official postgres runs as uid 999). Empty it
+  # ({}) only with an anyuid-class SCC; on OpenShift prefer an external database.
+  podSecurityContext:
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+qdrant:
+  enabled: false
+  image: qdrant/qdrant:v1.18.2
+  imagePullPolicy: IfNotPresent
+  # The chart runs the upstream image as a fixed non-root UID on vanilla
+  # Kubernetes. The template therefore routes every mutable Qdrant path
+  # (init marker, storage, snapshots, temp files) into the mounted storage
+  # volume instead of the image-owned /qdrant directory.
+  # Optional API key. When set it is wired into both Qdrant and the app
+  # (INQTRIX_QDRANT_API_KEY); empty means no auth (acceptable in-cluster).
+  apiKey: ""
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+  # Vanilla-k8s only; omitted under openshift.enabled (SCC assigns UID + fsGroup).
+  podSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+valkey:
+  enabled: false
+  image: valkey/valkey:9.1.0
+  imagePullPolicy: IfNotPresent
+  # Embedded verbatim into INQTRIX_VALKEY_URL, so use only URL-unreserved
+  # characters [A-Za-z0-9._~-] (the chart fails the render otherwise).
+  password: change-me-valkey
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+  # Vanilla-k8s only; omitted under openshift.enabled (SCC assigns UID + fsGroup).
+  podSecurityContext:
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Bundled S3-compatible object store (MinIO) -- the turnkey equivalent of the
+# Compose `--profile s3` SeaweedFS service. Enable for a self-contained object store
+# on vanilla Kubernetes OR OpenShift (minio tolerates the restricted-v2 arbitrary
+# UID); the bucket is created automatically on first upload. For production prefer
+# external/managed S3 (set INQTRIX_OBJECT_STORE_BACKEND=s3 plus the S3_* config/secret
+# yourself) and leave this disabled. Required by worker.enabled / multi-replica setups
+# (a local PVC is ReadWriteOnce and not shared across pods).
+s3:
+  enabled: false
+  image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+  imagePullPolicy: IfNotPresent
+  # MinIO root credentials ARE the S3 access/secret keys auto-wired into the app.
+  # Unlike the DB/Valkey passwords these are sent as request credentials (not embedded
+  # in a URL), so any value works; the secret key must be >= 8 characters (MinIO).
+  accessKey: inqtrix
+  secretKey: change-me-minio
+  # Bucket the app uses; created automatically on first upload.
+  bucket: inqtrix-files
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+  # Vanilla-k8s only; omitted under openshift.enabled (SCC assigns UID + fsGroup).
+  podSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi

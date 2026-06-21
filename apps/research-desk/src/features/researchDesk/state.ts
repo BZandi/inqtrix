@@ -32,21 +32,36 @@ import type {
   FileAssetRecord,
   FileGroupRecord,
   FileLibrarySectionRecord,
+  IndexingJobLive,
+  KnowledgeAnswerRecord,
+  KnowledgeSessionGroupRecord,
+  KnowledgeSessionRecord,
+  KnowledgeThreadItemRecord,
   ProjectConnection,
   ProjectPreferences,
   ProjectState,
   ResearchRunRecord,
   VectorIndexMemberRecord,
+  VectorIndexMemberState,
   VectorIndexRecord,
+  VectorIndexRunHistoryEntry,
+  VectorIndexStatus,
 } from '@/features/project/types'
+import {
+  DEFAULT_KNOWLEDGE_SESSION_ID,
+  DEFAULT_KNOWLEDGE_SESSION_TITLE,
+} from '@/features/project/knowledgeSessionDefaults'
 import {
   applyRunEvent,
   attachRunResult,
   DEFAULT_EMBED_MODEL_ID,
   EMBED_MODELS,
   mergeRunSummary,
+  VECTOR_INDEX_HISTORY_LIMIT,
 } from '@/features/project/types'
 import { moveItem } from '@/features/composer/reorder'
+import { knowledgeAnswerFromRunResult } from '@/features/knowledge/answer'
+import { applyKnowledgeRunEvent } from '@/features/knowledge/runSteps'
 import type { AppView, JobFilter, ResearchJob } from './types'
 
 export const stackOptions = [
@@ -126,6 +141,28 @@ export type ResearchDeskAction =
   | { type: 'markApiRunError'; message: string; runId: string }
   | { type: 'upsertApiRunSummary'; select?: boolean; summary: ResearchRunSummary }
   | {
+    /** Append new ids to the END of the order (older load-more pages) rather
+     * than prepending (the page-1 hydrate / newest). */
+    append?: boolean
+    memberships: Record<string, string | null>
+    threads: ChatThreadRecord[]
+    type: 'upsertServerChatThreads'
+  }
+  | { messages: ChatMessageRecord[]; threadId: string; type: 'upsertServerChatMessages' }
+  | { groups: ChatThreadGroupRecord[]; type: 'upsertServerChatThreadGroups' }
+  | { enabled: boolean; persistLocal?: boolean; type: 'setServerSyncEnabled' }
+  | { documents: EditorDocumentRecord[]; type: 'upsertServerEditorDocuments' }
+  | { contentMarkdown: string; documentId: string; type: 'setServerEditorDocumentBody' }
+  | { folders: EditorFolderRecord[]; type: 'upsertServerEditorFolders' }
+  | { comments: EditorCommentThreadRecord[]; type: 'upsertServerEditorComments' }
+  | { sections: FileLibrarySectionRecord[]; type: 'upsertServerAssetSections' }
+  | { groups: FileGroupRecord[]; type: 'upsertServerAssetGroups' }
+  | { assets: FileAssetRecord[]; type: 'upsertServerAssetMetadata' }
+  | { assetId: string; extractedText: string; type: 'setServerAssetBody' }
+  | { assetId: string; extractedText: string; type: 'upgradeFileAssetParse' }
+  | { assetId: string; pending: boolean; type: 'setFileAssetParsePending' }
+  | { indexes: VectorIndexRecord[]; type: 'upsertServerVectorIndexes' }
+  | {
     assistantMessageId: string
     contentMarkdown: string
     createdAt: string
@@ -165,6 +202,7 @@ export type ResearchDeskAction =
   | { type: 'setReportExpanded'; isExpanded: boolean }
   | { type: 'setReportVisible'; isVisible: boolean }
   | { type: 'setChatHistoryVisible'; isVisible: boolean }
+  | { type: 'setKnowledgeHistoryVisible'; isVisible: boolean }
   | { enabled: boolean; type: 'setChatChainingEnabled' }
   | { type: 'setSelectedChatModelTier'; tier: ChatModelTier | null }
   | { type: 'setSelectedChatModel'; model: string | null }
@@ -182,14 +220,33 @@ export type ResearchDeskAction =
   | { sectionId: string; title: string; type: 'renameFileLibrarySection' }
   | { sectionId: string; title: string; type: 'createFileLibrarySection' }
   | { sectionId: string; type: 'deleteFileLibrarySection' }
-  | { fileIds: string[]; title: string; type: 'createVectorIndex' }
+  | { dims?: number; fileIds: string[]; model?: EmbedModelId; title: string; type: 'createVectorIndex' }
   | { indexId: string; title: string; type: 'renameVectorIndex' }
   | { indexId: string; type: 'deleteVectorIndex' }
-  | { indexId: string; model: EmbedModelId; type: 'setVectorIndexModel' }
+  | { dims?: number; indexId: string; model: EmbedModelId; type: 'setVectorIndexModel' }
   | { fileIds: string[]; indexId: string; type: 'addDocsToVectorIndex' }
   | { fileId: string; indexId: string; type: 'removeDocFromVectorIndex' }
-  | { indexId: string; type: 'markVectorIndexIndexing' }
-  | { indexId: string; type: 'completeVectorIndexReindex' }
+  | { indexId: string; jobId: string; source: IndexingJobLive['source']; totalDocuments: number; type: 'startVectorIndexReindex' }
+  | { indexId: string; queuePosition: number | null; type: 'markVectorIndexQueued' }
+  | { completedDocuments: number; currentDocumentTitle?: string; embedded?: boolean; fileId?: string; indexId: string; totalDocuments: number; type: 'markVectorIndexProgress' }
+  | { embeddedFileIds?: string[]; skippedFileIds?: string[]; indexId: string; serverCollectionId?: string; serverCollectionModel?: string; serverDocumentIds?: Record<string, string>; type: 'completeVectorIndexReindex' }
+  | { indexId: string; message: string; type: 'markVectorIndexError' }
+  | { indexId: string; type: 'markVectorIndexCancelled' }
+  | { title: string; type: 'createKnowledgeSessionGroup' }
+  | { groupId: string; type: 'deleteKnowledgeSessionGroup' }
+  | { groupId: string; targetIndex: number; type: 'moveKnowledgeSessionGroup' }
+  | { groupId: string; title: string; type: 'renameKnowledgeSessionGroup' }
+  | { groupId: string | null; sessionId: string; targetIndex: number; type: 'moveKnowledgeSessionToGroup' }
+  | { session: KnowledgeSessionRecord; type: 'createKnowledgeSession' }
+  | { type: 'deleteKnowledgeSession'; sessionId: string }
+  | { title: string; sessionId: string; type: 'renameKnowledgeSession' }
+  | { type: 'selectKnowledgeSession'; sessionId: string }
+  | { groups: KnowledgeSessionGroupRecord[]; type: 'upsertServerKnowledgeSessionGroups' }
+  | { memberships: Record<string, string | null>; sessions: KnowledgeSessionRecord[]; type: 'upsertServerKnowledgeSessions' }
+  | { serverIds: string[]; type: 'pruneLocalPlaceholderKnowledgeSessions' }
+  | { items: KnowledgeThreadItemRecord[]; sessionId: string; type: 'setServerKnowledgeSessionItems' }
+  | { item: KnowledgeThreadItemRecord; type: 'startKnowledgeAsk' }
+  | { answer: KnowledgeAnswerRecord; runId: string; type: 'completeKnowledgeItem' }
 
 export function initializeResearchDeskState(): ResearchDeskState {
   return createEmptyProjectState()
@@ -200,10 +257,16 @@ export function researchDeskReducer(
   action: ResearchDeskAction,
 ): ResearchDeskState {
   if (action.type === 'hydrateProject') {
-    return action.state
+    // Bump the load epoch relative to the OUTGOING state (not the loaded one),
+    // so the project-scoped server-sync hooks see a changed identity and
+    // re-hydrate from this project's own server state -- never carrying the
+    // previous project's synced fingerprints into a delete. The loaded state's
+    // own (ephemeral, unserialized) epoch is discarded on purpose.
+    return { ...action.state, projectEpoch: state.projectEpoch + 1 }
   }
   if (action.type === 'setDemoMode') {
-    return action.enabled ? createSeedProjectState() : createEmptyProjectState()
+    const base = action.enabled ? createSeedProjectState() : createEmptyProjectState()
+    return { ...base, projectEpoch: state.projectEpoch + 1 }
   }
   if (action.type === 'markProjectSaved') {
     return {
@@ -294,6 +357,9 @@ export function researchDeskReducer(
   }
   if (action.type === 'setChatHistoryVisible') {
     return { ...state, ui: { ...state.ui, isChatHistoryVisible: action.isVisible } }
+  }
+  if (action.type === 'setKnowledgeHistoryVisible') {
+    return { ...state, ui: { ...state.ui, isKnowledgeHistoryVisible: action.isVisible } }
   }
   if (action.type === 'setComposerVisible') {
     return { ...state, ui: { ...state.ui, isComposerVisible: action.isVisible } }
@@ -893,7 +959,10 @@ export function researchDeskReducer(
     const researchRunOrder = state.researchRunOrder.includes(run.runId)
       ? state.researchRunOrder
       : [run.runId, ...state.researchRunOrder]
-    const shouldSelect = action.select || state.ui.selectedJobId === null
+    // Knowledge-mode runs are surfaced by the Wissen thread, never as
+    // the selected research job (they are filtered from the job list).
+    const shouldSelect = run.mode !== 'knowledge'
+      && (action.select || state.ui.selectedJobId === null)
     const selectedJobId = shouldSelect ? run.runId : state.ui.selectedJobId
 
     return {
@@ -912,43 +981,406 @@ export function researchDeskReducer(
       },
     }
   }
-  if (action.type === 'appendApiRunEvent') {
-    const current = state.researchRuns[action.event.run_id]
-    if (!current) return state
-    const run = applyRunEvent(current, action.event)
-
+  if (action.type === 'upsertServerChatThreads') {
+    // Hydrate thread METADATA from the server (M6a). Additive + local-
+    // newer-wins (never clobber unpushed local edits) + NEVER sets dirty
+    // (server-pushed state must not trigger a re-save loop). Messages are
+    // loaded separately on thread open; a freshly hydrated thread starts
+    // with an empty message list.
+    if (action.threads.length === 0) return state
+    const chatThreads = { ...state.chatThreads }
+    const chatThreadGroupMemberships = { ...state.chatThreadGroupMemberships }
+    const newIds: string[] = []
+    for (const incoming of action.threads) {
+      const local = chatThreads[incoming.id]
+      if (local) {
+        if (incoming.updatedAt > local.updatedAt) {
+          chatThreads[incoming.id] = {
+            ...local,
+            title: incoming.title,
+            preview: incoming.preview,
+            source: incoming.source,
+            createdAt: incoming.createdAt,
+            updatedAt: incoming.updatedAt,
+          }
+          chatThreadGroupMemberships[incoming.id] =
+            action.memberships[incoming.id] ?? null
+        }
+      } else {
+        chatThreads[incoming.id] = { ...incoming, messages: [] }
+        chatThreadGroupMemberships[incoming.id] =
+          action.memberships[incoming.id] ?? null
+        newIds.push(incoming.id)
+      }
+    }
+    // Preserve the SERVER's keyset order (created_at desc) within each batch:
+    // newIds already follows action.threads, which the hook fills straight from
+    // the server page. Re-sorting by another key (e.g. updatedAt) would make the
+    // merged list inconsistent across page boundaries -- the server paginates by
+    // created_at, so an older-created/recently-updated thread would float above
+    // page-1 threads it actually sorts after on the server. Keeping the server
+    // order makes the displayed list a faithful prefix of the canonical order
+    // across every paginated load. (Sending a message to an existing thread does
+    // not re-bubble it either -- see startChatExchange -- so created_at order is
+    // the coherent client model, not an approximation of activity-recency.)
+    // Page-1 / newest hydrate prepends; an older load-more page appends to the
+    // end so the displayed order stays newest-first across paginated loads.
+    const chatThreadOrder = newIds.length === 0
+      ? state.chatThreadOrder
+      : action.append
+        ? [...state.chatThreadOrder, ...newIds]
+        : [...newIds, ...state.chatThreadOrder]
+    return {
+      ...state,
+      chatThreadGroupMemberships,
+      chatThreadOrder,
+      chatThreads,
+    }
+  }
+  if (action.type === 'upsertServerChatMessages') {
+    // Load-on-open: fill a thread's messages from the server, merged by id
+    // and ordered chronologically. Never sets dirty. Preview stays as the
+    // metadata-hydrated value.
+    const thread = state.chatThreads[action.threadId]
+    if (!thread || action.messages.length === 0) return state
+    const byId = new Map(thread.messages.map((message) => [message.id, message]))
+    for (const message of action.messages) byId.set(message.id, message)
+    const messages = [...byId.values()].sort((a, b) =>
+      a.createdAt.localeCompare(b.createdAt),
+    )
+    return {
+      ...state,
+      chatThreads: {
+        ...state.chatThreads,
+        [action.threadId]: { ...thread, messages },
+      },
+    }
+  }
+  if (action.type === 'upsertServerChatThreadGroups') {
+    if (action.groups.length === 0) return state
+    const chatThreadGroups = { ...state.chatThreadGroups }
+    const newIds: string[] = []
+    for (const incoming of action.groups) {
+      const local = chatThreadGroups[incoming.id]
+      if (local) {
+        if (incoming.updatedAt > local.updatedAt) chatThreadGroups[incoming.id] = incoming
+      } else {
+        chatThreadGroups[incoming.id] = incoming
+        newIds.push(incoming.id)
+      }
+    }
+    const sortedNew = newIds.sort((a, b) =>
+      chatThreadGroups[b].updatedAt.localeCompare(chatThreadGroups[a].updatedAt),
+    )
+    const chatThreadGroupOrder = sortedNew.length > 0
+      ? [...sortedNew, ...state.chatThreadGroupOrder]
+      : state.chatThreadGroupOrder
+    return { ...state, chatThreadGroupOrder, chatThreadGroups }
+  }
+  if (action.type === 'setServerSyncEnabled') {
+    if (state.serverSyncEnabled === action.enabled) return state
+    // A genuine user opt-in (persistLocal omitted/true) marks the project dirty
+    // so the flag persists to the local manifest. The AUTO path
+    // (persistLocal:false) derives the flag from the authenticated session on
+    // every boot, so it must NOT dirty the project (nothing local to save, and
+    // dirtying would prompt a spurious "unsaved changes" save loop).
+    const dirty = action.persistLocal === false ? state.dirty : true
+    return { ...state, dirty, serverSyncEnabled: action.enabled }
+  }
+  if (action.type === 'upsertServerEditorDocuments') {
+    // Hydrate document METADATA from the server (M6b). Additive + local-
+    // newer-wins + KEEPS the local body (the body loads separately via
+    // setServerEditorDocumentBody on open) + never sets dirty.
+    if (action.documents.length === 0) return state
+    const editorDocuments = { ...state.editorDocuments }
+    const newIds: string[] = []
+    for (const incoming of action.documents) {
+      const local = editorDocuments[incoming.id]
+      if (local) {
+        if (incoming.updatedAt > local.updatedAt) {
+          editorDocuments[incoming.id] = {
+            ...incoming,
+            contentMarkdown: local.contentMarkdown,
+          }
+        }
+      } else {
+        editorDocuments[incoming.id] = incoming
+        newIds.push(incoming.id)
+      }
+    }
+    const sortedNew = newIds.sort((a, b) =>
+      editorDocuments[b].updatedAt.localeCompare(editorDocuments[a].updatedAt),
+    )
+    const editorDocumentOrder = sortedNew.length > 0
+      ? [...sortedNew, ...state.editorDocumentOrder]
+      : state.editorDocumentOrder
+    return { ...state, editorDocumentOrder, editorDocuments }
+  }
+  if (action.type === 'setServerEditorDocumentBody') {
+    // Load-on-open: fill a document's body from the server. Never changes
+    // updatedAt (so the autosave does not read it back as a local edit)
+    // and never sets dirty.
+    const document = state.editorDocuments[action.documentId]
+    if (!document) return state
+    return {
+      ...state,
+      editorDocuments: {
+        ...state.editorDocuments,
+        [action.documentId]: {
+          ...document,
+          contentMarkdown: action.contentMarkdown,
+        },
+      },
+    }
+  }
+  if (action.type === 'upsertServerEditorFolders') {
+    if (action.folders.length === 0) return state
+    const editorFolders = { ...state.editorFolders }
+    const newIds: string[] = []
+    for (const incoming of action.folders) {
+      const local = editorFolders[incoming.id]
+      if (local) {
+        if (incoming.updatedAt > local.updatedAt) editorFolders[incoming.id] = incoming
+      } else {
+        editorFolders[incoming.id] = incoming
+        newIds.push(incoming.id)
+      }
+    }
+    const sortedNew = newIds.sort((a, b) =>
+      editorFolders[b].updatedAt.localeCompare(editorFolders[a].updatedAt),
+    )
+    const editorFolderOrder = sortedNew.length > 0
+      ? [...sortedNew, ...state.editorFolderOrder]
+      : state.editorFolderOrder
+    return { ...state, editorFolderOrder, editorFolders }
+  }
+  if (action.type === 'upsertServerEditorComments') {
+    // Load-on-open: merge a document's comments from the server, by id,
+    // local-newer-wins, never dirty. (Comments have no order array — the
+    // editor selectors sort them by anchor position.)
+    if (action.comments.length === 0) return state
+    const editorComments = { ...state.editorComments }
+    for (const incoming of action.comments) {
+      const local = editorComments[incoming.id]
+      if (!local || incoming.updatedAt > local.updatedAt) {
+        editorComments[incoming.id] = incoming
+      }
+    }
+    return { ...state, editorComments }
+  }
+  if (action.type === 'upsertServerAssetSections') {
+    // Hydrate file-library section metadata (M6c). Additive + local-newer-
+    // wins + never dirty. Mirror of upsertServerEditorFolders.
+    if (action.sections.length === 0) return state
+    const fileLibrarySections = { ...state.fileLibrarySections }
+    const newIds: string[] = []
+    for (const incoming of action.sections) {
+      const local = fileLibrarySections[incoming.id]
+      if (local) {
+        if (incoming.updatedAt > local.updatedAt) fileLibrarySections[incoming.id] = incoming
+      } else {
+        fileLibrarySections[incoming.id] = incoming
+        newIds.push(incoming.id)
+      }
+    }
+    const sortedNew = newIds.sort((a, b) =>
+      fileLibrarySections[b].updatedAt.localeCompare(fileLibrarySections[a].updatedAt),
+    )
+    const fileLibrarySectionOrder = sortedNew.length > 0
+      ? [...sortedNew, ...state.fileLibrarySectionOrder]
+      : state.fileLibrarySectionOrder
+    return { ...state, fileLibrarySectionOrder, fileLibrarySections }
+  }
+  if (action.type === 'upsertServerAssetGroups') {
+    if (action.groups.length === 0) return state
+    const fileGroups = { ...state.fileGroups }
+    const newIds: string[] = []
+    for (const incoming of action.groups) {
+      const local = fileGroups[incoming.id]
+      if (local) {
+        if (incoming.updatedAt > local.updatedAt) fileGroups[incoming.id] = incoming
+      } else {
+        fileGroups[incoming.id] = incoming
+        newIds.push(incoming.id)
+      }
+    }
+    const sortedNew = newIds.sort((a, b) =>
+      fileGroups[b].updatedAt.localeCompare(fileGroups[a].updatedAt),
+    )
+    const fileGroupOrder = sortedNew.length > 0
+      ? [...sortedNew, ...state.fileGroupOrder]
+      : state.fileGroupOrder
+    return { ...state, fileGroupOrder, fileGroups }
+  }
+  if (action.type === 'upsertServerAssetMetadata') {
+    // Hydrate asset METADATA from the server (M6c). Additive + local-newer-
+    // wins + KEEPS the local extractedText (the body loads separately via
+    // setServerAssetBody on use) + never sets dirty. Mirror of
+    // upsertServerEditorDocuments.
+    if (action.assets.length === 0) return state
+    const fileAssets = { ...state.fileAssets }
+    const newIds: string[] = []
+    for (const incoming of action.assets) {
+      const local = fileAssets[incoming.id]
+      if (local) {
+        if (incoming.updatedAt > local.updatedAt) {
+          fileAssets[incoming.id] = { ...incoming, extractedText: local.extractedText }
+        }
+      } else {
+        fileAssets[incoming.id] = incoming
+        newIds.push(incoming.id)
+      }
+    }
+    const sortedNew = newIds.sort((a, b) =>
+      fileAssets[b].updatedAt.localeCompare(fileAssets[a].updatedAt),
+    )
+    const fileAssetOrder = sortedNew.length > 0
+      ? [...sortedNew, ...state.fileAssetOrder]
+      : state.fileAssetOrder
+    return { ...state, fileAssetOrder, fileAssets }
+  }
+  if (action.type === 'setServerAssetBody') {
+    // Load-on-use: fill an asset's extractedText from the server. Never
+    // changes updatedAt (so the autosave does not read it back as a local
+    // edit) and never sets dirty. Mirror of setServerEditorDocumentBody.
+    const asset = state.fileAssets[action.assetId]
+    if (!asset) return state
+    return {
+      ...state,
+      fileAssets: {
+        ...state.fileAssets,
+        [action.assetId]: { ...asset, extractedText: action.extractedText },
+      },
+    }
+  }
+  if (action.type === 'upgradeFileAssetParse') {
+    // The background (or index-time) server parse landed: replace the instant
+    // client body with the higher-fidelity MarkItDown text and reset the parse
+    // result to a clean success — this clears any client-parse error (e.g.
+    // pdf.js failing on Safari) that the server just superseded, and ends the
+    // pending state. A real edit: bumps updatedAt + dirty so it persists.
+    // No-ops if the asset is gone, the text is empty (never blank out a good
+    // client parse), or the upgrade already landed.
+    const asset = state.fileAssets[action.assetId]
+    if (
+      !asset
+      || !action.extractedText.trim()
+      || (asset.parserId === 'markitdown' && asset.extractedText === action.extractedText)
+    ) {
+      return state
+    }
     return {
       ...state,
       dirty: true,
+      fileAssets: {
+        ...state.fileAssets,
+        [asset.id]: {
+          ...asset,
+          extractedText: action.extractedText,
+          parserId: 'markitdown',
+          parseStatus: 'parsed',
+          parseWarning: null,
+          textTruncated: false,
+          parsePending: false,
+          updatedAt: new Date().toISOString(),
+        },
+      },
+    }
+  }
+  if (action.type === 'setFileAssetParsePending') {
+    // Transient background-parse flag (drives the "Parsing…" badge). Never
+    // dirty/persisted — it is a client-only in-flight marker.
+    const asset = state.fileAssets[action.assetId]
+    if (!asset || Boolean(asset.parsePending) === action.pending) return state
+    return {
+      ...state,
+      fileAssets: {
+        ...state.fileAssets,
+        [asset.id]: { ...asset, parsePending: action.pending },
+      },
+    }
+  }
+  if (action.type === 'upsertServerVectorIndexes') {
+    // Hydrate vector-index records from the server (M6c). Additive + local-
+    // newer-wins + never dirty. Full records (members + history travel with
+    // them); the ephemeral indexingJobs map is a SEPARATE field and is left
+    // untouched so a live reindex on this device is never clobbered.
+    if (action.indexes.length === 0) return state
+    const vectorIndexes = { ...state.vectorIndexes }
+    const newIds: string[] = []
+    for (const incoming of action.indexes) {
+      const local = vectorIndexes[incoming.id]
+      if (local) {
+        if (incoming.updatedAt > local.updatedAt) vectorIndexes[incoming.id] = incoming
+      } else {
+        vectorIndexes[incoming.id] = incoming
+        newIds.push(incoming.id)
+      }
+    }
+    const sortedNew = newIds.sort((a, b) =>
+      vectorIndexes[b].updatedAt.localeCompare(vectorIndexes[a].updatedAt),
+    )
+    const vectorIndexOrder = sortedNew.length > 0
+      ? [...sortedNew, ...state.vectorIndexOrder]
+      : state.vectorIndexOrder
+    return { ...state, vectorIndexOrder, vectorIndexes }
+  }
+  if (action.type === 'appendApiRunEvent') {
+    // Knowledge thread items consume the same event stream as the run
+    // records: demo asks have no run record, live asks have both.
+    const withKnowledge = applyEventToKnowledgeItem(state, action.event)
+    const current = withKnowledge.researchRuns[action.event.run_id]
+    if (!current) return withKnowledge
+    const run = applyRunEvent(current, action.event)
+
+    return {
+      ...withKnowledge,
+      dirty: true,
       researchRuns: {
-        ...state.researchRuns,
+        ...withKnowledge.researchRuns,
         [run.runId]: run,
       },
     }
   }
   if (action.type === 'attachApiRunResult') {
-    const current = state.researchRuns[action.result.run_id]
-    if (!current) return state
+    const knowledgeItem = knowledgeItemByRunId(state, action.result.run_id)
+    const withKnowledge = knowledgeItem
+      ? updateKnowledgeItem(state, knowledgeItem.id, (item) => ({
+        ...item,
+        answer: knowledgeAnswerFromRunResult(action.result),
+        status: 'completed',
+      }))
+      : state
+    const current = withKnowledge.researchRuns[action.result.run_id]
+    if (!current) return withKnowledge
     const run = attachRunResult(current, action.result)
 
     return {
-      ...state,
+      ...withKnowledge,
       dirty: true,
       researchRuns: {
-        ...state.researchRuns,
+        ...withKnowledge.researchRuns,
         [run.runId]: run,
       },
     }
   }
   if (action.type === 'markApiRunError') {
-    const current = state.researchRuns[action.runId]
-    if (!current) return state
+    const knowledgeItem = knowledgeItemByRunId(state, action.runId)
+    const withKnowledge = knowledgeItem
+      ? updateKnowledgeItem(state, knowledgeItem.id, (item) => (
+        item.status === 'completed'
+          ? item
+          : { ...item, error: action.message, status: 'failed' }
+      ))
+      : state
+    const current = withKnowledge.researchRuns[action.runId]
+    if (!current) return withKnowledge
 
     return {
-      ...state,
+      ...withKnowledge,
       dirty: true,
       researchRuns: {
-        ...state.researchRuns,
+        ...withKnowledge.researchRuns,
         [action.runId]: {
           ...current,
           error: action.message,
@@ -960,6 +1392,290 @@ export function researchDeskReducer(
         },
       },
     }
+  }
+  if (action.type === 'createKnowledgeSession') {
+    const exists = state.knowledgeSessions[action.session.id]
+    return {
+      ...state,
+      dirty: true,
+      knowledgeSessionOrder: exists
+        ? state.knowledgeSessionOrder
+        : [action.session.id, ...state.knowledgeSessionOrder],
+      knowledgeSessions: {
+        ...state.knowledgeSessions,
+        [action.session.id]: action.session,
+      },
+      selectedKnowledgeSessionId: action.session.id,
+    }
+  }
+  if (action.type === 'createKnowledgeSessionGroup') {
+    const now = new Date().toISOString()
+    const group: KnowledgeSessionGroupRecord = {
+      createdAt: now,
+      id: createId('knowledge-session-group'),
+      title: action.title.trim() || 'New folder',
+      updatedAt: now,
+    }
+    return {
+      ...state,
+      dirty: true,
+      knowledgeSessionGroupOrder: [group.id, ...(state.knowledgeSessionGroupOrder ?? [])],
+      knowledgeSessionGroups: {
+        ...(state.knowledgeSessionGroups ?? {}),
+        [group.id]: group,
+      },
+    }
+  }
+  if (action.type === 'renameKnowledgeSessionGroup') {
+    const group = state.knowledgeSessionGroups[action.groupId]
+    const title = action.title.trim()
+    if (!group || !title || group.title === title) return state
+    return {
+      ...state,
+      dirty: true,
+      knowledgeSessionGroups: {
+        ...state.knowledgeSessionGroups,
+        [group.id]: { ...group, title, updatedAt: new Date().toISOString() },
+      },
+    }
+  }
+  if (action.type === 'deleteKnowledgeSessionGroup') {
+    if (!state.knowledgeSessionGroups[action.groupId]) return state
+    const knowledgeSessionGroups = { ...state.knowledgeSessionGroups }
+    delete knowledgeSessionGroups[action.groupId]
+    const knowledgeSessionGroupMemberships = Object.fromEntries(
+      Object.entries(state.knowledgeSessionGroupMemberships ?? {})
+        .filter(([, groupId]) => groupId !== action.groupId),
+    )
+    return {
+      ...state,
+      dirty: true,
+      knowledgeSessionGroupMemberships,
+      knowledgeSessionGroupOrder: (state.knowledgeSessionGroupOrder ?? [])
+        .filter((groupId) => groupId !== action.groupId),
+      knowledgeSessionGroups,
+    }
+  }
+  if (action.type === 'moveKnowledgeSessionGroup') {
+    return moveKnowledgeSessionGroup(state, action.groupId, action.targetIndex)
+  }
+  if (action.type === 'moveKnowledgeSessionToGroup') {
+    return moveKnowledgeSessionToGroup(state, action.sessionId, action.groupId, action.targetIndex)
+  }
+  if (action.type === 'selectKnowledgeSession') {
+    if (!state.knowledgeSessions[action.sessionId]) return state
+    return { ...state, selectedKnowledgeSessionId: action.sessionId }
+  }
+  if (action.type === 'renameKnowledgeSession') {
+    const session = state.knowledgeSessions[action.sessionId]
+    const title = action.title.trim()
+    if (!session || !title || session.title === title) return state
+    return {
+      ...state,
+      dirty: true,
+      knowledgeSessions: {
+        ...state.knowledgeSessions,
+        [session.id]: { ...session, title, updatedAt: new Date().toISOString() },
+      },
+    }
+  }
+  if (action.type === 'deleteKnowledgeSession') {
+    // The last remaining session is deletable too: the empty state shows the
+    // composer, and the next ask creates a fresh session (startKnowledgeAsk).
+    if (!state.knowledgeSessions[action.sessionId]) return state
+    const knowledgeSessions = { ...state.knowledgeSessions }
+    delete knowledgeSessions[action.sessionId]
+    const knowledgeSessionOrder = state.knowledgeSessionOrder.filter((id) => id !== action.sessionId)
+    const knowledgeItems = { ...state.knowledgeItems }
+    const knowledgeItemOrder = state.knowledgeItemOrder.filter((itemId) => {
+      const item = knowledgeItems[itemId]
+      const keep = !item || item.sessionId !== action.sessionId
+      if (!keep) delete knowledgeItems[itemId]
+      return keep
+    })
+    const selectedKnowledgeSessionId = state.selectedKnowledgeSessionId === action.sessionId
+      ? knowledgeSessionOrder[0] ?? null
+      : state.selectedKnowledgeSessionId
+    const knowledgeSessionGroupMemberships = { ...(state.knowledgeSessionGroupMemberships ?? {}) }
+    delete knowledgeSessionGroupMemberships[action.sessionId]
+    return {
+      ...state,
+      dirty: true,
+      knowledgeItemOrder,
+      knowledgeItems,
+      knowledgeSessionGroupMemberships,
+      knowledgeSessionOrder,
+      knowledgeSessions,
+      selectedKnowledgeSessionId,
+    }
+  }
+  if (action.type === 'upsertServerKnowledgeSessionGroups') {
+    if (action.groups.length === 0) return state
+    const knowledgeSessionGroups = { ...state.knowledgeSessionGroups }
+    const newIds: string[] = []
+    for (const incoming of action.groups) {
+      const local = knowledgeSessionGroups[incoming.id]
+      if (local) {
+        if (incoming.updatedAt > local.updatedAt) knowledgeSessionGroups[incoming.id] = incoming
+      } else {
+        knowledgeSessionGroups[incoming.id] = incoming
+        newIds.push(incoming.id)
+      }
+    }
+    const sortedNew = newIds.sort((a, b) =>
+      knowledgeSessionGroups[b].updatedAt.localeCompare(knowledgeSessionGroups[a].updatedAt),
+    )
+    const knowledgeSessionGroupOrder = sortedNew.length > 0
+      ? [...sortedNew, ...state.knowledgeSessionGroupOrder]
+      : state.knowledgeSessionGroupOrder
+    return { ...state, knowledgeSessionGroupOrder, knowledgeSessionGroups }
+  }
+  if (action.type === 'upsertServerKnowledgeSessions') {
+    if (action.sessions.length === 0) return state
+    const knowledgeSessions = { ...state.knowledgeSessions }
+    const knowledgeSessionGroupMemberships = { ...state.knowledgeSessionGroupMemberships }
+    const newIds: string[] = []
+    for (const incoming of action.sessions) {
+      const local = knowledgeSessions[incoming.id]
+      if (local) {
+        if (incoming.updatedAt > local.updatedAt) {
+          knowledgeSessions[incoming.id] = incoming
+          knowledgeSessionGroupMemberships[incoming.id] =
+            action.memberships[incoming.id] ?? null
+        }
+      } else {
+        knowledgeSessions[incoming.id] = incoming
+        knowledgeSessionGroupMemberships[incoming.id] =
+          action.memberships[incoming.id] ?? null
+        newIds.push(incoming.id)
+      }
+    }
+    const knowledgeSessionOrder = newIds.length === 0
+      ? state.knowledgeSessionOrder
+      : [...newIds, ...state.knowledgeSessionOrder]
+    const selectedKnowledgeSessionId =
+      state.selectedKnowledgeSessionId && knowledgeSessions[state.selectedKnowledgeSessionId]
+        ? state.selectedKnowledgeSessionId
+        : knowledgeSessionOrder[0] ?? null
+    return {
+      ...state,
+      knowledgeSessionGroupMemberships,
+      knowledgeSessionOrder,
+      knowledgeSessions,
+      selectedKnowledgeSessionId,
+    }
+  }
+  if (action.type === 'pruneLocalPlaceholderKnowledgeSessions') {
+    // The server is authoritative for the untouched seed placeholder: drop
+    // only that pristine local bootstrap session when it is not on the server.
+    // A renamed or user-created empty session is user intent and must sync.
+    const serverIds = new Set(action.serverIds)
+    const sessionHasItems = (sessionId: string) =>
+      state.knowledgeItemOrder.some(
+        (itemId) => state.knowledgeItems[itemId]?.sessionId === sessionId,
+      )
+    const isPristineBootstrap = (sessionId: string) => {
+      const session = state.knowledgeSessions[sessionId]
+      return Boolean(session)
+        && sessionId === DEFAULT_KNOWLEDGE_SESSION_ID
+        && session.title === DEFAULT_KNOWLEDGE_SESSION_TITLE
+        && !sessionHasItems(sessionId)
+    }
+    const keep = (sessionId: string) => {
+      if (serverIds.has(sessionId) || sessionHasItems(sessionId)) return true
+      if (!state.knowledgeSessions[sessionId]) return false
+      return !isPristineBootstrap(sessionId)
+    }
+    const removedIds = state.knowledgeSessionOrder.filter((id) => !keep(id))
+    if (removedIds.length === 0) return state
+    const knowledgeSessions = { ...state.knowledgeSessions }
+    for (const id of removedIds) delete knowledgeSessions[id]
+    const knowledgeSessionOrder = state.knowledgeSessionOrder.filter(keep)
+    const knowledgeSessionGroupMemberships = { ...(state.knowledgeSessionGroupMemberships ?? {}) }
+    for (const id of removedIds) delete knowledgeSessionGroupMemberships[id]
+    const selectedKnowledgeSessionId =
+      state.selectedKnowledgeSessionId && knowledgeSessions[state.selectedKnowledgeSessionId]
+        ? state.selectedKnowledgeSessionId
+        : knowledgeSessionOrder[0] ?? null
+    // No dirty flag: this runs during hydrate (a server read), not a user edit,
+    // so it must not mark the project dirty or trigger a save.
+    return {
+      ...state,
+      knowledgeSessionGroupMemberships,
+      knowledgeSessionOrder,
+      knowledgeSessions,
+      selectedKnowledgeSessionId,
+    }
+  }
+  if (action.type === 'setServerKnowledgeSessionItems') {
+    const session = state.knowledgeSessions[action.sessionId]
+    if (!session) return state
+    const existingOtherIds = state.knowledgeItemOrder.filter((itemId) =>
+      state.knowledgeItems[itemId]?.sessionId !== action.sessionId)
+    const incomingItems = action.items.map((item) => ({ ...item, sessionId: action.sessionId }))
+    return {
+      ...state,
+      knowledgeItemOrder: [...existingOtherIds, ...incomingItems.map((item) => item.id)],
+      knowledgeItems: {
+        ...Object.fromEntries(existingOtherIds.flatMap((itemId) => {
+          const item = state.knowledgeItems[itemId]
+          return item ? [[itemId, item] as const] : []
+        })),
+        ...Object.fromEntries(incomingItems.map((item) => [item.id, item])),
+      },
+    }
+  }
+  if (action.type === 'startKnowledgeAsk') {
+    const session = state.knowledgeSessions[action.item.sessionId]
+    const sessionHasItems = state.knowledgeItemOrder.some((itemId) =>
+      state.knowledgeItems[itemId]?.sessionId === action.item.sessionId)
+    const updatedSession = session
+      ? {
+        ...session,
+        title: !sessionHasItems && isPlaceholderKnowledgeSessionTitle(session.title)
+          ? knowledgeSessionTitleFromQuestion(action.item.question)
+          : session.title,
+        updatedAt: action.item.createdAt,
+      }
+      : {
+        createdAt: action.item.createdAt,
+        id: action.item.sessionId,
+        title: knowledgeSessionTitleFromQuestion(action.item.question),
+        updatedAt: action.item.createdAt,
+      }
+    const knowledgeSessionOrder = state.knowledgeSessionOrder.includes(updatedSession.id)
+      ? state.knowledgeSessionOrder
+      : [updatedSession.id, ...state.knowledgeSessionOrder]
+    return {
+      ...state,
+      dirty: true,
+      knowledgeItemOrder: [...state.knowledgeItemOrder, action.item.id],
+      knowledgeItems: {
+        ...state.knowledgeItems,
+        [action.item.id]: action.item,
+      },
+      knowledgeSessionOrder,
+      knowledgeSessions: {
+        ...state.knowledgeSessions,
+        [updatedSession.id]: updatedSession,
+      },
+      selectedKnowledgeSessionId: updatedSession.id,
+    }
+  }
+  if (action.type === 'completeKnowledgeItem') {
+    const item = knowledgeItemByRunId(state, action.runId)
+    if (!item) return state
+    return updateKnowledgeItem(state, item.id, (current) => ({
+      ...current,
+      answer: action.answer,
+      progress: {
+        ...current.progress,
+        steps: current.progress.steps.map((step) => (
+          step.status === 'done' ? step : { ...step, status: 'done' as const }
+        )),
+      },
+      status: 'completed',
+    }))
   }
   if (action.type === 'cancelLocalRun') {
     const current = state.researchRuns[action.runId]
@@ -1315,13 +2031,14 @@ export function researchDeskReducer(
       members.push({ fileId, state: 'pending' })
     }
     const id = createId('vector-index')
+    const model = action.model ?? DEFAULT_EMBED_MODEL_ID
     const index: VectorIndexRecord = {
       createdAt: now,
-      dims: dimsForEmbedModel(DEFAULT_EMBED_MODEL_ID),
+      dims: action.dims ?? dimsForEmbedModel(model),
       handle: uniqueVectorHandle(slugifyVectorHandle(action.title), state),
       id,
       members,
-      model: DEFAULT_EMBED_MODEL_ID,
+      model,
       status: members.length > 0 ? 'stale' : 'ready',
       title: action.title.trim() || 'Neuer Vektor-Index',
       updatedAt: now,
@@ -1361,7 +2078,7 @@ export function researchDeskReducer(
     const hasMembers = index.members.length > 0
     return writeVectorIndex(state, {
       ...index,
-      dims: dimsForEmbedModel(action.model),
+      dims: action.dims ?? dimsForEmbedModel(action.model),
       members: hasMembers
         ? index.members.map((member): VectorIndexMemberRecord => ({ ...member, state: 'pending' }))
         : index.members,
@@ -1404,20 +2121,199 @@ export function researchDeskReducer(
       updatedAt: new Date().toISOString(),
     })
   }
-  if (action.type === 'markVectorIndexIndexing') {
+  if (action.type === 'startVectorIndexReindex') {
     const index = state.vectorIndexes[action.indexId]
-    if (!index || index.status === 'indexing') return state
-    return writeVectorIndex(state, { ...index, status: 'indexing', updatedAt: new Date().toISOString() })
+    if (!index) return state
+    const now = new Date().toISOString()
+    const next = writeVectorIndex(state, {
+      ...index,
+      lastError: null,
+      status: 'indexing',
+      updatedAt: now,
+    })
+    return {
+      ...next,
+      indexingJobs: {
+        ...next.indexingJobs,
+        [action.indexId]: {
+          completedDocuments: 0,
+          jobId: action.jobId,
+          percent: 0,
+          source: action.source,
+          startedAt: now,
+          totalDocuments: action.totalDocuments,
+        },
+      },
+    }
+  }
+  if (action.type === 'markVectorIndexQueued') {
+    // The server job is waiting for a free slot — surface its FIFO
+    // position. Ephemeral, like progress (no writeVectorIndex / dirty).
+    const live = state.indexingJobs[action.indexId]
+    if (!live) return state
+    return {
+      ...state,
+      indexingJobs: {
+        ...state.indexingJobs,
+        [action.indexId]: { ...live, queuePosition: action.queuePosition },
+      },
+    }
+  }
+  if (action.type === 'markVectorIndexProgress') {
+    // Hot path: update ONLY the ephemeral live entry — no writeVectorIndex,
+    // so the project is never marked dirty by streaming progress.
+    const live = state.indexingJobs[action.indexId]
+    if (!live) return state
+    const percent =
+      action.totalDocuments > 0
+        ? Math.round((action.completedDocuments / action.totalDocuments) * 100)
+        : live.percent
+    // Client-build path reports the just-confirmed member (fileId) so the file
+    // list can flip that row to its real outcome live. The durable server-job
+    // path omits fileId (it streams only counts) — then leave the sets as-is.
+    const embeddedFileIds =
+      action.fileId && action.embedded
+        ? [...(live.embeddedFileIds ?? []), action.fileId]
+        : live.embeddedFileIds
+    const skippedFileIds =
+      action.fileId && !action.embedded
+        ? [...(live.skippedFileIds ?? []), action.fileId]
+        : live.skippedFileIds
+    return {
+      ...state,
+      indexingJobs: {
+        ...state.indexingJobs,
+        [action.indexId]: {
+          ...live,
+          completedDocuments: action.completedDocuments,
+          currentDocumentTitle: action.currentDocumentTitle,
+          embeddedFileIds,
+          percent,
+          // Progress means a slot freed up and the job is running now —
+          // clear any queued position so the UI leaves the waiting state.
+          queuePosition: null,
+          skippedFileIds,
+          totalDocuments: action.totalDocuments,
+        },
+      },
+    }
   }
   if (action.type === 'completeVectorIndexReindex') {
     const index = state.vectorIndexes[action.indexId]
     if (!index || index.status !== 'indexing') return state
-    return writeVectorIndex(state, {
+    const now = new Date().toISOString()
+    const live = state.indexingJobs[action.indexId]
+    // `embeddedFileIds` is the COMPLETE set of members now in the collection
+    // (client-driven build/incremental): members in it are embedded. Members in
+    // `skippedFileIds` carried no extractable text — TERMINAL 'skipped' (can
+    // never embed), distinct from genuinely-not-yet-ingested members which stay
+    // 'pending'. The index is honestly 'ready' once nothing is 'pending'
+    // (skipped is an accepted terminal outcome, never a false "ready" for a doc
+    // that still owes vectors). When `embeddedFileIds` is absent (durable
+    // re-embed of an existing collection) every member was re-embedded.
+    const embeddedSet = action.embeddedFileIds ? new Set(action.embeddedFileIds) : null
+    const skippedSet = action.skippedFileIds ? new Set(action.skippedFileIds) : null
+    // Persist each member's backend document id (merge: this run's map for the
+    // just-ingested, existing ids kept) so a later removal deletes the exact doc.
+    const docIds = action.serverDocumentIds
+    const withDocId = (member: VectorIndexMemberRecord): string | undefined =>
+      docIds?.[member.fileId] ?? member.serverDocumentId
+    const nextMemberState = (member: VectorIndexMemberRecord): VectorIndexMemberState => {
+      if (embeddedSet?.has(member.fileId)) return 'embedded'
+      if (skippedSet?.has(member.fileId)) return 'skipped'
+      // Not part of THIS run (e.g. an incremental add of other docs): keep a
+      // terminal state the member already reached — only a genuinely
+      // unprocessed member stays 'pending'. A previously-skipped doc must not
+      // silently revert to pending.
+      return member.state === 'pending' ? 'pending' : member.state
+    }
+    const members = embeddedSet
+      ? index.members.map((member): VectorIndexMemberRecord => ({
+          ...member,
+          serverDocumentId: withDocId(member),
+          state: nextMemberState(member),
+        }))
+      : index.members.map((member): VectorIndexMemberRecord => ({
+          ...member,
+          serverDocumentId: withDocId(member),
+          // Durable re-embed re-vectorizes existing documents in place; a
+          // no-text 'skipped' member has no document to re-embed, so it stays
+          // skipped rather than falsely flipping to embedded.
+          state: member.state === 'skipped' ? 'skipped' : 'embedded',
+        }))
+    // Ready once nothing is genuinely pending; embedded + skipped are both
+    // terminal (matches the manifest's vectorIndexStatusOrDefault rule).
+    const nothingPending = members.every((member) => member.state !== 'pending')
+    const next = writeVectorIndex(state, {
       ...index,
-      members: index.members.map((member): VectorIndexMemberRecord => ({ ...member, state: 'embedded' })),
-      status: 'ready',
-      updatedAt: new Date().toISOString(),
+      history: appendVectorIndexHistory(index, {
+        documents: embeddedSet ? embeddedSet.size : (live?.totalDocuments ?? index.members.length),
+        durationMs: runDurationMs(live, now),
+        finishedAt: now,
+        result: 'ok',
+        startedAt: live?.startedAt ?? now,
+      }),
+      lastError: null,
+      members,
+      serverCollectionId: action.serverCollectionId ?? index.serverCollectionId ?? null,
+      serverCollectionModel:
+        action.serverCollectionModel ?? index.serverCollectionModel ?? null,
+      status: nothingPending ? 'ready' : 'stale',
+      updatedAt: now,
     })
+    return clearIndexingJob(next, action.indexId)
+  }
+  if (action.type === 'markVectorIndexError') {
+    const index = state.vectorIndexes[action.indexId]
+    // Same precondition as completion: a terminal transition is only valid
+    // while a run is in flight. Without it, a late/duplicate terminal
+    // callback (resume race, double cancel) would append a garbage history
+    // row and flip a finished index back to error.
+    if (!index || index.status !== 'indexing') return state
+    const now = new Date().toISOString()
+    const live = state.indexingJobs[action.indexId]
+    const next = writeVectorIndex(state, {
+      ...index,
+      history: appendVectorIndexHistory(index, {
+        documents: live?.completedDocuments ?? 0,
+        durationMs: runDurationMs(live, now),
+        error: action.message,
+        finishedAt: now,
+        result: 'error',
+        startedAt: live?.startedAt ?? now,
+      }),
+      lastError: action.message,
+      status: 'error',
+      updatedAt: now,
+    })
+    return clearIndexingJob(next, action.indexId)
+  }
+  if (action.type === 'markVectorIndexCancelled') {
+    const index = state.vectorIndexes[action.indexId]
+    if (!index || index.status !== 'indexing') return state
+    const now = new Date().toISOString()
+    const live = state.indexingJobs[action.indexId]
+    // Restore the pre-reindex status: stale if any member still needs
+    // embedding, else ready. The record's member states were untouched
+    // during the run, so this reflects reality without storing it.
+    const status: VectorIndexStatus = index.members.some(
+      (member) => member.state === 'pending',
+    )
+      ? 'stale'
+      : 'ready'
+    const next = writeVectorIndex(state, {
+      ...index,
+      history: appendVectorIndexHistory(index, {
+        documents: live?.completedDocuments ?? 0,
+        durationMs: runDurationMs(live, now),
+        finishedAt: now,
+        result: 'cancelled',
+        startedAt: live?.startedAt ?? now,
+      }),
+      status,
+      updatedAt: now,
+    })
+    return clearIndexingJob(next, action.indexId)
   }
   if (action.type === 'upsertChatRule') {
     const now = new Date().toISOString()
@@ -1755,6 +2651,151 @@ function threadWithMessages(
 
 function chatPreviewFromMessages(messages: readonly ChatMessageRecord[]) {
   return [...messages].reverse().find((message) => message.role === 'user')?.contentMarkdown ?? 'No user message yet'
+}
+
+function moveKnowledgeSessionGroup(
+  state: ResearchDeskState,
+  groupId: string,
+  targetIndex: number,
+): ResearchDeskState {
+  if (!state.knowledgeSessionGroups[groupId]) return state
+  const orderWithoutGroup = state.knowledgeSessionGroupOrder.filter((candidateId) => candidateId !== groupId)
+  const boundedTargetIndex = Math.max(0, Math.min(orderWithoutGroup.length, targetIndex))
+  const knowledgeSessionGroupOrder = [...orderWithoutGroup]
+  knowledgeSessionGroupOrder.splice(boundedTargetIndex, 0, groupId)
+
+  if (arraysEqual(knowledgeSessionGroupOrder, state.knowledgeSessionGroupOrder)) return state
+
+  return {
+    ...state,
+    dirty: true,
+    knowledgeSessionGroupOrder,
+  }
+}
+
+function moveKnowledgeSessionToGroup(
+  state: ResearchDeskState,
+  sessionId: string,
+  requestedGroupId: string | null,
+  targetIndex: number,
+): ResearchDeskState {
+  if (!state.knowledgeSessions[sessionId]) return state
+  const groupId = requestedGroupId && state.knowledgeSessionGroups[requestedGroupId]
+    ? requestedGroupId
+    : null
+  const currentGroupId = normalizedKnowledgeSessionGroupId(state, sessionId)
+  const currentSectionSessionIds = knowledgeSessionIdsForGroup(state, currentGroupId)
+  const currentIndex = currentSectionSessionIds.indexOf(sessionId)
+  const targetSessionIds = knowledgeSessionIdsForGroup(state, groupId).filter((id) => id !== sessionId)
+  const boundedTargetIndex = Math.max(0, Math.min(targetSessionIds.length, targetIndex))
+  if (currentGroupId === groupId && currentIndex === boundedTargetIndex) return state
+
+  const knowledgeSessionGroupMemberships = { ...(state.knowledgeSessionGroupMemberships ?? {}) }
+  if (groupId) {
+    knowledgeSessionGroupMemberships[sessionId] = groupId
+  } else {
+    delete knowledgeSessionGroupMemberships[sessionId]
+  }
+  const knowledgeSessions = currentGroupId === groupId
+    ? state.knowledgeSessions
+    : {
+      ...state.knowledgeSessions,
+      [sessionId]: {
+        ...state.knowledgeSessions[sessionId],
+        updatedAt: new Date().toISOString(),
+      },
+    }
+
+  return {
+    ...state,
+    dirty: true,
+    knowledgeSessionGroupMemberships,
+    knowledgeSessionOrder: insertKnowledgeSessionIntoSection(
+      state,
+      knowledgeSessionGroupMemberships,
+      sessionId,
+      groupId,
+      boundedTargetIndex,
+    ),
+    knowledgeSessions,
+  }
+}
+
+function insertKnowledgeSessionIntoSection(
+  state: ResearchDeskState,
+  memberships: Record<string, string | null>,
+  sessionId: string,
+  groupId: string | null,
+  targetIndex: number,
+) {
+  const orderWithoutSession = state.knowledgeSessionOrder.filter((id) => id !== sessionId)
+  const targetSessionIds = orderWithoutSession.filter((id) =>
+    normalizedKnowledgeSessionGroupId(state, id, memberships) === groupId)
+  const beforeSessionId = targetSessionIds[targetIndex]
+  if (beforeSessionId) {
+    return insertBefore(orderWithoutSession, sessionId, beforeSessionId)
+  }
+
+  const previousSessionId = targetSessionIds[targetIndex - 1]
+  if (previousSessionId) {
+    return insertAfter(orderWithoutSession, sessionId, previousSessionId)
+  }
+
+  const sectionInsertionIndex = emptyKnowledgeSessionSectionInsertionIndex(
+    state,
+    orderWithoutSession,
+    memberships,
+    groupId,
+  )
+  const nextOrder = [...orderWithoutSession]
+  nextOrder.splice(sectionInsertionIndex, 0, sessionId)
+  return nextOrder
+}
+
+function emptyKnowledgeSessionSectionInsertionIndex(
+  state: ResearchDeskState,
+  orderWithoutSession: string[],
+  memberships: Record<string, string | null>,
+  groupId: string | null,
+) {
+  const sectionKeys = [
+    ...state.knowledgeSessionGroupOrder.filter((candidateId) => Boolean(state.knowledgeSessionGroups[candidateId])),
+    null,
+  ]
+  const targetSectionIndex = Math.max(0, sectionKeys.findIndex((candidateId) => candidateId === groupId))
+  for (const nextGroupId of sectionKeys.slice(targetSectionIndex + 1)) {
+    const nextSessionId = orderWithoutSession.find((sessionId) => (
+      normalizedKnowledgeSessionGroupId(state, sessionId, memberships) === nextGroupId
+    ))
+    if (nextSessionId) return orderWithoutSession.indexOf(nextSessionId)
+  }
+
+  for (const previousGroupId of sectionKeys.slice(0, targetSectionIndex).reverse()) {
+    const previousSessionId = [...orderWithoutSession].reverse().find((sessionId) => (
+      normalizedKnowledgeSessionGroupId(state, sessionId, memberships) === previousGroupId
+    ))
+    if (previousSessionId) return orderWithoutSession.indexOf(previousSessionId) + 1
+  }
+
+  return orderWithoutSession.length
+}
+
+function knowledgeSessionIdsForGroup(
+  state: ResearchDeskState,
+  groupId: string | null,
+) {
+  return state.knowledgeSessionOrder.filter((sessionId) => (
+    normalizedKnowledgeSessionGroupId(state, sessionId) === groupId
+  ))
+}
+
+function normalizedKnowledgeSessionGroupId(
+  state: ResearchDeskState,
+  sessionId: string,
+  memberships = state.knowledgeSessionGroupMemberships,
+) {
+  const groupId = memberships[sessionId]
+  return groupId && state.knowledgeSessionGroups[groupId] ? groupId : null
 }
 
 function moveChatThreadGroup(
@@ -2452,6 +3493,21 @@ function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
+function knowledgeSessionTitleFromQuestion(question: string): string {
+  const title = question.trim().replace(/\s+/g, ' ').slice(0, 48)
+  return title || 'Knowledge session'
+}
+
+function isPlaceholderKnowledgeSessionTitle(title: string): boolean {
+  return [
+    'Knowledge session',
+    'New knowledge session',
+    'New session',
+    'Neue Sitzung',
+    DEFAULT_KNOWLEDGE_SESSION_TITLE,
+  ].includes(title)
+}
+
 function slugifyVectorHandle(value: string): string {
   const normalized = value
     .normalize('NFKD')
@@ -2479,12 +3535,90 @@ function dimsForEmbedModel(model: EmbedModelId): number {
   return EMBED_MODELS.find((entry) => entry.id === model)?.dims ?? 3072
 }
 
+function knowledgeItemByRunId(
+  state: ProjectState,
+  runId: string,
+): KnowledgeThreadItemRecord | null {
+  for (const itemId of state.knowledgeItemOrder) {
+    const item = state.knowledgeItems[itemId]
+    if (item && item.runId === runId) return item
+  }
+  return null
+}
+
+function updateKnowledgeItem(
+  state: ProjectState,
+  itemId: string,
+  update: (item: KnowledgeThreadItemRecord) => KnowledgeThreadItemRecord,
+): ProjectState {
+  const current = state.knowledgeItems[itemId]
+  if (!current) return state
+  const next = update(current)
+  if (next === current) return state
+  return {
+    ...state,
+    knowledgeItems: {
+      ...state.knowledgeItems,
+      [itemId]: next,
+    },
+  }
+}
+
+/** Route one run event into the matching knowledge thread item (live
+ * runs and demo asks share this path); terminal failure events also
+ * fail the item so the card never poses as still running. */
+function applyEventToKnowledgeItem(
+  state: ProjectState,
+  event: ResearchRunEvent,
+): ProjectState {
+  const item = knowledgeItemByRunId(state, event.run_id)
+  if (!item || item.status !== 'running') return state
+  return updateKnowledgeItem(state, item.id, (current) => {
+    const progress = applyKnowledgeRunEvent(current.progress, event)
+    if (event.type === 'inqtrix.run.failed' || event.type === 'inqtrix.run.cancelled') {
+      const error = typeof (event.data.error as { message?: unknown } | undefined)?.message === 'string'
+        ? String((event.data.error as { message?: unknown }).message)
+        : undefined
+      return {
+        ...current,
+        error: error ?? current.error,
+        progress,
+        status: 'failed',
+      }
+    }
+    if (progress === current.progress) return current
+    return { ...current, progress }
+  })
+}
+
 function writeVectorIndex(state: ProjectState, index: VectorIndexRecord): ProjectState {
   return {
     ...state,
     dirty: true,
     vectorIndexes: { ...state.vectorIndexes, [index.id]: index },
   }
+}
+
+/** Prepend one finished run to the index history, newest first, capped. */
+function appendVectorIndexHistory(
+  index: VectorIndexRecord,
+  entry: VectorIndexRunHistoryEntry,
+): VectorIndexRunHistoryEntry[] {
+  return [entry, ...(index.history ?? [])].slice(0, VECTOR_INDEX_HISTORY_LIMIT)
+}
+
+/** Elapsed run time from the live entry's start to *now* (ms, never negative). */
+function runDurationMs(live: IndexingJobLive | undefined, now: string): number {
+  if (!live) return 0
+  return Math.max(0, new Date(now).getTime() - new Date(live.startedAt).getTime())
+}
+
+/** Drop the ephemeral live-progress entry for an index (run finished). */
+function clearIndexingJob(state: ProjectState, indexId: string): ProjectState {
+  if (!(indexId in state.indexingJobs)) return state
+  const indexingJobs = { ...state.indexingJobs }
+  delete indexingJobs[indexId]
+  return { ...state, indexingJobs }
 }
 
 /** Removes the given file ids from every vector index's membership and

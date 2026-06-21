@@ -10,6 +10,7 @@ import pytest
 
 import inqtrix.server.runs as runs_module
 from inqtrix.server.runs import (
+    RunActive,
     RunHandle,
     RunNotFound,
     RunQueueFull,
@@ -171,6 +172,189 @@ def test_list_and_get_can_filter_by_workspace_id() -> None:
     assert store.get(run_a["run_id"], workspace_id="ws_browser_a")["workspace_id"] == "ws_browser_a"
     with pytest.raises(RunNotFound):
         store.get(run_b["run_id"], workspace_id="ws_browser_a")
+
+
+def test_delete_removes_terminal_run_for_owner() -> None:
+    store = _store(max_queue_size=2)
+    store.import_completed_run(
+        run_id="run_del_1",
+        question="report",
+        stack_name="default",
+        result={"answer": "body"},
+        workspace_id="ws_owner",
+        created_by_sub="owner-1",
+        created_by_tenant_id="default",
+    )
+
+    store.delete("run_del_1", workspace_id="ws_owner", requester_sub="owner-1")
+
+    # The run is gone from the durable surface, so a reload cannot re-hydrate
+    # it (the regression behind "deleted report comes back").
+    assert store.list(workspace_id="ws_owner") == []
+    with pytest.raises(RunNotFound):
+        store.get("run_del_1", workspace_id="ws_owner")
+    # Delete is not idempotent: a repeat is a clean 404, not a crash.
+    with pytest.raises(RunNotFound):
+        store.delete("run_del_1", workspace_id="ws_owner", requester_sub="owner-1")
+
+
+def test_delete_refuses_non_owner_and_cross_workspace() -> None:
+    store = _store(max_queue_size=2)
+    store.import_completed_run(
+        run_id="run_del_2",
+        question="report",
+        stack_name="default",
+        result={"answer": "body"},
+        workspace_id="ws_owner",
+        created_by_sub="owner-1",
+        created_by_tenant_id="default",
+    )
+
+    # Owner-only is stronger than cancel: a different creator gets the
+    # indistinct RunNotFound and the run survives.
+    with pytest.raises(RunNotFound):
+        store.delete(
+            "run_del_2", workspace_id="ws_owner", requester_sub="intruder"
+        )
+    # The right owner from the wrong namespace is denied too.
+    with pytest.raises(RunNotFound):
+        store.delete(
+            "run_del_2", workspace_id="ws_other", requester_sub="owner-1"
+        )
+    assert [s["run_id"] for s in store.list(workspace_id="ws_owner")] == [
+        "run_del_2"
+    ]
+
+
+def test_delete_allows_legacy_run_without_recorded_owner() -> None:
+    store = _store(max_queue_size=2)
+    store.import_completed_run(
+        run_id="run_legacy",
+        question="legacy report",
+        stack_name="default",
+        result={"answer": "body"},
+        workspace_id="ws_legacy",
+        created_by_sub=None,
+        created_by_tenant_id="default",
+    )
+
+    # A pre-scoping run has no recorded creator; gating it on the workspace
+    # alone keeps it deletable instead of orphaned forever, while a foreign
+    # namespace is still denied.
+    with pytest.raises(RunNotFound):
+        store.delete(
+            "run_legacy", workspace_id="ws_other", requester_sub="__anonymous__"
+        )
+    store.delete(
+        "run_legacy", workspace_id="ws_legacy", requester_sub="__anonymous__"
+    )
+    assert store.list(workspace_id="ws_legacy") == []
+
+
+def test_delete_refuses_a_still_active_run() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_work(handle: RunHandle) -> None:
+        started.set()
+        release.wait(timeout=1)
+        handle.complete({"answer": "done"})
+
+    store = _store(max_queue_size=2)
+    summary = store.submit(
+        question="running",
+        stack_name="default",
+        workspace_id="ws_owner",
+        created_by_sub="owner-1",
+        work=blocking_work,
+    )
+    _wait_until(started.is_set)
+
+    # Deleting a record an executing worker still holds would let its final
+    # write resurrect a half-gone run, so it is refused until terminal.
+    with pytest.raises(RunActive):
+        store.delete(
+            summary["run_id"], workspace_id="ws_owner", requester_sub="owner-1"
+        )
+
+    release.set()
+    _wait_until(
+        lambda: store.get(summary["run_id"], workspace_id="ws_owner")["status"]
+        == "completed"
+    )
+    store.delete(
+        summary["run_id"], workspace_id="ws_owner", requester_sub="owner-1"
+    )
+    assert store.list(workspace_id="ws_owner") == []
+
+
+def test_import_completed_run_persists_and_is_idempotent() -> None:
+    store = _store(max_queue_size=2)
+    first = store.import_completed_run(
+        run_id="run_report_1",
+        question="imported report",
+        stack_name="default",
+        result={"answer": "the report body", "metrics": {}},
+        created_at=1000.0,
+        workspace_id="ws_owner",
+        created_by_sub="owner-1",
+        created_by_tenant_id="default",
+    )
+    assert first["run_id"] == "run_report_1"
+    assert first["status"] == "completed"
+    # Lists + scopes to the owner's workspace, and the body is fetchable.
+    assert [s["run_id"] for s in store.list(workspace_id="ws_owner")] == [
+        "run_report_1"
+    ]
+    assert store.result("run_report_1")["answer"] == "the report body"
+    # Re-importing the OWNER's own run is an idempotent no-op (one row).
+    again = store.import_completed_run(
+        run_id="run_report_1",
+        question="imported report",
+        stack_name="default",
+        result={"answer": "ignored on re-import"},
+        created_by_sub="owner-1",
+        created_by_tenant_id="default",
+    )
+    assert again["run_id"] == "run_report_1"
+    assert len(store.list()) == 1
+
+
+def test_import_completed_run_never_overwrites_a_foreign_owner() -> None:
+    store = _store(max_queue_size=2)
+    store.import_completed_run(
+        run_id="run_shared_id",
+        question="A",
+        stack_name="default",
+        result={"answer": "owner A body"},
+        created_by_sub="owner-a",
+        created_by_tenant_id="default",
+    )
+    # A different principal importing the SAME id must NOT clobber or leak A's
+    # run; it gets a fresh id instead (No Silent Fallbacks, no cross-user loss).
+    other = store.import_completed_run(
+        run_id="run_shared_id",
+        question="B",
+        stack_name="default",
+        result={"answer": "owner B body"},
+        created_by_sub="owner-b",
+        created_by_tenant_id="default",
+    )
+    assert other["run_id"] != "run_shared_id"
+    assert store.result("run_shared_id")["answer"] == "owner A body"
+    assert store.result(other["run_id"])["answer"] == "owner B body"
+
+
+def test_import_completed_run_rejects_non_terminal_status() -> None:
+    store = _store()
+    with pytest.raises(ValueError):
+        store.import_completed_run(
+            run_id="x",
+            question="q",
+            stack_name="default",
+            result={},
+            status="running",
+        )
 
 
 def test_queue_full_rejects_extra_waiting_run() -> None:

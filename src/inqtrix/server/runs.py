@@ -16,9 +16,18 @@ from collections import deque
 from dataclasses import dataclass, field
 from enum import StrEnum
 from queue import Queue
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Mapping
 
-from inqtrix.runtime_logging import new_run_id, sanitize_event_payload
+from inqtrix.auth.permissions import SharePermission
+from inqtrix.runs.shared import (
+    access_annotation,
+    build_run_summary,
+    expand_run_event,
+)
+from inqtrix.runtime_logging import new_run_id
+
+if TYPE_CHECKING:
+    from inqtrix.auth.principal import UserContext
 from inqtrix.settings import ServerSettings
 from inqtrix.text import iter_word_chunks
 from inqtrix.urls import sanitize_error
@@ -52,6 +61,15 @@ class RunNotFound(KeyError):
     """Raised when a requested run id is not present in memory."""
 
 
+class RunActive(RuntimeError):
+    """Raised when a delete targets a run that is still queued or running.
+
+    Deletion is terminal-only: removing a record an executing worker still
+    holds would let its final write resurrect a half-gone run. The caller
+    cancels first, then deletes once the run reaches a terminal state.
+    """
+
+
 @dataclass
 class RunRecord:
     """Mutable server-side state for one native run."""
@@ -62,6 +80,15 @@ class RunRecord:
     workspace_id: str | None
     created_at: float
     work: RunWork | None = field(repr=False)
+    created_by_sub: str | None = None
+    """Verified subject that submitted the run (authorization fact,
+    server-resolved from the principal — unlike ``workspace_id``,
+    which is the client-supplied UI namespace). ``None`` only for
+    records created before the field existed."""
+    created_by_tenant_id: str | None = None
+    """Tenant of the submitting principal. Carried alongside the sub
+    because OIDC subjects are only unique per issuer/tenant — a sub
+    collision across tenants must never grant visibility."""
     agent_overrides: dict[str, Any] = field(default_factory=dict)
     mode: str = "research"
     status: RunStatus = RunStatus.QUEUED
@@ -179,8 +206,17 @@ class RunStore:
         agent_overrides: dict[str, Any] | None = None,
         mode: str = "research",
         workspace_id: str | None = None,
+        created_by_sub: str | None = None,
+        created_by_tenant_id: str | None = None,
+        request_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create a queued run and dispatch it if capacity is available.
+
+        Args:
+            request_payload: Re-execution payload persisted by durable
+                backends so worker processes can rebuild the run from
+                the row alone. Deliberately ignored here — in-memory
+                execution keeps the work closure in-process.
 
         Returns:
             Public run summary suitable for HTTP responses.
@@ -188,6 +224,7 @@ class RunStore:
         Raises:
             RunQueueFull: When the waiting queue is already full.
         """
+        del request_payload
         with self._lock:
             self._cleanup_locked()
             if len(self._pending) >= self._max_queue_size and self._running_count >= self._max_concurrent:
@@ -200,6 +237,8 @@ class RunStore:
                 stack_name=stack_name,
                 workspace_id=workspace_id,
                 created_at=time.time(),
+                created_by_sub=created_by_sub,
+                created_by_tenant_id=created_by_tenant_id,
                 work=work,
                 agent_overrides=dict(agent_overrides or {}),
                 mode=mode,
@@ -218,32 +257,172 @@ class RunStore:
             self._dispatch_locked()
             return self._summary_locked(record)
 
-    def get(self, run_id: str, *, workspace_id: str | None = None) -> dict[str, Any]:
+    def import_completed_run(
+        self,
+        *,
+        run_id: str,
+        question: str,
+        stack_name: str,
+        result: dict[str, Any],
+        status: str = "completed",
+        mode: str = "research",
+        agent_overrides: dict[str, Any] | None = None,
+        snapshot: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+        created_at: float | None = None,
+        workspace_id: str | None = None,
+        created_by_sub: str | None = None,
+        created_by_tenant_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist an ALREADY-TERMINAL run carried in from a project file.
+
+        Unlike :meth:`submit` (which queues a fresh run for execution), this
+        stores a completed report snapshot directly so a loaded project's
+        reports survive a reload + follow the user, scoped to the caller. The
+        client-supplied ``run_id`` is kept when free so the local and server
+        records stay aligned (no remap); a re-import of the caller's OWN run is
+        an idempotent no-op (snapshots are immutable). If the id is already held
+        by ANOTHER principal, a fresh id is allocated rather than overwriting or
+        leaking that row (No Silent Fallbacks).
+
+        ``created_at`` keeps the report's ORIGINAL date for display + ordering,
+        but ``finished_at`` is set to the import time so the durable-retention
+        clock starts now: a report older than the retention window must NOT be
+        pruned on the next cleanup just because its original run finished long
+        ago (that would re-lose it). ``finished_at`` is therefore not a
+        parameter.
+
+        Raises:
+            ValueError: When *status* is not a terminal status.
+        """
+        terminal = _coerce_status(status)
+        if terminal not in TERMINAL_RUN_STATUSES:
+            raise ValueError(
+                f"import_completed_run requires a terminal status, got {status!r}"
+            )
+        now = time.time()
+        with self._lock:
+            self._cleanup_locked()
+            existing = self._records.get(run_id)
+            if existing is not None and not (
+                existing.created_by_sub == created_by_sub
+                and existing.created_by_tenant_id == created_by_tenant_id
+            ):
+                log.warning(
+                    "Imported run id %s already owned by another principal; "
+                    "allocating a new id.",
+                    run_id,
+                )
+                run_id = self._new_unique_run_id_locked()
+                existing = None
+            if existing is not None:
+                return self._summary_locked(existing)
+            record = RunRecord(
+                run_id=run_id,
+                question=question[:500],
+                stack_name=stack_name,
+                workspace_id=workspace_id,
+                created_at=created_at if created_at is not None else now,
+                created_by_sub=created_by_sub,
+                created_by_tenant_id=created_by_tenant_id,
+                work=None,
+                agent_overrides=dict(agent_overrides or {}),
+                mode=mode,
+            )
+            record.events = deque(maxlen=self._event_buffer_size)
+            record.status = terminal
+            # Retention clock = import time (not the original finish), so an old
+            # report is kept the full window from when it was imported.
+            record.started_at = now
+            record.finished_at = now
+            record.finished_monotonic = time.monotonic()
+            record.snapshot = dict(snapshot or {})
+            record.result = (
+                dict(result) if terminal == RunStatus.COMPLETED else None
+            )
+            record.error = dict(error) if error else None
+            self._records[run_id] = record
+            return self._summary_locked(record)
+
+    def owner_sub(self, run_id: str) -> str | None:
+        """The run's creator regardless of visibility (share layer)."""
+        with self._lock:
+            record = self._records.get(run_id)
+            return record.created_by_sub if record is not None else None
+
+    def get(
+        self,
+        run_id: str,
+        *,
+        workspace_id: str | None = None,
+        visible_to: "UserContext | None" = None,
+        also_visible: "Mapping[str, SharePermission] | None" = None,
+    ) -> dict[str, Any]:
         """Return a public summary for *run_id*."""
         with self._lock:
             self._cleanup_locked()
-            record = self._record_locked(run_id, workspace_id=workspace_id)
-            return self._summary_locked(record)
+            record, shared = self._record_locked(
+                run_id,
+                workspace_id=workspace_id,
+                visible_to=visible_to,
+                also_visible=also_visible,
+            )
+            return self._summary_locked(record, shared=shared)
 
-    def list(self, *, workspace_id: str | None = None) -> list[dict[str, Any]]:
-        """Return public summaries for all in-memory runs."""
+    def list(
+        self,
+        *,
+        workspace_id: str | None = None,
+        visible_to: "UserContext | None" = None,
+        also_visible: "Mapping[str, SharePermission] | None" = None,
+    ) -> list[dict[str, Any]]:
+        """Return public summaries for all in-memory runs.
+
+        Shared-in runs join the listing REGARDLESS of the workspace
+        namespace filter (they carry the grantor's workspace id) and
+        carry the additive ``access`` annotation.
+        """
         with self._lock:
             self._cleanup_locked()
-            return [
-                self._summary_locked(record)
-                for record in sorted(
-                    self._records.values(),
-                    key=lambda item: item.created_at,
-                    reverse=True,
+            summaries = []
+            for record in sorted(
+                self._records.values(),
+                key=lambda item: item.created_at,
+                reverse=True,
+            ):
+                if _workspace_matches(
+                    record, workspace_id
+                ) and _visible_to_matches(record, visible_to):
+                    summaries.append(self._summary_locked(record))
+                    continue
+                shared = (
+                    also_visible.get(record.run_id)
+                    if also_visible is not None
+                    else None
                 )
-                if _workspace_matches(record, workspace_id)
-            ]
+                if shared is not None:
+                    summaries.append(
+                        self._summary_locked(record, shared=shared)
+                    )
+            return summaries
 
-    def result(self, run_id: str, *, workspace_id: str | None = None) -> dict[str, Any]:
+    def result(
+        self,
+        run_id: str,
+        *,
+        workspace_id: str | None = None,
+        visible_to: "UserContext | None" = None,
+        also_visible: "Mapping[str, SharePermission] | None" = None,
+    ) -> dict[str, Any]:
         """Return the stored result payload for a completed run."""
         with self._lock:
             self._cleanup_locked()
-            record = self._record_locked(run_id, workspace_id=workspace_id)
+            record, _shared = self._record_locked(
+                run_id,
+                workspace_id=workspace_id,
+                visible_to=visible_to,
+                also_visible=also_visible,
+            )
             if record.result is None:
                 raise RunNotFound(run_id)
             return {
@@ -252,11 +431,32 @@ class RunStore:
                 **record.result,
             }
 
-    def cancel(self, run_id: str, *, workspace_id: str | None = None) -> dict[str, Any]:
-        """Request cancellation for a queued or running run."""
+    def cancel(
+        self,
+        run_id: str,
+        *,
+        workspace_id: str | None = None,
+        visible_to: "UserContext | None" = None,
+        also_visible: "Mapping[str, SharePermission] | None" = None,
+    ) -> dict[str, Any]:
+        """Request cancellation for a queued or running run.
+
+        Shared-in recipients need at least an ``edit`` grant — a
+        view-only invitee watching a run must not be able to kill it;
+        the denial is the indistinct 404.
+        """
         with self._lock:
             self._cleanup_locked()
-            record = self._record_locked(run_id, workspace_id=workspace_id)
+            record, shared = self._record_locked(
+                run_id,
+                workspace_id=workspace_id,
+                visible_to=visible_to,
+                also_visible=also_visible,
+            )
+            if shared is not None and not shared.at_least(
+                SharePermission.EDIT
+            ):
+                raise RunNotFound(run_id)
             if record.status == RunStatus.QUEUED:
                 self._remove_pending_locked(run_id)
                 record.cancel_event.set()
@@ -278,11 +478,66 @@ class RunStore:
                 return self._summary_locked(record)
             return self._summary_locked(record)
 
-    def subscribe(self, run_id: str, *, workspace_id: str | None = None) -> RunSubscription:
+    def delete(
+        self,
+        run_id: str,
+        *,
+        workspace_id: str | None = None,
+        requester_sub: str | None = None,
+    ) -> None:
+        """Permanently remove one terminal run (owner-only).
+
+        Stronger than :meth:`cancel`: a shared-in recipient — even with an
+        ``edit`` grant — must never delete the owner's run, so the gate is
+        creator identity, not share visibility. A non-owner or a
+        cross-namespace caller gets the indistinct ``RunNotFound`` (denial
+        equals absence). Only terminal runs are deletable; an active run
+        raises ``RunActive`` so the executing worker cannot write into a
+        record that vanished mid-run.
+        """
+        with self._lock:
+            self._cleanup_locked()
+            record = self._records.get(run_id)
+            if record is None:
+                raise RunNotFound(run_id)
+            if (
+                (
+                    record.created_by_sub is not None
+                    and record.created_by_sub != requester_sub
+                )
+                or not _workspace_matches(record, workspace_id)
+            ):
+                # Owner-only for runs that HAVE a recorded creator; a legacy
+                # pre-scoping run (created_by_sub is None) has no owner signal
+                # but its workspace, so the namespace match alone gates it —
+                # otherwise such a run would be undeletable by anyone.
+                log.warning(
+                    "authz denied: run %s delete refused for sub=%s",
+                    run_id,
+                    requester_sub or "",
+                )
+                raise RunNotFound(run_id)
+            if record.status not in TERMINAL_RUN_STATUSES:
+                raise RunActive(run_id)
+            del self._records[run_id]
+
+    def subscribe(
+        self,
+        run_id: str,
+        *,
+        workspace_id: str | None = None,
+        visible_to: "UserContext | None" = None,
+        also_visible: "Mapping[str, SharePermission] | None" = None,
+    ) -> RunSubscription:
         """Subscribe to a run's event stream, replaying buffered events."""
         with self._lock:
             self._cleanup_locked()
-            record = self._record_locked(run_id, workspace_id=workspace_id)
+            record, _shared = self._record_locked(
+                run_id,
+                workspace_id=workspace_id,
+                visible_to=visible_to,
+                also_visible=also_visible,
+            )
             queue: Queue = Queue()
             record.subscribers.append(queue)
             return RunSubscription(
@@ -306,7 +561,7 @@ class RunStore:
     def emit(self, run_id: str, event_type: str, payload: dict[str, Any] | None = None) -> None:
         """Emit one event to the run buffer and live subscribers."""
         with self._lock:
-            record = self._record_locked(run_id)
+            record, _shared = self._record_locked(run_id)
             self._emit_locked(record, event_type, payload or {})
 
     def complete(
@@ -318,7 +573,7 @@ class RunStore:
     ) -> None:
         """Store the final result and mark the run completed."""
         with self._lock:
-            record = self._record_locked(run_id)
+            record, _shared = self._record_locked(run_id)
             if record.status in TERMINAL_RUN_STATUSES:
                 return
             if snapshot:
@@ -340,7 +595,7 @@ class RunStore:
     def fail(self, run_id: str, message: str, *, error_type: str = "server_error") -> None:
         """Mark a run failed with a sanitized error payload."""
         with self._lock:
-            record = self._record_locked(run_id)
+            record, _shared = self._record_locked(run_id)
             if record.status in TERMINAL_RUN_STATUSES:
                 return
             record.error = {
@@ -357,7 +612,7 @@ class RunStore:
     def mark_cancelled(self, run_id: str, *, reason: str) -> None:
         """Mark a running run cancelled after its worker exits."""
         with self._lock:
-            record = self._record_locked(run_id)
+            record, _shared = self._record_locked(run_id)
             if record.status in TERMINAL_RUN_STATUSES:
                 return
             self._mark_terminal_locked(record, RunStatus.CANCELLED)
@@ -431,11 +686,39 @@ class RunStore:
         run_id: str,
         *,
         workspace_id: str | None = None,
-    ) -> RunRecord:
+        visible_to: "UserContext | None" = None,
+        also_visible: "Mapping[str, SharePermission] | None" = None,
+    ) -> tuple[RunRecord, "SharePermission | None"]:
+        """The record plus the share grant that admitted it (if any).
+
+        Shared-in runs BYPASS the workspace namespace filter — they
+        carry the GRANTOR's workspace id, which would otherwise hide
+        every shared run from recipients filtering their own
+        namespace.
+        """
         record = self._records.get(run_id)
-        if record is None or not _workspace_matches(record, workspace_id):
+        if record is None:
             raise RunNotFound(run_id)
-        return record
+        shared = (
+            also_visible.get(run_id) if also_visible is not None else None
+        )
+        if _visible_to_matches(record, visible_to):
+            if not _workspace_matches(record, workspace_id):
+                raise RunNotFound(run_id)
+            return record, None
+        if shared is not None:
+            return record, shared
+        # The client sees the indistinct 404; the denial itself must
+        # stay operator-visible (Designprinzip 1). Persisting it to
+        # the audit log arrives with the durable run port — this
+        # store is sync/threaded, the audit sink is async.
+        log.warning(
+            "authz denied: run %s hidden from sub=%s tenant=%s",
+            run_id,
+            visible_to.principal.sub if visible_to else "",
+            visible_to.principal.tenant_id if visible_to else "",
+        )
+        raise RunNotFound(run_id)
 
     def _new_unique_run_id_locked(self) -> str:
         for _ in range(8):
@@ -462,29 +745,17 @@ class RunStore:
         except ValueError:
             return
 
-    def _summary_locked(self, record: RunRecord) -> dict[str, Any]:
-        elapsed = None
-        if record.started_at is not None:
-            end = record.finished_at or time.time()
-            elapsed = round(max(0.0, end - record.started_at), 2)
-        return {
-            "run_id": record.run_id,
-            "status": record.status.value,
-            "queue_position": self._queue_position_locked(record.run_id),
-            "question": record.question,
-            "stack": record.stack_name,
-            "workspace_id": record.workspace_id,
-            "mode": record.mode,
-            "agent_overrides": dict(record.agent_overrides),
-            "created_at": record.created_at,
-            "started_at": record.started_at,
-            "finished_at": record.finished_at,
-            "elapsed_seconds": elapsed,
-            "snapshot": dict(record.snapshot),
-            "error": dict(record.error) if record.error else None,
-            "events_url": f"/v1/runs/{record.run_id}/events",
-            "result_url": f"/v1/runs/{record.run_id}/result",
-        }
+    def _summary_locked(
+        self,
+        record: RunRecord,
+        *,
+        shared: "SharePermission | None" = None,
+    ) -> dict[str, Any]:
+        return build_run_summary(
+            record,
+            queue_position=self._queue_position_locked(record.run_id),
+            access=access_annotation(shared),
+        )
 
     def _emit_locked(
         self,
@@ -492,24 +763,13 @@ class RunStore:
         event_type: str,
         payload: dict[str, Any],
     ) -> None:
-        clean_payload = sanitize_event_payload(event_type, dict(payload))
-        snapshot = clean_payload.get("snapshot")
-        if isinstance(snapshot, dict):
-            record.snapshot = dict(snapshot)
-            if event_type != "inqtrix.run.snapshot":
-                snapshot_payload = sanitize_event_payload(
-                    "inqtrix.run.snapshot",
-                    {
-                        "status": record.status.value,
-                        "snapshot": record.snapshot,
-                    },
-                )
-                self._append_event_locked(
-                    record,
-                    "inqtrix.run.snapshot",
-                    snapshot_payload,
-                )
-        self._append_event_locked(record, event_type, clean_payload)
+        new_snapshot, events = expand_run_event(
+            event_type, payload, status=record.status.value
+        )
+        if new_snapshot is not None:
+            record.snapshot = new_snapshot
+        for expanded_type, clean_payload in events:
+            self._append_event_locked(record, expanded_type, clean_payload)
 
     def _append_event_locked(
         self,
@@ -548,6 +808,29 @@ def _require_minimum(name: str, value: int, *, minimum: int) -> int:
 def _workspace_matches(record: RunRecord, workspace_id: str | None) -> bool:
     """Return whether *record* belongs to the optional workspace namespace."""
     return workspace_id is None or record.workspace_id == workspace_id
+
+
+def _visible_to_matches(record: RunRecord, visible_to: "UserContext | None") -> bool:
+    """Authorization visibility predicate for one run record.
+
+    ``None`` means "no scoping" — the legacy anonymous/static
+    principals see every run, preserving single-tenant behaviour
+    bit-for-bit (the :class:`~inqtrix.auth.permissions.PermissionService`
+    yields ``None`` exactly for those). A scoped principal only sees
+    runs it created, matched on (tenant, sub) — sub alone is only
+    unique per issuer, so a cross-tenant sub collision must not grant
+    visibility. Pre-scoping records (``created_by_sub is None``) stay
+    invisible to scoped principals rather than leaking across users.
+    Workspace-shared run visibility arrives with the content/sharing
+    layer — creator-only is the deliberately conservative v1 rule.
+    """
+    if visible_to is None:
+        return True
+    return (
+        record.created_by_sub is not None
+        and record.created_by_sub == visible_to.principal.sub
+        and record.created_by_tenant_id == visible_to.principal.tenant_id
+    )
 
 
 def _coerce_status(status: RunStatus | str) -> RunStatus:

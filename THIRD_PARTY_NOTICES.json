@@ -6,6 +6,14 @@
       "ecosystem": "python",
       "license": "MIT",
       "metadata_source": "python package metadata: License-Expression",
+      "name": "alembic",
+      "version": "1.18.4"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
       "name": "annotated-doc",
       "version": "0.0.4"
     },
@@ -24,6 +32,30 @@
       "metadata_source": "python package metadata: License-Expression",
       "name": "anyio",
       "version": "4.13.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "argon2-cffi",
+      "version": "23.1.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "argon2-cffi-bindings",
+      "version": "25.1.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "asyncpg",
+      "version": "0.31.0"
     },
     {
       "dependency_surface": "python",
@@ -56,6 +88,14 @@
       "metadata_source": "python package metadata: classifiers",
       "name": "azure-storage-blob",
       "version": "12.29.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "beautifulsoup4",
+      "version": "4.15.0"
     },
     {
       "dependency_surface": "python",
@@ -124,6 +164,14 @@
     {
       "dependency_surface": "python",
       "ecosystem": "python",
+      "license": "Python Software Foundation License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "defusedxml",
+      "version": "0.7.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
       "license": "Apache Software License",
       "metadata_source": "python package metadata: classifiers",
       "name": "distro",
@@ -136,6 +184,14 @@
       "metadata_source": "python package metadata: License-Expression",
       "name": "fastapi",
       "version": "0.135.2"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache Software License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "flatbuffers",
+      "version": "25.12.19"
     },
     {
       "dependency_surface": "python",
@@ -192,6 +248,14 @@
       "metadata_source": "python package metadata: classifiers",
       "name": "jmespath",
       "version": "1.1.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "joserfc",
+      "version": "1.7.1"
     },
     {
       "dependency_surface": "python",
@@ -268,10 +332,58 @@
     {
       "dependency_surface": "python",
       "ecosystem": "python",
+      "license": "GNU Lesser General Public License v3 (LGPLv3)",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "ldap3",
+      "version": "2.9.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "Apache Software License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "magika",
+      "version": "0.6.2"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "mako",
+      "version": "1.3.12"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
       "license": "MIT License",
       "metadata_source": "python package metadata: classifiers",
       "name": "markdown-it-py",
       "version": "4.0.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "markdownify",
+      "version": "1.2.2"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "markitdown",
+      "version": "0.1.6"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD-3-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "markupsafe",
+      "version": "3.0.3"
     },
     {
       "dependency_surface": "python",
@@ -296,6 +408,22 @@
       "metadata_source": "python package metadata: classifiers",
       "name": "msal-extensions",
       "version": "1.3.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "numpy",
+      "version": "2.4.4"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "onnxruntime",
+      "version": "1.26.0"
     },
     {
       "dependency_surface": "python",
@@ -336,6 +464,22 @@
       "metadata_source": "python package metadata: classifiers",
       "name": "perplexityai",
       "version": "0.34.0"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "3-Clause BSD License",
+      "metadata_source": "python package metadata: License",
+      "name": "protobuf",
+      "version": "7.34.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD-2-Clause",
+      "metadata_source": "python package metadata: License",
+      "name": "pyasn1",
+      "version": "0.6.3"
     },
     {
       "dependency_surface": "python",
@@ -404,6 +548,14 @@
     {
       "dependency_surface": "python",
       "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "python-multipart",
+      "version": "0.0.32"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
       "license": "MIT License",
       "metadata_source": "python package metadata: classifiers",
       "name": "pyyaml",
@@ -456,6 +608,22 @@
       "metadata_source": "python package metadata: classifiers",
       "name": "sniffio",
       "version": "1.3.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "soupsieve",
+      "version": "2.8.4"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License",
+      "name": "sqlalchemy",
+      "version": "2.0.50"
     },
     {
       "dependency_surface": "python",
@@ -538,47 +706,23 @@
       "version": "0.25.0"
     },
     {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "BSD License",
-      "metadata_source": "python package metadata: classifiers",
-      "name": "altair",
-      "version": "6.1.0"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "MIT",
-      "metadata_source": "python package metadata: License-Expression",
-      "name": "attrs",
-      "version": "26.1.0"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "MIT License",
-      "metadata_source": "python package metadata: classifiers",
-      "name": "blinker",
-      "version": "1.9.0"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "BSD License",
-      "metadata_source": "python package metadata: classifiers",
-      "name": "gitdb",
-      "version": "4.0.12"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
+      "dependency_surface": "python-dev",
       "ecosystem": "python",
       "license": "BSD-3-Clause",
-      "metadata_source": "python package metadata: License",
-      "name": "gitpython",
-      "version": "3.1.47"
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "fakeredis",
+      "version": "2.36.1"
     },
     {
-      "dependency_surface": "python-dev/ui",
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "grpcio",
+      "version": "1.81.1"
+    },
+    {
+      "dependency_surface": "python-dev",
       "ecosystem": "python",
       "license": "MIT",
       "metadata_source": "python package metadata: License-Expression",
@@ -586,71 +730,7 @@
       "version": "2.3.0"
     },
     {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "BSD License",
-      "metadata_source": "python package metadata: classifiers",
-      "name": "jinja2",
-      "version": "3.1.6"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "MIT",
-      "metadata_source": "python package metadata: License-Expression",
-      "name": "jsonschema",
-      "version": "4.26.0"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "MIT",
-      "metadata_source": "python package metadata: License-Expression",
-      "name": "jsonschema-specifications",
-      "version": "2025.9.1"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "BSD-3-Clause",
-      "metadata_source": "python package metadata: License-Expression",
-      "name": "markupsafe",
-      "version": "3.0.3"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "MIT License",
-      "metadata_source": "python package metadata: classifiers",
-      "name": "narwhals",
-      "version": "2.20.0"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
-      "metadata_source": "python package metadata: License-Expression",
-      "name": "numpy",
-      "version": "2.4.4"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "BSD License",
-      "metadata_source": "python package metadata: classifiers",
-      "name": "pandas",
-      "version": "3.0.2"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "MIT-CMU",
-      "metadata_source": "python package metadata: License-Expression",
-      "name": "pillow",
-      "version": "12.2.0"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
+      "dependency_surface": "python-dev",
       "ecosystem": "python",
       "license": "MIT License",
       "metadata_source": "python package metadata: classifiers",
@@ -658,31 +738,15 @@
       "version": "1.6.0"
     },
     {
-      "dependency_surface": "python-dev/ui",
+      "dependency_surface": "python-dev",
       "ecosystem": "python",
-      "license": "3-Clause BSD License",
-      "metadata_source": "python package metadata: License",
-      "name": "protobuf",
-      "version": "7.34.1"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "Apache-2.0",
+      "license": "BSD-3-Clause",
       "metadata_source": "python package metadata: License-Expression",
-      "name": "pyarrow",
-      "version": "24.0.0"
+      "name": "portalocker",
+      "version": "3.2.0"
     },
     {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "Apache License 2.0",
-      "metadata_source": "python package metadata: License",
-      "name": "pydeck",
-      "version": "0.9.2"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
+      "dependency_surface": "python-dev",
       "ecosystem": "python",
       "license": "MIT",
       "metadata_source": "python package metadata: License-Expression",
@@ -690,7 +754,7 @@
       "version": "9.0.2"
     },
     {
-      "dependency_surface": "python-dev/ui",
+      "dependency_surface": "python-dev",
       "ecosystem": "python",
       "license": "Apache-2.0",
       "metadata_source": "python package metadata: License-Expression",
@@ -698,7 +762,7 @@
       "version": "1.3.0"
     },
     {
-      "dependency_surface": "python-dev/ui",
+      "dependency_surface": "python-dev",
       "ecosystem": "python",
       "license": "MIT",
       "metadata_source": "python package metadata: License-Expression",
@@ -706,55 +770,39 @@
       "version": "0.13.4"
     },
     {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "MIT",
-      "metadata_source": "python package metadata: License-Expression",
-      "name": "referencing",
-      "version": "0.37.0"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "MIT",
-      "metadata_source": "python package metadata: License-Expression",
-      "name": "rpds-py",
-      "version": "0.30.0"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "BSD License",
-      "metadata_source": "python package metadata: classifiers",
-      "name": "smmap",
-      "version": "5.0.3"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "Apache-2.0",
-      "metadata_source": "python package metadata: License-Expression",
-      "name": "streamlit",
-      "version": "1.56.0"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
-      "ecosystem": "python",
-      "license": "MIT License",
-      "metadata_source": "python package metadata: classifiers",
-      "name": "toml",
-      "version": "0.10.2"
-    },
-    {
-      "dependency_surface": "python-dev/ui",
+      "dependency_surface": "python-dev",
       "ecosystem": "python",
       "license": "Apache Software License",
       "metadata_source": "python package metadata: classifiers",
-      "name": "tornado",
-      "version": "6.5.5"
+      "name": "qdrant-client",
+      "version": "1.18.0"
     },
     {
-      "dependency_surface": "python-dev/ui",
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "redis",
+      "version": "8.0.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache Software License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "sortedcontainers",
+      "version": "2.4.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "valkey",
+      "version": "6.1.1"
+    },
+    {
+      "dependency_surface": "python-dev",
       "ecosystem": "python",
       "license": "MIT License",
       "metadata_source": "python package metadata: classifiers",
@@ -762,12 +810,100 @@
       "version": "8.1.1"
     },
     {
-      "dependency_surface": "python-dev/ui",
+      "dependency_surface": "python-dev",
       "ecosystem": "python",
       "license": "BSD-2-Clause",
       "metadata_source": "python package metadata: License-Expression",
       "name": "wrapt",
       "version": "2.1.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@codemirror/autocomplete",
+      "version": "6.20.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@codemirror/commands",
+      "version": "6.10.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@codemirror/lang-css",
+      "version": "6.3.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@codemirror/lang-html",
+      "version": "6.4.11"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@codemirror/lang-javascript",
+      "version": "6.2.5"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@codemirror/lang-markdown",
+      "version": "6.5.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@codemirror/language",
+      "version": "6.12.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@codemirror/lint",
+      "version": "6.9.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@codemirror/search",
+      "version": "6.7.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@codemirror/state",
+      "version": "6.6.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@codemirror/view",
+      "version": "6.43.0"
     },
     {
       "dependency_surface": "react-prod",
@@ -800,6 +936,94 @@
       "metadata_source": "pnpm package metadata",
       "name": "@floating-ui/utils",
       "version": "0.2.11"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "OFL-1.1",
+      "metadata_source": "pnpm package metadata",
+      "name": "@fontsource-variable/inter",
+      "version": "5.2.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@lezer/common",
+      "version": "1.5.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@lezer/css",
+      "version": "1.3.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@lezer/highlight",
+      "version": "1.2.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@lezer/html",
+      "version": "1.3.13"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@lezer/javascript",
+      "version": "1.5.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@lezer/lr",
+      "version": "1.4.10"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@lezer/markdown",
+      "version": "1.6.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@marijn/find-cluster-break",
+      "version": "1.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@napi-rs/canvas",
+      "version": "0.1.100"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@napi-rs/canvas-darwin-arm64",
+      "version": "0.1.100"
     },
     {
       "dependency_surface": "react-prod",
@@ -1246,6 +1470,14 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "@tiptap/extension-drag-handle-react",
+      "version": "3.23.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "@tiptap/extension-dropcursor",
       "version": "3.23.6"
     },
@@ -1486,6 +1718,14 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "@tiptap/suggestion",
+      "version": "3.23.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "@types/debug",
       "version": "4.1.13"
     },
@@ -1542,6 +1782,22 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "@types/node",
+      "version": "24.12.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/node",
+      "version": "25.9.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "@types/unist",
       "version": "2.0.11"
     },
@@ -1574,6 +1830,22 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "@xmldom/xmldom",
+      "version": "0.8.13"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "argparse",
+      "version": "1.0.10"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "aria-hidden",
       "version": "1.2.6"
     },
@@ -1584,6 +1856,22 @@
       "metadata_source": "pnpm package metadata",
       "name": "bail",
       "version": "2.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "base64-js",
+      "version": "1.5.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "bluebird",
+      "version": "3.4.7"
     },
     {
       "dependency_surface": "react-prod",
@@ -1646,6 +1934,14 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "codemirror",
+      "version": "6.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "comma-separated-tokens",
       "version": "2.0.3"
     },
@@ -1656,6 +1952,22 @@
       "metadata_source": "pnpm package metadata",
       "name": "commander",
       "version": "8.3.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "core-util-is",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "crelt",
+      "version": "1.0.6"
     },
     {
       "dependency_surface": "react-prod",
@@ -1704,6 +2016,30 @@
       "metadata_source": "pnpm package metadata",
       "name": "diff",
       "version": "9.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-2-Clause",
+      "metadata_source": "pnpm package metadata",
+      "name": "dingbat-to-unicode",
+      "version": "1.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "docx",
+      "version": "9.7.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD",
+      "metadata_source": "pnpm package metadata",
+      "name": "duck",
+      "version": "0.1.12"
     },
     {
       "dependency_surface": "react-prod",
@@ -1768,6 +2104,14 @@
       "metadata_source": "pnpm package metadata",
       "name": "get-nonce",
       "version": "1.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "hash.js",
+      "version": "1.1.7"
     },
     {
       "dependency_surface": "react-prod",
@@ -1886,6 +2230,22 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "immediate",
+      "version": "3.0.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "inherits",
+      "version": "2.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "inline-style-parser",
       "version": "0.2.7"
     },
@@ -1934,8 +2294,32 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "isarray",
+      "version": "1.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "(MIT OR GPL-3.0-or-later)",
+      "metadata_source": "pnpm package metadata",
+      "name": "jszip",
+      "version": "3.10.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "katex",
       "version": "0.16.46"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "lie",
+      "version": "3.3.0"
     },
     {
       "dependency_surface": "react-prod",
@@ -1952,6 +2336,30 @@
       "metadata_source": "pnpm package metadata",
       "name": "longest-streak",
       "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-2-Clause",
+      "metadata_source": "pnpm package metadata",
+      "name": "lop",
+      "version": "0.4.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "lucide-react",
+      "version": "1.17.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-2-Clause",
+      "metadata_source": "pnpm package metadata",
+      "name": "mammoth",
+      "version": "1.12.0"
     },
     {
       "dependency_surface": "react-prod",
@@ -2332,6 +2740,14 @@
     {
       "dependency_surface": "react-prod",
       "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "minimalistic-assert",
+      "version": "1.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
       "name": "motion",
@@ -2366,6 +2782,22 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "nanoid",
+      "version": "3.3.12"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "nanoid",
+      "version": "5.1.11"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "oniguruma-parser",
       "version": "0.12.2"
     },
@@ -2380,10 +2812,26 @@
     {
       "dependency_surface": "react-prod",
       "ecosystem": "react",
+      "license": "BSD-2-Clause",
+      "metadata_source": "pnpm package metadata",
+      "name": "option",
+      "version": "0.2.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
       "name": "orderedmap",
       "version": "2.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "(MIT AND Zlib)",
+      "metadata_source": "pnpm package metadata",
+      "name": "pako",
+      "version": "1.0.11"
     },
     {
       "dependency_surface": "react-prod",
@@ -2408,6 +2856,30 @@
       "metadata_source": "pnpm package metadata",
       "name": "parse5",
       "version": "7.3.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "path-is-absolute",
+      "version": "1.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "pnpm package metadata",
+      "name": "pdfjs-dist",
+      "version": "5.7.284"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "process-nextick-args",
+      "version": "2.0.1"
     },
     {
       "dependency_surface": "react-prod",
@@ -2574,6 +3046,14 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "readable-stream",
+      "version": "2.3.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "regex",
       "version": "6.1.0"
     },
@@ -2670,8 +3150,32 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "safe-buffer",
+      "version": "5.1.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BlueOak-1.0.0",
+      "metadata_source": "pnpm package metadata",
+      "name": "sax",
+      "version": "1.6.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "scheduler",
       "version": "0.27.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "setimmediate",
+      "version": "1.0.5"
     },
     {
       "dependency_surface": "react-prod",
@@ -2692,10 +3196,34 @@
     {
       "dependency_surface": "react-prod",
       "ecosystem": "react",
+      "license": "BSD-3-Clause",
+      "metadata_source": "pnpm package metadata",
+      "name": "sprintf-js",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "string_decoder",
+      "version": "1.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
       "name": "stringify-entities",
       "version": "4.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "style-mod",
+      "version": "4.1.3"
     },
     {
       "dependency_surface": "react-prod",
@@ -2720,6 +3248,14 @@
       "metadata_source": "pnpm package metadata",
       "name": "tailwind-merge",
       "version": "3.6.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "tokenx",
+      "version": "1.3.0"
     },
     {
       "dependency_surface": "react-prod",
@@ -2752,6 +3288,30 @@
       "metadata_source": "pnpm package metadata",
       "name": "tw-animate-css",
       "version": "1.4.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "underscore",
+      "version": "1.13.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "undici-types",
+      "version": "7.16.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "undici-types",
+      "version": "7.24.6"
     },
     {
       "dependency_surface": "react-prod",
@@ -2846,6 +3406,14 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "util-deprecate",
+      "version": "1.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "vfile",
       "version": "6.0.3"
     },
@@ -2880,6 +3448,30 @@
       "metadata_source": "pnpm package metadata",
       "name": "web-namespaces",
       "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "xml",
+      "version": "1.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "xml-js",
+      "version": "1.6.11"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "xmlbuilder",
+      "version": "10.1.1"
     },
     {
       "dependency_surface": "react-prod",
@@ -3070,6 +3662,14 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "@standard-schema/spec",
+      "version": "1.1.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "@tailwindcss/node",
       "version": "4.3.0"
     },
@@ -3102,6 +3702,22 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "@types/chai",
+      "version": "5.2.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/deep-eql",
+      "version": "4.0.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "@types/esrecurse",
       "version": "4.3.1"
     },
@@ -3112,14 +3728,6 @@
       "metadata_source": "pnpm package metadata",
       "name": "@types/json-schema",
       "version": "7.0.15"
-    },
-    {
-      "dependency_surface": "react-dev",
-      "ecosystem": "react",
-      "license": "MIT",
-      "metadata_source": "pnpm package metadata",
-      "name": "@types/node",
-      "version": "24.12.4"
     },
     {
       "dependency_surface": "react-dev",
@@ -3230,6 +3838,62 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "@vitest/expect",
+      "version": "4.1.7"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@vitest/mocker",
+      "version": "4.1.7"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@vitest/pretty-format",
+      "version": "4.1.7"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@vitest/runner",
+      "version": "4.1.7"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@vitest/snapshot",
+      "version": "4.1.7"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@vitest/spy",
+      "version": "4.1.7"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@vitest/utils",
+      "version": "4.1.7"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "acorn",
       "version": "8.16.0"
     },
@@ -3254,6 +3918,14 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "assertion-error",
+      "version": "2.0.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "balanced-match",
       "version": "4.0.4"
     },
@@ -3264,6 +3936,22 @@
       "metadata_source": "pnpm package metadata",
       "name": "brace-expansion",
       "version": "5.0.6"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "chai",
+      "version": "6.2.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "convert-source-map",
+      "version": "2.0.0"
     },
     {
       "dependency_surface": "react-dev",
@@ -3304,6 +3992,14 @@
       "metadata_source": "pnpm package metadata",
       "name": "enhanced-resolve",
       "version": "5.21.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "es-module-lexer",
+      "version": "2.1.0"
     },
     {
       "dependency_surface": "react-dev",
@@ -3372,10 +4068,26 @@
     {
       "dependency_surface": "react-dev",
       "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "estree-walker",
+      "version": "3.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
       "license": "BSD-2-Clause",
       "metadata_source": "pnpm package metadata",
       "name": "esutils",
       "version": "2.0.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "pnpm package metadata",
+      "name": "expect-type",
+      "version": "1.3.0"
     },
     {
       "dependency_surface": "react-dev",
@@ -3614,16 +4326,16 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
-      "name": "nanoid",
-      "version": "3.3.12"
+      "name": "natural-compare",
+      "version": "1.4.0"
     },
     {
       "dependency_surface": "react-dev",
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
-      "name": "natural-compare",
-      "version": "1.4.0"
+      "name": "obug",
+      "version": "2.1.1"
     },
     {
       "dependency_surface": "react-dev",
@@ -3664,6 +4376,14 @@
       "metadata_source": "pnpm package metadata",
       "name": "path-key",
       "version": "3.1.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "pathe",
+      "version": "2.0.3"
     },
     {
       "dependency_surface": "react-dev",
@@ -3740,10 +4460,34 @@
     {
       "dependency_surface": "react-dev",
       "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "siginfo",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
       "license": "BSD-3-Clause",
       "metadata_source": "pnpm package metadata",
       "name": "source-map-js",
       "version": "1.2.1"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "stackback",
+      "version": "0.0.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "std-env",
+      "version": "4.1.0"
     },
     {
       "dependency_surface": "react-dev",
@@ -3766,8 +4510,32 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "tinybench",
+      "version": "2.9.0"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "tinyexec",
+      "version": "1.2.3"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "tinyglobby",
       "version": "0.2.16"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "tinyrainbow",
+      "version": "3.1.0"
     },
     {
       "dependency_surface": "react-dev",
@@ -3804,14 +4572,6 @@
     {
       "dependency_surface": "react-dev",
       "ecosystem": "react",
-      "license": "MIT",
-      "metadata_source": "pnpm package metadata",
-      "name": "undici-types",
-      "version": "7.16.0"
-    },
-    {
-      "dependency_surface": "react-dev",
-      "ecosystem": "react",
       "license": "BSD-2-Clause",
       "metadata_source": "pnpm package metadata",
       "name": "uri-js",
@@ -3828,10 +4588,26 @@
     {
       "dependency_surface": "react-dev",
       "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "vitest",
+      "version": "4.1.7"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
       "license": "ISC",
       "metadata_source": "pnpm package metadata",
       "name": "which",
       "version": "2.0.2"
+    },
+    {
+      "dependency_surface": "react-dev",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "why-is-node-running",
+      "version": "2.3.0"
     },
     {
       "dependency_surface": "react-dev",

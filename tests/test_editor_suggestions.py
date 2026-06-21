@@ -18,6 +18,7 @@ from inqtrix.server.editor_suggestions import (
     parse_editor_suggest_response,
     result_from_parsed,
     validate_editor_suggest_result,
+    warnings_for_validation_issues,
 )
 from inqtrix.server.reference_documents import (
     ReferenceDocument,
@@ -346,6 +347,31 @@ def test_validate_one_sentence_allows_german_dates_and_decimals() -> None:
     })
 
     assert validate_editor_suggest_result(request, result) == []
+
+
+def test_validation_warnings_are_human_readable_without_raw_codes() -> None:
+    request = _direkt_request(
+        block_text="Der Originalabsatz war sehr lang und enthaelt mehrere Details.",
+        current_suggestion_markdown="Der Vorschlag ist noch immer laenger als gewuenscht.",
+        refinement_instruction="Noch kuerzer.",
+    )
+    result = result_from_parsed({
+        "rewritten_text": "Der Vorschlag ist noch immer laenger als gewuenscht und wiederholt sich.",
+        "changes": [],
+    })
+
+    issues = validate_editor_suggest_result(request, result)
+    # The validator still flags it (it drives the retry and is logged) ...
+    assert [issue.code for issue in issues] == ["not_shortened"]
+    # ... but the user never sees the raw code; the warning is plain language.
+    for locale in ("de", "en"):
+        warnings = warnings_for_validation_issues(issues, locale=locale)
+        assert warnings
+        assert all("not_shortened" not in warning for warning in warnings)
+    assert any(
+        "kuerzer" in warning.lower()
+        for warning in warnings_for_validation_issues(issues, locale="de")
+    )
 
 
 def test_validate_refinement_shortening_compares_against_current_suggestion() -> None:

@@ -672,3 +672,244 @@ def _build_answer_system_prompt_with_style(
         )
 
     return system
+
+
+# ---------------------------------------------------------------------------
+# Knowledge (internal document retrieval) answer synthesis
+# ---------------------------------------------------------------------------
+
+
+def build_chunk_context_prompt(
+    document_title: str, document_text: str, chunks: list[str]
+) -> str:
+    """Contextual-retrieval prompt: situate every chunk in its document.
+
+    One batched call per document (instead of one per chunk) keeps the
+    ingestion cost at a fraction of the per-chunk pattern; the model
+    returns a JSON array with exactly one short context per chunk.
+    """
+    numbered = "\n\n".join(
+        f"CHUNK {index}:\n{chunk}" for index, chunk in enumerate(chunks, 1)
+    )
+    return f"""Du situierst Textabschnitte innerhalb ihres Gesamtdokuments, damit sie bei einer Suche eigenstaendig verstaendlich sind.
+
+DOKUMENT (Titel: {document_title}):
+{document_text}
+
+ABSCHNITTE:
+{numbered}
+
+Erzeuge fuer JEDEN Abschnitt einen kurzen Kontext (hoechstens zwei Saetze, deutsch): Worum geht es im Dokument an dieser Stelle, auf welche Begriffe/Abschnitte bezieht sich der Text? Der Kontext muss Mehrdeutigkeiten aufloesen (z. B. wessen Pflichten, welcher Artikel, welche Personengruppe).
+
+Antworte AUSSCHLIESSLICH mit einem JSON-Array aus genau {len(chunks)} Strings in der Reihenfolge der Abschnitte:
+["Kontext zu Chunk 1", "Kontext zu Chunk 2", ...]"""
+
+
+def build_knowledge_gate_prompt(
+    question: str,
+    evidence_block: str,
+    *,
+    vocabulary_bridge: bool = False,
+) -> str:
+    """Sufficiency-gate prompt: judge evidence, optionally rewrite once.
+
+    The model answers STRICT JSON so the gate stays parseable by a
+    fast-tier mini model; the caller treats parse failures as
+    "sufficient" with a loud fallback marker.
+
+    Args:
+        question: The user question being judged.
+        evidence_block: The rendered evidence the answerer would see.
+        vocabulary_bridge: Strengthen ONLY the rewrite rule: the
+            alternative query must translate everyday phrasing into
+            the domain's technical/official vocabulary (the failure
+            class where a colloquial paraphrase misses the document's
+            terminology entirely). The default keeps the prompt
+            byte-identical to the pre-profile behaviour. The gate is
+            the single query-rewrite location in the pipeline —
+            bridge variants belong here, never in a parallel module.
+    """
+    if vocabulary_bridge:
+        rewrite_rule = (
+            '- Ist die Evidenz unzureichend, schlage in "rewritten_query" '
+            "GENAU EINE alternative deutsche Suchanfrage vor. Uebersetze "
+            "dabei die Alltagssprache der Frage in die Fachsprache der "
+            "Dokumente: verwende die praezisen Fach-, Behoerden- und "
+            "Gesetzesbegriffe, die ein offizielles Dokument fuer diesen "
+            "Sachverhalt benutzen wuerde. Wenn keine sinnvolle "
+            "Alternative existiert, setze null."
+        )
+    else:
+        rewrite_rule = (
+            '- Ist die Evidenz unzureichend, schlage in "rewritten_query" '
+            "GENAU EINE alternative deutsche Suchanfrage vor (andere "
+            "Begriffe, Synonyme); wenn keine sinnvolle Alternative "
+            "existiert, setze null."
+        )
+    return f"""Du bist ein Retrieval-Pruefer. Beurteile, ob die folgenden Evidenz-Ausschnitte ausreichen, um die Frage fundiert zu beantworten.
+
+FRAGE:
+{question}
+
+EVIDENZ:
+{evidence_block}
+
+Antworte AUSSCHLIESSLICH mit einem JSON-Objekt in genau dieser Form:
+{{"sufficient": true oder false, "coverage": "full" oder "partial" oder "none", "rewritten_query": "alternative Suchanfrage oder null", "reason": "ein kurzer Satz"}}
+
+Regeln:
+- "sufficient" ist true, wenn die Evidenz die Kernfrage belegbar beantwortet.
+- "coverage" beschreibt, wie viel der Frage die Evidenz abdeckt: "full" = alle Aspekte belegbar; "partial" = mindestens ein Aspekt belegbar, andere fehlen; "none" = die Evidenz hat mit der Frage inhaltlich nichts zu tun.
+{rewrite_rule}
+- Keine weiteren Felder, kein Text ausserhalb des JSON."""
+
+
+def build_knowledge_decompose_prompt(
+    question: str, *, max_sub_queries: int = 4
+) -> str:
+    """Decomposition prompt: split a multi-aspect question, or decline.
+
+    The model answers a STRICT JSON array (parseable by a fast-tier
+    mini model); ``[]`` is the explicit "single-aspect, do not split"
+    answer, so the caller can distinguish a deliberate no-split from a
+    parse failure.
+    """
+    return f"""Du zerlegst eine Frage fuer eine Dokumentensuche in eigenstaendige Teilfragen.
+
+FRAGE:
+{question}
+
+Antworte AUSSCHLIESSLICH mit einem JSON-Array aus deutschen Teilfragen:
+["Teilfrage 1", "Teilfrage 2", ...]
+
+Regeln:
+- Zerlege NUR, wenn die Frage mehrere klar trennbare Aspekte buendelt (z. B. mehrere Pflichten, Objekte oder Verfahren). Gib dann 2 bis {max_sub_queries} Teilfragen aus.
+- Jede Teilfrage muss fuer sich allein verstaendlich und suchbar sein (Bezugswoerter wie "davon"/"diese" aufloesen).
+- Behandelt die Frage nur EINEN Aspekt, antworte mit [].
+- Kein Text ausserhalb des JSON."""
+
+
+def build_knowledge_rerank_prompt(query: str, documents: list[str]) -> str:
+    """Listwise rerank prompt: order numbered candidates by relevance.
+
+    The model answers a STRICT JSON object with 1-based indices; the
+    caller validates uniqueness and range and fails loudly on any
+    deviation (a broken rerank stage must never silently pass the
+    input order through).
+    """
+    numbered = "\n\n".join(
+        f"[{index}] {document}"
+        for index, document in enumerate(documents, start=1)
+    )
+    return f"""Du sortierst Textauszuege nach ihrer Relevanz fuer eine Suchanfrage.
+
+SUCHANFRAGE:
+{query}
+
+AUSZUEGE:
+{numbered}
+
+Antworte AUSSCHLIESSLICH mit einem JSON-Objekt in genau dieser Form:
+{{"ranking": [Nummern der Auszuege, relevantester zuerst]}}
+
+Regeln:
+- Liste ALLE {len(documents)} Nummern genau einmal auf, sortiert von relevantester zu irrelevantester.
+- Relevanz heisst: Der Auszug traegt direkt zur Beantwortung der Suchanfrage bei.
+- Kein Text ausserhalb des JSON."""
+
+
+_KNOWLEDGE_REPORT_STRUCTURE = (
+    "- Gliedere die Antwort als Bericht mit GENAU diesen "
+    "Markdown-Abschnitten:\n"
+    "  ## Kurzfazit (2-3 Saetze, die Kernantwort)\n"
+    "  ## Kernaussagen (praegnante Aufzaehlung der belegten "
+    "Hauptpunkte)\n"
+    "  ## Detailanalyse (ausgefuehrte Antwort entlang der Aspekte "
+    "der Frage)\n"
+    "  ## Quellenlage (welche Auszuege was tragen und wo die "
+    "Evidenz endet)\n"
+)
+"""Report-profile section structure for the knowledge answer prompt.
+
+Mirrors the web side's ``answer_sections`` idea as a prompt-level
+variant — deliberately NOT a second synthesis engine.
+"""
+
+
+def build_knowledge_answer_prompt(
+    question: str,
+    evidence_block: str,
+    *,
+    history: str = "",
+    grounding: bool = False,
+    report: bool = False,
+) -> str:
+    """Build the answer-synthesis prompt for the knowledge algorithm.
+
+    Args:
+        question: The user question to answer from internal documents.
+        evidence_block: Pre-rendered evidence: one ``[K#]``-labelled
+            chunk per entry (document title + chunk text), already
+            capped to the context budget by the caller.
+        history: Optional pre-formatted conversation history block.
+        grounding: When ``True``, the prompt additionally requires a
+            ``ZITATE:`` block of verbatim, labelled quotes BEFORE the
+            ``ANTWORT:`` section (quote-then-answer). The caller
+            verifies the quotes deterministically and strips the block
+            from the user-facing answer.
+        report: Deep-profile answer form — replaces the free-form
+            structuring rule with a fixed four-section report
+            skeleton. Composes with *grounding* (the quote block
+            still precedes the report).
+
+    Returns:
+        The full German prompt. The citation rules mirror the web
+        research contract: answer only from the provided evidence,
+        cite every load-bearing statement with its ``[K#]`` label, and
+        say explicitly when the evidence does not cover the question
+        instead of filling gaps from model knowledge.
+    """
+    history_block = (
+        f"Bisheriger Gespraechsverlauf:\n{history}\n\n" if history else ""
+    )
+    grounding_block = (
+        (
+            "\nAUSGABEFORMAT:\n"
+            "Gib ZUERST eine Zeile 'ZITATE:' aus, gefolgt von den "
+            "woertlichen Belegstellen, auf die sich deine Antwort "
+            "stuetzt: pro Zeile genau ein Zitat in der Form\n"
+            '[K1] "woertliches Zitat aus dem Auszug"\n'
+            "Jedes Zitat muss EXAKT so im genannten Auszug stehen — "
+            "keine Auslassungen, keine Umformulierungen, hoechstens "
+            "30 Woerter pro Zitat.\n"
+            "Gib DANACH eine Zeile 'ANTWORT:' aus, gefolgt von der "
+            "eigentlichen Antwort nach den Regeln oben.\n"
+        )
+        if grounding
+        else ""
+    )
+    structure_rule = (
+        _KNOWLEDGE_REPORT_STRUCTURE
+        if report
+        else (
+            "- Strukturiere laengere Antworten mit Markdown-Ueberschriften "
+            "und Listen.\n"
+        )
+    )
+    return (
+        "Du beantwortest eine Frage AUSSCHLIESSLICH auf Basis der "
+        "folgenden Auszuege aus internen Dokumenten.\n\n"
+        f"{history_block}"
+        f"FRAGE:\n{question}\n\n"
+        f"DOKUMENT-AUSZUEGE:\n{evidence_block}\n\n"
+        "REGELN:\n"
+        "- Nutze NUR die Informationen aus den Auszuegen oben. Kein "
+        "eigenes Weltwissen ergaenzen.\n"
+        "- Belege jede tragende Aussage mit dem Label des Auszugs, "
+        "z. B. [K1] oder [K2][K3].\n"
+        "- Wenn die Auszuege die Frage nicht oder nur teilweise "
+        "beantworten, sage das ausdruecklich und benenne, was fehlt.\n"
+        "- Antworte in der Sprache der Frage.\n"
+        f"{structure_rule}"
+        f"{grounding_block}"
+    )

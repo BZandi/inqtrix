@@ -1,6 +1,8 @@
-import { phaseOrder } from '@/features/researchDesk/types'
 import { createDefaultFileLibrarySections } from '@/features/files/sections'
-import { reportReferencesFromMarkdown } from './reportReferences'
+import { seedKnowledgeThreadItem } from '@/features/knowledge/demo'
+import { DEMO_SHARED_IN_RUN_ID, resetDemoShares } from '@/features/sharing/demoShares'
+import { parseChatRule, parseChatThread, parseResearchRun } from './markdown'
+import { DEFAULT_KNOWLEDGE_SESSION_ID, DEFAULT_KNOWLEDGE_SESSION_TITLE } from './knowledgeSessionDefaults'
 import type {
   EditorCommentThreadRecord,
   EditorDocumentRecord,
@@ -12,6 +14,8 @@ import type {
   FileAssetRecord,
   FileGroupRecord,
   FileLibrarySectionRecord,
+  KnowledgeSessionGroupRecord,
+  KnowledgeSessionRecord,
   ProjectState,
   ResearchRunRecord,
   VectorIndexRecord,
@@ -19,12 +23,72 @@ import type {
 import { PROJECT_SCHEMA_VERSION } from './types'
 import { getOrCreateBrowserWorkspaceId } from './workspaceId'
 
-const seedCreatedAt = '2026-05-15T06:00:00.000Z'
+// Neutral fixed instant for all STORED demo data so no real creation date can
+// be inferred (anonymisation). The live/queued runs below are the deliberate
+// exception — they are a "happening now" simulation, so they use the current
+// session time to keep a believable runtime.
+const seedCreatedAt = '2026-01-01T00:00:00.000Z'
 
 const SEED_SECTION_LEGAL = 'file-section-legal'
 const SEED_SECTION_MARKET = 'file-section-market'
 const SEED_SECTION_OWN = 'file-section-own'
 const SEED_GROUP_EU_AI_ACT = 'file-group-eu-ai-act'
+
+const DEMO_CHAT_GROUP = 'chat-group-demos'
+const DEMO_KNOWLEDGE_SESSION_ID = 'knowledge-session-demo'
+/** The run whose report opens in the Editor (a real exported report). */
+const DEMO_EDITOR_RUN_ID = 'run_1c6d7daf4c9f45a5b023693627860b61'
+/** The hand-built live run id — shared with the demo live-progress simulator
+ * in ResearchDesk so the two can never drift (Designprinzip 4). */
+export const DEMO_RUNNING_RUN_ID = 'RO-live-9001'
+/** Rounds the live run advertises; the simulator counts within this bound. */
+export const DEMO_RUNNING_MAX_ROUNDS = 4
+
+// Real demo content: the bundled Inqtrix project export, run through the SAME
+// import parsers the directory loader uses (one parse path, no second seed
+// format — Designprinzip 4). Vite inlines these markdown files at build time.
+const demoRunFiles = import.meta.glob('./demoContent/search-history/*.md', {
+  eager: true,
+  import: 'default',
+  query: '?raw',
+}) as Record<string, string>
+const demoChatFiles = import.meta.glob('./demoContent/chat-history/*.md', {
+  eager: true,
+  import: 'default',
+  query: '?raw',
+}) as Record<string, string>
+const demoRuleFiles = import.meta.glob('./demoContent/rules/*.md', {
+  eager: true,
+  import: 'default',
+  query: '?raw',
+}) as Record<string, string>
+
+/** Parsed real research runs, newest first. One run is marked shared-in so
+ * the demo also shows the recipient "Mit mir geteilt" group. */
+function parsedDemoRuns(): ResearchRunRecord[] {
+  return Object.values(demoRunFiles)
+    .map((markdown) => parseResearchRun(markdown))
+    .map((run) =>
+      run.runId === DEMO_SHARED_IN_RUN_ID
+        ? { ...run, access: { permission: 'view' as const, via: 'share' as const } }
+        : run,
+    )
+    .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt))
+}
+
+/** Parsed real chat threads, newest first. */
+function parsedDemoChats(): ChatThreadRecord[] {
+  return Object.values(demoChatFiles)
+    .map((markdown) => parseChatThread(markdown))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+}
+
+/** Parsed real prompt templates (rules), stable by title. */
+function parsedDemoRules(): ChatRuleRecord[] {
+  return Object.values(demoRuleFiles)
+    .map((markdown) => parseChatRule(markdown))
+    .sort((a, b) => a.title.localeCompare(b.title))
+}
 
 const emptyEditorUi: EditorUiState = {
   activeDocumentId: null,
@@ -39,9 +103,40 @@ const emptyEditorUi: EditorUiState = {
   viewMode: 'live',
 }
 
+function createKnowledgeSession(
+  id: string,
+  title: string,
+  createdAt: string,
+): KnowledgeSessionRecord {
+  return {
+    createdAt,
+    id,
+    title,
+    updatedAt: createdAt,
+  }
+}
+
+function createKnowledgeSessionGroup(
+  id: string,
+  title: string,
+  createdAt: string,
+): KnowledgeSessionGroupRecord {
+  return {
+    createdAt,
+    id,
+    title,
+    updatedAt: createdAt,
+  }
+}
+
 export function createEmptyProjectState(): ProjectState {
   const now = new Date().toISOString()
   const defaultSections = createDefaultFileLibrarySections(now)
+  const defaultKnowledgeSession = createKnowledgeSession(
+    DEFAULT_KNOWLEDGE_SESSION_ID,
+    DEFAULT_KNOWLEDGE_SESSION_TITLE,
+    now,
+  )
 
   return {
     chatRuleOrder: [],
@@ -70,6 +165,15 @@ export function createEmptyProjectState(): ProjectState {
     fileGroups: {},
     fileLibrarySectionOrder: defaultSections.map((section) => section.id),
     fileLibrarySections: Object.fromEntries(defaultSections.map((section) => [section.id, section])),
+    indexingJobs: {},
+    knowledgeItemOrder: [],
+    knowledgeItems: {},
+    knowledgeSessionGroupMemberships: {},
+    knowledgeSessionGroupOrder: [],
+    knowledgeSessionGroups: {},
+    knowledgeSessionOrder: [defaultKnowledgeSession.id],
+    knowledgeSessions: { [defaultKnowledgeSession.id]: defaultKnowledgeSession },
+    selectedKnowledgeSessionId: defaultKnowledgeSession.id,
     localRunCounter: 1,
     preferences: {
       contrastMode: 'standard',
@@ -85,6 +189,8 @@ export function createEmptyProjectState(): ProjectState {
     },
     researchRunOrder: [],
     researchRuns: {},
+    serverSyncEnabled: false,
+    projectEpoch: 0,
     vectorIndexOrder: [],
     vectorIndexes: {},
     workspaceId: getOrCreateBrowserWorkspaceId(),
@@ -94,6 +200,7 @@ export function createEmptyProjectState(): ProjectState {
       chatChainingEnabled: false,
       expandedJobId: null,
       isChatHistoryVisible: true,
+      isKnowledgeHistoryVisible: true,
       isComposerVisible: true,
       isReportExpanded: false,
       isReportVisible: true,
@@ -110,6 +217,8 @@ export function createEmptyProjectState(): ProjectState {
 }
 
 export function createSeedProjectState(): ProjectState {
+  // A fresh demo starts from clean seeded shares (rebuild-on-toggle invariant).
+  resetDemoShares()
   const researchRuns = seedResearchRuns()
   const researchRunOrder = researchRuns.map((run) => run.runId)
   const chatThreads = seedChatThreads()
@@ -120,7 +229,7 @@ export function createSeedProjectState(): ProjectState {
   const chatRuleOrder = chatRules.map((rule) => rule.id)
   const editorFolders = seedEditorFolders()
   const editorFolderOrder = editorFolders.map((folder) => folder.id)
-  const editorDocuments = seedEditorDocuments()
+  const editorDocuments = seedEditorDocuments(researchRuns)
   const editorDocumentOrder = editorDocuments.map((document) => document.id)
   const editorComments = seedEditorComments()
   const openDocumentIds = editorDocumentOrder.slice(0, 2)
@@ -128,15 +237,35 @@ export function createSeedProjectState(): ProjectState {
   const fileGroups = seedFileGroups()
   const fileAssets = seedFileAssets()
   const vectorIndexes = seedVectorIndexes()
+  const knowledgeSeedItem = seedKnowledgeThreadItem(seedCreatedAt)
+  const knowledgeSession = createKnowledgeSession(
+    DEMO_KNOWLEDGE_SESSION_ID,
+    'AI Act Hochrisiko',
+    seedCreatedAt,
+  )
+  const knowledgeSessionGroup = createKnowledgeSessionGroup(
+    'knowledge-session-group-demo-eu-law',
+    'EU-Recht',
+    seedCreatedAt,
+  )
+  const knowledgeSeedItemInSession = {
+    ...knowledgeSeedItem,
+    sessionId: knowledgeSession.id,
+  }
+  // Open on a real completed report (not the live/queued run) so the report
+  // panel shows real content immediately.
+  const firstReportRunId =
+    researchRuns.find((run) => run.status === 'completed' && run.result?.markdown)
+      ?.runId
+    ?? researchRunOrder[0]
+    ?? null
 
   return {
     chatRuleOrder,
     chatRules: Object.fromEntries(chatRules.map((rule) => [rule.id, rule])),
-    chatThreadGroupMemberships: {
-      'chat-briefing': 'chat-group-policy',
-      'chat-method': 'chat-group-policy',
-      'chat-vendors': 'chat-group-vendors',
-    },
+    chatThreadGroupMemberships: Object.fromEntries(
+      chatThreads.map((thread) => [thread.id, DEMO_CHAT_GROUP]),
+    ),
     chatThreadGroupOrder,
     chatThreadGroups: Object.fromEntries(chatThreadGroups.map((group) => [group.id, group])),
     chatThreadOrder,
@@ -164,6 +293,36 @@ export function createSeedProjectState(): ProjectState {
     fileGroups: Object.fromEntries(fileGroups.map((group) => [group.id, group])),
     fileLibrarySectionOrder: fileLibrarySections.map((section) => section.id),
     fileLibrarySections: Object.fromEntries(fileLibrarySections.map((section) => [section.id, section])),
+    indexingJobs: {
+      'vector-index-eu-recht': {
+        completedDocuments: 1,
+        currentDocumentTitle: 'KI-Verordnung (AI Act) Volltext',
+        jobId: 'demo-seed-eu-recht',
+        percent: 25,
+        source: 'demo',
+        startedAt: new Date(Date.now() - 4_000).toISOString(),
+        totalDocuments: 4,
+      },
+      // A second reindex waiting behind it — shows the "In Warteschlange"
+      // state on load; the simulator promotes it on its first tick.
+      'vector-index-anbieter': {
+        completedDocuments: 0,
+        jobId: 'demo-seed-anbieter',
+        percent: 0,
+        queuePosition: 1,
+        source: 'demo',
+        startedAt: new Date(Date.now() - 1_000).toISOString(),
+        totalDocuments: 3,
+      },
+    },
+    knowledgeItemOrder: [knowledgeSeedItemInSession.id],
+    knowledgeItems: { [knowledgeSeedItemInSession.id]: knowledgeSeedItemInSession },
+    knowledgeSessionGroupMemberships: { [knowledgeSession.id]: knowledgeSessionGroup.id },
+    knowledgeSessionGroupOrder: [knowledgeSessionGroup.id],
+    knowledgeSessionGroups: { [knowledgeSessionGroup.id]: knowledgeSessionGroup },
+    knowledgeSessionOrder: [knowledgeSession.id],
+    knowledgeSessions: { [knowledgeSession.id]: knowledgeSession },
+    selectedKnowledgeSessionId: knowledgeSession.id,
     localRunCounter: 248,
     preferences: {
       contrastMode: 'standard',
@@ -179,6 +338,11 @@ export function createSeedProjectState(): ProjectState {
     },
     researchRunOrder,
     researchRuns: Object.fromEntries(researchRuns.map((run) => [run.runId, run])),
+    // The demo project showcases the server-synced state (the M6a feature)
+    // visually; the !isDemoMode capability gate still blocks any real server
+    // call, so this only lights up the "Synced" badge in the chat history.
+    serverSyncEnabled: true,
+    projectEpoch: 0,
     vectorIndexOrder: vectorIndexes.map((index) => index.id),
     vectorIndexes: Object.fromEntries(vectorIndexes.map((index) => [index.id, index])),
     workspaceId: 'ws_demo_research_desk',
@@ -186,8 +350,9 @@ export function createSeedProjectState(): ProjectState {
       activeFilter: 'all',
       activeView: 'research',
       chatChainingEnabled: false,
-      expandedJobId: researchRunOrder[0] ?? null,
+      expandedJobId: firstReportRunId,
       isChatHistoryVisible: true,
+      isKnowledgeHistoryVisible: true,
       isComposerVisible: true,
       isReportExpanded: false,
       isReportVisible: true,
@@ -197,7 +362,7 @@ export function createSeedProjectState(): ProjectState {
       selectedChatEffort: null,
       selectedChatModelTier: null,
       selectedChatThreadId: chatThreadOrder[0] ?? null,
-      selectedJobId: researchRunOrder[0] ?? null,
+      selectedJobId: firstReportRunId,
       selectedStack: 'anthropic_perplexity',
     },
   }
@@ -207,72 +372,15 @@ function seedChatThreadGroups(): ChatThreadGroupRecord[] {
   return [
     {
       createdAt: seedCreatedAt,
-      id: 'chat-group-policy',
-      title: 'Policy briefing',
-      updatedAt: seedCreatedAt,
-    },
-    {
-      createdAt: seedCreatedAt,
-      id: 'chat-group-vendors',
-      title: 'Provider comparisons',
+      id: DEMO_CHAT_GROUP,
+      title: 'Demos',
       updatedAt: seedCreatedAt,
     },
   ]
 }
 
 function seedChatRules(): ChatRuleRecord[] {
-  return [
-    {
-      contentMarkdown: 'Answer in a concise executive briefing style. Start with the bottom line, then list the strongest evidence and the main uncertainty.',
-      createdAt: seedCreatedAt,
-      id: 'rule-executive-brief',
-      label: 'executive-brief',
-      title: 'Executive briefing',
-      updatedAt: seedCreatedAt,
-    },
-    {
-      contentMarkdown: 'Focus on evidence quality. Distinguish verified claims, weak single-source claims, and points that need another source before they should be trusted.',
-      createdAt: seedCreatedAt,
-      id: 'rule-evidence-review',
-      label: 'evidence-review',
-      title: 'Evidence review',
-      updatedAt: seedCreatedAt,
-    },
-    {
-      category: 'instruction',
-      contentMarkdown: 'SYSTEM PROMPT:\nYour role is to assist the user by providing helpful, clear, and contextually relevant information. Respond in an informative, friendly, and neutral tone, adapting to the user\'s style and preferences based on the conversation history. Your purpose is to help solve problems, answer questions, generate ideas, write content, and support the user in a wide range of tasks.\n\nBEHAVIORAL GUIDELINES:\n1. Maintain a helpful, friendly, and professional demeanor.\n2. Avoid using jargon unless specifically requested by the user. Strive to communicate clearly, breaking down complex concepts into simple explanations.\n3. Respond accurately based on your training data, with knowledge defined training cutoff.\n4. Acknowledge uncertainties and suggest further ways to explore the topic if the answer is outside your knowledge.',
-      createdAt: seedCreatedAt,
-      id: 'rule-basis-prompt',
-      includeInAutocomplete: true,
-      label: 'base',
-      title: 'Basis Prompt',
-      updatedAt: seedCreatedAt,
-      visibility: { chat: true, editor: true },
-    },
-    {
-      category: 'function',
-      contentMarkdown: 'ROLLE: Du bist ein präziser zweisprachiger Lektor (Deutsch/Englisch).\n\nAUFGABE:\n- Korrigiere Grammatik, Rechtschreibung, Zeichensetzung und Stil.\n- Erhalte Tonalität und Fachbegriffe des Originals.\n- Gib nur den überarbeiteten Text zurück, ohne Kommentare.\n\nAUSGABE: ausschließlich der lektorierte Text.',
-      createdAt: seedCreatedAt,
-      id: 'rule-lektor-de-eng',
-      includeInAutocomplete: true,
-      label: 'lektor',
-      title: 'Lektor DE ENG',
-      updatedAt: seedCreatedAt,
-      visibility: { chat: true, editor: true },
-    },
-    {
-      category: 'context',
-      contentMarkdown: 'ROLLE: Professioneller Fachübersetzer Deutsch nach Englisch.\n\nKONTEXT:\n{{context}}\n\nVORGEHEN:\n- Übersetze sinngemäß, nicht wörtlich.\n- Übernimm Terminologie aus dem angehängten Glossar.\n- Behalte Formatierung und Absätze bei.',
-      createdAt: seedCreatedAt,
-      id: 'rule-uebersetzer-de-eng',
-      includeInAutocomplete: true,
-      label: 'translator',
-      linkedContextRefs: [{ fileId: 'file-asset-demo-1', kind: 'file-asset' }],
-      title: 'Übersetzer DE zu ENG',
-      updatedAt: seedCreatedAt,
-      visibility: { chat: true, editor: true },
-    },
-  ]
+  return parsedDemoRules()
 }
 
 function seedFileLibrarySections(): FileLibrarySectionRecord[] {
@@ -509,14 +617,22 @@ function seedVectorIndexes(): VectorIndexRecord[] {
         { fileId: 'file-asset-rechtsgutachten', state: 'pending' },
       ],
       model: 'text-embedding-3-large',
-      status: 'ready',
+      // A reindex is mid-flight on load (the demo "digital twin"): the
+      // local simulator advances it to done, mirroring DEMO_RUNNING_RUN_ID.
+      status: 'indexing',
       title: 'EU-Recht',
-      updatedAt: '2026-05-15T04:00:00.000Z',
+      updatedAt: seedCreatedAt,
     },
     {
       createdAt: seedCreatedAt,
       dims: 1536,
       handle: 'anbieter',
+      // A few past runs so the inline history is visible without waiting.
+      history: [
+        { documents: 3, durationMs: 47_000, finishedAt: '2026-06-15T08:41:00.000Z', result: 'ok', startedAt: '2026-06-15T08:40:13.000Z' },
+        { documents: 1, durationMs: 12_000, finishedAt: '2026-06-12T16:03:00.000Z', result: 'cancelled', startedAt: '2026-06-12T16:02:48.000Z' },
+        { documents: 0, durationMs: 6_000, error: 'Embedding-Backend nicht erreichbar.', finishedAt: '2026-06-10T11:20:00.000Z', result: 'error', startedAt: '2026-06-10T11:19:54.000Z' },
+      ],
       id: 'vector-index-anbieter',
       members: [
         { fileId: 'file-asset-perplexity-db', state: 'embedded' },
@@ -524,9 +640,11 @@ function seedVectorIndexes(): VectorIndexRecord[] {
         { fileId: 'file-asset-bsi-kriterien', state: 'embedded' },
       ],
       model: 'text-embedding-3-small',
-      status: 'ready',
+      // Seeded queued behind EU-Recht (see indexingJobs) to surface the
+      // "In Warteschlange" state on load; the simulator promotes it.
+      status: 'indexing',
       title: 'Anbieter-Wissen',
-      updatedAt: '2026-05-14T06:00:00.000Z',
+      updatedAt: seedCreatedAt,
     },
   ]
 }
@@ -536,306 +654,114 @@ function seedEditorFolders(): EditorFolderRecord[] {
     {
       createdAt: seedCreatedAt,
       id: 'editor-folder-briefs',
-      title: 'Briefs',
-      updatedAt: seedCreatedAt,
-    },
-    {
-      createdAt: seedCreatedAt,
-      id: 'editor-folder-drafts',
-      title: 'Drafts',
+      title: 'Berichte',
       updatedAt: seedCreatedAt,
     },
   ]
 }
 
-function seedEditorDocuments(): EditorDocumentRecord[] {
+/** The Editor opens with a real research report loaded (the user's ask):
+ * the chosen run's report, imported as an editable document. */
+function seedEditorDocuments(runs: ResearchRunRecord[]): EditorDocumentRecord[] {
+  const source =
+    runs.find((run) => run.runId === DEMO_EDITOR_RUN_ID && run.result?.markdown)
+    ?? runs.find((run) => run.status === 'completed' && run.result?.markdown)
+  if (!source?.result?.markdown) return []
+  const timestamp = source.finishedAt ?? source.submittedAt
   return [
     {
-      contentMarkdown: editorSovereignAiBrief(),
-      createdAt: '2026-05-15T10:42:00.000Z',
+      contentMarkdown: source.result.markdown,
+      createdAt: timestamp,
       folderId: 'editor-folder-briefs',
-      id: 'editor-doc-sovereign-ai-2026',
-      revision: 7,
+      id: 'editor-doc-demo-report',
+      revision: 1,
       source: 'imported-research-report',
-      sourceRunId: 'RO-0245',
-      title: 'Sovereign AI research 2026.md',
-      updatedAt: '2026-05-15T11:12:00.000Z',
-    },
-    {
-      contentMarkdown: editorMailDraft(),
-      createdAt: '2026-05-15T11:20:00.000Z',
-      folderId: 'editor-folder-drafts',
-      id: 'editor-doc-vendor-mail',
-      revision: 2,
-      source: 'blank',
-      title: 'Vendor follow-up mail.md',
-      updatedAt: '2026-05-15T11:37:00.000Z',
+      sourceRunId: source.runId,
+      title: 'EU AI Act – Open-Source-Modelle.md',
+      updatedAt: timestamp,
     },
   ]
 }
 
 function seedEditorComments(): EditorCommentThreadRecord[] {
-  return [
-    {
-      anchor: {
-        from: 97,
-        quoteAfter: 'for German public agencies',
-        quoteBefore: 'providers against',
-        selectedText: 'sovereignty requirements',
-        to: 121,
-      },
-      commentMarkdown: 'Make this criterion more concrete before sending the brief.',
-      createdAt: '2026-05-15T11:02:00.000Z',
-      documentId: 'editor-doc-sovereign-ai-2026',
-      id: 'editor-comment-sovereignty',
-      kind: 'collect',
-      status: 'open',
-      updatedAt: '2026-05-15T11:02:00.000Z',
-    },
-  ]
+  return []
 }
 
 function seedResearchRuns(): ResearchRunRecord[] {
-  return [
-    {
-      agentOverrides: { report_profile: 'deep', max_rounds: 5, first_round_queries: 10 },
-      createdAt: '2026-05-15T08:12:00.000Z',
-      events: [
-        runEvent('RO-0247-1', '2026-05-15T08:12:00.000Z', 'Analyzing question...'),
-        runEvent('RO-0247-2', '2026-05-15T08:12:20.000Z', 'Web search required (English search, recency: this week, news)'),
-        runEvent('RO-0247-3', '2026-05-15T08:13:00.000Z', 'Detected analysis goals: 2 sub-questions and 8 required aspects'),
-        runEvent('RO-0247-4', '2026-05-15T08:13:40.000Z', 'Planning search queries (round 1/5)...'),
-        runEvent('RO-0247-5', '2026-05-15T08:14:00.000Z', 'Generated 10 new search queries (DEEP required perspectives, STORM perspectives)'),
-        runEvent('RO-0247-6', '2026-05-15T08:14:30.000Z', 'Searching 10 queries (round 1/5)...'),
-        runEvent('RO-0247-7', '2026-05-15T08:15:00.000Z', 'Semantically grouping 60 evidence claims (LLM call, timeout 900s)...'),
-        runEvent('RO-0247-8', '2026-05-15T08:16:00.000Z', 'Processed 10 search responses, collected 59 references, created 61 evidence units'),
-        runEvent('RO-0247-9', '2026-05-15T08:16:30.000Z', 'Detected 50 related questions from search results'),
-        runEvent('RO-0247-10', '2026-05-15T08:17:00.000Z', 'Report evidence: 4 verified / 16 unverified candidates, context coverage 100%'),
-        runEvent('RO-0247-11', '2026-05-15T08:18:00.000Z', 'Evaluating information quality (after round 1/5)...'),
-        runEvent('RO-0247-12', '2026-05-15T08:18:30.000Z', 'Minor contradictions detected; confidence 7/10, more research required'),
-        runEvent('RO-0247-13', '2026-05-15T08:19:00.000Z', 'Planning search queries (round 2/5)...'),
-        runEvent('RO-0247-14', '2026-05-15T08:20:00.000Z', 'Searching 3 queries (round 2/5)...'),
-        runEvent('RO-0247-15', '2026-05-15T08:21:00.000Z', 'Evaluating information quality (after round 2/5)...', true),
-      ],
-      metrics: {
-        claims: 41,
-        queries: 13,
-        rounds: '2 / 5',
-        sources: 72,
-      },
-      phaseState: {
-        activePhase: 'evaluation',
-        completedPhases: ['analysis', 'planning', 'search'],
-      },
-      runId: 'RO-0247',
-      source: 'mock',
-      stack: 'anthropic_perplexity',
-      startedAt: '2026-05-15T08:12:00.000Z',
-      status: 'running',
-      submittedAt: '2026-05-15T08:12:00.000Z',
-      summary: {
-        title: 'Which providers meet the 2026 requirements for sovereign AI research in German public agencies?',
-      },
-    },
-    {
-      agentOverrides: { report_profile: 'compact', max_rounds: 10, first_round_queries: 6 },
-      createdAt: '2026-05-15T08:18:00.000Z',
-      events: [],
-      metrics: {
-        claims: 0,
-        queries: 0,
-        rounds: '0 / 10',
-        sources: 0,
-      },
-      phaseState: {
-        activePhase: 'analysis',
-        completedPhases: [],
-      },
-      runId: 'RO-0246',
-      source: 'mock',
-      stack: 'azure_web_search',
-      status: 'queued',
-      submittedAt: '2026-05-15T08:18:00.000Z',
-      summary: {
-        queueNote: 'Starts in ~2 min',
-        title: 'Compare Perplexity, Azure OpenAI Web Search, and Azure Foundry Web Search as search providers for Inqtrix.',
-      },
-    },
-    completedRun(
-      'RO-0245',
-      'Market analysis: sovereign LLMs in Europe - vendors, maturity, and use cases',
-      '2026-05-15T07:54:00.000Z',
-      751,
-      9,
-      '4 / 4',
-      31,
-      '8.7 / 10',
-      marketReport(),
-    ),
-    completedRun(
-      'RO-0244',
-      'Briefing: Which EU cloud vendors fit confidential research workflows?',
-      '2026-05-15T07:31:00.000Z',
-      584,
-      7,
-      '3 / 3',
-      18,
-      '8.1 / 10',
-      cloudReport(),
-    ),
-    completedRun(
-      'RO-0243',
-      'Evidence review: open-source search indexes for policy monitoring in Germany',
-      '2026-05-15T07:08:00.000Z',
-      968,
-      12,
-      '5 / 5',
-      42,
-      '9.0 / 10',
-      indexReport(),
-    ),
-    completedRun(
-      'RO-0242',
-      'Vendor comparison: web search with citations and traceable source chains',
-      '2026-05-15T06:42:00.000Z',
-      472,
-      6,
-      '2 / 2',
-      14,
-      '7.8 / 10',
-      citationsReport(),
-    ),
-    completedRun(
-      'RO-0241',
-      'Risk analysis: low-hallucination research for regulatory decisions',
-      '2026-05-15T06:15:00.000Z',
-      799,
-      10,
-      '4 / 4',
-      29,
-      '8.4 / 10',
-      riskReport(),
-    ),
-    completedRun(
-      'RO-0240',
-      'Briefing: audit-log requirements for AI-assisted research agents',
-      '2026-05-15T05:56:00.000Z',
-      627,
-      8,
-      '3 / 3',
-      23,
-      '8.6 / 10',
-      auditReport(),
-    ),
-  ]
+  // Real completed runs from the bundled project export, plus one live and one
+  // queued job so the demo also shows the streaming/breathing card states.
+  return [demoRunningRun(), demoQueuedRun(), ...parsedDemoRuns()]
 }
 
-function completedRun(
-  runId: string,
-  title: string,
-  submittedAt: string,
-  durationSeconds: number,
-  queries: number,
-  rounds: string,
-  sources: number,
-  score: string,
-  markdown: string,
-): ResearchRunRecord {
+/** A still-running job so the demo shows the live, breathing progress card the
+ * way a real run streams — the simulative aspect kept on purpose. It is a
+ * "happening now" simulation, so its timestamps are relative to the current
+ * session (a few minutes ago) — not a stored creation date — which keeps the
+ * runtime believable without revealing any past activity. */
+function demoRunningRun(): ResearchRunRecord {
+  const startMs = Date.now() - 230_000
+  const at = (offsetSeconds: number) =>
+    new Date(startMs + offsetSeconds * 1000).toISOString()
+  const startedAt = at(0)
   return {
-    agentOverrides: { report_profile: 'compact' },
-    createdAt: submittedAt,
-    durationSeconds,
-    events: completedRunEvents(runId, submittedAt, durationSeconds, queries, rounds, sources),
-    finishedAt: addSeconds(submittedAt, durationSeconds),
+    agentOverrides: { first_round_queries: 6, max_rounds: 4, report_profile: 'deep' },
+    createdAt: startedAt,
+    events: [
+      runEvent('RO-live-1', at(0), 'Analysiere Frage...'),
+      runEvent('RO-live-2', at(20), 'Websuche erforderlich (Aktualitaet: diesen Monat)'),
+      runEvent('RO-live-3', at(55), 'Analyseziele erkannt: 3 Teilfragen, 8 Pflichtaspekte'),
+      runEvent('RO-live-4', at(90), 'Plane Suchanfragen (Runde 1/4)...'),
+      runEvent('RO-live-5', at(125), '6 neue Suchanfragen generiert'),
+      runEvent('RO-live-6', at(160), 'Durchsuche 6 Anfragen (Runde 1/4)...'),
+      runEvent('RO-live-7', at(210), 'Bewerte Informationsqualitaet (nach Runde 1/4)...', true),
+    ],
     metrics: {
-      claims: 0,
-      queries,
-      rounds,
-      sources,
+      claims: 34,
+      queries: 6,
+      rounds: `1 / ${DEMO_RUNNING_MAX_ROUNDS}`,
+      sources: 48,
     },
     phaseState: {
-      activePhase: 'answer',
-      completedPhases: [...phaseOrder],
+      activePhase: 'evaluation',
+      completedPhases: ['analysis', 'planning', 'search'],
     },
-    result: {
-      markdown,
-      references: reportReferencesFromMarkdown(markdown, []),
-      topClaims: [],
-      topSources: [],
-    },
-    runId,
+    runId: DEMO_RUNNING_RUN_ID,
     source: 'mock',
     stack: 'anthropic_perplexity',
-    status: 'completed',
-    submittedAt,
+    startedAt,
+    status: 'running',
+    submittedAt: startedAt,
     summary: {
-      score,
-      title,
+      title:
+        'Welche neuen KI-Funktionen haben die grossen Cloud-Anbieter im Juni 2026 angekuendigt?',
     },
   }
 }
 
-function completedRunEvents(
-  runId: string,
-  submittedAt: string,
-  durationSeconds: number,
-  queries: number,
-  rounds: string,
-  sources: number,
-) {
-  const completedAt = addSeconds(submittedAt, durationSeconds)
-
-  return [
-    runEvent(`${runId}-1`, submittedAt, 'Analyzing question...'),
-    runEvent(`${runId}-2`, addSeconds(submittedAt, 45), 'Web search required (English search, recency: this month)'),
-    runEvent(`${runId}-3`, addSeconds(submittedAt, 95), `Planning search queries (round ${rounds})...`),
-    runEvent(`${runId}-4`, addSeconds(submittedAt, 150), `Searching ${queries} queries...`),
-    runEvent(`${runId}-5`, addSeconds(submittedAt, Math.max(210, durationSeconds - 180)), `Processed ${queries} search responses, collected ${sources} references`),
-    runEvent(`${runId}-6`, addSeconds(submittedAt, Math.max(260, durationSeconds - 120)), 'Evaluating information quality...'),
-    runEvent(`${runId}-7`, addSeconds(submittedAt, Math.max(320, durationSeconds - 70)), 'Confidence target reached; preparing final report'),
-    runEvent(`${runId}-8`, completedAt, 'Run completed'),
-  ]
+/** A queued job, to show the waiting state in the demo. Also "now"-relative
+ * (just submitted) for the same reason as the running run above. */
+function demoQueuedRun(): ResearchRunRecord {
+  const submittedAt = new Date(Date.now() - 60_000).toISOString()
+  return {
+    agentOverrides: { first_round_queries: 6, max_rounds: 10, report_profile: 'compact' },
+    createdAt: submittedAt,
+    events: [],
+    metrics: { claims: 0, queries: 0, rounds: '0 / 10', sources: 0 },
+    phaseState: { activePhase: 'analysis', completedPhases: [] },
+    runId: 'RO-queued-9002',
+    source: 'mock',
+    stack: 'azure_web_search',
+    status: 'queued',
+    submittedAt,
+    summary: {
+      queueNote: 'Startet in ~2 Min',
+      title: 'Vergleich der EU-Cloud-Anbieter fuer vertrauliche Recherche-Workflows.',
+    },
+  }
 }
 
 function seedChatThreads(): ChatThreadRecord[] {
-  return [
-    {
-      createdAt: '2026-05-15T08:24:00.000Z',
-      id: 'chat-briefing',
-      messages: [
-        chatMessage('msg-briefing-1', 'assistant', '2026-05-15T08:24:00.000Z', 'I can sharpen the question, collect source hypotheses, or prepare a research job. What should happen first?'),
-        chatMessage('msg-briefing-2', 'user', '2026-05-15T08:25:00.000Z', 'Help me formulate a short search strategy for German public-sector requirements around sovereign AI research.'),
-        chatMessage('msg-briefing-3', 'assistant', '2026-05-15T08:26:00.000Z', 'Three search lines would work well: legal requirements, operating model, and traceability. That can later become a research job with 5-6 starter queries.'),
-      ],
-      preview: 'Search strategy for public-sector requirements',
-      source: 'mock',
-      title: 'Prepare policy brief',
-      updatedAt: '2026-05-15T08:26:00.000Z',
-    },
-    {
-      createdAt: '2026-05-15T07:48:00.000Z',
-      id: 'chat-vendors',
-      messages: [
-        chatMessage('msg-vendors-1', 'assistant', '2026-05-15T07:48:00.000Z', 'Which vendors should be roughly classified?'),
-        chatMessage('msg-vendors-2', 'user', '2026-05-15T07:49:00.000Z', 'Perplexity, Azure OpenAI Web Search, and Azure Foundry Web Search. I care about source quality, controllability, and EU operations.'),
-      ],
-      preview: 'Sort vendors by source quality',
-      source: 'mock',
-      title: 'Classify LLM vendors',
-      updatedAt: '2026-05-15T07:49:00.000Z',
-    },
-    {
-      createdAt: '2026-05-14T15:20:00.000Z',
-      id: 'chat-method',
-      messages: [
-        chatMessage('msg-method-1', 'assistant', '2026-05-14T15:20:00.000Z', 'I would separate the terms first: search, retrieval, answer synthesis, and auditability. After that, the metrics can be defined more tightly.'),
-      ],
-      preview: 'Separate search and retrieval metrics',
-      source: 'mock',
-      title: 'Refine search strategy',
-      updatedAt: '2026-05-14T15:20:00.000Z',
-    },
-  ]
+  return parsedDemoChats()
 }
 
 function runEvent(
@@ -852,149 +778,4 @@ function runEvent(
     severity: title.toLowerCase().includes('contradiction') ? 'warning' as const : 'info' as const,
     title,
   }
-}
-
-function chatMessage(
-  id: string,
-  role: 'assistant' | 'user',
-  createdAt: string,
-  contentMarkdown: string,
-) {
-  return { contentMarkdown, createdAt, id, role }
-}
-
-function addSeconds(iso: string, seconds: number) {
-  return new Date(new Date(iso).getTime() + seconds * 1000).toISOString()
-}
-
-function marketReport() {
-  return `## Executive Summary
-
-The European sovereign LLM market is maturing from model comparison into procurement architecture. Buyers increasingly care about deployability, auditability, data residency, and support contracts, not just benchmark claims.
-
-## Findings
-
-- Sovereign offerings are strongest when the provider can combine model access, regional hosting, operational support, and clear contractual controls.
-- The most credible deployment paths use hybrid stacks: a high-quality model layer, an auditable search layer, and explicit retention controls.
-- The remaining risk is fragmentation. Many vendors can satisfy one requirement, but fewer can satisfy governance, performance, and operational continuity together.
-
-## Recommendation
-
-Treat sovereign LLM selection as a stack decision. Keep the research record attached to metrics, sources, and report text so the decision can be reloaded and audited later.
-
-## Referenzen
-
-- [E1](https://digital-strategy.ec.europa.eu/en/policies/ai-act)
-- [E2](https://www.bsi.bund.de/EN/Themen/Unternehmen-und-Organisationen/Informationen-und-Empfehlungen/Kuenstliche-Intelligenz/kuenstliche-intelligenz_node.html)
-- [E3](https://www.enisa.europa.eu/topics/artificial-intelligence)`
-}
-
-function cloudReport() {
-  return `## Briefing
-
-Confidential research workflows fit best on EU-operated cloud platforms that expose strong identity controls, regional data processing, and clear logging boundaries.
-
-## Assessment
-
-- Cloud locality alone is not sufficient; the platform also needs reliable audit logs and policy controls.
-- Search and LLM providers should be separable so sensitive workflows can swap providers without changing the whole app.
-- The operational winner is the platform that makes retention, source tracing, and incident review boringly explicit.
-
-## Next Step
-
-Validate provider claims with a small project export/import test before connecting live workloads.`
-}
-
-function indexReport() {
-  return `## Evidence Review
-
-Open-source search indexes are useful for policy monitoring when source coverage, freshness, and ranking behavior are visible enough to audit.
-
-## Key Points
-
-- Index transparency matters more than raw result volume for regulated research.
-- Public-sector monitoring should capture query history, result summaries, and report outputs together.
-- A reloadable project folder gives reviewers the minimum durable artifact: what was asked, what was found, and how it was summarized.
-
-## Conclusion
-
-Use open-source indexes as part of a provider-neutral research stack, but preserve the full project context for later review.`
-}
-
-function citationsReport() {
-  return `## Vendor Comparison
-
-Citation quality depends on whether the search provider returns stable URLs, extractable source metadata, and enough context for claim-level review.
-
-## Findings
-
-- Providers with good snippets but weak metadata create attractive reports that are hard to audit.
-- Providers with fewer but clearer sources can be better for policy and compliance workflows.
-- Exported Markdown should therefore carry both the report body and the run metrics that explain how the card was produced.
-
-## Recommendation
-
-Prefer vendors that make citation chains explicit and test them through project reloads, not only through live UI inspection.`
-}
-
-function riskReport() {
-  return `## Risk Analysis
-
-Low-hallucination research depends on more than model quality. The workflow needs visible fallback states, source diversity, and durable evidence records.
-
-## Risks
-
-- A polished report can hide weak source coverage if metrics are not stored with it.
-- A deleted card that survives in a project folder creates review confusion.
-- Running jobs should not be saved as completed artifacts because their state is incomplete.
-
-## Mitigation
-
-Persist only completed research reports, preserve their metrics in frontmatter, and physically remove deleted reports on save.`
-}
-
-function auditReport() {
-  return `## Briefing
-
-Audit logs for AI-assisted research agents need to preserve enough context to replay the user's working state without depending on a live backend.
-
-## Required Artifact
-
-- A project manifest for global UI and project metadata.
-- One Markdown file per completed research run.
-- One Markdown file per chat thread with explicit user and assistant message roles.
-
-## Outcome
-
-This structure keeps the export human-readable while still giving the React app enough metadata to rebuild cards, reports, and conversations.`
-}
-
-function editorSovereignAiBrief() {
-  return `# Sovereign AI research 2026
-
-This working note compares search and LLM providers against sovereignty requirements for German public agencies.
-
-## Decision Criteria
-
-- **Operational control:** data locality, provider transparency, and visible audit events.
-- **Source quality:** stable URLs, source metadata, and evidence that can be checked later.
-- **Workflow fit:** importable reports, editable drafts, and review comments before publication.
-
-## Draft Recommendation
-
-Start with the providers that expose the clearest source chain. Use the editor to turn completed research reports into policy-ready briefs, then review sensitive passages through inline comments before sending the final text.`
-}
-
-function editorMailDraft() {
-  return `# Vendor follow-up mail
-
-Hello,
-
-thank you for the initial material. We are currently comparing provider options for traceable AI research workflows and would appreciate clarification on three points:
-
-1. Which parts of the workflow are operated in the EU?
-2. How are search citations preserved for later audit?
-3. Can customers export working notes as Markdown?
-
-Best regards`
 }

@@ -458,23 +458,48 @@ def validate_editor_suggest_result(
     return issues
 
 
+_VALIDATION_WARNING_TEXT: dict[str, dict[str, str]] = {
+    "sentence_limit": {
+        "de": "Der Vorschlag enthaelt mehr Saetze als die Anweisung erlaubt.",
+        "en": "The suggestion has more sentences than the instruction allows.",
+    },
+    "not_shortened": {
+        "de": (
+            "Der Vorschlag ist nicht kuerzer als der markierte Text, obwohl die "
+            "Anweisung eine Kuerzung nahelegt."
+        ),
+        "en": (
+            "The suggestion is not shorter than the selected text, although the "
+            "instruction asks to shorten it."
+        ),
+    },
+    "unchanged": {
+        "de": "Der Vorschlag entspricht unveraendert dem markierten Text.",
+        "en": "The suggestion is unchanged from the selected text.",
+    },
+}
+
+
 def warnings_for_validation_issues(
     issues: list[EditorSuggestValidationIssue],
     *,
     locale: EditorSuggestLocale,
 ) -> list[str]:
-    """Return localized warnings for unresolved edit-contract issues."""
-    if not issues:
-        return []
-    if locale == "de":
-        return [
-            "Der Vorschlag konnte nicht eindeutig gegen die Nutzeranweisung "
-            f"validiert werden ({', '.join(issue.code for issue in issues)})."
-        ]
-    return [
-        "The suggestion could not be fully validated against the user instruction "
-        f"({', '.join(issue.code for issue in issues)})."
-    ]
+    """Return human-readable, localized warnings for unresolved edit issues.
+
+    The raw issue codes drive the retry and are logged (editor route), but they
+    must never reach the UI — a user should not read "(not_shortened)". A
+    genuine post-retry violation still surfaces, in plain language (No Silent
+    Fallbacks); an unmapped code falls back to its English message rather than
+    leaking the bare code.
+    """
+    lang = "de" if locale == "de" else "en"
+    warnings: list[str] = []
+    for issue in issues:
+        text = _VALIDATION_WARNING_TEXT.get(issue.code, {}).get(lang) or issue.message
+        if text not in warnings:
+            warnings.append(text)
+    return warnings
 
 
 def result_from_parsed(

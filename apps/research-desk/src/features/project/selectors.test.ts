@@ -4,11 +4,41 @@ import {
   chatRuleOptions,
   chatAttachmentsFromRefs,
   chatContextRefKey,
+  completedReportOptions,
   dedupeChatContextRefs,
+  isResearchDeskRun,
+  projectAllKnowledgeItems,
   projectChatRules,
+  projectKnowledgeItems,
+  projectKnowledgeSessionSections,
+  projectKnowledgeSessions,
   referenceDocsFromRefs,
 } from './selectors'
-import type { ChatRuleRecord, FileAssetRecord, FileGroupRecord, ProjectState } from './types'
+import type {
+  ChatRuleRecord,
+  FileAssetRecord,
+  FileGroupRecord,
+  KnowledgeSessionGroupRecord,
+  KnowledgeSessionRecord,
+  KnowledgeThreadItemRecord,
+  ProjectState,
+  ResearchRunRecord,
+} from './types'
+
+function makeReportRun(
+  runId: string,
+  mode: ResearchRunRecord['mode'],
+): ResearchRunRecord {
+  // Only the fields completedReportOptions reads matter here; the cast keeps
+  // the test focused on the mode filter, not on a full run-record fixture.
+  return {
+    mode,
+    result: { markdown: `# ${runId}` },
+    runId,
+    status: 'completed',
+    summary: { title: runId },
+  } as unknown as ResearchRunRecord
+}
 
 function makeAsset(id: string, label: string, overrides: Partial<FileAssetRecord> = {}): FileAssetRecord {
   return {
@@ -39,6 +69,53 @@ function makeRule(id: string, label: string, overrides: Partial<ChatRuleRecord> 
     id,
     label,
     title: `${label} prompt`,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function makeKnowledgeItem(
+  id: string,
+  sessionId: string,
+  overrides: Partial<KnowledgeThreadItemRecord> = {},
+): KnowledgeThreadItemRecord {
+  return {
+    collectionTitles: [],
+    createdAt: '2026-01-01T00:00:00.000Z',
+    id,
+    progress: { steps: [] },
+    question: id,
+    requestedProfile: null,
+    runId: null,
+    sessionId,
+    status: 'completed',
+    ...overrides,
+  }
+}
+
+function makeKnowledgeSession(
+  id: string,
+  title: string,
+  overrides: Partial<KnowledgeSessionRecord> = {},
+): KnowledgeSessionRecord {
+  return {
+    createdAt: '2026-01-01T00:00:00.000Z',
+    id,
+    title,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function makeKnowledgeSessionGroup(
+  id: string,
+  title: string,
+  overrides: Partial<KnowledgeSessionGroupRecord> = {},
+): KnowledgeSessionGroupRecord {
+  return {
+    createdAt: '2026-01-01T00:00:00.000Z',
+    id,
+    title,
     updatedAt: '2026-01-01T00:00:00.000Z',
     ...overrides,
   }
@@ -148,6 +225,66 @@ describe('projectChatRules', () => {
   })
 })
 
+describe('knowledge selectors', () => {
+  it('filters thread items to the selected knowledge session', () => {
+    const base = createEmptyProjectState()
+    const defaultSessionId = base.selectedKnowledgeSessionId as string
+    const state: ProjectState = {
+      ...base,
+      knowledgeItemOrder: ['ki-1', 'ki-2'],
+      knowledgeItems: {
+        'ki-1': makeKnowledgeItem('ki-1', defaultSessionId),
+        'ki-2': makeKnowledgeItem('ki-2', 'ks-2'),
+      },
+      knowledgeSessionOrder: [defaultSessionId, 'ks-2'],
+      knowledgeSessions: {
+        ...base.knowledgeSessions,
+        'ks-2': {
+          createdAt: '2026-01-01T00:00:00.000Z',
+          id: 'ks-2',
+          title: 'Second',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      },
+      selectedKnowledgeSessionId: 'ks-2',
+    }
+
+    expect(projectKnowledgeItems(state).map((item) => item.id)).toEqual(['ki-2'])
+    expect(projectAllKnowledgeItems(state).map((item) => item.id)).toEqual(['ki-1', 'ki-2'])
+    expect(projectKnowledgeSessions(state).map((session) => session.id)).toEqual([defaultSessionId, 'ks-2'])
+  })
+
+  it('groups knowledge sessions into folder sections and keeps invalid memberships ungrouped', () => {
+    const base = createEmptyProjectState()
+    const defaultSessionId = base.selectedKnowledgeSessionId as string
+    const state: ProjectState = {
+      ...base,
+      knowledgeSessionGroupMemberships: {
+        'ks-2': 'kg-1',
+        'ks-3': 'missing-group',
+      },
+      knowledgeSessionGroupOrder: ['kg-1'],
+      knowledgeSessionGroups: {
+        'kg-1': makeKnowledgeSessionGroup('kg-1', 'Client work'),
+      },
+      knowledgeSessionOrder: [defaultSessionId, 'ks-2', 'ks-3'],
+      knowledgeSessions: {
+        ...base.knowledgeSessions,
+        'ks-2': makeKnowledgeSession('ks-2', 'Inside folder'),
+        'ks-3': makeKnowledgeSession('ks-3', 'Loose session'),
+      },
+    }
+
+    const sections = projectKnowledgeSessionSections(state)
+
+    expect(sections).toHaveLength(2)
+    expect(sections[0]).toMatchObject({ groupId: 'kg-1', kind: 'group' })
+    expect(sections[0].sessions.map((session) => session.id)).toEqual(['ks-2'])
+    expect(sections[1]).toMatchObject({ groupId: null, kind: 'ungrouped' })
+    expect(sections[1].sessions.map((session) => session.id)).toEqual([defaultSessionId, 'ks-3'])
+  })
+})
+
 describe('chatRuleOptions', () => {
   it('filters autocomplete options by surface visibility and autocomplete status', () => {
     const state = stateWithRules([
@@ -195,5 +332,34 @@ describe('referenceDocsFromRefs', () => {
       { content: 'alpha content', label: 'alpha', pageCount: 3, sizeBytes: 12 },
       { content: 'report body', label: 'my-report', pageCount: null, sizeBytes: undefined },
     ])
+  })
+})
+
+describe('isResearchDeskRun', () => {
+  it('excludes only knowledge-mode runs; research/direct_llm/legacy count as desk runs', () => {
+    expect(isResearchDeskRun({ mode: 'knowledge' } as ResearchRunRecord)).toBe(false)
+    expect(isResearchDeskRun({ mode: 'research' } as ResearchRunRecord)).toBe(true)
+    expect(isResearchDeskRun({ mode: 'direct_llm' } as ResearchRunRecord)).toBe(true)
+    // A run with no mode is a legacy record and stays visible as a report.
+    expect(isResearchDeskRun({} as ResearchRunRecord)).toBe(true)
+  })
+})
+
+describe('completedReportOptions', () => {
+  it('offers research/direct_llm/legacy reports but never knowledge-mode runs', () => {
+    const state = createEmptyProjectState()
+    state.researchRuns = {
+      r1: makeReportRun('r1', 'research'),
+      r2: makeReportRun('r2', 'direct_llm'),
+      r3: makeReportRun('r3', 'knowledge'),
+      r4: makeReportRun('r4', undefined),
+    }
+    state.researchRunOrder = ['r1', 'r2', 'r3', 'r4']
+
+    const runIds = completedReportOptions(state).map((option) => option.runId)
+
+    // The editor "import report" + chat @research lists must match the desk:
+    // knowledge runs (the "Wissen" thread) never leak in as importable reports.
+    expect(runIds).toEqual(['r1', 'r2', 'r4'])
   })
 })

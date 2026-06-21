@@ -1,0 +1,6 @@
+{
+  "_established": "2026-01-01 first (dora, gruendlich) baseline: memory store + text-embedding-3-large, coverage verdict + declared-absence abstention ruler. Before the three-way coverage verdict this combination measured false_refusal 0.5556 (the binary gate refused answerable multi-aspect questions with partial evidence wholesale); partial coverage now answers with the gaps named. second_pass 0.65 shows the vocabulary-bridge rewrite loop actively working on this tier.",
+  "abstention_rate": 1.0,
+  "false_refusal_rate": 0.0,
+  "citation_rate": 1.0
+}

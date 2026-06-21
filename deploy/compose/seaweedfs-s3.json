@@ -1,0 +1,14 @@
+{
+  "identities": [
+    {
+      "name": "inqtrix-dev",
+      "credentials": [
+        {
+          "accessKey": "inqtrix-dev-access",
+          "secretKey": "inqtrix-dev-secret"
+        }
+      ],
+      "actions": ["Read", "Write", "List", "Tagging", "Admin"]
+    }
+  ]
+}

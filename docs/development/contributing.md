@@ -61,7 +61,6 @@ See [Installation](../getting-started/installation.md) for the full bootstrap.
 - Never commit real API keys, cassette files with live data, or customer-identifying information.
 - The project is explicitly experimental; do not add marketing claims to documentation.
 - The GNU Affero General Public License v3.0 only (`AGPL-3.0-only`) applies to all contributions; by opening a PR you confirm you have the right to license the content under it.
-- Inqtrix may also be offered under separate commercial licenses by Babak Zandi. Non-trivial external contributions that should be included in those commercial licensing paths may require a separate Contributor License Agreement before merge.
 
 ## Related docs
 

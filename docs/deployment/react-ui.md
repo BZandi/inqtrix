@@ -845,4 +845,3 @@ Composer mapping:
 
 - [Web server mode](webserver-mode.md)
 - [Run events](../observability/run-events.md)
-- [Streamlit UI](streamlit-ui.md)

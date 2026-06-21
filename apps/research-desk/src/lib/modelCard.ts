@@ -57,6 +57,20 @@ export function formatTokens(count: number): string {
   return `${count}`
 }
 
+/** Compact byte count for the quota meter: "0", "512 B", "4.0 KB",
+ * "45 MB", "1.2 GB" (1024-based, one decimal above KB). */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${Number.isInteger(value) ? value : Number(value.toFixed(1))} ${units[unit]}`
+}
+
 const CAPABILITY_LABELS: Record<string, string> = {
   reasoning: 'Reasoning',
   code: 'Code',

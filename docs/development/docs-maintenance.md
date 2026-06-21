@@ -140,15 +140,27 @@ Whenever a code change alters public behaviour, update the matching `docs/**` pa
 | Code area | Matching docs page(s) |
 |-----------|-----------------------|
 | `src/inqtrix/providers/<x>.py` | `docs/providers/<x>.md` |
+| `src/inqtrix/providers/__init__.py` (env provider selector), `ProviderSettings` in `settings.py` | `docs/getting-started/provider-recipes.md`, `docs/providers/overview.md`, `docs/configuration/settings-and-env.md` |
 | `src/inqtrix/strategies/<x>.py` | `docs/architecture/strategies.md` and/or the dedicated page under `docs/scoring-and-stopping/` |
-| `src/inqtrix/settings.py` | `docs/configuration/*.md` |
+| `src/inqtrix/settings.py` (any `Field(alias=...)` / `validation_alias`, or a new `*Settings` class) | `docs/configuration/settings-and-env.md` (every variable; see the completeness rule below), plus any affected `docs/configuration/*.md` |
+| `os.getenv` / `os.environ` reads outside `Settings` (`src/inqtrix/__main__.py`, `src/inqtrix/worker/__main__.py`, `scripts/*.py`, `tests/**`) | `docs/configuration/settings-and-env.md` (the process-level and development/test-only sections) |
 | `src/inqtrix/server/<x>.py` | `docs/deployment/webserver-mode.md` and/or `docs/deployment/security-hardening.md` |
+| `src/inqtrix/auth/<x>.py`, `src/inqtrix/server/routers/auth.py`, `src/inqtrix/server/routers/admin.py` | `docs/deployment/auth-modes.md`, `docs/deployment/security-hardening.md`, `docs/how-to/create-and-manage-users.md`; LDAP specifics `docs/how-to/connect-to-existing-ldap.md` |
+| `create_app`/`register_routes`/`build_container` injection seams (`auth_provider=`, `object_store_impl=`, `run_store=`, `permissions=`, `knowledge=`) | `docs/how-to/writing-a-custom-auth-provider.md`, `docs/how-to/writing-a-custom-storage.md` |
+| `src/inqtrix/knowledge/<x>.py`, `src/inqtrix/knowledge/stores/<x>.py`, `src/inqtrix/storage/knowledge_orm.py`, `src/inqtrix/services/knowledge_service.py` | `docs/knowledge/overview.md` and the data-flow/diagram page `docs/architecture/knowledge-retrieval.md`; profile semantics additionally `docs/configuration/knowledge-profiles.md` |
+| `src/inqtrix/storage/<x>.py`, `src/inqtrix/runs/<x>.py`, `src/inqtrix/worker/<x>.py` | `docs/getting-started/platform-components.md`, `docs/configuration/settings-and-env.md` |
+| project-persistence tier (`src/inqtrix/storage/{chat,editor,asset_records,knowledge_sessions,vector_index,account}_orm.py` + migrations, `src/inqtrix/project/*`, `src/inqtrix/services/{chat_history,editor_persistence,asset_records,knowledge_sessions,vector_index,account_preferences}_service.py`, and the `apps/research-desk` sync hooks) | `docs/architecture/data-architecture.md` (what-lives-where, the storage matrix, scoping, load-on-use / defer-while-indexing / account-wins, capability-gated tier switch) |
+| `deploy/compose/compose.dev.yaml` | `docs/getting-started/platform-components.md` (manual/host section) and, for the Dex/OIDC pieces, `docs/deployment/auth-modes.md` |
+| `deploy/compose/compose.stack.yaml`, `deploy/docker/**`, `deploy/nginx/**`, `deploy/.env.stack.example` | `docs/getting-started/stack-quickstart.md`, `docs/getting-started/platform-components.md`, `docs/deployment/runbooks.md`, `docs/deployment/deployment-modes.md`, `docs/deployment/kubernetes.md` (image hardening / nginx upstream template) |
+| `deploy/helm/inqtrix/**` (Helm chart, values, templates) | `docs/deployment/kubernetes.md`, `docs/deployment/deployment-modes.md` |
 | `src/inqtrix/agent.py` public API | `docs/architecture/public-api.md`, `docs/architecture/overview.md` |
 | `src/inqtrix/nodes.py` | `docs/architecture/nodes.md` |
 | `src/inqtrix/evidence.py` | `docs/architecture/evidence-pipeline.md` |
 | `src/inqtrix/prompts.py` answer behaviour | `docs/architecture/evidence-pipeline.md`, `docs/architecture/nodes.md` |
 | `src/inqtrix/runtime_logging.py` forensic schemas / log tooling | `docs/observability/logging.md`, `docs/observability/forensic-cookbook.md` |
 | `apps/research-desk/**`, `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml` | `docs/deployment/react-ui.md` and, when the run-event contract changes, `docs/observability/run-events.md` |
+
+**Env-var completeness rule.** [`settings-and-env.md`](../configuration/settings-and-env.md) is the single source of truth for environment variables and must list **every** variable the code reads: every `Field(alias=...)` / `validation_alias` in `settings.py` (a new `*Settings` class gets its own block), and every `os.getenv` / `os.environ` read in the server/worker bootstrap, scripts, and tests (the last under the development/test-only section). A variable may appear in a table row or in a "Further tuning" prose line, but it must appear under its exact name so the page stays greppable. The committed `.env.example` / `deploy/.env.stack.example` templates are curated starters, not the reference; keep them free of variables that no longer exist in code. Deep-dive pages (provider recipes, auth modes, logging) may show usage but link here for the definition.
 
 Maintainer notes are not a substitute for the public docs. Private decision logs describe why a change was made; `docs/**` describes the behaviour a user relies on.
 

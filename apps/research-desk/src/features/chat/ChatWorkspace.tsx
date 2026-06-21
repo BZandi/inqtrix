@@ -7,6 +7,7 @@ import {
   ChevronRight,
   CircleUserRound,
   Copy,
+  Database,
   Eraser,
   EyeOff,
   FileText,
@@ -82,6 +83,7 @@ import type {
 } from '@/features/researchRuns/types'
 import { ModelTierPicker } from '@/features/researchRuns/ModelTierPicker'
 import { ContextTokenMeter } from '@/features/composer/ContextTokenMeter'
+import { QuotaMeter } from '@/features/quota/QuotaMeter'
 import {
   buildContextTokenModel,
   estimateTokensFromText,
@@ -105,13 +107,19 @@ import { ContextChipLegend } from '@/features/composer/ContextChipLegend'
 import { MentionComposer, type MentionComposerHandle } from '@/features/composer/MentionComposer'
 import { type LabelResolver } from '@/features/composer/mentionDoc'
 import { resizeTextareaToRows } from '@/features/composer/textareaAutosize'
-import { OptionMenuHeader, optionMenuContentClassName } from '@/components/ui/option-menu'
+import { OptionMenuHeader, OptionMenuItem, optionMenuContentClassName } from '@/components/ui/option-menu'
 
 type ChatWorkspaceProps = {
   activeAssistantMessageId: string | null
   chatModelOptions: ChatModelOption[]
   chatModelOptionsStatus: 'available' | 'missing' | 'unresolved'
   chatHistorySections: ChatHistorySection[]
+  /** On-demand chat history: server has older thread pages not yet loaded. */
+  chatHistoryHasMore?: boolean
+  /** A load-older page request is in flight (busy state for the button). */
+  chatHistoryLoadingMore?: boolean
+  /** Load the next page of older threads. */
+  onLoadMoreChatHistory?: () => void
   defaultChatModel: NodeModelResolution | null
   fileGroupOptions: FileGroupMentionOption[]
   fileOptions: FileMentionOption[]
@@ -122,6 +130,10 @@ type ChatWorkspaceProps = {
   onAttachContext: (ref: ChatContextReferenceRecord) => void
   onAttachFiles: (files: File[]) => void
   onPillRefsChange: (refs: ChatContextReferenceRecord[]) => void
+  /** Session-scoped composer draft (text with serialized `[N]` pills) lifted to
+   * the parent shell so it survives a workspace unmount on view switch. */
+  chatDraft: string
+  onChatDraftChange: (draft: string) => void
   onAnswerLastUserMessage: (threadId: string, messageId: string) => void
   onBranchFromMessage: (threadId: string, messageId: string) => void
   onClearThread: () => void
@@ -158,6 +170,10 @@ type ChatWorkspaceProps = {
   onSelectedChatEffortChange: (effort: string | null) => void
   chatContextBase: { documents: number; reports: number; rules: number; conversation: number }
   chatContextCapacity: { contextWindowTokens: number | null; reservedOutputTokens: number }
+  /** `null` hides the knowledge scope picker (feature unavailable). */
+  knowledgeIndexOptions: KnowledgeIndexOption[] | null
+  selectedKnowledgeIndexIds: string[]
+  onSelectedKnowledgeIndexIdsChange: (ids: string[]) => void
   onStopGenerating: () => void
   onStreamingEnabledChange: (enabled: boolean) => void
   attachmentBudgetNotice: string | null
@@ -180,6 +196,16 @@ type ChatSendOptions = {
   modelTier?: ChatModelTier
   model?: string | null
   effort?: string | null
+  /** Backend knowledge-collection ids; non-empty switches the request
+   * to `mode: 'knowledge'` (non-streaming, answers from documents). */
+  knowledgeCollectionIds?: string[]
+}
+
+/** One ready, server-embedded vector index offered as a chat scope. */
+export type KnowledgeIndexOption = {
+  collectionId: string
+  id: string
+  title: string
 }
 
 export default function ChatWorkspace({
@@ -187,6 +213,9 @@ export default function ChatWorkspace({
   chatModelOptions,
   chatModelOptionsStatus,
   chatHistorySections,
+  chatHistoryHasMore,
+  chatHistoryLoadingMore,
+  onLoadMoreChatHistory,
   defaultChatModel,
   isDesktop,
   isHistoryVisible,
@@ -225,10 +254,15 @@ export default function ChatWorkspace({
   onSelectedChatEffortChange,
   chatContextBase,
   chatContextCapacity,
+  knowledgeIndexOptions,
+  selectedKnowledgeIndexIds,
+  onSelectedKnowledgeIndexIdsChange,
   onStopGenerating,
   onStreamingEnabledChange,
   onAttachFiles,
   onPillRefsChange,
+  chatDraft,
+  onChatDraftChange,
   fileGroupOptions,
   fileOptions,
   attachmentBudgetNotice,
@@ -278,6 +312,7 @@ export default function ChatWorkspace({
   const [titleDraft, setTitleDraft] = useState('')
   const chatEndRef = useRef<HTMLDivElement | null>(null)
   const composerRef = useRef<MentionComposerHandle | null>(null)
+  const didRestoreDraftRef = useRef(false)
   const lastAutoFollowThreadIdRef = useRef<string | null>(null)
   const messageEditTextareaRef = useRef<HTMLTextAreaElement | null>(null)
   const messagesScrollAreaRef = useRef<HTMLDivElement | null>(null)
@@ -335,6 +370,17 @@ export default function ChatWorkspace({
     setSelectedMessageIds(new Set())
     shouldAutoFollowChatRef.current = true
   }, [selectedThread?.id, selectedThread?.title])
+
+  // Restore the session draft once on mount so text AND its `[N]` pills survive a
+  // view switch (the workspace unmounts on switch). Setting the text unconditionally
+  // -- even for an empty draft -- forces `onRefsChange` to re-derive the parent pill
+  // mirror from the live editor, so no orphaned, unremovable chip can linger.
+  useEffect(() => {
+    if (didRestoreDraftRef.current) return
+    didRestoreDraftRef.current = true
+    composerRef.current?.setMentionText(chatDraft)
+    setDraft(composerRef.current?.getMentionText() ?? chatDraft)
+  }, [chatDraft])
 
   useEffect(() => {
     if (!selectedThread || selectedMessageIds.size === 0) return
@@ -500,7 +546,9 @@ export default function ChatWorkspace({
   }
 
   function handleComposerChange() {
-    setDraft(composerRef.current?.getMentionText() ?? '')
+    const next = composerRef.current?.getMentionText() ?? ''
+    setDraft(next)
+    onChatDraftChange(next)
     setComposerNotice(null)
     draftTextImprove.clearProposal()
   }
@@ -516,7 +564,9 @@ export default function ChatWorkspace({
 
   function acceptDraftImprovement(text: string) {
     composerRef.current?.setMentionText(text)
-    setDraft(composerRef.current?.getMentionText() ?? text)
+    const next = composerRef.current?.getMentionText() ?? text
+    setDraft(next)
+    onChatDraftChange(next)
     draftTextImprove.clearProposal()
     setDraftCommitPulseKey((key) => key + 1)
     window.requestAnimationFrame(() => composerRef.current?.focus())
@@ -526,18 +576,25 @@ export default function ChatWorkspace({
     const instruction = composerRef.current?.getInstructionText().trim() ?? ''
     if (!instruction || isSending) return
     shouldAutoFollowChatRef.current = true
+    const knowledgeCollectionIds = (knowledgeIndexOptions ?? [])
+      .filter((option) => selectedKnowledgeIndexIds.includes(option.id))
+      .map((option) => option.collectionId)
+    const modelOptions: ChatSendOptions | undefined = selectedChatModel
+      ? { model: selectedChatModel, effort: selectedChatEffort }
+      : selectedModelTier
+        ? { modelTier: selectedModelTier }
+        : undefined
     onSendMessage(
       instruction,
       pillRefs,
-      selectedChatModel
-        ? { model: selectedChatModel, effort: selectedChatEffort }
-        : selectedModelTier
-          ? { modelTier: selectedModelTier }
-          : undefined,
+      knowledgeCollectionIds.length > 0
+        ? { ...modelOptions, knowledgeCollectionIds }
+        : modelOptions,
     )
     composerRef.current?.clear()
     setDraft('')
     setPillRefs([])
+    onChatDraftChange('')
     setComposerNotice(null)
   }
 
@@ -547,18 +604,22 @@ export default function ChatWorkspace({
   }
 
   function handleRemoveChip(ref: ChatContextReferenceRecord) {
-    if (pillRefs.some((pill) => chatContextRefKey(pill) === chatContextRefKey(ref))) {
-      composerRef.current?.removeRef(ref)
-    } else {
-      onRemoveContext(ref)
-    }
+    // Target both sources unconditionally: removeRef no-ops when the chip is not a
+    // live editor pill, onRemoveContext no-ops when it is not a pending attachment.
+    // This keeps the "x" working even right after a remount, when the local pill
+    // mirror has not yet re-derived from the editor (mirrors handleRemoveEditorChip).
+    composerRef.current?.removeRef(ref)
+    onRemoveContext(ref)
   }
 
   const historyPanel = (
     <ChatHistoryPanel
       chatHistorySections={chatHistorySections}
+      hasMoreThreads={chatHistoryHasMore}
       isIncognito={isIncognito}
+      isLoadingMoreThreads={chatHistoryLoadingMore}
       locale={locale}
+      onLoadMoreThreads={onLoadMoreChatHistory}
       onCreateThread={onCreateThread}
       onCreateThreadGroup={onCreateThreadGroup}
       onDeleteThread={onDeleteThread}
@@ -1024,6 +1085,61 @@ export default function ChatWorkspace({
                     label={`${t.chat.chaining} · ${t.chat.chainingTooltip}`}
                     onClick={() => onChainingEnabledChange(!chainingEnabled)}
                   />
+                  {knowledgeIndexOptions && knowledgeIndexOptions.length > 0 ? (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          aria-label={t.chat.knowledgeScope}
+                          className={cn(
+                            composerIconButtonClassName,
+                            'shrink-0',
+                            selectedKnowledgeIndexIds.length > 0 && 'bg-brand-subtle text-brand hover:text-brand',
+                          )}
+                          disabled={isSending}
+                          type="button"
+                          variant="ghost"
+                        >
+                          <Database />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start" className={optionMenuContentClassName} side="top" sideOffset={8}>
+                        <OptionMenuHeader
+                          count={knowledgeIndexOptions.length}
+                          title={t.chat.knowledgeScope}
+                          value={
+                            selectedKnowledgeIndexIds.length > 0
+                              ? t.chat.knowledgeScopeActive.replace('{count}', String(selectedKnowledgeIndexIds.length))
+                              : t.chat.knowledgeScopeOff
+                          }
+                        />
+                        <div className="py-1">
+                          <OptionMenuItem
+                            active={selectedKnowledgeIndexIds.length === 0}
+                            description={t.chat.knowledgeScopeOffDescription}
+                            icon={MessageSquareText}
+                            label={t.chat.knowledgeScopeOff}
+                            onSelect={() => onSelectedKnowledgeIndexIdsChange([])}
+                          />
+                          {knowledgeIndexOptions.map((option) => (
+                            <OptionMenuItem
+                              active={selectedKnowledgeIndexIds.includes(option.id)}
+                              description={t.chat.knowledgeScopeIndexDescription}
+                              icon={Database}
+                              key={option.id}
+                              label={option.title}
+                              onSelect={() =>
+                                onSelectedKnowledgeIndexIdsChange(
+                                  selectedKnowledgeIndexIds.includes(option.id)
+                                    ? selectedKnowledgeIndexIds.filter((id) => id !== option.id)
+                                    : [...selectedKnowledgeIndexIds, option.id],
+                                )
+                              }
+                            />
+                          ))}
+                        </div>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  ) : null}
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button
@@ -1066,6 +1182,7 @@ export default function ChatWorkspace({
                   />
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
+                    <QuotaMeter disabled={isSending} />
                     <ContextTokenMeter
                       conversationLabel={t.chat.contextCatHistory}
                       disabled={isSending}

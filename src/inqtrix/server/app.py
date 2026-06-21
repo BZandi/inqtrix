@@ -5,45 +5,52 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import TYPE_CHECKING, AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from inqtrix.auth.api_key import build_auth_provider
 from inqtrix.providers import create_providers
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server.routes import create_router, register_routes
-from inqtrix.server.security import (
-    make_api_key_dependency,
-    make_cors_middleware_kwargs,
-)
-from inqtrix.server.runs import RunStore
+from inqtrix.server.security import make_cors_middleware_kwargs
+from inqtrix.services.health_service import provider_label, provider_ready
 from inqtrix.settings import Settings
 from inqtrix.strategies import StrategyContext, create_default_strategies, resolve_claim_extract_model
+
+if TYPE_CHECKING:
+    from inqtrix.auth.principal import AuthProvider
+    from inqtrix.storage.object_store import ObjectStore
 
 log = logging.getLogger("inqtrix")
 
 
-def _provider_label(provider: object) -> str:
-    """Return the public class name of a provider, unwrapping adapter shells."""
-    wrapped = getattr(provider, "_provider", None)
-    if wrapped is not None:
-        return type(wrapped).__name__
-    return type(provider).__name__
+_PLACEHOLDER_SECRET_MARKER = "CHANGE_ME"
 
 
-def _provider_ready(provider: object) -> bool:
-    """Probe the provider's ``is_available`` hook without raising."""
-    try:
-        checker = getattr(provider, "is_available", None)
-        return bool(checker()) if callable(checker) else False
-    except Exception as exc:  # noqa: BLE001 — keep startup probe non-fatal
-        log.warning(
-            "Startup-Health-Probe fuer %s fehlgeschlagen: %s",
-            _provider_label(provider),
-            exc,
-        )
-        return False
+def _placeholder_secret_fields(settings: Settings) -> list[str]:
+    """Env names of secret settings still holding a ``CHANGE_ME`` placeholder.
+
+    Returns the variable NAMES only — never the value. Lets ``create_app``
+    warn loudly at startup so a placeholder secret (the values shipped in
+    ``deploy/.env.stack.example``) cannot be deployed silently
+    (Designprinzip 1: No Silent Fallbacks).
+    """
+    candidates = {
+        "INQTRIX_SESSION_SECRET": settings.auth.session_secret,
+        "INQTRIX_PAT_PEPPER": settings.auth.pat_pepper,
+        "INQTRIX_SERVER_API_KEY": settings.server.api_key,
+        "INQTRIX_DATABASE_URL": settings.storage.database_url,
+        "INQTRIX_OIDC_CLIENT_SECRET": settings.auth.oidc_client_secret,
+        "INQTRIX_LDAP_BIND_PASSWORD": settings.auth.ldap_bind_password,
+    }
+    return [
+        name
+        for name, value in candidates.items()
+        if isinstance(value, str)
+        and _PLACEHOLDER_SECRET_MARKER in value.upper()
+    ]
 
 
 def create_app(
@@ -51,6 +58,8 @@ def create_app(
     settings: Settings | None = None,
     providers: ProviderContext | None = None,
     strategies: StrategyContext | None = None,
+    auth_provider: "AuthProvider | None" = None,
+    object_store_impl: "ObjectStore | None" = None,
 ) -> FastAPI:
     """Build the Inqtrix FastAPI app with optional Baukasten injection.
 
@@ -154,12 +163,30 @@ def create_app(
             _semaphore = asyncio.Semaphore(settings.server.max_concurrent)
         return _semaphore
 
-    run_store = RunStore.from_settings(settings.server)
+    # Run-store selection (memory default, durable opt-in) happens in
+    # the container's build_run_store bridge so the Postgres backends
+    # share one engine; nothing is built here anymore.
 
-    # Resolve opt-in security layers (all default to None / disabled).
-    api_key_dependency = make_api_key_dependency(settings.server)
+    # Resolve opt-in security layers (all default to disabled). The auth
+    # provider honours INQTRIX_AUTH_MODE with explicit-wins semantics and
+    # raises at startup on contradictory configuration (Designprinzip 1).
+    # An injected auth provider wins over env-driven mode resolution — the
+    # Enterprise-Austausch seam for a custom AuthProvider (no need to edit the
+    # build_auth_provider dispatch). See how-to/writing-a-custom-auth-provider.
+    auth_provider = auth_provider or build_auth_provider(settings)
+    # Loudly flag any secret still left at its CHANGE_ME placeholder — a
+    # placeholder secret is a silent insecurity, so it must be visible at
+    # startup (Designprinzip 1). Names only, never the value.
+    placeholder_secrets = _placeholder_secret_fields(settings)
+    if placeholder_secrets:
+        log.warning(
+            "INSECURE: %d secret(s) still hold a CHANGE_ME placeholder value "
+            "(%s) — set real secrets before production.",
+            len(placeholder_secrets),
+            ", ".join(placeholder_secrets),
+        )
     cors_kwargs = make_cors_middleware_kwargs(settings.server)
-    api_key_active = api_key_dependency is not None
+    api_key_active = auth_provider.mode == "apikey"
     cors_active = cors_kwargs is not None
 
     @asynccontextmanager
@@ -185,15 +212,15 @@ def create_app(
             logging_state["web_mirrored"],
         )
 
-        llm_label = _provider_label(providers.llm)
-        search_label = _provider_label(providers.search)
-        llm_ready = _provider_ready(providers.llm)
-        search_ready = _provider_ready(providers.search)
+        llm_label = provider_label(providers.llm)
+        search_label = provider_label(providers.search)
+        llm_ready = provider_ready(providers.llm, label=llm_label)
+        search_ready = provider_ready(providers.search, label=search_label)
         log.info(
             "Inqtrix server starting | llm=%s ready=%s | search=%s ready=%s "
             "| report_profile=%s | max_concurrent=%d | run_max_concurrent=%d "
             "| run_queue_max_size=%d | run_completed_ttl_seconds=%d "
-            "| api_key_gate=%s | cors=%s",
+            "| api_key_gate=%s | auth_mode=%s | cors=%s",
             llm_label,
             llm_ready,
             search_label,
@@ -204,6 +231,7 @@ def create_app(
             settings.server.run_queue_max_size,
             settings.server.run_completed_ttl_seconds,
             "on" if api_key_active else "off",
+            auth_provider.mode,
             "on" if cors_active else "off",
         )
         try:
@@ -214,29 +242,86 @@ def create_app(
                 llm_label,
                 search_label,
             )
+            # Durable run stores own an engine and a background loop
+            # thread; the memory store has no close() and is skipped.
+            container = getattr(_app.state, "container", None)
+            run_store = getattr(container, "run_store", None)
+            if run_store is not None and hasattr(run_store, "close"):
+                run_store.close()
+            # The Postgres quota store owns a NullPool engine; dispose it
+            # on the live loop here (record_blocking's throwaway loops
+            # cannot). Memory store / disabled quota -> no-op.
+            quota_service = getattr(container, "quota_service", None)
+            if quota_service is not None:
+                await quota_service.aclose()
+            # The Postgres-canonical knowledge store owns its own NullPool
+            # engine (loop-agnostic); dispose it on the live loop here.
+            # Memory/Qdrant stores have no aclose -> guarded no-op.
+            knowledge_service = getattr(container, "knowledge_service", None)
+            knowledge = getattr(knowledge_service, "knowledge", None)
+            store = getattr(knowledge, "store", None)
+            if store is not None and hasattr(store, "aclose"):
+                await store.aclose()
+            # The Postgres chat-history store owns its own NullPool engine;
+            # dispose it on the live loop here. Memory store -> no-op.
+            chat_history_service = getattr(
+                container, "chat_history_service", None
+            )
+            chat_store = getattr(chat_history_service, "store", None)
+            if chat_store is not None and hasattr(chat_store, "aclose"):
+                await chat_store.aclose()
+            # The Postgres editor store owns its own NullPool engine too.
+            editor_service = getattr(
+                container, "editor_persistence_service", None
+            )
+            editor_store = getattr(editor_service, "store", None)
+            if editor_store is not None and hasattr(editor_store, "aclose"):
+                await editor_store.aclose()
+            # The Postgres asset-record store owns its own NullPool engine too.
+            asset_service = getattr(container, "asset_records_service", None)
+            asset_store = getattr(asset_service, "store", None)
+            if asset_store is not None and hasattr(asset_store, "aclose"):
+                await asset_store.aclose()
+            # The Postgres vector-index store owns its own NullPool engine too.
+            vector_index_service = getattr(container, "vector_index_service", None)
+            vector_index_store = getattr(vector_index_service, "store", None)
+            if vector_index_store is not None and hasattr(vector_index_store, "aclose"):
+                await vector_index_store.aclose()
+            # The Postgres account-preferences store owns its own NullPool engine.
+            account_prefs_service = getattr(container, "account_preferences_service", None)
+            account_prefs_store = getattr(account_prefs_service, "store", None)
+            if account_prefs_store is not None and hasattr(account_prefs_store, "aclose"):
+                await account_prefs_store.aclose()
+            # The Postgres knowledge-session store owns its own NullPool engine.
+            knowledge_sessions_service = getattr(container, "knowledge_sessions_service", None)
+            knowledge_sessions_store = getattr(knowledge_sessions_service, "store", None)
+            if knowledge_sessions_store is not None and hasattr(knowledge_sessions_store, "aclose"):
+                await knowledge_sessions_store.aclose()
 
     # Fresh router per create_app() call to avoid duplicate route handlers
     app_router = create_router()
 
-    register_routes(
+    container = register_routes(
         app_router,
         providers=providers,
         strategies=strategies,
         settings=settings,
         semaphore_factory=semaphore_factory,
-        api_key_dependency=api_key_dependency,
-        run_store=run_store,
+        auth_provider=auth_provider,
+        object_store_impl=object_store_impl,
     )
 
+    enable_openapi = settings.server.enable_openapi
     app = FastAPI(
         title="Inqtrix Research Agent",
-        docs_url=None,
-        redoc_url=None,
-        openapi_url=None,
+        docs_url="/docs" if enable_openapi else None,
+        redoc_url="/redoc" if enable_openapi else None,
+        openapi_url="/openapi.json" if enable_openapi else None,
         lifespan=_lifespan,
     )
     if cors_kwargs is not None:
         app.add_middleware(CORSMiddleware, **cors_kwargs)
     app.include_router(app_router)
+    app.state.container = container
 
     return app

@@ -177,6 +177,33 @@ class TestResearchResult:
         assert result.top_claims[0].support_count == 2
         assert result.top_claims[0].source_tier_counts["primary"] == 1
 
+    def test_from_raw_preserves_report_reference_title(self):
+        """A reference title (e.g. a knowledge document's original filename)
+        must survive from state into the model AND the export payload — the
+        knowledge source list renders it instead of the raw citation URL."""
+        raw = {
+            "answer": "Antwort [K1]",
+            "usage": {},
+            "result_state": {
+                "report_references": [
+                    {
+                        "label": "K1",
+                        "url": "inqtrix://documents/kd_abc#chunk-1",
+                        "tier": "primary",
+                        "title": "AI ACT Regulation (EU) 2024:1689.pdf",
+                    },
+                    # No title supplied -> stays None, never invented.
+                    {"label": "K2", "url": "inqtrix://documents/kd_def#chunk-2", "tier": "primary"},
+                ],
+            },
+        }
+        result = ResearchResult.from_raw(raw)
+        assert result.references[0].title == "AI ACT Regulation (EU) 2024:1689.pdf"
+        assert result.references[1].title is None
+        payload = result.to_export_payload()
+        assert payload["references"][0]["title"] == "AI ACT Regulation (EU) 2024:1689.pdf"
+        assert payload["references"][1]["title"] is None
+
     def test_from_raw_empty_state(self):
         raw = {"answer": "Keine Ergebnisse", "usage": {}, "result_state": {}}
         result = ResearchResult.from_raw(raw)

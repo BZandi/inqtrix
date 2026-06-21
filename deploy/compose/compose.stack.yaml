@@ -1,0 +1,277 @@
+# Stack mode: one command to a running Research Desk.
+#
+#   docker compose -f deploy/compose/compose.stack.yaml \
+#     --env-file deploy/.env.stack up -d --build
+#
+# Always pass --env-file: it feeds the ${...} interpolation below (postgres
+# password, ports, the required-var guards). Compose does NOT auto-load a file
+# named .env.stack. Separately, the api/migrate/worker services read the env
+# file via `env_file:` so the app process sees every INQTRIX_* variable; that
+# path follows ${INQTRIX_ENV_FILE} and defaults to deploy/.env.stack. Both
+# mechanisms must point at the same file (see "a different file" below).
+#
+# Default stack (no profile): postgres + migrate (one-shot) + api + web.
+# The browser hits ONE origin (http://localhost:8080); nginx in the `web`
+# container reverse-proxies /api, /v1 and /health to the `api` service, so
+# there is no CORS and no VITE_INQTRIX_API_BASE_URL build-time coupling.
+#
+# Optional profiles (add as needed, e.g. --profile knowledge --profile workers):
+#   knowledge -> qdrant (persistent/hybrid retrieval)
+#   workers   -> valkey + a worker process (durable run scaling)
+#   s3        -> seaweedfs (S3 object store instead of the local volume)
+#   oidc      -> dex (enterprise SSO; the default is local auth)
+#
+# Config lives in deploy/.env.stack (copy from deploy/.env.stack.example).
+# To use a different file per setup, both mechanisms above must read it: add a
+# line INQTRIX_ENV_FILE=<path> inside that file (so `env_file:` follows it), and
+# pass the same path to --env-file (for ${...} interpolation). Example:
+#   # deploy/.env.azure.stack contains: INQTRIX_ENV_FILE=deploy/.env.azure.stack
+#   docker compose -f deploy/compose/compose.stack.yaml \
+#     --env-file deploy/.env.azure.stack up -d --build
+#
+# Image policy (binding): same as compose.dev.yaml — only Docker Official
+# Images or Docker-Sponsored OSS, always tag + digest pinned. Reuse the
+# digests verified for the dev stack; refresh deliberately.
+
+name: inqtrix
+
+services:
+  postgres:
+    # Docker Official Image, PostgreSQL 18.4 on Debian Trixie (digest from
+    # compose.dev.yaml). Not published on a host port: only the api/migrate/
+    # worker services reach it over the compose network. Back up via
+    # `compose exec postgres pg_dump` (see docs/deployment/runbooks.md).
+    image: docker.io/library/postgres:18.4-trixie@sha256:8ff36f3c66371cba71d20ceedccfc3de9669a68737607888c4ef0af93abe8e39
+    environment:
+      POSTGRES_USER: ${INQTRIX_PG_USER:-inqtrix}
+      POSTGRES_PASSWORD: ${INQTRIX_PG_PASSWORD:?set INQTRIX_PG_PASSWORD in deploy/.env.stack}
+      POSTGRES_DB: ${INQTRIX_PG_DB:-inqtrix}
+    volumes:
+      # postgres:18 moved PGDATA into a version-scoped subdir and declares
+      # VOLUME /var/lib/postgresql — mount the named volume THERE.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  migrate:
+    # One-shot schema migration. Runs the packaged Alembic migrations to head
+    # (the same inqtrix-migrate console script operators use) and exits 0.
+    # The api waits for this to complete, so migrations are an explicit,
+    # visible step — never a hidden startup hook. Re-run on update via
+    # `docker compose -f ... up migrate`.
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.api
+    command: ["inqtrix-migrate"]
+    env_file:
+      - ../../${INQTRIX_ENV_FILE:-deploy/.env.stack}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    # The FastAPI server (python -m inqtrix) on the internal network port
+    # 5100. Not published on the host: the web container is the only ingress.
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.api
+    env_file:
+      - ../../${INQTRIX_ENV_FILE:-deploy/.env.stack}
+    environment:
+      INQTRIX_SERVER_HOST: "0.0.0.0"
+      INQTRIX_SERVER_PORT: "5100"
+      INQTRIX_OBJECT_STORE_BACKEND: ${INQTRIX_OBJECT_STORE_BACKEND:-local}
+      INQTRIX_OBJECT_STORE_PATH: /var/lib/inqtrix/objects
+    volumes:
+      - objectstore:/var/lib/inqtrix/objects
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # The slim python image ships no curl; probe with the stdlib instead.
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5100/health').status==200 else 1)\"",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  web:
+    # nginx serving the built React bundle + reverse-proxying the API. The
+    # single host ingress, bound to loopback by default (put a TLS reverse
+    # proxy in front for remote access — see docs/how-to/deploy-to-production.md).
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.web
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${INQTRIX_WEB_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/ >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  worker:
+    # Durable-run worker. Enable with --profile workers together with
+    # INQTRIX_QUEUE_BACKEND=valkey + INQTRIX_VALKEY_URL in deploy/.env.stack.
+    # Shares the object-store volume so worker runs reach uploaded blobs.
+    profiles: ["workers"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.api
+    command: ["inqtrix-worker"]
+    env_file:
+      - ../../${INQTRIX_ENV_FILE:-deploy/.env.stack}
+    environment:
+      INQTRIX_OBJECT_STORE_BACKEND: ${INQTRIX_OBJECT_STORE_BACKEND:-local}
+      INQTRIX_OBJECT_STORE_PATH: /var/lib/inqtrix/objects
+    volumes:
+      - objectstore:/var/lib/inqtrix/objects
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+    restart: unless-stopped
+
+  qdrant:
+    # Persistent/hybrid knowledge store. Enable with --profile knowledge +
+    # INQTRIX_KNOWLEDGE_ENABLED=true, INQTRIX_VECTOR_BACKEND=qdrant,
+    # INQTRIX_QDRANT_URL=http://qdrant:6333 in deploy/.env.stack.
+    image: docker.io/qdrant/qdrant:v1.18.2@sha256:75eab8c4ba42096724fdcfde8b4de0b5713d529dde32f285a1f86fdcb2c9e50c
+    profiles: ["knowledge"]
+    environment:
+      QDRANT__SERVICE__API_KEY: ${INQTRIX_QDRANT_API_KEY:-inqtrix-qdrant-key}
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  valkey:
+    # Job-queue broker for the workers profile.
+    image: docker.io/valkey/valkey:9.1.0@sha256:4963247afc4cd33c7d3b2d2816b9f7f8eeebab148d29056c2ca4d7cbc966f2d9
+    profiles: ["workers"]
+    command: >-
+      valkey-server
+      --requirepass ${INQTRIX_VALKEY_PASSWORD:-change-me-valkey-password}
+      --appendonly yes
+      --appendfsync everysec
+      --save 3600 1
+    environment:
+      INQTRIX_VALKEY_PASSWORD: ${INQTRIX_VALKEY_PASSWORD:-change-me-valkey-password}
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test:
+        ["CMD-SHELL", "valkey-cli -a $${INQTRIX_VALKEY_PASSWORD} ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  seaweedfs:
+    # S3 object store (alternative to the default local volume). Enable with
+    # --profile s3 + INQTRIX_OBJECT_STORE_BACKEND=s3 and the S3 creds.
+    image: docker.io/chrislusf/seaweedfs:4.33@sha256:f0b358973e81f884304737645dd3b278c590c2c9d47d60089729d46324f70495
+    profiles: ["s3"]
+    command: >-
+      server -dir=/data -s3 -s3.port=8333
+      -s3.config=/etc/seaweedfs/s3.json
+      -master.volumeSizeLimitMB=1024
+    volumes:
+      - seaweedfs_data:/data
+      - ./seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null http://127.0.0.1:8333 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  dex:
+    # Reference OIDC IdP for the enterprise oidc profile (the default
+    # is local auth). Any OIDC-compliant provider works; Dex is only the dev
+    # reference. Enable with --profile oidc + INQTRIX_AUTH_MODE=oidc.
+    image: ghcr.io/dexidp/dex:v2.45.1@sha256:8499afd690c437f52301efd2b05b2455da5bd2dfc20332cd697dc9937f808462
+    profiles: ["oidc"]
+    environment:
+      DEX_INQTRIX_CLIENT_SECRET: ${INQTRIX_OIDC_CLIENT_SECRET:-inqtrix-oidc-secret}
+    volumes:
+      - ./dex-config.yaml:/etc/dex/config.yaml:ro
+      - dex_data:/var/dex
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:5556/dex/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+
+  lldap:
+    # Reference LDAP directory for the enterprise ldap profile (the
+    # default is local auth). Any RFC 4511 directory works; LLDAP is only
+    # the dev/demo reference. Enable with --profile ldap + INQTRIX_AUTH_MODE=
+    # ldap and point INQTRIX_LDAP_URL at ldap://lldap:3890 (the api reaches
+    # it over the compose network; only the setup web UI is published).
+    image: lldap/lldap:stable@sha256:2a8454b668c1aba7157e832eab0e242e1e7eb5fb7591d7e7774ba05286511ca8
+    profiles: ["ldap"]
+    environment:
+      LLDAP_LDAP_BASE_DN: "dc=example,dc=com"
+      LLDAP_LDAP_USER_PASS: ${INQTRIX_LDAP_BIND_PASSWORD:-inqtrix-ldap-password}
+      LLDAP_JWT_SECRET: ${INQTRIX_LLDAP_JWT_SECRET:-inqtrix-lldap-jwt-secret}
+      LLDAP_KEY_SEED: ${INQTRIX_LLDAP_KEY_SEED:-inqtrix-lldap-key-seed}
+    ports:
+      - "127.0.0.1:${INQTRIX_LLDAP_WEB_PORT:-17170}:17170"
+    volumes:
+      - lldap_data:/data
+    healthcheck:
+      test: ["CMD", "/app/lldap", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  # The api/worker now run as non-root (UID 1001, group 0). A FRESH objectstore
+  # volume inherits the image directory's group-0-writable permissions. If you
+  # are upgrading a stack that ran the OLD root image, the existing volume is
+  # root-owned; fix it ONCE before the first non-root start (or recreate it):
+  #   docker compose run --rm --user 0 api \
+  #     sh -c 'chgrp -R 0 /var/lib/inqtrix/objects && chmod -R g=u /var/lib/inqtrix/objects'
+  objectstore:
+  qdrant_storage:
+  valkey_data:
+  seaweedfs_data:
+  dex_data:
+  lldap_data:

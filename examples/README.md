@@ -59,7 +59,20 @@ Use these when you want to copy the constructor-first pattern into your own scri
 
 ## Webserver stacks
 
-`examples/webserver_stacks/` exposes the same provider combinations over the OpenAI-compatible HTTP API. Start one stack:
+`examples/webserver_stacks/` exposes the same provider combinations over the OpenAI-compatible HTTP API:
+
+| Script / doc | Shows |
+|--------|-------|
+| [`webserver_stacks/litellm_perplexity.py`](webserver_stacks/litellm_perplexity.py) | LiteLLM + Perplexity behind the HTTP server. |
+| [`webserver_stacks/anthropic_perplexity.py`](webserver_stacks/anthropic_perplexity.py) | Anthropic + Perplexity behind the HTTP server. |
+| [`webserver_stacks/bedrock_perplexity.py`](webserver_stacks/bedrock_perplexity.py) | Bedrock + Perplexity behind the HTTP server. |
+| [`webserver_stacks/azure_openai_perplexity.py`](webserver_stacks/azure_openai_perplexity.py) | Azure OpenAI + Perplexity behind the HTTP server. |
+| [`webserver_stacks/azure_foundry_web_search.py`](webserver_stacks/azure_foundry_web_search.py) | Azure OpenAI + Azure Foundry Web Search behind the HTTP server. |
+| [`webserver_stacks/azure_knowledge_quickstart.py`](webserver_stacks/azure_knowledge_quickstart.py) | Knowledge engine on the Azure stack (memory vector store, Azure embeddings); docstring walks the full curl sequence from collection to `mode=knowledge` run. Profiles: [Retrieval profiles](../docs/configuration/knowledge-profiles.md). |
+| [`webserver_stacks/multi_stack.py`](webserver_stacks/multi_stack.py) | Every stack above in one process; per-request `"stack"` routing plus `GET /v1/stacks` discovery. |
+| [`webserver_stacks/oidc_stack.md`](webserver_stacks/oidc_stack.md) | Walkthrough: browser SSO via `INQTRIX_AUTH_MODE=oidc` with the Dex reference IdP from the dev compose stack. |
+
+Start one stack:
 
 ```bash
 uv run python examples/webserver_stacks/anthropic_perplexity.py

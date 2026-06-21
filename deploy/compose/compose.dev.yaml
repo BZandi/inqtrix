@@ -1,0 +1,229 @@
+# Local development infrastructure for the inqtrix platform layer.
+#
+# Image policy (binding): ONLY images from Docker Hub's trusted-content
+# tiers — Docker Official Images (docker.io/library/*) or, where no
+# official image exists, Docker-Sponsored OSS published by the upstream
+# project itself. Always fully qualified (podman has no implicit
+# docker.io), always tag + manifest-list digest pinned. The digest is
+# what is enforced; the tag in front is for humans. Official images are
+# rebuilt every few weeks for base-image CVE fixes — refresh the digest
+# deliberately (see docs/development/local-infrastructure.md).
+#
+# Run with Podman (docker-compose v2 as the compose provider):
+#   podman compose -f deploy/compose/compose.dev.yaml up -d
+#
+# postgres:18 layout note: the 18+ official image moved PGDATA to a
+# version-scoped subdirectory and declares VOLUME /var/lib/postgresql —
+# mount the named volume THERE, not at /var/lib/postgresql/data (the
+# pre-18 convention), or the data lands outside the volume.
+
+name: inqtrix-dev
+
+services:
+  postgres:
+    # Docker Official Image (docker.io/library/postgres), PostgreSQL 18.4
+    # on Debian Trixie. Digest = multi-arch manifest list, resolved
+    # 2026-06-10.
+    image: docker.io/library/postgres:18.4-trixie@sha256:8ff36f3c66371cba71d20ceedccfc3de9669a68737607888c4ef0af93abe8e39
+    environment:
+      POSTGRES_USER: ${INQTRIX_PG_USER:-inqtrix}
+      POSTGRES_PASSWORD: ${INQTRIX_PG_PASSWORD:-inqtrix-dev-password}
+      POSTGRES_DB: ${INQTRIX_PG_DB:-inqtrix}
+    ports:
+      # Loopback only: the dev database must never listen on a LAN
+      # interface. Override the host port when 5432 is taken.
+      - "127.0.0.1:${INQTRIX_PG_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      # -h 127.0.0.1 forces TCP: during first-boot initdb a temporary
+      # unix-socket-only server answers pg_isready and would otherwise
+      # report healthy too early.
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  seaweedfs:
+    # Official SeaweedFS project image (docker.io/chrislusf/seaweedfs —
+    # the project creator's namespace IS the official channel; there is
+    # no seaweedfs org image). Apache-2.0. Digest resolved 2026-06-12.
+    # Single-container mode: master + volume + filer + S3 gateway in one
+    # process; /data holds BOTH volume blobs and the embedded filer
+    # metadata — always back up the whole volume.
+    image: docker.io/chrislusf/seaweedfs:4.33@sha256:f0b358973e81f884304737645dd3b278c590c2c9d47d60089729d46324f70495
+    command: >-
+      server -dir=/data -s3 -s3.port=8333
+      -s3.config=/etc/seaweedfs/s3.json
+      -master.volumeSizeLimitMB=1024
+    ports:
+      # Loopback only — the store must never be reachable from the LAN;
+      # clients get streamed content through the Inqtrix API.
+      - "127.0.0.1:${INQTRIX_S3_PORT:-8333}:8333"
+    volumes:
+      - seaweedfs_data:/data
+      # S3 identities: WITHOUT this file the S3 API is anonymous/open.
+      - ./seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      # Any HTTP answer means the S3 gateway is up — with auth enabled
+      # the root path correctly returns 403, so curl runs WITHOUT -f
+      # (wget would treat the 403 as failure and flap unhealthy).
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s -o /dev/null http://127.0.0.1:8333 || exit 1",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  qdrant:
+    # Official vendor image (docker.io/qdrant/qdrant — Docker-Sponsored
+    # OSS tier, Apache-2.0). Multi-arch index digest for v1.18.2,
+    # resolved 2026-06-12. Self-hosted Qdrant has NO auth by default —
+    # the API key below is mandatory wiring, not decoration.
+    image: docker.io/qdrant/qdrant:v1.18.2@sha256:75eab8c4ba42096724fdcfde8b4de0b5713d529dde32f285a1f86fdcb2c9e50c
+    environment:
+      QDRANT__SERVICE__API_KEY: ${INQTRIX_QDRANT_API_KEY:-inqtrix-dev-qdrant-key}
+      QDRANT__TELEMETRY_DISABLED: "true"
+    ports:
+      # Loopback only; 6334 (gRPC) mapped now so prefer_grpc later is
+      # a config flip, not a compose change.
+      - "127.0.0.1:${INQTRIX_QDRANT_PORT:-6333}:6333"
+      - "127.0.0.1:${INQTRIX_QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    healthcheck:
+      # The image ships neither curl nor wget (CVE-surface trimming);
+      # bash /dev/tcp is the established probe.
+      test:
+        [
+          "CMD-SHELL",
+          "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  valkey:
+    # Official Valkey community image (docker.io/valkey/valkey —
+    # Docker-Sponsored OSS tier, BSD-3). Multi-arch index digest for
+    # 9.1.0, resolved against the Hub API 2026-06-12. Job-queue broker
+    # for INQTRIX_QUEUE_BACKEND=valkey; the Postgres run row stays the
+    # source of truth, so appendfsync everysec (<=1s loss window) is
+    # the right durability/throughput point — a lost dispatch message
+    # is re-enqueued by the worker's reconciler.
+    image: docker.io/valkey/valkey:9.1.0@sha256:4963247afc4cd33c7d3b2d2816b9f7f8eeebab148d29056c2ca4d7cbc966f2d9
+    command: >-
+      valkey-server
+      --requirepass ${INQTRIX_VALKEY_PASSWORD:-inqtrix-dev-valkey-password}
+      --appendonly yes
+      --appendfsync everysec
+      --save 3600 1
+    ports:
+      # Loopback only — the broker must never be reachable from the LAN.
+      - "127.0.0.1:${INQTRIX_VALKEY_PORT:-6379}:6379"
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "valkey-cli -a $${INQTRIX_VALKEY_PASSWORD:-inqtrix-dev-valkey-password} ping | grep -q PONG",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    environment:
+      INQTRIX_VALKEY_PASSWORD: ${INQTRIX_VALKEY_PASSWORD:-inqtrix-dev-valkey-password}
+    restart: unless-stopped
+
+  dex:
+    # Reference IdP for AUTH_MODE=oidc (ADR-AUTH-1: Dex is the
+    # RECOMMENDED dev IdP, never an architecture component — any
+    # OIDC-compliant provider works). Official image on ghcr (the
+    # canonical registry; the 'latest' tag tracks master builds, never
+    # use it). v2.45.1 multi-arch index digest resolved via the
+    # registry API 2026-06-11. Default (alpine) variant so the
+    # busybox-wget healthcheck works. Gated behind the 'oidc' profile:
+    # plain `up -d` keeps the zero-auth default stack.
+    image: ghcr.io/dexidp/dex:v2.45.1@sha256:8499afd690c437f52301efd2b05b2455da5bd2dfc20332cd697dc9937f808462
+    profiles: ["oidc"]
+    environment:
+      DEX_INQTRIX_CLIENT_SECRET: ${INQTRIX_OIDC_CLIENT_SECRET:-inqtrix-dev-oidc-secret}
+    ports:
+      # Loopback only; the browser and the host-side API both reach
+      # the issuer under the identical 127.0.0.1 URL (no dual-hostname
+      # problem while the API runs on the host).
+      - "127.0.0.1:${INQTRIX_DEX_PORT:-5556}:5556"
+    volumes:
+      - ./dex-config.yaml:/etc/dex/config.yaml:ro
+      - dex_data:/var/dex
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    healthcheck:
+      # The healthz endpoint lives UNDER the issuer path (/dex).
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "-O",
+          "-",
+          "http://127.0.0.1:5556/dex/healthz",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+
+  lldap:
+    # Reference LDAP directory for AUTH_MODE=ldap: a throwaway LLDAP (the
+    # lightweight pure-Rust directory with a setup web UI) — RECOMMENDED for
+    # dev only, never an architecture component (any RFC 4511 directory
+    # works, see docs/how-to/connect-to-existing-ldap.md). Gated behind the
+    # 'ldap' profile so plain `up -d` keeps the zero-auth default stack.
+    # Digest pinned for reproducibility (the 'stable' release-channel digest
+    # resolved via the registry API 2026-06-14).
+    image: lldap/lldap:stable@sha256:2a8454b668c1aba7157e832eab0e242e1e7eb5fb7591d7e7774ba05286511ca8
+    profiles: ["ldap"]
+    environment:
+      LLDAP_LDAP_BASE_DN: "dc=example,dc=com"
+      # Admin (cn=admin,ou=people,dc=example,dc=com) bind password — the
+      # SAME value Inqtrix reads as INQTRIX_LDAP_BIND_PASSWORD.
+      LLDAP_LDAP_USER_PASS: ${INQTRIX_LDAP_BIND_PASSWORD:-inqtrix-dev-ldap-password}
+      LLDAP_JWT_SECRET: ${INQTRIX_LLDAP_JWT_SECRET:-inqtrix-dev-lldap-jwt-secret}
+      LLDAP_KEY_SEED: ${INQTRIX_LLDAP_KEY_SEED:-inqtrix-dev-lldap-key-seed}
+    ports:
+      # Loopback only: the host-side API binds LDAP on 3890; the operator
+      # opens the setup web UI on 17170 to create the demo user.
+      - "127.0.0.1:${INQTRIX_LDAP_PORT:-3890}:3890"
+      - "127.0.0.1:${INQTRIX_LLDAP_WEB_PORT:-17170}:17170"
+    volumes:
+      - lldap_data:/data
+    healthcheck:
+      test: ["CMD", "/app/lldap", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  seaweedfs_data:
+  qdrant_storage:
+  valkey_data:
+  dex_data:
+  lldap_data:

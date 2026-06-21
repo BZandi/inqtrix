@@ -1,0 +1,28 @@
+# Example overlay for Red Hat OpenShift.
+#
+#   helm install inqtrix deploy/helm/inqtrix \
+#     -f deploy/helm/inqtrix/values-openshift.yaml \
+#     --set image.registry=image-registry.openshift-image-registry.svc:5000/<project> \
+#     --set-string secret.data.INQTRIX_DATABASE_URL=postgresql+asyncpg://...
+#
+# openshift.enabled=true makes the chart render a Route (instead of an Ingress)
+# and OMIT runAsUser/runAsGroup/fsGroup so the restricted-v2 SCC assigns its own
+# arbitrary UID with supplemental GID 0. No SCC changes are needed: the images
+# run non-root, bind ports >1024 and write only to mounted volumes.
+#
+# Bundled backing services on OpenShift: qdrant, valkey and s3 (MinIO) run fine
+# under the arbitrary UID, so you may add `--set qdrant.enabled=true`,
+# `--set valkey.enabled=true` and `--set s3.enabled=true` for a turnkey demo. The
+# bundled Postgres is the exception (its image needs a fixed UID) -- keep it OFF
+# here and point INQTRIX_DATABASE_URL at an external/managed database.
+openshift:
+  enabled: true
+
+route:
+  enabled: true
+  # Leave host empty to let OpenShift generate one from the project/app name.
+  host: ""
+  tls:
+    enabled: true
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

@@ -1,0 +1,85 @@
+{{- if .Values.migrations.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-migrate
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "migrate") | nindent 4 }}
+  annotations:
+    # Hook phase tracks WHEN the database is available, so a fresh install never
+    # deadlocks:
+    #   - external DB (postgres.enabled=false): pre-install -- the DB already
+    #     exists, so migrate runs before the app pods start (no crash loop).
+    #   - bundled DB (postgres.enabled=true): post-install -- the bundled Postgres
+    #     is a normal resource created during install, so migrate must run after
+    #     it exists. The app pods may restart a few times until migrate completes.
+    # pre-upgrade always applies (the DB exists on upgrade). Helm blocks until the
+    # Job succeeds, so a failed migration fails the release. The wait-for-db loop
+    # in the container handles "created but not yet accepting connections".
+    "helm.sh/hook": {{ if .Values.postgres.enabled }}post-install,pre-upgrade{{ else }}pre-install,pre-upgrade{{ end }}
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "inqtrix.labels" (dict "root" . "component" "migrate") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      # Uses the namespace "default" ServiceAccount (no serviceAccountName): the
+      # chart's own ServiceAccount is a normal resource that does not exist during
+      # the pre-install hook phase, so referencing it would deadlock a fresh
+      # external-DB install. inqtrix-migrate makes no Kubernetes API calls anyway.
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "inqtrix.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "inqtrix.image.api" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Wait until the database accepts connections (the bundled Postgres may
+          # still be starting after a post-install create), then migrate. asyncpg
+          # ships in the image; ~120s bound (60 x 2s) fails loudly on timeout.
+          command:
+            - sh
+            - -c
+            - |
+              n=0
+              until python -c "import asyncio,os,re,asyncpg; asyncio.run(asyncpg.connect(re.sub(r'^(postgres(?:ql)?)\+[a-z0-9]+', r'\1', os.environ['INQTRIX_DATABASE_URL'])))" 2>/dev/null; do
+                n=$((n+1)); [ "$n" -ge 60 ] && { echo "database not reachable after timeout" >&2; exit 1; }
+                echo "waiting for database ($n)..."; sleep 2
+              done
+              exec inqtrix-migrate
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          # inqtrix-migrate only needs the database URL (StorageSettings reads it;
+          # every other field defaults). Supplying it directly -- not via the
+          # release ConfigMap/Secret -- means the hook does not depend on those
+          # not-yet-created resources during a fresh install.
+          env:
+            - name: INQTRIX_DATABASE_URL
+            {{- if .Values.secret.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.existingSecret }}
+                  key: INQTRIX_DATABASE_URL
+            {{- else }}
+              value: {{ include "inqtrix.databaseUrl" . | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /app/.cache
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+{{- end }}

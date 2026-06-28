@@ -375,6 +375,10 @@ def build_profile_manifest(
         entries.append(
             {
                 "id": profile.value,
+                # The multiplier on the request ``top_k`` that yields the FINAL
+                # surfaced-evidence count, so a client can render the effective
+                # ``final_k`` per profile without re-deriving the matrix.
+                "final_k_factor": plan.final_k_factor,
                 "stages": {
                     "rerank": plan.rerank,
                     "gate_rounds": plan.gate_rewrite_rounds,

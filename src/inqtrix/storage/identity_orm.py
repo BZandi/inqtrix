@@ -207,6 +207,7 @@ resource_shares = Table(
     Column("permission", Text, nullable=False),
     Column("granted_by_sub", Text, nullable=False),
     Column("created_at", DateTime(timezone=True), **_CREATED_AT),
+    Column("accepted_at", DateTime(timezone=True), nullable=True),
     Column("revoked_at", DateTime(timezone=True), nullable=True),
     Column("revoked_by_sub", Text, nullable=True),
     CheckConstraint(
@@ -243,7 +244,14 @@ resource_shares = Table(
     ),
 )
 """Generic share tuples (Zanzibar-lite): subject x resource ->
-ordered permission, soft-revoked for history."""
+ordered permission, soft-revoked for history.
+
+``accepted_at`` gates consent: NULL = pending (granted, awaiting the
+recipient's consent, grants nothing); non-NULL = accepted (active, grants
+access). ``revoked_at IS NOT NULL`` = inactive (owner-revoked or
+recipient-declined/left). The partial unique index keys on
+``revoked_at IS NULL`` only, so there is one active row per tuple whether it
+is pending or accepted."""
 
 
 audit_log = Table(

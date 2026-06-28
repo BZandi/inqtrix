@@ -813,7 +813,9 @@ in Chat and Editor autocomplete, and keeps existing chat attachment snapshots
 readable.
 
 `project.md` also persists project UI preferences under `preferences`: locale,
-theme mode (`light`, `dark`, or `system`), theme preset, and contrast mode.
+theme mode (`light`, `dark`, or `system`), theme preset, contrast mode, and
+the user message bubble tone (`gray`, `mint`, `orange`, `sky`, `violet`, or
+`ink`).
 Export/save writes the current provider state into that object, and project load
 applies it back to the React providers before rendering the loaded workspace.
 Runtime-only connection data such as Bearer tokens remains excluded from project

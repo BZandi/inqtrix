@@ -6,8 +6,10 @@ requires the model to emit a ``ZITATE:`` block of verbatim,
 quotes first conditions the subsequent answer on literal evidence
 (WebGPT/GopherCite lineage — the cheapest proven grounding step), and
 because the quotes claim to be verbatim they can be validated WITHOUT
-another LLM call: a whitespace-normalized substring check against the
-exact evidence entries the model saw.
+another LLM call: a substring check against the exact evidence entries
+the model saw, tolerant only to formatting (whitespace, Unicode/typography
+and case) so a genuinely verbatim quote is not failed by curly quotes,
+ligatures or line wrapping — never to paraphrase.
 
 Failure policy (No Silent Fallbacks): a response without a parseable
 quote block degrades to the unmodified answer with a loud log and the
@@ -19,6 +21,7 @@ them — the check never blocks or rewrites the answer.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 
 GROUNDING_MARKER_PARSED = "_knowledge_grounding_parsed"
@@ -32,6 +35,20 @@ _QUOTE_LINE = re.compile(
 )
 _QUOTE_CHARS = "\"'„“”»«‚‘’"
 
+# Typographic variants the model or a PDF text-layer may emit for the SAME
+# character: smart quotes -> ASCII quotes, dashes -> hyphen, zero-width
+# characters dropped. Folded so a genuinely verbatim quote still verifies even
+# when the source PDF used curly quotes or an em dash. Deliberately limited to
+# encoding/typography (never paraphrase).
+_TYPOGRAPHY = str.maketrans(
+    {
+        "„": '"', "“": '"', "”": '"', "»": '"', "«": '"',
+        "‚": "'", "‘": "'", "’": "'",
+        "–": "-", "—": "-", "―": "-",
+        "\u200b": "", "\u200c": "", "\u200d": "", "\ufeff": "",
+    }
+)
+
 
 @dataclass(frozen=True)
 class QuoteCheck:
@@ -41,8 +58,9 @@ class QuoteCheck:
         label: The evidence label the model attributed the quote to,
             e.g. ``"K1"`` — 1-based position in the evidence block.
         text: The quote text with surrounding quotation marks removed.
-        verified: ``True`` when the whitespace-normalized quote occurs
-            verbatim in the evidence entry the label points at;
+        verified: ``True`` when the quote occurs verbatim in the
+            evidence entry the label points at, tolerant only to
+            formatting (whitespace, Unicode/typography, case);
             ``False`` for paraphrases, ellipses, and out-of-range
             labels alike.
     """
@@ -71,8 +89,17 @@ class GroundingReport:
 
 
 def _normalize(text: str) -> str:
-    """Collapse all whitespace runs so line wrapping never fails a match."""
-    return " ".join(text.split())
+    """Fold typographic/encoding differences so a verbatim quote still matches.
+
+    The check stays a verbatim-substring match — only formatting is tolerated,
+    never paraphrase. NFKC folds ligatures, full-width and compatibility forms
+    (and maps no-break spaces to plain spaces); smart quotes and dashes map to
+    ASCII and zero-width characters drop (:data:`_TYPOGRAPHY`); whitespace runs
+    collapse (line wrapping); case folds. A reworded quote still differs in its
+    words and fails — no false ``verified``.
+    """
+    folded = unicodedata.normalize("NFKC", text).translate(_TYPOGRAPHY)
+    return " ".join(folded.split()).casefold()
 
 
 def check_grounding(

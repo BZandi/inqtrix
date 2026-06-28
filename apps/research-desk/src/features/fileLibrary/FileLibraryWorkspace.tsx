@@ -37,7 +37,7 @@ import { FileCard, FileRow } from './FileItem'
 import { FilePreviewPanel } from './FilePreviewPanel'
 import { deleteKnowledgeDocument, type ClientOptions } from '@/api/inqtrixClient'
 import { ConfirmDelete, InlineText, SortSelect, ViewToggle, type MoveTarget } from './controls'
-import { groupSlug } from './helpers'
+import { groupSlug, isMemberInRun } from './helpers'
 import { isInternalFileDrag, type ActiveTarget, type SortMode, type ViewMode } from './constants'
 
 const parser = createDefaultFileParser()
@@ -333,6 +333,10 @@ export function FileLibraryWorkspace({
       : activeIndexJob?.skippedFileIds?.includes(fileId)
         ? 'skipped'
         : undefined
+  // Whether THIS file is part of the *actively running* job's working set —
+  // only then does its row read "läuft" (see isMemberInRun: a still-queued job
+  // pulses nothing, a file outside the run keeps its real state).
+  const memberInRun = (fileId: string): boolean => isMemberInRun(activeIndexJob, fileId)
   function sortMembersForSort(members: ReturnType<typeof vectorIndexMembersResolved>) {
     if (sort === 'recent') return members
     const ordered = [...members]
@@ -374,6 +378,8 @@ export function FileLibraryWorkspace({
     enabled: knowledgeSync !== null,
     onCancelled: (indexId) => dispatch({ indexId, type: 'markVectorIndexCancelled' }),
     onComplete: (indexId) => dispatch({ indexId, type: 'completeVectorIndexReindex' }),
+    onDocumentCompleted: (indexId, documentId) =>
+      dispatch({ indexId, serverDocumentId: documentId, type: 'markVectorIndexDocumentEmbedded' }),
     onError: (indexId, message) => dispatch({ indexId, message, type: 'markVectorIndexError' }),
     onProgress: (indexId, completedDocuments, totalDocuments, currentDocumentTitle) =>
       dispatch({ completedDocuments, currentDocumentTitle, indexId, totalDocuments, type: 'markVectorIndexProgress' }),
@@ -395,18 +401,6 @@ export function FileLibraryWorkspace({
     const index = vectorIndexById(state, indexId)
     // One job per index at a time (the per-row action must not race the top run).
     if (!index || index.status === 'indexing') return
-    if (!knowledgeSync) {
-      // Demo: the local simulator (effect below) drives progress to done.
-      dispatch({
-        indexId,
-        jobId: `demo-${indexId}-${Date.now()}`,
-        source: 'demo',
-        totalDocuments: index.members.length,
-        type: 'startVectorIndexReindex',
-      })
-      return
-    }
-    const sync = knowledgeSync
     const memberEntries = vectorIndexMembersResolved(state, indexId)
     const pendingEntries = memberEntries.filter(
       (entry) =>
@@ -415,6 +409,26 @@ export function FileLibraryWorkspace({
     // Single-file action on a non-pending member: nothing to do (never fall
     // through to a full re-embed of the whole collection).
     if (onlyFileId && pendingEntries.length === 0) return
+    if (!knowledgeSync) {
+      // Demo: the local simulator (effect below) drives progress to done. Scope
+      // mirrors the real paths — index only the new (pending) members for an
+      // incremental add / per-row action, the whole index for a refresh/rebuild,
+      // so the demo never makes already-embedded rows read "läuft".
+      const demoWorkingSet =
+        !forceRebuild && pendingEntries.length > 0
+          ? pendingEntries.map((entry) => entry.asset.id)
+          : memberEntries.map((entry) => entry.asset.id)
+      dispatch({
+        indexId,
+        jobId: `demo-${indexId}-${Date.now()}`,
+        runningFileIds: demoWorkingSet,
+        source: 'demo',
+        totalDocuments: demoWorkingSet.length,
+        type: 'startVectorIndexReindex',
+      })
+      return
+    }
+    const sync = knowledgeSync
     // serverCollectionModel is absent on indexes built before the field existed
     // -> reads as a mismatch, so the next reindex heals via a full rebuild.
     const sameModel = index.serverCollectionModel === index.model
@@ -497,6 +511,9 @@ export function FileLibraryWorkspace({
       dispatch({
         indexId,
         jobId: `ingest-${indexId}-${Date.now()}`,
+        // Only the new (pending) members run — already-embedded members stay out
+        // of the working set so their rows keep reading "Indexiert".
+        runningFileIds: pendingAssets.map((asset) => asset.id),
         source: 'build',
         totalDocuments: pendingAssets.length,
         type: 'startVectorIndexReindex',
@@ -540,6 +557,8 @@ export function FileLibraryWorkspace({
     dispatch({
       indexId,
       jobId: `build-${indexId}-${Date.now()}`,
+      // A rebuild re-ingests every member, so the whole set is in the run.
+      runningFileIds: memberAssets.map((asset) => asset.id),
       source: 'build',
       totalDocuments: memberAssets.length,
       type: 'startVectorIndexReindex',
@@ -607,18 +626,27 @@ export function FileLibraryWorkspace({
     for (const [indexId, job] of Object.entries(state.indexingJobs)) {
       if (job.source !== 'demo' || timers.has(indexId)) continue
       const total = Math.max(1, job.totalDocuments)
+      // The working set in processing order — confirm one file per tick so the
+      // demo shows the same per-file flip as the real server path.
+      const running = job.runningFileIds ?? []
       let done = job.completedDocuments
       const interval = setInterval(() => {
+        const fileId = running[done]
         done += 1
+        dispatch({
+          completedDocuments: done,
+          embedded: true,
+          fileId,
+          indexId,
+          totalDocuments: total,
+          type: 'markVectorIndexProgress',
+        })
         if (done >= total) {
-          dispatch({ completedDocuments: total, indexId, totalDocuments: total, type: 'markVectorIndexProgress' })
           dispatch({ indexId, type: 'completeVectorIndexReindex' })
           const handle = timers.get(indexId)
           if (handle) clearInterval(handle)
           timers.delete(indexId)
-          return
         }
-        dispatch({ completedDocuments: done, indexId, totalDocuments: total, type: 'markVectorIndexProgress' })
       }, 850)
       timers.set(indexId, interval)
     }
@@ -844,6 +872,7 @@ export function FileLibraryWorkspace({
                     {indexMembers.map(({ asset, member }) => (
                       <FileRow
                         asset={asset}
+                        inRun={memberInRun(asset.id)}
                         indexing={activeIndex.status === 'indexing'}
                         key={asset.id}
                         liveProgress={memberLiveProgress(asset.id)}
@@ -860,6 +889,7 @@ export function FileLibraryWorkspace({
                     {indexMembers.map(({ asset, member }) => (
                       <FileCard
                         asset={asset}
+                        inRun={memberInRun(asset.id)}
                         indexing={activeIndex.status === 'indexing'}
                         key={asset.id}
                         liveProgress={memberLiveProgress(asset.id)}

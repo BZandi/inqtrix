@@ -111,6 +111,9 @@ def execute_reindex_job(
                 document.id,
             )
             continue
+        # This document is now re-embedded — emit a per-document event so the
+        # UI flips just this file's row, not all files together on completion.
+        handle.document_completed(document.id)
         if quota_service is not None and quota_subject is not None:
             quota_service.record_blocking(
                 quota_subject,

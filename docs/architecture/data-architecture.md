@@ -24,7 +24,7 @@ from a server read-cache.
 | **Qdrant** | Vectors + a lean payload only (document id, chunk id, collection id, tenant, filter metadata — under ~1 KB). | A vector index is a read index, not a record store. Keeping full text or metadata in the payload is the anti-pattern M2 removed; the canonical text is relational in Postgres, so a re-embed always has an authoritative source. |
 | **Object store** (S3 / SeaweedFS / local volume) | Original binaries (PDF, DOCX, …) via the files registry. | Binaries do not belong in Postgres rows. Postgres keeps a reference (`server_file_id`); the bytes stay external. |
 | **Valkey** | Job dispatch + live SSE buffering for runs and indexing jobs. | Durability lives in the Postgres job rows; Valkey only fans work out to the worker and carries live progress. Losing Valkey loses no committed state. |
-| **Browser `localStorage`** | Device-local UI state only: theme/contrast/preset (when offline), editor panel widths, scroll, drafts (`editorUi` / `ui`). | Per-device, sub-millisecond, never a server round-trip. Note: when a real session is active, theme/locale/contrast are promoted to the account tier (see below) and `localStorage` becomes a fallback. |
+| **Browser `localStorage`** | Device-local UI state only: theme/contrast/preset/user bubble tone (when offline), editor panel widths, scroll, drafts (`editorUi` / `ui`). | Per-device, sub-millisecond, never a server round-trip. Note: when a real session is active, theme/locale/contrast/user bubble tone are promoted to the account tier (see below) and `localStorage` becomes a fallback. |
 
 ```mermaid
 flowchart LR
@@ -66,7 +66,7 @@ latency note. This is the reference; the prose above explains the *why*.
 | Editor suggestions | **not persisted** (transient) | — | — | regenerable from an AI run |
 | File-asset records (+ extracted text) | Postgres (binary in object store) | metadata eager, **body load-on-use** | client | record relational, blob external |
 | Vector-index records (file↔collection) | Postgres (full record) | eager (small) | client | members + capped history travel with the record |
-| Account preferences | Postgres (per user) | eager on login | React state | follows the user, not the workspace |
+| Account preferences | Postgres (per user) | eager on login | React state | theme, locale, contrast, and user bubble tone follow the user, not the workspace |
 | Device UI state (panels, scroll, drafts) | Browser `localStorage` | eager (mount) | localStorage | no server round-trip |
 | Auth sessions | Postgres | eager (init) | memory | cookie session |
 | Job / progress state | Postgres job rows (durable) / in-memory (M1 fallback) | status poll / SSE | — | `FOR UPDATE SKIP LOCKED` |
@@ -183,7 +183,8 @@ hide:
   status — a second device never sees a frozen spinner, and a crashed run never
   strands one. A persisted `indexing` status is reconciled to the pre-run
   status on load (no run survives a reload).
-- **Account preferences follow the user.** Theme / locale / contrast are an
+- **Account preferences follow the user.** Theme / locale / contrast / user
+  bubble tone are an
   account tier (one row per `(tenant, sub)`), not project data, and are
   deliberately excluded from the project import. On a real per-user session the
   saved row is applied over the device's preferences on login ("account wins");
@@ -328,11 +329,36 @@ export, not the live source.
 
 ## Sharing
 
-Sharing applies to **indexed knowledge collections** (so a recipient can ask
-questions over shared documents), not to the private project tier. Ownership +
-ACL (`resource_shares`) + document metadata are all relational in Postgres, so
-"who can see what" is a join, and an access decision returns the indistinct
-not-found rather than leaking a resource's existence.
+Sharing is polymorphic over the durable tier: a single `resource_shares` ACL
+covers **research runs**, **indexed knowledge collections** (so a recipient can
+ask questions over shared documents), and **prompt templates** — not the
+private project tier. Ownership + ACL + document metadata are all relational in
+Postgres, so "who can see what" is a join, and an access decision returns the
+indistinct not-found rather than leaking a resource's existence.
+
+### Consent gate
+
+A share is **not active on grant** — the recipient must consent first. The
+`resource_shares.accepted_at` column carries the state: `NULL` = pending (the
+owner granted, but the recipient has not accepted), non-`NULL` = accepted
+(active). The consent is enforced at a single chokepoint: the read side
+(`ShareRepository.permission_for` and the shared-with-me union
+`shares_for_subjects`) filters `accepted_at IS NOT NULL`, so a pending share
+grants nothing anywhere — runs, collections, and templates all inherit the gate
+without a per-feature branch. Re-granting (e.g. raising view→edit) carries the
+recipient's existing acceptance forward, so a permission change never drops a
+recipient back to pending. The migration backfills pre-existing active shares
+to accepted, so an upgrade does not silently revoke anyone.
+
+The recipient surface lives behind `/v1/shares`: `GET /v1/shares/inbox` returns
+the caller's incoming shares split into `pending` (the consent queue) and
+`accepted` (shared with me); `POST /v1/shares/{id}/accept` consents; `DELETE
+/v1/shares/{id}` is one verb for two callers — the owner revokes, or the
+recipient drops their own share (declines a pending one, leaves an accepted
+one). `GET /v1/shares/mine` lists what the caller has shared out. The
+Research-Desk renders all of this in **Settings → Freigaben** (three sections),
+gated on `features.sharing` + a cookie session, with a pending-invitation count
+badge on the settings nav.
 
 ## Hot path on app start
 

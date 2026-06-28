@@ -780,6 +780,28 @@ export function displayRelativeDate(iso: string, locale: Locale) {
   return displayDateTime(iso, locale)
 }
 
+export function displayRelativeAge(iso: string, locale: Locale, now = new Date()) {
+  const value = new Date(iso)
+  if (Number.isNaN(value.getTime()) || Number.isNaN(now.getTime())) return ''
+
+  const diffMs = Math.max(0, now.getTime() - value.getTime())
+  const minuteMs = 60 * 1000
+  const hourMs = 60 * minuteMs
+  const dayMs = 24 * hourMs
+  const weekMs = 7 * dayMs
+
+  if (diffMs < minuteMs) return locale === 'de' ? 'Gerade eben' : 'Just now'
+  if (diffMs < hourMs) return `${Math.floor(diffMs / minuteMs)} ${locale === 'de' ? 'Min.' : 'min'}`
+  if (diffMs < dayMs) return `${Math.floor(diffMs / hourMs)} ${locale === 'de' ? 'Std.' : 'h'}`
+  if (diffMs < weekMs) {
+    const days = Math.floor(diffMs / dayMs)
+    return locale === 'de'
+      ? `${days} ${days === 1 ? 'Tag' : 'Tage'}`
+      : `${days} d`
+  }
+  return `${Math.floor(diffMs / weekMs)} ${locale === 'de' ? 'W' : 'w'}`
+}
+
 function displayTime(value: Date, locale: Locale) {
   return new Intl.DateTimeFormat(locale === 'de' ? 'de-DE' : 'en-US', {
     hour: '2-digit',

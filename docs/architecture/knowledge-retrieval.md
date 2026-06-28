@@ -107,7 +107,8 @@ This diagram answers: "What happens between a `mode=knowledge` question arriving
 
 ```mermaid
 flowchart TD
-    ReqIn[("data RunRequest<br/>question, collection_ids, profile, top_k")]
+    ReqIn[("data RunRequest<br/>question, collection_ids, profile, top_k, final_k")]
+    Ctx["fn contextualize_followup_question<br/>history to standalone retrieval query"]
     Plan["fn resolve_run_plan<br/>profile to frozen KnowledgeRunPlan"]
     Decomp{"router plan.decompose? (tief only)"}
     DoDecomp["fn decompose_question<br/>2-4 sub-queries, fast tier"]
@@ -125,7 +126,7 @@ flowchart TD
     Ground["fn check_grounding<br/>verbatim quotes vs source_text"]
     Out[("data answer + [K#] references")]
 
-    ReqIn --> Plan --> Decomp
+    ReqIn --> Ctx --> Plan --> Decomp
     Decomp -->|"yes"| DoDecomp --> Retr
     Decomp -->|"no"| Retr
     Retr --> Inter --> Budget --> Gate
@@ -140,12 +141,14 @@ flowchart TD
 
 Key transitions:
 
-- **Decompose** (`decompose_question`, tief profile only) splits the question into 2-4 sub-queries on the fast tier. Each sub-query and the original question are retrieved independently.
+- **Follow-up contextualization** (`contextualize_followup_question`) runs only when the request carries prior `messages`/`history`. It rewrites the current follow-up into a standalone retrieval query before profile selection, decomposition, retrieval, and gate evaluation. The final answer still receives the original user question and the history, but the prompt states that history is context only, not evidence. Provider/parse failures fall back to the original question with `_knowledge_query_context_fallback` and `inqtrix.knowledge.contextualized`.
+- **Decompose** (`decompose_question`, tief profile only) splits the retrieval query into 2-4 sub-queries on the fast tier. Each sub-query and the standalone retrieval query are retrieved independently.
 - **Interleave** (`interleave_candidates`) merges the per-query result lists round-robin — one candidate per list in rotation, the original question's list first, duplicates collapsed on `chunk.id`. This guarantees every aspect contributes to the top-k instead of the first list crowding the others out (the aggregation-failure class a plain first-wins union reproduces).
+- **Retrieval widths**: `top_k` (per-(sub-)query width, `knowledge_filters.top_k`, 1-50) bounds each `retrieve()` call; `final_k` bounds the candidate pool actually surfaced to the answer. By default `final_k = min(top_k × profile.final_k_factor, EVIDENCE_K_MAX)` — only `tief` raises the factor above `1.0`, so its decompose/gate fan-out widens evidence instead of collapsing back to `top_k`; a profile without decomposition retrieves `final_k` directly. An explicit `knowledge_filters.final_k` pins it, overriding the factor. `EVIDENCE_K_MAX` and each profile's `final_k_factor` are published in `/v1/capabilities` (`knowledge.evidence_k_max`, `knowledge.profiles[].final_k_factor`); full request contract in [knowledge-profiles.md](../configuration/knowledge-profiles.md).
 - **Evidence budget** renders the candidates as `[K1] Title (Abschnitt N)` entries up to a context-window-derived character budget. Truncation happens once, here, and emits `inqtrix.knowledge.evidence.truncated` — the reference list and the prompt always describe the same set.
 - **Sufficiency gate** (`evaluate_evidence`, `gate.py`) is one fast-tier call returning a three-way coverage verdict. `full` answers normally; `partial` answers with the gaps named explicitly (a binary verdict was observed refusing answerable multi-aspect questions wholesale); `none` yields the honest no-evidence answer instead of a fabrication. An unparseable gate response fails *open* to sufficient with the loud `_knowledge_gate_fallback` marker.
 - **The agentic loop**: while the gate is not satisfied, proposes a rewritten query, and the profile's round budget (capped by `INQTRIX_KNOWLEDGE_GATE_MAX_ROUNDS`) has rounds left, `run()` retrieves the rewritten query, merges it into the candidate pool (`merge_candidates`, original ranking authoritative), re-renders, and re-gates.
-- **Grounding** (`check_grounding`, `grounding.py`) verifies the answer's `ZITATE:` block of verbatim `[K#]` quotes WITHOUT another LLM call: a whitespace-normalized substring check against each chunk's `source_text` (the pre-contextualization body — a quote of the situating prefix must not verify as source content). The quote block is stripped from the user-facing answer; unverified quotes stay in the result with `verified=false`.
+- **Grounding** (`check_grounding`, `grounding.py`) verifies the answer's `ZITATE:` block of verbatim `[K#]` quotes WITHOUT another LLM call: a formatting-tolerant (whitespace, Unicode/typography, case) verbatim-substring check against each chunk's `source_text` (the pre-contextualization body — a quote of the situating prefix must not verify as source content). Tolerance covers only encoding/typography, never paraphrase, so a reworded quote still fails. The quote block is stripped from the user-facing answer; unverified quotes stay in the result with `verified=false`.
 
 ## Hybrid search and RRF
 
@@ -183,6 +186,16 @@ Key transitions:
 
   where `rank_i(d)` is `d`'s position in branch `i` and `k` is a smoothing constant. It is rank-based on purpose: dense cosine scores and BM25 IDF scores live on incommensurable scales, so fusing by **rank** rather than by raw score avoids one branch's score magnitude drowning the other. Both branches contribute regardless of scale.
 - **Reranker** (optional, `INQTRIX_RERANKER_PROVIDER`) re-scores a deeper candidate pool (`INQTRIX_RERANK_CANDIDATE_DEPTH`, default 40) down to the requested `top_k` (default 8). `cohere` calls a Cohere-rerank-schema endpoint (native or Azure serverless); `llm` is a listwise fallback through the deployment's own LLM, hard-capped at 20 candidates and roughly an order of magnitude costlier. The default is `none` — a visible capability flag, never a silent downgrade; hybrid without a reranker is warned about at startup because plain RRF can degrade top-1 precision on paraphrase queries.
+
+## Cross-lingual retrieval (query and corpus in different languages)
+
+A common case is a German question against English documents (or the reverse). The two branches behave very differently here:
+
+- **Dense is multilingual out of the box.** The default embedding model (`text-embedding-3-small`) and the selectable alternatives (`text-embedding-3-large`, `BAAI/bge-m3`, `voyage-3-large`) map semantically equivalent text across languages into one shared space. A German query and an English chunk land near each other with **no translation and no language tag** — and a language *filter* would actively break this, so documents/chunks deliberately carry no language metadata.
+- **BM25 (the sparse branch) is language-bound.** The lexical encoder tokenizes and stems in exactly one language (`bm25_german` today). Cross-lingual *keyword* matching is structurally impossible — "Verschlüsselung" and "encryption" share no token — so when the query and corpus languages differ the sparse branch contributes little or unstably. It does **not** contribute nothing: query and documents pass through the same encoder, so shared exact terms (names, codes, acronyms, numbers) can still match. (A multilingual learned-sparse model such as BGE-M3 exists as a model *family*, but the project's current Qdrant/fastembed BM25 is monolingual; query translation — a later phase — is the right small fix for it.)
+- **The cross-lingual lever is a multilingual cross-encoder reranker — optional, not required.** It stays a recommendation: `INQTRIX_RERANKER_PROVIDER=none` is the default and a valid choice, and a deployment without a reranker keeps today's dense+BM25 path **unchanged** — nothing degrades because a reranker is absent. When configured, the `cohere` provider (a rerank-**schema** adapter, not vendor-locked: native Cohere `rerank-v3.5`, Azure serverless, or any compatible self-hosted endpoint) re-scores the fused candidates against the original query directly across languages, over the already-multilingual dense branch — no new retrieval code. The `llm` reranker is a fallback whose multilingual quality depends on the configured LLM and costs latency/tokens; it is not the recommended cross-lingual lever. For environments that cannot use an external reranker, BM25 query translation (a deferred phase) is the alternative path that needs no separate rerank service.
+
+**Visibility (Phase 1).** The capability manifest (`/v1/capabilities` and the admin runtime payload) publishes `sparse_mode` (`bm25` or `off`), `sparse_language` (the BM25 tokenizer language, e.g. `de`, or `null` when sparse is off), `sparse_multilingual: false`, and `cross_lingual_recommendation: "reranker"`, so clients can show the limitation honestly. When the *confidently* detected query language differs from the tokenizer language, the run's `result_state.knowledge_sparse` carries the `_knowledge_sparse_tokenizer_mismatch` marker plus a redacted log/event (language codes only, never the query text). This signal is query-vs-**tokenizer** only — it does not reliably detect query-vs-**document** language, which needs per-collection language metadata (a deferred phase). The same-language default path adds no field, event, or log.
 
 ## Related docs
 

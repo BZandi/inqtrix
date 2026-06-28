@@ -23,7 +23,6 @@ import {
   BookOpen,
   Check,
   ChevronDown,
-  ChevronRight,
   Code2,
   Eye,
   FileDown,
@@ -31,21 +30,19 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
-  GripVertical,
-  Link,
   ListFilter,
   LoaderCircle,
   MessageSquarePlus,
   MessageSquareText,
   MessagesSquare,
+  MoreHorizontal,
   PanelBottomClose,
   PanelBottomOpen,
-  PanelLeftClose,
-  PanelRightClose,
   Paperclip,
   PencilLine,
+  Pin,
+  PinOff,
   Redo2,
-  Search,
   SearchCheck,
   SendHorizontal,
   Scale,
@@ -58,7 +55,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Chip } from '@/components/ui/chip'
-import { PanelRail } from '@/components/ui/panel-rail'
+import { PanelToggle } from '@/components/ui/panel-toggle'
 import { WelcomeState } from '@/components/ui/welcome-state'
 import { ComposerIconButton } from '@/features/composer/ComposerIconButton'
 import {
@@ -71,16 +68,30 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import {
+  EXPLORER_REVEAL_STEP,
+  ExplorerFolderRow,
+  ExplorerFolderToggle,
+  ExplorerItemRow,
+  ExplorerRevealControls,
+  ExplorerRunningIndicator,
+  ExplorerSearchField,
+  ExplorerSectionLabel,
+  isExplorerActionTarget,
+  isPastExplorerDragThreshold,
+} from '@/components/ui/explorer-list'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { ComposerStopButton } from '@/features/composer/ComposerStopButton'
 import {
   chatAttachmentChipsFromRefs,
   chatAttachmentsFromRefs,
   chatContextRefKey,
   chatRuleOptions,
   dedupeChatContextRefs,
+  displayRelativeAge,
   editorCommentsForDocument,
   fileGroupMentionOptions,
   fileMentionOptions,
@@ -104,6 +115,7 @@ import type {
 import { ModelTierPicker } from '@/features/researchRuns/ModelTierPicker'
 import { ContextTokenMeter } from '@/features/composer/ContextTokenMeter'
 import { QuotaMeter } from '@/features/quota/QuotaMeter'
+import { QuotaUsageFooter } from '@/features/quota/QuotaUsageFooter'
 import {
   buildContextTokenModel,
   estimateTokensFromText,
@@ -126,7 +138,6 @@ import { commentDecorationPluginKey, createEditorExtensions, normalizeEditorMark
 import { BlockHandle } from './BlockHandle'
 import { TableControls } from './TableControls'
 import { SelectionToolbar } from './SelectionToolbar'
-import { promptSetLink } from './linkCommand'
 import { MarkdownSourceEditor } from './MarkdownSourceEditor'
 import { documentDiffPlan, suggestionDiffPlan, type DocumentDiffBlock, type SuggestionDiffSegment } from './suggestionDiff'
 import {
@@ -239,7 +250,6 @@ const editorCopy = {
     bubbleUnderline: 'Unterstrichen',
     bubbleStrike: 'Durchgestrichen',
     bubbleCode: 'Code',
-    bubbleLink: 'Link',
     bubbleHighlight: 'Hervorheben',
     slashTable: 'Tabelle',
     slashDivider: 'Trenner',
@@ -302,11 +312,13 @@ const editorCopy = {
     deleteFolder: 'Ordner löschen',
     documents: 'Dokumente',
     dropIntoFolder: 'In Ordner verschieben',
-    emptyBody: 'Neue Markdown-Datei anlegen oder abgeschlossenen Research Report importieren.',
+    emptyBody: 'Arbeitsfläche für Markdown, importierte Research Reports und KI-gestützte Überarbeitung.',
+    emptyGuidance: 'Starten Sie mit einer leeren Datei zum Schreiben oder importieren Sie einen abgeschlossenen Research Report, um daraus ein bearbeitbares Dokument zu machen.',
+    emptyExample: 'Der Editor-Assistent unterstützt beim Umformulieren, Prüfen von Aussagen und Arbeiten mit Kommentaren.',
     emptyKicker: 'Editor',
     emptyTitle: 'Kein Dokument geöffnet',
     focus: 'Fokus',
-    hideAssistant: 'Assistant ausblenden',
+    hideAssistant: 'Editor-Assistent ausblenden',
     hideComments: 'Kommentare ausblenden',
     hideTree: 'Dateibaum ausblenden',
     importReport: 'Research Report importieren',
@@ -335,20 +347,26 @@ const editorCopy = {
     noComments: 'Noch keine Kommentare in diesem Dokument.',
     noDocuments: 'Noch keine Dokumente.',
     noReports: 'Keine abgeschlossenen Reports verfügbar.',
+    options: 'Optionen',
     searchDocuments: 'Dokumente suchen',
     searchClear: 'Suche zurücksetzen',
     searchNoResults: 'Keine passenden Dokumente.',
     moveDocument: 'Dokument verschieben',
     moveFolder: 'Ordner verschieben',
+    pinned: 'Angeheftet',
+    pinDocument: 'Dokument anheften',
     renameDocument: 'Dokument umbenennen',
     renameFolder: 'Ordner umbenennen',
     resolve: 'Erledigen',
     send: 'Senden',
-    showAssistant: 'Assistant einblenden',
+    showAssistant: 'Editor-Assistent einblenden',
     showComments: 'Kommentare einblenden',
+    showLess: 'Weniger anzeigen',
+    showMore: 'Mehr anzeigen',
     showTree: 'Dateibaum einblenden',
     source: 'Source',
     stopRun: 'Lauf abbrechen',
+    unpinDocument: 'Dokument lösen',
     updated: 'zuletzt bearbeitet',
   },
   en: {
@@ -403,7 +421,6 @@ const editorCopy = {
     bubbleUnderline: 'Underline',
     bubbleStrike: 'Strikethrough',
     bubbleCode: 'Code',
-    bubbleLink: 'Link',
     bubbleHighlight: 'Highlight',
     slashTable: 'Table',
     slashDivider: 'Divider',
@@ -466,11 +483,13 @@ const editorCopy = {
     deleteFolder: 'Delete folder',
     documents: 'Documents',
     dropIntoFolder: 'Move into folder',
-    emptyBody: 'Create a Markdown file or import a research report.',
+    emptyBody: 'Workspace for Markdown, imported research reports, and AI-assisted revision.',
+    emptyGuidance: 'Start with a blank file for writing, or import a completed research report to turn it into an editable document.',
+    emptyExample: 'The editor assistant helps rewrite passages, check claims, and work through comments.',
     emptyKicker: 'Editor',
     emptyTitle: 'No document open',
     focus: 'Focus',
-    hideAssistant: 'Hide assistant',
+    hideAssistant: 'Hide editor assistant',
     hideComments: 'Hide comments',
     hideTree: 'Hide file tree',
     importReport: 'Import research report',
@@ -499,20 +518,26 @@ const editorCopy = {
     noComments: 'No comments in this document yet.',
     noDocuments: 'No documents yet.',
     noReports: 'No completed reports available.',
+    options: 'Options',
     searchDocuments: 'Search documents',
     searchClear: 'Clear search',
     searchNoResults: 'No matching documents.',
     moveDocument: 'Move document',
     moveFolder: 'Move folder',
+    pinned: 'Pinned',
+    pinDocument: 'Pin document',
     renameDocument: 'Rename document',
     renameFolder: 'Rename folder',
     resolve: 'Resolve',
     send: 'Send',
-    showAssistant: 'Show assistant',
+    showAssistant: 'Show editor assistant',
     showComments: 'Show comments',
+    showLess: 'Show less',
+    showMore: 'Show more',
     showTree: 'Show file tree',
     source: 'Source',
     stopRun: 'Cancel run',
+    unpinDocument: 'Unpin document',
     updated: 'last edited',
   },
 } as const
@@ -683,20 +708,20 @@ export default function EditorWorkspace({
 
   return (
     <div className="flex h-[calc(100svh-var(--header-h))] min-w-0 bg-canvas text-foreground">
-      {state.editorUi.isTreeVisible ? (
+      {state.editorUi.isTreeVisible && (
         <EditorFileTree
           activeDocumentId={activeDocument?.id ?? null}
           copy={copy}
           dispatch={dispatch}
           documents={documents}
           folders={folders}
+          pinnedDocumentIds={state.ui.pinnedExplorer.editorDocumentIds}
           reportOptions={reportOptions}
-        />
-      ) : (
-        <PanelRail
-          label={copy.showTree}
-          onExpand={() => dispatch({ isVisible: true, type: 'setEditorTreeVisible' })}
-          side="left"
+          runningDocumentId={
+            (isGlobalRunning || runningCommentIds.length > 0 || runningSuggestionIds.length > 0)
+              ? activeDocument?.id ?? null
+              : null
+          }
         />
       )}
       <main className="flex min-w-0 flex-1 flex-col border-r border-border bg-background">
@@ -708,8 +733,10 @@ export default function EditorWorkspace({
               dispatch={dispatch}
               document={activeDocument}
               editor={activeEditor}
+              isCommentPanelVisible={state.editorUi.isCommentPanelVisible}
               isDiffVisible={state.editorUi.isDiffVisible}
               isDirty={state.dirty}
+              isTreeVisible={state.editorUi.isTreeVisible}
               viewMode={state.editorUi.viewMode}
             />
             <div className="flex min-h-0 flex-1 flex-col">
@@ -804,10 +831,27 @@ export default function EditorWorkspace({
             </div>
           </>
         ) : (
-          <EditorEmptyState copy={copy} dispatch={dispatch} reportOptions={reportOptions} />
+          <div className="relative flex min-h-0 flex-1 bg-background">
+            <header className="absolute inset-x-0 top-0 z-10 grid inqtrix-panel-header grid-cols-[auto_1fr_auto] items-center gap-2 border-b border-border bg-background px-3">
+              <EditorPanelToggle
+                copy={copy}
+                dispatch={dispatch}
+                side="left"
+                visible={state.editorUi.isTreeVisible}
+              />
+              <span aria-hidden />
+              <EditorPanelToggle
+                copy={copy}
+                dispatch={dispatch}
+                side="right"
+                visible={state.editorUi.isCommentPanelVisible}
+              />
+            </header>
+            <EditorEmptyState copy={copy} dispatch={dispatch} reportOptions={reportOptions} />
+          </div>
         )}
       </main>
-      {state.editorUi.isCommentPanelVisible ? (
+      {state.editorUi.isCommentPanelVisible && (
         <EditorCommentsPanel
           comments={comments}
           copy={copy}
@@ -823,12 +867,6 @@ export default function EditorWorkspace({
           selectedCommentId={state.editorUi.selectedCommentId}
           suggestions={documentSuggestions}
         />
-      ) : (
-        <PanelRail
-          label={copy.showComments}
-          onExpand={() => dispatch({ isVisible: true, type: 'setEditorCommentPanelVisible' })}
-          side="right"
-        />
       )}
     </div>
   )
@@ -840,16 +878,21 @@ function EditorFileTree({
   dispatch,
   documents,
   folders,
+  pinnedDocumentIds,
   reportOptions,
+  runningDocumentId,
 }: {
   activeDocumentId: string | null
   copy: EditorCopy
   dispatch: Dispatch<ResearchDeskAction>
   documents: EditorDocumentRecord[]
   folders: EditorFolderRecord[]
+  pinnedDocumentIds: readonly string[]
   reportOptions: CompletedReportOption[]
+  runningDocumentId: string | null
 }) {
   const [expandedFolderIds, setExpandedFolderIds] = useState<ReadonlySet<string>>(() => new Set(folders.map((folder) => folder.id)))
+  const [visibleDocumentCounts, setVisibleDocumentCounts] = useState<Record<string, number>>({})
   const [draggedDocumentId, setDraggedDocumentId] = useState<string | null>(null)
   const [draggedFolderId, setDraggedFolderId] = useState<string | null>(null)
   const [documentDropTarget, setDocumentDropTarget] = useState<EditorDocumentDropTarget | null>(null)
@@ -861,7 +904,12 @@ function EditorFileTree({
   const documentTitleInputRef = useRef<HTMLInputElement | null>(null)
   const folderTitleInputRef = useRef<HTMLInputElement | null>(null)
   const listRef = useRef<HTMLDivElement | null>(null)
-  const ungroupedDocuments = documents.filter((document) => !document.folderId || !folders.some((folder) => folder.id === document.folderId))
+  const suppressDocumentOpenClickRef = useRef(false)
+  const suppressFolderToggleClickRef = useRef(false)
+  const pinnedDocumentIdSet = new Set(pinnedDocumentIds)
+  const pinnedDocuments = documents.filter((document) => pinnedDocumentIdSet.has(document.id))
+  const treeDocuments = documents.filter((document) => !pinnedDocumentIdSet.has(document.id))
+  const ungroupedDocuments = treeDocuments.filter((document) => !document.folderId || !folders.some((folder) => folder.id === document.folderId))
   const hasFolders = folders.length > 0
   const [searchQuery, setSearchQuery] = useState('')
   const trimmedQuery = searchQuery.trim().toLowerCase()
@@ -881,6 +929,24 @@ function EditorFileTree({
     setExpandedFolderIds((current) => new Set([...current, ...folders.map((folder) => folder.id)]))
   }, [folders])
 
+  function visibleDocumentCount(sectionId: string) {
+    return visibleDocumentCounts[sectionId] ?? EXPLORER_REVEAL_STEP
+  }
+
+  function showMoreDocuments(sectionId: string, total: number) {
+    setVisibleDocumentCounts((current) => ({
+      ...current,
+      [sectionId]: Math.min((current[sectionId] ?? EXPLORER_REVEAL_STEP) + EXPLORER_REVEAL_STEP, total),
+    }))
+  }
+
+  function showLessDocuments(sectionId: string) {
+    setVisibleDocumentCounts((current) => ({
+      ...current,
+      [sectionId]: EXPLORER_REVEAL_STEP,
+    }))
+  }
+
   useLayoutEffect(() => {
     if (!editingDocumentId) return
     documentTitleInputRef.current?.focus()
@@ -894,6 +960,10 @@ function EditorFileTree({
   }, [editingFolderId])
 
   function toggleFolder(folderId: string) {
+    if (suppressFolderToggleClickRef.current) {
+      suppressFolderToggleClickRef.current = false
+      return
+    }
     setExpandedFolderIds((current) => {
       const next = new Set(current)
       if (next.has(folderId)) {
@@ -903,6 +973,14 @@ function EditorFileTree({
       }
       return next
     })
+  }
+
+  function openDocumentFromTree(documentId: string) {
+    if (suppressDocumentOpenClickRef.current) {
+      suppressDocumentOpenClickRef.current = false
+      return
+    }
+    dispatch({ documentId, type: 'openEditorDocument' })
   }
 
   function startDocumentTitleEdit(document: EditorDocumentRecord) {
@@ -960,18 +1038,30 @@ function EditorFileTree({
     return folderElements.length
   }
 
-  function beginFolderDrag(event: ReactPointerEvent<HTMLButtonElement>, folderId: string) {
-    if (event.button !== 0) return
-    event.preventDefault()
-    setDraggedFolderId(folderId)
-    setFolderDropTargetIndex(readFolderDropTarget(event.clientY, folderId))
+  function beginFolderDrag(event: ReactPointerEvent<HTMLElement>, folderId: string) {
+    if (event.button !== 0 || isExplorerActionTarget(event.target)) return
+    const startX = event.clientX
+    const startY = event.clientY
+    let didStartDrag = false
+
+    function startDrag(moveEvent: PointerEvent) {
+      didStartDrag = true
+      suppressFolderToggleClickRef.current = true
+      setDraggedFolderId(folderId)
+      setFolderDropTargetIndex(readFolderDropTarget(moveEvent.clientY, folderId))
+    }
 
     function handlePointerMove(moveEvent: PointerEvent) {
+      if (!didStartDrag) {
+        if (!isPastExplorerDragThreshold(startX, startY, moveEvent)) return
+        startDrag(moveEvent)
+      }
+      moveEvent.preventDefault()
       setFolderDropTargetIndex(readFolderDropTarget(moveEvent.clientY, folderId))
     }
 
     function finishPointerDrag(upEvent: PointerEvent) {
-      const nextDropTarget = readFolderDropTarget(upEvent.clientY, folderId)
+      const nextDropTarget = didStartDrag ? readFolderDropTarget(upEvent.clientY, folderId) : null
       cleanupPointerDrag()
       if (nextDropTarget === null) return
       dispatch({ folderId, targetIndex: nextDropTarget, type: 'moveEditorFolder' })
@@ -983,6 +1073,11 @@ function EditorFileTree({
       document.removeEventListener('pointercancel', cleanupPointerDrag)
       setDraggedFolderId(null)
       setFolderDropTargetIndex(null)
+      if (didStartDrag) {
+        window.setTimeout(() => {
+          suppressFolderToggleClickRef.current = false
+        }, 0)
+      }
     }
 
     document.addEventListener('pointermove', handlePointerMove)
@@ -1020,18 +1115,30 @@ function EditorFileTree({
     return { folderId, targetIndex: documentElements.length }
   }
 
-  function beginDocumentDrag(event: ReactPointerEvent<HTMLButtonElement>, documentId: string) {
-    if (event.button !== 0) return
-    event.preventDefault()
-    setDraggedDocumentId(documentId)
-    setDocumentDropTarget(readDocumentDropTarget(event.clientY, documentId))
+  function beginDocumentDrag(event: ReactPointerEvent<HTMLElement>, documentId: string) {
+    if (event.button !== 0 || isExplorerActionTarget(event.target)) return
+    const startX = event.clientX
+    const startY = event.clientY
+    let didStartDrag = false
+
+    function startDrag(moveEvent: PointerEvent) {
+      didStartDrag = true
+      suppressDocumentOpenClickRef.current = true
+      setDraggedDocumentId(documentId)
+      setDocumentDropTarget(readDocumentDropTarget(moveEvent.clientY, documentId))
+    }
 
     function handlePointerMove(moveEvent: PointerEvent) {
+      if (!didStartDrag) {
+        if (!isPastExplorerDragThreshold(startX, startY, moveEvent)) return
+        startDrag(moveEvent)
+      }
+      moveEvent.preventDefault()
       setDocumentDropTarget(readDocumentDropTarget(moveEvent.clientY, documentId))
     }
 
     function finishPointerDrag(upEvent: PointerEvent) {
-      const nextDropTarget = readDocumentDropTarget(upEvent.clientY, documentId)
+      const nextDropTarget = didStartDrag ? readDocumentDropTarget(upEvent.clientY, documentId) : null
       cleanupPointerDrag()
       if (!nextDropTarget) return
       dispatch({
@@ -1048,6 +1155,11 @@ function EditorFileTree({
       document.removeEventListener('pointercancel', cleanupPointerDrag)
       setDraggedDocumentId(null)
       setDocumentDropTarget(null)
+      if (didStartDrag) {
+        window.setTimeout(() => {
+          suppressDocumentOpenClickRef.current = false
+        }, 0)
+      }
     }
 
     document.addEventListener('pointermove', handlePointerMove)
@@ -1055,9 +1167,11 @@ function EditorFileTree({
     document.addEventListener('pointercancel', cleanupPointerDrag)
   }
 
+  const ungroupedVisibleCount = visibleDocumentCount('__ungrouped__')
+
   return (
     <aside className="flex w-[17.5rem] shrink-0 flex-col border-r border-border bg-surface">
-      <div className="flex h-12 items-center justify-between border-b border-border px-3">
+      <div className="flex inqtrix-panel-header items-center justify-between border-b border-border px-3">
         <div className="flex min-w-0 items-center gap-2">
           <Folder className="size-4 text-muted-foreground" />
           <h2 className="t-section truncate">{copy.documents}</h2>
@@ -1076,45 +1190,18 @@ function EditorFileTree({
           >
             <SquarePen className="size-4" />
           </TooltipButton>
-          <TooltipButton
-            label={copy.hideTree}
-            onClick={() => dispatch({ isVisible: false, type: 'setEditorTreeVisible' })}
-          >
-            <PanelLeftClose className="size-4" />
-          </TooltipButton>
         </div>
       </div>
-      <div className="border-b border-border px-2 py-1.5">
-        <div className="flex items-center gap-1.5 rounded-md bg-background/80 px-2 py-1">
-          <Search className="size-3.5 shrink-0 text-muted-foreground" />
-          <input
-            aria-label={copy.searchDocuments}
-            className="t-label min-w-0 flex-1 border-0 bg-transparent text-foreground outline-none placeholder:text-muted-foreground"
-            onChange={(event) => setSearchQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Escape' && searchQuery) {
-                event.preventDefault()
-                setSearchQuery('')
-              }
-            }}
-            placeholder={copy.searchDocuments}
-            type="search"
-            value={searchQuery}
-          />
-          {searchQuery ? (
-            <button
-              aria-label={copy.searchClear}
-              className="grid size-5 shrink-0 place-items-center rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              onClick={() => setSearchQuery('')}
-              type="button"
-            >
-              <X className="size-3.5" />
-            </button>
-          ) : null}
-        </div>
-      </div>
+      <ExplorerSearchField
+        clearLabel={copy.searchClear}
+        label={copy.searchDocuments}
+        onChange={setSearchQuery}
+        onClear={() => setSearchQuery('')}
+        placeholder={copy.searchDocuments}
+        value={searchQuery}
+      />
       <ScrollArea className="min-h-0 flex-1">
-        <div className="space-y-1 p-2" ref={listRef}>
+        <div className="inqtrix-explorer-list space-y-1 p-2" ref={listRef}>
           {isSearching ? (
             searchResults.length > 0 ? (
               <div className="space-y-0.5">
@@ -1129,10 +1216,13 @@ function EditorFileTree({
                     isDragging={false}
                     isEditing={editingDocumentId === document.id}
                     isNested={false}
+                    isPinned={pinnedDocumentIdSet.has(document.id)}
+                    isRunning={runningDocumentId === document.id}
                     key={document.id}
                     onDelete={() => dispatch({ documentId: document.id, type: 'deleteEditorDocument' })}
                     onDraftChange={setDocumentTitleDraft}
-                    onOpen={() => dispatch({ documentId: document.id, type: 'openEditorDocument' })}
+                    onOpen={() => openDocumentFromTree(document.id)}
+                    onTogglePinned={() => dispatch({ documentId: document.id, type: 'togglePinnedEditorDocument' })}
                     showAfterIndicator={false}
                     showBeforeIndicator={false}
                     startTitleEdit={startDocumentTitleEdit}
@@ -1146,13 +1236,44 @@ function EditorFileTree({
             )
           ) : (
           <>
+          {pinnedDocuments.length > 0 ? (
+            <section className="space-y-0.5">
+              <ExplorerSectionLabel className="pt-0">{copy.pinned}</ExplorerSectionLabel>
+              {pinnedDocuments.map((document) => (
+                <EditorDocumentTreeItem
+                  beginDocumentDrag={beginDocumentDrag}
+                  cancelTitleEdit={cancelDocumentTitleEdit}
+                  commitTitleEdit={commitDocumentTitleEdit}
+                  copy={copy}
+                  document={document}
+                  isActive={activeDocumentId === document.id}
+                  isDragging={draggedDocumentId === document.id}
+                  isEditing={editingDocumentId === document.id}
+                  isNested={false}
+                  isPinned
+                  isRunning={runningDocumentId === document.id}
+                  key={document.id}
+                  onDelete={() => dispatch({ documentId: document.id, type: 'deleteEditorDocument' })}
+                  onDraftChange={setDocumentTitleDraft}
+                  onOpen={() => openDocumentFromTree(document.id)}
+                  onTogglePinned={() => dispatch({ documentId: document.id, type: 'togglePinnedEditorDocument' })}
+                  showAfterIndicator={false}
+                  showBeforeIndicator={false}
+                  startTitleEdit={startDocumentTitleEdit}
+                  titleDraft={documentTitleDraft}
+                  titleInputRef={documentTitleInputRef}
+                />
+              ))}
+            </section>
+          ) : null}
           {folders.map((folder, folderIndex) => {
             const isExpanded = expandedFolderIds.has(folder.id)
             const isDraggingFolder = draggedFolderId === folder.id
             const showFolderBeforeIndicator = folderDropTargetIndex === folderIndex
             const showFolderAfterIndicator = folderDropTargetIndex === folders.length && folderIndex === folders.length - 1
             const showDropFrame = documentDropTarget?.folderId === folder.id
-            const folderDocuments = documents.filter((document) => document.folderId === folder.id)
+            const folderDocuments = treeDocuments.filter((document) => document.folderId === folder.id)
+            const visibleCount = visibleDocumentCount(folder.id)
             return (
               <section
                 className={cn(
@@ -1167,78 +1288,87 @@ function EditorFileTree({
               >
                 {showFolderBeforeIndicator ? <DropIndicator className="-top-1" /> : null}
                 {showFolderAfterIndicator ? <DropIndicator className="-bottom-1" /> : null}
-                <div className="group/folder grid min-h-8 grid-cols-[1.35rem_1rem_minmax(0,1fr)_auto_auto_auto_auto] items-center gap-1 px-1.5 text-foreground/75 transition-colors hover:text-foreground">
-                  <button
-                    aria-expanded={isExpanded}
-                    aria-label={`${isExpanded ? copy.hideTree : copy.showTree}: ${folder.title}`}
-                    className="grid size-6 place-items-center rounded-sm hover:bg-surface hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    onClick={() => toggleFolder(folder.id)}
-                    type="button"
-                  >
-                    {isExpanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
-                  </button>
-                  {isExpanded ? <FolderOpen className="size-3.5 shrink-0" /> : <Folder className="size-3.5 shrink-0" />}
-                  {editingFolderId === folder.id ? (
-                    <input
-                      aria-label={copy.renameFolder}
-                      className="t-label min-w-0 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                      onBlur={commitFolderTitleEdit}
-                      onChange={(event) => setFolderTitleDraft(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter') {
-                          event.preventDefault()
-                          commitFolderTitleEdit()
-                        }
-                        if (event.key === 'Escape') {
-                          event.preventDefault()
-                          cancelFolderTitleEdit()
-                        }
-                      }}
-                      ref={folderTitleInputRef}
-                      value={folderTitleDraft}
-                    />
-                  ) : (
-                    <button
-                      className="t-label min-w-0 truncate rounded-sm px-1 py-0.5 text-left text-foreground/75 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                      onDoubleClick={() => startFolderTitleEdit(folder)}
-                      onClick={() => toggleFolder(folder.id)}
-                      title={copy.renameFolder}
-                      type="button"
-                    >
-                      {folder.title}
-                    </button>
+                <ExplorerFolderRow
+                  onPointerDown={(event) => beginFolderDrag(event, folder.id)}
+                  actions={(
+                    <>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            aria-label={copy.options}
+                            className="size-6 shrink-0 text-foreground/55 hover:text-foreground"
+                            size="icon"
+                            type="button"
+                            variant="ghost"
+                          >
+                            <MoreHorizontal className="icon-sm" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-56">
+                          <DropdownMenuItem onSelect={() => startFolderTitleEdit(folder)}>
+                            <PencilLine className="icon-sm" />
+                            {copy.renameFolder}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            className="text-destructive focus:text-destructive"
+                            onSelect={() => dispatch({ folderId: folder.id, type: 'deleteEditorFolder' })}
+                          >
+                            <Trash2 className="icon-sm" />
+                            {copy.deleteFolder}
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                      <button
+                        aria-label={copy.createDocument}
+                        className="grid size-6 shrink-0 place-items-center rounded-sm text-foreground/50 transition hover:bg-surface hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        onClick={() => dispatch({ folderId: folder.id, type: 'createEditorDocument' })}
+                        type="button"
+                      >
+                        <SquarePen className="icon-sm" />
+                      </button>
+                    </>
                   )}
-                  <span className="t-hint shrink-0 rounded-sm px-1 tabular-nums text-muted-foreground">
-                    {folderDocuments.length}
-                  </span>
-                  <button
-                    aria-label={copy.createDocument}
-                    className="grid size-6 shrink-0 place-items-center rounded-sm text-foreground/50 opacity-0 transition hover:bg-surface hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/folder:opacity-100"
-                    onClick={() => dispatch({ folderId: folder.id, type: 'createEditorDocument' })}
-                    type="button"
-                  >
-                    <SquarePen className="size-3.5" />
-                  </button>
-                  <button
-                    aria-label={copy.moveFolder}
-                    className="grid size-6 shrink-0 cursor-grab place-items-center rounded-sm text-foreground/50 opacity-0 transition hover:bg-surface hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/folder:opacity-100 active:cursor-grabbing"
-                    onPointerDown={(event) => beginFolderDrag(event, folder.id)}
-                    type="button"
-                  >
-                    <GripVertical className="size-3.5" />
-                  </button>
-                  <button
-                    aria-label={copy.deleteFolder}
-                    className="grid size-6 shrink-0 place-items-center rounded-sm text-foreground/50 opacity-0 transition hover:bg-surface hover:text-destructive focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/folder:opacity-100"
-                    onClick={() => dispatch({ folderId: folder.id, type: 'deleteEditorFolder' })}
-                    type="button"
-                  >
-                    <Trash2 className="size-3.5" />
-                  </button>
-                </div>
+                >
+                  {editingFolderId === folder.id ? (
+                    <span className="flex min-h-8 min-w-0 items-center gap-1.5" data-explorer-action>
+                      <FolderOpen className="icon-sm shrink-0 text-muted-foreground" />
+                      <input
+                        aria-label={copy.renameFolder}
+                        className="min-w-0 flex-1 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 t-list text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        onBlur={commitFolderTitleEdit}
+                        onChange={(event) => setFolderTitleDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault()
+                            commitFolderTitleEdit()
+                          }
+                          if (event.key === 'Escape') {
+                            event.preventDefault()
+                            cancelFolderTitleEdit()
+                          }
+                        }}
+                        ref={folderTitleInputRef}
+                        value={folderTitleDraft}
+                      />
+                    </span>
+                  ) : (
+                    <ExplorerFolderToggle
+                      count={folderDocuments.length}
+                      expanded={isExpanded}
+                      icon={isExpanded ? <FolderOpen className="icon-sm shrink-0" /> : <Folder className="icon-sm shrink-0" />}
+                      label={`${isExpanded ? copy.hideTree : copy.showTree}: ${folder.title}`}
+                      onDoubleClick={(event) => {
+                        event.preventDefault()
+                        startFolderTitleEdit(folder)
+                      }}
+                      onToggle={() => toggleFolder(folder.id)}
+                      title={folder.title}
+                    />
+                  )}
+                </ExplorerFolderRow>
                 {isExpanded ? (
-                  <div className="ml-4 space-y-0.5 border-l border-border/70 pl-2">
-                    {folderDocuments.map((document, index) => (
+                  <div className="space-y-0.5">
+                    {folderDocuments.slice(0, visibleCount).map((document, index) => (
                       <EditorDocumentTreeItem
                         beginDocumentDrag={beginDocumentDrag}
                         cancelTitleEdit={cancelDocumentTitleEdit}
@@ -1249,17 +1379,28 @@ function EditorFileTree({
                         isDragging={draggedDocumentId === document.id}
                         isEditing={editingDocumentId === document.id}
                         isNested
+                        isPinned={false}
+                        isRunning={runningDocumentId === document.id}
                         key={document.id}
                         onDelete={() => dispatch({ documentId: document.id, type: 'deleteEditorDocument' })}
                         onDraftChange={setDocumentTitleDraft}
-                        onOpen={() => dispatch({ documentId: document.id, type: 'openEditorDocument' })}
-                        showAfterIndicator={documentDropTarget?.folderId === folder.id && documentDropTarget.targetIndex === folderDocuments.length && index === folderDocuments.length - 1}
+                        onOpen={() => openDocumentFromTree(document.id)}
+                        onTogglePinned={() => dispatch({ documentId: document.id, type: 'togglePinnedEditorDocument' })}
+                        showAfterIndicator={documentDropTarget?.folderId === folder.id && documentDropTarget.targetIndex === Math.min(visibleCount, folderDocuments.length) && index === Math.min(visibleCount, folderDocuments.length) - 1}
                         showBeforeIndicator={documentDropTarget?.folderId === folder.id && documentDropTarget.targetIndex === index}
                         startTitleEdit={startDocumentTitleEdit}
                         titleDraft={documentTitleDraft}
                         titleInputRef={documentTitleInputRef}
                       />
                     ))}
+                    <ExplorerRevealControls
+                      onShowLess={() => showLessDocuments(folder.id)}
+                      onShowMore={() => showMoreDocuments(folder.id, folderDocuments.length)}
+                      showLessLabel={copy.showLess}
+                      showMoreLabel={copy.showMore}
+                      total={folderDocuments.length}
+                      visibleCount={visibleCount}
+                    />
                     {folderDocuments.length === 0 ? (
                       <p className="rounded-md px-2 py-1.5 t-meta-sm font-medium text-muted-foreground">{copy.dropIntoFolder}</p>
                     ) : null}
@@ -1275,7 +1416,7 @@ function EditorFileTree({
               data-editor-folder-id="__ungrouped__"
             >
               {hasFolders && <p className="t-caption px-1.5 py-1 text-muted-foreground">{copy.documents}</p>}
-              {ungroupedDocuments.map((document, index) => (
+              {ungroupedDocuments.slice(0, ungroupedVisibleCount).map((document, index) => (
                 <EditorDocumentTreeItem
                   beginDocumentDrag={beginDocumentDrag}
                   cancelTitleEdit={cancelDocumentTitleEdit}
@@ -1286,17 +1427,28 @@ function EditorFileTree({
                   isDragging={draggedDocumentId === document.id}
                   isEditing={editingDocumentId === document.id}
                   isNested={false}
+                  isPinned={false}
+                  isRunning={runningDocumentId === document.id}
                   key={document.id}
                   onDelete={() => dispatch({ documentId: document.id, type: 'deleteEditorDocument' })}
                   onDraftChange={setDocumentTitleDraft}
-                  onOpen={() => dispatch({ documentId: document.id, type: 'openEditorDocument' })}
-                  showAfterIndicator={documentDropTarget?.folderId === null && documentDropTarget.targetIndex === ungroupedDocuments.length && index === ungroupedDocuments.length - 1}
+                  onOpen={() => openDocumentFromTree(document.id)}
+                  onTogglePinned={() => dispatch({ documentId: document.id, type: 'togglePinnedEditorDocument' })}
+                  showAfterIndicator={documentDropTarget?.folderId === null && documentDropTarget.targetIndex === Math.min(ungroupedVisibleCount, ungroupedDocuments.length) && index === Math.min(ungroupedVisibleCount, ungroupedDocuments.length) - 1}
                   showBeforeIndicator={documentDropTarget?.folderId === null && documentDropTarget.targetIndex === index}
                   startTitleEdit={startDocumentTitleEdit}
                   titleDraft={documentTitleDraft}
                   titleInputRef={documentTitleInputRef}
                 />
               ))}
+              <ExplorerRevealControls
+                onShowLess={() => showLessDocuments('__ungrouped__')}
+                onShowMore={() => showMoreDocuments('__ungrouped__', ungroupedDocuments.length)}
+                showLessLabel={copy.showLess}
+                showMoreLabel={copy.showMore}
+                total={ungroupedDocuments.length}
+                visibleCount={ungroupedVisibleCount}
+              />
               {documents.length === 0 ? (
                 <p className="px-2 py-6 text-center text-xs text-muted-foreground">{copy.noDocuments}</p>
               ) : null}
@@ -1306,6 +1458,7 @@ function EditorFileTree({
           )}
         </div>
       </ScrollArea>
+      <QuotaUsageFooter dimensions={['llm_tokens']} />
     </aside>
   )
 }
@@ -1320,16 +1473,19 @@ function EditorDocumentTreeItem({
   isDragging,
   isEditing,
   isNested,
+  isPinned,
+  isRunning,
   onDelete,
   onDraftChange,
   onOpen,
+  onTogglePinned,
   showAfterIndicator,
   showBeforeIndicator,
   startTitleEdit,
   titleDraft,
   titleInputRef,
 }: {
-  beginDocumentDrag: (event: ReactPointerEvent<HTMLButtonElement>, documentId: string) => void
+  beginDocumentDrag: (event: ReactPointerEvent<HTMLElement>, documentId: string) => void
   cancelTitleEdit: () => void
   commitTitleEdit: () => void
   copy: EditorCopy
@@ -1338,112 +1494,104 @@ function EditorDocumentTreeItem({
   isDragging: boolean
   isEditing: boolean
   isNested: boolean
+  isPinned: boolean
+  isRunning: boolean
   onDelete: () => void
   onDraftChange: (value: string) => void
   onOpen: () => void
+  onTogglePinned: () => void
   showAfterIndicator: boolean
   showBeforeIndicator: boolean
   startTitleEdit: (document: EditorDocumentRecord) => void
   titleDraft: string
   titleInputRef: RefObject<HTMLInputElement | null>
 }) {
+  const { locale } = useLocale()
+  const timeLabel = displayRelativeAge(document.updatedAt, locale)
+
   return (
-    <div
-      className={cn(
-        'group/document relative transition-colors',
-        isNested
-          ? 'bg-transparent hover:text-foreground'
-          : 'border-border/60 bg-card/60 shadow-[0_1px_1px_var(--shadow-hairline)] hover:border-border hover:bg-background',
-        !isNested && 'rounded-md border',
-        isNested && isActive && 'text-foreground before:absolute before:-left-[9px] before:bottom-1.5 before:top-1.5 before:w-0.5 before:rounded-full before:bg-brand',
-        !isNested && isActive && 'bg-brand-subtle text-foreground ring-1 ring-brand/25',
-        isDragging && 'scale-[0.99] opacity-75 shadow-[0_8px_20px_var(--shadow-soft)] ring-1 ring-ring/50',
-      )}
-      data-editor-document-id={document.id}
-    >
+    <div className="relative" data-editor-document-id={document.id}>
       {showBeforeIndicator ? <DropIndicator className="-top-1" /> : null}
       {showAfterIndicator ? <DropIndicator className="-bottom-1" /> : null}
-      <button
-        aria-label={copy.moveDocument}
-        className={cn(
-          'absolute top-1/2 z-10 grid -translate-y-1/2 cursor-grab place-items-center rounded-sm text-foreground/50 opacity-0 transition hover:bg-surface hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/document:opacity-100 active:cursor-grabbing',
-          isNested ? 'right-7 size-6' : 'right-8 size-7',
-        )}
+      <ExplorerItemRow
+        active={isActive}
+        dragging={isDragging}
+        nested={isNested}
         onPointerDown={(event) => beginDocumentDrag(event, document.id)}
-        type="button"
       >
-        <GripVertical className="size-3.5" />
-      </button>
-      {isEditing ? (
-        <div className={cn(
-          'grid w-full min-w-0 grid-cols-[1rem_minmax(0,1fr)] items-center gap-2 text-left',
-          isNested ? 'min-h-8 px-2 py-1 pr-14' : 'min-h-9 px-3 py-1.5 pr-16',
-        )}>
-          <FileText
-            className={cn(
-              'size-3.5 shrink-0',
-              isNested && isActive ? 'text-brand' : 'text-muted-foreground',
-            )}
-          />
-          <input
-            aria-label={copy.renameDocument}
-            className="t-list min-w-0 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            onBlur={commitTitleEdit}
-            onChange={(event) => onDraftChange(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault()
-                commitTitleEdit()
-              }
-              if (event.key === 'Escape') {
-                event.preventDefault()
-                cancelTitleEdit()
-              }
-            }}
-            ref={titleInputRef}
-            value={titleDraft}
-          />
-        </div>
-      ) : (
-        <button
-          aria-pressed={isActive}
-          className={cn(
-            'grid w-full min-w-0 grid-cols-[1rem_minmax(0,1fr)] items-center gap-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-            isNested ? 'min-h-8 px-2 py-1 pr-14' : 'min-h-9 px-3 py-1.5 pr-16',
-          )}
-          onClick={onOpen}
-          onDoubleClick={() => startTitleEdit(document)}
-          title={copy.renameDocument}
-          type="button"
-        >
-          <FileText
-            className={cn(
-              'size-3.5 shrink-0',
-              isNested && isActive ? 'text-brand' : 'text-muted-foreground',
-            )}
-          />
-          <span className={cn(
-            't-list min-w-0 truncate',
-            isNested ? 'text-foreground/85' : 'text-foreground',
-            isActive && 'text-foreground',
-          )}>
-            {document.title}
-          </span>
-        </button>
-      )}
-      <Button
-        aria-label={copy.deleteDocument}
-        className={cn(
-          'absolute top-1/2 -translate-y-1/2 text-foreground/55 opacity-0 transition hover:text-destructive focus-visible:opacity-100 group-hover/document:opacity-100',
-          isNested ? 'right-1 size-6' : 'right-1.5 size-7',
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              aria-label={isPinned ? copy.unpinDocument : copy.pinDocument}
+              className="absolute right-7 top-1/2 size-6 -translate-y-1/2 text-foreground/55 opacity-0 transition hover:text-foreground focus-visible:opacity-100 group-hover/explorer-item:opacity-100"
+              data-explorer-action
+              onClick={onTogglePinned}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              {isPinned ? <PinOff className="icon-sm" /> : <Pin className="icon-sm" />}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{isPinned ? copy.unpinDocument : copy.pinDocument}</TooltipContent>
+        </Tooltip>
+        {isEditing ? (
+          <div
+            className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-left"
+            data-explorer-action
+          >
+            <input
+              aria-label={copy.renameDocument}
+              className="t-list-regular min-w-0 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              onBlur={commitTitleEdit}
+              onChange={(event) => onDraftChange(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  commitTitleEdit()
+                }
+                if (event.key === 'Escape') {
+                  event.preventDefault()
+                  cancelTitleEdit()
+                }
+              }}
+              ref={titleInputRef}
+              value={titleDraft}
+            />
+            <span className="shrink-0 t-hint tabular-nums text-muted-foreground transition-opacity group-hover/explorer-item:opacity-0 group-focus-within/explorer-item:opacity-0">
+              {timeLabel}
+            </span>
+          </div>
+        ) : (
+          <button
+            aria-pressed={isActive}
+            className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            onClick={onOpen}
+            onDoubleClick={() => startTitleEdit(document)}
+            title={copy.renameDocument}
+            type="button"
+          >
+            <span className="t-list-regular min-w-0 truncate text-foreground">
+              {document.title}
+            </span>
+            <span className="flex shrink-0 items-center gap-1.5 t-hint tabular-nums text-muted-foreground transition-opacity group-hover/explorer-item:opacity-0 group-focus-within/explorer-item:opacity-0">
+              {isRunning ? <ExplorerRunningIndicator label={copy.runningSuggestion} /> : null}
+              {timeLabel}
+            </span>
+          </button>
         )}
-        onClick={onDelete}
-        size="icon"
-        type="button"
-        variant="ghost"
-      >
-        <Trash2 className="size-3.5" />
-      </Button>
+        <Button
+          aria-label={copy.deleteDocument}
+          className="absolute right-1 top-1/2 size-6 -translate-y-1/2 text-foreground/55 opacity-0 transition hover:text-destructive focus-visible:opacity-100 group-hover/explorer-item:opacity-100"
+          data-explorer-action
+          onClick={onDelete}
+          size="icon"
+          type="button"
+          variant="ghost"
+        >
+          <Trash2 className="icon-sm" />
+        </Button>
+      </ExplorerItemRow>
     </div>
   )
 }
@@ -1524,14 +1672,52 @@ function ImportReportMenu({
   )
 }
 
+/**
+ * The single header control that collapses/expands one editor side panel (file
+ * tree on the left, comments on the right). Lives at the leading/trailing edge
+ * of the editor header and stays put across the document/empty-state swap, so
+ * the toggles never move and a collapsed panel always has a reopen path.
+ */
+function EditorPanelToggle({
+  copy,
+  dispatch,
+  side,
+  visible,
+}: {
+  copy: EditorCopy
+  dispatch: Dispatch<ResearchDeskAction>
+  side: 'left' | 'right'
+  visible: boolean
+}) {
+  return side === 'left' ? (
+    <PanelToggle
+      collapseLabel={copy.hideTree}
+      expandLabel={copy.showTree}
+      expanded={visible}
+      onToggle={(next) => dispatch({ isVisible: next, type: 'setEditorTreeVisible' })}
+      side="left"
+    />
+  ) : (
+    <PanelToggle
+      collapseLabel={copy.hideAssistant}
+      expandLabel={copy.showAssistant}
+      expanded={visible}
+      onToggle={(next) => dispatch({ isVisible: next, type: 'setEditorCommentPanelVisible' })}
+      side="right"
+    />
+  )
+}
+
 function EditorTopBar({
   commentCount,
   copy,
   dispatch,
   document,
   editor,
+  isCommentPanelVisible,
   isDiffVisible,
   isDirty,
+  isTreeVisible,
   viewMode,
 }: {
   commentCount: number
@@ -1539,8 +1725,10 @@ function EditorTopBar({
   dispatch: Dispatch<ResearchDeskAction>
   document: EditorDocumentRecord
   editor: Editor | null
+  isCommentPanelVisible: boolean
   isDiffVisible: boolean
   isDirty: boolean
+  isTreeVisible: boolean
   viewMode: ProjectState['editorUi']['viewMode']
 }) {
   const [isEditingTitle, setIsEditingTitle] = useState(false)
@@ -1585,11 +1773,16 @@ function EditorTopBar({
     }
   }
 
+  const documentStatusText = document.source === 'imported-research-report' && document.sourceRunId
+    ? `${copy.importedFrom} ${document.sourceRunId} · ${copy.updated} ${formatEditorTime(document.updatedAt)}`
+    : `${copy.updated} ${formatEditorTime(document.updatedAt)}`
+
   return (
-    <header className="grid h-12 shrink-0 grid-cols-[minmax(12rem,1fr)_auto_minmax(12rem,1fr)] items-center gap-2 border-b border-border bg-background px-3">
+    <header className="grid inqtrix-panel-header grid-cols-[minmax(12rem,1fr)_auto_minmax(12rem,1fr)] items-center gap-2 border-b border-border bg-background px-3">
       <div className="flex min-w-0 items-center gap-2">
+        <EditorPanelToggle copy={copy} dispatch={dispatch} side="left" visible={isTreeVisible} />
         <FileText className="size-4 shrink-0 text-muted-foreground" />
-        <div className="min-w-0">
+        <div className="min-w-0" title={documentStatusText}>
           <div className="flex min-w-0 items-center gap-1.5">
             {isEditingTitle ? (
               <input
@@ -1615,7 +1808,7 @@ function EditorTopBar({
               <button
                 className="t-section min-w-0 flex-1 truncate rounded-sm text-left hover:text-brand focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 onDoubleClick={() => setIsEditingTitle(true)}
-                title={copy.renameDocument}
+                title={`${copy.renameDocument} · ${documentStatusText}`}
                 type="button"
               >
                 {document.title}
@@ -1623,19 +1816,6 @@ function EditorTopBar({
             )}
             {isDirty ? <span className="size-1.5 shrink-0 rounded-full bg-brand" aria-label="Unsaved changes" /> : null}
           </div>
-          <p
-            className="t-meta-sm truncate text-muted-foreground"
-            title={
-              document.source === 'imported-research-report' && document.sourceRunId
-                ? `${copy.importedFrom} ${document.sourceRunId} · ${copy.updated} ${formatEditorTime(document.updatedAt)}`
-                : undefined
-            }
-          >
-            {document.source === 'imported-research-report' && document.sourceRunId
-              ? `${copy.importedFrom} ${shortenRunId(document.sourceRunId)} · `
-              : ''}
-            {copy.updated} {formatEditorTime(document.updatedAt)}
-          </p>
         </div>
       </div>
       <EditorCommandToolbar editor={editor} isSource={viewMode === 'source'} />
@@ -1678,6 +1858,8 @@ function EditorTopBar({
         >
           <Trash2 className="size-4" />
         </TooltipButton>
+        <Separator className="mx-0.5 h-5" orientation="vertical" />
+        <EditorPanelToggle copy={copy} dispatch={dispatch} side="right" visible={isCommentPanelVisible} />
       </div>
     </header>
   )
@@ -2243,16 +2425,6 @@ function EditorCommandToolbar({
     <div className="flex min-w-0 items-center justify-center gap-0.5 overflow-x-auto px-1 [scrollbar-width:none]">
       <ToolbarButton disabled={disabled} icon={Undo2} label="Undo" onClick={() => editor?.chain().focus().undo().run()} />
       <ToolbarButton disabled={disabled} icon={Redo2} label="Redo" onClick={() => editor?.chain().focus().redo().run()} />
-      <Separator className="mx-0.5 h-5" orientation="vertical" />
-      <ToolbarButton
-        active={editor?.isActive('link')}
-        disabled={disabled}
-        icon={Link}
-        label="Link"
-        onClick={() => {
-          if (editor) promptSetLink(editor)
-        }}
-      />
     </div>
   )
 }
@@ -2461,7 +2633,6 @@ function EditorBubbleMenu({
               underline: copy.bubbleUnderline,
               strike: copy.bubbleStrike,
               code: copy.bubbleCode,
-              link: copy.bubbleLink,
               highlight: copy.bubbleHighlight,
               text: copy.slashText,
               heading1: copy.slashHeading1,
@@ -2901,26 +3072,26 @@ function EditorAssistantComposer({
                 </DropdownMenuContent>
               </DropdownMenu>
             ) : (
-              <Button
-                aria-label={isRunning ? copy.stopRun : copy.send}
-                className={cn(
-                  'size-7 rounded-md',
-                  !isRunning && attachedComments.length === 0 && draft.trim().length === 0
-                    ? 'text-muted-foreground/45'
-                    : 'bg-brand text-brand-foreground hover:bg-brand/90 hover:text-brand-foreground',
-                )}
-                disabled={!isRunning && attachedComments.length === 0 && draft.trim().length === 0}
-                onClick={isRunning ? onStop : onSend}
-                size="icon"
-                type="button"
-                variant={!isRunning && attachedComments.length === 0 && draft.trim().length === 0 ? 'ghost' : 'default'}
-              >
-                {isRunning ? (
-                  <LoaderCircle className="size-4 animate-spin" />
-                ) : (
+              isRunning ? (
+                <ComposerStopButton label={copy.stopRun} onClick={onStop} />
+              ) : (
+                <Button
+                  aria-label={copy.send}
+                  className={cn(
+                    'size-7 rounded-md',
+                    attachedComments.length === 0 && draft.trim().length === 0
+                      ? 'text-muted-foreground/45'
+                      : 'bg-brand text-brand-foreground hover:bg-brand/90 hover:text-brand-foreground',
+                  )}
+                  disabled={attachedComments.length === 0 && draft.trim().length === 0}
+                  onClick={onSend}
+                  size="icon"
+                  type="button"
+                  variant={attachedComments.length === 0 && draft.trim().length === 0 ? 'ghost' : 'default'}
+                >
                   <SendHorizontal className="size-4" />
-                )}
-              </Button>
+                </Button>
+              )
             )}
             </div>
           </div>
@@ -3036,17 +3207,11 @@ function EditorCommentsPanel({
 
   return (
     <aside className="flex w-[22rem] shrink-0 flex-col bg-background">
-      <div className="flex h-12 items-center justify-between border-b border-border px-3">
+      <div className="flex inqtrix-panel-header items-center justify-between border-b border-border px-3">
         <div className="flex items-center gap-2">
           <MessageSquarePlus className="size-4 text-brand" />
           <h2 className="t-section">{copy.assistant}</h2>
         </div>
-        <TooltipButton
-          label={copy.hideComments}
-          onClick={() => dispatch({ isVisible: false, type: 'setEditorCommentPanelVisible' })}
-        >
-          <PanelRightClose className="size-4" />
-        </TooltipButton>
       </div>
       <div className="flex flex-col gap-2 border-b border-border px-3 py-2">
         <div className="grid grid-cols-2 gap-0.5 rounded-md bg-muted/60 p-0.5">
@@ -3364,10 +3529,6 @@ function compactCommentQuote(value: string, maxLength: number): string {
   return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`
 }
 
-function shortenRunId(runId: string): string {
-  return runId.length > 12 ? `${runId.slice(0, 12)}…` : runId
-}
-
 function activeSuggestionFor(
   suggestions: EditorSuggestionRecord[],
   commentId: string,
@@ -3543,7 +3704,7 @@ function EditorEmptyState({
   reportOptions: CompletedReportOption[]
 }) {
   return (
-    <div className="flex min-h-0 flex-1 items-center justify-center bg-background px-6 py-8">
+    <div className="flex min-h-0 w-full flex-1 items-center justify-center bg-background px-6 py-8">
       <WelcomeState
         actions={(
           <div className="flex flex-wrap justify-center gap-2">
@@ -3565,6 +3726,8 @@ function EditorEmptyState({
             />
           </div>
         )}
+        body={<p>{copy.emptyGuidance}</p>}
+        example={copy.emptyExample}
         kicker={copy.emptyKicker}
         subtitle={copy.emptyBody}
         title={copy.emptyTitle}

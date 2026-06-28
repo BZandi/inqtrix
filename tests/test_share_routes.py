@@ -213,6 +213,22 @@ def test_shared_with_me_lists_the_grant(world):
     assert listed.json()["data"] == []
 
 
+def test_mine_lists_outgoing_shares(world):
+    client, csrf, owned, _foreign = world
+    grant(client, csrf, owned)
+    mine = client.get("/v1/shares/mine")
+    assert mine.status_code == 200
+    data = mine.json()["data"]
+    assert len(data) == 1
+    row = data[0]
+    assert row["resource_type"] == "run"
+    assert row["resource_id"] == owned
+    assert row["resource_title"] == "meine Recherche"
+    assert row["share_count"] == 1
+    # The recipient has not consented yet, so the share is still pending.
+    assert row["pending_count"] == 1
+
+
 def test_validation_errors(world):
     client, csrf, owned, _foreign = world
     headers = {"X-CSRF-Token": csrf}

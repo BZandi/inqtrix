@@ -1,7 +1,36 @@
 import { FileText, Paperclip, Table2, type LucideIcon } from '@/components/icons'
 import type { Locale } from '@/i18n/translations'
-import type { FileAssetRecord } from '@/features/project/types'
+import type { FileAssetRecord, IndexingJobLive, VectorIndexMemberState } from '@/features/project/types'
 import type { VectorIndexMemberResolved } from '@/features/project/selectors'
+
+/** Whether *fileId* is part of the actively running job's working set — only
+ * then does its row read "läuft". A still-QUEUED job (``queuePosition`` set) is
+ * not processing anything yet, so no row pulses while the header shows "In
+ * Warteschlange"; a file outside ``runningFileIds`` keeps its persisted state. */
+export function isMemberInRun(
+  job: IndexingJobLive | null | undefined,
+  fileId: string,
+): boolean {
+  if (!job || job.queuePosition != null) return false
+  return job.runningFileIds.includes(fileId)
+}
+
+/** The status a vector-index member's cell should display, given its persisted
+ * `state`, whether it is part of the CURRENT run's working set (`inRun`), and
+ * its server-confirmed live outcome this run (`liveProgress`).
+ *
+ * Only a file actually in the run reads "running" — a file outside the run
+ * keeps its persisted state, so indexing one new document never makes the
+ * already-embedded rows read "läuft" (the prior bug, where this was gated on
+ * the whole index's `indexing` status). A confirmed outcome (embedded/skipped)
+ * always wins as it lands. */
+export function memberCellState(
+  state: VectorIndexMemberState,
+  inRun: boolean,
+  liveProgress?: 'embedded' | 'skipped',
+): 'embedded' | 'skipped' | 'running' | 'pending' {
+  return liveProgress ?? (inRun ? 'running' : state)
+}
 
 /** Human-readable byte size. German locale uses a decimal comma to match the
  * rest of the UI (e.g. "2,4 MB"). */

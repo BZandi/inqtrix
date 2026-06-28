@@ -165,7 +165,7 @@ Clients discover features here instead of hardcoding them; the manifest is unaut
 | `algorithms` | Manifest of registered algorithm ids (`research`, `direct_llm`, and `knowledge` when enabled) with their capability dicts. |
 | `features` | Booleans: `knowledge`, `files`, `openapi`, `embedding_provider`; plus, when knowledge is on: `hybrid_retrieval`, `reranker`, `contextual_retrieval`, `document_parser`. Infrastructure-backed flags are false when the configured object store/vector store is not reachable. |
 | `files` | `max_file_bytes` (when files are enabled). |
-| `knowledge` | `default_embedding_model`, the annotated `embedding_catalog`, `default_top_k`, `default_profile`, `reranker_provider`, and `profiles[]` — the effective stage plan per retrieval profile including `degraded` stages, derived from the SAME ceiling instance the algorithm runs against. |
+| `knowledge` | `default_embedding_model`, the annotated `embedding_catalog`, `default_top_k`, `evidence_k_max` (the final-evidence ceiling that bounds a `final_k` override), `default_profile`, `reranker_provider`, and `profiles[]` — the effective stage plan per retrieval profile including each profile's `final_k_factor` and its `degraded` stages, derived from the SAME ceiling instance the algorithm runs against. |
 
 A capability flag never downgrades silently: a profile stage the operator ceiling forbids appears in `profiles[].degraded`, and unreachable S3/Qdrant backends clear the affected feature flags so the UI renders what would actually run.
 

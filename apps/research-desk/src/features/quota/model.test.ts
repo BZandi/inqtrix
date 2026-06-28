@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { formatBytes } from '@/lib/modelCard'
 import { seedQuotaUsage } from './demo'
 import {
+  buildFooterSections,
   buildQuotaMeterModel,
   formatQuotaAmount,
   limitDraftAction,
@@ -73,6 +74,31 @@ describe('buildQuotaMeterModel', () => {
     const model = buildQuotaMeterModel([row('runs', 1, 50, 4242)])
     const runs = model.dimensions.find((d) => d.key === 'runs')
     expect(runs?.resetAt).toBe(4242)
+  })
+})
+
+describe('buildFooterSections', () => {
+  it('picks the requested dimensions in caller order, regardless of row order', () => {
+    const sections = buildFooterSections(
+      [
+        row('runs', 12, 50),
+        { ...row('llm_tokens', 812_000, 1_000_000), period_start: 222 },
+        { ...row('embedding_tokens', 900_000, 2_000_000), period_start: 111 },
+      ],
+      ['embedding_tokens', 'llm_tokens'],
+    )
+    expect(sections).toEqual([
+      { dimension: 'embedding_tokens', limit: 2_000_000, periodStart: 111, used: 900_000 },
+      { dimension: 'llm_tokens', limit: 1_000_000, periodStart: 222, used: 812_000 },
+    ])
+  })
+
+  it('reads a missing row as an empty/unlimited account (used 0, no limit, no period)', () => {
+    // This is the *content* of an empty account; a failed LOAD is a separate
+    // concern the footer surfaces via state.status, so the two never collapse.
+    expect(buildFooterSections([], ['llm_tokens'])).toEqual([
+      { dimension: 'llm_tokens', limit: null, periodStart: 0, used: 0 },
+    ])
   })
 })
 

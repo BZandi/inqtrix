@@ -19,6 +19,13 @@ export function knowledgeStepLine(
   const facts = step.facts
 
   switch (step.kind) {
+    case 'context':
+      return {
+        id: step.id,
+        primary: facts.rewritten ? t.stepContextRewritten : t.stepContextUnchanged,
+        secondary: facts.contextMarker?.includes('fallback') ? t.stepContextFallback : undefined,
+        status: step.status,
+      }
     case 'profile': {
       const template = facts.autoSelected ? t.stepProfileAuto : t.stepProfile
       return {
@@ -53,6 +60,13 @@ export function knowledgeStepLine(
           .replace('{count}', String(collectionCount))
           .replace('{docs}', String(facts.collectionDocumentCount ?? 0))
           .replace('{hits}', String(facts.candidateCount ?? 0)),
+        // Make both retrieval widths visible — top_k (per-query) and final_k
+        // (surfaced evidence) — flagging an explicit final_k override.
+        secondary: facts.topK !== undefined && facts.finalK !== undefined
+          ? (facts.finalKOverridden ? t.stepRetrievalWidthsOverridden : t.stepRetrievalWidths)
+              .replace('{topK}', String(facts.topK))
+              .replace('{finalK}', String(facts.finalK))
+          : undefined,
         status: step.status,
       }
     }

@@ -274,6 +274,245 @@
   --file-subtle: oklch(0.24 0.07 195);
 }
 
+/*
+ * Incognito chat-header surface. The chat header signals the incognito state
+ * (nothing is saved) by rendering as the inverted neutral surface: a dark bar in
+ * light mode, a light bar in dark mode. Rather than hardcode an opposite palette
+ * (which would miss theme presets and high-contrast), every token is derived from
+ * `--primary` / `--primary-foreground` — the inverted neutral pair the system
+ * already defines for EVERY mode (root, dark, presets, high-contrast). The header
+ * subtree's utilities (`bg-background`, `text-foreground/75`, `border-border`,
+ * `bg-card`, `bg-brand-subtle text-brand`, `shadow-hairline`) then recompute
+ * against this scope automatically, so title, icons, hairlines and active states
+ * all flip and stay mutually consistent. Applied to the header element only, so
+ * the rest of the chat is untouched. `--destructive` is deliberately NOT remapped:
+ * the danger colour must stay red on either bar (the only destructive control in
+ * the header is disabled in incognito anyway). Keep in sync with DESIGN.md section 5.
+ */
+.inqtrix-chat-header--incognito {
+  --background: var(--primary);
+  --foreground: var(--primary-foreground);
+  --card: var(--primary);
+  --card-foreground: var(--primary-foreground);
+  --accent-foreground: var(--primary-foreground);
+  --brand: var(--primary-foreground);
+  --brand-foreground: var(--primary);
+  --border: color-mix(in oklab, var(--primary-foreground) 22%, transparent);
+  --accent: color-mix(in oklab, var(--primary-foreground) 12%, transparent);
+  --muted-foreground: color-mix(in oklab, var(--primary-foreground) 68%, transparent);
+  --brand-subtle: color-mix(in oklab, var(--primary-foreground) 16%, transparent);
+  --ring: color-mix(in oklab, var(--primary-foreground) 55%, transparent);
+  --shadow-hairline: transparent;
+}
+
+:root,
+.inqtrix-user-bubble-tone-preview[data-user-bubble-tone="gray"] {
+  --user-bubble-bg: oklch(0.955 0 0);
+  --user-bubble-fg: oklch(0.17 0 0);
+  --user-bubble-border: oklch(0.9 0 0);
+  --user-bubble-avatar-bg: oklch(0.965 0 0);
+  --user-bubble-avatar-fg: oklch(0.46 0 0);
+  --user-bubble-avatar-border: oklch(0.88 0 0);
+}
+
+:root[data-user-bubble-tone="mint"],
+.inqtrix-user-bubble-tone-preview[data-user-bubble-tone="mint"] {
+  --user-bubble-bg: oklch(0.94 0.045 155);
+  --user-bubble-fg: oklch(0.34 0.13 155);
+  --user-bubble-border: oklch(0.84 0.06 155);
+  --user-bubble-avatar-bg: oklch(0.955 0.035 155);
+  --user-bubble-avatar-fg: oklch(0.43 0.12 155);
+  --user-bubble-avatar-border: oklch(0.82 0.055 155);
+}
+
+:root[data-user-bubble-tone="orange"],
+.inqtrix-user-bubble-tone-preview[data-user-bubble-tone="orange"] {
+  --user-bubble-bg: oklch(0.94 0.055 55);
+  --user-bubble-fg: oklch(0.48 0.15 45);
+  --user-bubble-border: oklch(0.85 0.07 55);
+  --user-bubble-avatar-bg: oklch(0.96 0.045 55);
+  --user-bubble-avatar-fg: oklch(0.5 0.15 45);
+  --user-bubble-avatar-border: oklch(0.83 0.07 55);
+}
+
+:root[data-user-bubble-tone="sky"],
+.inqtrix-user-bubble-tone-preview[data-user-bubble-tone="sky"] {
+  --user-bubble-bg: oklch(0.94 0.04 225);
+  --user-bubble-fg: oklch(0.38 0.12 235);
+  --user-bubble-border: oklch(0.84 0.055 225);
+  --user-bubble-avatar-bg: oklch(0.96 0.032 225);
+  --user-bubble-avatar-fg: oklch(0.42 0.12 235);
+  --user-bubble-avatar-border: oklch(0.82 0.055 225);
+}
+
+:root[data-user-bubble-tone="violet"],
+.inqtrix-user-bubble-tone-preview[data-user-bubble-tone="violet"] {
+  --user-bubble-bg: oklch(0.94 0.045 292);
+  --user-bubble-fg: oklch(0.42 0.15 292);
+  --user-bubble-border: oklch(0.84 0.06 292);
+  --user-bubble-avatar-bg: oklch(0.955 0.035 292);
+  --user-bubble-avatar-fg: oklch(0.46 0.14 292);
+  --user-bubble-avatar-border: oklch(0.82 0.06 292);
+}
+
+:root[data-user-bubble-tone="ink"],
+.inqtrix-user-bubble-tone-preview[data-user-bubble-tone="ink"] {
+  --user-bubble-bg: oklch(0.13 0 0);
+  --user-bubble-fg: oklch(0.99 0 0);
+  --user-bubble-border: oklch(0.13 0 0);
+  --user-bubble-avatar-bg: oklch(0.22 0 0);
+  --user-bubble-avatar-fg: oklch(0.96 0 0);
+  --user-bubble-avatar-border: oklch(0.3 0 0);
+}
+
+.dark,
+.dark .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="gray"] {
+  --user-bubble-bg: oklch(0.28 0 0);
+  --user-bubble-fg: oklch(0.96 0 0);
+  --user-bubble-border: oklch(0.36 0 0);
+  --user-bubble-avatar-bg: oklch(0.24 0 0);
+  --user-bubble-avatar-fg: oklch(0.76 0 0);
+  --user-bubble-avatar-border: oklch(0.36 0 0);
+}
+
+.dark[data-user-bubble-tone="mint"],
+.dark .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="mint"] {
+  --user-bubble-bg: oklch(0.25 0.055 155);
+  --user-bubble-fg: oklch(0.84 0.12 155);
+  --user-bubble-border: oklch(0.36 0.075 155);
+  --user-bubble-avatar-bg: oklch(0.23 0.045 155);
+  --user-bubble-avatar-fg: oklch(0.76 0.12 155);
+  --user-bubble-avatar-border: oklch(0.36 0.075 155);
+}
+
+.dark[data-user-bubble-tone="orange"],
+.dark .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="orange"] {
+  --user-bubble-bg: oklch(0.27 0.065 55);
+  --user-bubble-fg: oklch(0.86 0.13 55);
+  --user-bubble-border: oklch(0.4 0.09 55);
+  --user-bubble-avatar-bg: oklch(0.24 0.055 55);
+  --user-bubble-avatar-fg: oklch(0.82 0.13 55);
+  --user-bubble-avatar-border: oklch(0.4 0.09 55);
+}
+
+.dark[data-user-bubble-tone="sky"],
+.dark .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="sky"] {
+  --user-bubble-bg: oklch(0.25 0.055 235);
+  --user-bubble-fg: oklch(0.84 0.11 225);
+  --user-bubble-border: oklch(0.38 0.08 235);
+  --user-bubble-avatar-bg: oklch(0.23 0.045 235);
+  --user-bubble-avatar-fg: oklch(0.78 0.1 225);
+  --user-bubble-avatar-border: oklch(0.38 0.08 235);
+}
+
+.dark[data-user-bubble-tone="violet"],
+.dark .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="violet"] {
+  --user-bubble-bg: oklch(0.26 0.06 292);
+  --user-bubble-fg: oklch(0.86 0.11 292);
+  --user-bubble-border: oklch(0.39 0.085 292);
+  --user-bubble-avatar-bg: oklch(0.24 0.052 292);
+  --user-bubble-avatar-fg: oklch(0.8 0.11 292);
+  --user-bubble-avatar-border: oklch(0.39 0.085 292);
+}
+
+.dark[data-user-bubble-tone="ink"],
+.dark .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="ink"] {
+  --user-bubble-bg: oklch(0.04 0 0);
+  --user-bubble-fg: oklch(1 0 0);
+  --user-bubble-border: oklch(0.34 0 0);
+  --user-bubble-avatar-bg: oklch(0.12 0 0);
+  --user-bubble-avatar-fg: oklch(0.94 0 0);
+  --user-bubble-avatar-border: oklch(0.34 0 0);
+}
+
+:root[data-contrast-mode="high"],
+:root[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview {
+  --user-bubble-bg: oklch(0.94 0 0);
+  --user-bubble-fg: oklch(0 0 0);
+  --user-bubble-border: oklch(0 0 0);
+  --user-bubble-avatar-bg: oklch(1 0 0);
+  --user-bubble-avatar-fg: oklch(0 0 0);
+  --user-bubble-avatar-border: oklch(0 0 0);
+}
+
+:root[data-contrast-mode="high"][data-user-bubble-tone="ink"],
+:root[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="ink"] {
+  --user-bubble-bg: oklch(0 0 0);
+  --user-bubble-fg: oklch(1 0 0);
+  --user-bubble-border: oklch(0 0 0);
+  --user-bubble-avatar-bg: oklch(0.12 0 0);
+  --user-bubble-avatar-fg: oklch(1 0 0);
+  --user-bubble-avatar-border: oklch(0 0 0);
+}
+
+:root[data-contrast-mode="high"][data-user-bubble-tone="mint"],
+:root[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="mint"] {
+  --user-bubble-bg: oklch(0.91 0.07 155);
+  --user-bubble-avatar-bg: oklch(0.96 0.04 155);
+}
+
+:root[data-contrast-mode="high"][data-user-bubble-tone="orange"],
+:root[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="orange"] {
+  --user-bubble-bg: oklch(0.91 0.08 55);
+  --user-bubble-avatar-bg: oklch(0.96 0.05 55);
+}
+
+:root[data-contrast-mode="high"][data-user-bubble-tone="sky"],
+:root[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="sky"] {
+  --user-bubble-bg: oklch(0.91 0.065 225);
+  --user-bubble-avatar-bg: oklch(0.96 0.04 225);
+}
+
+:root[data-contrast-mode="high"][data-user-bubble-tone="violet"],
+:root[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="violet"] {
+  --user-bubble-bg: oklch(0.91 0.065 292);
+  --user-bubble-avatar-bg: oklch(0.96 0.04 292);
+}
+
+.dark[data-contrast-mode="high"],
+.dark[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview {
+  --user-bubble-bg: oklch(0.16 0 0);
+  --user-bubble-fg: oklch(1 0 0);
+  --user-bubble-border: oklch(1 0 0);
+  --user-bubble-avatar-bg: oklch(0 0 0);
+  --user-bubble-avatar-fg: oklch(1 0 0);
+  --user-bubble-avatar-border: oklch(1 0 0);
+}
+
+.dark[data-contrast-mode="high"][data-user-bubble-tone="mint"],
+.dark[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="mint"] {
+  --user-bubble-bg: oklch(0.2 0.08 155);
+  --user-bubble-avatar-bg: oklch(0.13 0.06 155);
+}
+
+.dark[data-contrast-mode="high"][data-user-bubble-tone="orange"],
+.dark[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="orange"] {
+  --user-bubble-bg: oklch(0.2 0.09 55);
+  --user-bubble-avatar-bg: oklch(0.13 0.07 55);
+}
+
+.dark[data-contrast-mode="high"][data-user-bubble-tone="sky"],
+.dark[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="sky"] {
+  --user-bubble-bg: oklch(0.2 0.08 225);
+  --user-bubble-avatar-bg: oklch(0.13 0.06 225);
+}
+
+.dark[data-contrast-mode="high"][data-user-bubble-tone="violet"],
+.dark[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="violet"] {
+  --user-bubble-bg: oklch(0.2 0.08 292);
+  --user-bubble-avatar-bg: oklch(0.13 0.06 292);
+}
+
+.dark[data-contrast-mode="high"][data-user-bubble-tone="ink"],
+.dark[data-contrast-mode="high"] .inqtrix-user-bubble-tone-preview[data-user-bubble-tone="ink"] {
+  --user-bubble-bg: oklch(0 0 0);
+  --user-bubble-fg: oklch(1 0 0);
+  --user-bubble-border: oklch(1 0 0);
+  --user-bubble-avatar-bg: oklch(0.08 0 0);
+  --user-bubble-avatar-fg: oklch(1 0 0);
+  --user-bubble-avatar-border: oklch(1 0 0);
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -331,6 +570,7 @@
   .t-card { @apply text-sm font-semibold leading-snug; }        /* 14 — card / item / row title (shares 14/600 with t-section; the name conveys intent) */
   .t-body { @apply text-sm leading-normal; }                    /* 14 — reading text + inputs (line-height 1.5, matches chat) */
   .t-list { @apply text-[13px] font-semibold leading-snug; }    /* 13 — dense list / nav / menu primary label */
+  .t-list-regular { @apply text-[13px] leading-snug; }          /* 13 — dense explorer item label, regular weight */
   .t-label { @apply text-xs font-semibold; }                    /* 12 — form / control labels, group headers */
   .t-meta { @apply text-xs; }                                   /* 12 — subtitle / metadata / helper */
   .t-meta-sm { @apply text-[11px]; }                            /* 11 — dense subtitle / file metadata */
@@ -343,6 +583,32 @@
   .icon-md { @apply size-4; }     /* 16 — nav rail, toolbars, button glyphs, tone tiles */
   .icon-sm { @apply size-3.5; }   /* 14 — chat-input footer, file/list leading icons, inline/secondary actions, dense metadata */
   .icon-xs { @apply size-3; }     /* 12 — status dots, micro affordances */
+
+  .inqtrix-user-bubble {
+    background: var(--user-bubble-bg);
+    border-color: var(--user-bubble-border);
+    color: var(--user-bubble-fg);
+  }
+
+  .inqtrix-explorer-reveal {
+    overflow-anchor: none;
+  }
+
+  .inqtrix-explorer-list {
+    overflow-anchor: none;
+  }
+
+  .inqtrix-user-avatar {
+    background: var(--user-bubble-avatar-bg);
+    border-color: var(--user-bubble-avatar-border);
+    color: var(--user-bubble-avatar-fg);
+  }
+
+  .inqtrix-panel-header {
+    height: var(--header-h);
+    min-height: var(--header-h);
+    flex-shrink: 0;
+  }
 
   /* Surface tiers (applied during component migration, kept here as the
      reference): radius — controls/inputs rounded-md, cards/panels rounded-lg,

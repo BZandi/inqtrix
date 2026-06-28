@@ -789,6 +789,32 @@ Regeln:
 - Kein Text ausserhalb des JSON."""
 
 
+def build_knowledge_followup_context_prompt(question: str, history: str) -> str:
+    """Build the standalone-query rewrite prompt for conversational RAG.
+
+    The rewrite is a retrieval aid only: it may resolve pronouns or
+    references from prior turns, but it must not answer and must not
+    treat the history as evidence.
+    """
+    return f"""Du formulierst eine Nachfrage fuer ein Knowledge-RAG-System in eine eigenstaendige Suchfrage um.
+
+Der Gespraechsverlauf dient NUR dazu, Bezuege, Pronomen und ausgelassene Themen der aktuellen Frage zu klaeren. Er ist KEINE Beweisquelle und darf keine neuen Tatsachen in die Suchfrage einschmuggeln.
+
+GESPRAECHSVERLAUF:
+{history}
+
+AKTUELLE FRAGE:
+{question}
+
+Antworte AUSSCHLIESSLICH mit einem JSON-Objekt dieser Form:
+{{"question": "eigenstaendige Suchfrage"}}
+
+Regeln:
+- Wenn die aktuelle Frage bereits eigenstaendig ist, gib sie unveraendert als question zurueck.
+- Bewahre die Sprache der aktuellen Frage.
+- Kein Text ausserhalb des JSON."""
+
+
 def build_knowledge_rerank_prompt(query: str, documents: list[str]) -> str:
     """Listwise rerank prompt: order numbered candidates by relevance.
 
@@ -905,6 +931,9 @@ def build_knowledge_answer_prompt(
         "REGELN:\n"
         "- Nutze NUR die Informationen aus den Auszuegen oben. Kein "
         "eigenes Weltwissen ergaenzen.\n"
+        "- Der Gespraechsverlauf dient nur zur Einordnung der aktuellen "
+        "Frage; er ist keine Evidenzquelle. Verwende Aussagen aus dem "
+        "Verlauf nur, wenn die Auszuege oben sie stuetzen.\n"
         "- Belege jede tragende Aussage mit dem Label des Auszugs, "
         "z. B. [K1] oder [K2][K3].\n"
         "- Wenn die Auszuege die Frage nicht oder nur teilweise "

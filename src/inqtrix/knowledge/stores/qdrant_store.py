@@ -89,6 +89,15 @@ def _require_qdrant():
     return QdrantClient, models
 
 
+# The lexical (BM25) branch is monolingual. Its tokenizer language and the
+# ISO-639-1 code are the SAME fact in two representations (fastembed wants the
+# English name "german"; capability manifests and the algorithm compare against
+# detect_ui_language's "de"). Defined ONCE here so the encoder init and the
+# `sparse_language` property can never drift apart (Designprinzip 4).
+_BM25_TOKENIZER_LANGUAGE = "german"
+_BM25_LANGUAGE_CODE = "de"
+
+
 class _Bm25:
     """Lazy client-side BM25 sparse encoder (German), thread-safe init."""
 
@@ -108,7 +117,8 @@ class _Bm25:
                     except ImportError as exc:  # pragma: no cover - env-dependent
                         raise RuntimeError(_IMPORT_HINT) from exc
                     self._encoder = SparseTextEmbedding(
-                        model_name="Qdrant/bm25", language="german"
+                        model_name="Qdrant/bm25",
+                        language=_BM25_TOKENIZER_LANGUAGE,
                     )
         return self._encoder
 
@@ -214,6 +224,19 @@ class QdrantVectorIndex:
     @property
     def supports_hybrid(self) -> bool:
         return self._sparse_enabled
+
+    @property
+    def sparse_language(self) -> str | None:
+        """ISO 639-1 code of the BM25 tokenizer language, ``None`` when off.
+
+        The lexical branch tokenizes/stems in exactly one language ("de"
+        today, hardcoded ``language="german"``). Read-only: surfaced so the
+        capability manifest and the knowledge algorithm can make the
+        monolingual limitation of keyword retrieval visible — BM25 is
+        language-bound and never cross-lingual. Optional by convention;
+        consumers read it via ``getattr(store, "sparse_language", None)``.
+        """
+        return _BM25_LANGUAGE_CODE if self._sparse_enabled else None
 
     async def is_available(self) -> bool:
         """Return whether the Qdrant endpoint responds to a read-only call."""
@@ -477,6 +500,15 @@ class QdrantKnowledgeStore:
     @property
     def supports_hybrid(self) -> bool:
         return self._sparse_enabled
+
+    @property
+    def sparse_language(self) -> str | None:
+        """ISO 639-1 code of the BM25 tokenizer language, ``None`` when off.
+
+        Same contract as :attr:`QdrantVectorIndex.sparse_language`: the lexical
+        branch is monolingual ("de" today). Read-only, consumed via ``getattr``.
+        """
+        return _BM25_LANGUAGE_CODE if self._sparse_enabled else None
 
     async def is_available(self) -> bool:
         """Return whether the Qdrant endpoint responds to a read-only call."""

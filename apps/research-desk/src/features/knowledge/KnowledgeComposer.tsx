@@ -7,10 +7,12 @@ import {
   type ChangeEvent,
   type FormEvent,
   type KeyboardEvent,
+  type SyntheticEvent,
 } from 'react'
 import {
-  AtSign,
   Database,
+  Info,
+  Plus,
   SendHorizontal,
   SlidersHorizontal,
   Sparkles,
@@ -21,6 +23,7 @@ import { Chip } from '@/components/ui/chip'
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { MentionMenu, type MentionMenuOption } from '@/components/ui/mention-menu'
@@ -31,11 +34,14 @@ import {
 } from '@/components/ui/option-menu'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { ComposerIconButton, composerIconButtonClassName } from '@/features/composer/ComposerIconButton'
+import { composerIconButtonClassName } from '@/features/composer/ComposerIconButton'
+import { ComposerStopButton } from '@/features/composer/ComposerStopButton'
 import { QuotaMeter } from '@/features/quota/QuotaMeter'
 import { resizeTextareaToRows } from '@/features/composer/textareaAutosize'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
+import { detectCollectionMention, type CollectionMentionState } from './collectionMention'
+import { KnowledgeStatusMenu } from './KnowledgeStatusMenu'
 import type { KnowledgeProfileOption } from './profileOptions'
 import { profileDescription, profileDisplayName } from './stepLines'
 import type { KnowledgeCollectionOption } from './types'
@@ -46,7 +52,12 @@ type KnowledgeComposerProps = {
   connectedTop?: boolean
   defaultProfileId: string | null
   defaultTopK: number
+  /** Hard ceiling for the final_k override field (capability `evidence_k_max`). */
+  evidenceKMax: number
+  /** Configured reranker provider id, shown in the run overview. */
+  rerankerProvider: string | null
   disabled: boolean
+  isReplacing?: boolean
   /** A previous ask is still running. Gates ONLY the send action (single-flight),
    * NOT the textarea/pickers — so the next question can be drafted meanwhile,
    * like the chat composer during generation. */
@@ -55,20 +66,18 @@ type KnowledgeComposerProps = {
   /** Session-scoped draft question lifted to the shell so it survives a view switch. */
   draftQuestion: string
   onDraftQuestionChange: (question: string) => void
+  onCancelReplace?: () => void
   onProfileChange: (profileId: string | null) => void
   onSelectedCollectionIdsChange: (ids: string[]) => void
+  onStop: () => void
   onSubmit: (question: string) => void
   onTopKChange: (topK: number | null) => void
+  onFinalKChange: (finalK: number | null) => void
   profileOptions: KnowledgeProfileOption[]
   selectedCollectionIds: string[]
   selectedProfileId: string | null
   topK: number | null
-}
-
-type MentionState = {
-  /** Char index of the `@` in the textarea value. */
-  start: number
-  query: string
+  finalK: number | null
 }
 
 /**
@@ -83,27 +92,38 @@ export function KnowledgeComposer({
   connectedTop = false,
   defaultProfileId,
   defaultTopK,
+  evidenceKMax,
+  rerankerProvider,
   disabled,
+  isReplacing = false,
   running = false,
   notice,
   draftQuestion,
   onDraftQuestionChange,
+  onCancelReplace,
   onProfileChange,
   onSelectedCollectionIdsChange,
+  onStop,
   onSubmit,
   onTopKChange,
+  onFinalKChange,
   profileOptions,
   selectedCollectionIds,
   selectedProfileId,
   topK,
+  finalK,
 }: KnowledgeComposerProps) {
   const { t } = useLocale()
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   // Restore the session draft on mount (this composer unmounts on a view switch);
   // the sync effect mirrors edits and the submit-time clear back up to the shell.
   const [question, setQuestion] = useState(draftQuestion)
-  const [mention, setMention] = useState<MentionState | null>(null)
+  const [mention, setMention] = useState<CollectionMentionState | null>(null)
   const [mentionIndex, setMentionIndex] = useState(0)
+  useEffect(() => {
+    setQuestion(draftQuestion)
+    setMention(null)
+  }, [draftQuestion])
   useEffect(() => {
     onDraftQuestionChange(question)
   }, [question, onDraftQuestionChange])
@@ -114,13 +134,17 @@ export function KnowledgeComposer({
 
   const selectedCollections = collections.filter((collection) =>
     selectedCollectionIds.includes(collection.id))
+  // Collections not yet attached — the single source for both the typed-`@`
+  // mention menu and the `+` picker dropdown (no duplicate filter).
+  const addableCollections = useMemo(
+    () => collections.filter((collection) => !selectedCollectionIds.includes(collection.id)),
+    [collections, selectedCollectionIds],
+  )
   const mentionCandidates = useMemo(() => {
     if (!mention) return []
     const query = mention.query.toLowerCase()
-    return collections
-      .filter((collection) => !selectedCollectionIds.includes(collection.id))
-      .filter((collection) => collection.title.toLowerCase().includes(query))
-  }, [collections, mention, selectedCollectionIds])
+    return addableCollections.filter((collection) => collection.title.toLowerCase().includes(query))
+  }, [addableCollections, mention])
   const mentionOptions: MentionMenuOption[] = mentionCandidates.map((collection) => ({
     group: t.knowledge.collectionGroup,
     icon: Database,
@@ -130,26 +154,56 @@ export function KnowledgeComposer({
     tone: 'brand',
   }))
 
+  // Effective retrieval breadth for the field placeholder + the run overview:
+  // top_k falls back to the server default; final_k to the active profile's
+  // factor (min round(top_k * factor), clamped to the evidence ceiling).
+  const effectiveProfileId = selectedProfileId ?? defaultProfileId ?? profileOptions[0]?.id ?? null
+  const effectiveProfile = profileOptions.find((option) => option.id === effectiveProfileId) ?? null
+  const effectiveTopK = topK ?? defaultTopK
+  const finalKFactor = effectiveProfile?.finalKFactor ?? 1
+  const defaultFinalK = Math.max(1, Math.min(Math.round(effectiveTopK * finalKFactor), evidenceKMax))
+  const effectiveFinalK = finalK ?? defaultFinalK
+
   const canSubmit = !disabled
     && !running
     && question.trim().length > 0
     && selectedCollectionIds.length > 0
+  const sendLabel = isReplacing ? t.knowledge.updateQuestion : t.knowledge.send
 
   function updateMentionFromCaret(value: string, caret: number) {
-    const beforeCaret = value.slice(0, caret)
-    const match = beforeCaret.match(/(?:^|\s)@([^\s@]*)$/)
-    if (!match) {
-      setMention(null)
-      return
-    }
-    const start = caret - match[1].length - 1
-    setMention({ query: match[1], start })
+    const nextMention = detectCollectionMention(value, caret)
+    setMention(nextMention)
     setMentionIndex(0)
   }
 
+  function updateMentionFromTextarea(textarea: HTMLTextAreaElement) {
+    updateMentionFromCaret(textarea.value, textarea.selectionStart ?? textarea.value.length)
+  }
+
+  function refreshMentionAfterDomInput() {
+    window.requestAnimationFrame(() => {
+      const textarea = textareaRef.current
+      if (!textarea || document.activeElement !== textarea) return
+      updateMentionFromTextarea(textarea)
+    })
+  }
+
   function handleQuestionChange(event: ChangeEvent<HTMLTextAreaElement>) {
-    setQuestion(event.target.value)
-    updateMentionFromCaret(event.target.value, event.target.selectionStart ?? event.target.value.length)
+    setQuestion(event.currentTarget.value)
+    updateMentionFromTextarea(event.currentTarget)
+    refreshMentionAfterDomInput()
+  }
+
+  function handleQuestionCaretChange(event: SyntheticEvent<HTMLTextAreaElement>) {
+    updateMentionFromTextarea(event.currentTarget)
+  }
+
+  function handleQuestionKeyUp(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === 'Escape' || event.key === 'Enter' || event.key === 'Tab') return
+    if (mention && mentionOptions.length > 0 && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+      return
+    }
+    updateMentionFromTextarea(event.currentTarget)
   }
 
   function selectMentionOption(index: number) {
@@ -215,23 +269,6 @@ export function KnowledgeComposer({
     submitQuestion()
   }
 
-  function insertMentionTrigger() {
-    const textarea = textareaRef.current
-    const caret = textarea?.selectionStart ?? question.length
-    const before = question.slice(0, caret)
-    const needsSpace = before.length > 0 && !/\s$/.test(before)
-    const inserted = `${needsSpace ? ' ' : ''}@`
-    const nextValue = `${before}${inserted}${question.slice(caret)}`
-    const nextCaret = caret + inserted.length
-    setQuestion(nextValue)
-    setMention({ query: '', start: nextCaret - 1 })
-    setMentionIndex(0)
-    window.requestAnimationFrame(() => {
-      textareaRef.current?.focus()
-      textareaRef.current?.setSelectionRange(nextCaret, nextCaret)
-    })
-  }
-
   function removeCollection(collectionId: string) {
     onSelectedCollectionIdsChange(selectedCollectionIds.filter((id) => id !== collectionId))
   }
@@ -289,17 +326,42 @@ export function KnowledgeComposer({
           </div>
         )}
 
+        {isReplacing && (
+          <div className="mb-1.5 flex min-w-0 items-center justify-between gap-2 rounded-md border border-brand/20 bg-brand-subtle px-2 py-1">
+            <span className="min-w-0 truncate t-meta-sm font-semibold text-brand">
+              {t.knowledge.replacingQuestion}
+            </span>
+            {onCancelReplace && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    aria-label={t.knowledge.cancelEdit}
+                    className="size-5 shrink-0 text-brand hover:bg-brand/10 hover:text-brand"
+                    onClick={onCancelReplace}
+                    size="icon"
+                    type="button"
+                    variant="ghost"
+                  >
+                    <X className="size-3" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{t.knowledge.cancelEdit}</TooltipContent>
+              </Tooltip>
+            )}
+          </div>
+        )}
+
         <Textarea
           aria-label={t.knowledge.composerPlaceholder}
           className="min-h-16 resize-none border-0 bg-transparent pb-2 pl-2 pr-2 pt-2 text-sm font-normal leading-6 shadow-none placeholder:text-muted-foreground/70 focus-visible:ring-0"
           disabled={disabled}
           onBlur={() => setMention(null)}
           onChange={handleQuestionChange}
-          onClick={(event) => updateMentionFromCaret(
-            event.currentTarget.value,
-            event.currentTarget.selectionStart ?? event.currentTarget.value.length,
-          )}
+          onClick={handleQuestionCaretChange}
+          onFocus={handleQuestionCaretChange}
           onKeyDown={handleKeyDown}
+          onKeyUp={handleQuestionKeyUp}
+          onSelect={handleQuestionCaretChange}
           placeholder={t.knowledge.composerPlaceholder}
           ref={textareaRef}
           rows={1}
@@ -308,12 +370,44 @@ export function KnowledgeComposer({
 
         <div className="mt-1.5 flex items-center justify-between gap-2 border-t border-border/70 pt-1.5">
           <div className="flex min-w-0 items-center gap-1 overflow-hidden">
-            <ComposerIconButton
-              disabled={disabled || collections.length === 0}
-              icon={AtSign}
-              label={t.knowledge.collectionPickerTitle}
-              onClick={insertMentionTrigger}
-            />
+            <DropdownMenu modal={false}>
+              <Tooltip>
+                <DropdownMenuTrigger asChild>
+                  <TooltipTrigger asChild>
+                    <Button
+                      aria-label={t.knowledge.addCollection}
+                      className={composerIconButtonClassName}
+                      disabled={disabled || collections.length === 0}
+                      type="button"
+                      variant="ghost"
+                    >
+                      <Plus />
+                    </Button>
+                  </TooltipTrigger>
+                </DropdownMenuTrigger>
+                <TooltipContent>{t.knowledge.addCollection}</TooltipContent>
+              </Tooltip>
+              <DropdownMenuContent align="start" className={optionMenuContentClassName} side="top" sideOffset={8}>
+                <OptionMenuHeader count={addableCollections.length} title={t.knowledge.collectionPickerTitle} />
+                {addableCollections.length > 0 ? (
+                  <div className="py-1">
+                    {addableCollections.map((collection) => (
+                      <OptionMenuItem
+                        active={false}
+                        description={t.knowledge.collectionMenuHandle}
+                        icon={Database}
+                        key={collection.id}
+                        label={collection.title}
+                        onSelect={() =>
+                          onSelectedCollectionIdsChange([...selectedCollectionIds, collection.id])}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <p className="px-2.5 py-2 t-meta text-muted-foreground">{t.knowledge.allCollectionsAdded}</p>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
             <KnowledgeProfileMenu
               defaultProfileId={defaultProfileId}
               disabled={disabled}
@@ -339,11 +433,14 @@ export function KnowledgeComposer({
                 <TooltipContent>{t.knowledge.options}</TooltipContent>
               </Tooltip>
               <DropdownMenuContent align="start" className={optionMenuContentClassName} side="top" sideOffset={8}>
-                <OptionMenuHeader count={1} title={t.knowledge.options} />
+                <OptionMenuHeader count={2} title={t.knowledge.options} />
                 <div className="px-2.5 py-2">
-                  <label className="block t-label text-foreground" htmlFor="knowledge-top-k">
-                    {t.knowledge.topKLabel}
-                  </label>
+                  <div className="flex items-center gap-1">
+                    <label className="block t-label text-foreground" htmlFor="knowledge-top-k">
+                      {t.knowledge.topKLabel}
+                    </label>
+                    <ParameterInfo body={t.knowledge.topKInfo} title={t.knowledge.topKLabel} />
+                  </div>
                   <input
                     className="mt-1.5 h-8 w-full rounded-md border border-border bg-background px-2 text-sm tabular-nums text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
                     id="knowledge-top-k"
@@ -368,26 +465,71 @@ export function KnowledgeComposer({
                     {t.knowledge.topKHint.replace('{default}', String(defaultTopK))}
                   </p>
                 </div>
+                <DropdownMenuSeparator className="mx-0 my-0" />
+                <div className="px-2.5 py-2">
+                  <div className="flex items-center gap-1">
+                    <label className="block t-label text-foreground" htmlFor="knowledge-final-k">
+                      {t.knowledge.finalKLabel}
+                    </label>
+                    <ParameterInfo body={t.knowledge.finalKInfo} title={t.knowledge.finalKLabel} />
+                  </div>
+                  <input
+                    className="mt-1.5 h-8 w-full rounded-md border border-border bg-background px-2 text-sm tabular-nums text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    id="knowledge-final-k"
+                    max={evidenceKMax}
+                    min={1}
+                    onChange={(event) => {
+                      const raw = event.target.value.trim()
+                      if (raw === '') {
+                        onFinalKChange(null)
+                        return
+                      }
+                      const value = Number(raw)
+                      if (Number.isFinite(value)) {
+                        onFinalKChange(Math.min(evidenceKMax, Math.max(1, Math.round(value))))
+                      }
+                    }}
+                    placeholder={String(defaultFinalK)}
+                    type="number"
+                    value={finalK ?? ''}
+                  />
+                  <p className="mt-1 t-meta-sm text-muted-foreground">
+                    {t.knowledge.finalKHint.replace('{default}', String(defaultFinalK))}
+                  </p>
+                </div>
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
           <div className="flex shrink-0 items-center gap-1">
             <QuotaMeter disabled={disabled} />
-            <Button
-              aria-label={t.knowledge.send}
-              className={cn(
-                'size-7 shrink-0 rounded-md',
-                canSubmit
-                  ? 'bg-brand text-brand-foreground hover:bg-brand/90 hover:text-brand-foreground'
-                  : 'text-muted-foreground/45',
-              )}
-              disabled={!canSubmit}
-              size="icon"
-              type="submit"
-              variant={canSubmit ? 'default' : 'ghost'}
-            >
-              <SendHorizontal className="size-4" />
-            </Button>
+            <KnowledgeStatusMenu
+              disabled={disabled}
+              effectiveFinalK={effectiveFinalK}
+              effectiveTopK={effectiveTopK}
+              finalKOverridden={finalK != null}
+              profile={effectiveProfile}
+              rerankerProvider={rerankerProvider}
+              topKOverridden={topK != null}
+            />
+            {running ? (
+              <ComposerStopButton label={t.knowledge.stopAsk} onClick={onStop} />
+            ) : (
+              <Button
+                aria-label={sendLabel}
+                className={cn(
+                  'size-7 shrink-0 rounded-md',
+                  canSubmit
+                    ? 'bg-brand text-brand-foreground hover:bg-brand/90 hover:text-brand-foreground'
+                    : 'text-muted-foreground/45',
+                )}
+                disabled={!canSubmit}
+                size="icon"
+                type="submit"
+                variant={canSubmit ? 'default' : 'ghost'}
+              >
+                <SendHorizontal className="size-4" />
+              </Button>
+            )}
           </div>
         </div>
       </div>
@@ -395,6 +537,31 @@ export function KnowledgeComposer({
         <p className="mt-1.5 px-1 t-meta text-destructive">{notice}</p>
       )}
     </form>
+  )
+}
+
+/** Info affordance next to a setting: an `Info` glyph that opens a small
+ * hover-card explaining the parameter — the model-picker pattern (DESIGN §4). */
+function ParameterInfo({ body, title }: { body: string; title: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          className="flex size-4 shrink-0 items-center justify-center rounded-full text-muted-foreground/45 hover:text-muted-foreground"
+          role="img"
+        >
+          <Info className="size-3.5" />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent
+        className="w-72 rounded-xl border border-border bg-card p-3 text-left shadow-lg"
+        side="right"
+        sideOffset={8}
+      >
+        <p className="t-meta-sm font-medium text-foreground">{title}</p>
+        <p className="mt-1 t-meta-sm leading-relaxed text-muted-foreground">{body}</p>
+      </TooltipContent>
+    </Tooltip>
   )
 }
 

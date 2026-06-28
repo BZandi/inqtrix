@@ -66,14 +66,14 @@ Further tuning (the chosen provider's credentials): `anthropic` reads `ANTHROPIC
 
 ## Agent (`AgentSettings`)
 
-Tunes a single research run: loop bounds, stop thresholds, timeouts, input limits, and the search cache. `REPORT_PROFILE` doubles as a preset trigger — assigning `deep` applies a bundle of overrides for any field not explicitly set, so explicit env values always win over the profile.
+Tunes a single research run: loop bounds, stop thresholds, timeouts, input limits, and the search cache. `REPORT_PROFILE` doubles as a preset trigger — assigning `compact` or `deep` applies a bundle of overrides for any field not explicitly set, so explicit env values always win over the profile.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `REPORT_PROFILE` | `compact` | `compact` or `deep`. `deep` presets `max_rounds=5`, `min_rounds=2`, `confidence_stop=9`, `first_round_queries=10`, `answer_prompt_citations_max=500`, `reasoning_timeout=900`, `editor_assistant_timeout=900`, `claim_extract_timeout=600`, `search_timeout=300`, `max_total_seconds=1800`. See [Report profiles](report-profiles.md). |
-| `MAX_ROUNDS` | `4` | Hard upper bound for the research loop (`5` under DEEP). |
+| `REPORT_PROFILE` | `compact` | `compact` or `deep`. `compact` presets `max_rounds=2`, `min_rounds=1`, `confidence_stop=7`, `first_round_queries=6`; `deep` presets `max_rounds=4`, `min_rounds=2`, `confidence_stop=8`, `first_round_queries=10`, `answer_prompt_citations_max=500`, `reasoning_timeout=900`, `editor_assistant_timeout=900`, `claim_extract_timeout=600`, `search_timeout=300`, `max_total_seconds=1800`. See [Report profiles](report-profiles.md). |
+| `MAX_ROUNDS` | `2` | Hard upper bound for the research loop (`4` under DEEP). |
 | `MIN_ROUNDS` | `1` | Suppresses early stops until this round; clamped to `MAX_ROUNDS` at request time. |
-| `CONFIDENCE_STOP` | `8` | Minimum evaluator confidence (1-10) at which the stop cascade may emit `done` (`9` under DEEP). |
+| `CONFIDENCE_STOP` | `7` | Minimum evaluator confidence (1-10) at which the stop cascade may emit `done` (`8` under DEEP). |
 | `MAX_TOTAL_SECONDS` | `300` | Wall-clock deadline for the whole run, checked at node boundaries; also the base for the chat and SSE HTTP wait (this value + `REQUEST_WAIT_MARGIN_SECONDS`). `1800` under DEEP. |
 | `REASONING_TIMEOUT` | `120` | Per-call timeout (seconds) for reasoning LLM calls (classify/plan/evaluate/answer). `900` under DEEP. |
 | `EDITOR_ASSISTANT_TIMEOUT` | `120` | Per-call timeout (seconds) for editor suggest/instruct calls, decoupled from `REASONING_TIMEOUT`. Raise it if long editor instructions with large attachments hit a 504, without lengthening research reasoning calls. `900` under DEEP. |

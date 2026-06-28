@@ -233,3 +233,14 @@ class PromptTemplateService:
         except PromptTemplateNotFound:
             return None
         return record.owner_sub
+
+    async def title(self, tenant_id: str, template_id: str) -> str | None:
+        """Title lookup for the share surface (``None`` = absent, so the
+        inbox/outgoing listing skips it)."""
+        try:
+            record = await self._repository.get(
+                template_id, tenant_id=tenant_id
+            )
+        except PromptTemplateNotFound:
+            return None
+        return record.title

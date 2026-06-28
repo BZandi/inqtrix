@@ -1,18 +1,33 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent, type SyntheticEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, useReducedMotion } from 'motion/react'
-import { BadgeCheck, BookOpenCheck, Check, Copy, FileSearch, Info, ListChecks } from '@/components/icons'
+import { BadgeCheck, BookOpenCheck, Check, ChevronDown, Copy, FileSearch, Info, ListChecks, MoreHorizontal, Quote, Type } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import {
+  AssistantMenuHeader,
+  AssistantMenuIcon,
+  AssistantMenuLabel,
+  assistantMenuContentClassName,
+} from '@/components/ui/assistant-menu'
 import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer'
+import { MarkdownSelectionCopyMenu } from '@/components/markdown/MarkdownSelectionCopyMenu'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
-import type { KnowledgeAnswerRecord, KnowledgeReferenceRecord } from '@/features/project/types'
+import type { KnowledgeAnswerRecord, KnowledgeReferenceRecord, KnowledgeRunStepRecord } from '@/features/project/types'
 import { citationLabelFromHref, linkifyCitationLabels } from './answer'
-import { citationViews, groupCitationsByDocument } from './citations'
+import { formatAnswerForCopy, type AnswerCopyMode } from './copyAnswer'
+import { citationViews, firstOpenableCitation, groupCitationsByDocument } from './citations'
 import { CitationGroupList } from './CitationRow'
 import { excerptHighlightRanges, HighlightedExcerpt, previewWindow } from './CitationExcerpt'
+import { KnowledgeStepList } from './KnowledgeStepList'
 import { profileDisplayName } from './stepLines'
 
 type CitationPreview = {
@@ -33,31 +48,44 @@ type CitationPreview = {
  */
 export function AnswerCard({
   answer,
+  collectionCount,
+  completedAtLabel,
   highlightEntry = false,
   onOpenReference,
-  onOpenSteps,
+  steps = [],
 }: {
   answer: KnowledgeAnswerRecord
+  collectionCount: number
+  completedAtLabel?: string
   /** One-shot arrival choreography for the answer that just replaced a live run. */
   highlightEntry?: boolean
   onOpenReference: (reference: KnowledgeReferenceRecord) => void
-  /** Opens the right panel's "Schritte" tab to review this answer's agent run.
-   * Absent when the run kept no steps. */
-  onOpenSteps?: () => void
+  steps?: KnowledgeRunStepRecord[]
 }) {
   const { t } = useLocale()
   const reduceMotion = Boolean(useReducedMotion())
   const [copied, setCopied] = useState(false)
   const [preview, setPreview] = useState<CitationPreview | null>(null)
+  const [stepsOpen, setStepsOpen] = useState(false)
   const hideTimerRef = useRef<number | null>(null)
+  const hasSteps = steps.length > 0
 
   useEffect(() => () => {
     if (hideTimerRef.current) window.clearTimeout(hideTimerRef.current)
   }, [])
 
-  async function copyAnswer() {
+  const copyLabels = {
+    evidenceHeading: t.knowledge.copyEvidenceHeading,
+    pageLabel: t.knowledge.citationPage,
+    sectionLabel: t.knowledge.viewerSection,
+    sourcesHeading: t.knowledge.sources,
+    verifiedLabel: t.knowledge.viewerVerified,
+  }
+  const profileLabel = answer.profileId ? profileDisplayName(answer.profileId, t.knowledge) : null
+
+  async function copy(mode: AnswerCopyMode) {
     try {
-      await navigator.clipboard.writeText(answer.answerMarkdown)
+      await navigator.clipboard.writeText(formatAnswerForCopy(answer, mode, copyLabels))
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1200)
     } catch (error) {
@@ -127,45 +155,44 @@ export function AnswerCard({
         <BookOpenCheck className="size-4" />
       </span>
       <div className="min-w-0">
-        <div className="mb-1 flex items-center gap-2 t-meta-sm font-semibold text-muted-foreground">
-          <span>{answer.refusal ? t.knowledge.refusalTitle : t.knowledge.answerLabel}</span>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label={copied ? t.knowledge.answerCopied : t.knowledge.answerCopy}
-                className={cn(
-                  'size-6 text-foreground/65 opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/answer:opacity-100',
-                  copied && 'text-success opacity-100 hover:text-success',
-                )}
-                onClick={() => void copyAnswer()}
-                size="icon"
-                type="button"
-                variant="ghost"
-              >
-                {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{copied ? t.knowledge.answerCopied : t.knowledge.answerCopy}</TooltipContent>
-          </Tooltip>
-          {onOpenSteps && (
+        <div className="mb-1 flex min-w-0 items-center gap-1.5">
+          <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 t-meta-sm font-semibold text-muted-foreground">
+            <span className="min-w-0">{answer.refusal ? t.knowledge.refusalTitle : t.knowledge.answerLabel}</span>
+            {completedAtLabel && (
+              <span className="tabular-nums">{completedAtLabel}</span>
+            )}
+          </div>
+          {hasSteps && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
+                  aria-expanded={stepsOpen}
                   aria-label={t.knowledge.answerSteps}
-                  className="h-6 gap-1 px-1.5 text-foreground/65 opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/answer:opacity-100"
-                  onClick={onOpenSteps}
-                  size="sm"
+                  className="h-6 w-10 shrink-0 gap-0.5 px-1 text-foreground/65 hover:text-foreground"
+                  onClick={() => setStepsOpen((current) => !current)}
+                  size="icon"
                   type="button"
                   variant="ghost"
                 >
-                  <ListChecks className="size-3" />
-                  <span className="t-meta-sm">{t.knowledge.answerSteps}</span>
+                  <ListChecks className="size-3.5" />
+                  <ChevronDown className={cn('size-3 transition-transform', stepsOpen && 'rotate-180')} />
                 </Button>
               </TooltipTrigger>
               <TooltipContent>{t.knowledge.answerStepsHint}</TooltipContent>
             </Tooltip>
           )}
         </div>
+
+        {hasSteps && stepsOpen && (
+          <div className="mb-2 rounded-lg border border-border bg-surface/50 px-3 py-3">
+            <KnowledgeStepList
+              animateIn={false}
+              collectionCount={collectionCount}
+              failed={false}
+              steps={steps}
+            />
+          </div>
+        )}
 
         {answer.refusal ? (
           <div className="flex items-start gap-2.5 rounded-lg border border-border/70 bg-surface/60 p-3">
@@ -177,8 +204,9 @@ export function AnswerCard({
              mouseover/focus open the quick-glance preview, container exit
              (mouseleave/blur) schedules its dismissal. mouseleave fires ONCE on
              real exit (not per child), so hovering prose never flickers it. */
-          <div
+          <MarkdownSelectionCopyMenu
             className="chat-markdown text-sm leading-snug text-foreground"
+            markdown={answer.answerMarkdown}
             onBlur={scheduleHide}
             onClickCapture={handleCitationClick}
             onFocus={handleCitationHover}
@@ -192,7 +220,7 @@ export function AnswerCard({
               )}
               variant="chat"
             />
-          </div>
+          </MarkdownSelectionCopyMenu>
         )}
 
         {preview && (
@@ -214,14 +242,97 @@ export function AnswerCard({
                   citationViews(answer.references, answer.quotes, t.knowledge.viewerSection),
                 )}
                 onOpen={(picked) => onOpenReference(picked.reference)}
+                onOpenDocument={(group) => {
+                  const view = firstOpenableCitation(group)
+                  if (view) onOpenReference(view.reference)
+                }}
               />
             </div>
           </div>
         )}
 
-        <MetaLine answer={answer} />
+        <div className="mt-3 flex min-w-0 items-center gap-1 text-muted-foreground/80">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                aria-label={copied ? t.knowledge.answerCopied : t.knowledge.answerCopy}
+                className={cn(
+                  'size-6 shrink-0 text-foreground/65 hover:text-foreground',
+                  copied && 'text-success hover:text-success',
+                )}
+                onClick={() => void copy('sources')}
+                size="icon"
+                type="button"
+                variant="ghost"
+              >
+                {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{copied ? t.knowledge.answerCopied : t.knowledge.answerCopy}</TooltipContent>
+          </Tooltip>
+          <AnswerCopyMenu
+            completedAtLabel={completedAtLabel}
+            onCopy={(mode) => void copy(mode)}
+            profileLabel={profileLabel}
+          />
+          <MetaLine answer={answer} />
+        </div>
+
       </div>
     </motion.div>
+  )
+}
+
+/**
+ * The "more copy options" dropdown beside the copy button, sharing the chat
+ * assistant menu's primitives so both views read as one design language. The
+ * copy icon itself handles the common case (answer + source list); this menu
+ * offers the two variants: copy with the full evidence excerpts, or the bare
+ * answer text.
+ */
+function AnswerCopyMenu({
+  completedAtLabel,
+  onCopy,
+  profileLabel,
+}: {
+  completedAtLabel?: string
+  onCopy: (mode: AnswerCopyMode) => void
+  profileLabel?: string | null
+}) {
+  const { t } = useLocale()
+  return (
+    <DropdownMenu modal={false}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>
+            <Button
+              aria-label={t.knowledge.copyOptions}
+              className="size-6 shrink-0 text-foreground/65 transition-colors hover:text-foreground data-[state=open]:bg-accent data-[state=open]:text-foreground"
+              onClick={(event) => event.stopPropagation()}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              <MoreHorizontal className="size-3" />
+            </Button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent>{t.knowledge.copyOptions}</TooltipContent>
+      </Tooltip>
+      <DropdownMenuContent align="start" className={assistantMenuContentClassName} side="top" sideOffset={6}>
+        <AssistantMenuHeader primary={completedAtLabel ?? t.knowledge.answerLabel} secondary={profileLabel} />
+        <div className="p-1">
+          <DropdownMenuItem className="group gap-2 rounded-md px-2 py-1.5" onSelect={() => onCopy('evidence')}>
+            <AssistantMenuIcon icon={Quote} />
+            <AssistantMenuLabel>{t.knowledge.copyWithEvidence}</AssistantMenuLabel>
+          </DropdownMenuItem>
+          <DropdownMenuItem className="group gap-2 rounded-md px-2 py-1.5" onSelect={() => onCopy('answer')}>
+            <AssistantMenuIcon icon={Type} />
+            <AssistantMenuLabel>{t.knowledge.copyAnswerOnly}</AssistantMenuLabel>
+          </DropdownMenuItem>
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 
@@ -274,7 +385,7 @@ function MetaLine({ answer }: { answer: KnowledgeAnswerRecord }) {
   }
   if (parts.length === 0) return null
   return (
-    <p className="mt-3 t-meta text-muted-foreground/80">{parts.join(' · ')}</p>
+    <p className="min-w-0 t-meta text-muted-foreground/80">{parts.join(' · ')}</p>
   )
 }
 

@@ -218,6 +218,43 @@ class ChatHistoryService:
         parsed = [self._parse_message(thread_id, raw) for raw in messages]
         return await self._store.append_messages(parsed)
 
+    async def delete_message(
+        self,
+        thread_id: str,
+        message_id: str,
+        *,
+        visible_to: "UserContext | None",
+        also_visible: "Mapping[str, SharePermission] | None" = None,
+        request_workspace_id: str | None = None,
+    ) -> None:
+        """Delete one message from a thread the caller may edit.
+
+        Editing access, not owner-only: deleting a message is the inverse
+        of appending one, so it mirrors :meth:`append_messages` (owner or
+        at-least-edit share) rather than the owner-only thread/group
+        delete. Only an inaccessible/unknown thread raises (the indistinct
+        :class:`ThreadNotFound`, hide-on-deny preserved); a missing
+        message is the store's no-op (the idempotency rule the port
+        documents).
+        """
+        thread = await self._store.get_thread(thread_id)
+        shared = resolve_owned_access(
+            owner_sub=thread.created_by_sub,
+            resource_tenant_id=thread.tenant_id,
+            resource_id=thread.id,
+            visible_to=visible_to,
+            also_visible=also_visible,
+            not_found=ThreadNotFound,
+        )
+        if shared is not None and not shared.at_least(SharePermission.EDIT):
+            raise ThreadNotFound(thread_id)
+        deny_cross_workspace(
+            resource_workspace_id=thread.workspace_id,
+            request_workspace_id=request_workspace_id,
+            not_found=lambda: ThreadNotFound(thread_id),
+        )
+        await self._store.delete_message(thread_id, message_id)
+
     async def list_messages(
         self,
         thread_id: str,

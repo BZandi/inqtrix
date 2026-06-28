@@ -99,6 +99,11 @@ function isKnowledgeThreadItem(value: unknown): value is ServerKnowledgeThreadIt
   return typeof item.id === 'string'
     && typeof item.question === 'string'
     && typeof item.createdAt === 'string'
-    && (item.status === 'running' || item.status === 'completed' || item.status === 'failed')
+    && (
+      item.status === 'running'
+      || item.status === 'completed'
+      || item.status === 'failed'
+      || item.status === 'cancelled'
+    )
     && typeof item.progress === 'object'
 }

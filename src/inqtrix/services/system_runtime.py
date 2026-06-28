@@ -167,6 +167,7 @@ def _knowledge_payload(
     if service is None:
         return {
             "contextual_retrieval": False,
+            "cross_lingual_recommendation": "reranker",
             "default_top_k": None,
             "document_parser": "none",
             "embedding_model": None,
@@ -175,6 +176,9 @@ def _knowledge_payload(
             "hybrid_retrieval": False,
             "reranker": "none",
             "sparse": None,
+            "sparse_mode": "off",
+            "sparse_language": None,
+            "sparse_multilingual": False,
             "vector_store": "none",
             "vector_store_available": False,
         }
@@ -185,8 +189,17 @@ def _knowledge_payload(
         if probes is not None and probes.vector_store_available is not None
         else True
     )
+    # The store's lexical-branch language is the single truth for both the
+    # normalized mode (bm25/off) and the language code — derived once, never
+    # re-asserted independently.
+    sparse_language = getattr(context.store, "sparse_language", None)
     return {
         "contextual_retrieval": context.contextualizer is not None,
+        # Keyword (BM25) retrieval is monolingual and never cross-lingual; the
+        # cross-lingual lever is a multilingual cross-encoder reranker. Static
+        # facts so clients can surface the limitation honestly (the per-run
+        # query-vs-document mismatch needs collection language — a later phase).
+        "cross_lingual_recommendation": "reranker",
         "default_top_k": context.default_top_k,
         "document_parser": (
             settings.knowledge.document_parser
@@ -208,6 +221,9 @@ def _knowledge_payload(
             if settings.knowledge.vector_backend == "qdrant"
             else None
         ),
+        "sparse_mode": "bm25" if sparse_language is not None else "off",
+        "sparse_language": sparse_language,
+        "sparse_multilingual": False,
         "vector_store": settings.knowledge.vector_backend,
         "vector_store_available": vector_store_available,
     }

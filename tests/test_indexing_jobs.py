@@ -17,7 +17,7 @@ import pytest
 
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
-from inqtrix.knowledge.stores.ports import KnowledgeProviderContext
+from inqtrix.knowledge.stores.ports import DocumentNotFound, KnowledgeProviderContext
 from inqtrix.quota.models import QuotaDimension, QuotaSubject
 from inqtrix.server.indexing import (
     IndexingJobConflict,
@@ -330,6 +330,55 @@ def test_reindex_reembeds_every_document() -> None:
     assert embeddings.document_calls == calls_before + 2
 
 
+def test_reindex_emits_one_document_completed_event_per_document() -> None:
+    service, _embeddings, collection = _service_with_docs("alpha beta", "gamma delta")
+    store = _store()
+    indexing = IndexingService(knowledge_service=service, job_store=store)
+    summary = indexing.submit(collection=collection)
+    _wait_until(lambda: store.get(summary["job_id"])["status"] == "completed")
+    replay = store.subscribe(summary["job_id"]).replay
+    doc_events = [
+        event for event in replay
+        if event["type"] == "inqtrix.index.document_completed"
+    ]
+    # One per re-embedded document, each carrying its backend document id.
+    assert len(doc_events) == 2
+    assert all(event["data"]["outcome"] == "embedded" for event in doc_events)
+    assert all(event["data"]["document_id"] for event in doc_events)
+    # The per-document events land before the terminal completed event.
+    types = [event["type"] for event in replay]
+    last_doc = max(
+        index for index, kind in enumerate(types)
+        if kind == "inqtrix.index.document_completed"
+    )
+    assert types.index("inqtrix.index.completed") > last_doc
+
+
+def test_reindex_emits_no_document_completed_for_a_vanished_document(monkeypatch) -> None:
+    service, _embeddings, collection = _service_with_docs("alpha", "beta")
+    store = _store()
+    # One document is deleted between enumeration and re-embed (DocumentNotFound):
+    # it must be skipped WITHOUT emitting a per-document event — only the
+    # surviving document flips its file row.
+    real_reembed = service.reembed_document
+
+    async def vanishing_reembed(*, document, embedding_model):
+        if document.title == "Doc 0":
+            raise DocumentNotFound(document.id)
+        return await real_reembed(document=document, embedding_model=embedding_model)
+
+    monkeypatch.setattr(service, "reembed_document", vanishing_reembed)
+    indexing = IndexingService(knowledge_service=service, job_store=store)
+    summary = indexing.submit(collection=collection)
+    _wait_until(lambda: store.get(summary["job_id"])["status"] == "completed")
+    replay = store.subscribe(summary["job_id"]).replay
+    doc_events = [
+        event for event in replay
+        if event["type"] == "inqtrix.index.document_completed"
+    ]
+    assert len(doc_events) == 1
+
+
 def test_reindex_records_embedding_quota_per_document() -> None:
     service, _embeddings, collection = _service_with_docs("alpha beta", "gamma delta")
     principal = Principal(sub="user-1", kind="oidc_session")
@@ -365,6 +414,7 @@ def test_reindex_cancel_between_documents_stops_early() -> None:
     class FakeHandle:
         def __init__(self) -> None:
             self.progress_calls: list[int] = []
+            self.document_completed_ids: list[str] = []
             self.completed = False
             self.cancel_reason: str | None = None
 
@@ -378,6 +428,9 @@ def test_reindex_cancel_between_documents_stops_early() -> None:
 
         def progress(self, *, completed_documents: int, current_document_title: str = "") -> None:
             self.progress_calls.append(completed_documents)
+
+        def document_completed(self, document_id: str) -> None:
+            self.document_completed_ids.append(document_id)
 
         def complete(self) -> None:
             self.completed = True
@@ -396,6 +449,8 @@ def test_reindex_cancel_between_documents_stops_early() -> None:
     assert handle.cancel_reason == "client_requested_cancel"
     # Only the first document was re-embedded before the cancel took effect.
     assert embeddings.document_calls == calls_before + 1
+    # And exactly that one document emitted a per-document completion event.
+    assert len(handle.document_completed_ids) == 1
 
 
 def test_submit_raises_when_store_lacks_reembed() -> None:

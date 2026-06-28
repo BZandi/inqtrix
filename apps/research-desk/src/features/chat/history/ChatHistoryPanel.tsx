@@ -1,31 +1,50 @@
 import {
-  ChevronDown,
-  ChevronRight,
   Folder,
   FolderPlus,
   FolderOpen,
-  GripVertical,
   LoaderCircle,
   MessagesSquare,
-  PanelLeftClose,
+  MoreHorizontal,
+  PencilLine,
+  Pin,
+  PinOff,
   SquarePen,
   Trash2,
 } from '@/components/icons'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import {
+  EXPLORER_REVEAL_STEP,
+  ExplorerFolderRow,
+  ExplorerFolderToggle,
+  ExplorerItemRow,
+  ExplorerRevealControls,
+  ExplorerRunningIndicator,
+  ExplorerSearchField,
+  ExplorerSectionLabel,
+  isExplorerActionTarget,
+  isPastExplorerDragThreshold,
+} from '@/components/ui/explorer-list'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
-  displayRelativeDate,
+  displayRelativeAge,
   type ChatHistorySection,
 } from '@/features/project/selectors'
+import { QuotaUsageFooter } from '@/features/quota/QuotaUsageFooter'
 import { useLocale } from '@/i18n/LocaleProvider'
 import type { Locale, TranslationDictionary } from '@/i18n/translations'
 import { cn } from '@/lib/utils'
-import { appMotion } from '@/motion/transitions'
 import { AnimatePresence, motion } from 'motion/react'
 import {
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
@@ -46,12 +65,12 @@ type ChatHistoryPanelProps = {
   onCreateThreadGroup: () => void
   onDeleteThread: (threadId: string) => void
   onDeleteThreadGroup: (groupId: string) => void
-  onHide?: () => void
   onMoveThreadGroup: (groupId: string, targetIndex: number) => void
   onMoveThreadToGroup: (threadId: string, groupId: string | null, targetIndex: number) => void
   onRenameThread: (threadId: string, title: string) => void
   onRenameThreadGroup: (groupId: string, title: string) => void
   onSelectThread: (threadId: string) => void
+  onTogglePinnedThread: (threadId: string) => void
   /** Server has older thread pages not yet loaded (on-demand history). */
   hasMoreThreads?: boolean
   /** A load-older page request is in flight (disables the button + shows busy). */
@@ -59,6 +78,7 @@ type ChatHistoryPanelProps = {
   /** Load the next page of older threads. */
   onLoadMoreThreads?: () => void
   reduceMotion: boolean | null
+  pinnedThreadIds: readonly string[]
   runningThreadIds: ReadonlySet<string>
   selectedThreadId: string | null
   threads: ChatThread[]
@@ -74,16 +94,17 @@ export function ChatHistoryPanel({
   onCreateThreadGroup,
   onDeleteThread,
   onDeleteThreadGroup,
-  onHide,
   onMoveThreadGroup,
   onMoveThreadToGroup,
   onRenameThread,
   onRenameThreadGroup,
   onSelectThread,
+  onTogglePinnedThread,
   hasMoreThreads,
   isLoadingMoreThreads,
   onLoadMoreThreads,
   reduceMotion,
+  pinnedThreadIds,
   runningThreadIds,
   selectedThreadId,
   threads,
@@ -97,12 +118,15 @@ export function ChatHistoryPanel({
   const [groupDropTargetIndex, setGroupDropTargetIndex] = useState<number | null>(null)
   const [groupTitleDraft, setGroupTitleDraft] = useState('')
   const [historyThreadTitleDraft, setHistoryThreadTitleDraft] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
   const [threadDropTarget, setThreadDropTarget] = useState<ChatThreadDropTarget | null>(null)
   const groupTitleInputRef = useRef<HTMLInputElement | null>(null)
   const historyListRef = useRef<HTMLDivElement | null>(null)
   const historyThreadTitleInputRef = useRef<HTMLInputElement | null>(null)
   const skipGroupTitleCommitRef = useRef(false)
   const skipHistoryThreadTitleCommitRef = useRef(false)
+  const suppressGroupToggleClickRef = useRef(false)
+  const suppressThreadSelectClickRef = useRef(false)
 
   useLayoutEffect(() => {
     if (!editingGroupId) return
@@ -131,6 +155,10 @@ export function ChatHistoryPanel({
   }, [chatHistorySections, editingGroupId])
 
   function toggleChatThreadGroup(groupId: string) {
+    if (suppressGroupToggleClickRef.current) {
+      suppressGroupToggleClickRef.current = false
+      return
+    }
     setCollapsedGroupIds((current) => {
       const next = new Set(current)
       if (next.has(groupId)) {
@@ -140,6 +168,14 @@ export function ChatHistoryPanel({
       }
       return next
     })
+  }
+
+  function selectHistoryThread(threadId: string) {
+    if (suppressThreadSelectClickRef.current) {
+      suppressThreadSelectClickRef.current = false
+      return
+    }
+    onSelectThread(threadId)
   }
 
   function startGroupTitleEdit(groupId: string, title: string) {
@@ -217,18 +253,30 @@ export function ChatHistoryPanel({
     return groupElements.length
   }
 
-  function beginGroupDrag(event: ReactPointerEvent<HTMLButtonElement>, groupId: string) {
-    if (event.button !== 0) return
-    event.preventDefault()
-    setDraggedGroupId(groupId)
-    setGroupDropTargetIndex(readGroupDropTarget(event.clientY, groupId))
+  function beginGroupDrag(event: ReactPointerEvent<HTMLElement>, groupId: string) {
+    if (event.button !== 0 || isExplorerActionTarget(event.target)) return
+    const startX = event.clientX
+    const startY = event.clientY
+    let didStartDrag = false
+
+    function startDrag(moveEvent: PointerEvent) {
+      didStartDrag = true
+      suppressGroupToggleClickRef.current = true
+      setDraggedGroupId(groupId)
+      setGroupDropTargetIndex(readGroupDropTarget(moveEvent.clientY, groupId))
+    }
 
     function handlePointerMove(moveEvent: PointerEvent) {
+      if (!didStartDrag) {
+        if (!isPastExplorerDragThreshold(startX, startY, moveEvent)) return
+        startDrag(moveEvent)
+      }
+      moveEvent.preventDefault()
       setGroupDropTargetIndex(readGroupDropTarget(moveEvent.clientY, groupId))
     }
 
     function finishPointerDrag(upEvent: PointerEvent) {
-      const nextDropTarget = readGroupDropTarget(upEvent.clientY, groupId)
+      const nextDropTarget = didStartDrag ? readGroupDropTarget(upEvent.clientY, groupId) : null
       cleanupPointerDrag()
       if (nextDropTarget === null) return
       onMoveThreadGroup(groupId, nextDropTarget)
@@ -244,6 +292,11 @@ export function ChatHistoryPanel({
       document.removeEventListener('pointercancel', cancelPointerDrag)
       setDraggedGroupId(null)
       setGroupDropTargetIndex(null)
+      if (didStartDrag) {
+        window.setTimeout(() => {
+          suppressGroupToggleClickRef.current = false
+        }, 0)
+      }
     }
 
     document.addEventListener('pointermove', handlePointerMove)
@@ -292,18 +345,30 @@ export function ChatHistoryPanel({
     return { groupId, targetIndex: threadElements.length }
   }
 
-  function beginThreadDrag(event: ReactPointerEvent<HTMLButtonElement>, threadId: string) {
-    if (event.button !== 0) return
-    event.preventDefault()
-    setDraggedThreadId(threadId)
-    setThreadDropTarget(readThreadDropTarget(event.clientY, threadId))
+  function beginThreadDrag(event: ReactPointerEvent<HTMLElement>, threadId: string) {
+    if (event.button !== 0 || isExplorerActionTarget(event.target)) return
+    const startX = event.clientX
+    const startY = event.clientY
+    let didStartDrag = false
+
+    function startDrag(moveEvent: PointerEvent) {
+      didStartDrag = true
+      suppressThreadSelectClickRef.current = true
+      setDraggedThreadId(threadId)
+      setThreadDropTarget(readThreadDropTarget(moveEvent.clientY, threadId))
+    }
 
     function handlePointerMove(moveEvent: PointerEvent) {
+      if (!didStartDrag) {
+        if (!isPastExplorerDragThreshold(startX, startY, moveEvent)) return
+        startDrag(moveEvent)
+      }
+      moveEvent.preventDefault()
       setThreadDropTarget(readThreadDropTarget(moveEvent.clientY, threadId))
     }
 
     function finishPointerDrag(upEvent: PointerEvent) {
-      const nextDropTarget = readThreadDropTarget(upEvent.clientY, threadId)
+      const nextDropTarget = didStartDrag ? readThreadDropTarget(upEvent.clientY, threadId) : null
       cleanupPointerDrag()
       if (!nextDropTarget) return
       onMoveThreadToGroup(threadId, nextDropTarget.groupId, nextDropTarget.targetIndex)
@@ -319,6 +384,11 @@ export function ChatHistoryPanel({
       document.removeEventListener('pointercancel', cancelPointerDrag)
       setDraggedThreadId(null)
       setThreadDropTarget(null)
+      if (didStartDrag) {
+        window.setTimeout(() => {
+          suppressThreadSelectClickRef.current = false
+        }, 0)
+      }
     }
 
     document.addEventListener('pointermove', handlePointerMove)
@@ -326,9 +396,24 @@ export function ChatHistoryPanel({
     document.addEventListener('pointercancel', cancelPointerDrag)
   }
 
-  const hasHistoryStructure = threads.length > 0 || chatHistorySections.some((section) => section.kind === 'group')
-  const showUngroupedHistoryHeader = chatHistorySections.some((section) => section.kind === 'group')
-  const groupSectionIds = chatHistorySections.flatMap((section) => (
+  const pinnedThreadIdSet = new Set(pinnedThreadIds)
+  const trimmedSearchQuery = searchQuery.trim().toLowerCase()
+  const isSearching = trimmedSearchQuery.length > 0
+  const searchResults = useMemo(
+    () => (isSearching
+      ? threads.filter((thread) => thread.title.toLowerCase().includes(trimmedSearchQuery))
+      : []),
+    [isSearching, threads, trimmedSearchQuery],
+  )
+  const pinnedThreads = threads.filter((thread) => pinnedThreadIdSet.has(thread.id))
+  const explorerSections = chatHistorySections.map((section) => ({
+    ...section,
+    threads: section.threads.filter((thread) => !pinnedThreadIdSet.has(thread.id)),
+  })) as ChatHistorySection[]
+  const hasHistoryStructure = pinnedThreads.length > 0
+    || explorerSections.some((section) => section.threads.length > 0 || section.kind === 'group')
+  const showUngroupedHistoryHeader = explorerSections.some((section) => section.kind === 'group')
+  const groupSectionIds = explorerSections.flatMap((section) => (
     section.kind === 'group' ? [section.groupId] : []
   ))
   const dropIndicatorGroupSectionIds = draggedGroupId
@@ -337,7 +422,7 @@ export function ChatHistoryPanel({
 
   return (
     <aside className="flex min-h-0 flex-col border-b border-border bg-surface/60 lg:h-full lg:border-b-0">
-      <div className="flex h-12 items-center justify-between gap-2 border-b border-border px-3">
+      <div className="flex inqtrix-panel-header items-center justify-between gap-2 border-b border-border px-3">
         <div className="flex min-w-0 items-center gap-2">
           <MessagesSquare className="size-4 shrink-0 text-foreground/80" />
           <h1 className="truncate t-section text-foreground">
@@ -375,69 +460,129 @@ export function ChatHistoryPanel({
             </TooltipTrigger>
             <TooltipContent>{t.chat.new}</TooltipContent>
           </Tooltip>
-          {onHide ? (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  aria-label={t.chat.hideHistory}
-                  className="size-7 shrink-0 rounded-md"
-                  onClick={onHide}
-                  size="icon"
-                  type="button"
-                  variant="ghost"
-                >
-                  <PanelLeftClose className="size-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>{t.chat.hideHistory}</TooltipContent>
-            </Tooltip>
-          ) : null}
         </div>
       </div>
+      <ExplorerSearchField
+        clearLabel={t.chat.searchClear}
+        label={t.chat.searchHistory}
+        onChange={setSearchQuery}
+        onClear={() => setSearchQuery('')}
+        placeholder={t.chat.searchHistory}
+        value={searchQuery}
+      />
       <ScrollArea className="max-h-64 min-h-0 lg:max-h-none lg:flex-1">
-        <div className="space-y-1 p-2" ref={historyListRef}>
-          {hasHistoryStructure ? (
-            chatHistorySections.map((section) => (
-              <ChatHistorySectionView
-                beginGroupDrag={beginGroupDrag}
-                beginThreadDrag={beginThreadDrag}
-                cancelGroupTitleEdit={cancelGroupTitleEdit}
-                cancelHistoryThreadTitleEdit={cancelHistoryThreadTitleEdit}
-                collapsedGroupIds={collapsedGroupIds}
-                commitGroupTitleEdit={commitGroupTitleEdit}
-                commitHistoryThreadTitleEdit={commitHistoryThreadTitleEdit}
-                draggedGroupId={draggedGroupId}
-                draggedThreadId={draggedThreadId}
-                editingGroupId={editingGroupId}
-                editingHistoryThreadId={editingHistoryThreadId}
-                groupDropTargetIndex={groupDropTargetIndex}
-                groupIndex={section.kind === 'group' ? dropIndicatorGroupSectionIds.indexOf(section.groupId) : -1}
-                groupSectionCount={dropIndicatorGroupSectionIds.length}
-                groupTitleDraft={groupTitleDraft}
-                groupTitleInputRef={groupTitleInputRef}
-                historyThreadTitleDraft={historyThreadTitleDraft}
-                historyThreadTitleInputRef={historyThreadTitleInputRef}
-                isIncognito={isIncognito}
-                key={section.kind === 'group' ? section.groupId : UNGROUPED_CHAT_SECTION_ID}
-                locale={locale}
-                onCreateThread={onCreateThread}
-                onDeleteThread={onDeleteThread}
-                onDeleteThreadGroup={onDeleteThreadGroup}
-                onGroupTitleDraftChange={setGroupTitleDraft}
-                onHistoryThreadTitleDraftChange={setHistoryThreadTitleDraft}
-                onSelectThread={onSelectThread}
-                reduceMotion={reduceMotion}
-                runningThreadIds={runningThreadIds}
-                section={section}
-                selectedThreadId={selectedThreadId}
-                showUngroupedHeader={showUngroupedHistoryHeader}
-                startGroupTitleEdit={startGroupTitleEdit}
-                startHistoryThreadTitleEdit={startHistoryThreadTitleEdit}
-                t={t}
-                threadDropTarget={threadDropTarget}
-                toggleChatThreadGroup={toggleChatThreadGroup}
-              />
-            ))
+        <div className="inqtrix-explorer-list space-y-1 p-2" ref={historyListRef}>
+          {isSearching ? (
+            searchResults.length > 0 ? (
+              <div className="space-y-0.5">
+                {searchResults.map((thread) => (
+                  <ChatThreadHistoryItem
+                    beginThreadDrag={beginThreadDrag}
+                    cancelHistoryThreadTitleEdit={cancelHistoryThreadTitleEdit}
+                    commitHistoryThreadTitleEdit={commitHistoryThreadTitleEdit}
+                    editingHistoryThreadId={editingHistoryThreadId}
+                    historyThreadTitleDraft={historyThreadTitleDraft}
+                    historyThreadTitleInputRef={historyThreadTitleInputRef}
+                    isActive={selectedThreadId === thread.id}
+                    isDragging={draggedThreadId === thread.id}
+                    isIncognito={isIncognito}
+                    isNested={false}
+                    isPinned={pinnedThreadIdSet.has(thread.id)}
+                    isThreadRunning={runningThreadIds.has(thread.id)}
+                    key={thread.id}
+                    locale={locale}
+                    onDeleteThread={onDeleteThread}
+                    onHistoryThreadTitleDraftChange={setHistoryThreadTitleDraft}
+                    onSelectThread={selectHistoryThread}
+                    onTogglePinnedThread={onTogglePinnedThread}
+                    showAfterIndicator={false}
+                    showBeforeIndicator={false}
+                    startHistoryThreadTitleEdit={startHistoryThreadTitleEdit}
+                    t={t}
+                    thread={thread}
+                  />
+                ))}
+              </div>
+            ) : (
+              <p className="px-2 py-6 text-center t-meta-sm text-muted-foreground">{t.chat.searchEmpty}</p>
+            )
+          ) : hasHistoryStructure ? (
+            <>
+              {pinnedThreads.length > 0 && (
+                <div className="space-y-0.5">
+                  <ExplorerSectionLabel className="pt-0">{t.chat.pinned}</ExplorerSectionLabel>
+                  {pinnedThreads.map((thread) => (
+                    <ChatThreadHistoryItem
+                      beginThreadDrag={beginThreadDrag}
+                      cancelHistoryThreadTitleEdit={cancelHistoryThreadTitleEdit}
+                      commitHistoryThreadTitleEdit={commitHistoryThreadTitleEdit}
+                      editingHistoryThreadId={editingHistoryThreadId}
+                      historyThreadTitleDraft={historyThreadTitleDraft}
+                      historyThreadTitleInputRef={historyThreadTitleInputRef}
+                      isActive={selectedThreadId === thread.id}
+                      isDragging={draggedThreadId === thread.id}
+                      isIncognito={isIncognito}
+                      isNested={false}
+                      isPinned
+                      isThreadRunning={runningThreadIds.has(thread.id)}
+                      key={thread.id}
+                      locale={locale}
+                      onDeleteThread={onDeleteThread}
+                      onHistoryThreadTitleDraftChange={setHistoryThreadTitleDraft}
+                      onSelectThread={selectHistoryThread}
+                      onTogglePinnedThread={onTogglePinnedThread}
+                      showAfterIndicator={false}
+                      showBeforeIndicator={false}
+                      startHistoryThreadTitleEdit={startHistoryThreadTitleEdit}
+                      t={t}
+                      thread={thread}
+                    />
+                  ))}
+                </div>
+              )}
+              {explorerSections.map((section) => (
+                <ChatHistorySectionView
+                  beginGroupDrag={beginGroupDrag}
+                  beginThreadDrag={beginThreadDrag}
+                  cancelGroupTitleEdit={cancelGroupTitleEdit}
+                  cancelHistoryThreadTitleEdit={cancelHistoryThreadTitleEdit}
+                  collapsedGroupIds={collapsedGroupIds}
+                  commitGroupTitleEdit={commitGroupTitleEdit}
+                  commitHistoryThreadTitleEdit={commitHistoryThreadTitleEdit}
+                  draggedGroupId={draggedGroupId}
+                  draggedThreadId={draggedThreadId}
+                  editingGroupId={editingGroupId}
+                  editingHistoryThreadId={editingHistoryThreadId}
+                  groupDropTargetIndex={groupDropTargetIndex}
+                  groupIndex={section.kind === 'group' ? dropIndicatorGroupSectionIds.indexOf(section.groupId) : -1}
+                  groupSectionCount={dropIndicatorGroupSectionIds.length}
+                  groupTitleDraft={groupTitleDraft}
+                  groupTitleInputRef={groupTitleInputRef}
+                  historyThreadTitleDraft={historyThreadTitleDraft}
+                  historyThreadTitleInputRef={historyThreadTitleInputRef}
+                  isIncognito={isIncognito}
+                  key={section.kind === 'group' ? section.groupId : UNGROUPED_CHAT_SECTION_ID}
+                  locale={locale}
+                  onCreateThread={onCreateThread}
+                  onDeleteThread={onDeleteThread}
+                  onDeleteThreadGroup={onDeleteThreadGroup}
+                  onGroupTitleDraftChange={setGroupTitleDraft}
+                  onHistoryThreadTitleDraftChange={setHistoryThreadTitleDraft}
+                  onSelectThread={selectHistoryThread}
+                  onTogglePinnedThread={onTogglePinnedThread}
+                  reduceMotion={reduceMotion}
+                  runningThreadIds={runningThreadIds}
+                  section={section}
+                  selectedThreadId={selectedThreadId}
+                  showUngroupedHeader={showUngroupedHistoryHeader}
+                  startGroupTitleEdit={startGroupTitleEdit}
+                  startHistoryThreadTitleEdit={startHistoryThreadTitleEdit}
+                  t={t}
+                  threadDropTarget={threadDropTarget}
+                  toggleChatThreadGroup={toggleChatThreadGroup}
+                />
+              ))}
+            </>
           ) : (
             <div className="rounded-md border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
               {t.chat.noThreads}
@@ -462,6 +607,7 @@ export function ChatHistoryPanel({
           ) : null}
         </div>
       </ScrollArea>
+      <QuotaUsageFooter dimensions={['llm_tokens']} />
     </aside>
   )
 }
@@ -493,6 +639,7 @@ function ChatHistorySectionView({
   onGroupTitleDraftChange,
   onHistoryThreadTitleDraftChange,
   onSelectThread,
+  onTogglePinnedThread,
   reduceMotion,
   runningThreadIds,
   section,
@@ -504,8 +651,8 @@ function ChatHistorySectionView({
   threadDropTarget,
   toggleChatThreadGroup,
 }: {
-  beginGroupDrag: (event: ReactPointerEvent<HTMLButtonElement>, groupId: string) => void
-  beginThreadDrag: (event: ReactPointerEvent<HTMLButtonElement>, threadId: string) => void
+  beginGroupDrag: (event: ReactPointerEvent<HTMLElement>, groupId: string) => void
+  beginThreadDrag: (event: ReactPointerEvent<HTMLElement>, threadId: string) => void
   cancelGroupTitleEdit: () => void
   cancelHistoryThreadTitleEdit: () => void
   collapsedGroupIds: ReadonlySet<string>
@@ -530,6 +677,7 @@ function ChatHistorySectionView({
   onGroupTitleDraftChange: (value: string) => void
   onHistoryThreadTitleDraftChange: (value: string) => void
   onSelectThread: (threadId: string) => void
+  onTogglePinnedThread: (threadId: string) => void
   reduceMotion: boolean | null
   runningThreadIds: ReadonlySet<string>
   section: ChatHistorySection
@@ -563,6 +711,7 @@ function ChatHistorySectionView({
   const SectionIcon = section.kind === 'group'
     ? isCollapsed ? Folder : FolderOpen
     : MessagesSquare
+  const [visibleThreadCount, setVisibleThreadCount] = useState(EXPLORER_REVEAL_STEP)
 
   return (
     <motion.div
@@ -574,8 +723,6 @@ function ChatHistorySectionView({
       data-chat-history-draggable-group-id={section.kind === 'group' ? section.groupId : undefined}
       data-chat-history-group-id={groupKey}
       data-chat-history-section
-      layout={!reduceMotion}
-      transition={appMotion.panel}
     >
       {showGroupBeforeIndicator && (
         <span className="pointer-events-none absolute -top-1 left-1 right-1 h-0.5 rounded-full bg-brand shadow-[0_0_0_1px_var(--background)]" />
@@ -584,88 +731,91 @@ function ChatHistorySectionView({
         <span className="pointer-events-none absolute -bottom-1 left-1 right-1 h-0.5 rounded-full bg-brand shadow-[0_0_0_1px_var(--background)]" />
       )}
       {section.kind === 'group' && (
-        <div className="group/header grid min-h-8 grid-cols-[1.5rem_1rem_minmax(0,1fr)_auto_auto_auto_auto] items-center gap-1 px-1.5 text-foreground/75 transition-colors hover:text-foreground">
-          <button
-            aria-expanded={!isCollapsed}
-            aria-label={`${isCollapsed ? t.chat.expandGroup : t.chat.collapseGroup}: ${section.group.title}`}
-            className="grid size-6 shrink-0 place-items-center rounded-sm hover:bg-surface hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            onClick={() => toggleChatThreadGroup(section.groupId)}
-            type="button"
-          >
-            {isCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
-          </button>
-          <SectionIcon className="size-3.5 shrink-0" />
-          {editingGroupId === section.groupId ? (
-            <input
-              aria-label={t.chat.renameGroup}
-              className="min-w-0 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 text-xs font-semibold text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              onBlur={commitGroupTitleEdit}
-              onChange={(event) => onGroupTitleDraftChange(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  event.preventDefault()
-                  commitGroupTitleEdit()
-                }
-                if (event.key === 'Escape') {
-                  event.preventDefault()
-                  cancelGroupTitleEdit()
-                }
-              }}
-              ref={groupTitleInputRef}
-              value={groupTitleDraft}
-            />
-          ) : (
-            <button
-              className="min-w-0 truncate rounded-sm px-1 py-0.5 text-left text-xs font-semibold text-foreground/75 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              onClick={() => startGroupTitleEdit(section.groupId, section.group.title)}
-              title={t.chat.renameGroup}
-              type="button"
-            >
-              {title}
-            </button>
+        <ExplorerFolderRow
+          onPointerDown={(event) => beginGroupDrag(event, section.groupId)}
+          actions={(
+            <>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    aria-label={t.common.menu}
+                    className="size-6 shrink-0 text-foreground/55 hover:text-foreground"
+                    size="icon"
+                    type="button"
+                    variant="ghost"
+                  >
+                    <MoreHorizontal className="icon-sm" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-56">
+                  <DropdownMenuItem onSelect={() => startGroupTitleEdit(section.groupId, section.group.title)}>
+                    <PencilLine className="icon-sm" />
+                    {t.chat.renameGroup}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    className="text-destructive focus:text-destructive"
+                    onSelect={() => onDeleteThreadGroup(section.groupId)}
+                  >
+                    <Trash2 className="icon-sm" />
+                    {t.chat.deleteGroup}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    aria-label={`${t.chat.newInFolder}: ${section.group.title}`}
+                    className="size-6 shrink-0 text-foreground/55 hover:text-foreground"
+                    onClick={() => onCreateThread(section.groupId)}
+                    size="icon"
+                    type="button"
+                    variant="ghost"
+                  >
+                    <SquarePen className="icon-sm" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{t.chat.newInFolder}</TooltipContent>
+              </Tooltip>
+            </>
           )}
-          <span className="shrink-0 rounded-sm px-1 t-hint font-semibold tabular-nums text-muted-foreground">
-            {section.threads.length}
-          </span>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label={`${t.chat.newInFolder}: ${section.group.title}`}
-                className="size-6 shrink-0 text-foreground/50 opacity-0 transition hover:text-foreground focus-visible:opacity-100 group-hover/header:opacity-100"
-                onClick={() => onCreateThread(section.groupId)}
-                size="icon"
-                type="button"
-                variant="ghost"
-              >
-                <SquarePen className="size-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{t.chat.newInFolder}</TooltipContent>
-          </Tooltip>
-          <button
-            aria-label={`${t.chat.moveGroup}: ${section.group.title}`}
-            className="grid size-6 shrink-0 cursor-grab place-items-center rounded-sm text-foreground/50 opacity-0 transition hover:bg-surface hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/header:opacity-100 active:cursor-grabbing"
-            onPointerDown={(event) => beginGroupDrag(event, section.groupId)}
-            type="button"
-          >
-            <GripVertical className="size-3.5" />
-          </button>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label={`${t.chat.deleteGroup}: ${section.group.title}`}
-                className="size-6 shrink-0 text-foreground/50 opacity-0 transition hover:text-destructive focus-visible:opacity-100 group-hover/header:opacity-100"
-                onClick={() => onDeleteThreadGroup(section.groupId)}
-                size="icon"
-                type="button"
-                variant="ghost"
-              >
-                <Trash2 className="size-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{t.chat.deleteGroup}</TooltipContent>
-          </Tooltip>
-        </div>
+        >
+          {editingGroupId === section.groupId ? (
+            <span className="flex min-h-8 min-w-0 items-center gap-1.5" data-explorer-action>
+              <FolderOpen className="icon-sm shrink-0 text-muted-foreground" />
+              <input
+                aria-label={t.chat.renameGroup}
+                className="min-w-0 flex-1 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 t-list text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                onBlur={commitGroupTitleEdit}
+                onChange={(event) => onGroupTitleDraftChange(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    commitGroupTitleEdit()
+                  }
+                  if (event.key === 'Escape') {
+                    event.preventDefault()
+                    cancelGroupTitleEdit()
+                  }
+                }}
+                ref={groupTitleInputRef}
+                value={groupTitleDraft}
+              />
+            </span>
+          ) : (
+            <ExplorerFolderToggle
+              count={section.threads.length}
+              expanded={!isCollapsed}
+              icon={<SectionIcon className="icon-sm shrink-0" />}
+              label={`${isCollapsed ? t.chat.expandGroup : t.chat.collapseGroup}: ${section.group.title}`}
+              onDoubleClick={(event) => {
+                event.preventDefault()
+                startGroupTitleEdit(section.groupId, section.group.title)
+              }}
+              onToggle={() => toggleChatThreadGroup(section.groupId)}
+              title={title}
+            />
+          )}
+        </ExplorerFolderRow>
       )}
 
       {section.kind === 'ungrouped' && showUngroupedHeader && (
@@ -684,11 +834,8 @@ function ChatHistorySectionView({
             initial={reduceMotion ? false : { height: 0, opacity: 0 }}
             transition={{ duration: 0.16, ease: [0.2, 0, 0, 1] }}
           >
-            <div className={cn(
-              'space-y-0.5',
-              section.kind === 'group' && 'ml-4 border-l border-border/70 pl-2',
-            )}>
-              {threads.map((thread, index) => {
+            <div className="space-y-0.5">
+              {threads.slice(0, visibleThreadCount).map((thread, index) => {
                 const showBeforeIndicator = (
                   threadDropTarget?.groupId === groupId
                   && threadDropTarget.targetIndex === index
@@ -716,7 +863,7 @@ function ChatHistorySectionView({
                     onDeleteThread={onDeleteThread}
                     onHistoryThreadTitleDraftChange={onHistoryThreadTitleDraftChange}
                     onSelectThread={onSelectThread}
-                    reduceMotion={reduceMotion}
+                    onTogglePinnedThread={onTogglePinnedThread}
                     showAfterIndicator={showAfterIndicator}
                     showBeforeIndicator={showBeforeIndicator}
                     startHistoryThreadTitleEdit={startHistoryThreadTitleEdit}
@@ -725,6 +872,14 @@ function ChatHistorySectionView({
                   />
                 )
               })}
+              <ExplorerRevealControls
+                onShowLess={() => setVisibleThreadCount(EXPLORER_REVEAL_STEP)}
+                onShowMore={() => setVisibleThreadCount((count) => Math.min(count + EXPLORER_REVEAL_STEP, threads.length))}
+                showLessLabel={t.chat.showLess}
+                showMoreLabel={t.chat.showMore}
+                total={threads.length}
+                visibleCount={visibleThreadCount}
+              />
               {section.kind === 'group' && threads.length === 0 && !isCollapsed && (
                 <div className="rounded-md px-2 py-1.5 t-meta-sm font-medium text-muted-foreground">
                   {t.chat.emptyGroup}
@@ -759,19 +914,20 @@ function ChatThreadHistoryItem({
   isDragging,
   isIncognito,
   isNested,
+  isPinned,
   isThreadRunning,
   locale,
   onDeleteThread,
   onHistoryThreadTitleDraftChange,
   onSelectThread,
-  reduceMotion,
+  onTogglePinnedThread,
   showAfterIndicator,
   showBeforeIndicator,
   startHistoryThreadTitleEdit,
   t,
   thread,
 }: {
-  beginThreadDrag: (event: ReactPointerEvent<HTMLButtonElement>, threadId: string) => void
+  beginThreadDrag: (event: ReactPointerEvent<HTMLElement>, threadId: string) => void
   cancelHistoryThreadTitleEdit: () => void
   commitHistoryThreadTitleEdit: () => void
   editingHistoryThreadId: string | null
@@ -781,12 +937,13 @@ function ChatThreadHistoryItem({
   isDragging: boolean
   isIncognito: boolean
   isNested: boolean
+  isPinned?: boolean
   isThreadRunning: boolean
   locale: Locale
   onDeleteThread: (threadId: string) => void
   onHistoryThreadTitleDraftChange: (value: string) => void
   onSelectThread: (threadId: string) => void
-  reduceMotion: boolean | null
+  onTogglePinnedThread: (threadId: string) => void
   showAfterIndicator: boolean
   showBeforeIndicator: boolean
   startHistoryThreadTitleEdit: (threadId: string, title: string) => void
@@ -794,22 +951,12 @@ function ChatThreadHistoryItem({
   thread: ChatThread
 }) {
   const isEditingTitle = editingHistoryThreadId === thread.id
+  const timeLabel = displayRelativeAge(chatThreadHistoryTimeIso(thread), locale)
 
   return (
     <motion.div
-      className={cn(
-        'group/thread relative transition-colors',
-        isNested
-          ? 'bg-transparent hover:text-foreground'
-          : 'border-border/60 bg-card/60 shadow-[0_1px_1px_var(--shadow-hairline)] hover:border-border hover:bg-background',
-        !isNested && 'rounded-md border',
-        isNested && isActive && 'before:absolute before:-left-[9px] before:bottom-1.5 before:top-1.5 before:w-0.5 before:rounded-full before:bg-brand',
-        !isNested && isActive && 'border-brand/25 bg-brand-subtle/45 ring-1 ring-brand/10',
-        isDragging && 'scale-[0.99] opacity-75 shadow-[0_8px_20px_var(--shadow-soft)] ring-1 ring-ring/50',
-      )}
+      className="relative"
       data-chat-history-thread-id={thread.id}
-      layout={!reduceMotion}
-      transition={appMotion.panel}
     >
       {showBeforeIndicator && (
         <span className="pointer-events-none absolute -top-1 left-1 right-1 h-0.5 rounded-full bg-brand shadow-[0_0_0_1px_var(--background)]" />
@@ -817,109 +964,98 @@ function ChatThreadHistoryItem({
       {showAfterIndicator && (
         <span className="pointer-events-none absolute -bottom-1 left-1 right-1 h-0.5 rounded-full bg-brand shadow-[0_0_0_1px_var(--background)]" />
       )}
-      <button
-        aria-label={`${t.chat.moveThread}: ${thread.title}`}
-        className={cn(
-          'absolute top-1/2 z-10 grid -translate-y-1/2 cursor-grab place-items-center rounded-sm text-foreground/50 opacity-0 transition hover:bg-surface hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/thread:opacity-100 active:cursor-grabbing',
-          isNested ? 'right-7 size-6' : 'right-8 size-7',
-        )}
+      <ExplorerItemRow
+        active={isActive}
+        dragging={isDragging}
+        nested={isNested}
         onPointerDown={(event) => beginThreadDrag(event, thread.id)}
-        type="button"
       >
-        <GripVertical className="size-3.5" />
-      </button>
-      {isEditingTitle ? (
-        <div className={cn(
-          'grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-left',
-          isNested ? 'min-h-8 px-2 py-1 pr-14' : 'min-h-10 px-3 py-1.5 pr-16',
-        )}>
-          <span className="flex min-w-0 items-center gap-2">
-            <input
-              aria-label={t.chat.renameTitle}
-              className={cn(
-                'min-w-0 flex-1 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 t-list text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring',
-              )}
-              onBlur={commitHistoryThreadTitleEdit}
-              onChange={(event) => onHistoryThreadTitleDraftChange(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  event.preventDefault()
-                  commitHistoryThreadTitleEdit()
-                }
-                if (event.key === 'Escape') {
-                  event.preventDefault()
-                  cancelHistoryThreadTitleEdit()
-                }
-              }}
-              ref={historyThreadTitleInputRef}
-              value={historyThreadTitleDraft}
-            />
-            {isThreadRunning && <RunningThreadDot label={t.chat.generating} />}
-          </span>
-          <span className="shrink-0 t-hint text-muted-foreground">
-            {displayRelativeDate(chatThreadHistoryTimeIso(thread), locale)}
-          </span>
-        </div>
-      ) : (
-        <button
-          aria-pressed={isActive}
-          className={cn(
-            'grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-            isNested ? 'min-h-8 px-2 py-1 pr-14' : 'min-h-10 px-3 py-1.5 pr-16',
-          )}
-          onClick={() => onSelectThread(thread.id)}
-          onDoubleClick={() => startHistoryThreadTitleEdit(thread.id, thread.title)}
-          title={t.chat.renameTitle}
-          type="button"
-        >
-          <span className="flex min-w-0 items-center gap-2">
-            <span className={cn(
-              'block min-w-0 flex-1 truncate t-list',
-              isNested ? 'text-foreground/85' : 'text-foreground',
-              isActive && 'text-foreground',
-            )}>
-              {thread.title}
-            </span>
-            {isThreadRunning && <RunningThreadDot label={t.chat.generating} />}
-          </span>
-          <span className="shrink-0 t-hint text-muted-foreground">
-            {displayRelativeDate(chatThreadHistoryTimeIso(thread), locale)}
-          </span>
-        </button>
-      )}
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            aria-label={`${t.chat.delete}: ${thread.title}`}
-            className={cn(
-              'absolute top-1/2 -translate-y-1/2 text-foreground/55 opacity-0 transition hover:text-destructive focus-visible:opacity-100 group-hover/thread:opacity-100',
-              isNested ? 'right-1 size-6' : 'right-1.5 size-7',
-            )}
-            disabled={isIncognito}
-            onClick={() => onDeleteThread(thread.id)}
-            size="icon"
-            type="button"
-            variant="ghost"
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              aria-label={`${isPinned ? t.chat.unpinThread : t.chat.pinThread}: ${thread.title}`}
+              className="absolute right-7 top-1/2 size-6 -translate-y-1/2 text-foreground/55 opacity-0 transition hover:text-foreground focus-visible:opacity-100 group-hover/explorer-item:opacity-100"
+              data-explorer-action
+              onClick={() => onTogglePinnedThread(thread.id)}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              {isPinned ? <PinOff className="icon-sm" /> : <Pin className="icon-sm" />}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{isPinned ? t.chat.unpinThread : t.chat.pinThread}</TooltipContent>
+        </Tooltip>
+        {isEditingTitle ? (
+          <div
+            className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-left"
+            data-explorer-action
           >
-            <Trash2 className="size-3.5" />
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent>{t.chat.delete}</TooltipContent>
-      </Tooltip>
+            <span className="flex min-w-0 items-center gap-2">
+              <input
+                aria-label={t.chat.renameTitle}
+                className="min-w-0 flex-1 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 t-list-regular text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                onBlur={commitHistoryThreadTitleEdit}
+                onChange={(event) => onHistoryThreadTitleDraftChange(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    commitHistoryThreadTitleEdit()
+                  }
+                  if (event.key === 'Escape') {
+                    event.preventDefault()
+                    cancelHistoryThreadTitleEdit()
+                  }
+                }}
+                ref={historyThreadTitleInputRef}
+                value={historyThreadTitleDraft}
+              />
+              {isThreadRunning && <ExplorerRunningIndicator label={t.chat.generating} />}
+            </span>
+            <span className="shrink-0 t-hint tabular-nums text-muted-foreground transition-opacity group-hover/explorer-item:opacity-0 group-focus-within/explorer-item:opacity-0">
+              {timeLabel}
+            </span>
+          </div>
+        ) : (
+          <button
+            aria-pressed={isActive}
+            className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            onClick={() => onSelectThread(thread.id)}
+            onDoubleClick={() => startHistoryThreadTitleEdit(thread.id, thread.title)}
+            title={t.chat.renameTitle}
+            type="button"
+          >
+            <span className="flex min-w-0 items-center gap-2">
+              <span className="block min-w-0 flex-1 truncate t-list-regular text-foreground">
+                {thread.title}
+              </span>
+              {isThreadRunning && <ExplorerRunningIndicator label={t.chat.generating} />}
+            </span>
+            <span className="shrink-0 t-hint tabular-nums text-muted-foreground transition-opacity group-hover/explorer-item:opacity-0 group-focus-within/explorer-item:opacity-0">
+              {timeLabel}
+            </span>
+          </button>
+        )}
+        {!isIncognito ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                aria-label={`${t.chat.delete}: ${thread.title}`}
+                className="absolute right-1 top-1/2 size-6 -translate-y-1/2 text-foreground/55 opacity-0 transition hover:text-destructive focus-visible:opacity-100 group-hover/explorer-item:opacity-100"
+                data-explorer-action
+                onClick={() => onDeleteThread(thread.id)}
+                size="icon"
+                type="button"
+                variant="ghost"
+              >
+                <Trash2 className="icon-sm" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t.chat.delete}</TooltipContent>
+          </Tooltip>
+        ) : null}
+      </ExplorerItemRow>
     </motion.div>
-  )
-}
-
-function RunningThreadDot({ label }: { label: string }) {
-  return (
-    <span
-      aria-label={label}
-      className="relative flex size-2 shrink-0"
-      title={label}
-    >
-      <span className="absolute inline-flex size-full rounded-full bg-brand/45 opacity-75 motion-safe:animate-ping" />
-      <span className="relative inline-flex size-2 rounded-full bg-brand" />
-    </span>
   )
 }
 

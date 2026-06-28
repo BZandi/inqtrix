@@ -93,6 +93,29 @@ def test_german_quotation_marks_are_accepted():
     ]
 
 
+def test_smart_quotes_and_dashes_verify_against_ascii_source():
+    # The PDF text-layer used curly quotes and an em dash; the model quoted the
+    # ASCII forms. A genuinely verbatim quote must not fail on typography alone.
+    evidence = ["[K1] X\nEr nannte “den Vertrag” — verbindlich."]
+    content = (
+        "ZITATE:\n"
+        '[K1] "Er nannte "den Vertrag" - verbindlich."\n'
+        "ANTWORT:\nAntwort [K1]."
+    )
+    assert check_grounding(content, evidence).quotes[0].verified is True
+
+
+def test_ligature_and_case_differences_verify():
+    # NFKC folds the ffi ligature; case folds. Still a verbatim substring.
+    evidence = ["[K1] X\nDie EFFIZIENTE Abwicklung."]
+    content = (
+        "ZITATE:\n"
+        '[K1] "die eﬃziente abwicklung."\n'
+        "ANTWORT:\nAntwort [K1]."
+    )
+    assert check_grounding(content, evidence).quotes[0].verified is True
+
+
 def test_paraphrase_is_visibly_unverified():
     content = (
         "ZITATE:\n"

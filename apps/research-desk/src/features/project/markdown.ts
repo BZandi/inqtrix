@@ -5,6 +5,7 @@ import type {
   ChatContextReferenceRecord,
   ChatMessageAttachmentRecord,
   ChatMessageModelResolutionRecord,
+  ChatMessageRequestContextRecord,
   ChatMessageRecord,
   ChatRuleRecord,
   ChatThreadRecord,
@@ -318,7 +319,7 @@ function buildProjectExportPlan(state: ProjectState): ProjectExportPlan {
 
   for (const runId of state.researchRunOrder) {
     const run = state.researchRuns[runId]
-    if (!run || run.status !== 'completed' || !run.result?.markdown) continue
+    if (!run || run.mode === 'knowledge' || run.status !== 'completed' || !run.result?.markdown) continue
     researchRuns.push({
       id: run.runId,
       item: run,
@@ -732,6 +733,7 @@ function renderChatBody(messages: ChatMessageRecord[]) {
       `role=${JSON.stringify(message.role)}`,
       `created_at=${JSON.stringify(message.createdAt)}`,
       ...renderMessageModelResolutionAttrs(message.modelResolution),
+      ...renderMessageRequestContextAttrs(message.requestContext),
     ].join(' ')
     const attachments = renderMessageAttachments(message.attachments ?? [])
     const body = [
@@ -807,6 +809,7 @@ function parseChatBody(body: string): ChatMessageRecord[] {
         createdAt: stringValue(current.attrs.created_at),
         id: stringValue(current.attrs.id),
         modelResolution: parseMessageModelResolutionAttrs(current.attrs),
+        requestContext: parseMessageRequestContextAttrs(current.attrs),
         role: current.attrs.role === 'user' ? 'user' : 'assistant',
       })
       current = null
@@ -847,6 +850,35 @@ function parseMessageModelResolutionAttrs(
     modelSource: attrs.model_source ?? '',
     requestedTier: attrs.model_requested_tier ?? '',
     tier: attrs.model_tier ?? '',
+  }
+}
+
+function renderMessageRequestContextAttrs(
+  context: ChatMessageRequestContextRecord | undefined,
+) {
+  if (!context?.knowledgeCollectionIds || context.knowledgeCollectionIds.length === 0) return []
+  return [
+    `request_context=${JSON.stringify(JSON.stringify({
+      knowledgeCollectionIds: context.knowledgeCollectionIds,
+    }))}`,
+  ]
+}
+
+function parseMessageRequestContextAttrs(
+  attrs: Record<string, string>,
+): ChatMessageRequestContextRecord | undefined {
+  if (!attrs.request_context) return undefined
+  try {
+    const value = JSON.parse(attrs.request_context) as unknown
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+    const record = value as { knowledgeCollectionIds?: unknown }
+    if (!Array.isArray(record.knowledgeCollectionIds)) return undefined
+    const knowledgeCollectionIds = record.knowledgeCollectionIds.filter((id): id is string => (
+      typeof id === 'string' && id.trim().length > 0
+    ))
+    return knowledgeCollectionIds.length > 0 ? { knowledgeCollectionIds } : undefined
+  } catch {
+    return undefined
   }
 }
 

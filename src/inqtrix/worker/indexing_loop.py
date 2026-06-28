@@ -75,6 +75,12 @@ class FencedIndexingJobHandle(IndexingJobHandle):
             fence_attempt=self._fence_attempt,
         )
 
+    def document_completed(self, document_id: str) -> None:
+        """Emit a per-document completion event, fenced to this attempt."""
+        self._store.document_completed(
+            self.job_id, document_id, fence_attempt=self._fence_attempt
+        )
+
     def complete(self) -> None:
         """Mark the job completed, fenced to this attempt."""
         self.terminal_landed = self._store.complete(

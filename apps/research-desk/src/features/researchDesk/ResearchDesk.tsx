@@ -27,6 +27,12 @@ import { type AuthMode, isCookieSessionMode } from '@/features/auth/authMode'
 import { AuthLockScreen } from './components/AuthLockScreen'
 import ChatWorkspace from '@/features/chat/ChatWorkspace'
 import type { KnowledgeIndexOption } from '@/features/chat/ChatWorkspace'
+import {
+  buildChatRetryMessages,
+  findAssistantRetryTarget,
+  type ChatRetryMode,
+  type ChatRetryOptions,
+} from '@/features/chat/retry'
 import { useChatHistoryApi } from '@/features/chat/useChatHistoryApi'
 import { useEditorHistoryApi } from '@/features/editor/useEditorHistoryApi'
 import { useAssetHistoryApi } from '@/features/fileLibrary/useAssetHistoryApi'
@@ -63,9 +69,11 @@ import type {
   ChatContextReferenceRecord,
   ChatMessageAttachmentRecord,
   ChatMessageModelResolutionRecord,
+  ChatMessageRequestContextRecord,
   ChatMessageRecord,
   ChatThreadRecord,
   EmbedModelDescriptor,
+  KnowledgeAnswerRecord,
   KnowledgeSessionRecord,
   KnowledgeThreadItemRecord,
   ProjectPreferences,
@@ -90,16 +98,24 @@ import type {
   ResearchRunSummary,
 } from '@/features/researchRuns/types'
 import SettingsWorkspace from '@/features/settings/SettingsWorkspace'
-import { KnowledgeWorkspace, type KnowledgeMode } from '@/features/knowledge/KnowledgeWorkspace'
+import { KnowledgeWorkspace, type KnowledgeAskOptions, type KnowledgeMode } from '@/features/knowledge/KnowledgeWorkspace'
+import { knowledgeAnswerFromRunResult } from '@/features/knowledge/answer'
+import { buildKnowledgeAskMessages } from '@/features/knowledge/conversationContext'
+import { applyKnowledgeRunEvent } from '@/features/knowledge/runSteps'
 import { useKnowledgeSessionsApi } from '@/features/knowledge/useKnowledgeSessionsApi'
 import {
   buildDemoAskScript,
   createDemoKnowledgeDataSource,
   DEMO_KNOWLEDGE_DEFAULT_PROFILE,
   DEMO_KNOWLEDGE_DEFAULT_TOP_K,
+  DEMO_KNOWLEDGE_EVIDENCE_K_MAX,
   DEMO_KNOWLEDGE_PROFILE_MANIFEST,
+  DEMO_KNOWLEDGE_RERANKER_PROVIDER,
 } from '@/features/knowledge/demo'
-import { knowledgeProfileOptionsFromManifest } from '@/features/knowledge/profileOptions'
+import {
+  knowledgeProfileOptionsFromManifest,
+  resolveKnowledgeDefaultProfileId,
+} from '@/features/knowledge/profileOptions'
 import type { KnowledgeCollectionOption, KnowledgeDataSource } from '@/features/knowledge/types'
 import { useAuthSession } from '@/features/auth/useAuthSession'
 import { QuotaMeterProvider } from '@/features/quota/QuotaMeterContext'
@@ -109,12 +125,17 @@ import {
   DEMO_RUNNING_MAX_ROUNDS,
   DEMO_RUNNING_RUN_ID,
 } from '@/features/project/seedProject'
+import { isSharingEnabled } from '@/features/sharing/gate'
 import { personLabel } from '@/features/sharing/shareModel'
 import { useOutgoingShareCounts, useSharedWithMe } from '@/features/sharing/useShareSignals'
+import { useSharingInbox } from '@/features/sharing/useSharingInbox'
+import { seedSystemHealth } from '@/features/admin/demo'
 import { useTemplateSync } from '@/features/promptLibrary/useTemplateSync'
 import { FileLibraryWorkspace } from '@/features/fileLibrary/FileLibraryWorkspace'
 import { PromptLibraryWorkspace } from '@/features/promptLibrary/PromptLibraryWorkspace'
 import { ingestFiles, scheduleServerParse, type ServerFileUpload } from '@/features/files/ingest'
+import { chatStateForIncognito, ingestIncognitoFiles } from './incognitoAttachments'
+import { moveItem } from '@/features/composer/reorder'
 import { FILE_SECTION_TEMP_ID } from '@/features/files/sections'
 import {
   evaluateBudget,
@@ -188,7 +209,9 @@ export function ResearchDesk({
     setContrastMode,
     setPreset: setThemePreset,
     setTheme,
+    setUserBubbleTone,
     theme,
+    userBubbleTone,
   } = useTheme()
   const reduceMotion = useReducedMotion()
   const isDesktop = useMediaQuery('(min-width: 1024px)')
@@ -222,6 +245,14 @@ export function ResearchDesk({
     t.chat.incognitoTitle,
     t.chat.incognitoPreview,
   ))
+  // Incognito chat attachments are held here, NOT in the synced `state.fileAssets`,
+  // so they never upload, never sync to the DB, and never surface in the library
+  // or `@files:` mention list. Mirrors the local-only `incognitoThread`. The refs
+  // are kept locally too (not in the reducer's `pendingChatAttachmentRefs`) because
+  // the reducer's `contextRefExists` guard would reject a ref whose asset is not in
+  // `state.fileAssets`. Both are discarded on every incognito-session reset.
+  const [incognitoAssets, setIncognitoAssets] = useState<Record<string, FileAssetRecord>>({})
+  const [incognitoAttachmentRefs, setIncognitoAttachmentRefs] = useState<ChatContextReferenceRecord[]>([])
   const [chatStreamingEnabled, setChatStreamingEnabled] = useState(true)
   const chatControllerByThreadIdRef = useRef<Map<string, AbortController>>(new Map())
   const chatFlushFrameByThreadIdRef = useRef<Map<string, number>>(new Map())
@@ -334,12 +365,39 @@ export function ResearchDesk({
   // these must not outlive a full reload (per the "page-switch only" decision).
   const [chatDraft, setChatDraft] = useState('')
   const [researchQuestion, setResearchQuestion] = useState('')
-  const combinedChatRefs = dedupeChatContextRefs([...chatPillRefs, ...state.ui.pendingChatAttachmentRefs])
-  const pendingChips = chatAttachmentChipsFromRefs(state, combinedChatRefs)
+  // In incognito the pinned attachments live in local state (incognitoAttachmentRefs),
+  // never in the reducer — so they stay out of the synced store. Inline @mention
+  // pills (chatPillRefs) only ever reference existing library data, so they are
+  // unchanged in both modes.
+  const pendingChatRefs = isIncognitoChat ? incognitoAttachmentRefs : state.ui.pendingChatAttachmentRefs
+  const combinedChatRefs = dedupeChatContextRefs([...chatPillRefs, ...pendingChatRefs])
+  // Resolver view for the chat path: in incognito it also sees the local-only
+  // attachments, so chips/budget/the outgoing message can resolve their bodies
+  // without those assets ever entering the synced store (see incognitoAttachments).
+  const chatResolveState = isIncognitoChat ? chatStateForIncognito(state, incognitoAssets) : state
+  const pendingChips = chatAttachmentChipsFromRefs(chatResolveState, combinedChatRefs)
   const fileOptions = fileMentionOptions(state)
   const fileGroupOptions = fileGroupMentionOptions(state)
 
   const handleAttachChatFiles = async (files: File[]) => {
+    if (isIncognitoChat) {
+      // Local-only: client-parse without upload, hold the records + refs in
+      // incognito state (NOT the reducer, whose contextRefExists guard would
+      // drop a ref whose asset is absent from state.fileAssets).
+      const existingLabels = Object.values(incognitoAssets).map((asset) => asset.label)
+      const assets = await ingestIncognitoFiles(files, existingLabels)
+      if (assets.length === 0) return
+      setIncognitoAssets((current) => {
+        const next = { ...current }
+        for (const asset of assets) next[asset.id] = asset
+        return next
+      })
+      setIncognitoAttachmentRefs((current) => [
+        ...current,
+        ...assets.map((asset) => ({ fileId: asset.id, kind: 'file-asset' as const })),
+      ])
+      return
+    }
     const existingLabels = projectFileAssets(state).map((asset) => asset.label)
     const assets = await ingestFiles(
       files,
@@ -357,7 +415,7 @@ export function ResearchDesk({
   }
 
   const pendingAttachmentBudget = evaluateBudget(
-    chatAttachmentsFromRefs(state, combinedChatRefs).map((attachment) => ({
+    chatAttachmentsFromRefs(chatResolveState, combinedChatRefs).map((attachment) => ({
       content: attachment.contentMarkdown,
       label: attachment.label ?? attachment.title,
     })),
@@ -383,8 +441,8 @@ export function ResearchDesk({
   // effect then re-arms only on a genuine preference change, matching the
   // stable-reference contract the sibling sync hooks rely on (M6c).
   const currentPreferences = useMemo<ProjectPreferences>(
-    () => ({ contrastMode, locale, theme, themePreset }),
-    [contrastMode, locale, theme, themePreset],
+    () => ({ contrastMode, locale, theme, themePreset, userBubbleTone }),
+    [contrastMode, locale, theme, themePreset, userBubbleTone],
   )
   const handleApiSummary = useCallback((summary: ResearchRunSummary, options?: { select?: boolean }) => {
     dispatch({ select: options?.select, summary, type: 'upsertApiRunSummary' })
@@ -411,6 +469,10 @@ export function ResearchDesk({
     stackNames: apiStackNames,
     stacks: apiStacks,
   } = useServerDiscovery({ enabled: !isDemoMode })
+  const effectiveHealth = useMemo(
+    () => (isDemoMode ? seedSystemHealth() : health),
+    [health, isDemoMode],
+  )
   // Client AI-request aborts are derived from the server's published HTTP waits
   // (the /v1/capabilities timeouts block) so a raised server-side timeout is not
   // silently capped by the browser. A ref keeps run-start handlers on the
@@ -495,7 +557,7 @@ export function ResearchDesk({
   })
   // One badge for any API error: discovery probes or run operations.
   const apiError = discoveryError ?? runError
-  const singleStackLabel = useMemo(() => resolveSingleStackLabel(health), [health])
+  const singleStackLabel = useMemo(() => resolveSingleStackLabel(effectiveHealth), [effectiveHealth])
   const knowledgeAvailable = !isDemoMode && capabilities?.features.knowledge === true
   const embedCatalog = useMemo<readonly EmbedModelDescriptor[]>(() => {
     const serverCatalog = capabilities?.knowledge?.embedding_catalog
@@ -629,7 +691,7 @@ export function ResearchDesk({
     syncActive: projectSyncActive,
     workspaceId: effectiveWorkspaceId,
   })
-  // Account preferences (theme/locale/contrast) are an ACCOUNT tier, not
+  // Account preferences (theme/locale/contrast/bubble tone) are an ACCOUNT tier, not
   // project data: they sync on a real per-user session (cookieAuthed) + the
   // durable capability, independent of the project's server-sync opt-in, and
   // are NOT part of the project import. "Account wins on login".
@@ -701,8 +763,14 @@ export function ResearchDesk({
   const [knowledgeCollectionIds, setKnowledgeCollectionIds] = useState<string[]>([])
   const [knowledgeProfileId, setKnowledgeProfileId] = useState<string | null>(null)
   const [knowledgeTopK, setKnowledgeTopK] = useState<number | null>(null)
+  const [knowledgeFinalK, setKnowledgeFinalK] = useState<number | null>(null)
   const [knowledgeAskError, setKnowledgeAskError] = useState<string | null>(null)
+  const [isIncognitoKnowledge, setIsIncognitoKnowledge] = useState(false)
+  const [incognitoKnowledgeAskError, setIncognitoKnowledgeAskError] = useState<string | null>(null)
+  const [incognitoKnowledgeItems, setIncognitoKnowledgeItems] = useState<KnowledgeThreadItemRecord[]>([])
   const knowledgeDemoTimeoutsRef = useRef<number[]>([])
+  const incognitoKnowledgeRunIdsRef = useRef<Set<string>>(new Set())
+  const incognitoKnowledgeItemsRef = useRef<KnowledgeThreadItemRecord[]>([])
   const knowledgeCollections = useMemo<KnowledgeCollectionOption[]>(() => {
     if (!knowledgeWorkspaceVisible) return []
     return projectVectorIndexes(state)
@@ -728,12 +796,22 @@ export function ResearchDesk({
     ),
     [capabilities, isDemoMode],
   )
-  const knowledgeDefaultProfileId = isDemoMode
+  const knowledgeServerDefaultProfileId = isDemoMode
     ? DEMO_KNOWLEDGE_DEFAULT_PROFILE
     : capabilities?.knowledge?.default_profile ?? null
+  const knowledgeDefaultProfileId = useMemo(
+    () => resolveKnowledgeDefaultProfileId(knowledgeProfileOptions, knowledgeServerDefaultProfileId),
+    [knowledgeProfileOptions, knowledgeServerDefaultProfileId],
+  )
   const knowledgeDefaultTopK = isDemoMode
     ? DEMO_KNOWLEDGE_DEFAULT_TOP_K
     : capabilities?.knowledge?.default_top_k ?? DEMO_KNOWLEDGE_DEFAULT_TOP_K
+  const knowledgeEvidenceKMax = isDemoMode
+    ? DEMO_KNOWLEDGE_EVIDENCE_K_MAX
+    : capabilities?.knowledge?.evidence_k_max ?? DEMO_KNOWLEDGE_EVIDENCE_K_MAX
+  const knowledgeRerankerProvider = isDemoMode
+    ? DEMO_KNOWLEDGE_RERANKER_PROVIDER
+    : capabilities?.knowledge?.reranker_provider ?? null
   const knowledgeItems = useMemo(
     () => projectKnowledgeItems(state),
     [state.knowledgeItemOrder, state.knowledgeItems, state.selectedKnowledgeSessionId],
@@ -742,6 +820,9 @@ export function ResearchDesk({
     () => projectAllKnowledgeItems(state),
     [state.knowledgeItemOrder, state.knowledgeItems],
   )
+  const displayedKnowledgeItems = isIncognitoKnowledge ? incognitoKnowledgeItems : knowledgeItems
+  const displayedKnowledgeAllItems = isIncognitoKnowledge ? incognitoKnowledgeItems : knowledgeAllItems
+  const displayedKnowledgeAskError = isIncognitoKnowledge ? incognitoKnowledgeAskError : knowledgeAskError
   const knowledgeSessions = useMemo(
     () => projectKnowledgeSessions(state),
     [state.knowledgeSessionOrder, state.knowledgeSessions],
@@ -756,7 +837,7 @@ export function ResearchDesk({
       state.knowledgeSessions,
     ],
   )
-  const isKnowledgeAskRunning = knowledgeAllItems.some((item) => item.status === 'running')
+  const isKnowledgeAskRunning = displayedKnowledgeAllItems.some((item) => item.status === 'running')
   const knowledgeDataSource = useMemo<KnowledgeDataSource>(() => {
     if (isDemoMode) return createDemoKnowledgeDataSource()
     const clientOptions = { apiKey: apiKey.trim() || undefined, workspaceId: effectiveWorkspaceId }
@@ -775,6 +856,10 @@ export function ResearchDesk({
     }
   }, [apiKey, isDemoMode, serverFilesAvailable, projectPersistenceAvailable, effectiveWorkspaceId])
 
+  useEffect(() => {
+    incognitoKnowledgeItemsRef.current = incognitoKnowledgeItems
+  }, [incognitoKnowledgeItems])
+
   // Falls back to research when the knowledge capability disappears
   // (e.g. backend switch) while the view is active.
   useEffect(() => {
@@ -790,34 +875,214 @@ export function ResearchDesk({
     }
   }, [])
 
+  useEffect(() => {
+    if (knowledgeWorkspaceVisible) return
+    discardServerKnowledgeRuns(
+      knowledgeRunIdsFromThreadItems(incognitoKnowledgeItemsRef.current),
+      { cancelIfActive: true },
+    )
+    incognitoKnowledgeRunIdsRef.current.clear()
+    setIncognitoKnowledgeItems([])
+    setIncognitoKnowledgeAskError(null)
+    setIsIncognitoKnowledge(false)
+  }, [knowledgeWorkspaceVisible])
+
+  function discardServerKnowledgeRuns(
+    runIds: string[],
+    options: { cancelIfActive?: boolean } = {},
+  ) {
+    const uniqueRunIds = [...new Set(runIds)].filter(Boolean)
+    if (uniqueRunIds.length === 0 || isDemoMode || !discoveryReady || !authUnlocked) return
+    void Promise.all(uniqueRunIds.map(async (runId) => {
+      try {
+        await deleteRun(runId, { cancelIfActive: options.cancelIfActive })
+      } catch (error) {
+        console.warn('Inqtrix knowledge run delete failed.', error)
+      }
+    }))
+  }
+
+  function deleteLocalResearchRunRecords(runIds: string[]) {
+    for (const runId of new Set(runIds)) {
+      if (state.researchRuns[runId]) dispatch({ jobId: runId, type: 'deleteJob' })
+    }
+  }
+
+  function retireKnowledgeRunRecords(
+    runIds: string[],
+    options: { cancelIfActive?: boolean } = {},
+  ) {
+    deleteLocalResearchRunRecords(runIds)
+    discardServerKnowledgeRuns(runIds, options)
+  }
+
+  function updateIncognitoKnowledgeItem(
+    runId: string,
+    update: (item: KnowledgeThreadItemRecord) => KnowledgeThreadItemRecord,
+  ) {
+    if (!incognitoKnowledgeRunIdsRef.current.has(runId)) return
+    setIncognitoKnowledgeItems((current) =>
+      current.map((item) => (item.runId === runId ? update(item) : item)),
+    )
+  }
+
+  function startIncognitoKnowledgeAsk(item: KnowledgeThreadItemRecord, replaceItemId?: string) {
+    incognitoKnowledgeRunIdsRef.current.add(item.runId ?? item.id)
+    setIncognitoKnowledgeItems((current) => {
+      if (!replaceItemId) return [...current, item]
+      let replaced = false
+      const next = current.map((existing) => {
+        if (existing.id !== replaceItemId) return existing
+        replaced = true
+        return { ...item, id: existing.id, sessionId: existing.sessionId }
+      })
+      return replaced ? next : [...current, item]
+    })
+  }
+
+  function applyIncognitoKnowledgeEvent(event: ResearchRunEvent) {
+    const terminalExit = event.type === 'inqtrix.run.failed' || event.type === 'inqtrix.run.cancelled'
+    const terminalStatus = event.type === 'inqtrix.run.cancelled' ? 'cancelled' : 'failed'
+    updateIncognitoKnowledgeItem(event.run_id, (item) => {
+      if (item.status !== 'running') return item
+      const progress = applyKnowledgeRunEvent(item.progress, event)
+      if (terminalExit) {
+        const error = typeof (event.data.error as { message?: unknown } | undefined)?.message === 'string'
+          ? String((event.data.error as { message?: unknown }).message)
+          : item.error
+        return { ...item, error, progress, status: terminalStatus }
+      }
+      return progress === item.progress ? item : { ...item, progress }
+    })
+    if (terminalExit) {
+      incognitoKnowledgeRunIdsRef.current.delete(event.run_id)
+      discardServerKnowledgeRuns([event.run_id])
+    }
+  }
+
+  function completeIncognitoKnowledgeRun(runId: string, answer: KnowledgeAnswerRecord) {
+    const completedAt = new Date().toISOString()
+    updateIncognitoKnowledgeItem(runId, (item) => ({
+      ...item,
+      answer,
+      completedAt,
+      progress: {
+        ...item.progress,
+        steps: item.progress.steps.map((step) => (
+          step.status === 'done' ? step : { ...step, status: 'done' as const }
+        )),
+      },
+      status: 'completed',
+    }))
+    incognitoKnowledgeRunIdsRef.current.delete(runId)
+    discardServerKnowledgeRuns([runId])
+  }
+
+  function failIncognitoKnowledgeRun(runId: string, message: string) {
+    updateIncognitoKnowledgeItem(runId, (item) => (
+      item.status === 'completed' ? item : { ...item, error: message, status: 'failed' }
+    ))
+    incognitoKnowledgeRunIdsRef.current.delete(runId)
+    discardServerKnowledgeRuns([runId], { cancelIfActive: true })
+  }
+
+  function setKnowledgeIncognito(enabled: boolean) {
+    if (!enabled) {
+      discardServerKnowledgeRuns(
+        knowledgeRunIdsFromThreadItems(incognitoKnowledgeItemsRef.current),
+        { cancelIfActive: true },
+      )
+    }
+    incognitoKnowledgeRunIdsRef.current.clear()
+    setIncognitoKnowledgeItems([])
+    setIncognitoKnowledgeAskError(null)
+    setKnowledgeAskError(null)
+    setIsIncognitoKnowledge(enabled)
+  }
+
+  function clearKnowledgeAskSession() {
+    if (isIncognitoKnowledge) {
+      discardServerKnowledgeRuns(
+        knowledgeRunIdsFromThreadItems(incognitoKnowledgeItemsRef.current),
+        { cancelIfActive: true },
+      )
+      incognitoKnowledgeRunIdsRef.current.clear()
+      setIncognitoKnowledgeItems([])
+      setIncognitoKnowledgeAskError(null)
+      return
+    }
+    if (state.selectedKnowledgeSessionId) {
+      retireKnowledgeRunRecords(knowledgeRunIdsFromThreadItems(knowledgeItems), { cancelIfActive: true })
+      dispatch({ sessionId: state.selectedKnowledgeSessionId, type: 'clearKnowledgeSession' })
+    }
+  }
+
+  function deleteKnowledgeAskItems(itemIds: string[]) {
+    const itemIdSet = new Set(itemIds)
+    if (isIncognitoKnowledge) {
+      const deletedItems = incognitoKnowledgeItemsRef.current.filter((item) => itemIdSet.has(item.id))
+      discardServerKnowledgeRuns(knowledgeRunIdsFromThreadItems(deletedItems), { cancelIfActive: true })
+      for (const item of deletedItems) {
+        if (item.runId) incognitoKnowledgeRunIdsRef.current.delete(item.runId)
+      }
+      setIncognitoKnowledgeItems((current) => current.filter((item) => !itemIdSet.has(item.id)))
+      return
+    }
+    const deletedItems = itemIds.flatMap((itemId) => {
+      const item = state.knowledgeItems[itemId]
+      return item ? [item] : []
+    })
+    retireKnowledgeRunRecords(knowledgeRunIdsFromThreadItems(deletedItems), { cancelIfActive: true })
+    dispatch({ itemIds, type: 'deleteKnowledgeItems' })
+  }
+
+  function deleteKnowledgeAskSession(sessionId: string) {
+    const deletedItems = state.knowledgeItemOrder.flatMap((itemId) => {
+      const item = state.knowledgeItems[itemId]
+      return item?.sessionId === sessionId ? [item] : []
+    })
+    retireKnowledgeRunRecords(knowledgeRunIdsFromThreadItems(deletedItems), { cancelIfActive: true })
+    dispatch({ sessionId, type: 'deleteKnowledgeSession' })
+  }
+
   async function handleKnowledgeAsk(
     question: string,
-    options: {
-      collectionIds?: string[]
-      profileId?: string | null
-      topK?: number | null
-    } = {},
+    options: KnowledgeAskOptions = {},
   ) {
     if (isKnowledgeAskRunning) return
     if (!isDemoMode && !authUnlocked) return
+    const replaceItemId = options.replaceItemId
+    const setActiveAskError = isIncognitoKnowledge ? setIncognitoKnowledgeAskError : setKnowledgeAskError
     const selectedIds = options.collectionIds ?? knowledgeCollectionIds
-    const selectedProfileId = options.profileId ?? knowledgeProfileId
-    const selectedTopK = options.topK ?? knowledgeTopK
+    const selectedProfileId = options.profileId ?? knowledgeProfileId ?? knowledgeDefaultProfileId
+    const selectedTopK = Object.prototype.hasOwnProperty.call(options, 'topK')
+      ? options.topK ?? null
+      : knowledgeTopK
+    const selectedFinalK = Object.prototype.hasOwnProperty.call(options, 'finalK')
+      ? options.finalK ?? null
+      : knowledgeFinalK
     const selected = knowledgeCollections.filter((collection) =>
       selectedIds.includes(collection.id))
     if (selected.length === 0) {
-      setKnowledgeAskError(t.knowledge.collectionsRequired)
+      setActiveAskError(t.knowledge.collectionsRequired)
       return
     }
-    setKnowledgeAskError(null)
+    setActiveAskError(null)
 
     const collectionTitles = selected.map((collection) => collection.title)
     const backendCollectionIds = selected.map((collection) => collection.collectionId)
+    const replacedItem = replaceItemId
+      ? isIncognitoKnowledge
+        ? incognitoKnowledgeItems.find((item) => item.id === replaceItemId) ?? null
+        : state.knowledgeItems[replaceItemId] ?? null
+      : null
     const sessionId =
-      state.selectedKnowledgeSessionId
+      replacedItem?.sessionId
+      ?? (isIncognitoKnowledge ? 'ks-incognito' : state.selectedKnowledgeSessionId)
       ?? state.knowledgeSessionOrder[0]
       ?? createClientId('ks')
     const buildItem = (runId: string): KnowledgeThreadItemRecord => ({
+      collectionIds: selected.map((collection) => collection.id),
       collectionTitles,
       createdAt: new Date().toISOString(),
       id: createClientId('kn'),
@@ -827,44 +1092,137 @@ export function ResearchDesk({
       runId,
       sessionId,
       status: 'running',
+      topK: selectedTopK ?? null,
+      finalK: selectedFinalK ?? null,
     })
+    const startPersistedItem = (item: KnowledgeThreadItemRecord) => {
+      if (replaceItemId) {
+        dispatch({ item, replacedItemId: replaceItemId, type: 'restartKnowledgeAsk' })
+        return
+      }
+      dispatch({ item, type: 'startKnowledgeAsk' })
+    }
 
     if (isDemoMode) {
       const runId = createClientId('kn-demo')
-      dispatch({ item: buildItem(runId), type: 'startKnowledgeAsk' })
+      const item = buildItem(runId)
+      if (isIncognitoKnowledge) {
+        startIncognitoKnowledgeAsk(item, replaceItemId)
+      } else {
+        startPersistedItem(item)
+      }
+      if (replaceItemId && replacedItem?.runId) {
+        if (isIncognitoKnowledge) {
+          discardServerKnowledgeRuns([replacedItem.runId], { cancelIfActive: true })
+        } else {
+          retireKnowledgeRunRecords([replacedItem.runId], { cancelIfActive: true })
+        }
+      }
       const script = buildDemoAskScript(runId)
       let elapsed = 0
       for (const step of script.steps) {
         elapsed += step.delayMs
         knowledgeDemoTimeoutsRef.current.push(window.setTimeout(() => {
-          dispatch({ event: step.event, type: 'appendApiRunEvent' })
+          if (isIncognitoKnowledge) {
+            applyIncognitoKnowledgeEvent(step.event)
+          } else {
+            dispatch({ event: step.event, type: 'appendApiRunEvent' })
+          }
         }, elapsed))
       }
       knowledgeDemoTimeoutsRef.current.push(window.setTimeout(() => {
-        dispatch({ answer: script.answer, runId, type: 'completeKnowledgeItem' })
+        if (isIncognitoKnowledge) {
+          completeIncognitoKnowledgeRun(runId, script.answer)
+        } else {
+          dispatch({ answer: script.answer, runId, type: 'completeKnowledgeItem' })
+        }
       }, elapsed + script.completeAfterMs))
       return
     }
 
+    const messages = buildKnowledgeAskMessages(displayedKnowledgeItems, question, { replaceItemId })
     const summary = await submitRun(
       {
         knowledgeFilters: {
           collectionIds: backendCollectionIds,
           ...(selectedProfileId ? { profile: selectedProfileId } : {}),
           ...(selectedTopK ? { topK: selectedTopK } : {}),
+          ...(selectedFinalK ? { finalK: selectedFinalK } : {}),
         },
+        messages,
         mode: 'knowledge',
         question,
       },
       {
+        callbacks: isIncognitoKnowledge
+          ? {
+            onEvent: applyIncognitoKnowledgeEvent,
+            onResult: (result) => completeIncognitoKnowledgeRun(result.run_id, knowledgeAnswerFromRunResult(result)),
+            onRunError: failIncognitoKnowledgeRun,
+          }
+          : undefined,
         onCreated: (created) => {
-          dispatch({ item: buildItem(created.run_id), type: 'startKnowledgeAsk' })
+          const item = buildItem(created.run_id)
+          if (isIncognitoKnowledge) {
+            startIncognitoKnowledgeAsk(item, replaceItemId)
+          } else {
+            startPersistedItem(item)
+          }
+          if (replaceItemId && replacedItem?.runId) {
+            if (isIncognitoKnowledge) {
+              discardServerKnowledgeRuns([replacedItem.runId], { cancelIfActive: true })
+            } else {
+              retireKnowledgeRunRecords([replacedItem.runId], { cancelIfActive: true })
+            }
+          }
         },
         select: false,
+        suppressSummary: isIncognitoKnowledge,
       },
     )
     if (!summary) {
-      setKnowledgeAskError(t.knowledge.askFailed)
+      setActiveAskError(t.knowledge.askFailed)
+    }
+  }
+
+  async function handleStopKnowledgeAsk() {
+    const runningItem = displayedKnowledgeAllItems.find((item) => item.status === 'running' && item.runId)
+    if (!runningItem?.runId) return
+    const runId = runningItem.runId
+    const wasIncognito = isIncognitoKnowledge
+    const setActiveAskError = wasIncognito ? setIncognitoKnowledgeAskError : setKnowledgeAskError
+    const cancelEvent: ResearchRunEvent = {
+      created_at: Math.floor(Date.now() / 1000),
+      data: {
+        message: t.knowledge.runCancelled,
+        status: 'cancelled',
+      },
+      run_id: runId,
+      sequence: Date.now(),
+      type: 'inqtrix.run.cancelled',
+    }
+    const applyCancelEvent = () => {
+      if (wasIncognito) {
+        applyIncognitoKnowledgeEvent(cancelEvent)
+        return
+      }
+      dispatch({ event: cancelEvent, type: 'appendApiRunEvent' })
+    }
+
+    setActiveAskError(null)
+    if (isDemoMode) {
+      for (const timeoutId of knowledgeDemoTimeoutsRef.current) window.clearTimeout(timeoutId)
+      knowledgeDemoTimeoutsRef.current = []
+      applyCancelEvent()
+      return
+    }
+    if (!authUnlocked) return
+
+    try {
+      await cancelRun(runId)
+      applyCancelEvent()
+    } catch (error) {
+      setActiveAskError(messageFromError(error))
     }
   }
 
@@ -875,7 +1233,11 @@ export function ResearchDesk({
       ?? knowledgeCollections[0]
       ?? null
     if (!demoCollection) {
-      setKnowledgeAskError(t.knowledge.collectionsRequired)
+      if (isIncognitoKnowledge) {
+        setIncognitoKnowledgeAskError(t.knowledge.collectionsRequired)
+      } else {
+        setKnowledgeAskError(t.knowledge.collectionsRequired)
+      }
       return
     }
     setKnowledgeCollectionIds([demoCollection.id])
@@ -912,17 +1274,17 @@ export function ResearchDesk({
     ? state.ui.selectedStack
     : defaultStackName
   const chatModelOptionsState = useMemo(
-    () => resolveChatModelOptions(health, chatModelDiscoveryStack, apiStacks),
-    [apiStacks, chatModelDiscoveryStack, health],
+    () => resolveChatModelOptions(effectiveHealth, chatModelDiscoveryStack, apiStacks),
+    [apiStacks, chatModelDiscoveryStack, effectiveHealth],
   )
   const chatModelOptions = chatModelOptionsState.options
   const chatModelCatalog = useMemo(
-    () => resolveModelCatalog(health, chatModelDiscoveryStack, apiStacks),
-    [apiStacks, chatModelDiscoveryStack, health],
+    () => resolveModelCatalog(effectiveHealth, chatModelDiscoveryStack, apiStacks),
+    [apiStacks, chatModelDiscoveryStack, effectiveHealth],
   )
   const defaultChatModel = useMemo(
-    () => resolveDefaultChatModel(health, chatModelDiscoveryStack, apiStacks),
-    [apiStacks, chatModelDiscoveryStack, health],
+    () => resolveDefaultChatModel(effectiveHealth, chatModelDiscoveryStack, apiStacks),
+    [apiStacks, chatModelDiscoveryStack, effectiveHealth],
   )
   const selectedChatCard = chatModelCatalog.find(
     (entry) => entry.model_id === state.ui.selectedChatModel,
@@ -931,7 +1293,7 @@ export function ResearchDesk({
   // added live inside ChatWorkspace). The attachment content is the same the
   // request will carry; history mirrors buildChatMessages' last-20 window.
   const chatContextBase = useMemo(() => {
-    const attachments = chatAttachmentsFromRefs(state, combinedChatRefs)
+    const attachments = chatAttachmentsFromRefs(chatResolveState, combinedChatRefs)
     let documents = 0
     let reports = 0
     let rules = 0
@@ -947,7 +1309,7 @@ export function ResearchDesk({
       0,
     )
     return { documents, reports, rules, conversation }
-  }, [state, combinedChatRefs, displayedChatThread])
+  }, [chatResolveState, combinedChatRefs, displayedChatThread])
   const chatContextCapacity = {
     contextWindowTokens: selectedChatCard?.context_window_tokens ?? null,
     reservedOutputTokens: selectedChatCard?.max_output_tokens ?? 0,
@@ -985,11 +1347,33 @@ export function ResearchDesk({
   // Sharing exists on the oidc surface with a live session; the capability
   // flag keeps none/apikey deployments byte-identical. Demo mode simulates it
   // from seeded data so the feature is visible offline (like the quota meter).
-  const sharingEnabled =
-    isDemoMode
-    || (capabilities?.features.sharing === true
-      && isCookieMode
-      && authSession.status === 'authenticated')
+  const sharingEnabled = isSharingEnabled({
+    authMode,
+    capabilities,
+    isDemo: isDemoMode,
+    sessionStatus: authSession.status,
+  })
+  // Resolved once here so the settings panel and the nav badge share one
+  // source of truth (and one fetch); `null` when sharing is off hides the
+  // settings section entirely.
+  const sharingInbox = useSharingInbox({
+    demo: isDemoMode,
+    enabled: sharingEnabled,
+  })
+  // "Öffnen" in the sharing panel: navigate to the resource's home view. The
+  // accepted item already surfaces in that view's list (runs in the "Mit mir
+  // geteilt" divider, collections/templates in their lists), so no per-entity
+  // focus plumbing is built (would mean 3 divergent mechanisms).
+  const openSharedResource = useCallback((resourceType: string) => {
+    const view =
+      resourceType === 'knowledge_collection'
+        ? 'database'
+        : resourceType === 'prompt_template'
+          ? 'prompt-library'
+          : 'research'
+    setSettingsRequestedSection(null)
+    dispatch({ type: 'setActiveView', view })
+  }, [dispatch])
   // The quota meter follows the same cookie-session + capability gate;
   // demo mode shows seeded figures so the feature is visible offline.
   const quotaMeterEnabled =
@@ -1122,7 +1506,7 @@ export function ResearchDesk({
     try {
       const nextState = await loadProject({ onWorkStart: () => setProjectAction('load') })
       abortAllChatRequests()
-      // Account preferences (theme/locale/contrast) are an account tier, not
+      // Account preferences (theme/locale/contrast/bubble tone) are an account tier, not
       // project data: while a real per-user session drives them, a loaded
       // project file must NOT bleed its embedded prefs into the live theme
       // (which the account autosave would then PUT, clobbering the account
@@ -1130,7 +1514,7 @@ export function ResearchDesk({
       // when there is no account sync (the local-first case). M6c.
       if (!accountSyncActive) applyProjectPreferences(nextState.preferences)
       setIsIncognitoChat(false)
-      setIncognitoThread(createIncognitoThread(t.chat.incognitoTitle, t.chat.incognitoPreview))
+      resetIncognitoSession()
       setActiveChatRequestsByThreadId({})
       dispatch({ state: nextState, type: 'hydrateProject' })
     } catch (error) {
@@ -1226,6 +1610,8 @@ export function ResearchDesk({
     const explicitModel = options.model ?? state.ui.selectedChatModel
     const explicitEffort = options.effort ?? state.ui.selectedChatEffort
     const chatStack = stackDiscoveryStatus === 'available' ? state.ui.selectedStack : undefined
+    const knowledgeCollectionIds = options.knowledgeCollectionIds ?? []
+    const requestContext = chatRequestContextForKnowledge(knowledgeCollectionIds)
     const modelResolution = explicitModel
       ? explicitModelResolution(explicitModel, explicitEffort)
       : chatMessageModelResolutionForTier(
@@ -1235,7 +1621,7 @@ export function ResearchDesk({
         )
     const messageAttachmentRefs = dedupeChatContextRefs([
       ...inlineAttachmentRefs,
-      ...state.ui.pendingChatAttachmentRefs,
+      ...pendingChatRefs,
     ])
     // Guarantee any attached file-asset bodies are loaded before they are read
     // synchronously into the outgoing attachments (M6c load-on-use). The
@@ -1247,7 +1633,7 @@ export function ResearchDesk({
     let assetBodies: Map<string, string>
     try {
       assetBodies = await ensureAssetBodiesLoaded(
-        assetIdsFromChatRefs(state, messageAttachmentRefs),
+        assetIdsFromChatRefs(chatResolveState, messageAttachmentRefs),
       )
     } catch (error) {
       setChatErrorByThreadId((current) => ({
@@ -1257,7 +1643,7 @@ export function ResearchDesk({
       return
     }
     const messageAttachments = chatAttachmentsFromRefs(
-      state,
+      chatResolveState,
       messageAttachmentRefs,
       assetBodies,
     )
@@ -1276,10 +1662,14 @@ export function ResearchDesk({
           contentMarkdown: trimmedContent,
           createdAt,
           modelResolution,
+          requestContext,
           userMessageId,
         },
       ))
-      dispatch({ type: 'clearChatDraftAttachment' })
+      // Clear only the draft refs; keep incognitoAssets so the same file can be
+      // re-referenced within the session (mirrors how a normal chat keeps its
+      // asset in state.fileAssets after sending).
+      setIncognitoAttachmentRefs([])
     } else {
       dispatch({
         assistantMessageId,
@@ -1287,6 +1677,7 @@ export function ResearchDesk({
         createdAt,
         attachmentRefs: messageAttachmentRefs,
         modelResolution,
+        requestContext,
         threadId,
         type: 'startChatExchange',
         userMessageId,
@@ -1315,7 +1706,6 @@ export function ResearchDesk({
       },
     }))
 
-    const knowledgeCollectionIds = options.knowledgeCollectionIds ?? []
     const chainTemplates = state.ui.chatChainingEnabled && knowledgeCollectionIds.length === 0
       ? chatFunctionChainTemplatesFromRefs(state.chatRules, messageAttachmentRefs)
       : []
@@ -1329,7 +1719,7 @@ export function ResearchDesk({
         model: explicitModel,
         effort: explicitEffort,
         sourceAttachments: chatAttachmentsFromRefs(
-          state,
+          chatResolveState,
           messageAttachmentRefs.filter((ref) => isPillKind(ref.kind)),
           assetBodies,
         ),
@@ -1757,6 +2147,114 @@ export function ResearchDesk({
     })
   }
 
+  async function handleRetryAssistantMessage(
+    threadId: string,
+    assistantMessageId: string,
+    mode: ChatRetryMode,
+    options: ChatRetryOptions = {},
+  ) {
+    if (!isDemoMode && !authUnlocked) return
+
+    const selectedThread = threadId === INCOGNITO_THREAD_ID
+      ? incognitoThread
+      : state.chatThreads[threadId]
+    const retryTarget = selectedThread
+      ? findAssistantRetryTarget(selectedThread.messages, assistantMessageId)
+      : null
+    if (!selectedThread || !retryTarget || chatControllerByThreadIdRef.current.has(threadId)) return
+    if (chatControllerByThreadIdRef.current.size >= MAX_PARALLEL_CHAT_REQUESTS) {
+      setChatNoticeByThreadId((current) => ({
+        ...current,
+        [threadId]: t.chat.parallelLimitReached,
+      }))
+      return
+    }
+
+    const hasRetryModelOverride = (
+      Object.prototype.hasOwnProperty.call(options, 'model')
+      || Object.prototype.hasOwnProperty.call(options, 'modelTier')
+      || Object.prototype.hasOwnProperty.call(options, 'effort')
+    )
+    const modelTier = hasRetryModelOverride
+      ? options.modelTier ?? null
+      : state.ui.selectedChatModelTier
+    const explicitModel = hasRetryModelOverride
+      ? options.model ?? null
+      : state.ui.selectedChatModel
+    const explicitEffort = hasRetryModelOverride
+      ? options.effort ?? null
+      : state.ui.selectedChatEffort
+    const modelResolution = explicitModel
+      ? explicitModelResolution(explicitModel, explicitEffort)
+      : chatMessageModelResolutionForTier(
+          chatModelOptionsState,
+          defaultChatModel,
+          modelTier,
+        )
+    const knowledgeCollectionIds = retryTarget.assistantMessage.requestContext?.knowledgeCollectionIds ?? []
+    const requestContext = chatRequestContextForKnowledge(knowledgeCollectionIds)
+    const nextAssistantMessageId = createClientId('msg')
+    const createdAt = new Date().toISOString()
+
+    if (threadId === INCOGNITO_THREAD_ID) {
+      setIncognitoThread((current) => retryAssistantResponseInThread(
+        current,
+        {
+          assistantMessageId: nextAssistantMessageId,
+          createdAt,
+          modelResolution,
+          requestContext,
+          replacedAssistantMessageId: assistantMessageId,
+        },
+      ))
+    } else {
+      dispatch({
+        assistantMessageId: nextAssistantMessageId,
+        createdAt,
+        modelResolution,
+        requestContext,
+        replacedAssistantMessageId: assistantMessageId,
+        threadId,
+        type: 'startChatAssistantRetry',
+      })
+    }
+    setChatErrorByThreadId((current) => {
+      const next = { ...current }
+      delete next[threadId]
+      return next
+    })
+    setChatNoticeByThreadId((current) => {
+      const next = { ...current }
+      delete next[threadId]
+      return next
+    })
+
+    const controller = new AbortController()
+    chatControllerByThreadIdRef.current.set(threadId, controller)
+    chatStreamContentByThreadIdRef.current.set(threadId, '')
+    setActiveChatRequestsByThreadId((current) => ({
+      ...current,
+      [threadId]: {
+        assistantMessageId: nextAssistantMessageId,
+        phase: 'submitted',
+        threadId,
+      },
+    }))
+
+    await runChatAssistantRequest({
+      assistantMessageId: nextAssistantMessageId,
+      controller,
+      effort: explicitEffort,
+      knowledgeCollectionIds,
+      model: explicitModel,
+      modelTier,
+      requestMessages: buildChatRetryMessages(retryTarget, mode),
+      stack: stackDiscoveryStatus === 'available' ? state.ui.selectedStack : undefined,
+      threadId,
+      useStreaming: chatStreamingEnabled,
+    })
+  }
+
   function handleStopChatGeneration() {
     if (!activeChatThreadId) return
     chatControllerByThreadIdRef.current.get(activeChatThreadId)?.abort()
@@ -1813,7 +2311,7 @@ export function ResearchDesk({
       if (isIncognitoChat && chatControllerByThreadIdRef.current.has(INCOGNITO_THREAD_ID)) return
       if (isIncognitoChat) {
         setIsIncognitoChat(false)
-        setIncognitoThread(createIncognitoThread(t.chat.incognitoTitle, t.chat.incognitoPreview))
+        resetIncognitoSession()
       }
       dispatch({ groupId, type: 'createChatThread' })
       return
@@ -1831,7 +2329,7 @@ export function ResearchDesk({
         delete next[INCOGNITO_THREAD_ID]
         return next
       })
-      setIncognitoThread(createIncognitoThread(t.chat.incognitoTitle, t.chat.incognitoPreview))
+      resetIncognitoSession()
       dispatch({ type: 'clearChatDraftAttachment' })
       return
     }
@@ -1843,7 +2341,7 @@ export function ResearchDesk({
     const threadId = isIncognitoChat ? INCOGNITO_THREAD_ID : state.ui.selectedChatThreadId
     if (threadId && chatControllerByThreadIdRef.current.has(threadId)) return
     if (isIncognitoChat) {
-      setIncognitoThread(createIncognitoThread(t.chat.incognitoTitle, t.chat.incognitoPreview))
+      resetIncognitoSession()
       setChatErrorByThreadId((current) => {
         const next = { ...current }
         delete next[INCOGNITO_THREAD_ID]
@@ -1871,10 +2369,19 @@ export function ResearchDesk({
     })
   }
 
+  // Start a fresh incognito session: blank thread plus discard the local-only
+  // attachments (assets + draft refs). Called on every enter/leave/switch/load
+  // so no incognito file survives into another session.
+  function resetIncognitoSession() {
+    setIncognitoThread(createIncognitoThread(t.chat.incognitoTitle, t.chat.incognitoPreview))
+    setIncognitoAssets({})
+    setIncognitoAttachmentRefs([])
+  }
+
   function handleIncognitoChange(enabled: boolean) {
     if (activeChatThreadId && chatControllerByThreadIdRef.current.has(activeChatThreadId)) return
     setIsIncognitoChat(enabled)
-    setIncognitoThread(createIncognitoThread(t.chat.incognitoTitle, t.chat.incognitoPreview))
+    resetIncognitoSession()
     dispatch({ type: 'clearChatDraftAttachment' })
   }
 
@@ -1882,7 +2389,7 @@ export function ResearchDesk({
     if (isIncognitoChat && chatControllerByThreadIdRef.current.has(INCOGNITO_THREAD_ID)) return
     if (isIncognitoChat) {
       setIsIncognitoChat(false)
-      setIncognitoThread(createIncognitoThread(t.chat.incognitoTitle, t.chat.incognitoPreview))
+      resetIncognitoSession()
     }
     dispatch({ threadId, type: 'selectChatThread' })
   }
@@ -1994,6 +2501,7 @@ export function ResearchDesk({
     setLocale(preferences.locale)
     setTheme(preferences.theme)
     setThemePreset(preferences.themePreset)
+    setUserBubbleTone(preferences.userBubbleTone)
   }
 
   async function handleCancelJob(runId: string) {
@@ -2081,6 +2589,7 @@ export function ResearchDesk({
             setSettingsRequestedSection(null)
             dispatch({ type: 'setActiveView', view })
           }}
+          settingsBadgeCount={sharingInbox.pendingCount}
           showKnowledge={knowledgeWorkspaceVisible}
           profileSlot={
             <ProfileAvatar
@@ -2159,12 +2668,23 @@ export function ResearchDesk({
               isIncognito={isIncognitoChat}
               isSending={activeChatRequest !== null}
               onAttachContext={(ref) => {
-                dispatch({ ref, type: 'attachChatContextToDraft' })
+                // Incognito pins the ref locally (it references existing library
+                // data, but the reducer's pending refs are ignored in incognito);
+                // the normal path stores it in the reducer draft.
+                if (isIncognitoChat) {
+                  setIncognitoAttachmentRefs((current) =>
+                    current.some((existing) => chatContextRefKey(existing) === chatContextRefKey(ref))
+                      ? current
+                      : [...current, ref],
+                  )
+                } else {
+                  dispatch({ ref, type: 'attachChatContextToDraft' })
+                }
                 // Prefetch the file body in the background so it is already in
                 // hand when the message is sent (M6c load-on-use); the send
                 // guard awaits it regardless if this has not finished, so a
                 // prefetch failure here is intentionally best-effort.
-                void ensureAssetBodiesLoaded(assetIdsFromChatRefs(state, [ref])).catch(() => {})
+                void ensureAssetBodiesLoaded(assetIdsFromChatRefs(chatResolveState, [ref])).catch(() => {})
               }}
               onAttachFiles={(files) => void handleAttachChatFiles(files)}
               onPillRefsChange={setChatPillRefs}
@@ -2179,6 +2699,8 @@ export function ResearchDesk({
               onDeleteThreadGroup={(groupId) => dispatch({ groupId, type: 'deleteChatThreadGroup' })}
               onDeleteThread={handleDeleteChatThread}
               onEditMessage={handleEditChatMessage}
+              onRetryAssistantMessage={(threadId, messageId, mode, options) =>
+                void handleRetryAssistantMessage(threadId, messageId, mode, options)}
               chainingEnabled={state.ui.chatChainingEnabled}
               onChainingEnabledChange={(enabled) => dispatch({ enabled, type: 'setChatChainingEnabled' })}
               onIncognitoChange={handleIncognitoChange}
@@ -2200,12 +2722,27 @@ export function ResearchDesk({
                 threadId,
                 type: 'moveChatThreadToGroup',
               })}
-              onRemoveContext={(ref) => dispatch({ ref, type: 'removeChatContextFromDraft' })}
-              onReorderContext={(fromIndex, toIndex) => dispatch({ fromIndex, toIndex, type: 'reorderChatContextInDraft' })}
-              pendingReorderKeys={state.ui.pendingChatAttachmentRefs.map(chatContextRefKey)}
+              onRemoveContext={(ref) => {
+                if (isIncognitoChat) {
+                  setIncognitoAttachmentRefs((current) =>
+                    current.filter((existing) => chatContextRefKey(existing) !== chatContextRefKey(ref)),
+                  )
+                } else {
+                  dispatch({ ref, type: 'removeChatContextFromDraft' })
+                }
+              }}
+              onReorderContext={(fromIndex, toIndex) => {
+                if (isIncognitoChat) {
+                  setIncognitoAttachmentRefs((current) => moveItem(current, fromIndex, toIndex))
+                } else {
+                  dispatch({ fromIndex, toIndex, type: 'reorderChatContextInDraft' })
+                }
+              }}
+              pendingReorderKeys={pendingChatRefs.map(chatContextRefKey)}
               pillKeys={chatPillRefs.map(chatContextRefKey)}
               onSendMessage={(contentMarkdown, refs, options) => void handleChatMessageSubmit(contentMarkdown, refs, options)}
               onSelectThread={handleSelectChatThread}
+              onTogglePinnedThread={(threadId) => dispatch({ threadId, type: 'togglePinnedChatThread' })}
               onSelectedModelTierChange={(tier) => dispatch({ tier, type: 'setSelectedChatModelTier' })}
               chatModelCatalog={chatModelCatalog}
               selectedChatModel={state.ui.selectedChatModel}
@@ -2221,6 +2758,7 @@ export function ResearchDesk({
               onStreamingEnabledChange={setChatStreamingEnabled}
               attachmentBudgetNotice={attachmentBudgetNotice}
               pendingChips={pendingChips}
+              pinnedThreadIds={state.ui.pinnedExplorer.chatThreadIds}
               reduceMotion={reduceMotion}
               requestError={activeChatThreadId
                 ? chatErrorByThreadId[activeChatThreadId] ?? null
@@ -2268,18 +2806,22 @@ export function ResearchDesk({
           ) : state.ui.activeView === 'knowledge' ? (
             <KnowledgeWorkspace
               collections={knowledgeCollections}
-              composerNotice={knowledgeAskError}
+              composerNotice={displayedKnowledgeAskError}
               dataSource={knowledgeDataSource}
               defaultProfileId={knowledgeDefaultProfileId}
               defaultTopK={knowledgeDefaultTopK}
+              evidenceKMax={knowledgeEvidenceKMax}
+              rerankerProvider={knowledgeRerankerProvider}
               historyItems={knowledgeAllItems}
               isAskDisabled={!isDemoMode && !authUnlocked}
               isAskRunning={isKnowledgeAskRunning}
               isHistoryVisible={state.ui.isKnowledgeHistoryVisible}
-              items={knowledgeItems}
+              isIncognito={isIncognitoKnowledge}
+              items={displayedKnowledgeItems}
               sessionSections={knowledgeSessionSections}
               sessions={knowledgeSessions}
               mode={knowledgeMode}
+              onClearSession={clearKnowledgeAskSession}
               onCreateSession={(groupId) => {
                 const session = createKnowledgeSession()
                 dispatch({ session, type: 'createKnowledgeSession' })
@@ -2289,10 +2831,13 @@ export function ResearchDesk({
               }}
               onCreateSessionGroup={() => dispatch({ title: t.knowledge.newFolder, type: 'createKnowledgeSessionGroup' })}
               onDeleteSessionGroup={(groupId) => dispatch({ groupId, type: 'deleteKnowledgeSessionGroup' })}
-              onDeleteSession={(sessionId) => dispatch({ sessionId, type: 'deleteKnowledgeSession' })}
+	              onDeleteSession={deleteKnowledgeAskSession}
+              onDeleteItems={deleteKnowledgeAskItems}
               onDemoAsk={isDemoMode ? handleKnowledgeDemoAsk : undefined}
               onHistoryVisibleChange={(isVisible) => dispatch({ isVisible, type: 'setKnowledgeHistoryVisible' })}
-              onAsk={(question) => void handleKnowledgeAsk(question)}
+              onIncognitoChange={setKnowledgeIncognito}
+              onOpenDatabase={() => dispatch({ type: 'setActiveView', view: 'database' })}
+              onAsk={(question, options) => void handleKnowledgeAsk(question, options)}
               knowledgeQuestion={knowledgeQuestion}
               onKnowledgeQuestionChange={setKnowledgeQuestion}
               onModeChange={setKnowledgeMode}
@@ -2303,13 +2848,18 @@ export function ResearchDesk({
               onRenameSessionGroup={(groupId, title) => dispatch({ groupId, title, type: 'renameKnowledgeSessionGroup' })}
               onRenameSession={(sessionId, title) => dispatch({ sessionId, title, type: 'renameKnowledgeSession' })}
               onSelectSession={(sessionId) => dispatch({ sessionId, type: 'selectKnowledgeSession' })}
+              onStopAsk={() => void handleStopKnowledgeAsk()}
+              onTogglePinnedSession={(sessionId) => dispatch({ sessionId, type: 'togglePinnedKnowledgeSession' })}
               onSelectedCollectionIdsChange={setKnowledgeCollectionIds}
               onTopKChange={setKnowledgeTopK}
+              onFinalKChange={setKnowledgeFinalK}
               profileId={knowledgeProfileId}
               profileOptions={knowledgeProfileOptions}
+              pinnedSessionIds={state.ui.pinnedExplorer.knowledgeSessionIds}
               selectedCollectionIds={knowledgeCollectionIds}
               selectedSessionId={state.selectedKnowledgeSessionId}
               topK={knowledgeTopK}
+              finalK={knowledgeFinalK}
             />
           ) : state.ui.activeView === 'prompt-library' ? (
             <PromptLibraryWorkspace
@@ -2365,6 +2915,8 @@ export function ResearchDesk({
               reduceMotion={reduceMotion}
               selectedStack={displayedSelectedStack}
               requestedSection={settingsRequestedSection}
+              sharing={sharingEnabled ? sharingInbox : null}
+              onOpenSharedResource={openSharedResource}
               stackDiscoveryStatus={stackDiscoveryStatus}
               stackOptions={effectiveStackOptions}
             />
@@ -2436,6 +2988,10 @@ function createIncognitoThread(title: string, preview: string): ChatThreadRecord
   }
 }
 
+function knowledgeRunIdsFromThreadItems(items: readonly KnowledgeThreadItemRecord[]) {
+  return items.flatMap((item) => (item.runId ? [item.runId] : []))
+}
+
 function appendChatExchangeToThread(
   thread: ChatThreadRecord,
   options: {
@@ -2444,6 +3000,7 @@ function appendChatExchangeToThread(
     contentMarkdown: string
     createdAt: string
     modelResolution?: ChatMessageModelResolutionRecord
+    requestContext?: ChatMessageRequestContextRecord
     userMessageId: string
   },
 ): ChatThreadRecord {
@@ -2459,6 +3016,7 @@ function appendChatExchangeToThread(
     createdAt: options.createdAt,
     id: options.assistantMessageId,
     modelResolution: options.modelResolution,
+    requestContext: options.requestContext,
     role: 'assistant',
   }
 
@@ -2479,6 +3037,7 @@ function appendAssistantResponseToLastUserMessage(
     assistantMessageId: string
     createdAt: string
     modelResolution?: ChatMessageModelResolutionRecord
+    requestContext?: ChatMessageRequestContextRecord
     userMessageId: string
   },
 ): ChatThreadRecord {
@@ -2496,10 +3055,53 @@ function appendAssistantResponseToLastUserMessage(
         createdAt: options.createdAt,
         id: options.assistantMessageId,
         modelResolution: options.modelResolution,
+        requestContext: options.requestContext,
         role: 'assistant',
       },
     ],
   )
+}
+
+function retryAssistantResponseInThread(
+  thread: ChatThreadRecord,
+  options: {
+    assistantMessageId: string
+    createdAt: string
+    modelResolution?: ChatMessageModelResolutionRecord
+    requestContext?: ChatMessageRequestContextRecord
+    replacedAssistantMessageId: string
+  },
+): ChatThreadRecord {
+  const assistantIndex = thread.messages.findIndex((message) => message.id === options.replacedAssistantMessageId)
+  const assistantMessage = assistantIndex >= 0 ? thread.messages[assistantIndex] : undefined
+  const userMessage = assistantIndex > 0 ? thread.messages[assistantIndex - 1] : undefined
+  if (
+    !assistantMessage
+    || assistantMessage.role !== 'assistant'
+    || !userMessage
+    || userMessage.role !== 'user'
+    || !userMessage.contentMarkdown.trim()
+  ) {
+    return thread
+  }
+
+  return {
+    ...threadWithMessages(
+      thread,
+      [
+        ...thread.messages.slice(0, assistantIndex),
+        {
+          contentMarkdown: '',
+          createdAt: options.createdAt,
+          id: options.assistantMessageId,
+          modelResolution: options.modelResolution,
+          requestContext: options.requestContext,
+          role: 'assistant',
+        },
+      ],
+    ),
+    updatedAt: options.createdAt,
+  }
 }
 
 function setThreadAssistantMessageContent(
@@ -2715,6 +3317,13 @@ function chatAgentOverrides(
   if (model) return effort ? { model, effort } : { model }
   if (modelTier) return { modelTier }
   return undefined
+}
+
+function chatRequestContextForKnowledge(
+  knowledgeCollectionIds: readonly string[],
+): ChatMessageRequestContextRecord | undefined {
+  const ids = knowledgeCollectionIds.filter((id) => id.trim().length > 0)
+  return ids.length > 0 ? { knowledgeCollectionIds: ids } : undefined
 }
 
 function explicitModelResolution(

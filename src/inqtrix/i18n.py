@@ -90,6 +90,38 @@ def detect_ui_language(text: str) -> str:
     return "en"
 
 
+def detect_ui_language_confident(text: str) -> str | None:
+    """Return ``"de"``/``"en"`` only on a positive signal, else ``None``.
+
+    Unlike :func:`detect_ui_language` (which DEFAULTS to ``"en"`` for empty or
+    ambiguous input), this reports a language only when a clear signal is
+    present: a DE-specific character, or a strict stopword-count majority for
+    exactly one language. Ambiguous input (e.g. a short term query with no
+    stopwords like ``"DSGVO Pflichten"``) returns ``None``.
+
+    Why a separate, stricter primitive: callers that act on a *mismatch* must
+    not fire on a guess. The tokenizer-mismatch visibility for BM25 retrieval
+    flags only confident cross-language cases; the ``"en"`` fallback of
+    :func:`detect_ui_language` would otherwise misread untagged DE queries as
+    English and raise false alarms. Shares the same stopword tables (Prinzip 4
+    — defined once).
+    """
+    if not text:
+        return None
+    if _DE_CHARS.search(text):
+        return "de"
+    tokens = _TOKEN_RE.findall(text.lower())
+    if not tokens:
+        return None
+    de_hits = sum(1 for tok in tokens if tok in _DE_STOPWORDS)
+    en_hits = sum(1 for tok in tokens if tok in _EN_STOPWORDS)
+    if de_hits > en_hits:
+        return "de"
+    if en_hits > de_hits:
+        return "en"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Translation table
 # ---------------------------------------------------------------------------

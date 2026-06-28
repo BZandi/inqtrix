@@ -25,6 +25,8 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from inqtrix.core.results import AgentResult, RunRequest
+from inqtrix.i18n import detect_ui_language_confident
+from inqtrix.knowledge.contextualize import contextualize_followup_question
 from inqtrix.knowledge.gate import GateDecision, evaluate_evidence
 from inqtrix.knowledge.grounding import (
     GROUNDING_MARKER_FALLBACK,
@@ -57,6 +59,61 @@ log = logging.getLogger("inqtrix")
 
 _EVIDENCE_BUDGET_FLOOR_CHARS = 8_000
 _PROMPT_RESERVED_TOKENS = 4_000
+
+# Visible-not-silent marker (Designprinzip 1): the BM25 tokenizer language does
+# not match the confidently-detected query language, so the lexical branch's
+# language-specific normalization (tokenizing/stemming/stopwords) does not apply
+# cleanly and keyword retrieval is less reliable. NOT "contributes nothing" —
+# query and documents pass through the same encoder, so exact terms can still
+# match. This signal is query-vs-TOKENIZER only; query-vs-DOCUMENT visibility
+# needs per-collection language (a later phase).
+SPARSE_MARKER_TOKENIZER_MISMATCH = "_knowledge_sparse_tokenizer_mismatch"
+
+
+def _sparse_tokenizer_state(
+    knowledge: KnowledgeProviderContext,
+    question: str,
+    emit: "Any",
+) -> dict[str, Any] | None:
+    """Flag a confident query-vs-BM25-tokenizer language mismatch, or ``None``.
+
+    Returns a small visibility record (marker + the two language codes) only
+    when the lexical branch is active (``sparse_language`` is set) AND the query
+    language is *confidently* detected AND it differs from the tokenizer
+    language. Otherwise ``None`` — so the same-language default path adds no new
+    field, log, or event (byte-/field-identical). The log carries only the two
+    language codes plus the marker, never the query text (sensitivity discipline,
+    cf. :func:`inqtrix.urls.sanitize_log_message`).
+    """
+    sparse_language = getattr(knowledge.store, "sparse_language", None)
+    if sparse_language is None:
+        return None
+    query_language = detect_ui_language_confident(question)
+    if query_language is None or query_language == sparse_language:
+        return None
+    log.warning(
+        "Knowledge-Sparse: Query-Sprache (%s) passt nicht zur BM25-Tokenizer-"
+        "Sprache (%s) — lexikalische Normalisierung greift nicht sauber, "
+        "Sparse-Qualitaet weniger verlaesslich (exakte Begriffe koennen weiter "
+        "matchen). Optional einen mehrsprachigen Cross-Encoder-Reranker "
+        "aktivieren (z. B. Cohere rerank-v3.5). (%s)",
+        query_language,
+        sparse_language,
+        SPARSE_MARKER_TOKENIZER_MISMATCH,
+    )
+    emit(
+        "inqtrix.knowledge.sparse.tokenizer_mismatch",
+        {
+            "query_language": query_language,
+            "sparse_language": sparse_language,
+            "marker": SPARSE_MARKER_TOKENIZER_MISMATCH,
+        },
+    )
+    return {
+        "marker": SPARSE_MARKER_TOKENIZER_MISMATCH,
+        "query_language": query_language,
+        "sparse_language": sparse_language,
+    }
 
 
 def _resolve_collection_ids(request: RunRequest) -> list[str] | None:
@@ -308,6 +365,72 @@ class KnowledgeAlgorithm:
         )
         return decomposition.sub_queries
 
+    def _run_query_contextualization(
+        self,
+        llm: Any,
+        context: "RunContext",
+        request: RunRequest,
+        emit,
+        usage_accumulator: dict[str, int],
+    ) -> tuple[str, dict[str, Any]]:
+        """Resolve the retrieval query for a conversational Knowledge turn.
+
+        Args:
+            llm: Provider used for the optional standalone-query rewrite.
+            context: Per-run container with model routing and timeout settings.
+            request: Incoming Knowledge run request. ``history`` controls
+                whether contextualization is attempted.
+            emit: Event sink used to expose the contextualization decision.
+            usage_accumulator: Mutable prompt/completion-token totals for this
+                pre-retrieval step.
+
+        Returns:
+            A tuple of the query text used by retrieval and a compact state
+            dictionary for the final ``result_state``. No-history turns return
+            the original question and are omitted from ``result_state`` to keep
+            the historical no-history payload stable.
+        """
+        if not request.history.strip():
+            return request.question, {
+                "used_history": False,
+                "rewritten": False,
+                "marker": None,
+            }
+        provider_models = getattr(llm, "models", None)
+        requested_tier = (
+            context.agent_settings.model_tier or ""
+        ).strip() or None
+        contextualize_model = (
+            resolve_model(
+                "knowledge_contextualize", provider_models, requested_tier
+            )
+            or None
+            if provider_models is not None
+            else None
+        )
+        result, usage = contextualize_followup_question(
+            llm,
+            question=request.question,
+            history=request.history,
+            model=contextualize_model,
+            timeout=context.agent_settings.reasoning_timeout,
+        )
+        usage_accumulator["prompt_tokens"] += usage["prompt_tokens"]
+        usage_accumulator["completion_tokens"] += usage["completion_tokens"]
+        emit(
+            "inqtrix.knowledge.contextualized",
+            {
+                "used_history": True,
+                "rewritten": result.rewritten,
+                "marker": result.marker,
+            },
+        )
+        return result.question, {
+            "used_history": True,
+            "rewritten": result.rewritten,
+            "marker": result.marker,
+        }
+
     def run(
         self,
         request: RunRequest,
@@ -319,6 +442,11 @@ class KnowledgeAlgorithm:
         knowledge = self._knowledge
         emit = context.event_sink or (lambda _event, _payload: None)
         started = time.monotonic()
+        llm = context.providers.llm
+        contextualize_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+        query_question, contextualization_state = self._run_query_contextualization(
+            llm, context, request, emit, contextualize_usage
+        )
 
         raw_profile = request.knowledge_filters.get("profile")
         requested_profile = (
@@ -330,7 +458,7 @@ class KnowledgeAlgorithm:
         # threads/workers; per-request flags on `self` would race.
         plan = resolve_run_plan(
             requested_profile,
-            question=request.question,
+            question=query_question,
             ceiling=self._ceiling,
         )
         emit(
@@ -355,6 +483,10 @@ class KnowledgeAlgorithm:
         )
 
         collection_ids = _resolve_collection_ids(request)
+        # Make the BM25 tokenizer-language limitation visible (No Silent
+        # Fallbacks). Returns None on the same-language default path, so
+        # result_state stays field-identical there.
+        sparse_state = _sparse_tokenizer_state(knowledge, query_question, emit)
         top_k = int(
             request.knowledge_filters.get("top_k", knowledge.default_top_k)
         )
@@ -363,14 +495,22 @@ class KnowledgeAlgorithm:
         # so its decompose + gate fan-out surfaces a broader, multi-document
         # evidence set instead of being re-collapsed back to `top_k`. An explicit
         # request `top_k` stays the base the factor scales.
-        final_k = min(int(top_k * plan.final_k_factor), EVIDENCE_K_MAX)
-        llm = context.providers.llm
+        # A request may pin `final_k` directly (validated to 1..EVIDENCE_K_MAX at
+        # the resolver); the explicit value then beats the profile factor, and
+        # the override is surfaced so the live ledger never hides it.
+        explicit_final_k = request.knowledge_filters.get("final_k")
+        final_k_overridden = explicit_final_k is not None
+        final_k = (
+            min(int(explicit_final_k), EVIDENCE_K_MAX)
+            if final_k_overridden
+            else min(int(top_k * plan.final_k_factor), EVIDENCE_K_MAX)
+        )
 
         decompose_usage = {"prompt_tokens": 0, "completion_tokens": 0}
         sub_queries: tuple[str, ...] = ()
         if plan.decompose:
             sub_queries = self._run_decomposition(
-                llm, context, request.question, emit, decompose_usage
+                llm, context, query_question, emit, decompose_usage
             )
 
         def _retrieve(query: str, k: int = top_k) -> list[RetrievalCandidate]:
@@ -391,20 +531,21 @@ class KnowledgeAlgorithm:
             # Round-robin across the original question and every sub-query so
             # each aspect contributes; each list is per-query `top_k`, the union
             # is capped at the profile's wider `final_k`.
-            result_lists = [_retrieve(request.question)] + [
+            result_lists = [_retrieve(query_question)] + [
                 _retrieve(sub_query) for sub_query in sub_queries
             ]
             candidates = interleave_candidates(result_lists, limit=final_k)
         else:
             # No decomposition: a single query must fill the evidence budget
             # itself, so retrieve `final_k` directly.
-            candidates = _retrieve(request.question, final_k)
+            candidates = _retrieve(query_question, final_k)
         emit(
             "inqtrix.knowledge.retrieval.completed",
             {
                 "candidate_count": len(candidates),
                 "top_k": top_k,
                 "final_k": final_k,
+                "final_k_overridden": final_k_overridden,
                 # Coverage: how many documents are in scope — ALL are searched
                 # (the filter is collection-level), so this confirms the answer
                 # considered every indexed document.
@@ -437,12 +578,12 @@ class KnowledgeAlgorithm:
                 },
             )
 
-        queries_run = [request.question, *sub_queries]
+        queries_run = [query_question, *sub_queries]
         gate_state: dict[str, Any] = {"enabled": plan.gate_enabled}
         gate_usage = {"prompt_tokens": 0, "completion_tokens": 0}
         if plan.gate_enabled and used_candidates:
             decision = self._run_gate(
-                llm, context, request.question, evidence_block, emit,
+                llm, context, query_question, evidence_block, emit,
                 gate_usage,
                 round_index=0,
                 vocabulary_bridge=plan.vocabulary_bridge,
@@ -487,7 +628,7 @@ class KnowledgeAlgorithm:
                     candidates, max_chars=budget_chars
                 )
                 decision = self._run_gate(
-                    llm, context, request.question, evidence_block, emit,
+                    llm, context, query_question, evidence_block, emit,
                     gate_usage,
                     round_index=rounds_used,
                     vocabulary_bridge=plan.vocabulary_bridge,
@@ -635,10 +776,13 @@ class KnowledgeAlgorithm:
                 )
 
         usage["prompt_tokens"] += (
-            gate_usage["prompt_tokens"] + decompose_usage["prompt_tokens"]
+            contextualize_usage["prompt_tokens"]
+            + gate_usage["prompt_tokens"]
+            + decompose_usage["prompt_tokens"]
         )
         usage["completion_tokens"] += (
-            gate_usage["completion_tokens"]
+            contextualize_usage["completion_tokens"]
+            + gate_usage["completion_tokens"]
             + decompose_usage["completion_tokens"]
         )
 
@@ -690,6 +834,15 @@ class KnowledgeAlgorithm:
                 "elapsed_seconds": round(time.monotonic() - started, 2),
             },
         }
+        # Only present on a real tokenizer-language mismatch — keeps the
+        # same-language default result_state field-identical (No Silent
+        # Fallbacks without new noise).
+        if sparse_state is not None:
+            raw["result_state"]["knowledge_sparse"] = sparse_state
+        if contextualization_state["used_history"]:
+            raw["result_state"]["knowledge_contextualization"] = {
+                **contextualization_state,
+            }
         return AgentResult(
             answer=answer,
             result_type="knowledge_result",

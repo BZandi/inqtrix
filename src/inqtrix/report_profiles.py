@@ -78,8 +78,10 @@ class ReportProfileTuning:
     Attributes:
         settings_overrides: ``AgentSettings`` fields auto-overridden
             when the profile is selected (see :class:`AgentSettings`
-            ``with_report_profile_defaults``). Empty dict for profiles
-            that intentionally inherit user-supplied settings.
+            ``with_report_profile_defaults``). Include profile-owned
+            baseline values for every field that another profile may
+            raise, so request-time profile switches can move in both
+            directions while preserving explicit user settings.
         answer_sections: Ordered tuple of :class:`AnswerSectionSpec`
             describing the per-profile section layout.
         answer_claim_prompt_items: Maximum number of consolidated
@@ -225,7 +227,18 @@ _DEEP_ANSWER_SECTIONS = (
 
 
 _COMPACT_TUNING = ReportProfileTuning(
-    settings_overrides={},
+    settings_overrides={
+        "max_rounds": 2,
+        "min_rounds": 1,
+        "confidence_stop": 7,
+        "first_round_queries": 6,
+        "answer_prompt_citations_max": 60,
+        "reasoning_timeout": 120,
+        "editor_assistant_timeout": 120,
+        "claim_extract_timeout": 60,
+        "search_timeout": 60,
+        "max_total_seconds": 300,
+    },
     answer_sections=_COMPACT_ANSWER_SECTIONS,
     answer_claim_prompt_items=20,
     claim_input_char_limit=24000,
@@ -248,9 +261,9 @@ _DEEP_TUNING = ReportProfileTuning(
     # synthesis, 10 lifts that to ~14-15 without exceeding sensible
     # parallelization (still ``min(len, first_round_queries)`` workers).
     settings_overrides={
-        "max_rounds": 5,
+        "max_rounds": 4,
         "min_rounds": 2,
-        "confidence_stop": 9,
+        "confidence_stop": 8,
         "first_round_queries": 10,
         "answer_prompt_citations_max": 500,
         "reasoning_timeout": 900,
@@ -309,13 +322,12 @@ def settings_overrides_for_report_profile(profile: ReportProfile | str) -> dict[
     Args:
         profile: Either a :class:`ReportProfile` enum value or its
             string representation. Unknown values fall back to
-            ``ReportProfile.COMPACT`` (which has no overrides).
+            ``ReportProfile.COMPACT``.
 
     Returns:
         A new ``dict`` mapping ``AgentSettings`` field names to the
-        profile-specific override values. Returns an empty dict for
-        the COMPACT profile (no overrides). Caller may mutate the
-        returned dict freely — it is a fresh copy of the bundle's
+        profile-specific override values. Caller may mutate the returned
+        dict freely — it is a fresh copy of the bundle's
         ``settings_overrides``.
     """
     return dict(tuning_for_report_profile(profile).settings_overrides)

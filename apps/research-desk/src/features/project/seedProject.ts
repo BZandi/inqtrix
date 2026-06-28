@@ -16,6 +16,7 @@ import type {
   FileLibrarySectionRecord,
   KnowledgeSessionGroupRecord,
   KnowledgeSessionRecord,
+  PinnedExplorerState,
   ProjectState,
   ResearchRunRecord,
   VectorIndexRecord,
@@ -103,6 +104,12 @@ const emptyEditorUi: EditorUiState = {
   viewMode: 'live',
 }
 
+const emptyPinnedExplorer: PinnedExplorerState = {
+  chatThreadIds: [],
+  editorDocumentIds: [],
+  knowledgeSessionIds: [],
+}
+
 function createKnowledgeSession(
   id: string,
   title: string,
@@ -180,6 +187,7 @@ export function createEmptyProjectState(): ProjectState {
       locale: 'de',
       theme: 'system',
       themePreset: 'standard',
+      userBubbleTone: 'gray',
     },
     project: {
       createdAt: now,
@@ -206,6 +214,7 @@ export function createEmptyProjectState(): ProjectState {
       isReportVisible: true,
       pendingChatAttachmentRefs: [],
       pendingChatReportRunId: null,
+      pinnedExplorer: emptyPinnedExplorer,
       selectedChatModel: null,
       selectedChatEffort: null,
       selectedChatModelTier: null,
@@ -295,21 +304,26 @@ export function createSeedProjectState(): ProjectState {
     fileLibrarySections: Object.fromEntries(fileLibrarySections.map((section) => [section.id, section])),
     indexingJobs: {
       'vector-index-eu-recht': {
-        completedDocuments: 1,
-        currentDocumentTitle: 'KI-Verordnung (AI Act) Volltext',
+        completedDocuments: 0,
+        currentDocumentTitle: 'Rechtsgutachten KI-Haftung',
         jobId: 'demo-seed-eu-recht',
-        percent: 25,
+        percent: 0,
+        // Incremental add: only the new (pending) rechtsgutachten runs; the
+        // three embedded members keep reading "Indexiert" (see seedVectorIndexes).
+        runningFileIds: ['file-asset-rechtsgutachten'],
         source: 'demo',
         startedAt: new Date(Date.now() - 4_000).toISOString(),
-        totalDocuments: 4,
+        totalDocuments: 1,
       },
       // A second reindex waiting behind it — shows the "In Warteschlange"
-      // state on load; the simulator promotes it on its first tick.
+      // state on load; the simulator promotes it on its first tick. A full
+      // refresh, so its whole member set is the working set.
       'vector-index-anbieter': {
         completedDocuments: 0,
         jobId: 'demo-seed-anbieter',
         percent: 0,
         queuePosition: 1,
+        runningFileIds: ['file-asset-perplexity-db', 'file-asset-azure-foundry', 'file-asset-bsi-kriterien'],
         source: 'demo',
         startedAt: new Date(Date.now() - 1_000).toISOString(),
         totalDocuments: 3,
@@ -329,6 +343,7 @@ export function createSeedProjectState(): ProjectState {
       locale: 'de',
       theme: 'dark',
       themePreset: 'standard',
+      userBubbleTone: 'gray',
     },
     project: {
       createdAt: seedCreatedAt,
@@ -358,6 +373,11 @@ export function createSeedProjectState(): ProjectState {
       isReportVisible: true,
       pendingChatAttachmentRefs: [],
       pendingChatReportRunId: null,
+      pinnedExplorer: {
+        chatThreadIds: chatThreadOrder.slice(0, 1),
+        editorDocumentIds: editorDocumentOrder.slice(0, 1),
+        knowledgeSessionIds: [],
+      },
       selectedChatModel: null,
       selectedChatEffort: null,
       selectedChatModelTier: null,

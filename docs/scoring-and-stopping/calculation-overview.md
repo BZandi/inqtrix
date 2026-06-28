@@ -149,7 +149,7 @@ The prompt + parser live in `prompts.py::EVALUATE_FORMAT_SUFFIX` (~lines
 | Setting / metric | Where | Type | Effect | Default |
 |---|---|---|---|---|
 | `round` | `s["round"]` | int counter | Loop counter incremented by `search` | 0..max_rounds |
-| `max_rounds` | `settings.py` | Config | Hard upper bound | 4 COMPACT / 5 DEEP |
+| `max_rounds` | `settings.py` | Config | Hard upper bound | 2 COMPACT / 4 DEEP |
 | `min_rounds` | `settings.py` | Config | Suppresses stop until reached | 1 COMPACT / 2 DEEP |
 | `confidence_stop` | `settings.py` | Config | Final stop threshold | 8 |
 | `first_round_queries` | `settings.py` | Config | Round-0 query count | 6 COMPACT / 10 DEEP |

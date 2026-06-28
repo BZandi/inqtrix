@@ -79,10 +79,42 @@ describe('knowledge session sync conversion', () => {
   it('hydrates item payloads under the owning server session id', () => {
     const parsed = itemsFromServerSession(serverSession({
       id: 'ks-server',
-      items_json: JSON.stringify([{ ...item(), sessionId: undefined }, { id: 4 }]),
+      items_json: JSON.stringify([{
+        ...item({
+          collectionIds: ['collection-1'],
+          completedAt: '2026-01-01T00:05:00.000Z',
+          topK: null,
+          finalK: 16,
+        }),
+        sessionId: undefined,
+      }, { id: 4 }]),
     }))
     expect(parsed).toHaveLength(1)
-    expect(parsed[0]).toMatchObject({ id: 'ki-1', sessionId: 'ks-server' })
+    expect(parsed[0]).toMatchObject({
+      collectionIds: ['collection-1'],
+      completedAt: '2026-01-01T00:05:00.000Z',
+      id: 'ki-1',
+      sessionId: 'ks-server',
+      topK: null,
+      finalK: 16,
+    })
+  })
+
+  it('hydrates cancelled item payloads', () => {
+    const parsed = itemsFromServerSession(serverSession({
+      id: 'ks-server',
+      items_json: JSON.stringify([item({
+        completedAt: undefined,
+        status: 'cancelled',
+      })]),
+    }))
+
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]).toMatchObject({
+      id: 'ki-1',
+      sessionId: 'ks-server',
+      status: 'cancelled',
+    })
   })
 
   it('serializes payloads and fingerprints the data that affects autosave', () => {
@@ -92,7 +124,13 @@ describe('knowledge session sync conversion', () => {
       title: 'Session',
       updatedAt: '2026-01-02T00:00:00.000Z',
     }
-    const items = [item({ sessionId: 'ks-1' })]
+    const items = [item({
+      collectionIds: ['collection-1'],
+      completedAt: '2026-01-01T00:05:00.000Z',
+      sessionId: 'ks-1',
+      topK: 12,
+      finalK: 16,
+    })]
     const payload = serverKnowledgeSessionPayload(session, items, 'kg-1')
 
     expect(payload).toMatchObject({

@@ -13,9 +13,11 @@ import type {
 } from '@/features/quota/admin'
 import type { QuotaDimensionUsage } from '@/features/quota/model'
 import type {
+  OutgoingShare,
   ShareInvitee,
   ShareRecordInfo,
   SharedWithMeEntry,
+  SharingInbox,
   UserSearchResult,
 } from '@/features/sharing/types'
 import type {
@@ -555,6 +557,19 @@ export async function appendChatMessages(
     `/v1/chat/threads/${threadId}/messages`,
     { ...options, body: { messages }, method: 'POST' },
   )
+}
+
+/** Delete one message from a thread (edit access; idempotent — a missing
+ * message is a quiet 204, so an autosave re-issue never wedges the loop). */
+export async function deleteChatMessage(
+  threadId: string,
+  messageId: string,
+  options: ClientOptions = {},
+) {
+  await request(`/v1/chat/threads/${threadId}/messages/${messageId}`, {
+    ...options,
+    method: 'DELETE',
+  })
 }
 
 /** All of the caller's chat-thread groups (newest first). */
@@ -1102,7 +1117,7 @@ export async function deleteVectorIndex(indexId: string, options: ClientOptions 
 
 // -- account preferences (M6c) ----------------------------------------------
 //
-// A single per-user settings row (theme/locale/contrast). NOT project data and
+// A single per-user settings row (theme/locale/contrast/bubble tone). NOT project data and
 // NOT part of the project import — it follows the user across devices. GET
 // returns 404 when the user has never saved; getAccountPreferences maps that
 // to null so the caller keeps its own default (the defaults are a frontend
@@ -1114,6 +1129,7 @@ export type ServerAccountPreferences = {
   locale: string
   theme: string
   theme_preset: string
+  user_bubble_tone?: string
   updated_at: number
 }
 
@@ -1136,6 +1152,7 @@ export async function saveAccountPreferences(
     locale: string
     theme: string
     theme_preset: string
+    user_bubble_tone: string
     updated_at: number
   },
   options: ClientOptions = {},
@@ -1212,6 +1229,30 @@ export async function listSharedWithMe(
   return payload.data
 }
 
+/** The caller's incoming shares, split into pending (consent queue) and
+ * accepted (shared with me) — the sharing settings panel's source. */
+export async function fetchSharingInbox(options: ClientOptions = {}) {
+  const payload = await requestJson<{ data: SharingInbox }>(
+    '/v1/shares/inbox',
+    options,
+  )
+  return payload.data
+}
+
+/** The resources the caller has shared out, grouped per resource. */
+export async function fetchOutgoingShares(options: ClientOptions = {}) {
+  const payload = await requestJson<{ data: OutgoingShare[] }>(
+    '/v1/shares/mine',
+    options,
+  )
+  return payload.data
+}
+
+/** Accept one pending incoming share (the recipient's consent). */
+export async function acceptShare(shareId: string, options: ClientOptions = {}) {
+  await request(`/v1/shares/${shareId}/accept`, { ...options, method: 'POST' })
+}
+
 /** Active-share counts for the badge layer, keyed by resource id. */
 export async function fetchOutgoingShareCounts(
   resourceType: string,
@@ -1245,6 +1286,7 @@ export async function createResearchRun(
     method: 'POST',
     body: {
       question: request.question,
+      messages: request.messages,
       stack: request.stack,
       mode: request.mode,
       workspace_id: options.workspaceId,
@@ -2140,6 +2182,7 @@ function serializeKnowledgeFilters(filters?: KnowledgeChatFilters) {
   return {
     collection_ids: filters.collectionIds,
     ...(filters.topK ? { top_k: filters.topK } : {}),
+    ...(filters.finalK ? { final_k: filters.finalK } : {}),
     ...(filters.profile ? { profile: filters.profile } : {}),
   }
 }

@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
+import type { ResearchRunEvent, ResearchRunSummary } from '@/features/researchRuns/types'
 import { createEmptyProjectState } from '@/features/project/seedProject'
 import type {
   ChatRuleRecord,
+  ChatThreadRecord,
+  EditorDocumentRecord,
+  EditorFolderRecord,
   FileAssetRecord,
   KnowledgeSessionGroupRecord,
   KnowledgeSessionRecord,
@@ -90,6 +94,68 @@ function makeKnowledgeItem(
   }
 }
 
+function makeRunSummary(overrides: Partial<ResearchRunSummary> = {}): ResearchRunSummary {
+  return {
+    agent_overrides: {},
+    created_at: Date.parse('2026-01-01T00:00:00.000Z') / 1000,
+    elapsed_seconds: null,
+    error: null,
+    events_url: '/v1/runs/run-1/events',
+    finished_at: null,
+    mode: 'research',
+    question: 'Research question',
+    queue_position: null,
+    result_url: '/v1/runs/run-1/result',
+    run_id: 'run-1',
+    snapshot: {},
+    stack: 'test-stack',
+    started_at: null,
+    status: 'queued',
+    ...overrides,
+  }
+}
+
+function makeChatThread(id: string, title: string, overrides: Partial<ChatThreadRecord> = {}): ChatThreadRecord {
+  return {
+    createdAt: '2026-01-01T00:00:00.000Z',
+    id,
+    messages: [],
+    preview: 'Preview',
+    source: 'mock',
+    title,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function makeEditorFolder(id: string, title: string, overrides: Partial<EditorFolderRecord> = {}): EditorFolderRecord {
+  return {
+    createdAt: '2026-01-01T00:00:00.000Z',
+    id,
+    title,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function makeEditorDocument(
+  id: string,
+  title: string,
+  overrides: Partial<EditorDocumentRecord> = {},
+): EditorDocumentRecord {
+  return {
+    contentMarkdown: `# ${title}`,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    folderId: null,
+    id,
+    revision: 1,
+    source: 'blank',
+    title,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
 describe('ui visibility reducer actions', () => {
   it('hides and shows the chat history panel', () => {
     const hidden = researchDeskReducer(createEmptyProjectState(), {
@@ -104,6 +170,23 @@ describe('ui visibility reducer actions', () => {
     expect(shown.ui.isChatHistoryVisible).toBe(true)
   })
 
+  it('marks the project dirty for every collapsible-panel toggle (durable persistence)', () => {
+    // Each collapse flag is a persisted ui/editorUi field; a pure toggle must
+    // dirty the project so it is saved/pushed and survives reload. A revert that
+    // drops dirty:true from any of these would otherwise pass silently.
+    const collapseActions = [
+      'setChatHistoryVisible',
+      'setKnowledgeHistoryVisible',
+      'setReportVisible',
+      'setEditorTreeVisible',
+      'setEditorCommentPanelVisible',
+    ] as const
+    for (const type of collapseActions) {
+      const next = researchDeskReducer(createEmptyProjectState(), { isVisible: false, type })
+      expect(next.dirty, `${type} must dirty the project`).toBe(true)
+    }
+  })
+
   it('hides and shows the knowledge history panel', () => {
     const hidden = researchDeskReducer(createEmptyProjectState(), {
       isVisible: false,
@@ -115,6 +198,100 @@ describe('ui visibility reducer actions', () => {
       type: 'setKnowledgeHistoryVisible',
     })
     expect(shown.ui.isKnowledgeHistoryVisible).toBe(true)
+  })
+})
+
+describe('api run summary reducer actions', () => {
+  it('keeps knowledge runs out of the global research run store', () => {
+    const base = createEmptyProjectState()
+
+    const reduced = researchDeskReducer(base, {
+      summary: makeRunSummary({ mode: 'knowledge', run_id: 'run-knowledge' }),
+      type: 'upsertApiRunSummary',
+    })
+
+    expect(reduced).toBe(base)
+    expect(reduced.researchRuns['run-knowledge']).toBeUndefined()
+    expect(reduced.researchRunOrder).not.toContain('run-knowledge')
+  })
+})
+
+describe('pinned explorer reducer actions', () => {
+  it('toggles pinned chat threads, knowledge sessions and editor documents', () => {
+    const base = createEmptyProjectState()
+    const sessionId = base.selectedKnowledgeSessionId as string
+    const seeded = {
+      ...base,
+      chatThreadOrder: ['ct-1'],
+      chatThreads: { 'ct-1': makeChatThread('ct-1', 'Chat') },
+      editorDocumentOrder: ['doc-1'],
+      editorDocuments: { 'doc-1': makeEditorDocument('doc-1', 'Doc') },
+    }
+
+    const withChatPin = researchDeskReducer(seeded, {
+      threadId: 'ct-1',
+      type: 'togglePinnedChatThread',
+    })
+    const withKnowledgePin = researchDeskReducer(withChatPin, {
+      sessionId,
+      type: 'togglePinnedKnowledgeSession',
+    })
+    const withDocumentPin = researchDeskReducer(withKnowledgePin, {
+      documentId: 'doc-1',
+      type: 'togglePinnedEditorDocument',
+    })
+
+    expect(withDocumentPin.ui.pinnedExplorer.chatThreadIds).toEqual(['ct-1'])
+    expect(withDocumentPin.ui.pinnedExplorer.knowledgeSessionIds).toEqual([sessionId])
+    expect(withDocumentPin.ui.pinnedExplorer.editorDocumentIds).toEqual(['doc-1'])
+    expect(withDocumentPin.dirty).toBe(true)
+
+    const unpinned = researchDeskReducer(withDocumentPin, {
+      threadId: 'ct-1',
+      type: 'togglePinnedChatThread',
+    })
+    expect(unpinned.ui.pinnedExplorer.chatThreadIds).toEqual([])
+  })
+
+  it('removes stale pins when pinned entries are deleted', () => {
+    const base = createEmptyProjectState()
+    const sessionId = base.selectedKnowledgeSessionId as string
+    const seeded = {
+      ...base,
+      chatThreadOrder: ['ct-1'],
+      chatThreads: { 'ct-1': makeChatThread('ct-1', 'Chat') },
+      editorDocumentOrder: ['doc-1'],
+      editorDocuments: { 'doc-1': makeEditorDocument('doc-1', 'Doc') },
+      editorUi: { ...base.editorUi, activeDocumentId: 'doc-1', openDocumentIds: ['doc-1'] },
+      ui: {
+        ...base.ui,
+        pinnedExplorer: {
+          chatThreadIds: ['ct-1'],
+          editorDocumentIds: ['doc-1'],
+          knowledgeSessionIds: [sessionId],
+        },
+        selectedChatThreadId: 'ct-1',
+      },
+    }
+
+    const withoutChat = researchDeskReducer(seeded, {
+      threadId: 'ct-1',
+      type: 'deleteChatThread',
+    })
+    const withoutKnowledge = researchDeskReducer(withoutChat, {
+      sessionId,
+      type: 'deleteKnowledgeSession',
+    })
+    const withoutDocument = researchDeskReducer(withoutKnowledge, {
+      documentId: 'doc-1',
+      type: 'deleteEditorDocument',
+    })
+
+    expect(withoutDocument.ui.pinnedExplorer).toEqual({
+      chatThreadIds: [],
+      editorDocumentIds: [],
+      knowledgeSessionIds: [],
+    })
   })
 })
 
@@ -170,6 +347,199 @@ describe('knowledge session reducer actions', () => {
     expect(deleted.knowledgeItems['ki-2']).toBeUndefined()
     expect(deleted.knowledgeItems['ki-1']).toBeDefined()
     expect(deleted.selectedKnowledgeSessionId).toBe(defaultSessionId)
+  })
+
+  it('deletes selected knowledge Q&A entries and touches their sessions', () => {
+    const base = createEmptyProjectState()
+    const defaultSessionId = base.selectedKnowledgeSessionId as string
+    const seeded = {
+      ...base,
+      knowledgeItemOrder: ['ki-1', 'ki-2'],
+      knowledgeItems: {
+        'ki-1': makeKnowledgeItem('ki-1', defaultSessionId),
+        'ki-2': makeKnowledgeItem('ki-2', defaultSessionId, { question: 'Second question' }),
+      },
+      knowledgeSessions: {
+        ...base.knowledgeSessions,
+        [defaultSessionId]: { ...base.knowledgeSessions[defaultSessionId], updatedAt: '2026-01-01T00:00:00.000Z' },
+      },
+    }
+
+    const deleted = researchDeskReducer(seeded, {
+      itemIds: ['ki-1'],
+      type: 'deleteKnowledgeItems',
+    })
+
+    expect(deleted.knowledgeItemOrder).toEqual(['ki-2'])
+    expect(deleted.knowledgeItems['ki-1']).toBeUndefined()
+    expect(deleted.knowledgeItems['ki-2']).toBeDefined()
+    expect(deleted.knowledgeSessions[defaultSessionId].updatedAt).not.toBe('2026-01-01T00:00:00.000Z')
+    expect(deleted.dirty).toBe(true)
+  })
+
+  it('clears one knowledge session without removing sibling session entries', () => {
+    const base = createEmptyProjectState()
+    const defaultSessionId = base.selectedKnowledgeSessionId as string
+    const seeded = {
+      ...base,
+      knowledgeItemOrder: ['ki-1', 'ki-2'],
+      knowledgeItems: {
+        'ki-1': makeKnowledgeItem('ki-1', defaultSessionId),
+        'ki-2': makeKnowledgeItem('ki-2', 'ks-2'),
+      },
+      knowledgeSessionOrder: [defaultSessionId, 'ks-2'],
+      knowledgeSessions: {
+        ...base.knowledgeSessions,
+        [defaultSessionId]: { ...base.knowledgeSessions[defaultSessionId], updatedAt: '2026-01-01T00:00:00.000Z' },
+        'ks-2': makeKnowledgeSession('ks-2', 'Second'),
+      },
+    }
+
+    const cleared = researchDeskReducer(seeded, {
+      sessionId: defaultSessionId,
+      type: 'clearKnowledgeSession',
+    })
+
+    expect(cleared.knowledgeItemOrder).toEqual(['ki-2'])
+    expect(cleared.knowledgeItems['ki-1']).toBeUndefined()
+    expect(cleared.knowledgeItems['ki-2']).toBeDefined()
+    expect(cleared.knowledgeSessions[defaultSessionId]).toBeDefined()
+    expect(cleared.knowledgeSessions[defaultSessionId].updatedAt).not.toBe('2026-01-01T00:00:00.000Z')
+    expect(cleared.selectedKnowledgeSessionId).toBe(defaultSessionId)
+    expect(cleared.dirty).toBe(true)
+  })
+
+  it('restarts a knowledge ask in place and clears the previous answer payload', () => {
+    const base = createEmptyProjectState()
+    const defaultSessionId = base.selectedKnowledgeSessionId as string
+    const seeded = {
+      ...base,
+      knowledgeItemOrder: ['ki-1'],
+      knowledgeItems: {
+        'ki-1': makeKnowledgeItem('ki-1', defaultSessionId, {
+          answer: {
+            answerMarkdown: 'Old answer',
+            degradedStages: [],
+            references: [],
+            refusal: false,
+            quotes: [],
+          },
+          collectionIds: ['collection-old'],
+          completedAt: '2026-01-03T00:00:00.000Z',
+          error: 'old error',
+          status: 'completed',
+          topK: 5,
+        }),
+      },
+    }
+
+    const restarted = researchDeskReducer(seeded, {
+      item: makeKnowledgeItem('ki-new', defaultSessionId, {
+        collectionIds: ['collection-new'],
+        collectionTitles: ['EU Recht', 'AI Act'],
+        createdAt: '2026-01-04T00:00:00.000Z',
+        question: 'Updated question',
+        requestedProfile: 'tief',
+        runId: 'run-new',
+        topK: null,
+      }),
+      replacedItemId: 'ki-1',
+      type: 'restartKnowledgeAsk',
+    })
+
+    expect(restarted.knowledgeItemOrder).toEqual(['ki-1'])
+    expect(restarted.knowledgeItems['ki-1']).toMatchObject({
+      collectionIds: ['collection-new'],
+      collectionTitles: ['EU Recht', 'AI Act'],
+      createdAt: '2026-01-04T00:00:00.000Z',
+      id: 'ki-1',
+      progress: { steps: [] },
+      question: 'Updated question',
+      requestedProfile: 'tief',
+      runId: 'run-new',
+      sessionId: defaultSessionId,
+      status: 'running',
+      topK: null,
+    })
+    expect(restarted.knowledgeItems['ki-1'].answer).toBeUndefined()
+    expect(restarted.knowledgeItems['ki-1'].completedAt).toBeUndefined()
+    expect(restarted.knowledgeItems['ki-1'].error).toBeUndefined()
+    expect(restarted.knowledgeSessions[defaultSessionId].updatedAt).toBe('2026-01-04T00:00:00.000Z')
+    expect(restarted.dirty).toBe(true)
+  })
+
+  it('sets completedAt when a knowledge item completes', () => {
+    const base = createEmptyProjectState()
+    const defaultSessionId = base.selectedKnowledgeSessionId as string
+    const seeded = {
+      ...base,
+      knowledgeItemOrder: ['ki-1'],
+      knowledgeItems: {
+        'ki-1': makeKnowledgeItem('ki-1', defaultSessionId, {
+          progress: {
+            steps: [{ facts: {}, id: 'answer', kind: 'answer', status: 'running' }],
+          },
+        }),
+      },
+    }
+
+    const completed = researchDeskReducer(seeded, {
+      answer: {
+        answerMarkdown: 'Fresh answer',
+        degradedStages: [],
+        references: [],
+        refusal: false,
+        quotes: [],
+      },
+      runId: 'run-ki-1',
+      type: 'completeKnowledgeItem',
+    })
+
+    expect(completed.knowledgeItems['ki-1'].status).toBe('completed')
+    expect(completed.knowledgeItems['ki-1'].completedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    expect(completed.knowledgeItems['ki-1'].progress.steps[0].status).toBe('done')
+    expect(completed.knowledgeSessions[defaultSessionId].updatedAt).toBe(completed.knowledgeItems['ki-1'].completedAt)
+    expect(completed.dirty).toBe(true)
+  })
+
+  it('marks a running knowledge item as cancelled when its run is cancelled', () => {
+    const base = createEmptyProjectState()
+    const defaultSessionId = base.selectedKnowledgeSessionId as string
+    const seeded = {
+      ...base,
+      knowledgeItemOrder: ['ki-1'],
+      knowledgeItems: {
+        'ki-1': makeKnowledgeItem('ki-1', defaultSessionId, {
+          progress: {
+            steps: [{ facts: {}, id: 'answer', kind: 'answer', status: 'running' }],
+          },
+        }),
+      },
+      knowledgeSessions: {
+        ...base.knowledgeSessions,
+        [defaultSessionId]: {
+          ...base.knowledgeSessions[defaultSessionId],
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      },
+    }
+    const event: ResearchRunEvent = {
+      created_at: Date.parse('2026-01-02T00:05:00.000Z') / 1000,
+      data: { message: 'Request cancelled', status: 'cancelled' },
+      run_id: 'run-ki-1',
+      sequence: 5,
+      type: 'inqtrix.run.cancelled',
+    }
+
+    const cancelled = researchDeskReducer(seeded, {
+      event,
+      type: 'appendApiRunEvent',
+    })
+
+    expect(cancelled.knowledgeItems['ki-1'].status).toBe('cancelled')
+    expect(cancelled.knowledgeItems['ki-1'].progress.steps[0].status).toBe('done')
+    expect(cancelled.knowledgeItems['ki-1'].error).toBeUndefined()
+    expect(cancelled.knowledgeSessions[defaultSessionId].updatedAt).not.toBe('2026-01-01T00:00:00.000Z')
   })
 
   it('deletes the last remaining session, leaving an empty state', () => {
@@ -386,6 +756,55 @@ describe('chat folder reducer actions', () => {
     expect(next.chatThreadGroupMemberships[threadId as string]).toBe(groupId)
     expect(next.chatThreadOrder[0]).toBe(threadId)
     expect(next.dirty).toBe(true)
+  })
+
+  it('dissolves a deleted chat folder while keeping its threads', () => {
+    const base = createEmptyProjectState()
+    const seeded = {
+      ...base,
+      chatThreadGroupMemberships: { 'ct-1': 'cg-1' },
+      chatThreadGroupOrder: ['cg-1'],
+      chatThreadGroups: {
+        'cg-1': {
+          createdAt: '2026-01-01T00:00:00.000Z',
+          id: 'cg-1',
+          title: 'Folder',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      },
+      chatThreadOrder: ['ct-1'],
+      chatThreads: { 'ct-1': makeChatThread('ct-1', 'Chat') },
+    }
+
+    const next = researchDeskReducer(seeded, {
+      groupId: 'cg-1',
+      type: 'deleteChatThreadGroup',
+    })
+
+    expect(next.chatThreadGroups['cg-1']).toBeUndefined()
+    expect(next.chatThreadGroupMemberships['ct-1']).toBeUndefined()
+    expect(next.chatThreads['ct-1']).toBeDefined()
+  })
+})
+
+describe('editor folder reducer actions', () => {
+  it('dissolves a deleted editor folder while keeping its documents', () => {
+    const base = createEmptyProjectState()
+    const seeded = {
+      ...base,
+      editorDocumentOrder: ['doc-1'],
+      editorDocuments: { 'doc-1': makeEditorDocument('doc-1', 'Doc', { folderId: 'folder-1' }) },
+      editorFolderOrder: ['folder-1'],
+      editorFolders: { 'folder-1': makeEditorFolder('folder-1', 'Folder') },
+    }
+
+    const next = researchDeskReducer(seeded, {
+      folderId: 'folder-1',
+      type: 'deleteEditorFolder',
+    })
+
+    expect(next.editorFolders['folder-1']).toBeUndefined()
+    expect(next.editorDocuments['doc-1']).toMatchObject({ folderId: null })
   })
 })
 
@@ -921,6 +1340,55 @@ describe('live indexing-job lifecycle', () => {
     const started = researchDeskReducer(state, { indexId: id, jobId: 'j1', source: 'server', totalDocuments: 2, type: 'startVectorIndexReindex' })
     expect(started.vectorIndexes[id].status).toBe('indexing')
     expect(started.indexingJobs[id]).toMatchObject({ completedDocuments: 0, jobId: 'j1', percent: 0, source: 'server', totalDocuments: 2 })
+  })
+
+  it('defaults runningFileIds to every member when the action omits it (server re-embed)', () => {
+    // The durable server re-embed does not pass a working set — it re-vectorizes
+    // the whole collection, so every member must be in the run.
+    const { id, state } = withIndex('a', 'b')
+    const started = researchDeskReducer(state, { indexId: id, jobId: 'j1', source: 'server', totalDocuments: 2, type: 'startVectorIndexReindex' })
+    expect([...started.indexingJobs[id].runningFileIds].sort()).toEqual(['a', 'b'])
+  })
+
+  it('uses the explicit runningFileIds subset (incremental add) so only those files run', () => {
+    // Indexing one new document must NOT pull the already-embedded members into
+    // the run — only the passed subset is the working set.
+    const { id, state } = withIndex('a', 'b')
+    const started = researchDeskReducer(state, { indexId: id, jobId: 'j1', runningFileIds: ['b'], source: 'build', totalDocuments: 1, type: 'startVectorIndexReindex' })
+    expect(started.indexingJobs[id].runningFileIds).toEqual(['b'])
+  })
+
+  it('markVectorIndexDocumentEmbedded maps a server document id to its file and flips it live', () => {
+    // The durable server re-embed confirms documents by backend id; the reducer
+    // resolves it to the local file via the member's serverDocumentId.
+    const { id, state } = withIndex('a', 'b')
+    const model = state.vectorIndexes[id].model
+    let next = researchDeskReducer(state, { indexId: id, jobId: 'j0', source: 'build', totalDocuments: 2, type: 'startVectorIndexReindex' })
+    // A completed build assigns each member its backend document id.
+    next = researchDeskReducer(next, {
+      embeddedFileIds: ['a', 'b'],
+      indexId: id,
+      serverCollectionId: 'col-1',
+      serverCollectionModel: model,
+      serverDocumentIds: { a: 'kd_a', b: 'kd_b' },
+      type: 'completeVectorIndexReindex',
+    })
+    next = researchDeskReducer(next, { indexId: id, jobId: 'j1', source: 'server', totalDocuments: 2, type: 'startVectorIndexReindex' })
+    const clean = { ...next, dirty: false }
+    const flipped = researchDeskReducer(clean, { indexId: id, serverDocumentId: 'kd_a', type: 'markVectorIndexDocumentEmbedded' })
+    // Only file 'a' flips; the project is not dirtied (ephemeral live state).
+    expect(flipped.dirty).toBe(false)
+    expect(flipped.indexingJobs[id].embeddedFileIds).toContain('a')
+    expect(flipped.indexingJobs[id].embeddedFileIds ?? []).not.toContain('b')
+  })
+
+  it('markVectorIndexDocumentEmbedded ignores an unknown server document id (older index)', () => {
+    // A member without a tracked serverDocumentId cannot be mapped → no-op; the
+    // row flips at completion instead. State is returned unchanged.
+    const { id, state } = withIndex('a')
+    const started = researchDeskReducer(state, { indexId: id, jobId: 'j1', source: 'server', totalDocuments: 1, type: 'startVectorIndexReindex' })
+    const same = researchDeskReducer(started, { indexId: id, serverDocumentId: 'kd_unknown', type: 'markVectorIndexDocumentEmbedded' })
+    expect(same).toBe(started)
   })
 
   it('progress updates the live job without dirtying the project', () => {

@@ -11,7 +11,6 @@ import {
   MessageSquarePlus,
   Minimize2,
   PanelRightClose,
-  PanelRightOpen,
 } from '@/components/icons'
 import {
   useEffect,
@@ -36,10 +35,6 @@ import {
 } from '../researchDesk/components/runDisplay'
 import { MarkdownReport } from './MarkdownReport'
 
-type ReportRestoreRailProps = {
-  onShow: () => void
-}
-
 type ReportPanelProps = {
   isExpanded: boolean
   onExpandedChange: (isExpanded: boolean) => void
@@ -59,30 +54,6 @@ type ReportPanelMode =
 type ReportPanelState = {
   markdown: string | null
   mode: ReportPanelMode
-}
-
-export function ReportRestoreRail({ onShow }: ReportRestoreRailProps) {
-  const { t } = useLocale()
-
-  return (
-    <aside className="flex min-h-12 items-start justify-center rounded-lg border border-border bg-card p-1 shadow-[0_1px_2px_var(--shadow-hairline)] lg:min-h-0">
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            aria-label={t.report.show}
-            className="mt-1"
-            onClick={onShow}
-            size="icon"
-            type="button"
-            variant="ghost"
-          >
-            <PanelRightOpen className="size-4" />
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent side="left">{t.report.show}</TooltipContent>
-      </Tooltip>
-    </aside>
-  )
 }
 
 export function ReportPanel({
@@ -124,7 +95,7 @@ export function ReportPanel({
     >
       <Tabs defaultValue="preview" className="flex h-full min-h-[420px] flex-col lg:min-h-0">
         <div>
-          <div className="flex h-12 items-center justify-between gap-3 border-b border-border px-3">
+          <div className="flex inqtrix-panel-header items-center justify-between gap-3 border-b border-border px-3">
             <div className="min-w-0">
               <h2 className="t-section truncate text-foreground">
                 {panelTitle}

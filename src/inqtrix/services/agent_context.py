@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 
-from inqtrix.knowledge.profiles import parse_knowledge_profile
+from inqtrix.knowledge.profiles import EVIDENCE_K_MAX, parse_knowledge_profile
 from inqtrix.services.overrides import (
     AgentOverridesRequest,
     apply_overrides,
@@ -51,6 +51,35 @@ class ResolvedAgentContext:
     agent_overrides: dict[str, Any]
     mode: str
     knowledge_filters: dict[str, Any]
+
+
+def _validate_int_knowledge_filter(
+    filters: dict[str, Any], name: str, lo: int, hi: int
+) -> None:
+    """Validate an optional integer ``knowledge_filters`` override in place.
+
+    Rejects non-integers, ``bool`` (``isinstance(True, int)`` is True, but a
+    boolean is never a valid count), and out-of-range values with HTTP 400 — so
+    a bad ``top_k``/``final_k`` fails loudly on every execution path (chat,
+    native runs, worker replay) instead of silently coercing to a surprising
+    retrieval width. Absent keys are left untouched (server default applies).
+    """
+    raw = filters.get(name)
+    if raw is None:
+        return
+    if isinstance(raw, bool) or not isinstance(raw, int) or not (lo <= raw <= hi):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "message": (
+                        f"knowledge_filters.{name} muss eine ganze Zahl "
+                        f"zwischen {lo} und {hi} sein"
+                    ),
+                    "type": "invalid_request_error",
+                }
+            },
+        )
 
 
 class AgentContextResolver:
@@ -259,7 +288,8 @@ class AgentContextResolver:
                     "type": "invalid_request_error",
                 }},
             )
-        raw_profile = (raw_filters or {}).get("profile")
+        filters = raw_filters or {}
+        raw_profile = filters.get("profile")
         if raw_profile is not None:
             # Validated here so a typo fails with 400 on every
             # execution path (chat, native runs, worker replay)
@@ -274,6 +304,11 @@ class AgentContextResolver:
                         "type": "invalid_request_error",
                     }},
                 ) from exc
+        # Retrieval-width overrides validated at the same chokepoint. ``top_k``
+        # mirrors the settings bound (``INQTRIX_KNOWLEDGE_TOP_K`` 1..50);
+        # ``final_k`` cannot exceed the algorithm's evidence ceiling.
+        _validate_int_knowledge_filter(filters, "top_k", 1, 50)
+        _validate_int_knowledge_filter(filters, "final_k", 1, EVIDENCE_K_MAX)
         return ResolvedAgentContext(
             stack_name=stack_name,
             providers=active_providers,

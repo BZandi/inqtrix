@@ -2,6 +2,7 @@ import { PanelBottomOpen, Users } from '@/components/icons'
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { PanelToggle } from '@/components/ui/panel-toggle'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { WelcomeState } from '@/components/ui/welcome-state'
 import type { CreateResearchRunRequest } from '@/features/researchRuns/types'
@@ -24,11 +25,13 @@ type ResearchRunColumnProps = {
   cancelSubmittingRunIds: ReadonlySet<string>
   expandedJobId: string | null
   isComposerVisible: boolean
+  isReportVisible: boolean
   jobs: ResearchJob[]
   onActiveFilterChange: (filter: JobFilter) => void
   onCancelJob: (jobId: string) => void
   onComposerSubmit: (request: CreateResearchRunRequest) => void
   onComposerVisibleChange: (isComposerVisible: boolean) => void
+  onReportVisibleChange: (isVisible: boolean) => void
   onResearchQuestionChange: (question: string) => void
   researchQuestion: string
   onDeleteJob: (jobId: string) => void
@@ -49,11 +52,13 @@ export function ResearchRunColumn({
   cancelSubmittingRunIds,
   expandedJobId,
   isComposerVisible,
+  isReportVisible,
   jobs,
   onActiveFilterChange,
   onCancelJob,
   onComposerSubmit,
   onComposerVisibleChange,
+  onReportVisibleChange,
   onResearchQuestionChange,
   researchQuestion,
   onDeleteJob,
@@ -87,6 +92,15 @@ export function ResearchRunColumn({
         activeFilter={activeFilter}
         jobs={allJobs}
         onActiveFilterChange={onActiveFilterChange}
+        trailing={
+          <PanelToggle
+            collapseLabel={t.report.hide}
+            expandLabel={t.report.show}
+            expanded={isReportVisible}
+            onToggle={onReportVisibleChange}
+            side="right"
+          />
+        }
       />
       {allJobs.length === 0 ? (
         <ResearchEmptyState
@@ -225,20 +239,27 @@ function ResearchEmptyState({
       <WelcomeState
         actions={(
           <div className="flex flex-wrap justify-center gap-2">
-          {suggestions.map((suggestion) => (
-            <Button
-              className="h-8 rounded-md px-2.5 text-xs"
-              key={suggestion.label}
-              onClick={() => onSuggestionSelect(suggestion.question)}
-              type="button"
-              variant="outline"
-            >
-              <span>{suggestion.label}</span>
-            </Button>
-          ))}
+            {suggestions.map((suggestion) => (
+              <Button
+                className="h-8 rounded-md px-2.5 text-xs"
+                key={suggestion.label}
+                onClick={() => onSuggestionSelect(suggestion.question)}
+                type="button"
+                variant="outline"
+              >
+                <span>{suggestion.label}</span>
+              </Button>
+            ))}
           </div>
         )}
+        body={(
+          <>
+            <p>{t.home.emptyBody}</p>
+            <p>{t.home.emptyGuidance}</p>
+          </>
+        )}
         className="pointer-events-auto"
+        example={t.home.emptyExample}
         kicker={t.home.emptyKicker}
         subtitle={t.home.emptyDescription}
         title={t.home.emptyTitle}

@@ -176,6 +176,17 @@ class ChatStore(Protocol):
         Returns the stored messages."""
         ...
 
+    async def delete_message(self, thread_id: str, message_id: str) -> None:
+        """Delete one message from a thread (idempotent).
+
+        Scoped on the composite ``(thread_id, id)`` so a re-used id in
+        another thread is never touched. A no-op when the row is absent:
+        the autosave diff may re-issue a delete after a coalesced burst or
+        a multi-device race, and a missing-row error would wedge the
+        retry loop (the same idempotency rule the upsert append honours).
+        """
+        ...
+
     async def list_messages_page(
         self,
         thread_id: str,

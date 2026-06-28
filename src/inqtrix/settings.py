@@ -250,10 +250,10 @@ class AgentSettings(BaseSettings):
     container image can be re-tuned per environment without code changes.
 
     The ``report_profile`` field doubles as a preset trigger: assigning
-    ``ReportProfile.DEEP`` (via env or constructor) auto-applies the
-    DEEP-specific overrides defined in
-    :mod:`inqtrix.report_profiles`, but only for fields the user has
-    not explicitly set (see :meth:`with_report_profile_defaults`).
+    ``ReportProfile.COMPACT`` or ``ReportProfile.DEEP`` (via env or
+    constructor) auto-applies the profile-specific overrides defined in
+    :mod:`inqtrix.report_profiles`, but only for fields the user has not
+    explicitly set (see :meth:`with_report_profile_defaults`).
     """
 
     model_config = _SETTINGS_MODEL_CONFIG
@@ -263,28 +263,30 @@ class AgentSettings(BaseSettings):
         alias="REPORT_PROFILE",
         description=(
             "Selects the answer style and depth preset (``compact`` or "
-            "``deep``). Assigning ``deep`` triggers a bundle of profile-"
-            "specific overrides (``max_rounds=5``, ``min_rounds=2``, "
-            "``confidence_stop=9``, ``first_round_queries=10``, "
-            "``answer_prompt_citations_max=500``, "
+            "``deep``). The active profile triggers a bundle of profile-"
+            "specific overrides. ``compact`` sets ``max_rounds=2``, "
+            "``min_rounds=1``, ``confidence_stop=7`` and "
+            "``first_round_queries=6``; ``deep`` sets ``max_rounds=4``, "
+            "``min_rounds=2``, ``confidence_stop=8``, "
+            "``first_round_queries=10``, ``answer_prompt_citations_max=500``, "
             "``reasoning_timeout=900``, ``editor_assistant_timeout=900``, "
             "``claim_extract_timeout=600``, "
             "``search_timeout=300``, ``max_total_seconds=1800``) for any field the user has not "
             "set explicitly."
         ),
     )
-    """Selects the answer style and depth preset (``compact`` or ``deep``). Assigning ``deep`` triggers a bundle of profile-specific overrides (``max_rounds=5``, ``min_rounds=2``, ``confidence_stop=9``, ``first_round_queries=10``, ``answer_prompt_citations_max=500``, ``reasoning_timeout=900``, ``editor_assistant_timeout=900``, ``claim_extract_timeout=600``, ``search_timeout=300``, ``max_total_seconds=1800``) for any field the user has not set explicitly."""
+    """Selects the answer style and depth preset (``compact`` or ``deep``). The active profile triggers profile-specific overrides for any field the user has not set explicitly: ``compact`` uses ``max_rounds=2``, ``min_rounds=1``, ``confidence_stop=7`` and ``first_round_queries=6``; ``deep`` uses ``max_rounds=4``, ``min_rounds=2``, ``confidence_stop=8``, ``first_round_queries=10`` and the larger answer/timeout budgets."""
     max_rounds: int = Field(
-        4,
+        2,
         alias="MAX_ROUNDS",
         description=(
             "Hard upper bound for the research loop. Mirrors "
             "``AgentConfig.max_rounds`` — see that field for tuning "
-            "guidance. Default ``4`` matches COMPACT; DEEP raises "
-            "to ``5``."
+            "guidance. Default ``2`` matches COMPACT; DEEP raises "
+            "to ``4``."
         ),
     )
-    """Hard upper bound for the research loop. Mirrors ``AgentConfig.max_rounds`` — see that field for tuning guidance. Default ``4`` matches COMPACT; DEEP raises to ``5``."""
+    """Hard upper bound for the research loop. Mirrors ``AgentConfig.max_rounds`` — see that field for tuning guidance. Default ``2`` matches COMPACT; DEEP raises to ``4``."""
     min_rounds: int = Field(
         1,
         alias="MIN_ROUNDS",
@@ -305,15 +307,15 @@ class AgentSettings(BaseSettings):
     )
     """Lower bound for the research loop. Default ``1`` preserves the existing behaviour (an early ``confidence_stop`` / plateau / utility stop after Round 0 is allowed). Raise this when the model used as evaluator tends to over-confidently signal ``done`` before the STORM diversification in Round 1+ has had a chance to broaden the source pool. Typical effect of ``min_rounds=2``: at least one additional search round runs even if the confidence target was already reached in Round 0. Clamped to ``max_rounds`` at request time so configuration mistakes never extend the loop beyond the user-specified hard cap."""
     confidence_stop: int = Field(
-        8,
+        7,
         alias="CONFIDENCE_STOP",
         description=(
             "Minimum evaluator confidence (1-10) at which the stop "
-            "cascade may emit ``done``. Default ``8`` for COMPACT, "
-            "``9`` for DEEP. Lower for latency-sensitive deployments."
+            "cascade may emit ``done``. Default ``7`` for COMPACT, "
+            "``8`` for DEEP. Lower for latency-sensitive deployments."
         ),
     )
-    """Minimum evaluator confidence (1-10) at which the stop cascade may emit ``done``. Default ``8`` for COMPACT, ``9`` for DEEP. Lower for latency-sensitive deployments."""
+    """Minimum evaluator confidence (1-10) at which the stop cascade may emit ``done``. Default ``7`` for COMPACT, ``8`` for DEEP. Lower for latency-sensitive deployments."""
     first_round_queries: int = Field(
         6,
         alias="FIRST_ROUND_QUERIES",

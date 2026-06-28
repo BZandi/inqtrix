@@ -82,15 +82,35 @@ POST /v1/runs   (or /v1/chat/completions)
   "knowledge_filters": {
     "collection_ids": ["kc_…"],
     "profile": "gruendlich",
-    "top_k": 8
+    "top_k": 8,
+    "final_k": 12
   }
 }
 ```
 
-Valid values: `schnell`, `standard`, `gruendlich`, `tief`, `auto`. An
-unknown value fails the request with HTTP 400 naming the valid set —
-a typo never silently runs a different profile. `top_k` stays an
-orthogonal override under every profile.
+Valid `profile` values: `schnell`, `standard`, `gruendlich`, `tief`,
+`auto`. An unknown value fails the request with HTTP 400 naming the
+valid set — a typo never silently runs a different profile.
+
+`top_k` (per-query retrieval width) and `final_k` (the number of
+evidence chunks that reach the answer) are orthogonal overrides under
+every profile. Both are validated at the one resolver chokepoint and
+fail with HTTP 400 when not a plain integer in range — `top_k` in
+`1..50` (mirrors `INQTRIX_KNOWLEDGE_TOP_K`), `final_k` in
+`1..EVIDENCE_K_MAX`. Without `final_k` the surfaced-evidence count is
+`min(top_k * profile.final_k_factor, EVIDENCE_K_MAX)` (only `tief`
+raises the factor above `1.0`); an explicit `final_k` pins it directly,
+overriding the factor. The ceiling `EVIDENCE_K_MAX` and every profile's
+`final_k_factor` are published in the `/v1/capabilities` manifest
+(`knowledge.evidence_k_max`, `knowledge.profiles[].final_k_factor`) so a
+client can render the effective `final_k` and bound its override.
+
+Note: `final_k` can exceed `top_k`. The wider candidate pool comes from
+the breadth of the run, not from `top_k` — query decomposition (`tief`)
+fans out into sub-queries each retrieving `top_k`, the reranker selects
+`final_k` from a far deeper candidate pool, and gate rewrite rounds add
+more. For a profile without decomposition, the single retrieval is run
+at `final_k` directly (so `top_k` only governs per-sub-query width).
 
 ## Stage notes
 

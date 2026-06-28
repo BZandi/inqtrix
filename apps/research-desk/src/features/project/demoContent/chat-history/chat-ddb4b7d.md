@@ -13,7 +13,7 @@ updated_at: "2026-01-01T13:00:10.000Z"
 Wie kann ich in Python eine Differentialgleichung platten und animieren, gib mir eine Schritt für Schritt Anleitung mit Code.
 <!-- /inqtrix:message -->
 
-<!-- inqtrix:message id="msg-1779029183213-tcrk50" role="assistant" created_at="2026-01-01T13:00:00.000Z" -->
+<!-- inqtrix:message id="msg-1779029183213-tcrk50" role="assistant" created_at="2026-01-01T13:00:00.000Z" model="claude-sonnet-4-6" model_tier="mid" model_effort="medium" model_requested_tier="mid" model_source="demo" model_effort_source="demo" -->
 # Differentialgleichung in Python lösen, plotten & animieren
 
 Hier eine Schritt-für-Schritt-Anleitung am Beispiel eines **gedämpften Pendels**:

@@ -9,10 +9,12 @@ import type { ChatMessageRecord } from '@/features/project/types'
 import {
   fingerprintThread,
   groupRecordFromServer,
+  messageIdsToDelete,
   messageRecordFromServer,
   serverGroupPayload,
   serverMessagePayload,
   serverThreadPayload,
+  shouldFetchMessageBaselineBeforePush,
   threadNeedsSync,
   threadRecordFromServer,
 } from './chatHistorySync'
@@ -54,7 +56,7 @@ describe('chatHistorySync converters', () => {
     expect(record.source).toBe('api')
   })
 
-  it('round-trips a message with attachments/chainTrace/modelResolution verbatim', () => {
+  it('round-trips a message with attachments/chainTrace/modelResolution/requestContext verbatim', () => {
     const record: ChatMessageRecord = {
       attachments: [
         {
@@ -77,12 +79,14 @@ describe('chatHistorySync converters', () => {
         requestedTier: 'deep',
         tier: 'deep',
       },
+      requestContext: { knowledgeCollectionIds: ['kc_1', 'kc_2'] },
       role: 'assistant',
     }
     const payload = serverMessagePayload(record)
     expect(payload.metadata.attachments).toEqual(record.attachments)
     expect(payload.metadata.chainTrace).toEqual(record.chainTrace)
     expect(payload.metadata.modelResolution).toEqual(record.modelResolution)
+    expect(payload.metadata.requestContext).toEqual(record.requestContext)
 
     const wire: ServerChatMessage = {
       content_markdown: payload.content_markdown,
@@ -108,8 +112,24 @@ describe('chatHistorySync converters', () => {
     expect('attachments' in record).toBe(false)
     expect('chainTrace' in record).toBe(false)
     expect('modelResolution' in record).toBe(false)
+    expect('requestContext' in record).toBe(false)
     // And a bare message packs an empty metadata object (no junk keys).
     expect(serverMessagePayload(record).metadata).toEqual({})
+  })
+
+  it('ignores malformed request context metadata from the server', () => {
+    const record = messageRecordFromServer({
+      content_markdown: 'plain',
+      created_at: 10,
+      id: 'cm_malformed',
+      metadata: {
+        requestContext: { knowledgeCollectionIds: [123, '', 'kc_1'] },
+      },
+      role: 'assistant',
+      thread_id: 'ct_1',
+    })
+
+    expect(record.requestContext).toEqual({ knowledgeCollectionIds: ['kc_1'] })
   })
 
   it('round-trips a group record', () => {
@@ -177,5 +197,46 @@ describe('thread fingerprint diff', () => {
       null,
     )
     expect(threadNeedsSync(serverSeed, localNewer)).toBe(true)
+  })
+})
+
+describe('message delete diff', () => {
+  const message = (id: string): ChatMessageRecord => ({
+    contentMarkdown: id,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    id,
+    role: 'user',
+  })
+
+  it('names the messages the server still holds but the thread dropped', () => {
+    const known = new Set(['cm_0', 'cm_1', 'cm_2'])
+    // cm_1 was deleted locally; the other two remain.
+    expect(messageIdsToDelete(known, [message('cm_0'), message('cm_2')])).toEqual([
+      'cm_1',
+    ])
+  })
+
+  it('returns nothing when an unknown baseline means the server set is unfetched', () => {
+    // An un-opened thread: deleting against an unknown baseline could drop
+    // messages the client simply never loaded, so the diff must be empty.
+    expect(messageIdsToDelete(undefined, [message('cm_0')])).toEqual([])
+  })
+
+  it('returns nothing when no message left the thread (no spurious delete)', () => {
+    const known = new Set(['cm_0', 'cm_1'])
+    expect(messageIdsToDelete(known, [message('cm_0'), message('cm_1')])).toEqual(
+      [],
+    )
+  })
+
+  it('deletes every message when the conversation was cleared', () => {
+    const known = new Set(['cm_0', 'cm_1'])
+    expect(messageIdsToDelete(known, []).sort()).toEqual(['cm_0', 'cm_1'])
+  })
+
+  it('requires a server baseline fetch before pushing local messages with an unknown baseline', () => {
+    expect(shouldFetchMessageBaselineBeforePush(undefined, [message('cm_retry')])).toBe(true)
+    expect(shouldFetchMessageBaselineBeforePush(undefined, [])).toBe(false)
+    expect(shouldFetchMessageBaselineBeforePush(new Set(['cm_old']), [message('cm_retry')])).toBe(false)
   })
 })

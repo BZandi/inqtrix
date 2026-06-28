@@ -26,9 +26,15 @@ export type CitationView = {
 
 const SNIPPET_MAX = 220
 
+/** Collapse internal whitespace runs to single spaces and trim the ends. Shared
+ * by the clamped row snippet and the unclamped copy-to-clipboard excerpt. */
+export function collapseWhitespace(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
 /** Collapse whitespace and clamp to a 2-line-ish snippet with an ellipsis. */
 function clampSnippet(text: string): string {
-  const collapsed = text.replace(/\s+/g, ' ').trim()
+  const collapsed = collapseWhitespace(text)
   return collapsed.length > SNIPPET_MAX
     ? `${collapsed.slice(0, SNIPPET_MAX).trimEnd()}…`
     : collapsed
@@ -104,4 +110,24 @@ export function groupCitationsByDocument(views: CitationView[]): CitationDocumen
     group.citations.push(view)
   }
   return groups
+}
+
+/**
+ * The document group matching the currently open source, or null. Used to scope
+ * the panel's Belege list to the active document (document-centric reader): when
+ * a source is open, only its document + passages are shown. A null `documentId`
+ * (no open source) yields null so the caller falls back to the full list.
+ */
+export function activeCitationGroup(
+  groups: CitationDocumentGroup[],
+  documentId: string | null | undefined,
+): CitationDocumentGroup | null {
+  if (!documentId) return null
+  return groups.find((group) => group.documentId === documentId) ?? null
+}
+
+/** First openable citation of a document group (clicking a document header opens
+ * the document at its first cited passage), or null when none can be opened. */
+export function firstOpenableCitation(group: CitationDocumentGroup): CitationView | null {
+  return group.citations.find((view) => view.canOpen) ?? null
 }

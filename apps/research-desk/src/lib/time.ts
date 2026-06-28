@@ -37,3 +37,27 @@ export function formatDurationMsShort(ms: number): string {
   if (hours > 0) return `${hours}:${minutes.toString().padStart(2, '0')}:${ss}`
   return `${minutes}:${ss}`
 }
+
+/** Chat-style message timestamp used anywhere a conversational entry needs the
+ * same date + time surface. It intentionally uses the viewer's local timezone,
+ * matching the previous chat-only formatter. */
+export function formatMessageTimestamp(iso: string, locale: string): string {
+  const date = new Date(iso)
+  const formatterLocale = locale === 'de' ? 'de-DE' : 'en-US'
+  const dateLabel = new Intl.DateTimeFormat(formatterLocale, locale === 'de'
+    ? {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    }
+    : {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+    }).format(date)
+  const timeLabel = new Intl.DateTimeFormat(formatterLocale, {
+    hour: locale === 'de' ? '2-digit' : 'numeric',
+    minute: '2-digit',
+  }).format(date)
+  return `${dateLabel} · ${timeLabel}`
+}

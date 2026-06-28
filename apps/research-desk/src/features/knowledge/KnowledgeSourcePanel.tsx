@@ -5,10 +5,10 @@ import {
   useRef,
   useState,
 } from 'react'
-import { BadgeCheck, ChevronDown, ChevronUp, ExternalLink, FileText, PanelRightClose } from '@/components/icons'
+import { BadgeCheck, ChevronDown, ChevronLeft, ChevronUp, ExternalLink, FileText, PanelRightClose } from '@/components/icons'
 import { Button } from '@/components/ui/button'
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
@@ -21,12 +21,16 @@ import {
   type HighlightRange,
 } from './highlight'
 import { excerptHighlightRanges, HighlightedExcerpt } from './CitationExcerpt'
-import { citationKey, citationViews, groupCitationsByDocument } from './citations'
+import {
+  activeCitationGroup,
+  citationKey,
+  citationViews,
+  firstOpenableCitation,
+  groupCitationsByDocument,
+} from './citations'
 import { CitationGroupList } from './CitationRow'
-import { KnowledgeStepList } from './KnowledgeStepList'
 import type { DocumentViewerTarget, KnowledgeDataSource } from './types'
 
-type PanelTab = 'sources' | 'steps'
 /** "Beleg" = the cited excerpt (the retrieved chunk, highlighted); "document" =
  * the full extracted text with span highlight; "source" = the original PDF
  * opened at the cited page with a soft page highlight. */
@@ -40,34 +44,28 @@ type DocumentState =
 
 /**
  * Right-hand LAYOUT panel for the knowledge Ask view (the counterpart of the
- * Research Desk's `ReportPanel`): embedded beside the conversation, not a
- * popup. Two tabs:
- *  - "Belege": the cited sources of the active answer (click to read) plus the
- *    citation reader (the cited excerpt with the quoted span highlighted, and
- *    the full extracted document on demand).
- *  - "Schritte": the agent steps of the active answer, reviewable after the
- *    fact (the same `KnowledgeStepList` the live run card renders).
+ * Research Desk's `ReportPanel`): embedded beside the conversation, not a popup.
+ * It stays focused on cited sources and document reading; Ask run steps are
+ * shown inline with their Q&A entry.
  *
- * `item` is null in Find mode (only the reader, no steps); `target` is the
+ * `item` is null in Find mode (only the reader); `target` is the
  * document currently open in the reader.
  */
 export function KnowledgeSourcePanel({
-  collectionCount,
   dataSource,
   item,
   onClose,
   onSelectReference,
-  onTabChange,
-  tab,
   target,
 }: {
-  collectionCount: number
   dataSource: KnowledgeDataSource
   item: KnowledgeThreadItemRecord | null
+  /** Closes the panel. The shared header toggle owns this on desktop, but the
+   * panel keeps its own close because on mobile the panel is a full overlay
+   * (absolute inset-0 z-30) that occludes that header toggle — same occlusion
+   * case as the report panel's fullscreen mode. */
   onClose: () => void
   onSelectReference: (reference: KnowledgeReferenceRecord) => void
-  onTabChange: (tab: PanelTab) => void
-  tab: PanelTab
   target: DocumentViewerTarget | null
 }) {
   const { t } = useLocale()
@@ -79,89 +77,107 @@ export function KnowledgeSourcePanel({
     citationViews(references, quotes, t.knowledge.viewerSection),
   )
   const activeKey = target ? citationKey(target.documentId, target.chunkIndex) : null
-  const steps = item?.progress.steps ?? []
-  const hasSteps = steps.length > 0
+
+  // Document-centric Belege: with a source open the list scopes to that one
+  // document (its passages); "Alle Belege" returns to the full list without
+  // closing the reader. The reset reacts to the active KEY (document + chunk),
+  // not only documentId — switching to another passage of the SAME document
+  // changes only the chunk and must re-focus too.
+  const [showAllSources, setShowAllSources] = useState(false)
+  useEffect(() => {
+    setShowAllSources(false)
+  }, [activeKey])
+
+  const scopedGroup = target && !showAllSources
+    ? activeCitationGroup(citationGroups, target.documentId)
+    : null
+  const visibleGroups = scopedGroup ? [scopedGroup] : citationGroups
+  const canReturnToAllSources = Boolean(scopedGroup) && citationGroups.length > 1
+
+  function focusReference(reference: KnowledgeReferenceRecord) {
+    setShowAllSources(false)
+    onSelectReference(reference)
+  }
+
+  // The occurrence list (back-to-all-sources affordance + grouped citations),
+  // shared by the split layout and the no-reader layout.
+  const listContent = (
+    <div className="px-3 py-2">
+      {canReturnToAllSources && (
+        <button
+          className="mb-1.5 flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left t-meta-sm text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+          onClick={() => setShowAllSources(true)}
+          type="button"
+        >
+          <ChevronLeft className="icon-xs shrink-0" />
+          {t.knowledge.panelAllSources}
+        </button>
+      )}
+      <CitationGroupList
+        activeDocumentId={target?.documentId ?? null}
+        activeKey={activeKey}
+        groups={visibleGroups}
+        onOpen={(view) => focusReference(view.reference)}
+        onOpenDocument={(group) => {
+          const view = firstOpenableCitation(group)
+          if (view) focusReference(view.reference)
+        }}
+      />
+    </div>
+  )
 
   return (
     <aside className="flex h-full w-full min-w-0 flex-col border-l border-border bg-background">
-      <Tabs
-        className="flex h-full min-h-0 flex-col"
-        onValueChange={(value) => onTabChange(value as PanelTab)}
-        value={tab}
-      >
-        <div className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
-          <TabsList className="h-8 bg-surface">
-            <TabsTrigger className="h-6 px-2 text-xs" value="sources">
-              {t.knowledge.panelSources}
-            </TabsTrigger>
-            <TabsTrigger className="h-6 px-2 text-xs" disabled={!hasSteps} value="steps">
-              {t.knowledge.panelSteps}
-            </TabsTrigger>
-          </TabsList>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label={t.knowledge.panelCollapse}
-                className="size-7 shrink-0 text-muted-foreground hover:text-foreground"
-                onClick={onClose}
-                size="icon"
-                type="button"
-                variant="ghost"
-              >
-                <PanelRightClose className="size-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="left">{t.knowledge.panelCollapse}</TooltipContent>
-          </Tooltip>
-        </div>
+      <div className="flex inqtrix-panel-header items-center justify-between gap-2 border-b border-border px-3">
+        <h2 className="truncate t-section text-foreground">{t.knowledge.panelSources}</h2>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              aria-label={t.knowledge.panelCollapse}
+              className="size-7 shrink-0 text-muted-foreground hover:text-foreground"
+              onClick={onClose}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              <PanelRightClose className="size-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="left">{t.knowledge.panelCollapse}</TooltipContent>
+        </Tooltip>
+      </div>
 
-        <TabsContent className="min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden" value="sources">
-          <div className="flex h-full min-h-0 flex-col">
-            {references.length > 0 && (
-              // Always independently scrollable. With a reader open below it the
-              // list is height-capped so it never starves the reader of vertical
-              // space; with no reader selected it fills the panel so every
-              // citation is reachable (otherwise a long list is stuck in a short
-              // box above an empty placeholder).
-              <div className={cn('min-h-0 border-b border-border', target ? 'shrink-0' : 'flex-1')}>
-                <ScrollArea className={target ? 'max-h-52' : 'h-full min-h-0'}>
-                  <div className="px-3 py-2">
-                    <CitationGroupList
-                      activeKey={activeKey}
-                      groups={citationGroups}
-                      onOpen={(view) => onSelectReference(view.reference)}
-                    />
-                  </div>
-                </ScrollArea>
-              </div>
-            )}
-            {target ? (
+      <div className="flex min-h-0 flex-1 flex-col">
+        {references.length > 0 && target ? (
+          // List + reader share the panel via a draggable vertical split, so the
+          // reader never starves the occurrence list of height and the user can
+          // choose the balance (the same primitive as the other modes' splits).
+          // The list scrolls independently (type="auto" surfaces the scrollbar
+          // whenever the occurrences overflow).
+          <ResizablePanelGroup className="min-h-0 flex-1" orientation="vertical">
+            <ResizablePanel className="flex min-h-0 flex-col overflow-hidden" defaultSize="38%" minSize="20%">
+              <ScrollArea className="min-h-0 flex-1" type="auto">
+                {listContent}
+              </ScrollArea>
+            </ResizablePanel>
+            <ResizableHandle aria-label={t.knowledge.panelResizeVertical} orientation="vertical" />
+            <ResizablePanel className="flex min-h-0 flex-col overflow-hidden" defaultSize="62%" minSize="30%">
               <DocumentReader collectionLabel={target.collectionLabel} dataSource={dataSource} target={target} />
-            ) : references.length === 0 ? (
-              <div className="flex flex-1 items-center justify-center px-6 text-center">
-                <p className="t-meta text-muted-foreground">{t.knowledge.panelPickSource}</p>
-              </div>
-            ) : null}
-          </div>
-        </TabsContent>
-
-        <TabsContent className="min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden" value="steps">
-          <ScrollArea className="h-full min-h-0">
-            <div className="px-4 py-4">
-              {hasSteps ? (
-                <KnowledgeStepList
-                  animateIn={false}
-                  collectionCount={collectionCount}
-                  failed={item?.status === 'failed'}
-                  steps={steps}
-                />
-              ) : (
-                <p className="t-meta text-muted-foreground">{t.knowledge.panelNoSteps}</p>
-              )}
-            </div>
+            </ResizablePanel>
+          </ResizablePanelGroup>
+        ) : references.length > 0 ? (
+          // No reader open: the occurrence list fills the panel.
+          <ScrollArea className="min-h-0 flex-1" type="auto">
+            {listContent}
           </ScrollArea>
-        </TabsContent>
-      </Tabs>
+        ) : target ? (
+          <DocumentReader collectionLabel={target.collectionLabel} dataSource={dataSource} target={target} />
+        ) : (
+          <div className="flex flex-1 items-center justify-center px-6 text-center">
+            <p className="t-meta text-muted-foreground">{t.knowledge.panelPickSource}</p>
+          </div>
+        )}
+      </div>
     </aside>
   )
 }
@@ -197,13 +213,15 @@ function DocumentReader({
 
   // New citation → back to the Beleg view, drop the previously loaded document,
   // and re-arm the loader (immediately for a no-excerpt target whose only view
-  // is the document).
+  // is the document). Keyed on document AND chunk so switching to another
+  // occurrence of the SAME document also re-focuses the reader on it (the
+  // document tab otherwise stayed put and would not scroll to the new match).
   useEffect(() => {
     setTab(hasExcerpt ? 'excerpt' : 'document')
     setActiveMatch(0)
     setDocumentState({ kind: 'idle' })
     setDocRequested(!hasExcerpt)
-  }, [target.documentId, hasExcerpt])
+  }, [target.documentId, target.chunkIndex, hasExcerpt])
 
   // Load the FULL document once requested (Dokument tab opened, or no excerpt).
   // The Beleg view needs only the in-citation excerpt, so a small citation never

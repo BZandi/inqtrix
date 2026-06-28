@@ -228,7 +228,10 @@ serviceAccount:
 # into the app (INQTRIX_DATABASE_URL / INQTRIX_QDRANT_URL+VECTOR_BACKEND+
 # KNOWLEDGE_ENABLED / INQTRIX_QUEUE_BACKEND+VALKEY_URL / INQTRIX_OBJECT_STORE_BACKEND+
 # S3_ENDPOINT_URL+S3_BUCKET+S3 keys) so a turnkey demo is one command. Any value you
-# set explicitly in `config`/`secret` wins over the auto-wired default.
+# set explicitly in `config`/`secret` wins over the auto-wired default. If
+# secret.existingSecret is set, the chart cannot write derived secret keys into that
+# user-managed Secret; include any bundled-service secret values there yourself
+# (database URL, Valkey URL, S3 keys, and Qdrant API key if enabled).
 #
 # All bundled services are single-pod, demo/dev ONLY (not highly available); for
 # production on any platform prefer managed instances and leave these disabled.

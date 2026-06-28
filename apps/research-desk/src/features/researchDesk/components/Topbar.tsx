@@ -68,14 +68,7 @@ export function Topbar({
 }: TopbarProps) {
   const { t } = useLocale()
   const reduceMotion = useReducedMotion()
-  // When server-synced, the local-file connection states (unsaved / download
-  // fallback / local) are noise that contradicts the "synced" badge: the
-  // server is the live source, so the pill shows the project name instead and
-  // the ServerSyncBadge carries the persistence status. The local-first /
-  // apikey tiers keep the connection status (the file IS their source).
-  const status = serverSyncEnabled
-    ? { label: projectName, tone: 'success' as const }
-    : projectStatus(projectConnection, dirty, t)
+  const status = projectStatus(projectConnection, dirty, t)
   const activeModeLabel = viewLabel(activeView, t)
 
   return (
@@ -120,19 +113,9 @@ export function Topbar({
         </div>
 
         <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1.5">
-          <div
-            className={cn(
-              'inline-flex h-8 max-w-64 items-center gap-1.5 rounded-md px-2 text-xs font-semibold text-foreground',
-              status.tone === 'warning' && 'text-brand',
-            )}
-            title={projectName}
-          >
-            <span className={cn(
-              'size-2 shrink-0 rounded-full bg-success shadow-[0_0_0_4px_var(--success-subtle)]',
-              status.tone === 'warning' && 'bg-brand shadow-[0_0_0_4px_var(--brand-subtle)]',
-            )} />
-            <span className="truncate">{status.label}</span>
-          </div>
+          {!serverSyncEnabled ? (
+            <ProjectStatusBadge projectName={projectName} status={status} />
+          ) : null}
           <div
             aria-label={t.topbar.projectActions}
             className="inline-flex h-8 items-center rounded-md border border-border bg-card p-0.5 shadow-[0_1px_2px_var(--shadow-hairline)]"
@@ -191,7 +174,7 @@ export function Topbar({
               </>
             )}
           </div>
-          {serverSyncEnabled ? <ServerSyncBadge error={serverSyncError} t={t} /> : null}
+          {serverSyncEnabled ? <ServerSyncBadge error={serverSyncError} projectName={projectName} t={t} /> : null}
           <ThemeToggle />
           <LanguageToggle />
           <RepoLink />
@@ -222,6 +205,40 @@ export function Topbar({
 function viewLabel(view: AppView, t: TranslationDictionary) {
   if (view === 'prompt-library') return t.navigation.promptLibrary
   return t.navigation[view]
+}
+
+function ProjectStatusBadge({
+  projectName,
+  status,
+}: {
+  projectName: string
+  status: { label: string; tone: 'success' | 'warning' }
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <div
+          aria-label={`${status.label}: ${projectName}`}
+          className={cn(
+            'inline-flex h-8 max-w-40 items-center gap-1.5 rounded-md px-2 t-meta-sm font-semibold text-foreground',
+            status.tone === 'warning' && 'text-brand',
+          )}
+          role="status"
+          tabIndex={0}
+        >
+          <span className={cn(
+            'size-2 shrink-0 rounded-full bg-success shadow-[0_0_0_4px_var(--success-subtle)]',
+            status.tone === 'warning' && 'bg-brand shadow-[0_0_0_4px_var(--brand-subtle)]',
+          )} />
+          <span className="truncate">{status.label}</span>
+        </div>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-72">
+        <span className="block font-semibold">{projectName}</span>
+        <span className="block opacity-80">{status.label}</span>
+      </TooltipContent>
+    </Tooltip>
+  )
 }
 
 function ProjectActionButton({
@@ -258,20 +275,25 @@ function ProjectActionButton({
 
 function ServerSyncBadge({
   error,
+  projectName,
   t,
 }: {
   error: string | null
+  projectName: string
   t: TranslationDictionary
 }) {
-  const label = error ? t.topbar.serverSyncError : t.topbar.serverSynced
+  const label = error ? t.topbar.serverSyncError : t.topbar.serverSyncedShort
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <div
+          aria-label={`${label}: ${projectName}`}
           className={cn(
-            'inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-card px-2.5 text-xs font-medium shadow-[0_1px_2px_var(--shadow-hairline)]',
+            'inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-card px-2.5 t-meta-sm font-medium shadow-[0_1px_2px_var(--shadow-hairline)]',
             error ? 'text-destructive' : 'text-muted-foreground',
           )}
+          role="status"
+          tabIndex={0}
         >
           <Server
             className={cn('icon-sm shrink-0', error ? 'text-destructive' : 'text-success')}
@@ -279,7 +301,10 @@ function ServerSyncBadge({
           <span className="hidden sm:inline">{label}</span>
         </div>
       </TooltipTrigger>
-      <TooltipContent>{error ?? t.topbar.serverSyncedHint}</TooltipContent>
+      <TooltipContent className="max-w-72">
+        <span className="block font-semibold">{projectName}</span>
+        <span className="block opacity-80">{error ?? t.topbar.serverSyncedHint}</span>
+      </TooltipContent>
     </Tooltip>
   )
 }

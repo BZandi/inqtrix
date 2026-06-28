@@ -73,9 +73,9 @@ or `create_app(providers=...)`.
 | Field | Default | Purpose |
 |-------|---------|---------|
 | `report_profile` | `ReportProfile.COMPACT` | Answer depth: `COMPACT` keeps the concise format; `DEEP` raises evidence context and answer budgets. See [Report profiles](report-profiles.md). |
-| `max_rounds` | `4` | Maximum research-loop iterations. |
+| `max_rounds` | `2` | Maximum research-loop iterations. |
 | `min_rounds` | `1` | Minimum research rounds before an already-triggered stop may be accepted; earlier stops are suppressed unless `max_rounds` is reached. |
-| `confidence_stop` | `8` | Stop threshold for `final_confidence` in evaluate. See [Confidence](../scoring-and-stopping/confidence.md). |
+| `confidence_stop` | `7` | Stop threshold for `final_confidence` in evaluate. See [Confidence](../scoring-and-stopping/confidence.md). |
 | `first_round_queries` | `6` | Query count for round 0. Round 1+ uses `max(6, first_round_queries - 2)` so planning slots and executed search calls stay aligned. |
 | `answer_prompt_citations_max` | `60` | Visible upper bound on URLs in the answer prompt. DEEP raises this to `500`; no hidden body cap or citation-block character budget applies afterward. |
 | `max_question_length` | `60_000` | Validation guardrail on user input. Generous because the chat composer inlines attached file content into the message. |

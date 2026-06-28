@@ -3,8 +3,9 @@
 Pins the v1 contracts: only owners (or manage grants) may grant and
 revoke, re-grants replace the permission, denials are
 indistinguishable from absence, shared-with-me reduces to the highest
-grant, and the permission layer immediately honours minted shares
-(one store backs both surfaces — no split brain).
+grant, and consent gates access — a freshly minted share is pending and
+grants nothing until the recipient accepts (one store backs both
+surfaces — no split brain).
 """
 
 from __future__ import annotations
@@ -40,6 +41,11 @@ def make_service(store: MemoryIdentityStore | None = None):
     async def resolve_run_owner(tenant_id: str, resource_id: str):
         return RESOURCES.get(resource_id)
 
+    async def resolve_run_title(tenant_id: str, resource_id: str):
+        # Only the genuinely-owned resource carries a title; a share on a
+        # resource without one (e.g. pruned) must be skipped by the listings.
+        return {"run_owned": "Meine Recherche"}.get(resource_id)
+
     async def user_exists(tenant_id: str, sub: str) -> bool:
         return sub in KNOWN_USERS
 
@@ -47,6 +53,7 @@ def make_service(store: MemoryIdentityStore | None = None):
         shares=identity,
         permissions=permissions,
         owner_resolvers={"run": resolve_run_owner},
+        title_resolvers={"run": resolve_run_title},
         user_lookup=user_exists,
         audit=identity,
     )
@@ -65,11 +72,24 @@ async def grant(service, principal=OWNER, resource_id="run_owned",
 
 class TestGrant:
     @pytest.mark.asyncio
-    async def test_owner_grants_and_permission_layer_honours_it(self):
+    async def test_grant_is_pending_until_accepted(self):
+        """A minted share grants nothing until the recipient consents; the
+        permission layer only honours it after :meth:`accept` (the consent
+        gate, enforced once in ``permission_for``)."""
         service, permissions, _identity = make_service()
         created = await grant(service)
         assert len(created) == 1
         assert created[0].permission is SharePermission.VIEW
+        assert created[0].accepted_at is None
+        # Pending: no access yet.
+        assert not await permissions.can(
+            RECIPIENT,
+            SharePermission.VIEW,
+            resource_type="run",
+            resource_id="run_owned",
+        )
+        # Consent flips access on; the level is still VIEW, not EDIT.
+        assert await service.accept(RECIPIENT, share_id=created[0].id)
         assert await permissions.can(
             RECIPIENT,
             SharePermission.VIEW,
@@ -77,6 +97,40 @@ class TestGrant:
             resource_id="run_owned",
         )
         assert not await permissions.can(
+            RECIPIENT,
+            SharePermission.EDIT,
+            resource_type="run",
+            resource_id="run_owned",
+        )
+
+    @pytest.mark.asyncio
+    async def test_only_the_recipient_can_accept(self):
+        """Consent is the recipient's alone: owner/stranger accept is a
+        no-op ``False`` and never grants access."""
+        service, permissions, _identity = make_service()
+        created = await grant(service)
+        assert not await service.accept(OWNER, share_id=created[0].id)
+        assert not await service.accept(STRANGER, share_id=created[0].id)
+        assert not await permissions.can(
+            RECIPIENT,
+            SharePermission.VIEW,
+            resource_type="run",
+            resource_id="run_owned",
+        )
+        # The genuine recipient still can; double-accept is a benign False.
+        assert await service.accept(RECIPIENT, share_id=created[0].id)
+        assert not await service.accept(RECIPIENT, share_id=created[0].id)
+
+    @pytest.mark.asyncio
+    async def test_regrant_preserves_acceptance(self):
+        """A permission change on an already-accepted share must NOT drop the
+        recipient back to pending — access stays live across the re-grant."""
+        service, permissions, _identity = make_service()
+        created = await grant(service)
+        assert await service.accept(RECIPIENT, share_id=created[0].id)
+        # Owner raises the level; the recipient does not re-consent.
+        await grant(service, invitees=(("user-2", SharePermission.EDIT),))
+        assert await permissions.can(
             RECIPIENT,
             SharePermission.EDIT,
             resource_type="run",
@@ -164,6 +218,13 @@ class TestRevoke:
     async def test_owner_revokes_and_access_disappears(self):
         service, permissions, _identity = make_service()
         created = await grant(service)
+        assert await service.accept(RECIPIENT, share_id=created[0].id)
+        assert await permissions.can(
+            RECIPIENT,
+            SharePermission.VIEW,
+            resource_type="run",
+            resource_id="run_owned",
+        )
         assert await service.revoke(OWNER, share_id=created[0].id)
         assert not await permissions.can(
             RECIPIENT,
@@ -190,8 +251,10 @@ class TestListings:
     @pytest.mark.asyncio
     async def test_shared_with_me_reduces_to_highest_grant(self):
         service, _permissions, identity = make_service()
-        await grant(service)
-        # A group grant on the same resource with a higher level.
+        created = await grant(service)
+        await service.accept(RECIPIENT, share_id=created[0].id)
+        # A group grant on the same resource with a higher level (seed seam
+        # arranges it as already accepted).
         identity.add_group("g1", ["user-2"])
         identity.add_share(
             subject_type="group",
@@ -205,6 +268,16 @@ class TestListings:
         )
         assert set(shared) == {"run_owned"}
         assert shared["run_owned"].permission is SharePermission.EDIT
+
+    @pytest.mark.asyncio
+    async def test_shared_with_me_excludes_pending(self):
+        """A pending share is not yet shared-in: the consent gate keeps it out
+        of the visibility union until accepted."""
+        service, _permissions, _identity = make_service()
+        await grant(service)
+        assert (
+            await service.shared_with_me(RECIPIENT, resource_type="run") == {}
+        )
 
     @pytest.mark.asyncio
     async def test_outgoing_counts_count_active_shares(self):
@@ -231,9 +304,30 @@ class TestListings:
             )
 
     @pytest.mark.asyncio
+    async def test_outgoing_groups_with_pending_count(self):
+        service, _permissions, _identity = make_service()
+        first = await grant(service)  # user-2, pending
+        await grant(service, invitees=(("user-3", SharePermission.VIEW),))
+        await service.accept(RECIPIENT, share_id=first[0].id)
+        items = await service.outgoing(OWNER)
+        assert len(items) == 1
+        item = items[0]
+        assert item.resource_id == "run_owned"
+        assert item.resource_title == "Meine Recherche"
+        assert item.share_count == 2
+        # user-3 has not consented yet.
+        assert item.pending_count == 1
+
+    @pytest.mark.asyncio
     async def test_list_for_resource_requires_view(self):
         service, _permissions, _identity = make_service()
-        await grant(service)
+        created = await grant(service)
+        # A pending recipient has no view access yet, so cannot list either.
+        with pytest.raises(ShareNotAllowed):
+            await service.list_for_resource(
+                RECIPIENT, resource_type="run", resource_id="run_owned"
+            )
+        await service.accept(RECIPIENT, share_id=created[0].id)
         listed = await service.list_for_resource(
             RECIPIENT, resource_type="run", resource_id="run_owned"
         )
@@ -242,3 +336,94 @@ class TestListings:
             await service.list_for_resource(
                 STRANGER, resource_type="run", resource_id="run_owned"
             )
+
+
+class TestRecipientDrop:
+    @pytest.mark.asyncio
+    async def test_decline_pending_removes_invitation(self):
+        service, _permissions, identity = make_service()
+        created = await grant(service)
+        assert await service.recipient_drop(
+            RECIPIENT, share_id=created[0].id
+        )
+        assert await service.inbox(RECIPIENT) == ()
+        assert "share.declined" in [
+            entry.action for entry in identity.audit_entries
+        ]
+
+    @pytest.mark.asyncio
+    async def test_leave_accepted_drops_access(self):
+        service, permissions, identity = make_service()
+        created = await grant(service)
+        await service.accept(RECIPIENT, share_id=created[0].id)
+        assert await service.recipient_drop(
+            RECIPIENT, share_id=created[0].id
+        )
+        assert not await permissions.can(
+            RECIPIENT,
+            SharePermission.VIEW,
+            resource_type="run",
+            resource_id="run_owned",
+        )
+        assert "share.left" in [
+            entry.action for entry in identity.audit_entries
+        ]
+
+    @pytest.mark.asyncio
+    async def test_stranger_cannot_drop_someone_elses_share(self):
+        service, _permissions, _identity = make_service()
+        created = await grant(service)
+        assert not await service.recipient_drop(
+            STRANGER, share_id=created[0].id
+        )
+        # The invitation survives for the real recipient.
+        assert len(await service.inbox(RECIPIENT)) == 1
+
+
+class TestInbox:
+    @pytest.mark.asyncio
+    async def test_inbox_partitions_pending_then_accepted(self):
+        service, _permissions, _identity = make_service()
+        created = await grant(service)
+        pending = await service.inbox(RECIPIENT)
+        assert len(pending) == 1
+        assert pending[0].resource_id == "run_owned"
+        assert pending[0].resource_title == "Meine Recherche"
+        assert pending[0].accepted_at is None
+
+        await service.accept(RECIPIENT, share_id=created[0].id)
+        accepted = await service.inbox(RECIPIENT)
+        assert len(accepted) == 1
+        assert accepted[0].accepted_at is not None
+
+    @pytest.mark.asyncio
+    async def test_inbox_skips_titleless_resources(self):
+        service, _permissions, identity = make_service()
+        # A share whose title resolver yields None (resource gone/untitled)
+        # must not surface — there is nothing for the recipient to act on.
+        identity.add_share(
+            subject_type="user",
+            subject_id="user-2",
+            resource_type="run",
+            resource_id="run_pruned",
+            permission=SharePermission.VIEW,
+            accepted=False,
+        )
+        assert await service.inbox(RECIPIENT) == ()
+
+    @pytest.mark.asyncio
+    async def test_inbox_excludes_group_shares(self):
+        service, _permissions, identity = make_service()
+        identity.add_group("g1", ["user-2"])
+        identity.add_share(
+            subject_type="group",
+            subject_id="g1",
+            resource_type="run",
+            resource_id="run_owned",
+            permission=SharePermission.VIEW,
+            accepted=False,
+        )
+        # The inbox is the per-user consent surface: a group share the
+        # recipient cannot individually accept or drop must not appear
+        # (symmetry with recipient_drop, which also refuses group shares).
+        assert await service.inbox(RECIPIENT) == ()

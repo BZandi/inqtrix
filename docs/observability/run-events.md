@@ -128,7 +128,7 @@ Event payloads are sanitized through the same recursive drop-list used by runtim
 
 Terminal events are `inqtrix.run.completed`, `inqtrix.run.failed`, and `inqtrix.run.cancelled`. A browser can close its SSE connection after receiving one of those.
 
-Background knowledge reindex jobs use the same endpoint and event model on a parallel surface: `GET /v1/knowledge/indexing-jobs/{job_id}/events` streams `inqtrix.index.{queued,started,progress,cancel_requested,completed,failed,cancelled}` (the progress event carries a `snapshot` with `completed_documents`/`total_documents`), and in the durable backend they run over a separate Valkey stream consumed by the same `inqtrix-worker` — see [Web server mode](../deployment/webserver-mode.md).
+Background knowledge reindex jobs use the same endpoint and event model on a parallel surface: `GET /v1/knowledge/indexing-jobs/{job_id}/events` streams `inqtrix.index.{queued,started,progress,document_completed,cancel_requested,completed,failed,cancelled}` (the progress event carries a `snapshot` with `completed_documents`/`total_documents`; the non-terminal `document_completed` event carries the just-embedded `document_id` and `outcome`, so a UI can flip that one document to done before the whole run finishes), and in the durable backend they run over a separate Valkey stream consumed by the same `inqtrix-worker` — see [Web server mode](../deployment/webserver-mode.md).
 
 Cancellation is a two-step lifecycle for running jobs. `POST
 /v1/runs/{run_id}/cancel` returns the current summary, but a running summary can

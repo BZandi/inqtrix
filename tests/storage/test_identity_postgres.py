@@ -26,6 +26,7 @@ from inqtrix.auth.permissions import (
     PermissionService,
     ResourceNotFound,
     SharePermission,
+    SubjectRef,
     WorkspaceNotFound,
     WorkspaceRole,
 )
@@ -431,6 +432,10 @@ async def arrange_identity_facts(factory) -> str:
                 resource_id="r1",
                 permission="manage",
                 granted_by_sub="owner",
+                # Accepted: these grants stand for active access, and the
+                # consent gate (``accepted_at IS NOT NULL``) excludes pending
+                # rows from ``permission_for``.
+                accepted_at=text("now()"),
             )
         )
         # Competing lower-ranked direct grant on the same resource: the
@@ -445,6 +450,7 @@ async def arrange_identity_facts(factory) -> str:
                 resource_id="r1",
                 permission="view",
                 granted_by_sub="owner",
+                accepted_at=text("now()"),
             )
         )
     return workspace_id
@@ -610,6 +616,232 @@ async def test_revoke_shares_for_resource_clears_every_grant(session_factory):
         )
         == 0
     )
+
+
+@pytest.mark.asyncio
+async def test_consent_gates_access_on_postgres(session_factory):
+    """A minted share is pending and grants nothing until the recipient
+    accepts; only the recipient may accept, double-accept is a no-op.
+
+    PG-specific: the ``accepted_at IS NOT NULL`` filter in ``permission_for``
+    and the guarded ``accept_share_by_id`` UPDATE run only against live SQL.
+    """
+    backend = PostgresIdentityBackend(
+        session_factory=session_factory, app_role=APP_ROLE
+    )
+    service = PermissionService(
+        members=backend, groups=backend, shares=backend, audit=backend
+    )
+    share = await backend.create_share(
+        tenant_id="default",
+        subject_type="user",
+        subject_id="alice",
+        resource_type="report",
+        resource_id="r1",
+        permission=SharePermission.VIEW,
+        granted_by_sub="owner",
+    )
+    assert share.accepted_at is None
+
+    async def alice_can_view() -> bool:
+        return await service.can(
+            oidc("alice"),
+            SharePermission.VIEW,
+            resource_type="report",
+            resource_id="r1",
+        )
+
+    assert not await alice_can_view()
+    # The wrong recipient cannot accept; the share stays pending.
+    assert (
+        await backend.accept_share_by_id(
+            tenant_id="default", share_id=share.id, subject_sub="mallory"
+        )
+        is None
+    )
+    assert not await alice_can_view()
+
+    accepted = await backend.accept_share_by_id(
+        tenant_id="default", share_id=share.id, subject_sub="alice"
+    )
+    assert accepted is not None and accepted.accepted_at is not None
+    # Double-accept is a benign no-op (already accepted).
+    assert (
+        await backend.accept_share_by_id(
+            tenant_id="default", share_id=share.id, subject_sub="alice"
+        )
+        is None
+    )
+    assert await alice_can_view()
+
+
+@pytest.mark.asyncio
+async def test_regrant_preserves_acceptance_on_postgres(session_factory):
+    """A permission change on an accepted share keeps access live (the
+    re-grant carries ``accepted_at`` forward) — a PG-only RETURNING path."""
+    backend = PostgresIdentityBackend(
+        session_factory=session_factory, app_role=APP_ROLE
+    )
+    service = PermissionService(
+        members=backend, groups=backend, shares=backend, audit=backend
+    )
+    share = await backend.create_share(
+        tenant_id="default",
+        subject_type="user",
+        subject_id="alice",
+        resource_type="report",
+        resource_id="r1",
+        permission=SharePermission.VIEW,
+        granted_by_sub="owner",
+    )
+    await backend.accept_share_by_id(
+        tenant_id="default", share_id=share.id, subject_sub="alice"
+    )
+    regranted = await backend.create_share(
+        tenant_id="default",
+        subject_type="user",
+        subject_id="alice",
+        resource_type="report",
+        resource_id="r1",
+        permission=SharePermission.EDIT,
+        granted_by_sub="owner",
+    )
+    assert regranted.accepted_at is not None
+    assert await service.can(
+        oidc("alice"),
+        SharePermission.EDIT,
+        resource_type="report",
+        resource_id="r1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_inbox_and_outgoing_repos_on_postgres(session_factory):
+    """inbox_for_subjects spans kinds and keeps pending+accepted; outgoing
+    returns the grantor's active shares; both exclude revoked rows.
+
+    PG-specific: these are new SELECTs whose WHERE filters (revoked_at IS NULL,
+    the subject-tuple IN, granted_by_sub) only run against live SQL.
+    """
+    backend = PostgresIdentityBackend(
+        session_factory=session_factory, app_role=APP_ROLE
+    )
+    alice = [SubjectRef(subject_type="user", subject_id="alice")]
+    pending = await backend.create_share(
+        tenant_id="default", subject_type="user", subject_id="alice",
+        resource_type="run", resource_id="run-1",
+        permission=SharePermission.VIEW, granted_by_sub="owner",
+    )
+    accepted = await backend.create_share(
+        tenant_id="default", subject_type="user", subject_id="alice",
+        resource_type="knowledge_collection", resource_id="kc-1",
+        permission=SharePermission.EDIT, granted_by_sub="owner",
+    )
+    await backend.create_share(
+        tenant_id="default", subject_type="user", subject_id="bob",
+        resource_type="run", resource_id="run-1",
+        permission=SharePermission.VIEW, granted_by_sub="owner",
+    )
+    await backend.accept_share_by_id(
+        tenant_id="default", share_id=accepted.id, subject_sub="alice"
+    )
+
+    inbox = await backend.inbox_for_subjects(
+        tenant_id="default", subjects=alice
+    )
+    by_res = {record.resource_id: record for record in inbox}
+    assert set(by_res) == {"run-1", "kc-1"}
+    assert by_res["run-1"].accepted_at is None
+    assert by_res["kc-1"].accepted_at is not None
+
+    outgoing = await backend.outgoing_shares_for_grantor(
+        tenant_id="default", grantor_sub="owner"
+    )
+    assert len(outgoing) == 3  # alice x2 + bob x1
+
+    # Revoking alice's pending run share drops it from both listings.
+    await backend.revoke_share_by_id(
+        tenant_id="default", share_id=pending.id, revoked_by_sub="alice"
+    )
+    inbox_after = await backend.inbox_for_subjects(
+        tenant_id="default", subjects=alice
+    )
+    assert {record.resource_id for record in inbox_after} == {"kc-1"}
+    outgoing_after = await backend.outgoing_shares_for_grantor(
+        tenant_id="default", grantor_sub="owner"
+    )
+    assert len(outgoing_after) == 2
+
+
+@pytest.mark.asyncio
+async def test_migration_backfill_activates_existing_shares(session_factory):
+    """The 0028 backfill keeps PRE-existing active shares accessible on upgrade
+    and must NOT touch revoked ones.
+
+    The migration round-trip runs against an empty DB, so the backfill UPDATE
+    itself never hits a row there — this exercises it against data: an
+    active-but-unaccepted row (an old grant) becomes accepted and grants
+    access, while a revoked row stays untouched (pinning the
+    ``revoked_at IS NULL`` half of the WHERE clause).
+    """
+    backend = PostgresIdentityBackend(
+        session_factory=session_factory, app_role=APP_ROLE
+    )
+    service = PermissionService(
+        members=backend, groups=backend, shares=backend, audit=backend
+    )
+    # accepted_at NULL = a share minted before 0028 (or a v1 pending grant).
+    alice_share = await backend.create_share(
+        tenant_id="default", subject_type="user", subject_id="alice",
+        resource_type="report", resource_id="r1",
+        permission=SharePermission.VIEW, granted_by_sub="owner",
+    )
+    assert alice_share.accepted_at is None
+    bob_share = await backend.create_share(
+        tenant_id="default", subject_type="user", subject_id="bob",
+        resource_type="report", resource_id="r1",
+        permission=SharePermission.VIEW, granted_by_sub="owner",
+    )
+    await backend.revoke_share_by_id(
+        tenant_id="default", share_id=bob_share.id, revoked_by_sub="owner"
+    )
+
+    async def can_view(sub: str) -> bool:
+        return await service.can(
+            oidc(sub),
+            SharePermission.VIEW,
+            resource_type="report",
+            resource_id="r1",
+        )
+
+    # Before the backfill the active row is pending -> no access.
+    assert not await can_view("alice")
+
+    # The migration 0028 backfill, verbatim.
+    async with scoped(session_factory) as session:
+        await session.execute(
+            text(
+                "UPDATE resource_shares SET accepted_at = created_at "
+                "WHERE accepted_at IS NULL AND revoked_at IS NULL"
+            )
+        )
+
+    # The pre-existing active share is now accepted and grants access...
+    assert await can_view("alice")
+    # ...and the revoked row was left untouched (WHERE respected revoked_at).
+    async with scoped(session_factory) as session:
+        bob_accepted_at = (
+            await session.execute(
+                select(resource_shares.c.accepted_at).where(
+                    resource_shares.c.tenant_id == "default",
+                    resource_shares.c.subject_id == "bob",
+                    resource_shares.c.resource_type == "report",
+                    resource_shares.c.resource_id == "r1",
+                )
+            )
+        ).scalar_one()
+    assert bob_accepted_at is None
+    assert not await can_view("bob")
 
 
 async def _exercise_membership_admin(store) -> None:

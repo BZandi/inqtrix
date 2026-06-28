@@ -106,11 +106,19 @@ export type InqtrixStack = {
 
 export type ResearchRunMode = 'direct_llm' | 'knowledge' | 'research'
 
+export type ResearchRunMessage = {
+  content: string
+  role: 'assistant' | 'system' | 'user'
+}
+
 /** Scope filters for `mode: 'knowledge'` requests. Serialized to the
  * backend `knowledge_filters` body field. */
 export type KnowledgeChatFilters = {
   collectionIds: string[]
   topK?: number
+  /** Surfaced-evidence count override (`final_k`). Omitted = the profile's
+   * factor applies. Serialized to `knowledge_filters.final_k`. */
+  finalK?: number
   /** Retrieval profile id (`schnell` | `standard` | `gruendlich` | `tief`
    * | `auto`). Omitted = server default. Valid ids come from the
    * capability manifest (`knowledge.profiles`), never a hardcoded list. */
@@ -121,6 +129,10 @@ export type KnowledgeChatFilters = {
  * carry `stages` + `degraded`; the `auto` entry only `delegates_to`. */
 export type KnowledgeProfileManifestEntry = {
   id: string
+  /** Multiplier on the request `top_k` for the FINAL surfaced-evidence count;
+   * lets the client render the effective `final_k` per profile (only `tief`
+   * raises it above 1.0). */
+  final_k_factor?: number
   stages?: {
     rerank: boolean
     gate_rounds: number
@@ -200,11 +212,17 @@ export type InqtrixCapabilities = {
   knowledge?: {
     default_embedding_model: string
     default_top_k: number
+    /** Hard ceiling on the FINAL evidence count (`final_k`); bounds the
+     * client's final_k override field. */
+    evidence_k_max?: number
     embedding_catalog: EmbeddingCatalogEntry[]
     /** Selectable retrieval profiles; absent on backends without the
      * profile engine — the picker then stays hidden. */
     profiles?: KnowledgeProfileManifestEntry[]
     default_profile?: string
+    /** Configured reranker provider id, shown in the run overview when the
+     * rerank stage is active. */
+    reranker_provider?: string
   }
   /** Effective server-side HTTP wait deadlines (seconds). The client derives
    * its own AbortController timeouts from these (server wait + margin) instead
@@ -252,6 +270,7 @@ export type AgentOverrides = {
 
 export type CreateResearchRunRequest = {
   question: string
+  messages?: ResearchRunMessage[]
   stack?: string
   mode?: ResearchRunMode
   agentOverrides?: AgentOverrides

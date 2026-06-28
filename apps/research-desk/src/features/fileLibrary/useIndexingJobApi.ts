@@ -26,6 +26,9 @@ import {
 type IndexingCallbacks = {
   onCancelled: (indexId: string) => void
   onComplete: (indexId: string) => void
+  /** A single document finished embedding (server document id) — flips just
+   * that file's row live, so a re-embed no longer flips all files together. */
+  onDocumentCompleted: (indexId: string, documentId: string) => void
   onError: (indexId: string, message: string) => void
   onProgress: (
     indexId: string,
@@ -52,6 +55,7 @@ export function useIndexingJobApi({
   enabled,
   onCancelled,
   onComplete,
+  onDocumentCompleted,
   onError,
   onProgress,
   onQueued,
@@ -65,6 +69,7 @@ export function useIndexingJobApi({
   const callbacksRef = useRef<IndexingCallbacks>({
     onCancelled,
     onComplete,
+    onDocumentCompleted,
     onError,
     onProgress,
     onQueued,
@@ -75,12 +80,13 @@ export function useIndexingJobApi({
     callbacksRef.current = {
       onCancelled,
       onComplete,
+      onDocumentCompleted,
       onError,
       onProgress,
       onQueued,
       onStart,
     }
-  }, [onCancelled, onComplete, onError, onProgress, onQueued, onStart])
+  }, [onCancelled, onComplete, onDocumentCompleted, onError, onProgress, onQueued, onStart])
 
   const handleEvent = useCallback((event: IndexingJobEvent) => {
     const indexId = jobIndexRef.current.get(event.job_id)
@@ -121,6 +127,13 @@ export function useIndexingJobApi({
         indexId,
         typeof position === 'number' ? position : null,
       )
+    } else if (event.type === 'inqtrix.index.document_completed') {
+      // Per-document flip — NOT throttled (each file should land) and it carries
+      // no counts, so it never touches the progress bar.
+      const documentId = event.data?.document_id
+      if (typeof documentId === 'string') {
+        callbacksRef.current.onDocumentCompleted(indexId, documentId)
+      }
     }
   }, [])
 

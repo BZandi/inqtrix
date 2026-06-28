@@ -1,7 +1,5 @@
 import { useMemo } from 'react'
-import { seedQuotaUsage } from './demo'
-import { useQuotaMeterGate } from './QuotaMeterContext'
-import { useQuotaUsage } from './useQuotaUsage'
+import { useQuotaMeterGate, useQuotaUsageData } from './QuotaMeterContext'
 
 export type EmbeddingQuota = {
   used: number
@@ -22,12 +20,13 @@ export type EmbeddingQuota = {
  * Shares the meter's gate ({@link QuotaMeterProvider}) and poll.
  */
 export function useEmbeddingQuota(): EmbeddingQuota | null {
-  const { enabled, demo } = useQuotaMeterGate()
-  const { state } = useQuotaUsage(enabled && !demo)
+  const { enabled } = useQuotaMeterGate()
+  const { rows } = useQuotaUsageData()
+  // Only the ``period_start ?? now`` fallback below needs a clock; the rows
+  // (live or demo) are already resolved upstream in QuotaMeterProvider.
   const now = useMemo(() => Math.floor(Date.now() / 1000), [])
 
   if (!enabled) return null
-  const rows = demo ? seedQuotaUsage(now) : state.rows
   const row = rows.find((entry) => entry.dimension === 'embedding_tokens')
   const used = row?.used ?? 0
   const limit = row?.limit ?? null

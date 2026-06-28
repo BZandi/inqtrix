@@ -350,6 +350,14 @@ class RunStore:
             record = self._records.get(run_id)
             return record.created_by_sub if record is not None else None
 
+    def title(self, run_id: str) -> str | None:
+        """The run's question as a share-surface title, regardless of
+        visibility — a pending-share recipient must see it to decide. ``None``
+        when the run no longer exists (e.g. pruned), so the inbox skips it."""
+        with self._lock:
+            record = self._records.get(run_id)
+            return record.question if record is not None else None
+
     def get(
         self,
         run_id: str,

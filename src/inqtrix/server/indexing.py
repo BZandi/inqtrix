@@ -285,6 +285,10 @@ class IndexingJobHandle:
         """Mark the job cancelled after the worker observed the request."""
         self._store.mark_cancelled(self.job_id, reason=reason)
 
+    def document_completed(self, document_id: str) -> None:
+        """Emit a per-document 'embedded' event for one finished document."""
+        self._store.document_completed(self.job_id, document_id)
+
 
 class IndexingJobStore:
     """Thread-safe in-memory queue and registry for reindex jobs.
@@ -595,6 +599,24 @@ class IndexingJobStore:
                     "reason": reason,
                     "snapshot": _job_snapshot(record),
                 },
+            )
+
+    def document_completed(self, job_id: str, document_id: str) -> None:
+        """Emit a per-document completion event (one document finished embedding).
+
+        A standalone, non-terminal event carrying the backend document id so the
+        frontend can flip that one file's row to "Indexiert" the moment it lands,
+        rather than all files flipping together on completion. It is NOT part of
+        the progress snapshot — the document-count bar is unchanged.
+        """
+        with self._lock:
+            record = self._records.get(job_id)
+            if record is None or record.status in TERMINAL_INDEXING_STATUSES:
+                return
+            self._emit_locked(
+                record,
+                "inqtrix.index.document_completed",
+                {"document_id": document_id, "outcome": "embedded"},
             )
 
     # -- internals -------------------------------------------------------- #

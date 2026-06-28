@@ -24,8 +24,12 @@ function thread(
   }
 }
 
-function message(id: string, createdAt: string): ChatMessageRecord {
-  return { contentMarkdown: id, createdAt, id, role: 'user' }
+function message(
+  id: string,
+  createdAt: string,
+  overrides: Partial<ChatMessageRecord> = {},
+): ChatMessageRecord {
+  return { contentMarkdown: id, createdAt, id, role: 'user', ...overrides }
 }
 
 function withThread(local: ChatThreadRecord): ProjectState {
@@ -141,5 +145,105 @@ describe('server chat hydration (M6a)', () => {
     const next = researchDeskReducer(base, { enabled: true, type: 'setServerSyncEnabled' })
     expect(next.serverSyncEnabled).toBe(true)
     expect(next.dirty).toBe(true)
+  })
+})
+
+describe('chat message branching and retry', () => {
+  it('replaces the selected assistant answer and removes later messages on retry', () => {
+    const local = thread('ct_1', {
+      messages: [
+        message('cm_u1', '2026-01-01T00:01:00.000Z', { contentMarkdown: 'First prompt' }),
+        message('cm_a1', '2026-01-01T00:02:00.000Z', {
+          contentMarkdown: 'First answer',
+          requestContext: { knowledgeCollectionIds: ['kc_1'] },
+          role: 'assistant',
+        }),
+        message('cm_u2', '2026-01-01T00:03:00.000Z', { contentMarkdown: 'Follow-up' }),
+        message('cm_a2', '2026-01-01T00:04:00.000Z', {
+          contentMarkdown: 'Follow-up answer',
+          role: 'assistant',
+        }),
+      ],
+    })
+
+    const next = researchDeskReducer(withThread(local), {
+      assistantMessageId: 'cm_retry',
+      createdAt: '2026-01-01T00:05:00.000Z',
+      requestContext: { knowledgeCollectionIds: ['kc_1'] },
+      replacedAssistantMessageId: 'cm_a1',
+      threadId: 'ct_1',
+      type: 'startChatAssistantRetry',
+    })
+
+    expect(next.chatThreads.ct_1.messages).toEqual([
+      local.messages[0],
+      {
+        contentMarkdown: '',
+        createdAt: '2026-01-01T00:05:00.000Z',
+        id: 'cm_retry',
+        requestContext: { knowledgeCollectionIds: ['kc_1'] },
+        role: 'assistant',
+      },
+    ])
+    expect(next.chatThreads.ct_1.updatedAt).toBe('2026-01-01T00:05:00.000Z')
+    expect(next.dirty).toBe(true)
+  })
+
+  it('refuses retry for assistant greetings without a preceding user message', () => {
+    const local = thread('ct_1', {
+      messages: [
+        message('cm_a0', '2026-01-01T00:01:00.000Z', {
+          contentMarkdown: 'Hello',
+          role: 'assistant',
+        }),
+      ],
+    })
+    const seeded = withThread(local)
+
+    const next = researchDeskReducer(seeded, {
+      assistantMessageId: 'cm_retry',
+      createdAt: '2026-01-01T00:02:00.000Z',
+      replacedAssistantMessageId: 'cm_a0',
+      threadId: 'ct_1',
+      type: 'startChatAssistantRetry',
+    })
+
+    expect(next).toBe(seeded)
+  })
+
+  it('keeps branch behavior scoped to messages through the selected turn', () => {
+    const local = thread('ct_1', {
+      messages: [
+        message('cm_u1', '2026-01-01T00:01:00.000Z', { contentMarkdown: 'First prompt' }),
+        message('cm_a1', '2026-01-01T00:02:00.000Z', {
+          contentMarkdown: 'First answer',
+          requestContext: { knowledgeCollectionIds: ['kc_branch'] },
+          role: 'assistant',
+        }),
+        message('cm_u2', '2026-01-01T00:03:00.000Z', { contentMarkdown: 'Follow-up' }),
+        message('cm_a2', '2026-01-01T00:04:00.000Z', {
+          contentMarkdown: 'Follow-up answer',
+          role: 'assistant',
+        }),
+      ],
+    })
+
+    const next = researchDeskReducer(withThread(local), {
+      messageId: 'cm_a1',
+      threadId: 'ct_1',
+      type: 'branchChatThreadFromMessage',
+    })
+    const branchId = next.ui.selectedChatThreadId
+    expect(branchId).not.toBe('ct_1')
+    expect(branchId).not.toBeNull()
+    const branch = next.chatThreads[branchId ?? '']
+
+    expect(next.chatThreads.ct_1.messages).toHaveLength(4)
+    expect(branch.messages.map((item) => item.contentMarkdown)).toEqual([
+      'First prompt',
+      'First answer',
+    ])
+    expect(branch.messages.map((item) => item.id)).not.toEqual(['cm_u1', 'cm_a1'])
+    expect(branch.messages[1].requestContext).toEqual({ knowledgeCollectionIds: ['kc_branch'] })
   })
 })

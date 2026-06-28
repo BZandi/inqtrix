@@ -12,9 +12,8 @@ import {
 } from '@/components/icons'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useLocale } from '@/i18n/LocaleProvider'
-import { formatTokens } from '@/lib/modelCard'
 import { cn } from '@/lib/utils'
-import { quotaBarFractionClass, quotaBarWidth } from '@/features/quota/model'
+import { QuotaMeterSection } from '@/features/quota/QuotaMeterSection'
 import type { EmbeddingQuota } from '@/features/quota/useEmbeddingQuota'
 import type { VectorIndexStatus } from '@/features/project/types'
 import { formatBytes } from './helpers'
@@ -110,12 +109,6 @@ function UsageMeters({
   const usage = t.fileLibrary.storageUsage
     .replace('{used}', formatBytes(usedBytes, locale))
     .replace('{total}', formatBytes(FILE_QUOTA_BYTES, locale))
-  const quotaLimit = embeddingQuota?.limit ?? null
-  const quotaLimited = quotaLimit != null && quotaLimit > 0
-  const quotaFraction =
-    embeddingQuota && quotaLimited && quotaLimit != null
-      ? embeddingQuota.used / quotaLimit
-      : null
   const quotaMonth =
     embeddingQuota && embeddingQuota.periodStart > 0
       ? new Date(embeddingQuota.periodStart * 1000).toLocaleDateString(locale, {
@@ -123,12 +116,6 @@ function UsageMeters({
           timeZone: 'UTC',
         })
       : ''
-  const quotaValue = embeddingQuota
-    ? quotaLimited && quotaLimit != null
-      ? `${formatTokens(embeddingQuota.used)} / ${formatTokens(quotaLimit)} ${t.vectorIndex.tokensUnit}`
-      : `${formatTokens(embeddingQuota.used)} · ${t.quota.unlimited}`
-    : ''
-  const quotaWidth = quotaBarWidth(quotaFraction)
 
   return (
     <div className="space-y-3 px-1 py-0.5">
@@ -150,33 +137,17 @@ function UsageMeters({
         </div>
       </section>
       {embeddingQuota ? (
-        <section className="border-t border-border/70 pt-3">
-          <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5">
-            <span className="inline-flex items-center gap-1.5 t-label text-foreground">
-              <Layers className="size-3.5 shrink-0 text-muted-foreground" />
-              <span>{t.vectorIndex.embeddingQuota}</span>
-            </span>
-            {quotaMonth ? (
-              <span className="shrink-0 t-meta-sm text-muted-foreground">{quotaMonth}</span>
-            ) : null}
-          </div>
-          <p
-            className={cn(
-              'mt-1 t-meta-sm tabular-nums',
-              embeddingQuota.exhausted ? 'text-destructive' : 'text-muted-foreground',
-            )}
-          >
-            {quotaValue}
-          </p>
-          {quotaLimited ? (
-            <span className="mt-2 block h-1.5 overflow-hidden rounded-full bg-muted">
-              <span
-                className={cn('block h-full rounded-full', quotaBarFractionClass(quotaFraction))}
-                style={{ width: `${quotaWidth}%` }}
-              />
-            </span>
-          ) : null}
-        </section>
+        <QuotaMeterSection
+          className="border-t border-border/70 pt-3"
+          dimension="embedding_tokens"
+          icon={Layers}
+          label={t.vectorIndex.embeddingQuota}
+          limit={embeddingQuota.limit}
+          periodLabel={quotaMonth || undefined}
+          unitLabel={t.vectorIndex.tokensUnit}
+          unlimitedLabel={t.quota.unlimited}
+          used={embeddingQuota.used}
+        />
       ) : null}
     </div>
   )

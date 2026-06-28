@@ -35,6 +35,28 @@ const profileResolved = event('inqtrix.knowledge.profile.resolved', {
 })
 
 describe('applyKnowledgeRunEvent', () => {
+  it('records follow-up contextualization before the retrieval plan', () => {
+    const progress = reduceEvents([
+      event('inqtrix.knowledge.contextualized', {
+        marker: '_knowledge_query_context_applied',
+        rewritten: true,
+        used_history: true,
+      }),
+      profileResolved,
+    ])
+
+    expect(progress.steps.map((step) => [step.kind, step.status])).toEqual([
+      ['context', 'done'],
+      ['profile', 'done'],
+      ['vocabulary', 'running'],
+      ['retrieval', 'running'],
+    ])
+    expect(progress.steps[0].facts).toMatchObject({
+      contextMarker: '_knowledge_query_context_applied',
+      rewritten: true,
+    })
+  })
+
   it('captures the resolved plan and opens vocabulary + retrieval steps', () => {
     const progress = reduceEvents([profileResolved])
 
@@ -184,6 +206,21 @@ describe('applyKnowledgeRunEvent', () => {
       sufficient: false,
     })
     expect(progress.steps.at(-1)).toMatchObject({ kind: 'answer', status: 'running' })
+  })
+
+  it('captures final_k and the override marker from retrieval.completed', () => {
+    const progress = reduceEvents([
+      profileResolved,
+      event('inqtrix.knowledge.retrieval.completed', {
+        candidate_count: 16,
+        final_k: 16,
+        final_k_overridden: true,
+        top_k: 8,
+      }),
+    ])
+    const retrieval = progress.steps.find((step) => step.kind === 'retrieval')
+    expect(retrieval?.facts.finalK).toBe(16)
+    expect(retrieval?.facts.finalKOverridden).toBe(true)
   })
 
   it('closes the answer step and appends grounding on grounding.checked', () => {

@@ -7,7 +7,12 @@ import string
 
 import pytest
 
-from inqtrix.i18n import MESSAGES, detect_ui_language, t
+from inqtrix.i18n import (
+    MESSAGES,
+    detect_ui_language,
+    detect_ui_language_confident,
+    t,
+)
 
 
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)(?::[^}]*)?\}")
@@ -47,6 +52,41 @@ class TestDetectUILanguage:
     def test_proper_noun_only_returns_en(self):
         # No stopwords either way — fall back to EN.
         assert detect_ui_language("Bitcoin price 2026") == "en"
+
+
+class TestDetectUILanguageConfident:
+    """The stricter primitive: a language only on a positive signal, else None.
+
+    Unlike :func:`detect_ui_language`, ambiguous input must NOT be guessed as
+    English — otherwise the BM25 tokenizer-mismatch visibility would raise false
+    alarms on untagged German term queries.
+    """
+
+    def test_empty_or_whitespace_is_none(self):
+        assert detect_ui_language_confident("") is None
+        assert detect_ui_language_confident("   ") is None
+
+    def test_umlaut_or_eszett_is_confident_de(self):
+        assert detect_ui_language_confident("Größe der Datei") == "de"
+        assert detect_ui_language_confident("Straße") == "de"
+
+    def test_de_stopword_majority_is_confident_de(self):
+        assert detect_ui_language_confident("Wie ist die Haftung geregelt?") == "de"
+
+    def test_en_stopword_majority_is_confident_en(self):
+        assert detect_ui_language_confident("How is the liability defined?") == "en"
+
+    def test_ambiguous_term_query_is_none_not_english(self):
+        # The load-bearing case: no stopwords either way -> None (NOT "en"),
+        # so a German term query never falsely reads as English.
+        assert detect_ui_language_confident("DSGVO Pflichten") is None
+        assert detect_ui_language_confident("Bitcoin price 2026") is None
+
+    def test_diverges_from_detect_ui_language_on_ambiguous(self):
+        # detect_ui_language defaults ambiguous -> "en"; the confident variant
+        # stays None. This difference is exactly why the new primitive exists.
+        assert detect_ui_language("DSGVO Pflichten") == "en"
+        assert detect_ui_language_confident("DSGVO Pflichten") is None
 
 
 class TestTranslator:

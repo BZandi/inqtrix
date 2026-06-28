@@ -18,7 +18,7 @@ The value is an integer **0-10**:
 
 The primary effect of `final_confidence` is the threshold check
 `conf >= confidence_stop` in the final stop gate (default `confidence_stop
-= 8`).
+= 7` for COMPACT, `8` for DEEP).
 
 ## Pipeline overview
 
@@ -368,7 +368,7 @@ was True → marker stays False).
 | Setting | Default | Effect |
 |---|---|---|
 | `confidence_stop` | 8 | Final stop threshold. Lower to tolerate earlier termination. |
-| `max_rounds` | 4 (COMPACT) / 5 (DEEP) | Hard cap on research rounds. |
+| `max_rounds` | 2 (COMPACT) / 4 (DEEP) | Hard cap on research rounds. |
 | `min_rounds` | 1 (COMPACT) / 2 (DEEP) | Global floor that can suppress an already-triggered stop until reached. |
 | `tier_mid_model` (provider) | `""` | Model for the evaluate node's tier. Put evaluate on a stronger model here (or via `evaluate_model`) for better structured-output / `CONFIDENCE` calibration. See [LLM calls](../architecture/llm-calls.md). |
 

@@ -2,8 +2,8 @@
  * Account-preferences server sync (M6c account tier).
  *
  * Unlike the project-persistence hooks, this is NOT project data and is NOT
- * part of the project import: a user's theme / locale / contrast follow the
- * USER across devices, in their own per-user server row. "Account wins on
+ * part of the project import: a user's theme / locale / contrast / bubble tone
+ * follow the USER across devices, in their own per-user server row. "Account wins on
  * login" — on mount (a real per-user session) the saved preferences are
  * fetched and APPLIED over whatever the device held, then every change is
  * pushed. A user who has never saved (404) keeps their local/default until the

@@ -329,6 +329,13 @@ def grant_via_http(
     return response.json()["data"][0]
 
 
+def accept_via_http(client: TestClient, share_id: str) -> None:
+    response = client.post(
+        f"/v1/shares/{share_id}/accept", headers={SUB_HEADER: RECIPIENT}
+    )
+    assert response.status_code == 200
+
+
 def test_http_recipient_sees_shared_run_until_revoked(monkeypatch):
     client = make_sharing_client(monkeypatch)
     with client:
@@ -340,6 +347,14 @@ def test_http_recipient_sees_shared_run_until_revoked(monkeypatch):
         assert before_grant.status_code == 404
 
         share = grant_via_http(client, run_id)
+
+        # Consent gate: a pending share grants nothing — still hidden.
+        pending = client.get(
+            f"/v1/runs/{run_id}", headers={SUB_HEADER: RECIPIENT}
+        )
+        assert pending.status_code == 404
+
+        accept_via_http(client, share["id"])
 
         summary = client.get(
             f"/v1/runs/{run_id}", headers={SUB_HEADER: RECIPIENT}
@@ -377,7 +392,7 @@ def test_http_listing_union_and_shared_with_me(monkeypatch):
     with client:
         shared_run = create_completed_run(client)
         own_run = create_completed_run(client, sub=RECIPIENT)
-        grant_via_http(client, shared_run)
+        accept_via_http(client, grant_via_http(client, shared_run)["id"])
 
         listed = client.get(
             "/v1/runs", headers={SUB_HEADER: RECIPIENT}
@@ -404,17 +419,143 @@ def test_http_listing_union_and_shared_with_me(monkeypatch):
         assert mine[0]["granted_by_display_name"] == "Olga Owner"
 
 
+def test_http_inbox_accept_and_leave(monkeypatch):
+    client = make_sharing_client(monkeypatch)
+    with client:
+        run_id = create_completed_run(client)
+        share = grant_via_http(client, run_id)
+
+        # The pending invitation shows in the recipient inbox, title-enriched
+        # and carrying the grantor's display name.
+        inbox = client.get(
+            "/v1/shares/inbox", headers={SUB_HEADER: RECIPIENT}
+        ).json()["data"]
+        assert inbox["accepted"] == []
+        assert len(inbox["pending"]) == 1
+        invite = inbox["pending"][0]
+        assert invite["id"] == share["id"]
+        assert invite["resource_type"] == "run"
+        assert invite["resource_id"] == run_id
+        assert invite["resource_title"] == "Testfrage?"
+        assert invite["permission"] == "view"
+        assert invite["granted_by_display_name"] == "Olga Owner"
+        assert invite["accepted_at"] is None
+
+        # A stranger cannot accept; the share stays pending.
+        assert (
+            client.post(
+                f"/v1/shares/{share['id']}/accept",
+                headers={SUB_HEADER: STRANGER},
+            ).status_code
+            == 404
+        )
+
+        accept_via_http(client, share["id"])
+
+        # After consent it moves to the accepted section.
+        accepted_inbox = client.get(
+            "/v1/shares/inbox", headers={SUB_HEADER: RECIPIENT}
+        ).json()["data"]
+        assert accepted_inbox["pending"] == []
+        assert len(accepted_inbox["accepted"]) == 1
+        assert accepted_inbox["accepted"][0]["accepted_at"] is not None
+
+        # The recipient leaves: their own DELETE drops the share and access.
+        left = client.delete(
+            f"/v1/shares/{share['id']}", headers={SUB_HEADER: RECIPIENT}
+        )
+        assert left.status_code == 200
+        assert client.get(
+            "/v1/shares/inbox", headers={SUB_HEADER: RECIPIENT}
+        ).json()["data"] == {"pending": [], "accepted": []}
+        assert (
+            client.get(
+                f"/v1/runs/{run_id}", headers={SUB_HEADER: RECIPIENT}
+            ).status_code
+            == 404
+        )
+
+
+def test_http_recipient_declines_pending(monkeypatch):
+    client = make_sharing_client(monkeypatch)
+    with client:
+        run_id = create_completed_run(client)
+        share = grant_via_http(client, run_id)
+        # Decline a pending invitation: the recipient's DELETE before accepting.
+        declined = client.delete(
+            f"/v1/shares/{share['id']}", headers={SUB_HEADER: RECIPIENT}
+        )
+        assert declined.status_code == 200
+        assert (
+            client.get(
+                "/v1/shares/inbox", headers={SUB_HEADER: RECIPIENT}
+            ).json()["data"]["pending"]
+            == []
+        )
+        # The owner's outgoing view no longer lists the resource.
+        assert (
+            client.get(
+                "/v1/shares/mine", headers={SUB_HEADER: OWNER}
+            ).json()["data"]
+            == []
+        )
+
+
+def test_http_stranger_cannot_delete_share(monkeypatch):
+    client = make_sharing_client(monkeypatch)
+    with client:
+        run_id = create_completed_run(client)
+        share = grant_via_http(client, run_id)
+        # Neither owner nor recipient: the DELETE dual-path denies (404), and
+        # the invitation survives for the real recipient.
+        denied = client.delete(
+            f"/v1/shares/{share['id']}", headers={SUB_HEADER: STRANGER}
+        )
+        assert denied.status_code == 404
+        inbox = client.get(
+            "/v1/shares/inbox", headers={SUB_HEADER: RECIPIENT}
+        ).json()["data"]
+        assert len(inbox["pending"]) == 1
+
+
+def test_http_mine_counts_pending_then_accepted(monkeypatch):
+    client = make_sharing_client(monkeypatch)
+    with client:
+        run_id = create_completed_run(client)
+        share = grant_via_http(client, run_id)
+
+        before = client.get(
+            "/v1/shares/mine", headers={SUB_HEADER: OWNER}
+        ).json()["data"]
+        assert len(before) == 1
+        assert before[0]["resource_id"] == run_id
+        assert before[0]["resource_title"] == "Testfrage?"
+        assert before[0]["share_count"] == 1
+        assert before[0]["pending_count"] == 1
+
+        accept_via_http(client, share["id"])
+        after = client.get(
+            "/v1/shares/mine", headers={SUB_HEADER: OWNER}
+        ).json()["data"]
+        assert after[0]["share_count"] == 1
+        assert after[0]["pending_count"] == 0
+
+
 def test_http_cancel_needs_edit_grant(monkeypatch):
     client = make_sharing_client(monkeypatch)
     with client:
         run_id = create_completed_run(client)
-        grant_via_http(client, run_id, permission="view")
+        view_share = grant_via_http(client, run_id, permission="view")
+        accept_via_http(client, view_share["id"])
 
+        # Accepted view grant: a view grantee still cannot cancel.
         denied = client.post(
             f"/v1/runs/{run_id}/cancel", headers={SUB_HEADER: RECIPIENT}
         )
         assert denied.status_code == 404
 
+        # The owner upgrades to edit; the re-grant carries the recipient's
+        # consent forward, so edit access is live without a second accept.
         grant_via_http(client, run_id, permission="edit")
         allowed = client.post(
             f"/v1/runs/{run_id}/cancel", headers={SUB_HEADER: RECIPIENT}

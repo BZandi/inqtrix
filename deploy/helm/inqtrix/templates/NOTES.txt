@@ -31,6 +31,24 @@ NOTE: valkey.enabled is set but worker.enabled is not, so the bundled Valkey is
 not used -- runs execute in-process (single-pod). Set worker.enabled=true to
 dispatch runs to a worker via the queue.
 {{- end }}
+{{- if and .Values.secret.existingSecret (or .Values.postgres.enabled .Values.valkey.enabled .Values.s3.enabled (and .Values.qdrant.enabled .Values.qdrant.apiKey)) }}
+
+NOTE: secret.existingSecret is set, so the chart uses your user-managed Secret and
+does not render derived bundled-service secret values into the app environment.
+Include the matching keys in {{ .Values.secret.existingSecret }} yourself:
+{{- if .Values.postgres.enabled }}
+  - INQTRIX_DATABASE_URL for the bundled Postgres connection.
+{{- end }}
+{{- if .Values.valkey.enabled }}
+  - INQTRIX_VALKEY_URL for the bundled Valkey connection.
+{{- end }}
+{{- if .Values.s3.enabled }}
+  - INQTRIX_S3_ACCESS_KEY and INQTRIX_S3_SECRET_KEY for bundled MinIO.
+{{- end }}
+{{- if and .Values.qdrant.enabled .Values.qdrant.apiKey }}
+  - INQTRIX_QDRANT_API_KEY for authenticated bundled Qdrant.
+{{- end }}
+{{- end }}
 {{- if and .Values.worker.enabled (not .Values.s3.enabled) (ne (.Values.config.INQTRIX_OBJECT_STORE_BACKEND | toString) "s3") }}
 
 WARNING: the worker does NOT share the object store with the api here. With the

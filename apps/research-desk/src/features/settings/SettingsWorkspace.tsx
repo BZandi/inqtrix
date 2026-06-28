@@ -15,6 +15,7 @@ import {
   Scale,
   Server,
   Settings,
+  Share2,
   Shield,
   SlidersHorizontal,
   Sun,
@@ -41,6 +42,8 @@ import { isAdminRole } from '@/features/auth/roleAccess'
 import { QuotaAdminPanel } from '@/features/quota/QuotaAdminPanel'
 import { useQuotaAdmin } from '@/features/quota/useQuotaAdmin'
 import { DEMO_OWNER } from '@/features/sharing/demoShares'
+import { SharingPanel } from '@/features/sharing/SharingPanel'
+import type { SharingInboxHandle } from '@/features/sharing/useSharingInbox'
 import {
   SettingsRow,
   SettingsRowBlock,
@@ -55,7 +58,12 @@ import type {
 } from '@/features/researchRuns/types'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
-import { useTheme, type ThemeMode, type ThemePreset } from '@/theme/ThemeProvider'
+import {
+  useTheme,
+  type ThemeMode,
+  type ThemePreset,
+  type UserBubbleTone,
+} from '@/theme/ThemeProvider'
 
 type SettingsWorkspaceProps = {
   apiCapabilities?: InqtrixCapabilities | null
@@ -82,6 +90,13 @@ type SettingsWorkspaceProps = {
   onSsoLogin?: () => void
   onSsoLogout?: () => void
   onStackChange: (stack: string) => void
+  /** Navigate to a shared resource's home view from the sharing panel
+   * (run -> research, collection -> database, template -> prompt library). */
+  onOpenSharedResource?: (resourceType: string) => void
+  /** Shared sharing-inbox state (resolved once in the desk so the nav badge
+   * and the panel agree). `null` hides the sharing section — sharing is off
+   * (none/apikey, no capability, or not authenticated). */
+  sharing?: SharingInboxHandle | null
   /** One-shot deep link: when set, the workspace focuses this
    * section on mount/changes (the avatar menu's settings entry). */
   requestedSection?: 'security' | null
@@ -102,8 +117,11 @@ type SettingsSectionId =
   | 'preferences'
   | 'quotas'
   | 'security'
+  | 'sharing'
 
 type SettingsNavItem = {
+  /** Optional count chip (e.g. pending share invitations); hidden when 0. */
+  badge?: number
   description: string
   icon: LucideIcon
   id: SettingsSectionId
@@ -138,13 +156,24 @@ export default function SettingsWorkspace({
   onSsoLogin,
   onSsoLogout,
   onStackChange,
+  onOpenSharedResource,
   reduceMotion,
   requestedSection = null,
   selectedStack,
+  sharing = null,
   stackDiscoveryStatus,
   stackOptions,
 }: SettingsWorkspaceProps) {
-  const { contrastMode, preset, setContrastMode, setPreset, setTheme, theme } = useTheme()
+  const {
+    contrastMode,
+    preset,
+    setContrastMode,
+    setPreset,
+    setTheme,
+    setUserBubbleTone,
+    theme,
+    userBubbleTone,
+  } = useTheme()
   const { t } = useLocale()
   // Instance administration is gated on the instance role (default-closed,
   // [[roleAccess]]) or demo — the single platform-admin axis.
@@ -220,6 +249,42 @@ export default function SettingsWorkspace({
       value: 'sage',
     },
   ]
+  const userBubbleToneOptions: Array<{
+    description: string
+    label: string
+    value: UserBubbleTone
+  }> = [
+    {
+      description: t.settings.userBubbleGrayDescription,
+      label: t.settings.userBubbleGray,
+      value: 'gray',
+    },
+    {
+      description: t.settings.userBubbleMintDescription,
+      label: t.settings.userBubbleMint,
+      value: 'mint',
+    },
+    {
+      description: t.settings.userBubbleOrangeDescription,
+      label: t.settings.userBubbleOrange,
+      value: 'orange',
+    },
+    {
+      description: t.settings.userBubbleSkyDescription,
+      label: t.settings.userBubbleSky,
+      value: 'sky',
+    },
+    {
+      description: t.settings.userBubbleVioletDescription,
+      label: t.settings.userBubbleViolet,
+      value: 'violet',
+    },
+    {
+      description: t.settings.userBubbleInkDescription,
+      label: t.settings.userBubbleInk,
+      value: 'ink',
+    },
+  ]
 
   const apiBaseUrl = import.meta.env.VITE_INQTRIX_API_BASE_URL || t.settings.sameOriginApi
   const legal = apiHealth?.legal
@@ -248,6 +313,21 @@ export default function SettingsWorkspace({
           id: 'security',
           label: t.settings.security,
         },
+        // Sharing management is per-user (your incoming invitations + what you
+        // shared), so it lives in the account group. Only present when the
+        // sharing surface is enabled (container mode, authenticated, or demo);
+        // the badge counts pending invitations awaiting consent.
+        ...(sharing
+          ? [
+              {
+                badge: sharing.pendingCount,
+                description: t.sharingManagement.navDescription,
+                icon: Share2,
+                id: 'sharing' as const,
+                label: t.sharingManagement.navLabel,
+              },
+            ]
+          : []),
         // Personal access tokens are per-user (session-scoped server-side),
         // not an admin feature: any authenticated cookie-session user manages
         // their OWN tokens, so this lives in the account group.
@@ -386,13 +466,18 @@ export default function SettingsWorkspace({
         quotaAdmin={quotaAdmin}
         selectedStack={selectedStack}
         sessionSub={sessionSub}
+        sharing={sharing}
+        onOpenSharedResource={onOpenSharedResource}
         setContrastMode={setContrastMode}
         setPreset={setPreset}
         setTheme={setTheme}
+        setUserBubbleTone={setUserBubbleTone}
         stackDiscoveryStatus={stackDiscoveryStatus}
         stackModeLabel={stackModeLabel}
         stackOptions={stackOptions}
         theme={theme}
+        userBubbleTone={userBubbleTone}
+        userBubbleToneOptions={userBubbleToneOptions}
       />
     </SettingsShell>
   )
@@ -455,7 +540,7 @@ function SettingsSidebar({
                 <GroupIcon className="icon-sm text-foreground/70" />
                 {group.label}
               </p>
-              <div className="flex gap-1.5 lg:relative lg:flex-col lg:gap-0.5 lg:pl-6 lg:before:absolute lg:before:bottom-1 lg:before:left-3 lg:before:top-1 lg:before:w-px lg:before:bg-muted-foreground/25 lg:before:content-['']">
+              <div className="flex gap-1.5 lg:relative lg:flex-col lg:gap-0.5 lg:pl-6 lg:[--settings-rail-x:0.75rem] lg:before:absolute lg:before:bottom-1 lg:before:left-[var(--settings-rail-x)] lg:before:top-1 lg:before:w-px lg:before:bg-muted-foreground/25 lg:before:content-['']">
                 {group.items.map((item) => (
                   <SettingsNavButton
                     item={item}
@@ -514,7 +599,7 @@ function SettingsNavButton({
       aria-current={isActive ? 'page' : undefined}
       className={cn(
         'relative flex h-8 shrink-0 items-center gap-2 rounded-md border-l-2 border-transparent px-2 text-muted-foreground transition-colors hover:bg-accent/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:h-7 lg:w-full lg:justify-start',
-        nested && 'lg:-ml-6 lg:w-[calc(100%+1.5rem)] lg:pl-8 lg:before:absolute lg:before:left-[9.5px] lg:before:top-1/2 lg:before:size-1.5 lg:before:-translate-y-1/2 lg:before:rounded-full lg:before:bg-muted-foreground/60 lg:before:content-[""] lg:hover:before:bg-muted-foreground/80',
+        nested && 'lg:-ml-6 lg:w-[calc(100%+1.5rem)] lg:pl-8 lg:before:absolute lg:before:left-[calc(var(--settings-rail-x)-0.1875rem)] lg:before:top-1/2 lg:before:size-1.5 lg:before:-translate-y-1/2 lg:before:rounded-full lg:before:bg-muted-foreground/60 lg:before:content-[""] lg:hover:before:bg-muted-foreground/80',
         isActive && 'border-brand bg-brand-subtle text-brand hover:bg-brand-subtle hover:text-brand',
         nested && isActive && 'lg:before:bg-brand',
       )}
@@ -524,6 +609,11 @@ function SettingsNavButton({
     >
       <Icon className="icon-sm shrink-0" />
       <span className="t-list whitespace-nowrap">{item.label}</span>
+      {item.badge && item.badge > 0 ? (
+        <span className="ml-auto inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-brand px-1 t-hint font-semibold tabular-nums text-brand-foreground">
+          {item.badge > 9 ? '9+' : item.badge}
+        </span>
+      ) : null}
     </button>
   )
 }
@@ -560,10 +650,15 @@ function SettingsPanel({
   setContrastMode,
   setPreset,
   setTheme,
+  setUserBubbleTone,
+  sharing,
+  onOpenSharedResource,
   stackDiscoveryStatus,
   stackModeLabel,
   stackOptions,
   theme,
+  userBubbleTone,
+  userBubbleToneOptions,
 }: {
   activeItem: SettingsNavItem
   adminUsers: ReturnType<typeof useAdminUsers>
@@ -612,10 +707,19 @@ function SettingsPanel({
   setContrastMode: (mode: 'high' | 'standard') => void
   setPreset: (preset: ThemePreset) => void
   setTheme: (theme: ThemeMode) => void
+  setUserBubbleTone: (tone: UserBubbleTone) => void
+  sharing: SharingInboxHandle | null
+  onOpenSharedResource?: (resourceType: string) => void
   stackDiscoveryStatus: StackDiscoveryStatus
   stackModeLabel: string
   stackOptions: string[]
   theme: ThemeMode
+  userBubbleTone: UserBubbleTone
+  userBubbleToneOptions: Array<{
+    description: string
+    label: string
+    value: UserBubbleTone
+  }>
 }) {
   const isAdminDataSection = ADMIN_DATA_SECTION_IDS.has(activeItem.id)
 
@@ -653,6 +757,9 @@ function SettingsPanel({
             setPreset={setPreset}
             setTheme={setTheme}
             theme={theme}
+            userBubbleTone={userBubbleTone}
+            userBubbleToneOptions={userBubbleToneOptions}
+            setUserBubbleTone={setUserBubbleTone}
           />
         ) : activeItem.id === 'connection' ? (
           <ConnectionPanel
@@ -689,6 +796,16 @@ function SettingsPanel({
           />
         ) : activeItem.id === 'quotas' ? (
           <QuotaAdminPanel admin={quotaAdmin} />
+        ) : activeItem.id === 'sharing' && sharing ? (
+          <SharingPanel
+            demo={isDemoMode}
+            onOpen={onOpenSharedResource ?? (() => {})}
+            ownerEmail={isDemoMode ? DEMO_OWNER.email : authSession?.email ?? null}
+            ownerName={
+              isDemoMode ? DEMO_OWNER.displayName : authSession?.displayName ?? null
+            }
+            sharing={sharing}
+          />
         ) : (
           <LicensingPanel
             legal={legal}
@@ -993,7 +1110,10 @@ function AppearancePanel({
   setContrastMode,
   setPreset,
   setTheme,
+  setUserBubbleTone,
   theme,
+  userBubbleTone,
+  userBubbleToneOptions,
 }: {
   contrastMode: 'high' | 'standard'
   modeOptions: Array<{
@@ -1012,7 +1132,14 @@ function AppearancePanel({
   setContrastMode: (mode: 'high' | 'standard') => void
   setPreset: (preset: ThemePreset) => void
   setTheme: (theme: ThemeMode) => void
+  setUserBubbleTone: (tone: UserBubbleTone) => void
   theme: ThemeMode
+  userBubbleTone: UserBubbleTone
+  userBubbleToneOptions: Array<{
+    description: string
+    label: string
+    value: UserBubbleTone
+  }>
 }) {
   const { t } = useLocale()
 
@@ -1027,37 +1154,47 @@ function AppearancePanel({
         />
       </SettingsRow>
       <SettingsRowBlock description={t.settings.themeDescription} title={t.settings.theme}>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
           {presetOptions.map((option) => {
             const isActive = preset === option.value
 
             return (
-              <button
-                aria-pressed={isActive}
-                className={cn(
-                  'group relative rounded-md border border-border bg-background p-2.5 text-left transition-colors hover:border-brand/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                  isActive && 'border-brand ring-2 ring-brand',
-                )}
+              <AppearanceChoiceButton
+                active={isActive}
+                description={option.description}
                 key={option.value}
-                onClick={() => setPreset(option.value)}
-                type="button"
-              >
-                {isActive ? (
-                  <span className="absolute right-2 top-2 inline-flex size-4 items-center justify-center rounded-full bg-brand text-brand-foreground">
-                    <Check className="icon-xs" />
-                  </span>
-                ) : null}
-                <span
-                  aria-hidden
-                  className="flex h-9 items-center gap-1.5 overflow-hidden rounded-[5px] border border-border px-2"
-                  style={{ background: option.surface }}
-                >
-                  <span className="h-2.5 w-10 rounded-full" style={{ background: option.accent }} />
-                  <span className="h-2.5 w-5 rounded-full opacity-40" style={{ background: option.accent }} />
-                </span>
-                <span className="mt-2 block t-card text-foreground">{option.label}</span>
-                <span className="mt-0.5 block t-meta text-muted-foreground">{option.description}</span>
-              </button>
+                label={option.label}
+                onSelect={setPreset}
+                swatch={
+                  <ThemePresetSwatch
+                    accent={option.accent}
+                    surface={option.surface}
+                  />
+                }
+                value={option.value}
+              />
+            )
+          })}
+        </div>
+      </SettingsRowBlock>
+      <SettingsRowBlock
+        description={t.settings.userBubbleToneDescription}
+        title={t.settings.userBubbleTone}
+      >
+        <div className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
+          {userBubbleToneOptions.map((option) => {
+            const isActive = userBubbleTone === option.value
+
+            return (
+              <AppearanceChoiceButton
+                active={isActive}
+                description={option.description}
+                key={option.value}
+                label={option.label}
+                onSelect={setUserBubbleTone}
+                swatch={<UserBubbleToneSwatch tone={option.value} />}
+                value={option.value}
+              />
             )
           })}
         </div>
@@ -1075,6 +1212,95 @@ function AppearancePanel({
         />
       </SettingsRow>
     </SettingsSection>
+  )
+}
+
+function AppearanceChoiceButton<T extends string>({
+  active,
+  description,
+  label,
+  onSelect,
+  swatch,
+  value,
+}: {
+  active: boolean
+  description: string
+  label: string
+  onSelect: (value: T) => void
+  swatch: ReactNode
+  value: T
+}) {
+  return (
+    <button
+      aria-pressed={active}
+      className={cn(
+        'group flex min-h-11 items-center gap-2 rounded-md border border-border bg-background px-2 py-1.5 text-left transition-colors hover:border-brand/40 hover:bg-surface/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+        active && 'border-brand/45 bg-brand-subtle hover:bg-brand-subtle',
+      )}
+      onClick={() => onSelect(value)}
+      type="button"
+    >
+      {swatch}
+      <span className="min-w-0 flex-1">
+        <span className={cn('block truncate t-list', active ? 'text-brand' : 'text-foreground')}>
+          {label}
+        </span>
+        <span
+          className={cn(
+            'mt-0.5 block truncate t-meta-sm',
+            active ? 'text-brand/80' : 'text-muted-foreground',
+          )}
+        >
+          {description}
+        </span>
+      </span>
+      <span
+        aria-hidden
+        className={cn(
+          'ml-auto inline-flex size-4 shrink-0 items-center justify-center rounded-full border',
+          active
+            ? 'border-brand bg-brand text-brand-foreground'
+            : 'border-transparent text-transparent',
+        )}
+      >
+        {active ? <Check className="icon-xs" /> : null}
+      </span>
+    </button>
+  )
+}
+
+function ThemePresetSwatch({
+  accent,
+  surface,
+}: {
+  accent: string
+  surface: string
+}) {
+  return (
+    <span
+      aria-hidden
+      className="flex h-8 w-14 shrink-0 items-center justify-center rounded-md border border-border bg-card p-1 shadow-[0_1px_2px_var(--shadow-hairline)]"
+    >
+      <span
+        className="flex h-full w-full items-center gap-1 overflow-hidden rounded-[5px] px-1.5"
+        style={{ background: surface }}
+      >
+        <span className="h-1.5 w-6 rounded-full" style={{ background: accent }} />
+        <span className="h-1.5 w-3 rounded-full opacity-40" style={{ background: accent }} />
+      </span>
+    </span>
+  )
+}
+
+function UserBubbleToneSwatch({ tone }: { tone: UserBubbleTone }) {
+  return (
+    <span
+      aria-hidden
+      className="inqtrix-user-bubble-tone-preview flex h-8 w-14 shrink-0 items-center justify-center rounded-md border border-border bg-card p-1 shadow-[0_1px_2px_var(--shadow-hairline)]"
+      data-user-bubble-tone={tone}
+    >
+      <span className="inqtrix-user-bubble h-3 w-9 rounded-full border shadow-[0_1px_2px_var(--shadow-hairline)]" />
+    </span>
   )
 }
 

@@ -174,6 +174,16 @@ class PostgresChatStore(BaseSessionStore):
             await session.execute(stmt)
         return messages
 
+    async def delete_message(self, thread_id: str, message_id: str) -> None:
+        async with self._session() as session:
+            await session.execute(
+                delete(chat_messages).where(
+                    chat_messages.c.tenant_id == _DEFAULT_TENANT,
+                    chat_messages.c.thread_id == thread_id,
+                    chat_messages.c.id == message_id,
+                )
+            )
+
     async def list_messages_page(
         self,
         thread_id: str,

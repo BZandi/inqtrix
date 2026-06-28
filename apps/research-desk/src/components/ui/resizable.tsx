@@ -28,14 +28,22 @@ const ResizablePanel = ResizablePrimitive.Panel
  */
 const ResizableHandle = ({
   className,
+  orientation = "horizontal",
   ...props
-}: React.ComponentProps<typeof ResizablePrimitive.Separator>) => (
+}: React.ComponentProps<typeof ResizablePrimitive.Separator> & {
+  /** Match the parent `ResizablePanelGroup` direction. `horizontal` (default,
+   * side-by-side panels) keeps a vertical seam + col-resize; `vertical`
+   * (stacked panels) is a horizontal seam + row-resize. */
+  orientation?: "horizontal" | "vertical"
+}) => (
   <ResizablePrimitive.Separator
     className={cn(
-      "relative w-px shrink-0 cursor-col-resize bg-border outline-none transition-colors duration-150",
-      "after:absolute after:inset-y-0 after:left-1/2 after:w-4 after:-translate-x-1/2",
+      "relative shrink-0 bg-border outline-none transition-colors duration-150",
       "hover:bg-foreground/20 data-[separator=hover]:bg-foreground/20 data-[separator=drag]:bg-brand",
       "focus-visible:ring-1 focus-visible:ring-ring",
+      orientation === "vertical"
+        ? "h-px cursor-row-resize after:absolute after:inset-x-0 after:top-1/2 after:h-4 after:-translate-y-1/2"
+        : "w-px cursor-col-resize after:absolute after:inset-y-0 after:left-1/2 after:w-4 after:-translate-x-1/2",
       className
     )}
     {...props}

@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { KnowledgeProfileManifestEntry } from '@/features/researchRuns/types'
-import { knowledgeProfileOptionsFromManifest } from './profileOptions'
+import {
+  knowledgeProfileOptionsFromManifest,
+  resolveKnowledgeDefaultProfileId,
+} from './profileOptions'
 
 const manifest: KnowledgeProfileManifestEntry[] = [
   {
@@ -67,11 +70,58 @@ describe('knowledgeProfileOptionsFromManifest', () => {
     })
   })
 
+  it('maps final_k_factor, defaulting to 1 when the entry omits it', () => {
+    const options = knowledgeProfileOptionsFromManifest([
+      manifest[0], // schnell: no final_k_factor → defaults to 1
+      {
+        final_k_factor: 2,
+        id: 'tief',
+        stages: {
+          decompose: true,
+          gate_rounds: 3,
+          grounding: true,
+          rerank: true,
+          report: true,
+          vocabulary_bridge: true,
+        },
+      },
+    ])
+    expect(options[0].finalKFactor).toBe(1)
+    expect(options[1].finalKFactor).toBe(2)
+  })
+
   it('drops malformed entries without an id', () => {
     const options = knowledgeProfileOptionsFromManifest([
       ...manifest,
       { id: '' } as KnowledgeProfileManifestEntry,
     ])
     expect(options.map((option) => option.id)).toEqual(['schnell', 'gruendlich', 'auto'])
+  })
+
+  it('prefers the deep profile when the manifest offers it', () => {
+    const options = knowledgeProfileOptionsFromManifest([
+      ...manifest,
+      {
+        id: 'tief',
+        stages: {
+          decompose: true,
+          gate_rounds: 3,
+          grounding: true,
+          rerank: true,
+          report: true,
+          vocabulary_bridge: true,
+        },
+      },
+    ])
+
+    expect(resolveKnowledgeDefaultProfileId(options, 'standard')).toBe('tief')
+  })
+
+  it('falls back to the server default and then the first profile', () => {
+    const options = knowledgeProfileOptionsFromManifest(manifest)
+
+    expect(resolveKnowledgeDefaultProfileId(options, 'gruendlich')).toBe('gruendlich')
+    expect(resolveKnowledgeDefaultProfileId(options, 'standard')).toBe('schnell')
+    expect(resolveKnowledgeDefaultProfileId([], 'standard')).toBeNull()
   })
 })

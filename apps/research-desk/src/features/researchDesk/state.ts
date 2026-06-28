@@ -14,6 +14,7 @@ import type {
   ChatMessageRecord,
   ChatMessageAttachmentRecord,
   ChatMessageModelResolutionRecord,
+  ChatMessageRequestContextRecord,
   ChatRuleRecord,
   ChatThreadGroupRecord,
   ChatThreadRecord,
@@ -89,10 +90,12 @@ export type ResearchDeskAction =
   | { ruleId: string; type: 'deleteChatRule' }
   | { groupId: string; type: 'deleteChatThreadGroup' }
   | { type: 'deleteChatThread'; threadId: string }
+  | { threadId: string; type: 'togglePinnedChatThread' }
   | { type: 'deleteJob'; jobId: string }
   | { folderId?: string | null; type: 'createEditorDocument' }
   | { title: string; type: 'createEditorFolder' }
   | { documentId: string; type: 'deleteEditorDocument' }
+  | { documentId: string; type: 'togglePinnedEditorDocument' }
   | { folderId: string; type: 'deleteEditorFolder' }
   | { documentId: string; type: 'openEditorDocument' }
   | { documentId: string; type: 'closeEditorDocumentTab' }
@@ -168,6 +171,7 @@ export type ResearchDeskAction =
     createdAt: string
     attachmentRefs?: ChatContextReferenceRecord[]
     modelResolution?: ChatMessageModelResolutionRecord
+    requestContext?: ChatMessageRequestContextRecord
     threadId: string
     type: 'startChatExchange'
     userMessageId: string
@@ -176,9 +180,19 @@ export type ResearchDeskAction =
     assistantMessageId: string
     createdAt: string
     modelResolution?: ChatMessageModelResolutionRecord
+    requestContext?: ChatMessageRequestContextRecord
     threadId: string
     type: 'startChatAssistantResponse'
     userMessageId: string
+  }
+  | {
+    assistantMessageId: string
+    createdAt: string
+    modelResolution?: ChatMessageModelResolutionRecord
+    requestContext?: ChatMessageRequestContextRecord
+    replacedAssistantMessageId: string
+    threadId: string
+    type: 'startChatAssistantRetry'
   }
   | {
     assistantMessageId: string
@@ -226,9 +240,10 @@ export type ResearchDeskAction =
   | { dims?: number; indexId: string; model: EmbedModelId; type: 'setVectorIndexModel' }
   | { fileIds: string[]; indexId: string; type: 'addDocsToVectorIndex' }
   | { fileId: string; indexId: string; type: 'removeDocFromVectorIndex' }
-  | { indexId: string; jobId: string; source: IndexingJobLive['source']; totalDocuments: number; type: 'startVectorIndexReindex' }
+  | { indexId: string; jobId: string; runningFileIds?: string[]; source: IndexingJobLive['source']; totalDocuments: number; type: 'startVectorIndexReindex' }
   | { indexId: string; queuePosition: number | null; type: 'markVectorIndexQueued' }
   | { completedDocuments: number; currentDocumentTitle?: string; embedded?: boolean; fileId?: string; indexId: string; totalDocuments: number; type: 'markVectorIndexProgress' }
+  | { indexId: string; serverDocumentId: string; type: 'markVectorIndexDocumentEmbedded' }
   | { embeddedFileIds?: string[]; skippedFileIds?: string[]; indexId: string; serverCollectionId?: string; serverCollectionModel?: string; serverDocumentIds?: Record<string, string>; type: 'completeVectorIndexReindex' }
   | { indexId: string; message: string; type: 'markVectorIndexError' }
   | { indexId: string; type: 'markVectorIndexCancelled' }
@@ -239,6 +254,7 @@ export type ResearchDeskAction =
   | { groupId: string | null; sessionId: string; targetIndex: number; type: 'moveKnowledgeSessionToGroup' }
   | { session: KnowledgeSessionRecord; type: 'createKnowledgeSession' }
   | { type: 'deleteKnowledgeSession'; sessionId: string }
+  | { sessionId: string; type: 'togglePinnedKnowledgeSession' }
   | { title: string; sessionId: string; type: 'renameKnowledgeSession' }
   | { type: 'selectKnowledgeSession'; sessionId: string }
   | { groups: KnowledgeSessionGroupRecord[]; type: 'upsertServerKnowledgeSessionGroups' }
@@ -246,10 +262,23 @@ export type ResearchDeskAction =
   | { serverIds: string[]; type: 'pruneLocalPlaceholderKnowledgeSessions' }
   | { items: KnowledgeThreadItemRecord[]; sessionId: string; type: 'setServerKnowledgeSessionItems' }
   | { item: KnowledgeThreadItemRecord; type: 'startKnowledgeAsk' }
+  | { itemIds: string[]; type: 'deleteKnowledgeItems' }
+  | { sessionId: string; type: 'clearKnowledgeSession' }
+  | { item: KnowledgeThreadItemRecord; replacedItemId: string; type: 'restartKnowledgeAsk' }
   | { answer: KnowledgeAnswerRecord; runId: string; type: 'completeKnowledgeItem' }
 
 export function initializeResearchDeskState(): ResearchDeskState {
   return createEmptyProjectState()
+}
+
+function toggleExplorerPin(ids: readonly string[], id: string) {
+  return ids.includes(id)
+    ? ids.filter((currentId) => currentId !== id)
+    : [id, ...ids]
+}
+
+function removeExplorerPin(ids: readonly string[], id: string) {
+  return ids.filter((currentId) => currentId !== id)
 }
 
 export function researchDeskReducer(
@@ -267,6 +296,51 @@ export function researchDeskReducer(
   if (action.type === 'setDemoMode') {
     const base = action.enabled ? createSeedProjectState() : createEmptyProjectState()
     return { ...base, projectEpoch: state.projectEpoch + 1 }
+  }
+  if (action.type === 'togglePinnedChatThread') {
+    if (!state.chatThreads[action.threadId]) return state
+    return {
+      ...state,
+      dirty: true,
+      ui: {
+        ...state.ui,
+        pinnedExplorer: {
+          ...state.ui.pinnedExplorer,
+          chatThreadIds: toggleExplorerPin(state.ui.pinnedExplorer.chatThreadIds, action.threadId),
+        },
+      },
+    }
+  }
+  if (action.type === 'togglePinnedEditorDocument') {
+    if (!state.editorDocuments[action.documentId]) return state
+    return {
+      ...state,
+      dirty: true,
+      ui: {
+        ...state.ui,
+        pinnedExplorer: {
+          ...state.ui.pinnedExplorer,
+          editorDocumentIds: toggleExplorerPin(state.ui.pinnedExplorer.editorDocumentIds, action.documentId),
+        },
+      },
+    }
+  }
+  if (action.type === 'togglePinnedKnowledgeSession') {
+    if (!state.knowledgeSessions[action.sessionId]) return state
+    return {
+      ...state,
+      dirty: true,
+      ui: {
+        ...state.ui,
+        pinnedExplorer: {
+          ...state.ui.pinnedExplorer,
+          knowledgeSessionIds: toggleExplorerPin(
+            state.ui.pinnedExplorer.knowledgeSessionIds,
+            action.sessionId,
+          ),
+        },
+      },
+    }
   }
   if (action.type === 'markProjectSaved') {
     return {
@@ -353,13 +427,16 @@ export function researchDeskReducer(
     return { ...state, ui: { ...state.ui, isReportExpanded: action.isExpanded } }
   }
   if (action.type === 'setReportVisible') {
-    return { ...state, ui: { ...state.ui, isReportVisible: action.isVisible } }
+    // Collapse state is a persisted ui field (markdown.ts/fileSystem.ts); mark
+    // dirty so a pure toggle is durably saved/pushed and survives reload, like
+    // chatChainingEnabled above (not opportunistically left to the next save).
+    return { ...state, dirty: true, ui: { ...state.ui, isReportVisible: action.isVisible } }
   }
   if (action.type === 'setChatHistoryVisible') {
-    return { ...state, ui: { ...state.ui, isChatHistoryVisible: action.isVisible } }
+    return { ...state, dirty: true, ui: { ...state.ui, isChatHistoryVisible: action.isVisible } }
   }
   if (action.type === 'setKnowledgeHistoryVisible') {
-    return { ...state, ui: { ...state.ui, isKnowledgeHistoryVisible: action.isVisible } }
+    return { ...state, dirty: true, ui: { ...state.ui, isKnowledgeHistoryVisible: action.isVisible } }
   }
   if (action.type === 'setComposerVisible') {
     return { ...state, ui: { ...state.ui, isComposerVisible: action.isVisible } }
@@ -385,6 +462,7 @@ export function researchDeskReducer(
     }
   }
   if (action.type === 'deleteJob') {
+    if (!state.researchRuns[action.jobId]) return state
     const researchRuns = { ...state.researchRuns }
     delete researchRuns[action.jobId]
     const researchRunOrder = state.researchRunOrder.filter((runId) => runId !== action.jobId)
@@ -558,6 +636,13 @@ export function researchDeskReducer(
       editorComments,
       editorDocumentOrder,
       editorDocuments,
+      ui: {
+        ...state.ui,
+        pinnedExplorer: {
+          ...state.ui.pinnedExplorer,
+          editorDocumentIds: removeExplorerPin(state.ui.pinnedExplorer.editorDocumentIds, action.documentId),
+        },
+      },
       editorUi: {
         ...state.editorUi,
         activeDocumentId,
@@ -875,12 +960,14 @@ export function researchDeskReducer(
   if (action.type === 'setEditorCommentPanelVisible') {
     return {
       ...state,
+      dirty: true,
       editorUi: { ...state.editorUi, isCommentPanelVisible: action.isVisible },
     }
   }
   if (action.type === 'setEditorTreeVisible') {
     return {
       ...state,
+      dirty: true,
       editorUi: { ...state.editorUi, isTreeVisible: action.isVisible },
     }
   }
@@ -954,6 +1041,10 @@ export function researchDeskReducer(
     }
   }
   if (action.type === 'upsertApiRunSummary') {
+    // Knowledge-mode runs are owned by the Knowledge thread. Keeping them out of
+    // the global run store prevents deleted/incognito Q&A from reappearing via
+    // run-list hydration or project export.
+    if (action.summary.mode === 'knowledge') return state
     const current = state.researchRuns[action.summary.run_id]
     const run = mergeRunSummary(current, action.summary, state.ui.selectedStack)
     const researchRunOrder = state.researchRunOrder.includes(run.runId)
@@ -1344,12 +1435,24 @@ export function researchDeskReducer(
   }
   if (action.type === 'attachApiRunResult') {
     const knowledgeItem = knowledgeItemByRunId(state, action.result.run_id)
+    const completedAt = new Date().toISOString()
     const withKnowledge = knowledgeItem
-      ? updateKnowledgeItem(state, knowledgeItem.id, (item) => ({
-        ...item,
-        answer: knowledgeAnswerFromRunResult(action.result),
-        status: 'completed',
-      }))
+      ? touchKnowledgeSessions(
+        updateKnowledgeItem({ ...state, dirty: true }, knowledgeItem.id, (item) => ({
+          ...item,
+          answer: knowledgeAnswerFromRunResult(action.result),
+          completedAt,
+          progress: {
+            ...item.progress,
+            steps: item.progress.steps.map((step) => (
+              step.status === 'done' ? step : { ...step, status: 'done' as const }
+            )),
+          },
+          status: 'completed',
+        })),
+        [knowledgeItem.sessionId],
+        completedAt,
+      )
       : state
     const current = withKnowledge.researchRuns[action.result.run_id]
     if (!current) return withKnowledge
@@ -1366,12 +1469,17 @@ export function researchDeskReducer(
   }
   if (action.type === 'markApiRunError') {
     const knowledgeItem = knowledgeItemByRunId(state, action.runId)
+    const updatedAt = new Date().toISOString()
     const withKnowledge = knowledgeItem
-      ? updateKnowledgeItem(state, knowledgeItem.id, (item) => (
-        item.status === 'completed'
-          ? item
-          : { ...item, error: action.message, status: 'failed' }
-      ))
+      ? touchKnowledgeSessions(
+        updateKnowledgeItem({ ...state, dirty: true }, knowledgeItem.id, (item) => (
+          item.status === 'completed'
+            ? item
+            : { ...item, error: action.message, status: 'failed' }
+        )),
+        [knowledgeItem.sessionId],
+        updatedAt,
+      )
       : state
     const current = withKnowledge.researchRuns[action.runId]
     if (!current) return withKnowledge
@@ -1507,6 +1615,13 @@ export function researchDeskReducer(
       knowledgeSessionOrder,
       knowledgeSessions,
       selectedKnowledgeSessionId,
+      ui: {
+        ...state.ui,
+        pinnedExplorer: {
+          ...state.ui.pinnedExplorer,
+          knowledgeSessionIds: removeExplorerPin(state.ui.pinnedExplorer.knowledgeSessionIds, action.sessionId),
+        },
+      },
     }
   }
   if (action.type === 'upsertServerKnowledgeSessionGroups') {
@@ -1625,6 +1740,37 @@ export function researchDeskReducer(
       },
     }
   }
+  if (action.type === 'deleteKnowledgeItems') {
+    const itemIds = new Set(action.itemIds)
+    const existingIds = action.itemIds.filter((itemId) => Boolean(state.knowledgeItems[itemId]))
+    if (existingIds.length === 0) return state
+    const sessionIds = new Set(existingIds.map((itemId) => state.knowledgeItems[itemId].sessionId))
+    const knowledgeItems = { ...state.knowledgeItems }
+    for (const itemId of existingIds) delete knowledgeItems[itemId]
+    const updatedAt = new Date().toISOString()
+    return touchKnowledgeSessions({
+      ...state,
+      dirty: true,
+      knowledgeItemOrder: state.knowledgeItemOrder.filter((itemId) => !itemIds.has(itemId)),
+      knowledgeItems,
+    }, sessionIds, updatedAt)
+  }
+  if (action.type === 'clearKnowledgeSession') {
+    if (!state.knowledgeSessions[action.sessionId]) return state
+    const itemIds = state.knowledgeItemOrder.filter((itemId) =>
+      state.knowledgeItems[itemId]?.sessionId === action.sessionId)
+    if (itemIds.length === 0) return state
+    const itemIdSet = new Set(itemIds)
+    const knowledgeItems = { ...state.knowledgeItems }
+    for (const itemId of itemIds) delete knowledgeItems[itemId]
+    const updatedAt = new Date().toISOString()
+    return touchKnowledgeSessions({
+      ...state,
+      dirty: true,
+      knowledgeItemOrder: state.knowledgeItemOrder.filter((itemId) => !itemIdSet.has(itemId)),
+      knowledgeItems,
+    }, [action.sessionId], updatedAt)
+  }
   if (action.type === 'startKnowledgeAsk') {
     const session = state.knowledgeSessions[action.item.sessionId]
     const sessionHasItems = state.knowledgeItemOrder.some((itemId) =>
@@ -1662,20 +1808,56 @@ export function researchDeskReducer(
       selectedKnowledgeSessionId: updatedSession.id,
     }
   }
+  if (action.type === 'restartKnowledgeAsk') {
+    const current = state.knowledgeItems[action.replacedItemId]
+    if (!current) return state
+    const restarted: KnowledgeThreadItemRecord = {
+      collectionTitles: action.item.collectionTitles,
+      createdAt: action.item.createdAt,
+      id: current.id,
+      progress: { steps: [] },
+      question: action.item.question,
+      requestedProfile: action.item.requestedProfile,
+      runId: action.item.runId,
+      sessionId: current.sessionId,
+      status: 'running',
+    }
+    if (action.item.collectionIds) restarted.collectionIds = action.item.collectionIds
+    if (action.item.topK !== undefined) restarted.topK = action.item.topK
+    if (action.item.finalK !== undefined) restarted.finalK = action.item.finalK
+    return touchKnowledgeSessions({
+      ...state,
+      dirty: true,
+      knowledgeItems: {
+        ...state.knowledgeItems,
+        [current.id]: restarted,
+      },
+      selectedKnowledgeSessionId: current.sessionId,
+    }, [current.sessionId], action.item.createdAt)
+  }
   if (action.type === 'completeKnowledgeItem') {
     const item = knowledgeItemByRunId(state, action.runId)
     if (!item) return state
-    return updateKnowledgeItem(state, item.id, (current) => ({
-      ...current,
-      answer: action.answer,
-      progress: {
-        ...current.progress,
-        steps: current.progress.steps.map((step) => (
-          step.status === 'done' ? step : { ...step, status: 'done' as const }
-        )),
-      },
-      status: 'completed',
-    }))
+    const completedAt = new Date().toISOString()
+    return touchKnowledgeSessions(
+      updateKnowledgeItem({
+        ...state,
+        dirty: true,
+      }, item.id, (current) => ({
+        ...current,
+        answer: action.answer,
+        completedAt,
+        progress: {
+          ...current.progress,
+          steps: current.progress.steps.map((step) => (
+            step.status === 'done' ? step : { ...step, status: 'done' as const }
+          )),
+        },
+        status: 'completed',
+      })),
+      [item.sessionId],
+      completedAt,
+    )
   }
   if (action.type === 'cancelLocalRun') {
     const current = state.researchRuns[action.runId]
@@ -2139,6 +2321,11 @@ export function researchDeskReducer(
           completedDocuments: 0,
           jobId: action.jobId,
           percent: 0,
+          // The run's working set. A client subset (incremental add) is passed
+          // explicitly; the durable server re-embed omits it (the worker, not
+          // the client, enumerates the docs) — default to every member, since a
+          // re-embed re-vectorizes the whole collection.
+          runningFileIds: action.runningFileIds ?? index.members.map((member) => member.fileId),
           source: action.source,
           startedAt: now,
           totalDocuments: action.totalDocuments,
@@ -2194,6 +2381,30 @@ export function researchDeskReducer(
           queuePosition: null,
           skippedFileIds,
           totalDocuments: action.totalDocuments,
+        },
+      },
+    }
+  }
+  if (action.type === 'markVectorIndexDocumentEmbedded') {
+    // The durable server re-embed confirms documents by their backend id (the
+    // SSE per-document event). Resolve it to the local file via the member's
+    // serverDocumentId and flip just that row live — same ephemeral
+    // `embeddedFileIds` channel the client-build path uses, so no dirty.
+    const live = state.indexingJobs[action.indexId]
+    const index = state.vectorIndexes[action.indexId]
+    if (!live || !index) return state
+    const matched = index.members.find(
+      (member) => member.serverDocumentId === action.serverDocumentId,
+    )
+    // No tracked id (older index) → cannot map; the row flips at completion.
+    if (!matched || live.embeddedFileIds?.includes(matched.fileId)) return state
+    return {
+      ...state,
+      indexingJobs: {
+        ...state.indexingJobs,
+        [action.indexId]: {
+          ...live,
+          embeddedFileIds: [...(live.embeddedFileIds ?? []), matched.fileId],
         },
       },
     }
@@ -2493,6 +2704,9 @@ export function researchDeskReducer(
   if (action.type === 'startChatAssistantResponse') {
     return startChatAssistantResponse(state, action)
   }
+  if (action.type === 'startChatAssistantRetry') {
+    return startChatAssistantRetry(state, action)
+  }
   if (action.type === 'setChatAssistantMessageContent') {
     return setChatAssistantMessageContent(state, action)
   }
@@ -2516,6 +2730,10 @@ export function researchDeskReducer(
         ...state.ui,
         pendingChatAttachmentRefs: [],
         pendingChatReportRunId: null,
+        pinnedExplorer: {
+          ...state.ui.pinnedExplorer,
+          chatThreadIds: removeExplorerPin(state.ui.pinnedExplorer.chatThreadIds, action.threadId),
+        },
         selectedChatThreadId,
       },
     }
@@ -2633,6 +2851,9 @@ function cloneChatMessage(message: ChatMessageRecord): ChatMessageRecord {
     ...message,
     attachments: message.attachments ? message.attachments.map((attachment) => ({ ...attachment })) : undefined,
     id: createId('msg'),
+    requestContext: message.requestContext
+      ? { knowledgeCollectionIds: message.requestContext.knowledgeCollectionIds?.slice() }
+      : undefined,
   }
 }
 
@@ -3049,6 +3270,7 @@ function startChatExchange(
     createdAt: action.createdAt,
     id: action.assistantMessageId,
     modelResolution: action.modelResolution,
+    requestContext: action.requestContext,
     role: 'assistant' as const,
   }
   const nextThread: ChatThreadRecord = {
@@ -3096,6 +3318,7 @@ function startChatAssistantResponse(
     createdAt: action.createdAt,
     id: action.assistantMessageId,
     modelResolution: action.modelResolution,
+    requestContext: action.requestContext,
     role: 'assistant',
   }
 
@@ -3104,6 +3327,48 @@ function startChatAssistantResponse(
     chatThreads: {
       ...state.chatThreads,
       [thread.id]: threadWithMessages(thread, [...thread.messages, assistantMessage], action.createdAt),
+    },
+    dirty: true,
+  }
+}
+
+function startChatAssistantRetry(
+  state: ResearchDeskState,
+  action: Extract<ResearchDeskAction, { type: 'startChatAssistantRetry' }>,
+): ResearchDeskState {
+  const thread = state.chatThreads[action.threadId]
+  if (!thread) return state
+
+  const assistantIndex = thread.messages.findIndex((message) => (
+    message.id === action.replacedAssistantMessageId
+  ))
+  const assistantMessage = assistantIndex >= 0 ? thread.messages[assistantIndex] : undefined
+  const userMessage = assistantIndex > 0 ? thread.messages[assistantIndex - 1] : undefined
+  if (
+    !assistantMessage
+    || assistantMessage.role !== 'assistant'
+    || !userMessage
+    || userMessage.role !== 'user'
+    || !userMessage.contentMarkdown.trim()
+  ) {
+    return state
+  }
+
+  const retryMessage: ChatMessageRecord = {
+    contentMarkdown: '',
+    createdAt: action.createdAt,
+    id: action.assistantMessageId,
+    modelResolution: action.modelResolution,
+    requestContext: action.requestContext,
+    role: 'assistant',
+  }
+  const messages = [...thread.messages.slice(0, assistantIndex), retryMessage]
+
+  return {
+    ...state,
+    chatThreads: {
+      ...state.chatThreads,
+      [thread.id]: threadWithMessages(thread, messages, action.createdAt),
     },
     dirty: true,
   }
@@ -3564,18 +3829,37 @@ function updateKnowledgeItem(
   }
 }
 
+function touchKnowledgeSessions(
+  state: ProjectState,
+  sessionIds: Iterable<string>,
+  updatedAt: string,
+): ProjectState {
+  const existingIds = [...new Set(sessionIds)].filter((sessionId) => Boolean(state.knowledgeSessions[sessionId]))
+  if (existingIds.length === 0) return state
+
+  const knowledgeSessions = { ...state.knowledgeSessions }
+  for (const sessionId of existingIds) {
+    const session = knowledgeSessions[sessionId]
+    knowledgeSessions[sessionId] = { ...session, updatedAt }
+  }
+  return { ...state, knowledgeSessions }
+}
+
 /** Route one run event into the matching knowledge thread item (live
- * runs and demo asks share this path); terminal failure events also
- * fail the item so the card never poses as still running. */
+ * runs and demo asks share this path); terminal events also close the
+ * item so the card never poses as still running. */
 function applyEventToKnowledgeItem(
   state: ProjectState,
   event: ResearchRunEvent,
 ): ProjectState {
   const item = knowledgeItemByRunId(state, event.run_id)
   if (!item || item.status !== 'running') return state
-  return updateKnowledgeItem(state, item.id, (current) => {
+  const updatedAt = new Date().toISOString()
+  const terminalExit = event.type === 'inqtrix.run.failed' || event.type === 'inqtrix.run.cancelled'
+  const terminalStatus = event.type === 'inqtrix.run.cancelled' ? 'cancelled' : 'failed'
+  const updated = updateKnowledgeItem(terminalExit ? { ...state, dirty: true } : state, item.id, (current) => {
     const progress = applyKnowledgeRunEvent(current.progress, event)
-    if (event.type === 'inqtrix.run.failed' || event.type === 'inqtrix.run.cancelled') {
+    if (terminalExit) {
       const error = typeof (event.data.error as { message?: unknown } | undefined)?.message === 'string'
         ? String((event.data.error as { message?: unknown }).message)
         : undefined
@@ -3583,12 +3867,15 @@ function applyEventToKnowledgeItem(
         ...current,
         error: error ?? current.error,
         progress,
-        status: 'failed',
+        status: terminalStatus,
       }
     }
     if (progress === current.progress) return current
     return { ...current, progress }
   })
+  return terminalExit
+    ? touchKnowledgeSessions(updated, [item.sessionId], updatedAt)
+    : updated
 }
 
 function writeVectorIndex(state: ProjectState, index: VectorIndexRecord): ProjectState {

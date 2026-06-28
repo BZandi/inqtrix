@@ -14,6 +14,7 @@ import type {
   FileAssetRecord,
   FileGroupRecord,
   FileLibrarySectionRecord,
+  PinnedExplorerState,
   ProjectState,
   ProjectWriteResult,
   VectorIndexMemberRecord,
@@ -484,6 +485,13 @@ function buildProjectStateFromFiles({
         (ui as Record<string, unknown>).pendingChatReportRunId,
         researchRuns,
       ),
+      pinnedExplorer: resolvePinnedExplorerFromManifest(
+        (ui as Record<string, unknown>).pinnedExplorer,
+        {
+          chatThreadIds: chatThreadOrder,
+          editorDocumentIds: editorDocumentOrder,
+        },
+      ),
       selectedChatModelTier: chatModelTierOrDefault(
         (ui as Record<string, unknown>).selectedChatModelTier,
       ),
@@ -504,6 +512,37 @@ function buildProjectStateFromFiles({
 
 function workspaceIdOrDefault(value: unknown) {
   return isWorkspaceId(value) ? value : getOrCreateBrowserWorkspaceId()
+}
+
+export function resolvePinnedExplorerFromManifest(
+  value: unknown,
+  validIds: {
+    chatThreadIds?: readonly string[]
+    editorDocumentIds?: readonly string[]
+    knowledgeSessionIds?: readonly string[]
+  } = {},
+): PinnedExplorerState {
+  const record = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+  return {
+    chatThreadIds: pinnedIdsFromManifest(record.chatThreadIds, validIds.chatThreadIds),
+    editorDocumentIds: pinnedIdsFromManifest(record.editorDocumentIds, validIds.editorDocumentIds),
+    knowledgeSessionIds: pinnedIdsFromManifest(record.knowledgeSessionIds, validIds.knowledgeSessionIds),
+  }
+}
+
+function pinnedIdsFromManifest(value: unknown, validIds?: readonly string[]) {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const valid = validIds ? new Set(validIds) : null
+  return value.filter((id): id is string => {
+    if (typeof id !== 'string' || !id.trim()) return false
+    if (seen.has(id)) return false
+    if (valid && !valid.has(id)) return false
+    seen.add(id)
+    return true
+  })
 }
 
 function chatThreadGroupsFromManifest(value: unknown): ProjectState['chatThreadGroups'] {
@@ -1252,6 +1291,7 @@ function preferencesOrDefault(value: unknown): ProjectState['preferences'] {
     locale: localeOrDefault(preferences.locale),
     theme: themeOrDefault(preferences.theme),
     themePreset: themePresetOrDefault(preferences.themePreset),
+    userBubbleTone: userBubbleToneOrDefault(preferences.userBubbleTone),
   }
 }
 
@@ -1276,6 +1316,17 @@ function themePresetOrDefault(value: unknown): ProjectState['preferences']['them
     || value === 'sage'
     ? value
     : 'standard'
+}
+
+function userBubbleToneOrDefault(value: unknown): ProjectState['preferences']['userBubbleTone'] {
+  return value === 'gray'
+    || value === 'mint'
+    || value === 'orange'
+    || value === 'sky'
+    || value === 'violet'
+    || value === 'ink'
+    ? value
+    : 'gray'
 }
 
 function chatModelTierOrDefault(value: unknown): ProjectState['ui']['selectedChatModelTier'] {

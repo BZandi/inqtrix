@@ -10,6 +10,26 @@ function line(step: KnowledgeRunStepRecord, collectionCount = 1) {
 }
 
 describe('knowledgeStepLine', () => {
+  it('renders follow-up contextualization outcomes', () => {
+    expect(line({
+      facts: { contextMarker: '_knowledge_query_context_applied', rewritten: true },
+      id: 'context',
+      kind: 'context',
+      status: 'done',
+    })).toMatchObject({
+      primary: 'Nachfrage mit Verlauf geklärt',
+    })
+    expect(line({
+      facts: { contextMarker: '_knowledge_query_context_fallback', rewritten: false },
+      id: 'context',
+      kind: 'context',
+      status: 'done',
+    })).toMatchObject({
+      primary: 'Verlauf geprüft; Frage bleibt eigenständig',
+      secondary: 'Originalfrage genutzt',
+    })
+  })
+
   it('renders the deep RAG live ledger lines used by the demo twin', () => {
     const steps: KnowledgeRunStepRecord[] = [
       {
@@ -72,5 +92,17 @@ describe('knowledgeStepLine', () => {
       status: 'done',
     }
     expect(line(retrieval).primary).toBe('Durchsuche 1 Sammlung… (16 Treffer)')
+  })
+
+  it('surfaces top_k and final_k as a secondary line, flagging an override', () => {
+    const base: KnowledgeRunStepRecord = {
+      facts: { candidateCount: 16, topK: 8, finalK: 16 },
+      id: 'retrieval',
+      kind: 'retrieval',
+      status: 'done',
+    }
+    expect(line(base).secondary).toBe('top_k 8 · final_k 16')
+    expect(line({ ...base, facts: { ...base.facts, finalKOverridden: true } }).secondary)
+      .toBe('top_k 8 · final_k 16 · überschrieben')
   })
 })

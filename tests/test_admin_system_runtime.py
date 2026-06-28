@@ -64,7 +64,7 @@ def _configured_runtime_container():
             default_top_k=8,
             embeddings=SimpleNamespace(default_model="text-embedding-3-large"),
             reranker=object(),
-            store=SimpleNamespace(supports_hybrid=True),
+            store=SimpleNamespace(supports_hybrid=True, sparse_language="de"),
         ),
         parser=object(),
     )
@@ -114,6 +114,14 @@ def test_runtime_payload_reports_configured_backends_without_secrets():
     assert payload["knowledge"]["vector_store"] == "qdrant"
     assert payload["knowledge"]["vector_store_available"] is True
     assert payload["knowledge"]["hybrid_retrieval"] is True
+    # Cross-lingual honesty: BM25 is monolingual ("de" here) and never
+    # cross-lingual; the lever is a multilingual reranker. The store delegates
+    # the tokenizer language up from the Qdrant vector index.
+    assert payload["knowledge"]["sparse"] == "bm25_german"
+    assert payload["knowledge"]["sparse_mode"] == "bm25"
+    assert payload["knowledge"]["sparse_language"] == "de"
+    assert payload["knowledge"]["sparse_multilingual"] is False
+    assert payload["knowledge"]["cross_lingual_recommendation"] == "reranker"
     assert payload["api"]["openapi"] is False
 
     serialized = json.dumps(payload, sort_keys=True)

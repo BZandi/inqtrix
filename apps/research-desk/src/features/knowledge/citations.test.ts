@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { KnowledgeReferenceRecord } from '@/features/project/types'
-import { citationKey, citationViews, groupCitationsByDocument } from './citations'
+import {
+  activeCitationGroup,
+  citationKey,
+  citationViews,
+  firstOpenableCitation,
+  groupCitationsByDocument,
+} from './citations'
 
 const SECTION = 'Abschnitt {n}'
 
@@ -55,5 +61,51 @@ describe('citationKey', () => {
   it('keys a cited passage by (document, chunk)', () => {
     expect(citationKey('d1', 3)).toBe('d1:3')
     expect(citationKey(null, null)).toBe(':')
+  })
+})
+
+describe('activeCitationGroup', () => {
+  const groups = groupCitationsByDocument(
+    citationViews(
+      [
+        ref({ label: 'K1', documentId: 'd1', chunkIndex: 0, title: 'A.pdf', url: 'inqtrix://documents/d1#chunk-0' }),
+        ref({ label: 'K2', documentId: 'd2', chunkIndex: 0, title: 'B.pdf', url: 'inqtrix://documents/d2#chunk-0' }),
+      ],
+      [],
+      SECTION,
+    ),
+  )
+
+  it('returns the group for the active document', () => {
+    expect(activeCitationGroup(groups, 'd2')?.documentId).toBe('d2')
+  })
+
+  it('returns null for an unknown or missing document id', () => {
+    expect(activeCitationGroup(groups, 'd9')).toBeNull()
+    expect(activeCitationGroup(groups, null)).toBeNull()
+    expect(activeCitationGroup(groups, undefined)).toBeNull()
+  })
+})
+
+describe('firstOpenableCitation', () => {
+  it('returns the first citation that can be opened', () => {
+    const groups = groupCitationsByDocument(
+      citationViews(
+        [
+          ref({ label: 'K5', documentId: 'd1', chunkIndex: 1, title: 'A.pdf', url: 'inqtrix://documents/d1#chunk-1' }),
+          ref({ label: 'K6', documentId: 'd1', chunkIndex: 2, title: 'A.pdf', url: 'inqtrix://documents/d1#chunk-2' }),
+        ],
+        [],
+        SECTION,
+      ),
+    )
+    expect(firstOpenableCitation(groups[0])?.label).toBe('K5')
+  })
+
+  it('returns null when no citation in the group can be opened', () => {
+    // A reference without a documentId is not openable (canOpen === false).
+    const views = citationViews([ref({ label: 'K7', title: 'C.pdf', url: 'inqtrix://documents/x' })], [], SECTION)
+    const group = { citations: views, documentId: null, title: 'C.pdf' }
+    expect(firstOpenableCitation(group)).toBeNull()
   })
 })

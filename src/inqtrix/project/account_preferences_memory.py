@@ -20,11 +20,20 @@ class MemoryAccountPreferencesStore:
         return self._rows.get(sub)
 
     async def upsert_preferences(
-        self, *, sub, contrast_mode, locale, theme, theme_preset, updated_at
+        self,
+        *,
+        sub,
+        contrast_mode,
+        locale,
+        theme,
+        theme_preset,
+        user_bubble_tone,
+        updated_at,
     ) -> AccountPreferences:
         prefs = AccountPreferences(
             sub=sub, contrast_mode=contrast_mode, locale=locale, theme=theme,
-            theme_preset=theme_preset, updated_at=updated_at,
+            theme_preset=theme_preset, user_bubble_tone=user_bubble_tone,
+            updated_at=updated_at,
         )
         self._rows[sub] = prefs
         return prefs

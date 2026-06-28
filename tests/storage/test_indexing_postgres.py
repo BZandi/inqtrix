@@ -321,6 +321,70 @@ def test_claim_fencing_discards_zombie_terminal_writes(store):
         release.set()
 
 
+def test_document_completed_event_round_trips(store):
+    """The per-document event's JSON payload survives Postgres unchanged
+    (no schema column — it lives in the generic event ``data``)."""
+    def work(handle):
+        handle.begin(1)
+        handle.document_completed("kd_round")
+        handle.complete()
+
+    summary = submit_reembed(store, collection_id="col-doc", work=work)
+    wait_for_status(store, summary["job_id"], {"completed"})
+
+    subscription = store.subscribe(summary["job_id"])
+    try:
+        events = subscription.replay
+    finally:
+        subscription.close()
+    doc_events = [
+        event for event in events
+        if event["type"] == "inqtrix.index.document_completed"
+    ]
+    assert len(doc_events) == 1
+    assert doc_events[0]["data"] == {"document_id": "kd_round", "outcome": "embedded"}
+
+
+def test_document_completed_respects_the_claim_fence(store):
+    """A reclaimed zombie's per-document event (old fence) is dropped, the
+    current attempt's lands — same fence as progress/terminal writes."""
+    release = threading.Event()
+
+    def slow(handle):
+        handle.begin(1)
+        release.wait(10)
+        handle.complete()
+
+    def doc_event_count(job_id):
+        subscription = store.subscribe(job_id)
+        try:
+            return sum(
+                1 for event in subscription.replay
+                if event["type"] == "inqtrix.index.document_completed"
+            )
+        finally:
+            subscription.close()
+
+    try:
+        submit_reembed(store, collection_id="col-a", work=slow)
+        submit_reembed(store, collection_id="col-b", work=slow)
+        third = submit_reembed(store, collection_id="col-c", work=slow)
+        job_id = third["job_id"]
+        assert store.get(job_id)["status"] == "queued"
+
+        assert store.claim_for_execution(job_id, "default", allow_takeover=False).attempt == 1
+        assert store.claim_for_execution(job_id, "default", allow_takeover=True).attempt == 2
+
+        # The zombie's event (old fence) is a discarded no-op...
+        store.document_completed(job_id, "kd_zombie", fence_attempt=1)
+        assert doc_event_count(job_id) == 0
+        # ...while the current attempt's event lands.
+        store.document_completed(job_id, "kd_live", fence_attempt=2)
+        assert doc_event_count(job_id) == 1
+    finally:
+        release.set()
+
+
 def test_orphan_sweep_fails_stale_rows_on_first_touch(store):
     release = threading.Event()
 

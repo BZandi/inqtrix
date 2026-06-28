@@ -148,7 +148,8 @@ labels and metadata; 10 is for eyebrows/hints. Calibrated to Carbon's productive
 | `.t-section` | 14 | 600 | snug | **Section / panel / content heading** — Report panel "Report", Chat "Gespräche" + the chat title, Editor "Dokumente" / "Editor-Assistent", "Alle Dokumente", "Neuer Prompt", report content sections ("Belege/Quellen"), Settings sections, modal titles. Bold, but body-size — a section heading is *not* a whole page. |
 | `.t-card` | 14 | 600 | snug | **Card / item / row title** — research run cards, file/doc cards, Settings row titles. Same 14/600 as `.t-section`; the name conveys intent (a card/row vs. a section heading). |
 | `.t-body` | 14 | 400 | normal (1.5) | Reading text + inputs (NOT Markdown) — prompt textarea, instructional hints, settings descriptions, search/input text. Line-height 1.5 matches the chat reading body. |
-| `.t-list` | 13 | 600 | 1.25rem | **Dense list / menu primary label** — chat history thread rows, file-list labels, mention-menu primary option, nav rows |
+| `.t-list` | 13 | 600 | 1.25rem | **Dense list / menu primary label** — folder headers, nav rows, menu primary option, strongly labelled dense rows |
+| `.t-list-regular` | 13 | 400 | 1.25rem | **Dense explorer item label** — normal chat/knowledge/editor history entries where selection/folder context already provides hierarchy |
 | `.t-label` | 12 | 600 | — | Form / control labels, folder-group headers ("Neuer Ordner") |
 | `.t-meta` | 12 | 400 | — | Subtitle / metadata / helper text / breadcrumb — sidebar subtitles, "Dokumente › …" breadcrumb |
 | `.t-meta-sm` | 11 | 400 | — | Dense subtitle / file metadata — file size & path lines, dense secondary text |
@@ -261,6 +262,8 @@ Colours are OKLCH tokens in `globals.css` (4 presets + dark + high-contrast). Us
 | Primary action | `bg-brand text-brand-foreground hover:bg-brand/90` (brand = purple) | The one prominent CTA per toolbar (Composer send, Save, Upload, Add). **Exactly one** brand-filled button per toolbar; everything else is `outline`/`ghost`. Do **not** use the near-black `bg-primary` for content CTAs. |
 | Selected / active | `bg-brand-subtle text-brand` (optionally a `border-l-2` accent bar) | Selected list row, active toggle, active nav item — one pattern everywhere |
 | Tones (`lib/tone.ts`) | `brand` / `success` / `file` / `warning` | Semantic accents: mention scopes, prompt categories (instruction=brand, function=success, context=warning), file identity = `file` (cyan) |
+| User message bubble | `--user-bubble-*`, `.inqtrix-user-bubble`, `.inqtrix-user-avatar` | User-authored messages in Chat and Knowledge Desk. Default is neutral gray; Settings offers curated `gray` / `mint` / `orange` / `sky` / `violet` / `ink` tones with light, dark, and high-contrast values. Assistant messages and Markdown rendering stay separate. |
+| Incognito chat header | `.inqtrix-chat-header--incognito` (token scope, `globals.css`) | Applied to the chat header bar only when incognito is active. Re-maps the subtree's neutral/brand tokens to the **inverted** surface (dark bar in light mode, light bar in dark mode) by deriving everything from `--primary` / `--primary-foreground`, so it stays correct across presets and high-contrast. Signals the "nothing is saved" state; title, icons and badge follow automatically. Not a `.t-*` role — a surface scope; keep in sync with `globals.css`. |
 | Muted / disabled | `text-muted-foreground`, disabled `text-muted-foreground/45` | Secondary text and disabled controls |
 
 ---
@@ -306,8 +309,8 @@ category eyebrow (dot + label + count), do **not** repeat that category as a fil
 
 | Element | Convention |
 |---|---|
-| Top panel header bar | `h-12` tall, `px-3` horizontal, title `.t-section` (a whole-page header is `.t-title`) |
-| `--header-h` | `2.75rem` — the compact sticky app topbar height (single source; AppRail offset subtracts it) |
+| Top panel header bar | `.inqtrix-panel-header` (`var(--header-h)` tall), `px-3`/`px-4` horizontal, title `.t-section`; keep these single-row and move secondary context to body content or hover text (a whole-page header is `.t-title`) |
+| `--header-h` | `2.75rem` — the compact sticky app topbar and panel-header height (single source; AppRail offset subtracts it) |
 | Workspace sidebars | compact `bg-surface/50` navigation rails with `border-r`, dense list rows, and content descriptions in the main panel, not repeated as large sidebar intro blocks; secondary workspace headers align to the app rail's first icon center, sidebar header icons share the same leading icon column as nav rows, and the main panel header hairline aligns with the sidebar header hairline; group anchors use dark `t-caption` text plus outline icons; grouped Settings-nav items may use a subtle indented rail with item nodes on desktop, with the selected row spanning the full group width and the selected node using the brand accent; runtime/status badges belong in the sidebar footer, not beside the title |
 | Toolbar row | one shared control height `h-8`; gap `gap-2`; **one** brand CTA |
 | Content padding | base `p-4`, wider screens `md:p-6` |

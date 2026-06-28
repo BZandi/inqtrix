@@ -77,11 +77,14 @@ class RunRequest(BaseModel):
         default_factory=dict,
         description=(
             "Knowledge-retrieval scope for ``mode=knowledge`` requests "
-            "(``collection_ids`` list, optional ``top_k``). Inert for "
+            "(``collection_ids`` list; optional ``profile``, ``top_k``, and "
+            "``final_k`` overrides). ``top_k`` is the per-query retrieval width "
+            "(1..50); ``final_k`` pins the surfaced-evidence count "
+            "(1..EVIDENCE_K_MAX), overriding the profile factor. Inert for "
             "algorithms that do not retrieve from internal documents."
         ),
     )
-    """Knowledge-retrieval scope for ``mode=knowledge`` requests (``collection_ids`` list, optional ``top_k``). Inert for algorithms that do not retrieve from internal documents."""
+    """Knowledge-retrieval scope for ``mode=knowledge`` requests (``collection_ids`` list; optional ``profile``, ``top_k``, ``final_k`` overrides). ``top_k`` is the per-query retrieval width (1..50); ``final_k`` pins the surfaced-evidence count (1..EVIDENCE_K_MAX), overriding the profile factor. Inert for algorithms that do not retrieve from internal documents."""
 
 
 class AgentResult(BaseModel):

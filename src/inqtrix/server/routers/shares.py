@@ -184,17 +184,41 @@ def build_router(container: "AppContainer") -> APIRouter:
             "data": await _enrich(created, principal.tenant_id),
         }
 
-    @router.delete("/v1/shares/{share_id}")
-    async def revoke_share(share_id: str, request: Request):
-        """Revoke one share (owner/manage only; 404 hides denials)."""
+    @router.post("/v1/shares/{share_id}/accept")
+    async def accept_share(share_id: str, request: Request):
+        """Accept one pending share addressed to the caller.
+
+        Consent is the recipient's alone: until this lands the share grants
+        nothing. An unknown id, a foreign recipient, an already-accepted or a
+        revoked share all return the same 404 (denial hidden behind absence).
+        """
         principal, error = await _scoped_principal(request)
         if error is not None:
             return error
-        if not await service.revoke(principal, share_id=share_id):
+        if not await service.accept(principal, share_id=share_id):
             return error_response(
                 404, "Freigabe nicht gefunden", "not_found"
             )
-        return {"revoked": True}
+        return {"accepted": True}
+
+    @router.delete("/v1/shares/{share_id}")
+    async def remove_share(share_id: str, request: Request):
+        """Remove one share — two callers, one verb.
+
+        The owner/manager revokes it, OR the recipient drops their own (declines
+        a pending invitation / leaves an accepted share). The paths are mutually
+        exclusive: only the owner passes the manage gate, only the recipient
+        matches ``subject_id``. Either way the response is ``{"revoked": true}``;
+        a caller who is neither gets the surface's indistinct 404.
+        """
+        principal, error = await _scoped_principal(request)
+        if error is not None:
+            return error
+        if await service.revoke(principal, share_id=share_id):
+            return {"revoked": True}
+        if await service.recipient_drop(principal, share_id=share_id):
+            return {"revoked": True}
+        return error_response(404, "Freigabe nicht gefunden", "not_found")
 
     @router.get("/v1/shares/shared-with-me")
     async def shared_with_me(request: Request, resource_type: str = ""):
@@ -265,5 +289,81 @@ def build_router(container: "AppContainer") -> APIRouter:
         except ShareValidationError as exc:
             return error_response(400, str(exc), "invalid_request_error")
         return {"object": "map", "data": dict(counts)}
+
+    @router.get("/v1/shares/inbox")
+    async def inbox(request: Request):
+        """The caller's incoming shares, split into pending and accepted.
+
+        One title-enriched listing across every shareable kind, powering the
+        settings "Eingegangen" (pending consent) and "Mit mir geteilt"
+        (accepted) sections. Grantor display names are joined here in one batch
+        (the same idiom as shared-with-me); the service supplies the titles.
+        """
+        principal, error = await _scoped_principal(request)
+        if error is not None:
+            return error
+        items = await service.inbox(principal)
+        grantors = {}
+        grantor_subs = tuple({item.granted_by_sub for item in items})
+        if users is not None and grantor_subs:
+            grantors = await users.profiles_for_subjects(
+                tenant_id=principal.tenant_id, subs=grantor_subs
+            )
+
+        def _payload(item) -> dict:
+            profile = grantors.get(item.granted_by_sub)
+            return {
+                "id": item.share_id,
+                "resource_type": item.resource_type,
+                "resource_id": item.resource_id,
+                "resource_title": item.resource_title,
+                "permission": item.permission.value,
+                "granted_by_sub": item.granted_by_sub,
+                "granted_by_display_name": (
+                    profile.display_name if profile is not None else None
+                ),
+                "created_at": item.created_at,
+                "accepted_at": item.accepted_at,
+            }
+
+        return {
+            "object": "map",
+            "data": {
+                "pending": [
+                    _payload(item)
+                    for item in items
+                    if item.accepted_at is None
+                ],
+                "accepted": [
+                    _payload(item)
+                    for item in items
+                    if item.accepted_at is not None
+                ],
+            },
+        }
+
+    @router.get("/v1/shares/mine")
+    async def mine(request: Request):
+        """The caller's outgoing shares, grouped per resource (the settings
+        "Von mir geteilt" section). Each row carries the title and the active /
+        pending recipient counts; per-recipient management reuses the existing
+        share dialog against this resource id."""
+        principal, error = await _scoped_principal(request)
+        if error is not None:
+            return error
+        items = await service.outgoing(principal)
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "resource_type": item.resource_type,
+                    "resource_id": item.resource_id,
+                    "resource_title": item.resource_title,
+                    "share_count": item.share_count,
+                    "pending_count": item.pending_count,
+                }
+                for item in items
+            ],
+        }
 
     return router

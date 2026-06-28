@@ -5,6 +5,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import type { FileAssetRecord, VectorIndexMemberState } from '@/features/project/types'
+import { StatusBadge } from '@/features/settings/parts'
 import {
   ConfirmDelete,
   InlineText,
@@ -15,11 +16,11 @@ import {
   TypeTile,
   type MoveTarget,
 } from './controls'
-import { chunkEstimate, formatAddedAt, formatAddedAtFull, formatBytes, typeMeta } from './helpers'
+import { chunkEstimate, formatAddedAt, formatAddedAtFull, formatBytes, memberCellState, typeMeta } from './helpers'
 import { FILE_DRAG_TYPE } from './constants'
 
 export const LIBRARY_GRID = 'grid grid-cols-[minmax(0,1fr)_4.5rem_3rem_5rem_7rem_3.5rem_4rem] items-center gap-3'
-export const INDEX_GRID = 'grid grid-cols-[minmax(0,1fr)_4.5rem_4rem_5rem_7rem_minmax(6rem,9rem)_2.5rem] items-center gap-3'
+export const INDEX_GRID = 'grid grid-cols-[minmax(0,1fr)_4.5rem_7rem_5rem_7rem_minmax(6rem,9rem)_2.5rem] items-center gap-3'
 
 export type FileItemProps = {
   asset: FileAssetRecord
@@ -28,10 +29,13 @@ export type FileItemProps = {
   referenceCount?: number
   moveTargets?: MoveTarget[]
   memberState?: VectorIndexMemberState
-  /** Whether the member's index is CURRENTLY running an embed job — so a
-   * `pending` member only reads "embedding…" while a job actually runs, never
-   * forever (the prior bug). */
+  /** Whether the member's index is CURRENTLY running ANY embed job — gates the
+   * per-row actions (no "remove" / no per-file "index this file" while a run is
+   * in flight, "one job per index"). NOT the running-label gate — see `inRun`. */
   indexing?: boolean
+  /** Whether THIS specific file is part of the current run's working set
+   * (`runningFileIds`) — drives whether the row reads "läuft". */
+  inRun?: boolean
   /** This file's server-confirmed live outcome during an active run. */
   liveProgress?: 'embedded' | 'skipped'
   source?: string | null
@@ -50,32 +54,36 @@ export type FileItemProps = {
 function ChunkCell({
   asset,
   state,
-  indexing = false,
+  inRun = false,
   liveProgress,
 }: {
   asset: FileAssetRecord
   state: VectorIndexMemberState
-  indexing?: boolean
+  /** Whether THIS file is part of the running job's working set
+   * (`runningFileIds`). "läuft" is shown ONLY for files the active run actually
+   * processes — a file outside the run keeps its real state, so indexing one new
+   * document never makes the already-embedded rows read "läuft" (the prior bug). */
+  inRun?: boolean
   /** During an active run, this file's server-CONFIRMED outcome so far:
    * `embedded` (done), `skipped` (no text), or undefined (not yet processed →
    * still running). Drives the live, per-file feedback. */
   liveProgress?: 'embedded' | 'skipped'
 }) {
   const { locale, t } = useLocale()
-  // While a run is in flight the live per-file outcome wins (each row flips as
-  // the server confirms it); once it completes the persisted state takes over.
-  // A still-unprocessed file shows the pulsing dot ONLY during an active run,
-  // never forever (No-Silent-Fallbacks).
-  const effective: 'embedded' | 'skipped' | 'running' | 'pending' = indexing
-    ? (liveProgress ?? 'running')
-    : state
+  // The server-confirmed live outcome wins (each row flips as it lands); a file
+  // in the run but not yet confirmed shows the pulsing "läuft"; everything else
+  // keeps its persisted state (No-Silent-Fallbacks: only an in-run file pulses,
+  // never forever and never a row outside the run).
+  const effective = memberCellState(state, inRun, liveProgress)
   if (effective === 'running') {
+    // A brand status pill with the pulsing dot — same table density as the other
+    // states and the same tone as the index-level "Indexiere…" badge.
     return (
       <Tooltip>
         <TooltipTrigger asChild>
-          <span className="inline-flex cursor-help items-center justify-end gap-1 text-brand">
+          <span className="inline-flex h-5 cursor-help items-center gap-1 rounded-md border border-brand/25 bg-brand-subtle px-1.5 t-hint font-medium text-brand">
             <span className="inqtrix-running-dot size-1.5 rounded-full bg-brand" />
-            <span className="t-meta-sm font-medium">{t.vectorIndex.embeddingRunning}</span>
+            {t.vectorIndex.embeddingRunning}
           </span>
         </TooltipTrigger>
         <TooltipContent side="top">{t.vectorIndex.embeddingRunningTooltip}</TooltipContent>
@@ -83,11 +91,15 @@ function ChunkCell({
     )
   }
   if (effective === 'embedded') {
+    // Explicit "Indexiert" status (best practice) instead of a bare number; the
+    // chunk count moves into the tooltip as the secondary detail.
     const chunks = chunkEstimate(asset)
     return (
       <Tooltip>
         <TooltipTrigger asChild>
-          <span className="cursor-help tabular-nums">{chunks.toLocaleString(locale)}</span>
+          <span className="inline-flex cursor-help">
+            <StatusBadge density="table" label={t.vectorIndex.statusReady} tone="success" />
+          </span>
         </TooltipTrigger>
         <TooltipContent side="top">{t.vectorIndex.chunks.replace('{count}', chunks.toLocaleString(locale))}</TooltipContent>
       </Tooltip>
@@ -100,10 +112,12 @@ function ChunkCell({
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="inline-flex cursor-help items-center justify-end gap-1 text-muted-foreground">
-          <span className="t-meta-sm font-medium">
-            {noText ? t.vectorIndex.embeddingNoText : t.vectorIndex.embeddingPending}
-          </span>
+        <span className="inline-flex cursor-help">
+          <StatusBadge
+            density="table"
+            label={noText ? t.vectorIndex.embeddingNoText : t.vectorIndex.embeddingPending}
+            tone="neutral"
+          />
         </span>
       </TooltipTrigger>
       <TooltipContent side="top">
@@ -152,37 +166,59 @@ function AddedCell({ asset }: { asset: FileAssetRecord }) {
 function NameCell({
   asset,
   breadcrumb,
+  mode,
   onRename,
 }: {
   asset: FileAssetRecord
   breadcrumb?: string | null
+  mode: FileItemProps['mode']
   onRename?: (fileId: string, label: string) => void
 }) {
   const { t } = useLocale()
+  const titleNode = onRename ? (
+    <InlineText
+      ariaLabel={t.fileLibrary.rename}
+      className="min-w-0 max-w-full t-list text-foreground"
+      onCommit={(label) => onRename(asset.id, label)}
+      value={asset.label}
+    />
+  ) : (
+    <span className="min-w-0 truncate t-list text-foreground">{asset.label}</span>
+  )
+
+  const metaNode = (
+    <div className="flex min-w-0 items-center gap-1.5 t-meta-sm text-muted-foreground">
+      <span className="min-w-0 flex-1 truncate" title={asset.fileName}>{asset.fileName}</span>
+      {breadcrumb ? <span className="shrink-0 whitespace-nowrap text-muted-foreground/60">· {breadcrumb}</span> : null}
+    </div>
+  )
+
   return (
     <div className="flex min-w-0 items-center gap-2">
       <TypeTile asset={asset} size="sm" />
-      <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <span className="shrink-0 t-mono text-muted-foreground/70">@files:</span>
-          {onRename ? (
-            <InlineText
-              ariaLabel={t.fileLibrary.rename}
-              className="min-w-0 max-w-full t-list text-foreground"
-              onCommit={(label) => onRename(asset.id, label)}
-              value={asset.label}
-            />
-          ) : (
-            <span className="min-w-0 truncate t-list text-foreground">{asset.label}</span>
-          )}
-          <StatusMark asset={asset} />
-          <ParserBadge asset={asset} />
+      {mode === 'index' ? (
+        <div className="grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_7rem] items-start gap-x-2">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="shrink-0 t-mono text-muted-foreground/70">@files:</span>
+            {titleNode}
+            <StatusMark asset={asset} />
+          </div>
+          <div className="flex min-w-0 items-center justify-start">
+            <ParserBadge asset={asset} />
+          </div>
+          {metaNode}
         </div>
-        <div className="flex min-w-0 items-center gap-1.5 t-meta-sm text-muted-foreground">
-          <span className="min-w-0 flex-1 truncate" title={asset.fileName}>{asset.fileName}</span>
-          {breadcrumb ? <span className="shrink-0 whitespace-nowrap text-muted-foreground/60">· {breadcrumb}</span> : null}
+      ) : (
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="shrink-0 t-mono text-muted-foreground/70">@files:</span>
+            {titleNode}
+            <StatusMark asset={asset} />
+            <ParserBadge asset={asset} />
+          </div>
+          {metaNode}
         </div>
-      </div>
+      )}
     </div>
   )
 }
@@ -281,7 +317,7 @@ function dragHandlers(props: FileItemProps) {
 
 export function FileRow(props: FileItemProps) {
   const { locale, t } = useLocale()
-  const { asset, breadcrumb, indexing, liveProgress, memberState, mode, referenceCount, source } = props
+  const { asset, breadcrumb, inRun, liveProgress, memberState, mode, referenceCount, source } = props
   const isIndex = mode === 'index'
   const meta = typeMeta(asset)
   const canPreview = mode === 'library' && Boolean(props.onPreview)
@@ -295,11 +331,11 @@ export function FileRow(props: FileItemProps) {
       onClick={canPreview ? () => props.onPreview?.(asset.id) : undefined}
       {...dragHandlers(props)}
     >
-      <NameCell asset={asset} breadcrumb={breadcrumb} onRename={props.onRename} />
+      <NameCell asset={asset} breadcrumb={breadcrumb} mode={mode} onRename={props.onRename} />
       <div className="min-w-0"><TypeBadge asset={asset} /></div>
       <div className="text-right t-meta tabular-nums text-muted-foreground">
         {isIndex ? (
-          <ChunkCell asset={asset} indexing={indexing} liveProgress={liveProgress} state={memberState ?? 'pending'} />
+          <ChunkCell asset={asset} inRun={inRun} liveProgress={liveProgress} state={memberState ?? 'pending'} />
         ) : meta.paged && asset.pageCount != null ? (
           asset.pageCount
         ) : (
@@ -328,7 +364,7 @@ export function FileRow(props: FileItemProps) {
 
 export function FileCard(props: FileItemProps) {
   const { locale, t } = useLocale()
-  const { asset, breadcrumb, indexing, liveProgress, memberState, mode, referenceCount } = props
+  const { asset, breadcrumb, inRun, liveProgress, memberState, mode, referenceCount } = props
   const isIndex = mode === 'index'
   const meta = typeMeta(asset)
   const canPreview = mode === 'library' && Boolean(props.onPreview)
@@ -381,7 +417,7 @@ export function FileCard(props: FileItemProps) {
           {meta.paged && asset.pageCount != null ? ` · ${asset.pageCount} ${t.fileLibrary.pagesUnit}` : ''}
         </span>
         {isIndex ? (
-          <ChunkCell asset={asset} indexing={indexing} liveProgress={liveProgress} state={memberState ?? 'pending'} />
+          <ChunkCell asset={asset} inRun={inRun} liveProgress={liveProgress} state={memberState ?? 'pending'} />
         ) : (
           <UsedCell count={referenceCount ?? 0} />
         )}
@@ -389,4 +425,3 @@ export function FileCard(props: FileItemProps) {
     </div>
   )
 }
-

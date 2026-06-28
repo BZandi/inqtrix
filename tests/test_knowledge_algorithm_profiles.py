@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from typing import Any
 
@@ -20,6 +21,7 @@ import pytest
 from inqtrix.core.context import RunContext, RuntimeContext
 from inqtrix.core.results import RunRequest
 from inqtrix.knowledge.algorithm import KnowledgeAlgorithm
+from inqtrix.knowledge.profiles import EVIDENCE_K_MAX
 from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
 from inqtrix.knowledge.stores.ports import (
     DocumentChunk,
@@ -67,6 +69,33 @@ class ScriptedLLM:
         return True
 
 
+class ContextualizingLLM(ScriptedLLM):
+    """Scripted follow-up contextualizer plus the normal answer/gate script."""
+
+    def __init__(
+        self,
+        contextualized_question: str | Exception,
+        gate_verdicts: list[dict[str, Any]] | None = None,
+    ) -> None:
+        super().__init__(gate_verdicts)
+        self._contextualized_question = contextualized_question
+        self.context_prompts: list[str] = []
+
+    def complete_with_metadata(self, prompt: str, **kwargs: Any) -> LLMResponse:
+        if "Knowledge-RAG-System" in prompt and "eigenstaendige Suchfrage" in prompt:
+            self.context_prompts.append(prompt)
+            if isinstance(self._contextualized_question, Exception):
+                raise self._contextualized_question
+            return LLMResponse(
+                content=json.dumps({"question": self._contextualized_question}),
+                prompt_tokens=7,
+                completion_tokens=4,
+                model="stub-context",
+                finish_reason="stop",
+            )
+        return super().complete_with_metadata(prompt, **kwargs)
+
+
 class RecordingStore(MemoryKnowledgeStore):
     """Memory store recording the top_k of every search call.
 
@@ -79,6 +108,7 @@ class RecordingStore(MemoryKnowledgeStore):
 
     def __init__(self, *, grow: bool = False) -> None:
         super().__init__()
+        self.embedded_queries: list[str] = []
         self.search_top_ks: list[int] = []
         self._grow = grow
         self._calls = 0
@@ -121,6 +151,18 @@ class RecordingReranker:
         ]
 
 
+class RecordingEmbeddings(StubEmbeddings):
+    """Embedding stub recording the query texts passed to retrieval."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.query_texts: list[str] = []
+
+    def embed_query(self, text, *, model=None):
+        self.query_texts.append(text)
+        return super().embed_query(text, model=model)
+
+
 def make_algorithm(
     llm: ScriptedLLM,
     *,
@@ -132,8 +174,10 @@ def make_algorithm(
     default_top_k: int = 4,
 ):
     store = RecordingStore(grow=grow)
+    embeddings = RecordingEmbeddings()
+    store.embedded_queries = embeddings.query_texts
     knowledge = KnowledgeProviderContext(
-        embeddings=StubEmbeddings(),
+        embeddings=embeddings,
         store=store,
         default_top_k=default_top_k,
         reranker=reranker,
@@ -199,6 +243,44 @@ def run_with_profile(algorithm, runtime, context, profile=None, events=None):
         runtime=runtime,
         context=context,
     )
+
+
+def run_followup(
+    algorithm: KnowledgeAlgorithm,
+    runtime: RuntimeContext,
+    context: RunContext,
+    *,
+    events: list[tuple[str, dict[str, Any]]] | None = None,
+) -> Any:
+    """Run a follow-up Knowledge request with prior Q&A history."""
+    if events is not None:
+        context = RunContext(
+            providers=context.providers,
+            strategies=None,
+            agent_settings=context.agent_settings,
+            event_sink=lambda event, payload: events.append((event, payload)),
+        )
+    return algorithm.run(
+        RunRequest(
+            mode="knowledge",
+            question="Und die Haftung?",
+            history=(
+                "Nutzer: Wie ist der Rahmenvertrag geregelt?\n"
+                "Assistent: Der Rahmenvertrag nennt den Auftragswert."
+            ),
+            knowledge_filters={"profile": "schnell"},
+        ),
+        runtime=runtime,
+        context=context,
+    )
+
+
+def retrieval_queries(store: RecordingStore) -> list[str]:
+    """Return real retrieval queries, excluding the vector dimension probe."""
+    return [
+        query for query in store.embedded_queries
+        if query != "dimension probe"
+    ]
 
 
 SUFFICIENT = {"sufficient": True, "rewritten_query": None, "reason": "ok"}
@@ -346,6 +428,51 @@ class TestCeilingDegradation:
             run_with_profile(algorithm, runtime, context, "turbo")
 
 
+class TestConversationalContext:
+    def test_followup_history_rewrites_the_retrieval_query(self):
+        events: list[tuple[str, dict]] = []
+        llm = ContextualizingLLM(
+            "Wie ist die Haftung im Rahmenvertrag geregelt?"
+        )
+        algorithm, store, context, runtime = make_algorithm(llm)
+        result = run_followup(algorithm, runtime, context, events=events)
+
+        queries = retrieval_queries(store)
+        assert queries[0] == (
+            "Wie ist die Haftung im Rahmenvertrag geregelt?"
+        )
+        assert llm.context_prompts, "history must trigger one context call"
+        assert "Und die Haftung?" in llm.answer_prompts[0]
+        assert "Bisheriger Gespraechsverlauf" in llm.answer_prompts[0]
+        contextualized = dict(events)["inqtrix.knowledge.contextualized"]
+        assert contextualized == {
+            "marker": "_knowledge_query_context_applied",
+            "rewritten": True,
+            "used_history": True,
+        }
+        state = result.raw["result_state"]
+        assert state["knowledge_contextualization"] == contextualized
+        assert state["queries"][0] == queries[0]
+
+    def test_contextualization_failure_falls_back_loudly(self, caplog):
+        events: list[tuple[str, dict]] = []
+        llm = ContextualizingLLM(RuntimeError("context down"))
+        algorithm, store, context, runtime = make_algorithm(llm)
+
+        with caplog.at_level(logging.WARNING, logger="inqtrix"):
+            result = run_followup(algorithm, runtime, context, events=events)
+
+        assert retrieval_queries(store)[0] == "Und die Haftung?"
+        assert any("_knowledge_query_context_fallback" in message for message in caplog.messages)
+        contextualized = dict(events)["inqtrix.knowledge.contextualized"]
+        assert contextualized == {
+            "marker": "_knowledge_query_context_fallback",
+            "rewritten": False,
+            "used_history": True,
+        }
+        assert result.raw["result_state"]["knowledge_contextualization"] == contextualized
+
+
 class TestProfileEvent:
     def test_profile_resolved_event_carries_the_plan(self):
         events: list[tuple[str, dict]] = []
@@ -465,3 +592,68 @@ class TestSingletonConcurrency:
         assert schnell_state["knowledge_gate"]["enabled"] is False
         assert standard_state["knowledge_profile"]["id"] == "standard"
         assert standard_state["knowledge_gate"]["enabled"] is True
+
+
+class TestFinalKOverride:
+    """An explicit ``final_k`` pins the surfaced-evidence count, overriding the
+    profile factor, clamped to the ceiling, and surfaced as overridden."""
+
+    def _run(self, store_algo, filters):
+        algorithm, store, context, runtime = store_algo
+        events: list[tuple[str, dict[str, Any]]] = []
+        ctx = RunContext(
+            providers=context.providers,
+            strategies=None,
+            agent_settings=context.agent_settings,
+            event_sink=lambda event, payload: events.append((event, payload)),
+        )
+        algorithm.run(
+            RunRequest(
+                mode="knowledge",
+                question="Wie ist die Haftung geregelt?",
+                knowledge_filters=filters,
+            ),
+            runtime=runtime,
+            context=ctx,
+        )
+        return store, dict(events)["inqtrix.knowledge.retrieval.completed"]
+
+    def test_explicit_final_k_sets_the_single_retrieval_width(self):
+        # `schnell` does not decompose, so the one retrieval runs at final_k.
+        store, completed = self._run(
+            make_algorithm(ScriptedLLM(), default_top_k=4),
+            {"profile": "schnell", "final_k": 12},
+        )
+        assert store.search_top_ks == [12]
+        assert completed["final_k"] == 12
+        assert completed["final_k_overridden"] is True
+
+    def test_final_k_override_is_clamped_to_the_ceiling(self):
+        # Algorithm-layer backstop (the resolver would 400 a value this large);
+        # a value reaching the algorithm is still bounded to EVIDENCE_K_MAX.
+        store, completed = self._run(
+            make_algorithm(ScriptedLLM(), default_top_k=4),
+            {"profile": "schnell", "final_k": EVIDENCE_K_MAX + 50},
+        )
+        assert store.search_top_ks == [EVIDENCE_K_MAX]
+        assert completed["final_k"] == EVIDENCE_K_MAX
+
+    def test_no_override_keeps_the_profile_factor(self):
+        _, completed = self._run(
+            make_algorithm(ScriptedLLM(), default_top_k=4),
+            {"profile": "schnell"},
+        )
+        assert completed["final_k"] == 4  # schnell factor 1.0 * top_k 4
+        assert completed["final_k_overridden"] is False
+
+    def test_override_beats_the_profile_factor_in_the_decompose_branch(self):
+        # `tief` decomposes, so the override must flow through the
+        # interleave/merge `limit=final_k` path, not just the no-decompose one.
+        # SUFFICIENT keeps the gate from looping; the override (20) beats the
+        # factor result (4 * 2.0 = 8).
+        _, completed = self._run(
+            make_algorithm(ScriptedLLM([SUFFICIENT]), default_top_k=4),
+            {"profile": "tief", "final_k": 20},
+        )
+        assert completed["final_k"] == 20
+        assert completed["final_k_overridden"] is True

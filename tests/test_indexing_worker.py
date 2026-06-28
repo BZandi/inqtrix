@@ -47,6 +47,9 @@ class StubStore:
         self.calls.append(("cancelled", reason, fence_attempt))
         return self.terminal_lands
 
+    def document_completed(self, job_id, document_id, *, fence_attempt=None):
+        self.calls.append(("document_completed", document_id, fence_attempt))
+
 
 def test_fenced_handle_threads_the_attempt_into_every_write():
     store = StubStore()
@@ -54,12 +57,14 @@ def test_fenced_handle_threads_the_attempt_into_every_write():
 
     handle.begin(5)
     handle.progress(completed_documents=2, current_document_title="doc")
+    handle.document_completed("kd_1")
     handle.complete()
     handle.fail("kaputt")
     handle.cancel("client_requested_cancel")
 
     assert ("set_total", 5, 7) in store.calls
     assert ("progress", 2, 7) in store.calls
+    assert ("document_completed", "kd_1", 7) in store.calls
     assert ("complete", 7) in store.calls
     assert any(c[0] == "fail" and c[3] == 7 for c in store.calls)
     assert ("cancelled", "client_requested_cancel", 7) in store.calls

@@ -320,6 +320,21 @@ class PostgresRunStore(DurableJobStoreBase):
             ).first()
         return row[0] if row is not None else None
 
+    def title(self, run_id: str) -> str | None:
+        """The run's question as a share-surface title, regardless of
+        visibility — a pending-share recipient must see it to decide. ``None``
+        when the run no longer exists, so the inbox skips it."""
+        return self._call(self._title_db(run_id))
+
+    async def _title_db(self, run_id: str) -> str | None:
+        async with self._session("default") as session:
+            row = (
+                await session.execute(
+                    select(runs.c.question).where(runs.c.run_id == run_id)
+                )
+            ).first()
+        return row[0] if row is not None else None
+
     async def _delete_db(
         self,
         run_id: str,

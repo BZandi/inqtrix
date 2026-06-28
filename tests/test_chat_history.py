@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from inqtrix.auth.permissions import SharePermission
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.pagination import decode_cursor
 from inqtrix.project.chat_memory import MemoryChatStore
@@ -232,6 +233,149 @@ async def test_append_to_foreign_thread_denied(service) -> None:
                        "content_markdown": "x", "created_at": 1.0}],
             visible_to=_scoped("user-b"),
         )
+
+
+async def _append(
+    service: ChatHistoryService,
+    *,
+    thread_id: str,
+    caller_sub: str,
+    message_ids: list[str],
+) -> None:
+    await service.append_messages(
+        thread_id,
+        messages=[
+            {"id": mid, "role": "user", "content_markdown": mid,
+             "created_at": float(n)}
+            for n, mid in enumerate(message_ids)
+        ],
+        visible_to=_scoped(caller_sub),
+    )
+
+
+async def _message_ids(
+    service: ChatHistoryService, *, thread_id: str, caller_sub: str
+) -> list[str]:
+    page, _ = await service.list_messages(
+        thread_id, limit=50, after=None, visible_to=_scoped(caller_sub)
+    )
+    return [m.id for m in page]
+
+
+@pytest.mark.asyncio
+async def test_delete_message_removes_only_that_message_for_the_owner(service) -> None:
+    """The core fix: deleting one message drops it from the thread and
+    leaves its siblings — the durable counterpart the append-only push
+    lacked, so a reload no longer resurrects it."""
+    await _save_thread(
+        service, thread_id="ct_1", caller_sub="user-a", created_at=1.0
+    )
+    await _append(
+        service, thread_id="ct_1", caller_sub="user-a",
+        message_ids=["cm_0", "cm_1", "cm_2"],
+    )
+    await service.delete_message(
+        "ct_1", "cm_1", visible_to=_scoped("user-a")
+    )
+    assert await _message_ids(
+        service, thread_id="ct_1", caller_sub="user-a"
+    ) == ["cm_2", "cm_0"]  # cm_1 gone, order otherwise intact (newest-first)
+
+
+@pytest.mark.asyncio
+async def test_delete_message_is_idempotent(service) -> None:
+    """Deleting an already-gone (or never-present) message is a no-op, not
+    an error — a coalesced-burst or multi-device re-issue must not wedge
+    the autosave retry loop."""
+    await _save_thread(
+        service, thread_id="ct_1", caller_sub="user-a", created_at=1.0
+    )
+    await _append(
+        service, thread_id="ct_1", caller_sub="user-a", message_ids=["cm_0"]
+    )
+    await service.delete_message("ct_1", "cm_0", visible_to=_scoped("user-a"))
+    # Second delete of the same id, and a delete of an unknown id: both quiet.
+    await service.delete_message("ct_1", "cm_0", visible_to=_scoped("user-a"))
+    await service.delete_message(
+        "ct_1", "cm_never", visible_to=_scoped("user-a")
+    )
+    assert await _message_ids(
+        service, thread_id="ct_1", caller_sub="user-a"
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_delete_message_denied_for_a_foreign_caller(service) -> None:
+    """A scoped non-owner cannot delete another user's message, and the
+    denial is the indistinct ThreadNotFound (existence undisclosed); the
+    message survives."""
+    await _save_thread(
+        service, thread_id="ct_a", caller_sub="user-a", created_at=1.0
+    )
+    await _append(
+        service, thread_id="ct_a", caller_sub="user-a", message_ids=["cm_0"]
+    )
+    with pytest.raises(ThreadNotFound):
+        await service.delete_message(
+            "ct_a", "cm_0", visible_to=_scoped("user-b")
+        )
+    assert await _message_ids(
+        service, thread_id="ct_a", caller_sub="user-a"
+    ) == ["cm_0"]
+
+
+@pytest.mark.asyncio
+async def test_delete_message_needs_an_edit_share_not_merely_view(service) -> None:
+    """Deleting a message is the inverse of appending, so it takes editing
+    access (like append_messages), not the owner-only thread delete: an
+    EDIT share may delete, a VIEW share may not."""
+    await _save_thread(
+        service, thread_id="ct_a", caller_sub="user-a", created_at=1.0
+    )
+    await _append(
+        service, thread_id="ct_a", caller_sub="user-a",
+        message_ids=["cm_0", "cm_1"],
+    )
+    # A view share cannot delete.
+    with pytest.raises(ThreadNotFound):
+        await service.delete_message(
+            "ct_a", "cm_0", visible_to=_scoped("user-b"),
+            also_visible={"ct_a": SharePermission.VIEW},
+        )
+    # An edit share can.
+    await service.delete_message(
+        "ct_a", "cm_0", visible_to=_scoped("user-b"),
+        also_visible={"ct_a": SharePermission.EDIT},
+    )
+    assert await _message_ids(
+        service, thread_id="ct_a", caller_sub="user-a"
+    ) == ["cm_1"]
+
+
+@pytest.mark.asyncio
+async def test_delete_message_blocked_across_a_different_workspace(service) -> None:
+    """Defense-in-depth (mirrors the thread delete): a delete carrying a
+    different project's workspace namespace is denied and leaves the row,
+    never a silent cross-project drop."""
+    await service.save_thread(
+        id="ct_1", title="T", preview="", source="api", group_id=None,
+        created_at=1.0, updated_at=1.0, caller_sub="user-a",
+        workspace_id="ws_a", visible_to=_scoped("user-a"),
+    )
+    await service.append_messages(
+        "ct_1",
+        messages=[{"id": "cm_0", "role": "user", "content_markdown": "x",
+                   "created_at": 0.0}],
+        visible_to=_scoped("user-a"),
+    )
+    with pytest.raises(ThreadNotFound):
+        await service.delete_message(
+            "ct_1", "cm_0", visible_to=_scoped("user-a"),
+            request_workspace_id="ws_b",
+        )
+    assert await _message_ids(
+        service, thread_id="ct_1", caller_sub="user-a"
+    ) == ["cm_0"]
 
 
 @pytest.mark.asyncio

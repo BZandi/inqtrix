@@ -40,14 +40,14 @@ from inqtrix.settings import AgentSettings, ModelSettings, ServerSettings, Setti
 def test_overrides_request_accepts_whitelist_fields():
     """All whitelist fields must validate when supplied with sane values."""
     overrides = AgentOverridesRequest(
-        max_rounds=5,
+        max_rounds=4,
         min_rounds=2,
-        confidence_stop=9,
+        confidence_stop=8,
         report_profile=ReportProfile.DEEP,
         max_total_seconds=540,
         first_round_queries=10,
     )
-    assert overrides.max_rounds == 5
+    assert overrides.max_rounds == 4
     assert overrides.report_profile == ReportProfile.DEEP
 
 
@@ -125,10 +125,10 @@ def test_apply_overrides_preserves_operator_explicit_fields():
     patched = apply_overrides(base, overrides)
 
     assert patched.report_profile == ReportProfile.DEEP
-    # Operator-explicit value wins over the DEEP profile default of 5.
+    # Operator-explicit value wins over the DEEP profile default of 4.
     assert patched.max_rounds == 6
     # Non-explicit fields take on DEEP defaults.
-    assert patched.confidence_stop == 9
+    assert patched.confidence_stop == 8
     assert patched.first_round_queries == 10
 
 
@@ -141,8 +141,8 @@ def test_apply_overrides_applies_full_profile_defaults():
 
     assert patched.report_profile == ReportProfile.DEEP
     # All DEEP-profile defaults filled in.
-    assert patched.max_rounds == 5
-    assert patched.confidence_stop == 9
+    assert patched.max_rounds == 4
+    assert patched.confidence_stop == 8
     assert patched.first_round_queries == 10
 
 
@@ -155,11 +155,30 @@ def test_apply_overrides_user_explicit_wins_over_profile_defaults():
     patched = apply_overrides(base, overrides)
 
     assert patched.report_profile == ReportProfile.DEEP
-    # User-explicit value wins over the DEEP default of 5.
+    # User-explicit value wins over the DEEP default of 4.
     assert patched.max_rounds == 3
     # Other DEEP defaults are still applied.
-    assert patched.confidence_stop == 9
+    assert patched.confidence_stop == 8
     assert patched.first_round_queries == 10
+
+
+def test_apply_overrides_can_switch_deep_base_back_to_compact_defaults():
+    """A compact profile switch resets non-explicit fields from a DEEP base."""
+    base = AgentSettings(report_profile=ReportProfile.DEEP)
+    overrides = AgentOverridesRequest(report_profile=ReportProfile.COMPACT)
+    patched = apply_overrides(base, overrides)
+
+    assert patched.report_profile == ReportProfile.COMPACT
+    assert patched.max_rounds == 2
+    assert patched.min_rounds == 1
+    assert patched.confidence_stop == 7
+    assert patched.first_round_queries == 6
+    assert patched.answer_prompt_citations_max == 60
+    assert patched.reasoning_timeout == 120
+    assert patched.editor_assistant_timeout == 120
+    assert patched.claim_extract_timeout == 60
+    assert patched.search_timeout == 60
+    assert patched.max_total_seconds == 300
 
 
 # ------------------------------------------------------------------ #
@@ -324,8 +343,8 @@ def test_chat_completions_with_profile_switch_routes_deep_settings(monkeypatch):
     forwarded = captured["settings"]
     assert forwarded.report_profile == ReportProfile.DEEP
     # DEEP profile defaults must have cascaded.
-    assert forwarded.max_rounds == 5
-    assert forwarded.confidence_stop == 9
+    assert forwarded.max_rounds == 4
+    assert forwarded.confidence_stop == 8
     assert forwarded.first_round_queries == 10
 
 

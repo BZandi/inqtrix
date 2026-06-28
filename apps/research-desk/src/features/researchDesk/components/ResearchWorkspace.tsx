@@ -4,7 +4,7 @@ import {
   ResizablePanelGroup,
 } from '@/components/ui/resizable'
 import type { CreateResearchRunRequest } from '@/features/researchRuns/types'
-import { ReportPanel, ReportRestoreRail } from '@/features/report/ReportPanel'
+import { ReportPanel } from '@/features/report/ReportPanel'
 import type { ResearchRunRecord } from '@/features/project/types'
 import type { JobFilter, ResearchJob } from '../types'
 import { ResearchRunColumn } from './ResearchRunColumn'
@@ -80,11 +80,13 @@ export function ResearchWorkspace({
       cancelSubmittingRunIds={cancelSubmittingRunIds}
       expandedJobId={expandedJobId}
       isComposerVisible={isComposerVisible}
+      isReportVisible={isReportVisible}
       jobs={jobs}
       onActiveFilterChange={onActiveFilterChange}
       onCancelJob={onCancelJob}
       onComposerSubmit={onComposerSubmit}
       onComposerVisibleChange={onComposerVisibleChange}
+      onReportVisibleChange={onReportVisibleChange}
       onResearchQuestionChange={onResearchQuestionChange}
       researchQuestion={researchQuestion}
       onDeleteJob={onDeleteJob}
@@ -123,7 +125,7 @@ export function ResearchWorkspace({
           <ReportPanel
             isExpanded={isReportExpanded}
             onExpandedChange={onReportExpandedChange}
-            onHide={() => onReportVisibleChange(false)}
+            onHide={() => { onReportExpandedChange(false); onReportVisibleChange(false) }}
             onUseReportInChat={onUseReportInChat}
             selectedRun={selectedRun}
           />
@@ -132,13 +134,10 @@ export function ResearchWorkspace({
     )
   }
 
+  // Report collapsed: the run column takes the full width (no leftover rail);
+  // the report panel is reopened from the toggle in the run column's filter header.
   if (isDesktop) {
-    return (
-      <div className="grid h-full grid-cols-[minmax(0,1fr)_44px] gap-2 overflow-hidden lg:min-h-0">
-        <div className="min-h-0 overflow-hidden">{runColumn}</div>
-        <ReportRestoreRail onShow={() => onReportVisibleChange(true)} />
-      </div>
-    )
+    return <div className="h-full min-h-0 overflow-hidden lg:min-h-0">{runColumn}</div>
   }
 
   return (
@@ -148,13 +147,11 @@ export function ResearchWorkspace({
         <ReportPanel
           isExpanded={isReportExpanded}
           onExpandedChange={onReportExpandedChange}
-          onHide={() => onReportVisibleChange(false)}
+          onHide={() => { onReportExpandedChange(false); onReportVisibleChange(false) }}
           onUseReportInChat={onUseReportInChat}
           selectedRun={selectedRun}
         />
-      ) : (
-        <ReportRestoreRail onShow={() => onReportVisibleChange(true)} />
-      )}
+      ) : null}
     </div>
   )
 }

@@ -10,6 +10,7 @@ import {
 export type ThemeMode = 'light' | 'dark' | 'system'
 export type ThemePreset = 'standard' | 'slate' | 'graphite' | 'sage'
 export type ContrastMode = 'standard' | 'high'
+export type UserBubbleTone = 'gray' | 'mint' | 'orange' | 'sky' | 'violet' | 'ink'
 
 type ThemeContextValue = {
   contrastMode: ContrastMode
@@ -18,12 +19,15 @@ type ThemeContextValue = {
   setContrastMode: (mode: ContrastMode) => void
   setPreset: (preset: ThemePreset) => void
   setTheme: (theme: ThemeMode) => void
+  setUserBubbleTone: (tone: UserBubbleTone) => void
   theme: ThemeMode
+  userBubbleTone: UserBubbleTone
 }
 
 const THEME_STORAGE_KEY = 'inqtrix.researchDesk.theme'
 const THEME_PRESET_STORAGE_KEY = 'inqtrix.researchDesk.themePreset'
 const CONTRAST_MODE_STORAGE_KEY = 'inqtrix.researchDesk.contrastMode'
+const USER_BUBBLE_TONE_STORAGE_KEY = 'inqtrix.researchDesk.userBubbleTone'
 const ThemeContext = createContext<ThemeContextValue | null>(null)
 
 type ThemeProviderProps = {
@@ -35,6 +39,9 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
   const [preset, setPresetState] = useState<ThemePreset>(() => readStoredPreset())
   const [contrastMode, setContrastModeState] = useState<ContrastMode>(() =>
     readStoredContrastMode(),
+  )
+  const [userBubbleTone, setUserBubbleToneState] = useState<UserBubbleTone>(() =>
+    readStoredUserBubbleTone(),
   )
   const [systemTheme, setSystemTheme] = useState<'light' | 'dark'>(() =>
     getSystemTheme(),
@@ -58,8 +65,9 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
     root.classList.toggle('dark', resolvedTheme === 'dark')
     root.dataset.contrastMode = contrastMode
     root.dataset.themePreset = preset
+    root.dataset.userBubbleTone = userBubbleTone
     root.style.colorScheme = resolvedTheme
-  }, [contrastMode, preset, resolvedTheme])
+  }, [contrastMode, preset, resolvedTheme, userBubbleTone])
 
   const value = useMemo<ThemeContextValue>(
     () => ({
@@ -78,9 +86,14 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
         localStorage.setItem(THEME_STORAGE_KEY, nextTheme)
         setThemeState(nextTheme)
       },
+      setUserBubbleTone(nextTone) {
+        localStorage.setItem(USER_BUBBLE_TONE_STORAGE_KEY, nextTone)
+        setUserBubbleToneState(nextTone)
+      },
       theme,
+      userBubbleTone,
     }),
-    [contrastMode, preset, resolvedTheme, theme],
+    [contrastMode, preset, resolvedTheme, theme, userBubbleTone],
   )
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>
@@ -121,6 +134,22 @@ function readStoredContrastMode(): ContrastMode {
   if (typeof localStorage === 'undefined') return 'standard'
   const stored = localStorage.getItem(CONTRAST_MODE_STORAGE_KEY)
   return stored === 'high' ? stored : 'standard'
+}
+
+function readStoredUserBubbleTone(): UserBubbleTone {
+  if (typeof localStorage === 'undefined') return 'gray'
+  const stored = localStorage.getItem(USER_BUBBLE_TONE_STORAGE_KEY)
+  if (
+    stored === 'gray'
+    || stored === 'mint'
+    || stored === 'orange'
+    || stored === 'sky'
+    || stored === 'violet'
+    || stored === 'ink'
+  ) {
+    return stored
+  }
+  return 'gray'
 }
 
 function getSystemTheme(): 'light' | 'dark' {

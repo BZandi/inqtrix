@@ -9,7 +9,6 @@ import {
   Heading3,
   Highlighter,
   Italic,
-  Link,
   List,
   ListOrdered,
   ListTodo,
@@ -30,7 +29,6 @@ import {
 import { Separator } from '@/components/ui/separator'
 import { cn } from '@/lib/utils'
 import { runBlockAction, type BlockActionId } from './blockActions'
-import { promptSetLink } from './linkCommand'
 
 /** Localized strings for the selection toolbar, assembled from `editorCopy` in
  * `EditorWorkspace` (DE + EN) so all copy stays in one place. Block-type labels
@@ -43,7 +41,6 @@ export type SelectionToolbarLabels = {
   underline: string
   strike: string
   code: string
-  link: string
   highlight: string
   text: string
   heading1: string
@@ -79,7 +76,7 @@ function activeTurnInto(editor: Editor) {
 
 /**
  * Formatting cluster of the selection bubble menu (live mode). Markdown-safe
- * controls only — Bold/Italic/Underline/Strike/Code/Link/Highlight (all
+ * controls only — Bold/Italic/Underline/Strike/Code/Highlight (all
  * round-trip through `@tiptap/markdown`) plus a "Turn into" block-type switcher
  * (`runBlockAction`, shared with the slash menu) and a prominent Comment entry.
  * No text colour / alignment / super-subscript (those are lost in GFM). The
@@ -145,7 +142,6 @@ export function SelectionToolbar({
       <MiniToolbarButton active={editor.isActive('code')} icon={Code2} label={labels.code} onClick={() => editor.chain().focus().toggleCode().run()} />
       <Separator className="mx-0.5 h-4" orientation="vertical" />
 
-      <MiniToolbarButton active={editor.isActive('link')} icon={Link} label={labels.link} onClick={() => promptSetLink(editor)} />
       <MiniToolbarButton active={editor.isActive('highlight')} icon={Highlighter} label={labels.highlight} onClick={() => editor.chain().focus().toggleHighlight().run()} />
     </div>
   )

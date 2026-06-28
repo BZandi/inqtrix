@@ -2,14 +2,25 @@ import { describe, expect, it } from 'vitest'
 import { createDefaultFileLibrarySections } from '@/features/files/sections'
 import { createEmptyProjectState } from './seedProject'
 import {
+  buildProjectFiles,
+  parseChatThread,
   parseChatRule,
   parseFileAsset,
   parseProjectManifest,
+  serializeChatThread,
   serializeChatRule,
   serializeFileAsset,
   serializeProjectManifest,
 } from './markdown'
-import type { ChatRuleRecord, FileAssetRecord, FileGroupRecord, ProjectState, VectorIndexRecord } from './types'
+import type {
+  ChatRuleRecord,
+  ChatThreadRecord,
+  FileAssetRecord,
+  FileGroupRecord,
+  ProjectState,
+  ResearchRunRecord,
+  VectorIndexRecord,
+} from './types'
 
 function makeAsset(id: string, label: string, overrides: Partial<FileAssetRecord> = {}): FileAssetRecord {
   return {
@@ -41,6 +52,32 @@ function makeRule(overrides: Partial<ChatRuleRecord> = {}): ChatRuleRecord {
     label: 'profile',
     title: 'Profile',
     updatedAt: '2026-01-02T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function makeResearchRun(id: string, overrides: Partial<ResearchRunRecord> = {}): ResearchRunRecord {
+  return {
+    agentOverrides: {},
+    createdAt: '2026-01-01T00:00:00.000Z',
+    events: [],
+    finishedAt: '2026-01-01T00:01:00.000Z',
+    metrics: { claims: 0, queries: 0, rounds: '0', sources: 0 },
+    mode: 'research',
+    phaseState: { activePhase: 'answer', completedPhases: ['analysis', 'planning', 'search', 'evaluation', 'answer'] },
+    result: {
+      markdown: `# ${id}`,
+      references: [],
+      topClaims: [],
+      topSources: [],
+    },
+    runId: id,
+    source: 'api',
+    stack: 'test-stack',
+    startedAt: '2026-01-01T00:00:01.000Z',
+    status: 'completed',
+    submittedAt: '2026-01-01T00:00:00.000Z',
+    summary: { title: id },
     ...overrides,
   }
 }
@@ -100,6 +137,42 @@ describe('serializeChatRule / parseChatRule', () => {
   })
 })
 
+describe('serializeChatThread / parseChatThread', () => {
+  it('round-trips assistant request context metadata additively', () => {
+    const thread: ChatThreadRecord = {
+      createdAt: '2026-06-26T12:00:00.000Z',
+      id: 'ct_1',
+      messages: [
+        {
+          contentMarkdown: 'Use knowledge mode.',
+          createdAt: '2026-06-26T12:01:00.000Z',
+          id: 'cm_u1',
+          role: 'user',
+        },
+        {
+          contentMarkdown: 'Knowledge-grounded answer.',
+          createdAt: '2026-06-26T12:02:00.000Z',
+          id: 'cm_a1',
+          requestContext: { knowledgeCollectionIds: ['kc_1', 'kc_2'] },
+          role: 'assistant',
+        },
+      ],
+      preview: 'Knowledge-grounded answer.',
+      source: 'api',
+      title: 'Knowledge retry',
+      updatedAt: '2026-06-26T12:02:00.000Z',
+    }
+
+    const parsed = parseChatThread(serializeChatThread(thread).contents)
+
+    expect(parsed.messages[1].requestContext).toEqual({ knowledgeCollectionIds: ['kc_1', 'kc_2'] })
+    expect(parsed.messages.map((message) => message.contentMarkdown)).toEqual([
+      'Use knowledge mode.',
+      'Knowledge-grounded answer.',
+    ])
+  })
+})
+
 describe('serializeFileAsset / parseFileAsset', () => {
   it('round-trips an asset with all metadata', () => {
     const asset = makeAsset('f1', 'alpha', {
@@ -122,7 +195,50 @@ describe('serializeFileAsset / parseFileAsset', () => {
   })
 })
 
+describe('project file export plan', () => {
+  it('exports completed research runs but skips knowledge-mode runs', () => {
+    const researchRun = makeResearchRun('run-research')
+    const knowledgeRun = makeResearchRun('run-knowledge', { mode: 'knowledge' })
+    const state: ProjectState = {
+      ...createEmptyProjectState(),
+      researchRunOrder: ['run-research', 'run-knowledge'],
+      researchRuns: {
+        'run-knowledge': knowledgeRun,
+        'run-research': researchRun,
+      },
+    }
+
+    const paths = buildProjectFiles(state).map((file) => file.path)
+
+    expect(paths.some((path) => path.includes('run-research'))).toBe(true)
+    expect(paths.some((path) => path.includes('run-knowledge'))).toBe(false)
+  })
+})
+
 describe('project manifest file library', () => {
+  it('round-trips pinned explorer UI state additively', () => {
+    const base = createEmptyProjectState()
+    const state: ProjectState = {
+      ...base,
+      ui: {
+        ...base.ui,
+        pinnedExplorer: {
+          chatThreadIds: ['ct-1'],
+          editorDocumentIds: ['doc-1'],
+          knowledgeSessionIds: ['ks-1'],
+        },
+      },
+    }
+
+    const data = parseProjectManifest(serializeProjectManifest(state).contents)
+
+    expect((data.ui as Record<string, unknown>).pinnedExplorer).toEqual({
+      chatThreadIds: ['ct-1'],
+      editorDocumentIds: ['doc-1'],
+      knowledgeSessionIds: ['ks-1'],
+    })
+  })
+
   it('serializes and re-parses sections, groups and asset order', () => {
     const sections = createDefaultFileLibrarySections('2026-01-01T00:00:00.000Z')
     const group: FileGroupRecord = {

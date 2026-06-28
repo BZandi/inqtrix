@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -276,6 +277,35 @@ def test_streaming_knowledge_mode_is_rejected_loudly():
     }
 
 
+@pytest.mark.parametrize(
+    "bad_filters",
+    [
+        {"top_k": 0},
+        {"top_k": 999},
+        {"top_k": True},
+        {"final_k": 0},
+        {"final_k": 999},
+        {"final_k": 1.5},
+    ],
+)
+def test_knowledge_filters_reject_out_of_range_overrides(bad_filters):
+    # top_k/final_k are validated at the one resolver chokepoint, so a bad value
+    # fails loudly with 400 instead of coercing to a surprising retrieval width.
+    client, _ = make_knowledge_client()
+    with client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "Frage"}],
+                "mode": "knowledge",
+                "stream": False,
+                "knowledge_filters": bad_filters,
+            },
+        )
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+
+
 def test_knowledge_mode_with_empty_store_says_no_evidence():
     client, _ = make_knowledge_client()
     with client:
@@ -307,8 +337,19 @@ def test_capabilities_with_knowledge_enabled():
     assert payload["features"]["knowledge"] is True
     assert payload["knowledge"]["default_embedding_model"] == "stub-embed-8"
     assert payload["knowledge"]["default_top_k"] == 4
+    # The final-evidence ceiling is published so a client can bound a final_k
+    # override to the same cap the algorithm clamps to.
+    assert payload["knowledge"]["evidence_k_max"] == 40
     catalog = payload["knowledge"]["embedding_catalog"]
     assert catalog == [{"model_id": "stub-embed-8", "card": None}]
+    # Cross-lingual capability honesty: the keyword branch is monolingual and
+    # the reranker is the cross-lingual lever. This client uses a dense-only
+    # store with no lexical branch, so sparse_language is explicitly None (not
+    # just present); the static facts are always published.
+    assert payload["knowledge"]["sparse_multilingual"] is False
+    assert payload["knowledge"]["cross_lingual_recommendation"] == "reranker"
+    assert payload["knowledge"]["sparse_mode"] == "off"
+    assert payload["knowledge"]["sparse_language"] is None
 
 
 def test_capabilities_without_knowledge():

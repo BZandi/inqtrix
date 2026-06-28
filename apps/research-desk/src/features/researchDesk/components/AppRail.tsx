@@ -13,18 +13,22 @@ type AppRailProps = {
   /** Capability gate for the knowledge workspace entry (true when the
    * backend advertises `features.knowledge`, or in demo mode). */
   showKnowledge?: boolean
+  /** Pending share invitations awaiting consent — a count chip on the
+   * settings entry so the inbox is discoverable from anywhere. 0 hides it. */
+  settingsBadgeCount?: number
   /** Identity slot rendered below the settings entry (the profile
    * avatar in oidc mode; absent otherwise). */
   profileSlot?: ReactNode
 }
 
 type RailItem = {
+  badge?: number
   icon: LucideIcon
   label: string
   value: AppView
 }
 
-export function AppRail({ activeView, onViewChange, showKnowledge = false, profileSlot }: AppRailProps) {
+export function AppRail({ activeView, onViewChange, settingsBadgeCount = 0, showKnowledge = false, profileSlot }: AppRailProps) {
   const { t } = useLocale()
   const deskItems: RailItem[] = [
     { icon: Globe2, label: t.navigation.research, value: 'research' },
@@ -37,6 +41,7 @@ export function AppRail({ activeView, onViewChange, showKnowledge = false, profi
     { icon: FileText, label: t.navigation.editor, value: 'editor' },
   ]
   const settingsItem = {
+    badge: settingsBadgeCount,
     icon: Settings,
     label: t.navigation.settings,
     value: 'settings',
@@ -55,7 +60,7 @@ export function AppRail({ activeView, onViewChange, showKnowledge = false, profi
   return (
     <nav
       aria-label={t.navigation.label}
-      className="sticky top-[var(--header-h)] z-20 flex h-[calc(100svh-var(--header-h))] w-12 shrink-0 flex-col items-center border-r border-border bg-background/90 px-1.5 py-3 backdrop-blur md:w-14 md:px-2"
+      className="sticky top-[var(--header-h)] z-20 flex h-[calc(100svh-var(--header-h))] w-12 shrink-0 flex-col items-center border-r border-border bg-background/90 px-1.5 pb-3 pt-1 backdrop-blur md:w-14 md:px-2"
     >
       <div className="flex flex-col items-center gap-1">
         {deskItems.map((item) => (
@@ -88,6 +93,7 @@ function RailButton({
 }) {
   const Icon = item.icon
   const isActive = activeView === item.value
+  const badge = item.badge ?? 0
 
   return (
     <Tooltip>
@@ -96,7 +102,7 @@ function RailButton({
           aria-label={item.label}
           aria-pressed={isActive}
           className={cn(
-            'size-9 rounded-md text-muted-foreground',
+            'relative size-9 rounded-md text-muted-foreground',
             isActive && 'bg-brand-subtle text-brand shadow-none hover:bg-brand-subtle hover:text-brand',
           )}
           onClick={() => onViewChange(item.value)}
@@ -105,6 +111,11 @@ function RailButton({
           variant={isActive ? 'default' : 'ghost'}
         >
           <Icon className="size-4" />
+          {badge > 0 ? (
+            <span className="absolute -right-0.5 -top-0.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-brand px-1 t-hint font-semibold tabular-nums text-brand-foreground">
+              {badge > 9 ? '9+' : badge}
+            </span>
+          ) : null}
         </Button>
       </TooltipTrigger>
       <TooltipContent side="right">{item.label}</TooltipContent>

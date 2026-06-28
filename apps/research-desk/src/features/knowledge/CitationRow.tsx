@@ -30,7 +30,7 @@ export function CitationRow({
     <button
       className={cn(
         'flex w-full min-w-0 items-start gap-2 rounded-md px-1.5 py-1 text-left transition-colors',
-        view.canOpen ? 'hover:bg-accent/60' : 'cursor-default',
+        view.canOpen ? 'group hover:bg-accent/60' : 'cursor-default',
         active && 'bg-brand-subtle/60',
       )}
       disabled={!view.canOpen}
@@ -38,7 +38,7 @@ export function CitationRow({
       title={view.canOpen ? t.knowledge.openReference : undefined}
       type="button"
     >
-      <span className="t-mono mt-0.5 shrink-0 rounded bg-surface px-1 py-0.5 text-muted-foreground">
+      <span className="t-mono mt-0.5 shrink-0 rounded bg-surface px-1 py-0.5 text-muted-foreground transition-colors group-hover:bg-brand-subtle group-hover:text-brand">
         {view.label}
       </span>
       <span className="min-w-0 flex-1">
@@ -80,29 +80,34 @@ function VerifiedBadge() {
  * Citations grouped by document (panel Belege list): each document's title is
  * shown once as a header, its cited passages nested beneath — so several chunks
  * of the same PDF read as one source with N passages, not N identical filenames.
+ *
+ * When `onOpenDocument` is supplied, the document header is clickable (opens the
+ * document at its first cited passage) — the document-centric reader entry point
+ * shared by the answer's source list and the panel. `activeDocumentId` marks the
+ * header of the document currently open in the reader.
  */
 export function CitationGroupList({
+  activeDocumentId = null,
   activeKey,
   groups,
   onOpen,
+  onOpenDocument,
 }: {
+  activeDocumentId?: string | null
   activeKey: string | null
   groups: CitationDocumentGroup[]
   onOpen: (view: CitationView) => void
+  onOpenDocument?: (group: CitationDocumentGroup) => void
 }) {
   return (
     <ul className="space-y-2">
       {groups.map((group) => (
         <li key={group.documentId ?? `title:${group.title}`}>
-          <div className="flex min-w-0 items-center gap-1.5 px-1.5 py-0.5">
-            <FileText className="icon-sm shrink-0 text-muted-foreground/70" />
-            <span className="min-w-0 truncate t-list font-medium text-foreground">{group.title}</span>
-            {group.citations.length > 1 ? (
-              <span className="shrink-0 t-hint tabular-nums text-muted-foreground/60">
-                {group.citations.length}
-              </span>
-            ) : null}
-          </div>
+          <DocumentGroupHeader
+            active={activeDocumentId != null && group.documentId === activeDocumentId}
+            group={group}
+            onOpenDocument={onOpenDocument}
+          />
           <ul className="space-y-px border-l border-border/60 pl-1.5">
             {group.citations.map((view) => (
               <li key={`${view.label}-${view.reference.url}`}>
@@ -118,5 +123,47 @@ export function CitationGroupList({
         </li>
       ))}
     </ul>
+  )
+}
+
+/** Document title row of a citation group. A plain label by default; a button
+ * (styled like a `CitationRow`) when it can open the document. */
+function DocumentGroupHeader({
+  active,
+  group,
+  onOpenDocument,
+}: {
+  active: boolean
+  group: CitationDocumentGroup
+  onOpenDocument?: (group: CitationDocumentGroup) => void
+}) {
+  const { t } = useLocale()
+  const interactive = Boolean(onOpenDocument) && group.documentId != null
+  const content = (
+    <>
+      <FileText className="icon-sm shrink-0 text-muted-foreground/70" />
+      <span className="min-w-0 truncate t-list font-medium text-foreground">{group.title}</span>
+      {group.citations.length > 1 ? (
+        <span className="shrink-0 t-hint tabular-nums text-muted-foreground/60">
+          {group.citations.length}
+        </span>
+      ) : null}
+    </>
+  )
+  if (!interactive) {
+    return <div className="flex min-w-0 items-center gap-1.5 px-1.5 py-0.5">{content}</div>
+  }
+  return (
+    <button
+      className={cn(
+        'flex w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left transition-colors hover:bg-accent/60',
+        active && 'bg-brand-subtle/60',
+      )}
+      onClick={() => onOpenDocument?.(group)}
+      title={t.knowledge.openReference}
+      type="button"
+    >
+      {content}
+    </button>
   )
 }

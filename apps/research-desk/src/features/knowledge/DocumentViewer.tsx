@@ -135,13 +135,10 @@ export function DocumentViewer({
           minSize="30%"
         >
           <aside className="flex h-full w-full flex-col border-l border-border bg-background shadow-[0_8px_28px_-12px_var(--shadow-soft)]">
-            <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-3">
+            <header className="flex inqtrix-panel-header items-center gap-2 border-b border-border px-3">
           <FileText className="icon-md shrink-0 text-foreground/80" />
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0 flex-1" title={target.collectionLabel ?? undefined}>
             <h2 className="truncate t-section text-foreground">{title}</h2>
-            {target.collectionLabel && (
-              <p className="truncate t-meta text-muted-foreground">{target.collectionLabel}</p>
-            )}
           </div>
 
           {tab === 'extracted' && matches.length > 0 && (

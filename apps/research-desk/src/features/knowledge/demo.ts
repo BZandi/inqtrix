@@ -108,21 +108,25 @@ const DEMO_DOCUMENTS: DemoDocument[] = [
 export const DEMO_KNOWLEDGE_PROFILE_MANIFEST: KnowledgeProfileManifestEntry[] = [
   {
     degraded: [],
+    final_k_factor: 1,
     id: 'schnell',
     stages: { decompose: false, gate_rounds: 0, grounding: false, rerank: false, report: false, vocabulary_bridge: false },
   },
   {
     degraded: [],
+    final_k_factor: 1,
     id: 'standard',
     stages: { decompose: false, gate_rounds: 0, grounding: true, rerank: true, report: false, vocabulary_bridge: false },
   },
   {
     degraded: ['rerank'],
+    final_k_factor: 1,
     id: 'gruendlich',
     stages: { decompose: false, gate_rounds: 2, grounding: true, rerank: false, report: false, vocabulary_bridge: true },
   },
   {
     degraded: [],
+    final_k_factor: 2,
     id: 'tief',
     stages: { decompose: true, gate_rounds: 2, grounding: true, rerank: true, report: true, vocabulary_bridge: true },
   },
@@ -132,8 +136,10 @@ export const DEMO_KNOWLEDGE_PROFILE_MANIFEST: KnowledgeProfileManifestEntry[] = 
   },
 ]
 
-export const DEMO_KNOWLEDGE_DEFAULT_PROFILE = 'standard'
+export const DEMO_KNOWLEDGE_DEFAULT_PROFILE = 'tief'
 export const DEMO_KNOWLEDGE_DEFAULT_TOP_K = 8
+export const DEMO_KNOWLEDGE_EVIDENCE_K_MAX = 40
+export const DEMO_KNOWLEDGE_RERANKER_PROVIDER = 'cohere'
 
 const DEMO_ANSWER_MARKDOWN = [
   'Ein KI-System gilt nach dem AI Act in zwei Konstellationen als Hochrisiko-System:',
@@ -233,7 +239,7 @@ export function seedKnowledgeThreadItem(createdAt: string): KnowledgeThreadItemR
       steps: [
         { facts: { autoSelected: true, degradedStages: ['rerank'], profile: 'gruendlich' }, id: 'profile', kind: 'profile', status: 'done' },
         { facts: {}, id: 'vocabulary', kind: 'vocabulary', status: 'done' },
-        { facts: { candidateCount: 24, collectionDocumentCount: 6, topK: 8 }, id: 'retrieval', kind: 'retrieval', status: 'done' },
+        { facts: { candidateCount: 24, collectionDocumentCount: 6, topK: 8, finalK: 8 }, id: 'retrieval', kind: 'retrieval', status: 'done' },
         { facts: { round: 1, roundsTotal: 3, sufficient: true }, id: 'gate-0', kind: 'gate', status: 'done' },
         { facts: {}, id: 'answer', kind: 'answer', status: 'done' },
         { facts: { quotesTotal: 2, quotesVerified: 2 }, id: 'grounding', kind: 'grounding', status: 'done' },
@@ -308,9 +314,11 @@ export function buildDemoAskScript(runId: string): DemoAskScript {
       {
         delayMs: 900,
         event: event('inqtrix.knowledge.retrieval.completed', {
-          candidate_count: 8,
+          candidate_count: 16,
           collection_document_count: 6,
           embedding_model: 'text-embedding-3-large',
+          final_k: 16,
+          final_k_overridden: false,
           top_k: 8,
         }),
       },

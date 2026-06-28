@@ -254,18 +254,26 @@ class MemoryIdentityStore:
             self._groups[group_id] = set(members)
             self._group_tenants[group_id] = tenant_id
 
-    def add_share(
+    def _write_share_locked(
         self,
         *,
+        tenant_id: str,
         subject_type: str,
         subject_id: str,
         resource_type: str,
         resource_id: str,
         permission: SharePermission,
-        tenant_id: str = "default",
-        granted_by_sub: str = "seed",
-    ) -> None:
-        """Grant one share tuple (subject x resource -> permission)."""
+        granted_by_sub: str,
+        accepted_at: float | None,
+    ) -> "ShareRecord":
+        """Replace the active row for a tuple and mirror the access fast path.
+
+        The lock must be held. ``_shares`` (the ``permission_for`` fast path)
+        holds ONLY accepted grants: a pending write drops any stale fast-path
+        entry, an accepted write sets it — so consent is enforced without a
+        second filter in ``permission_for`` (Wurzel, nicht Symptom). One
+        active record per tuple is preserved (re-grant replaces).
+        """
         import time as _time
         import uuid as _uuid
 
@@ -278,24 +286,60 @@ class MemoryIdentityStore:
             resource_type=resource_type,
             resource_id=resource_id,
         )
-        with self._lock:
+        if accepted_at is not None:
             self._shares[key] = permission
-            # Replace any existing active record for the tuple (the
-            # re-grant semantics of the admin surface).
-            self._share_records = {
-                share_id: record
-                for share_id, record in self._share_records.items()
-                if not (
-                    record.tenant_id == tenant_id
-                    and record.subject_type == subject_type
-                    and record.subject_id == subject_id
-                    and record.resource_type == resource_type
-                    and record.resource_id == resource_id
-                )
-            }
-            share_id = str(_uuid.uuid4())
-            self._share_records[share_id] = ShareRecord(
-                id=share_id,
+        else:
+            self._shares.pop(key, None)
+        self._share_records = {
+            share_id: record
+            for share_id, record in self._share_records.items()
+            if not (
+                record.tenant_id == tenant_id
+                and record.subject_type == subject_type
+                and record.subject_id == subject_id
+                and record.resource_type == resource_type
+                and record.resource_id == resource_id
+            )
+        }
+        share_id = str(_uuid.uuid4())
+        record = ShareRecord(
+            id=share_id,
+            tenant_id=tenant_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            permission=permission,
+            granted_by_sub=granted_by_sub,
+            created_at=_time.time(),
+            accepted_at=accepted_at,
+        )
+        self._share_records[share_id] = record
+        return record
+
+    def add_share(
+        self,
+        *,
+        subject_type: str,
+        subject_id: str,
+        resource_type: str,
+        resource_id: str,
+        permission: SharePermission,
+        tenant_id: str = "default",
+        granted_by_sub: str = "seed",
+        accepted: bool = True,
+    ) -> None:
+        """Grant one share tuple (subject x resource -> permission).
+
+        The synchronous seed/arrange seam. Defaults to ``accepted=True`` so
+        arranged fixtures grant access immediately (mirroring the migration
+        that backfills pre-existing rows as accepted); pass ``accepted=False``
+        to seed a pending invitation awaiting consent.
+        """
+        import time as _time
+
+        with self._lock:
+            self._write_share_locked(
                 tenant_id=tenant_id,
                 subject_type=subject_type,
                 subject_id=subject_id,
@@ -303,7 +347,7 @@ class MemoryIdentityStore:
                 resource_id=resource_id,
                 permission=permission,
                 granted_by_sub=granted_by_sub,
-                created_at=_time.time(),
+                accepted_at=_time.time() if accepted else None,
             )
 
     def revoke_share(
@@ -397,17 +441,14 @@ class MemoryIdentityStore:
         permission: SharePermission,
         granted_by_sub: str,
     ) -> "ShareRecord":
-        """Grant or re-grant; the latest intent replaces the tuple."""
-        self.add_share(
-            subject_type=subject_type,
-            subject_id=subject_id,
-            resource_type=resource_type,
-            resource_id=resource_id,
-            permission=permission,
-            tenant_id=tenant_id,
-            granted_by_sub=granted_by_sub,
-        )
+        """Grant or re-grant; the latest intent replaces the tuple.
+
+        A re-grant carries the prior active row's ``accepted_at`` forward (a
+        permission change on an accepted share keeps access live); a brand-new
+        grant has no prior row and starts pending — the consent gate.
+        """
         with self._lock:
+            prior_accepted_at: float | None = None
             for record in self._share_records.values():
                 if (
                     record.tenant_id == tenant_id
@@ -416,8 +457,55 @@ class MemoryIdentityStore:
                     and record.resource_type == resource_type
                     and record.resource_id == resource_id
                 ):
-                    return record
-        raise RuntimeError("share record vanished after creation")
+                    prior_accepted_at = record.accepted_at
+                    break
+            return self._write_share_locked(
+                tenant_id=tenant_id,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                permission=permission,
+                granted_by_sub=granted_by_sub,
+                accepted_at=prior_accepted_at,
+            )
+
+    async def accept_share_by_id(
+        self, *, tenant_id: str, share_id: str, subject_sub: str
+    ) -> "ShareRecord | None":
+        """Flip one pending share to accepted; returns it, or ``None``.
+
+        Mirrors the Postgres guard: active, still pending, addressed to
+        *subject_sub*. Accepting moves the grant into the ``_shares`` access
+        fast path so ``permission_for`` starts honouring it. No ``subject_type``
+        guard is needed (unlike ``recipient_drop``): *subject_sub* is a user
+        ``sub`` and a group share's ``subject_id`` is a group id, so the
+        ``subject_id`` match already excludes group rows.
+        """
+        import time as _time
+        from dataclasses import replace as _replace
+
+        with self._lock:
+            record = self._share_records.get(share_id)
+            if (
+                record is None
+                or record.tenant_id != tenant_id
+                or record.subject_id != subject_sub
+                or record.accepted_at is not None
+            ):
+                return None
+            accepted = _replace(record, accepted_at=_time.time())
+            self._share_records[share_id] = accepted
+            self._shares[
+                _ShareKey(
+                    tenant_id=record.tenant_id,
+                    subject_type=record.subject_type,
+                    subject_id=record.subject_id,
+                    resource_type=record.resource_type,
+                    resource_id=record.resource_id,
+                )
+            ] = record.permission
+            return accepted
 
     async def get_share(
         self, *, tenant_id: str, share_id: str
@@ -431,6 +519,14 @@ class MemoryIdentityStore:
     async def revoke_share_by_id(
         self, *, tenant_id: str, share_id: str, revoked_by_sub: str
     ) -> "ShareRecord | None":
+        # The memory store is the volatile no-infra default: it hard-deletes
+        # the row where Postgres soft-revokes (sets revoked_at/revoked_by_sub
+        # for the durable history). The observable contract is identical —
+        # every listing/visibility method returns active-only on both — and
+        # the revocation FACT is still captured by the audit sink in both
+        # backends. Hard-delete is also why create_share's carry-forward scan
+        # below can match by tuple without a revoked_at filter: a revoked row
+        # is simply gone, never a stale tombstone to skip.
         with self._lock:
             record = self._share_records.get(share_id)
             if record is None or record.tenant_id != tenant_id:
@@ -506,6 +602,7 @@ class MemoryIdentityStore:
                 if (
                     record.tenant_id != tenant_id
                     or record.resource_type != resource_type
+                    or record.accepted_at is None
                     or (record.subject_type, record.subject_id) not in wanted
                 ):
                     continue
@@ -515,6 +612,37 @@ class MemoryIdentityStore:
                 ):
                     best[record.resource_id] = record
         return best
+
+    async def inbox_for_subjects(
+        self, *, tenant_id: str, subjects: Sequence[SubjectRef]
+    ) -> tuple["ShareRecord", ...]:
+        """Active (pending + accepted) shares to the subjects, all kinds.
+
+        Keeps pending rows (unlike :meth:`shares_for_subjects`) so the
+        recipient inbox can offer them for consent; oldest first.
+        """
+        wanted = {(s.subject_type, s.subject_id) for s in subjects}
+        with self._lock:
+            rows = [
+                record
+                for record in self._share_records.values()
+                if record.tenant_id == tenant_id
+                and (record.subject_type, record.subject_id) in wanted
+            ]
+        return tuple(sorted(rows, key=lambda record: record.created_at))
+
+    async def outgoing_shares_for_grantor(
+        self, *, tenant_id: str, grantor_sub: str
+    ) -> tuple["ShareRecord", ...]:
+        """Active shares *grantor_sub* granted, all kinds, oldest first."""
+        with self._lock:
+            rows = [
+                record
+                for record in self._share_records.values()
+                if record.tenant_id == tenant_id
+                and record.granted_by_sub == grantor_sub
+            ]
+        return tuple(sorted(rows, key=lambda record: record.created_at))
 
     async def share_counts_for_resources(
         self,

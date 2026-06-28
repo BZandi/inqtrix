@@ -20,6 +20,10 @@ below mirror `_COMPACT_TUNING` and `_DEEP_TUNING` in `report_profiles.py`:
 
 | Knob | COMPACT | DEEP | Effect |
 |---|---|---|---|
+| `max_rounds` | 2 | 4 | Hard cap on research rounds. |
+| `min_rounds` | 1 | 2 | Minimum completed rounds before early-stop is allowed. |
+| `confidence_stop` | 7 | 8 | Evaluator-confidence threshold for the stop cascade. |
+| `first_round_queries` | 6 | 10 | Broad search fan-out in Round 0. |
 | `context_block_max_len` | profile default | profile default | Per-block truncation for ingested source passages. |
 | `answer_prompt_citations_max` | 60 | 500 | Hard cap on citations passed to the answer composer. Can also be set directly via `AgentConfig`. |
 | `claim_max_items` | profile default | profile default | Maximum claims extracted per source by the claim-extraction LLM. |
@@ -102,7 +106,7 @@ On the HTTP `/v1/chat/completions` endpoint, callers can flip the profile per re
 
 ## Profile-switch semantics
 
-`apply_overrides()` treats the profile as an explicit field: when a request or an operator sets `report_profile`, the derived budgets are **not** overwritten with the profile's default. This keeps surgical overrides (e.g. `max_rounds=2` together with `report_profile=deep`) working the way the operator expects. The pinned scenarios live in `tests/test_server_overrides.py`.
+`apply_overrides()` treats the profile and any caller/operator-provided knob as explicit: when a request or an operator sets `report_profile`, profile-derived defaults fill only fields that neither side set directly. This keeps surgical overrides (e.g. `max_rounds=2` together with `report_profile=deep`) working the way the operator expects, while a pure profile switch can still move from `deep` back to `compact`. The pinned scenarios live in `tests/test_server_overrides.py`.
 
 ## Writing a custom profile
 

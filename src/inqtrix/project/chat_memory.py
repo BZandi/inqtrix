@@ -127,6 +127,9 @@ class MemoryChatStore:
             stored.append(merged)
         return stored
 
+    async def delete_message(self, thread_id: str, message_id: str) -> None:
+        self._messages.pop((thread_id, message_id), None)
+
     async def list_messages_page(
         self,
         thread_id: str,

@@ -294,3 +294,15 @@ class TestManifest:
             "decompose",
             "report",
         }
+
+    def test_final_k_factor_is_published_per_profile(self):
+        # The client recomputes the effective final_k from this factor, so the
+        # manifest must carry it (only deep widens beyond the request top_k).
+        by_id = {
+            entry["id"]: entry
+            for entry in build_profile_manifest(make_ceiling())
+            if "stages" in entry
+        }
+        assert by_id["tief"]["final_k_factor"] == 2.0
+        assert by_id["standard"]["final_k_factor"] == 1.0
+        assert by_id["schnell"]["final_k_factor"] == 1.0

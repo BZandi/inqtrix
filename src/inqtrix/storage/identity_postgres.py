@@ -137,25 +137,31 @@ class PostgresIdentityBackend:
 
         The partial unique index allows one ACTIVE row per tuple, so a
         re-grant soft-revokes the existing row first — the caller's
-        latest intent wins, the history stays auditable.
+        latest intent wins, the history stays auditable. A re-grant carries
+        the prior row's ``accepted_at`` forward, so changing the permission on
+        an already-accepted share keeps access live (a brand-new grant has no
+        prior row and starts pending).
         """
         from inqtrix.auth.shares import ShareRecord
 
         share_id = uuid.uuid4()
-        now = func.now()
         async with self._session(tenant_id) as session:
-            await session.execute(
-                update(resource_shares)
-                .where(
-                    resource_shares.c.tenant_id == tenant_id,
-                    resource_shares.c.subject_type == subject_type,
-                    resource_shares.c.subject_id == subject_id,
-                    resource_shares.c.resource_type == resource_type,
-                    resource_shares.c.resource_id == resource_id,
-                    resource_shares.c.revoked_at.is_(None),
+            prior = (
+                await session.execute(
+                    update(resource_shares)
+                    .where(
+                        resource_shares.c.tenant_id == tenant_id,
+                        resource_shares.c.subject_type == subject_type,
+                        resource_shares.c.subject_id == subject_id,
+                        resource_shares.c.resource_type == resource_type,
+                        resource_shares.c.resource_id == resource_id,
+                        resource_shares.c.revoked_at.is_(None),
+                    )
+                    .values(revoked_at=func.now(), revoked_by_sub=granted_by_sub)
+                    .returning(resource_shares.c.accepted_at)
                 )
-                .values(revoked_at=now, revoked_by_sub=granted_by_sub)
-            )
+            ).first()
+            carried_accepted_at = prior.accepted_at if prior is not None else None
             await session.execute(
                 insert(resource_shares).values(
                     id=share_id,
@@ -166,6 +172,7 @@ class PostgresIdentityBackend:
                     resource_id=resource_id,
                     permission=permission.value,
                     granted_by_sub=granted_by_sub,
+                    accepted_at=carried_accepted_at,
                 )
             )
         import time as _time
@@ -180,6 +187,11 @@ class PostgresIdentityBackend:
             permission=permission,
             granted_by_sub=granted_by_sub,
             created_at=_time.time(),
+            accepted_at=(
+                carried_accepted_at.timestamp()
+                if carried_accepted_at is not None
+                else None
+            ),
         )
 
     async def get_share(
@@ -219,6 +231,41 @@ class PostgresIdentityBackend:
                         revoked_at=func.now(),
                         revoked_by_sub=revoked_by_sub,
                     )
+                    .returning(resource_shares)
+                )
+            ).first()
+        return self._share_record(row) if row is not None else None
+
+    async def accept_share_by_id(
+        self, *, tenant_id: str, share_id: str, subject_sub: str
+    ) -> "ShareRecord | None":
+        """Flip one pending share to accepted; returns it, or ``None``.
+
+        Guarded in the predicate: the row must be active, still pending
+        (``accepted_at IS NULL``), and addressed to *subject_sub* — so a
+        foreign recipient, an already-accepted share, and a missing one all
+        update zero rows and return ``None`` (the surface's 404 rule).
+
+        No ``subject_type`` guard is needed (unlike :meth:`recipient_drop`'s
+        explicit one): *subject_sub* is a user ``sub``, and a group share's
+        ``subject_id`` is a group id, so the ``subject_id`` match already
+        excludes group rows structurally.
+        """
+        share_uuid = _as_uuid(share_id)
+        if share_uuid is None:
+            return None
+        async with self._session(tenant_id) as session:
+            row = (
+                await session.execute(
+                    update(resource_shares)
+                    .where(
+                        resource_shares.c.tenant_id == tenant_id,
+                        resource_shares.c.id == share_uuid,
+                        resource_shares.c.subject_id == subject_sub,
+                        resource_shares.c.revoked_at.is_(None),
+                        resource_shares.c.accepted_at.is_(None),
+                    )
+                    .values(accepted_at=func.now())
                     .returning(resource_shares)
                 )
             ).first()
@@ -267,6 +314,53 @@ class PostgresIdentityBackend:
             ).all()
         return tuple(self._share_record(row) for row in rows)
 
+    async def inbox_for_subjects(
+        self, *, tenant_id: str, subjects: Sequence[SubjectRef]
+    ) -> tuple["ShareRecord", ...]:
+        """Active (pending + accepted) shares to the subjects, all kinds.
+
+        The recipient inbox source — unlike :meth:`shares_for_subjects` it
+        keeps pending rows (so they can be consented to) and spans every
+        resource kind in one query.
+        """
+        if not subjects:
+            return ()
+        pairs = [(s.subject_type, s.subject_id) for s in subjects]
+        async with self._session(tenant_id) as session:
+            rows = (
+                await session.execute(
+                    select(resource_shares)
+                    .where(
+                        resource_shares.c.tenant_id == tenant_id,
+                        resource_shares.c.revoked_at.is_(None),
+                        tuple_(
+                            resource_shares.c.subject_type,
+                            resource_shares.c.subject_id,
+                        ).in_(pairs),
+                    )
+                    .order_by(resource_shares.c.created_at)
+                )
+            ).all()
+        return tuple(self._share_record(row) for row in rows)
+
+    async def outgoing_shares_for_grantor(
+        self, *, tenant_id: str, grantor_sub: str
+    ) -> tuple["ShareRecord", ...]:
+        """Active shares *grantor_sub* granted, all kinds, oldest first."""
+        async with self._session(tenant_id) as session:
+            rows = (
+                await session.execute(
+                    select(resource_shares)
+                    .where(
+                        resource_shares.c.tenant_id == tenant_id,
+                        resource_shares.c.granted_by_sub == grantor_sub,
+                        resource_shares.c.revoked_at.is_(None),
+                    )
+                    .order_by(resource_shares.c.created_at)
+                )
+            ).all()
+        return tuple(self._share_record(row) for row in rows)
+
     async def shares_for_subjects(
         self,
         *,
@@ -284,6 +378,7 @@ class PostgresIdentityBackend:
                         resource_shares.c.tenant_id == tenant_id,
                         resource_shares.c.resource_type == resource_type,
                         resource_shares.c.revoked_at.is_(None),
+                        resource_shares.c.accepted_at.isnot(None),
                         tuple_(
                             resource_shares.c.subject_type,
                             resource_shares.c.subject_id,
@@ -345,6 +440,11 @@ class PostgresIdentityBackend:
                 row.created_at.timestamp()
                 if row.created_at is not None
                 else 0.0
+            ),
+            accepted_at=(
+                row.accepted_at.timestamp()
+                if row.accepted_at is not None
+                else None
             ),
         )
 
@@ -599,12 +699,14 @@ class PostgresIdentityBackend:
         resource_id: str,
         subjects: Sequence[SubjectRef],
     ) -> SharePermission | None:
-        """Highest active grant any of *subjects* holds on the resource.
+        """Highest active, ACCEPTED grant any of *subjects* holds.
 
         The max-rank reduction happens in Python against the
         application ordering — the database stores permissions as
         plain text precisely so it never holds a second ordering
-        authority.
+        authority. Pending shares (``accepted_at IS NULL``) are excluded:
+        consent is the single gate, enforced here so every ``can``/visibility
+        path inherits it without its own branch.
         """
         if not subjects:
             return None
@@ -620,6 +722,7 @@ class PostgresIdentityBackend:
                     resource_shares.c.resource_type == resource_type,
                     resource_shares.c.resource_id == resource_id,
                     resource_shares.c.revoked_at.is_(None),
+                    resource_shares.c.accepted_at.isnot(None),
                 )
             )
             return highest_grant(

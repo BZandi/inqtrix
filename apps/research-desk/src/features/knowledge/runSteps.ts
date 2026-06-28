@@ -28,6 +28,16 @@ export function applyKnowledgeRunEvent(
   event: ResearchRunEvent,
 ): KnowledgeRunProgressRecord {
   switch (event.type) {
+    case 'inqtrix.knowledge.contextualized':
+      return appendStep(progress, {
+        facts: {
+          contextMarker: stringFact(event.data.marker),
+          rewritten: event.data.rewritten === true,
+        },
+        id: 'context',
+        kind: 'context',
+        status: 'done',
+      })
     case 'inqtrix.knowledge.profile.resolved':
       return applyProfileResolved(progress, event)
     case 'inqtrix.knowledge.decomposition.completed':
@@ -110,6 +120,8 @@ function applyRetrievalCompleted(
     candidateCount: numberFact(event.data.candidate_count),
     collectionDocumentCount: numberFact(event.data.collection_document_count),
     topK: numberFact(event.data.top_k),
+    finalK: numberFact(event.data.final_k),
+    finalKOverridden: event.data.final_k_overridden === true,
   }
   let next = upsertStep(progress, {
     facts,

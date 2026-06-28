@@ -1,6 +1,11 @@
 import type { JobFilter, JobPhase, JobStatus, AppView } from '@/features/researchDesk/types'
 import type { Locale } from '@/i18n/translations'
-import type { ContrastMode, ThemeMode, ThemePreset } from '@/theme/ThemeProvider'
+import type {
+  ContrastMode,
+  ThemeMode,
+  ThemePreset,
+  UserBubbleTone,
+} from '@/theme/ThemeProvider'
 import type {
   ResearchClaim,
   ResearchMetrics,
@@ -33,6 +38,12 @@ export type ProjectMetadata = {
   updatedAt: string
 }
 
+export type PinnedExplorerState = {
+  chatThreadIds: string[]
+  editorDocumentIds: string[]
+  knowledgeSessionIds: string[]
+}
+
 export type ProjectUiState = {
   activeFilter: JobFilter
   activeView: AppView
@@ -45,6 +56,7 @@ export type ProjectUiState = {
   isReportVisible: boolean
   pendingChatAttachmentRefs: ChatContextReferenceRecord[]
   pendingChatReportRunId: string | null
+  pinnedExplorer: PinnedExplorerState
   selectedChatModel: string | null
   selectedChatEffort: string | null
   selectedChatModelTier: ChatModelTier | null
@@ -185,6 +197,7 @@ export type ProjectPreferences = {
   locale: Locale
   theme: ThemeMode
   themePreset: ThemePreset
+  userBubbleTone: UserBubbleTone
 }
 
 export type ResearchRunSource = 'api' | 'imported' | 'mock'
@@ -438,6 +451,12 @@ export const VECTOR_INDEX_HISTORY_LIMIT = 10
 export type IndexingJobLive = {
   completedDocuments: number
   currentDocumentTitle?: string
+  /** The asset ids this run actually PROCESSES (its working set): the new
+   * (pending) members for an incremental add, every member for a rebuild /
+   * durable re-embed. A file row reads "läuft" only while its id is in here and
+   * not yet confirmed — so indexing one file never makes the already-embedded
+   * rows read "läuft" (they are outside the run). */
+  runningFileIds: string[]
   /** Client-build live per-file progress (the durable server-job path leaves
    * these absent): asset ids the server has CONFIRMED embedded / skipped so
    * far this run, so each file row flips to its real outcome as it lands.
@@ -533,6 +552,10 @@ export type ChatMessageModelResolutionRecord = {
   tier: string
 }
 
+export type ChatMessageRequestContextRecord = {
+  knowledgeCollectionIds?: string[]
+}
+
 export type ChatChainStepStatus = 'ok' | 'error' | 'stopped'
 
 export type ChatChainStepRecord = {
@@ -548,6 +571,7 @@ export type ChatMessageRecord = {
   createdAt: string
   id: string
   modelResolution?: ChatMessageModelResolutionRecord
+  requestContext?: ChatMessageRequestContextRecord
   role: ChatRole
 }
 
@@ -570,6 +594,7 @@ export type ChatThreadRecord = {
 
 /** Step kinds shown on the live knowledge run card, in pipeline order. */
 export type KnowledgeStepKind =
+  | 'context'
   | 'profile'
   | 'decompose'
   | 'vocabulary'
@@ -589,6 +614,7 @@ export type KnowledgeStepFacts = {
   /** Total documents in the searched collection scope (all are eligible) —
    * confirms coverage in the retrieval step line. */
   collectionDocumentCount?: number
+  contextMarker?: string
   degradedStages?: string[]
   dropped?: number
   kept?: number
@@ -601,6 +627,8 @@ export type KnowledgeStepFacts = {
   subQueryCount?: number
   sufficient?: boolean
   topK?: number
+  finalK?: number
+  finalKOverridden?: boolean
 }
 
 export type KnowledgeRunStepRecord = {
@@ -672,11 +700,17 @@ export type KnowledgeAnswerRecord = {
   evidenceUsed?: number | null
 }
 
-export type KnowledgeItemStatus = 'running' | 'completed' | 'failed'
+export type KnowledgeItemStatus = 'running' | 'completed' | 'failed' | 'cancelled'
 
 export type KnowledgeThreadItemRecord = {
   answer?: KnowledgeAnswerRecord
+  /** Local selection keys for the collections used by this ask. Stored so an
+   * in-place rerun can address the same RAG scope even after the composer moved
+   * on. Older items may omit it and fall back to title matching. */
+  collectionIds?: string[]
   collectionTitles: string[]
+  /** When the answer arrived. `createdAt` remains the user question time. */
+  completedAt?: string
   createdAt: string
   error?: string
   id: string
@@ -688,6 +722,10 @@ export type KnowledgeThreadItemRecord = {
   runId: string | null
   sessionId: string
   status: KnowledgeItemStatus
+  /** Per-run retrieval breadth used by the ask. Null means server default. */
+  topK?: number | null
+  /** Per-run surfaced-evidence override (`final_k`). Null = profile factor. */
+  finalK?: number | null
 }
 
 export type KnowledgeSessionRecord = {

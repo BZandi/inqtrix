@@ -93,6 +93,17 @@ class PostgresKnowledgeStore:
         """Delegated to the vector index (hybrid dispatch flag)."""
         return self._vectors.supports_hybrid
 
+    @property
+    def sparse_language(self) -> str | None:
+        """Delegated BM25 tokenizer language of the vector index.
+
+        ``None`` when the index has no lexical branch (e.g. the in-process
+        :class:`MemoryVectorIndex`, which carries no such property). Surfaced
+        so the canonical Postgres+Qdrant path also reports the monolingual
+        sparse limitation to the capability manifest and the algorithm.
+        """
+        return getattr(self._vectors, "sparse_language", None)
+
     async def is_available(self) -> bool:
         """Return whether the delegated vector index is reachable now."""
         return await self._vectors.is_available()

@@ -19,7 +19,14 @@ from inqtrix.project.base_session_store import (
 )
 from inqtrix.storage.account_orm import account_preferences
 
-_MUTABLE = ["contrast_mode", "locale", "theme", "theme_preset", "updated_at"]
+_MUTABLE = [
+    "contrast_mode",
+    "locale",
+    "theme",
+    "theme_preset",
+    "user_bubble_tone",
+    "updated_at",
+]
 
 
 class PostgresAccountPreferencesStore(BaseSessionStore):
@@ -38,11 +45,20 @@ class PostgresAccountPreferencesStore(BaseSessionStore):
         return self._from_row(row) if row is not None else None
 
     async def upsert_preferences(
-        self, *, sub, contrast_mode, locale, theme, theme_preset, updated_at
+        self,
+        *,
+        sub,
+        contrast_mode,
+        locale,
+        theme,
+        theme_preset,
+        user_bubble_tone,
+        updated_at,
     ) -> AccountPreferences:
         stmt = pg_insert(account_preferences).values(
             tenant_id=_DEFAULT_TENANT, sub=sub, contrast_mode=contrast_mode,
             locale=locale, theme=theme, theme_preset=theme_preset,
+            user_bubble_tone=user_bubble_tone,
             updated_at=updated_at,
         )
         stmt = stmt.on_conflict_do_update(
@@ -57,6 +73,7 @@ class PostgresAccountPreferencesStore(BaseSessionStore):
     def _from_row(row) -> AccountPreferences:
         return AccountPreferences(
             sub=row.sub, contrast_mode=row.contrast_mode, locale=row.locale,
-            theme=row.theme, theme_preset=row.theme_preset, updated_at=row.updated_at,
+            theme=row.theme, theme_preset=row.theme_preset,
+            user_bubble_tone=row.user_bubble_tone, updated_at=row.updated_at,
             tenant_id=row.tenant_id,
         )

@@ -25,6 +25,10 @@ English.
 | **answer** (per section) | Writes one markdown section of the final report with `[E*]` citations; iterates over 3-6 sections, each seeing the running report. | `build_answer_section_system_prompt(...)` + `build_answer_section_user_prompt(...)`; full system prompt with style/safety/citation rules. | `question`, the **full evidence overview** + allowed citations + label map, source/claim metrics, `required`/`uncovered_aspects`, `competing_events`, conversation `history`, completed headings, report-so-far summary, used evidence labels, the section spec. | Free markdown (`##`/`###`, `[E12]`). Normalisation + markdown repair + incompleteness detection. | 3-6× per run |
 | **claim_extract** | Extracts checkable single claims per search hit (`claim_text`, `evidence_snippet`, `claim_type`, `polarity`, `needs_primary`, `provider_refs`, `published_date`). | `build_claim_extraction_prompt(max_claims)`. | `question`, the **search hit full text** (capped ~16k chars), normalised citations, source-ref map, `max_claims`. | JSON schema via `complete_structured` (with a JSON fallback). Reasoning follows the **fast** tier's effort (`tier_fast_effort`; unset/`none` by default → no reasoning). | 1× per search hit (5-50+) |
 | **direct_chat** | Answers directly without research when classify returns DIRECT (the conversational path). | `_DIRECT_CHAT_SYSTEM_PROMPT` + a formatted prompt in [`graph.py`](../../src/inqtrix/graph.py). | `question`, conversation `history`. | Free text. | 1× per run (DIRECT only) |
+| **knowledge_contextualize** | Rewrites a Knowledge Ask follow-up into a standalone retrieval query. | `build_knowledge_followup_context_prompt(question, history)`. | Current user question plus formatted conversation history; history is context only, not evidence. | Strict JSON object with `question`; provider/parse failures fall back loudly to the original question with `_knowledge_query_context_fallback`. | 0-1× per `mode=knowledge` run |
+| **knowledge_decompose** | Splits a deep-profile knowledge retrieval query into independent sub-queries. | `build_knowledge_decompose_prompt(question)`. | Standalone retrieval query. | Strict JSON array; parse failure degrades to no split with a visible marker. | 0-1× per `mode=knowledge` run |
+| **knowledge_gate** | Judges whether retrieved `[K#]` evidence is sufficient and may propose a rewritten query. | `build_knowledge_gate_prompt(...)`. | Standalone retrieval query and rendered evidence block. | Strict JSON object; parse failure fails open with `_knowledge_gate_fallback`. | 0-N× per `mode=knowledge` run |
+| **knowledge_answer** | Synthesises the cited Knowledge answer. | `build_knowledge_answer_prompt(...)`. | Original user question, optional conversation history, and current `[K#]` evidence excerpts. | Markdown answer, optionally preceded by a quote block verified by `grounding.py`. | 0-1× per `mode=knowledge` run |
 
 **plan — conditional strategy fragments** (appended depending on state):
 perspective-diversity (STORM), deep-review, alternative-hypothesis (round 1),
@@ -52,6 +56,10 @@ A node is mapped to a tier by the hard-coded
 | **classify** | **fast** | none | Classification + decomposition; small models are reliable here; 1× per run. |
 | **claim_extract** | **fast** | none | Highest volume (1× per hit) — the biggest cost lever; strict-schema extraction where reasoning hurts. |
 | **direct_chat** | **mid** (request-selectable) | none | Single conversational call; mid balances quality and latency. Selectable per request via `model_tier`. |
+| **knowledge_contextualize** | **fast** | none | Cheap query rewrite for follow-up resolution; the answer still relies on retrieved evidence. |
+| **knowledge_decompose** | **fast** | none | Small structured rewrite task; deep-profile only. |
+| **knowledge_gate** | **fast** | none | Repeated structured sufficiency checks; cost-sensitive and prompt-scaffolded. |
+| **knowledge_answer** | **high** | reasoning **on** | Final cited synthesis over retrieved evidence, largest quality lever in Knowledge mode. |
 
 Default tier effort is **unset** for every tier, so out of the box tiers differ
 only by *model* and nothing gains implicit reasoning. Turn reasoning on

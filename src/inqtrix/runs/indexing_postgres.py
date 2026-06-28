@@ -372,6 +372,16 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
             )
         )
 
+    def document_completed(
+        self, job_id: str, document_id: str, *, fence_attempt: int | None = None
+    ) -> None:
+        """Emit a per-document completion event (one document finished embedding)."""
+        self._call(
+            self._document_completed_db(
+                job_id, document_id, fence_attempt=fence_attempt
+            )
+        )
+
     # -- worker surface --------------------------------------------------- #
 
     def claim_for_execution(
@@ -827,6 +837,36 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 row["tenant_id"],
                 "inqtrix.index.progress",
                 {"snapshot": _snapshot_from_row(row)},
+            )
+
+    async def _document_completed_db(
+        self,
+        job_id: str,
+        document_id: str,
+        *,
+        fence_attempt: int | None = None,
+    ) -> None:
+        async with self._session(DEFAULT_TENANT) as session:
+            if not await self._fence_ok(session, job_id, fence_attempt):
+                return
+            # A standalone event (no column write); guard against a late event
+            # after the job went terminal, mirroring _progress_db's status gate.
+            tenant_id = (
+                await session.execute(
+                    select(indexing_jobs.c.tenant_id).where(
+                        indexing_jobs.c.job_id == job_id,
+                        indexing_jobs.c.status.notin_(_TERMINAL_VALUES),
+                    )
+                )
+            ).scalar_one_or_none()
+            if tenant_id is None:
+                return
+            await self._append_events_db(
+                session,
+                job_id,
+                tenant_id,
+                "inqtrix.index.document_completed",
+                {"document_id": document_id, "outcome": "embedded"},
             )
 
     async def _terminal_db(

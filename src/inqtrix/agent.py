@@ -196,15 +196,15 @@ class AgentConfig(BaseModel):
     )
     """Controls the report style and research-depth preset. Use ``ReportProfile.COMPACT`` for the current concise answer style with lower latency. Use ``ReportProfile.DEEP`` to keep more evidence in the pipeline and produce a denser, review-style report with broader citation coverage and higher runtime/token cost. Explicit settings such as ``max_rounds`` or ``confidence_stop`` still override the preset."""
     max_rounds: int = Field(
-        default=4,
+        default=2,
         description=(
             "Hard upper bound for the research loop. The loop never runs "
             "more search rounds than this, regardless of confidence / "
-            "plateau / utility signals. Increase to 5-6 for DEEP-style "
-            "coverage on complex topics; lower to 2 to constrain cost."
+            "plateau / utility signals. COMPACT defaults to 2; increase "
+            "to 4 for DEEP-style coverage on complex topics."
         ),
     )
-    """Hard upper bound for the research loop. The loop never runs more search rounds than this, regardless of confidence / plateau / utility signals. Increase to 5-6 for DEEP-style coverage on complex topics; lower to 2 to constrain cost."""
+    """Hard upper bound for the research loop. The loop never runs more search rounds than this, regardless of confidence / plateau / utility signals. COMPACT defaults to 2; increase to 4 for DEEP-style coverage on complex topics."""
     min_rounds: int = Field(
         default=1,
         description=(
@@ -222,17 +222,17 @@ class AgentConfig(BaseModel):
     )
     """Lower bound for the research loop. Default ``1`` preserves existing behaviour (an early stop after Round 0 is allowed). Raise to ``2+`` when the evaluator model tends to over-confidently signal ``done`` before the STORM diversification in Round 1+ has had a chance to broaden the source pool. Typical effect of ``min_rounds=2``: at least one additional search round runs even if ``confidence_stop`` was already reached in Round 0. Clamped to ``max_rounds`` at request time so a misconfiguration never extends the loop beyond the user-specified hard cap."""
     confidence_stop: int = Field(
-        default=8,
+        default=7,
         description=(
             "Minimum confidence (1-10) at which the loop is allowed to "
             "stop early. The evaluator model assigns the value; once it "
             "reaches this threshold, the stop cascade may emit ``done``. "
-            "Default ``8`` matches the COMPACT profile; DEEP raises it "
-            "to ``9`` for stricter evidence demands. Lower to ``6-7`` "
-            "when latency matters more than evidence breadth."
+            "Default ``7`` matches the COMPACT profile; DEEP raises it "
+            "to ``8`` for stricter evidence demands. Lower when latency "
+            "matters more than evidence breadth."
         ),
     )
-    """Minimum confidence (1-10) at which the loop is allowed to stop early. The evaluator model assigns the value; once it reaches this threshold, the stop cascade may emit ``done``. Default ``8`` matches the COMPACT profile; DEEP raises it to ``9`` for stricter evidence demands. Lower to ``6-7`` when latency matters more than evidence breadth."""
+    """Minimum confidence (1-10) at which the loop is allowed to stop early. The evaluator model assigns the value; once it reaches this threshold, the stop cascade may emit ``done``. Default ``7`` matches the COMPACT profile; DEEP raises it to ``8`` for stricter evidence demands. Lower when latency matters more than evidence breadth."""
     first_round_queries: int = Field(
         default=6,
         description=(

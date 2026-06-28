@@ -52,6 +52,10 @@ class ShareRecord:
         permission: Granted level.
         granted_by_sub: Granting subject (audit/display).
         created_at: Unix seconds.
+        accepted_at: Unix seconds the recipient consented, or ``None`` while
+            the share is still pending. ``None`` grants no access (the consent
+            gate); a non-``None`` value is what every visibility query filters
+            on. Defaults to ``None`` so a freshly minted grant starts pending.
     """
 
     id: str
@@ -63,6 +67,56 @@ class ShareRecord:
     permission: SharePermission
     granted_by_sub: str
     created_at: float
+    accepted_at: float | None = None
+
+
+@dataclass(frozen=True)
+class InboxItem:
+    """One share addressed to the caller, title-enriched for the inbox.
+
+    The recipient-facing view of a :class:`ShareRecord`: it adds the resolved
+    resource title (a pending recipient has no access yet, so the title comes
+    from an owner-bypassing read) and keeps ``accepted_at`` so the surface can
+    split pending invitations from accepted (active) shares.
+
+    Attributes:
+        share_id: Revocation/accept handle.
+        resource_type: Polymorphic kind.
+        resource_id: Identifier within the kind.
+        resource_title: Human-readable title, resolved server-side.
+        permission: Granted level.
+        granted_by_sub: The grantor (the router joins the display name).
+        created_at: Unix seconds the grant was minted.
+        accepted_at: Unix seconds the caller consented, or ``None`` (pending).
+    """
+
+    share_id: str
+    resource_type: str
+    resource_id: str
+    resource_title: str
+    permission: SharePermission
+    granted_by_sub: str
+    created_at: float
+    accepted_at: float | None
+
+
+@dataclass(frozen=True)
+class OutgoingItem:
+    """One resource the caller has shared out, grouped across its recipients.
+
+    Attributes:
+        resource_type: Polymorphic kind.
+        resource_id: Identifier within the kind.
+        resource_title: Human-readable title, resolved server-side.
+        share_count: Active shares on the resource granted by the caller.
+        pending_count: Of those, how many are still awaiting consent.
+    """
+
+    resource_type: str
+    resource_id: str
+    resource_title: str
+    share_count: int
+    pending_count: int
 
 
 class ShareNotAllowed(Exception):
@@ -167,11 +221,54 @@ class ShareAdminRepository(Protocol):
         """Active-share count per resource (badge numbers)."""
         ...
 
+    async def accept_share_by_id(
+        self, *, tenant_id: str, share_id: str, subject_sub: str
+    ) -> ShareRecord | None:
+        """Mark one pending share accepted; returns it, or ``None``.
+
+        Only flips a share that is active, still pending
+        (``accepted_at IS NULL``), and addressed to *subject_sub* (the
+        recipient is the sole party who can consent). Returns ``None`` for an
+        unknown id, a foreign recipient, an already-accepted share, or a
+        revoked one — all indistinguishable (the surface's 404 rule).
+        """
+        ...
+
+    async def inbox_for_subjects(
+        self,
+        *,
+        tenant_id: str,
+        subjects: Sequence[SubjectRef],
+    ) -> tuple[ShareRecord, ...]:
+        """Every active (pending OR accepted) share addressed to the
+        subjects, across ALL resource kinds — the recipient inbox source.
+
+        Distinct from :meth:`shares_for_subjects`, which is accepted-only
+        (the access union) and single-kind: the inbox needs the pending rows
+        too so the recipient can consent to them.
+        """
+        ...
+
+    async def outgoing_shares_for_grantor(
+        self, *, tenant_id: str, grantor_sub: str
+    ) -> tuple[ShareRecord, ...]:
+        """Every active share *grantor_sub* granted, across all resource
+        kinds — the "shared by me" source (oldest first)."""
+        ...
+
 
 OwnerResolver = Callable[[str, str], Awaitable[str | None]]
 """``(tenant_id, resource_id) -> owner_sub`` or ``None`` when the
 resource does not exist. One resolver per shareable resource type,
 registered by the composition root."""
+
+TitleResolver = Callable[[str, str], Awaitable[str | None]]
+"""``(tenant_id, resource_id) -> human-readable title`` or ``None`` when
+the resource is gone. The same shape as :data:`OwnerResolver` but a
+distinct registry: it reads the resource's display title (owner-bypassing,
+so a pending recipient can see what they were offered). A missing resolver
+for a kind simply yields no title — the inbox/outgoing listing skips that
+row rather than inventing one."""
 
 
 class ShareService:
@@ -183,6 +280,10 @@ class ShareService:
             subject assembly).
         owner_resolvers: ``resource_type -> resolver``; an unknown
             type is a 400, a vanished resource a 404.
+        title_resolvers: ``resource_type -> title resolver`` for the
+            recipient inbox and the "shared by me" listing. Optional and
+            additive: a kind with no resolver yields untitled rows that the
+            listings skip, so the access/grant surface is unaffected.
         user_lookup: Async ``(tenant_id, sub) -> bool`` existence
             check for invitees (typo guard against granting to
             nonexistent subjects). The users mirror backs it.
@@ -203,10 +304,12 @@ class ShareService:
         user_lookup: Callable[[str, str], Awaitable[bool]],
         audit: "AuditSink | None" = None,
         restrict_to_members: bool = False,
+        title_resolvers: Mapping[str, TitleResolver] | None = None,
     ) -> None:
         self._shares = shares
         self._permissions = permissions
         self._owner_resolvers = dict(owner_resolvers)
+        self._title_resolvers = dict(title_resolvers or {})
         self._user_lookup = user_lookup
         self._audit = audit
         self._restrict_to_members = restrict_to_members
@@ -359,6 +462,176 @@ class ShareService:
             {"subject": revoked.subject_id},
         )
         return True
+
+    async def accept(
+        self, principal: "Principal", *, share_id: str
+    ) -> bool:
+        """Accept one pending share addressed to the caller.
+
+        Consent is the recipient's alone: the repository flips the share only
+        when it is active, still pending, and has ``subject_id ==
+        principal.sub``. Until this lands the share grants nothing — the
+        accepted timestamp is exactly what every visibility query filters on.
+
+        A successful acceptance is audited as ``share.accepted`` so the consent
+        is operator-visible. A denial (unknown id, foreign recipient,
+        already-accepted, revoked) returns an indistinguishable ``False`` — the
+        same 404-hiding convention as the owner-side :meth:`revoke`, and not an
+        audited security event: the benign cases dominate and the share id is a
+        UUID a foreign caller cannot guess, so loud auditing here would be noise
+        without signal (Designprinzip 5).
+        """
+        accepted = await self._shares.accept_share_by_id(
+            tenant_id=principal.tenant_id,
+            share_id=share_id,
+            subject_sub=principal.sub,
+        )
+        if accepted is None:
+            return False
+        await self._audit_event(
+            principal,
+            "share.accepted",
+            accepted.resource_type,
+            accepted.resource_id,
+            {"granted_by": accepted.granted_by_sub},
+        )
+        return True
+
+    async def recipient_drop(
+        self, principal: "Principal", *, share_id: str
+    ) -> bool:
+        """Remove the caller's OWN share — decline a pending invitation or
+        leave an accepted one.
+
+        The recipient is the only party this empowers (the owner uses
+        :meth:`revoke` instead): the share must be a user share addressed to
+        ``principal.sub``. It soft-revokes, stamped with the recipient as
+        ``revoked_by_sub``, and audits ``share.declined`` (was pending) or
+        ``share.left`` (was accepted) so the action is operator-visible. A
+        foreign or unknown share is an indistinguishable ``False`` (the
+        router's 404).
+        """
+        share = await self._shares.get_share(
+            tenant_id=principal.tenant_id, share_id=share_id
+        )
+        if (
+            share is None
+            or share.subject_type != "user"
+            or share.subject_id != principal.sub
+        ):
+            return False
+        dropped = await self._shares.revoke_share_by_id(
+            tenant_id=principal.tenant_id,
+            share_id=share_id,
+            revoked_by_sub=principal.sub,
+        )
+        if dropped is None:
+            return False
+        action = (
+            "share.declined" if dropped.accepted_at is None else "share.left"
+        )
+        await self._audit_event(
+            principal,
+            action,
+            dropped.resource_type,
+            dropped.resource_id,
+            {"granted_by": dropped.granted_by_sub},
+        )
+        return True
+
+    async def inbox(self, principal: "Principal") -> tuple[InboxItem, ...]:
+        """The caller's incoming DIRECT shares (pending + accepted), all kinds,
+        title-enriched and oldest first.
+
+        Pending rows are the consent queue; accepted rows are the "shared with
+        me" list — the surface splits them on ``accepted_at``. Rows whose
+        resource has vanished (no title) are dropped: an orphaned grant is
+        nothing the recipient can act on. The grantor display name is joined by
+        the router, which owns the users mirror.
+
+        Only the caller's OWN user shares are listed — NOT shares to groups the
+        caller belongs to. The inbox is the per-user consent surface, so every
+        row must be one the caller can accept or drop themselves; a group share
+        is a group-admin concern (and is schema-supported but never minted in
+        v1). This keeps the inbox symmetric with :meth:`recipient_drop` — no
+        undeclinable rows — and isolated from the permission/visibility union,
+        which keeps unioning groups via ``subjects_for``.
+        """
+        subject = SubjectRef(subject_type="user", subject_id=principal.sub)
+        records = await self._shares.inbox_for_subjects(
+            tenant_id=principal.tenant_id, subjects=(subject,)
+        )
+        items: list[InboxItem] = []
+        for record in records:
+            title = await self._resolve_title(
+                principal.tenant_id, record.resource_type, record.resource_id
+            )
+            if title is None:
+                continue
+            items.append(
+                InboxItem(
+                    share_id=record.id,
+                    resource_type=record.resource_type,
+                    resource_id=record.resource_id,
+                    resource_title=title,
+                    permission=record.permission,
+                    granted_by_sub=record.granted_by_sub,
+                    created_at=record.created_at,
+                    accepted_at=record.accepted_at,
+                )
+            )
+        return tuple(items)
+
+    async def outgoing(
+        self, principal: "Principal"
+    ) -> tuple[OutgoingItem, ...]:
+        """The resources the caller has shared out, grouped per resource with
+        active and pending counts, title-enriched (oldest resource first).
+
+        v1 reads ``granted_by_sub == caller`` — only owners mint shares today,
+        so this is exactly "what I shared". Resources without a title (deleted)
+        are dropped, mirroring :meth:`inbox`. (v2 note: if ``manage`` grants
+        become grantable, a co-manager's re-grant would list under the
+        re-grantor here, not the owner — revisit whether outgoing should track
+        the originating owner separately.)
+        """
+        records = await self._shares.outgoing_shares_for_grantor(
+            tenant_id=principal.tenant_id, grantor_sub=principal.sub
+        )
+        grouped: dict[tuple[str, str], list[ShareRecord]] = {}
+        for record in records:
+            grouped.setdefault(
+                (record.resource_type, record.resource_id), []
+            ).append(record)
+        items: list[OutgoingItem] = []
+        for (resource_type, resource_id), group in grouped.items():
+            title = await self._resolve_title(
+                principal.tenant_id, resource_type, resource_id
+            )
+            if title is None:
+                continue
+            pending = sum(1 for record in group if record.accepted_at is None)
+            items.append(
+                OutgoingItem(
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    resource_title=title,
+                    share_count=len(group),
+                    pending_count=pending,
+                )
+            )
+        return tuple(items)
+
+    async def _resolve_title(
+        self, tenant_id: str, resource_type: str, resource_id: str
+    ) -> str | None:
+        """Human-readable title for one resource, or ``None`` when the kind has
+        no resolver or the resource is gone — the listings skip such rows
+        rather than showing a bare id."""
+        resolver = self._title_resolvers.get(resource_type)
+        if resolver is None:
+            return None
+        return await resolver(tenant_id, resource_id)
 
     async def list_for_resource(
         self, principal: "Principal", *, resource_type: str, resource_id: str

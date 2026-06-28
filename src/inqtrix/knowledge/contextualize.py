@@ -27,14 +27,21 @@ from dataclasses import dataclass
 from typing import Any
 
 from inqtrix.model_routing import resolve_model
-from inqtrix.prompts import build_chunk_context_prompt
+from inqtrix.prompts import (
+    build_chunk_context_prompt,
+    build_knowledge_followup_context_prompt,
+)
 
 log = logging.getLogger("inqtrix")
 
 CONTEXT_MARKER_APPLIED = "_chunk_context_applied"
 CONTEXT_MARKER_FALLBACK = "_chunk_context_fallback"
+QUERY_CONTEXT_MARKER_APPLIED = "_knowledge_query_context_applied"
+QUERY_CONTEXT_MARKER_UNCHANGED = "_knowledge_query_context_unchanged"
+QUERY_CONTEXT_MARKER_FALLBACK = "_knowledge_query_context_fallback"
 
 _JSON_ARRAY = re.compile(r"\[.*\]", re.DOTALL)
+_JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 
 _MAX_DOCUMENT_PROMPT_CHARS = 60_000
 """Documents above this size skip contextualization for the overflow
@@ -56,6 +63,25 @@ class ContextualizedChunks:
 
     texts: list[str]
     marker: str
+
+
+@dataclass(frozen=True)
+class ContextualizedQuestion:
+    """Standalone retrieval question derived from a conversation turn.
+
+    Attributes:
+        question: The query text to use for retrieval. On fallback this
+            is the original user question.
+        marker: ``_knowledge_query_context_applied``,
+            ``_knowledge_query_context_unchanged`` or
+            ``_knowledge_query_context_fallback``.
+        rewritten: Whether the returned query differs from the current
+            user question.
+    """
+
+    question: str
+    marker: str
+    rewritten: bool
 
 
 class ChunkContextualizer(ABC):
@@ -167,3 +193,127 @@ class LLMChunkContextualizer(ChunkContextualizer):
         if not all(isinstance(item, str) for item in payload):
             return None
         return payload
+
+
+def contextualize_followup_question(
+    llm: Any,
+    *,
+    question: str,
+    history: str,
+    model: str | None = None,
+    timeout: float = 120.0,
+) -> tuple[ContextualizedQuestion, dict[str, int]]:
+    """Rewrite a follow-up into a standalone retrieval query.
+
+    The history is used only for anaphora/topic resolution. Any provider
+    or parse failure falls back loudly to the original question so RAG
+    remains available and observable.
+
+    Args:
+        llm: Provider exposing ``complete_with_metadata``.
+        question: Current user question from the active turn.
+        history: Prior conversation text. It is context for rewriting only,
+            never an evidence source.
+        model: Optional routed model name for the contextualization call.
+        timeout: Provider timeout in seconds. Defaults to the algorithm's
+            reasoning timeout when called from ``KnowledgeAlgorithm``.
+
+    Returns:
+        A contextualized question plus prompt/completion token usage. Empty
+        history or empty questions return the original question with zero
+        usage and the ``_knowledge_query_context_unchanged`` marker.
+    """
+    original = question.strip()
+    if not history.strip() or not original:
+        return (
+            ContextualizedQuestion(
+                question=original,
+                marker=QUERY_CONTEXT_MARKER_UNCHANGED,
+                rewritten=False,
+            ),
+            {"prompt_tokens": 0, "completion_tokens": 0},
+        )
+    prompt = build_knowledge_followup_context_prompt(original, history)
+    try:
+        response = llm.complete_with_metadata(
+            prompt, model=model, timeout=timeout
+        )
+    except Exception as exc:  # noqa: BLE001 - visible fallback, not fatal
+        log.warning(
+            "Knowledge follow-up contextualization failed (%s); using the "
+            "original question for retrieval (%s).",
+            exc,
+            QUERY_CONTEXT_MARKER_FALLBACK,
+        )
+        return (
+            ContextualizedQuestion(
+                question=original,
+                marker=QUERY_CONTEXT_MARKER_FALLBACK,
+                rewritten=False,
+            ),
+            {"prompt_tokens": 0, "completion_tokens": 0},
+        )
+
+    usage = {
+        "prompt_tokens": getattr(response, "prompt_tokens", 0) or 0,
+        "completion_tokens": getattr(response, "completion_tokens", 0) or 0,
+    }
+    parsed = _parse_contextualized_question(
+        getattr(response, "content", "") or ""
+    )
+    if parsed is None:
+        log.warning(
+            "Knowledge follow-up contextualization response was not "
+            "parseable; using the original question for retrieval (%s).",
+            QUERY_CONTEXT_MARKER_FALLBACK,
+        )
+        return (
+            ContextualizedQuestion(
+                question=original,
+                marker=QUERY_CONTEXT_MARKER_FALLBACK,
+                rewritten=False,
+            ),
+            usage,
+        )
+
+    rewritten = parsed != original
+    marker = (
+        QUERY_CONTEXT_MARKER_APPLIED
+        if rewritten
+        else QUERY_CONTEXT_MARKER_UNCHANGED
+    )
+    return (
+        ContextualizedQuestion(
+            question=parsed,
+            marker=marker,
+            rewritten=rewritten,
+        ),
+        usage,
+    )
+
+
+def _parse_contextualized_question(content: str) -> str | None:
+    """Parse the strict JSON object returned by the contextualizer.
+
+    Args:
+        content: Raw provider response. Surrounding prose is tolerated only
+            when a single JSON object can still be extracted.
+
+    Returns:
+        The non-empty ``question`` field, or ``None`` when the response cannot
+        be trusted.
+    """
+    match = _JSON_OBJECT.search(content)
+    if match is None:
+        return None
+    try:
+        payload = json.loads(match.group(0))
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    question = payload.get("question")
+    if not isinstance(question, str):
+        return None
+    question = question.strip()
+    return question or None

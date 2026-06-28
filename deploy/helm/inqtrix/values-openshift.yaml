@@ -12,9 +12,12 @@
 #
 # Bundled backing services on OpenShift: qdrant, valkey and s3 (MinIO) run fine
 # under the arbitrary UID, so you may add `--set qdrant.enabled=true`,
-# `--set valkey.enabled=true` and `--set s3.enabled=true` for a turnkey demo. The
-# bundled Postgres is the exception (its image needs a fixed UID) -- keep it OFF
-# here and point INQTRIX_DATABASE_URL at an external/managed database.
+# `--set valkey.enabled=true` and `--set s3.enabled=true` for a turnkey demo. When
+# secret.existingSecret is used, include the derived secret values in that Secret
+# yourself (for example INQTRIX_VALKEY_URL and INQTRIX_S3_ACCESS_KEY/SECRET_KEY);
+# the chart cannot mutate a user-managed Secret. The bundled Postgres is the
+# exception (its image needs a fixed UID) -- keep it OFF here and point
+# INQTRIX_DATABASE_URL at an external/managed database.
 openshift:
   enabled: true
 

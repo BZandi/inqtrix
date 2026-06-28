@@ -6,6 +6,7 @@ import {
   chatContextRefKey,
   completedReportOptions,
   dedupeChatContextRefs,
+  displayRelativeAge,
   isResearchDeskRun,
   projectAllKnowledgeItems,
   projectChatRules,
@@ -24,6 +25,31 @@ import type {
   ProjectState,
   ResearchRunRecord,
 } from './types'
+
+describe('displayRelativeAge', () => {
+  const now = new Date('2026-06-26T12:00:00.000Z')
+
+  it('formats compact German age labels', () => {
+    expect(displayRelativeAge('2026-06-26T11:59:20.000Z', 'de', now)).toBe('Gerade eben')
+    expect(displayRelativeAge('2026-06-26T11:54:00.000Z', 'de', now)).toBe('6 Min.')
+    expect(displayRelativeAge('2026-06-26T10:00:00.000Z', 'de', now)).toBe('2 Std.')
+    expect(displayRelativeAge('2026-06-23T12:00:00.000Z', 'de', now)).toBe('3 Tage')
+    expect(displayRelativeAge('2026-06-05T12:00:00.000Z', 'de', now)).toBe('3 W')
+  })
+
+  it('formats compact English age labels', () => {
+    expect(displayRelativeAge('2026-06-26T11:59:20.000Z', 'en', now)).toBe('Just now')
+    expect(displayRelativeAge('2026-06-26T11:54:00.000Z', 'en', now)).toBe('6 min')
+    expect(displayRelativeAge('2026-06-26T10:00:00.000Z', 'en', now)).toBe('2 h')
+    expect(displayRelativeAge('2026-06-23T12:00:00.000Z', 'en', now)).toBe('3 d')
+    expect(displayRelativeAge('2026-06-05T12:00:00.000Z', 'en', now)).toBe('3 w')
+  })
+
+  it('returns an empty label for invalid dates', () => {
+    expect(displayRelativeAge('not-a-date', 'de', now)).toBe('')
+    expect(displayRelativeAge('2026-06-26T12:00:00.000Z', 'en', new Date('invalid'))).toBe('')
+  })
+})
 
 function makeReportRun(
   runId: string,

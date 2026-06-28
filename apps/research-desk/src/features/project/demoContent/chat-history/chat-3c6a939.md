@@ -9,7 +9,7 @@ thread_id: "chat-1779029550194-63jhri"
 title: "Bedeutung Maxwell-Gleichungen"
 updated_at: "2026-01-01T13:30:10.000Z"
 ---
-<!-- inqtrix:message id="msg-1779029550194-4289b5" role="assistant" created_at="2026-01-01T13:30:00.000Z" -->
+<!-- inqtrix:message id="msg-1779029550194-4289b5" role="assistant" created_at="2026-01-01T13:30:00.000Z" model="claude-haiku-4-5" model_tier="fast" model_effort="none" model_requested_tier="fast" model_source="demo" model_effort_source="demo" -->
 New conversation ready. Ask a question or sketch the research you want to derive from it.
 <!-- /inqtrix:message -->
 
@@ -17,7 +17,7 @@ New conversation ready. Ask a question or sketch the research you want to derive
 Wie lauten die Maxwell-Gleichungen und welche Bedeutung haben diese? Leite aus einer Gleichung die Maschenregel ab. Geh mathematisch detailliert vor und beschreibe die Gleichungen aus mathematischer Sicht.Formatiere die Gleichungen mit Latex und schreibe gerne auch inline Gleichungen damit es ein echter Aufsatz wird!
 <!-- /inqtrix:message -->
 
-<!-- inqtrix:message id="msg-1779029569730-qlkj68" role="assistant" created_at="2026-01-01T13:30:05.000Z" -->
+<!-- inqtrix:message id="msg-1779029569730-qlkj68" role="assistant" created_at="2026-01-01T13:30:05.000Z" model="claude-opus-4-8" model_tier="high" model_effort="medium" model_requested_tier="high" model_source="demo" model_effort_source="demo" -->
 # Die Maxwell-Gleichungen: Mathematische Grundlagen und physikalische Bedeutung
 
 ## Überblick

@@ -444,7 +444,7 @@ def build_account_preferences_store(settings: Settings) -> Any:
 
     Mirrors :func:`build_vector_index_store`: in-memory default (offline/test);
     ``INQTRIX_STORAGE_BACKEND=postgres`` makes the per-user UI preferences
-    (theme/locale/contrast) durable, on its OWN NullPool engine.
+    (theme/locale/contrast/bubble tone) durable, on its OWN NullPool engine.
     """
     if settings.storage.backend != "postgres":
         from inqtrix.project.account_preferences_memory import (
@@ -669,11 +669,25 @@ def build_knowledge_context(
         # plain RRF fusion without a rerank stage degrades rank-1 on
         # paraphrase queries versus dense-only. Hybrid pays off for
         # exact/out-of-vocabulary terms and with a reranker on top.
+        # Cross-lingual note: the BM25 branch is language-bound (monolingual),
+        # so it contributes little when query and documents differ in language.
+        # A multilingual cross-encoder reranker is the lever there — but it stays
+        # OPTIONAL: `none` is the default and a valid choice, and a deployment
+        # without a reranker keeps today's dense+BM25 path unchanged. The
+        # recommended option is the `cohere` provider, which is a rerank-SCHEMA
+        # adapter (not vendor-locked): native Cohere rerank-v3.5, Azure
+        # serverless, or any compatible self-hosted endpoint. The `llm` provider
+        # is a fallback whose multilingual quality depends on the configured LLM
+        # and costs latency/tokens.
         log.warning(
             "Hybrid-Retrieval ohne Reranker-Stufe: RRF kann die "
-            "Top-1-Praezision bei Paraphrase-Fragen verschlechtern. "
-            "Reranker konfigurieren (INQTRIX_RERANKER_PROVIDER) oder "
-            "INQTRIX_KNOWLEDGE_SPARSE=off setzen."
+            "Top-1-Praezision bei Paraphrase-Fragen verschlechtern, und der "
+            "BM25-Zweig hilft bei sprachverschiedenen Korpora (z. B. deutsche "
+            "Frage gegen englische Dokumente) kaum. Optional einen mehrsprachigen "
+            "Cross-Encoder-Reranker konfigurieren (z. B. "
+            "INQTRIX_RERANKER_PROVIDER=cohere mit rerank-v3.5 oder einem "
+            "kompatiblen Endpoint) oder bewusst ohne bleiben; "
+            "INQTRIX_KNOWLEDGE_SPARSE=off deaktiviert den Sparse-Zweig."
         )
     contextualizer = None
     if settings.knowledge.contextualize == "on":
@@ -933,36 +947,59 @@ def build_container(
         async def _run_owner(tenant_id: str, resource_id: str):
             return active_run_store.owner_sub(resource_id)
 
+        async def _run_title(tenant_id: str, resource_id: str):
+            return active_run_store.title(resource_id)
+
         async def _user_exists(tenant_id: str, sub: str) -> bool:
             return await provider_users.has_subject(
                 tenant_id=tenant_id, sub=sub
             )
 
         owner_resolvers: dict = {"run": _run_owner}
+        # Title resolvers (recipient inbox + "shared by me" listing) mirror the
+        # owner resolvers one-for-one: same keys, owner-bypassing reads so a
+        # pending recipient sees what they were offered — only titles/names
+        # (run question, collection name, template title), never content or
+        # any sensitive field.
+        title_resolvers: dict = {"run": _run_title}
         if knowledge_service is not None:
 
-            async def _collection_owner(tenant_id: str, resource_id: str):
+            async def _collection(tenant_id: str, resource_id: str):
                 from inqtrix.knowledge.stores.ports import CollectionNotFound
 
                 try:
-                    collection = await knowledge_service.knowledge.store.get_collection(
+                    return await knowledge_service.knowledge.store.get_collection(
                         resource_id
                     )
                 except CollectionNotFound:
                     return None
+
+            async def _collection_owner(tenant_id: str, resource_id: str):
+                collection = await _collection(tenant_id, resource_id)
                 # Legacy collections (created_by_sub None) have no
                 # owner and need none — they are visible to everyone
                 # already; None makes them unshareable (404).
-                return collection.created_by_sub
+                return collection.created_by_sub if collection else None
+
+            async def _collection_title(tenant_id: str, resource_id: str):
+                collection = await _collection(tenant_id, resource_id)
+                return collection.name if collection else None
 
             owner_resolvers["knowledge_collection"] = _collection_owner
+            title_resolvers["knowledge_collection"] = _collection_title
 
         async def _template_owner(tenant_id: str, resource_id: str):
             return await prompt_template_service.owner_sub(
                 tenant_id, resource_id
             )
 
+        async def _template_title(tenant_id: str, resource_id: str):
+            return await prompt_template_service.title(
+                tenant_id, resource_id
+            )
+
         owner_resolvers["prompt_template"] = _template_owner
+        title_resolvers["prompt_template"] = _template_title
 
         share_service = ShareService(
             shares=active_workspace_admin,
@@ -971,6 +1008,7 @@ def build_container(
             user_lookup=_user_exists,
             audit=active_workspace_admin,
             restrict_to_members=settings.sharing.restrict_to_workspace_members,
+            title_resolvers=title_resolvers,
         )
     # Quota service: only when enabled AND a multi-user mode
     # (oidc/local/ldap). The single-operator none/apikey/demo modes are

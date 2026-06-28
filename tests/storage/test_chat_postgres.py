@@ -200,6 +200,39 @@ async def test_message_id_reuse_across_threads_is_isolated(store) -> None:
 
 
 @pytest.mark.asyncio
+async def test_delete_message_is_composite_scoped_and_idempotent(store) -> None:
+    """The DELETE is scoped on the composite (thread_id, id): it removes
+    only the targeted row, leaves the same id living in another thread,
+    and a repeat delete of a gone row is a quiet no-op (the autosave
+    re-issue must not error)."""
+    await _save(store, "ct_a", owner="ua", created_at=1.0)
+    await _save(store, "ct_b", owner="ub", created_at=1.0)
+    await store.append_messages([
+        ChatMessage(id="cm_dup", thread_id="ct_a", role="assistant",
+                    content_markdown="A", created_at=1.0),
+        ChatMessage(id="cm_keep", thread_id="ct_a", role="user",
+                    content_markdown="keep", created_at=2.0),
+    ])
+    await store.append_messages([
+        ChatMessage(id="cm_dup", thread_id="ct_b", role="user",
+                    content_markdown="B", created_at=1.0)
+    ])
+
+    await store.delete_message("ct_a", "cm_dup")
+    # Gone only from ct_a; a sibling and the foreign-thread namesake remain.
+    a_page, _ = await store.list_messages_page("ct_a", limit=50, after=None)
+    assert [m.id for m in a_page] == ["cm_keep"]
+    b_page, _ = await store.list_messages_page("ct_b", limit=50, after=None)
+    assert [m.id for m in b_page] == ["cm_dup"]
+
+    # Idempotent: re-deleting the gone row and an unknown id both no-op.
+    await store.delete_message("ct_a", "cm_dup")
+    await store.delete_message("ct_a", "cm_never")
+    a_page, _ = await store.list_messages_page("ct_a", limit=50, after=None)
+    assert [m.id for m in a_page] == ["cm_keep"]
+
+
+@pytest.mark.asyncio
 async def test_group_delete_orphans_thread(store) -> None:
     """The FK ``ON DELETE SET NULL`` orphans a group's threads instead of
     deleting them."""

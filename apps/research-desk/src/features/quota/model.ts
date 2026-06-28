@@ -84,6 +84,47 @@ export function buildQuotaMeterModel(
   }
 }
 
+/** One picked dimension for the persistent rail usage footer (the quiet
+ * Database-style glance reused across Knowledge/Chat/Editor). Generic over the
+ * key so the caller's narrow dimension union survives into the result (the
+ * footer maps each key to a label/icon and must keep the narrow type). */
+export type FooterSection<K extends QuotaDimensionKey = QuotaDimensionKey> = {
+  dimension: K
+  used: number
+  limit: number | null
+  /** Flow-window start (unix seconds); ``0`` -> no month label. */
+  periodStart: number
+}
+
+/** Pick the requested dimensions out of the raw usage rows, in the caller's
+ * order, for the rail usage footer.
+ *
+ * Pure (no locale, no DOM): a missing row reads as ``used = 0`` /
+ * ``limit = null`` (unlimited), exactly like {@link buildQuotaMeterModel}, so
+ * the *content* of an empty account is well-defined. A failed LOAD is a
+ * separate concern the footer handles via ``state.status`` — it must NOT reuse
+ * this empty-rows path, or a failed fetch would masquerade as a healthy
+ * unlimited account (Designprinzip 1, No Silent Fallback). ``fraction`` /
+ * ``exhausted`` are deliberately NOT computed here: the bar's threshold/banding
+ * has a single owner downstream (the section primitive over
+ * {@link quotaBarFractionClass}/{@link quotaBarWidth}, Designprinzip 4).
+ */
+export function buildFooterSections<K extends QuotaDimensionKey>(
+  rows: readonly QuotaDimensionUsage[],
+  dimensions: readonly K[],
+): FooterSection<K>[] {
+  const byKey = new Map(rows.map((row) => [row.dimension, row]))
+  return dimensions.map((dimension): FooterSection<K> => {
+    const row = byKey.get(dimension)
+    return {
+      dimension,
+      limit: row?.limit ?? null,
+      periodStart: row?.period_start ?? 0,
+      used: row?.used ?? 0,
+    }
+  })
+}
+
 function thresholdFor(fraction: number | null): QuotaMeterThreshold {
   if (fraction == null) return 'unknown'
   if (fraction >= CRITICAL_AT) return 'critical'

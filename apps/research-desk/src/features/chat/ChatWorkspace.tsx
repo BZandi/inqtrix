@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   BookOpen,
   Bot,
+  BrainCircuit,
   Check,
   ChevronDown,
   ChevronRight,
@@ -11,18 +12,22 @@ import {
   Eraser,
   EyeOff,
   FileText,
+  GitBranchPlus,
   Library,
   ListChecks,
+  ListMinus,
   ListOrdered,
+  ListPlus,
+  MoreHorizontal,
   MessageSquareText,
   MessageSquarePlus,
   Paperclip,
   PencilLine,
   Plus,
+  RefreshCw,
   Save,
   SendHorizontal,
   SlidersHorizontal,
-  Square,
   Trash2,
   type LucideIcon,
   X,
@@ -37,9 +42,11 @@ import {
   useState,
   type FormEvent,
   type KeyboardEvent,
+  type ReactNode,
   type RefObject,
 } from 'react'
 import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer'
+import { MarkdownSelectionCopyMenu } from '@/components/markdown/MarkdownSelectionCopyMenu'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { WelcomeState } from '@/components/ui/welcome-state'
@@ -53,8 +60,17 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import {
+  assistantMenuContentClassName,
+  AssistantMenuHeader,
+  AssistantMenuIcon,
+  AssistantMenuLabel,
+} from '@/components/ui/assistant-menu'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -89,8 +105,13 @@ import {
   estimateTokensFromText,
   type ContextCategoryInput,
 } from '@/features/files/contextTokens'
-import { modelEffortLabelFromToken, modelNameLabel } from '@/features/researchRuns/modelLabels'
+import {
+  modelEffortLabelFromToken,
+  modelNameLabel,
+  modelTierLabel,
+} from '@/features/researchRuns/modelLabels'
 import { useLocale } from '@/i18n/LocaleProvider'
+import { formatMessageTimestamp } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
 import {
@@ -99,8 +120,9 @@ import {
   useTextImprovement,
   type TextImprovementApiOptions,
 } from '@/features/textImprove'
-import { PanelRail } from '@/components/ui/panel-rail'
+import { PanelToggle } from '@/components/ui/panel-toggle'
 import { ComposerIconButton, composerIconButtonClassName } from '@/features/composer/ComposerIconButton'
+import { ComposerStopButton } from '@/features/composer/ComposerStopButton'
 import { ChatHistoryPanel } from './history/ChatHistoryPanel'
 import type { ChatMessage, ChatThread } from './types'
 import { ContextChipLegend } from '@/features/composer/ContextChipLegend'
@@ -108,6 +130,7 @@ import { MentionComposer, type MentionComposerHandle } from '@/features/composer
 import { type LabelResolver } from '@/features/composer/mentionDoc'
 import { resizeTextareaToRows } from '@/features/composer/textareaAutosize'
 import { OptionMenuHeader, OptionMenuItem, optionMenuContentClassName } from '@/components/ui/option-menu'
+import type { ChatRetryMode, ChatRetryOptions } from './retry'
 
 type ChatWorkspaceProps = {
   activeAssistantMessageId: string | null
@@ -143,6 +166,12 @@ type ChatWorkspaceProps = {
   onDeleteThreadGroup: (groupId: string) => void
   onDeleteThread: (threadId: string) => void
   onEditMessage: (threadId: string, messageId: string, contentMarkdown: string) => void
+  onRetryAssistantMessage: (
+    threadId: string,
+    messageId: string,
+    mode: ChatRetryMode,
+    options?: ChatRetryOptions,
+  ) => void
   chainingEnabled: boolean
   onChainingEnabledChange: (enabled: boolean) => void
   onIncognitoChange: (enabled: boolean) => void
@@ -162,6 +191,7 @@ type ChatWorkspaceProps = {
     options?: ChatSendOptions,
   ) => void
   onSelectThread: (threadId: string) => void
+  onTogglePinnedThread: (threadId: string) => void
   onSelectedModelTierChange: (tier: ChatModelTier | null) => void
   chatModelCatalog?: ModelCatalogEntry[]
   selectedChatModel: string | null
@@ -178,6 +208,7 @@ type ChatWorkspaceProps = {
   onStreamingEnabledChange: (enabled: boolean) => void
   attachmentBudgetNotice: string | null
   pendingChips: ChatAttachmentChipModel[]
+  pinnedThreadIds: readonly string[]
   reduceMotion: boolean | null
   reportOptions: CompletedReportOption[]
   requestError: string | null
@@ -208,6 +239,8 @@ export type KnowledgeIndexOption = {
   title: string
 }
 
+const chatModelTierOrder: ChatModelTier[] = ['high', 'mid', 'fast']
+
 export default function ChatWorkspace({
   activeAssistantMessageId,
   chatModelOptions,
@@ -231,6 +264,7 @@ export default function ChatWorkspace({
   onDeleteThreadGroup,
   onDeleteThread,
   onEditMessage,
+  onRetryAssistantMessage,
   chainingEnabled,
   onChainingEnabledChange,
   onIncognitoChange,
@@ -246,6 +280,7 @@ export default function ChatWorkspace({
   pillKeys,
   onSendMessage,
   onSelectThread,
+  onTogglePinnedThread,
   onSelectedModelTierChange,
   chatModelCatalog = [],
   selectedChatModel,
@@ -267,6 +302,7 @@ export default function ChatWorkspace({
   fileOptions,
   attachmentBudgetNotice,
   pendingChips,
+  pinnedThreadIds,
   reduceMotion,
   reportOptions,
   requestError,
@@ -519,6 +555,15 @@ export default function ChatWorkspace({
     onBranchFromMessage(selectedThread.id, messageId)
   }
 
+  function retryAssistantMessage(
+    messageId: string,
+    mode: ChatRetryMode,
+    options?: ChatRetryOptions,
+  ) {
+    if (!selectedThread || isSending) return
+    onRetryAssistantMessage(selectedThread.id, messageId, mode, options)
+  }
+
   function answerLastUserMessage(messageId: string) {
     if (!selectedThread || isSending) return
     onAnswerLastUserMessage(selectedThread.id, messageId)
@@ -624,12 +669,13 @@ export default function ChatWorkspace({
       onCreateThreadGroup={onCreateThreadGroup}
       onDeleteThread={onDeleteThread}
       onDeleteThreadGroup={onDeleteThreadGroup}
-      onHide={isDesktop ? () => onHistoryVisibleChange(false) : undefined}
       onMoveThreadGroup={onMoveThreadGroup}
       onMoveThreadToGroup={onMoveThreadToGroup}
       onRenameThread={onRenameThread}
       onRenameThreadGroup={onRenameThreadGroup}
       onSelectThread={onSelectThread}
+      onTogglePinnedThread={onTogglePinnedThread}
+      pinnedThreadIds={pinnedThreadIds}
       reduceMotion={reduceMotion}
       runningThreadIds={runningThreadIds}
       selectedThreadId={selectedThread?.id ?? null}
@@ -639,10 +685,28 @@ export default function ChatWorkspace({
 
   const conversationPanel = (
         <section className="flex min-h-[620px] min-w-0 flex-col bg-background lg:h-full lg:min-h-0 lg:overflow-hidden">
-	          <div className="z-10 flex h-12 shrink-0 items-center justify-between gap-2 border-b border-border bg-background px-4 md:px-6">
+	          <div
+            className={cn(
+              'z-10 flex inqtrix-panel-header items-center justify-between gap-2 border-b border-border bg-background px-4 transition-colors md:px-6',
+              // Incognito makes a consequential state (nothing is saved) impossible
+              // to miss: the header inverts to the opposite-mode neutral surface.
+              // The treatment is token-scoped in globals.css, so title/icons/badge
+              // follow automatically.
+              isIncognito && 'inqtrix-chat-header--incognito',
+            )}
+          >
             <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+              {isDesktop && (
+                <PanelToggle
+                  collapseLabel={t.chat.hideHistory}
+                  expandLabel={t.chat.showHistory}
+                  expanded={isHistoryVisible}
+                  onToggle={onHistoryVisibleChange}
+                  side="left"
+                />
+              )}
               <MessageSquareText className="size-4 shrink-0 text-foreground/80" />
-              <div className="min-w-0 flex-1 overflow-hidden">
+              <div className="min-w-0 flex-1 overflow-hidden" title={selectedThread ? selectedThread.preview : undefined}>
                 <div className="flex min-w-0 items-center gap-2 overflow-hidden">
                   {isEditingTitle && selectedThread ? (
                     <input
@@ -684,12 +748,6 @@ export default function ChatWorkspace({
                     </Badge>
                   )}
                 </div>
-                <p
-                  className="max-w-md truncate t-meta-sm text-muted-foreground"
-                  title={selectedThread ? selectedThread.preview : undefined}
-                >
-                  {selectedThread ? selectedThread.preview : t.chat.empty}
-                </p>
               </div>
 	            </div>
 	            <div className="flex shrink-0 items-center gap-2">
@@ -840,10 +898,20 @@ export default function ChatWorkspace({
           >
 	            <div className="mx-auto flex min-h-full w-full max-w-5xl flex-col gap-5 px-4 py-6 md:px-8">
               {selectedThread && selectedThread.messages.length > 0 ? (
-                selectedThread.messages.map((message) => (
+                selectedThread.messages.map((message, index) => {
+                  const previousMessage = selectedThread.messages[index - 1]
+                  const canRetryAssistantMessage = !isSending
+                    && previousMessage?.role === 'user'
+                    && previousMessage.contentMarkdown.trim().length > 0
+                  return (
                   <ChatMessageBubble
                     canAnswerLastUserMessage={canAnswerLastUserMessage && message.id === lastMessage?.id}
                     canBranch={!isIncognito && !isSending}
+                    canRetryAssistantMessage={canRetryAssistantMessage}
+                    chatModelCatalog={chatModelCatalog}
+                    chatModelOptions={chatModelOptions}
+                    chatModelOptionsStatus={chatModelOptionsStatus}
+                    defaultChatModel={defaultChatModel}
                     editDraft={messageEditDraft}
                     editTextareaRef={messageEditTextareaRef}
                     editingMessageId={editingMessageId}
@@ -859,10 +927,15 @@ export default function ChatWorkspace({
                     onEdit={startMessageEdit}
                     onEditDraftChange={setMessageEditDraft}
                     onEditKeyDown={handleMessageEditKeyDown}
+                    onRetryAssistantMessage={retryAssistantMessage}
                     onToggleSelected={toggleSelectedMessage}
                     reduceMotion={reduceMotion}
+                    selectedChatEffort={selectedChatEffort}
+                    selectedChatModel={selectedChatModel}
+                    selectedModelTier={selectedModelTier}
                   />
-                ))
+                  )
+                })
               ) : selectedThread ? (
                 <EmptyChatState
                   subtitle={pendingChips.length > 0 ? t.chat.emptyWithContext : t.chat.emptyHint}
@@ -958,7 +1031,7 @@ export default function ChatWorkspace({
                     onChange={handleComposerChange}
                     onRefsChange={handleComposerRefsChange}
                     onSubmit={sendDraft}
-                    placeholder={t.chat.placeholder}
+                    placeholder={isIncognito ? t.chat.incognitoPlaceholder : t.chat.placeholder}
                     ref={composerRef}
                     resolveLabel={resolveMentionLabel}
                   />
@@ -1140,6 +1213,19 @@ export default function ChatWorkspace({
                       </DropdownMenuContent>
                     </DropdownMenu>
                   ) : null}
+                  <ModelTierPicker
+                    defaultModel={defaultChatModel}
+                    disabled={isSending}
+                    onChange={onSelectedModelTierChange}
+                    options={chatModelOptions}
+                    optionsStatus={chatModelOptionsStatus}
+                    selectedTier={selectedModelTier}
+                    modelCatalog={chatModelCatalog}
+                    selectedModel={selectedChatModel}
+                    selectedEffort={selectedChatEffort}
+                    onModelChange={onSelectedChatModelChange}
+                    onEffortChange={onSelectedChatEffortChange}
+                  />
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button
@@ -1167,19 +1253,6 @@ export default function ChatWorkspace({
                       </div>
                     </DropdownMenuContent>
                   </DropdownMenu>
-                  <ModelTierPicker
-                    defaultModel={defaultChatModel}
-                    disabled={isSending}
-                    onChange={onSelectedModelTierChange}
-                    options={chatModelOptions}
-                    optionsStatus={chatModelOptionsStatus}
-                    selectedTier={selectedModelTier}
-                    modelCatalog={chatModelCatalog}
-                    selectedModel={selectedChatModel}
-                    selectedEffort={selectedChatEffort}
-                    onModelChange={onSelectedChatModelChange}
-                    onEffortChange={onSelectedChatEffortChange}
-                  />
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
                     <QuotaMeter disabled={isSending} />
@@ -1189,16 +1262,10 @@ export default function ChatWorkspace({
                       model={contextTokenModel}
                     />
                     {isSending ? (
-                      <Button
-                        aria-label={t.chat.stopGenerating}
-                        className="size-7 rounded-md text-muted-foreground hover:bg-accent/70 hover:text-destructive focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0"
+                      <ComposerStopButton
+                        label={t.chat.stopGenerating}
                         onClick={onStopGenerating}
-                        size="icon"
-                        type="button"
-                        variant="ghost"
-                      >
-                        <Square className="size-4 fill-current" />
-                      </Button>
+                      />
                     ) : contextOverflow ? (
                       <DropdownMenu onOpenChange={setOverflowConfirmOpen} open={overflowConfirmOpen}>
                         <DropdownMenuTrigger asChild>
@@ -1315,11 +1382,6 @@ export default function ChatWorkspace({
           </ResizablePanelGroup>
         ) : (
           <div className="flex min-h-0 w-full overflow-hidden bg-background">
-            <PanelRail
-              label={t.chat.showHistory}
-              onExpand={() => onHistoryVisibleChange(true)}
-              side="left"
-            />
             <div className="min-h-0 min-w-0 flex-1 overflow-hidden">{conversationPanel}</div>
           </div>
         )
@@ -1428,13 +1490,16 @@ function ChatComposerToggleItem({
 }
 
 function ChatMessageModelChip({
+  modelCatalog,
   modelResolution,
 }: {
+  modelCatalog?: ModelCatalogEntry[]
   modelResolution: ChatMessage['modelResolution']
 }) {
   const { t } = useLocale()
   if (!modelResolution?.model) return null
-  const label = `${modelNameLabel(modelResolution, t.chat.modelUnknown)} · ${modelEffortLabelFromToken(modelResolution.effort, t.chat)}`
+  const label = chatMessageModelLabel(modelResolution, t.chat, modelCatalog)
+    ?? modelNameLabel(modelResolution, t.chat.modelUnknown)
   return (
     <span
       className="max-w-[min(42vw,16rem)] truncate rounded-md bg-muted/60 px-1.5 py-0.5 t-hint font-semibold text-muted-foreground"
@@ -1473,6 +1538,13 @@ function EmptyChatState({
   return (
     <div className="flex flex-1 items-center justify-center px-6 py-8 text-center">
       <WelcomeState
+        body={(
+          <>
+            <p>{t.chat.emptyBody}</p>
+            <p>{renderMentionHint(t.chat.emptyGuidance)}</p>
+          </>
+        )}
+        example={t.chat.emptyExample}
         kicker={t.chat.title}
         subtitle={renderMentionHint(subtitle)}
         title={title}
@@ -1484,6 +1556,11 @@ function EmptyChatState({
 function ChatMessageBubble({
   canAnswerLastUserMessage,
   canBranch,
+  canRetryAssistantMessage,
+  chatModelCatalog,
+  chatModelOptions,
+  chatModelOptionsStatus,
+  defaultChatModel,
   editDraft,
   editTextareaRef,
   editingMessageId,
@@ -1498,11 +1575,20 @@ function ChatMessageBubble({
   onEdit,
   onEditDraftChange,
   onEditKeyDown,
+  onRetryAssistantMessage,
   onToggleSelected,
   reduceMotion,
+  selectedChatEffort,
+  selectedChatModel,
+  selectedModelTier,
 }: {
   canAnswerLastUserMessage: boolean
   canBranch: boolean
+  canRetryAssistantMessage: boolean
+  chatModelCatalog: ModelCatalogEntry[]
+  chatModelOptions: ChatModelOption[]
+  chatModelOptionsStatus: 'available' | 'missing' | 'unresolved'
+  defaultChatModel: NodeModelResolution | null
   editDraft: string
   editTextareaRef: RefObject<HTMLTextAreaElement | null>
   editingMessageId: string | null
@@ -1517,10 +1603,14 @@ function ChatMessageBubble({
   onEdit: (message: ChatMessage) => void
   onEditDraftChange: (value: string) => void
   onEditKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void
+  onRetryAssistantMessage: (messageId: string, mode: ChatRetryMode, options?: ChatRetryOptions) => void
   onToggleSelected: (messageId: string) => void
   reduceMotion: boolean | null
+  selectedChatEffort: string | null
+  selectedChatModel: string | null
+  selectedModelTier: ChatModelTier | null
 }) {
-  const { t } = useLocale()
+  const { locale, t } = useLocale()
   const [copied, setCopied] = useState(false)
   const isUser = message.role === 'user'
   const isEditing = editingMessageId === message.id
@@ -1528,6 +1618,7 @@ function ChatMessageBubble({
   const canCopy = message.contentMarkdown.trim().length > 0
   const canContinueFromHere = !isUser && !isSelectionMode && canBranch && canCopy && !isStreaming
   const canGenerateAnswer = isUser && !isSelectionMode && canAnswerLastUserMessage && canCopy && !isStreaming && !isEditing
+  const timestampLabel = formatMessageTimestamp(message.createdAt, locale)
   const selectionLabel = isSelected ? t.chat.messageSelected : t.chat.selectMessage
   const selectionControl = isSelectionMode ? (
     <MessageSelectionControl
@@ -1571,39 +1662,24 @@ function ChatMessageBubble({
             <Icon className="size-4" />
           </span>
           <div className="min-w-0" aria-live={isStreaming ? 'polite' : undefined}>
-            <div className="mb-1 flex items-center gap-2 t-meta-sm font-semibold text-muted-foreground">
+            <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 t-meta-sm font-semibold text-muted-foreground">
               <span>{t.chat.assistant}</span>
-              <ChatMessageModelChip modelResolution={message.modelResolution} />
-              <span>{formatTime(message.createdAt)}</span>
+              <ChatMessageModelChip modelCatalog={chatModelCatalog} modelResolution={message.modelResolution} />
+              <span className="whitespace-nowrap tabular-nums">{timestampLabel}</span>
               {isSelectionMode && (
                 <MessageSelectionPill isSelected={isSelected} label={selectionLabel} />
-              )}
-              {!isSelectionMode && (
-                <MessageActionButton
-                  canCopy={canCopy}
-                  copied={copied}
-                  icon="copy"
-                  label={copied ? t.chat.copiedMessage : t.chat.copyMessage}
-                  onClick={() => void copyMessage()}
-                />
-              )}
-              {canContinueFromHere && (
-                <MessageActionButton
-                  icon="branch"
-                  label={t.chat.continueFromHere}
-                  onClick={() => onBranch(message.id)}
-                />
               )}
             </div>
             {message.chainTrace && message.chainTrace.length > 0 && (
               <ChatChainTrace steps={message.chainTrace} />
             )}
             {message.contentMarkdown ? (
-              <div
+              <MarkdownSelectionCopyMenu
                 className={cn(
                   'chat-markdown max-w-4xl text-sm leading-snug text-foreground',
                   isStreaming && !reduceMotion && 'animate-in fade-in-0 duration-200',
                 )}
+                markdown={message.contentMarkdown}
               >
                 <MarkdownRenderer
                   isStreaming={isStreaming}
@@ -1619,13 +1695,40 @@ function ChatMessageBubble({
                     )}
                   />
                 )}
-              </div>
+              </MarkdownSelectionCopyMenu>
             ) : (
               !(message.chainTrace && message.chainTrace.length > 0) && (
                 <GeneratingPlaceholder reduceMotion={reduceMotion} />
               )
             )}
             <ChatMessageAttachments attachments={message.attachments} />
+            {!isSelectionMode && (
+              <MessageActionRow align="start">
+                <MessageActionButton
+                  canCopy={canCopy}
+                  copied={copied}
+                  icon="copy"
+                  label={copied ? t.chat.copiedMessage : t.chat.copyMessage}
+                  onClick={() => void copyMessage()}
+                />
+                <AssistantMessageMenu
+                  canBranch={canContinueFromHere}
+                  canRetry={canRetryAssistantMessage && canCopy && !isStreaming}
+                  assistantModelLabel={chatMessageModelLabel(message.modelResolution, t.chat, chatModelCatalog)}
+                  chatModelCatalog={chatModelCatalog}
+                  chatModelOptions={chatModelOptions}
+                  chatModelOptionsStatus={chatModelOptionsStatus}
+                  defaultChatModel={defaultChatModel}
+                  messageId={message.id}
+                  onBranch={onBranch}
+                  onRetry={onRetryAssistantMessage}
+                  selectedChatEffort={selectedChatEffort}
+                  selectedChatModel={selectedChatModel}
+                  selectedModelTier={selectedModelTier}
+                  timestampLabel={timestampLabel}
+                />
+              </MessageActionRow>
+            )}
           </div>
         </div>
       </div>
@@ -1642,37 +1745,12 @@ function ChatMessageBubble({
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 justify-end">
             <div className="min-w-0 max-w-[min(72%,44rem)]">
-              <div className="mb-1 flex items-center justify-end gap-2 t-meta-sm font-semibold text-muted-foreground">
-                {!isSelectionMode && (
-                  <>
-                    <MessageActionButton
-                      canCopy={canCopy}
-                      copied={copied}
-                      icon="copy"
-                      label={copied ? t.chat.copiedMessage : t.chat.copyMessage}
-                      onClick={() => void copyMessage()}
-                    />
-                    {!isStreaming && (
-                      <MessageActionButton
-                        icon="edit"
-                        label={t.chat.editMessage}
-                        onClick={() => onEdit(message)}
-                      />
-                    )}
-                    {canGenerateAnswer && (
-                      <MessageActionButton
-                        icon="answer"
-                        label={t.chat.generateAnswer}
-                        onClick={() => onAnswerLastUserMessage(message.id)}
-                      />
-                    )}
-                  </>
-                )}
+              <div className="mb-1 flex flex-wrap items-center justify-end gap-x-2 gap-y-0.5 t-meta-sm font-semibold text-muted-foreground">
                 {isSelectionMode && (
                   <MessageSelectionPill isSelected={isSelected} label={selectionLabel} />
                 )}
                 <span>{t.chat.you}</span>
-                <span>{formatTime(message.createdAt)}</span>
+                <span className="whitespace-nowrap tabular-nums">{timestampLabel}</span>
               </div>
               <ChatMessageAttachments align="end" attachments={message.attachments} />
               {isEditing ? (
@@ -1685,14 +1763,39 @@ function ChatMessageBubble({
                   textareaRef={editTextareaRef}
                 />
               ) : (
-                <div className="rounded-lg border border-brand/25 bg-brand px-3 py-2.5 text-sm leading-6 text-primary-foreground shadow-[0_1px_2px_var(--shadow-hairline)]">
+                <div className="inqtrix-user-bubble rounded-lg px-3 py-2.5 text-sm leading-6 shadow-[0_1px_2px_var(--shadow-hairline)]">
                   {message.contentMarkdown}
                 </div>
+              )}
+              {!isSelectionMode && !isEditing && (
+                <MessageActionRow align="end">
+                  <MessageActionButton
+                    canCopy={canCopy}
+                    copied={copied}
+                    icon="copy"
+                    label={copied ? t.chat.copiedMessage : t.chat.copyMessage}
+                    onClick={() => void copyMessage()}
+                  />
+                  {!isStreaming && (
+                    <MessageActionButton
+                      icon="edit"
+                      label={t.chat.editMessage}
+                      onClick={() => onEdit(message)}
+                    />
+                  )}
+                  {canGenerateAnswer && (
+                    <MessageActionButton
+                      icon="answer"
+                      label={t.chat.generateAnswer}
+                      onClick={() => onAnswerLastUserMessage(message.id)}
+                    />
+                  )}
+                </MessageActionRow>
               )}
             </div>
           </div>
         </div>
-        <span className="mt-1 flex size-8 shrink-0 items-center justify-center rounded-md border border-brand/20 bg-brand-subtle text-brand">
+        <span className="inqtrix-user-avatar mt-1 flex size-8 shrink-0 items-center justify-center rounded-md border">
           <Icon className="size-4" />
         </span>
       </div>
@@ -1816,6 +1919,436 @@ function ChatMessageEditForm({
   )
 }
 
+function MessageActionRow({
+  align,
+  children,
+}: {
+  align: 'end' | 'start'
+  children: ReactNode
+}) {
+  return (
+    <div
+      className={cn(
+        'mt-1 flex min-h-6 items-center gap-1 text-muted-foreground',
+        align === 'end' ? 'justify-end' : 'justify-start',
+      )}
+    >
+      {children}
+    </div>
+  )
+}
+
+function retryModelLabel({
+  catalog,
+  defaultModel,
+  model,
+  options,
+  tier,
+  t,
+}: {
+  catalog: ModelCatalogEntry[]
+  defaultModel: NodeModelResolution | null
+  model: string | null
+  options: ChatModelOption[]
+  tier: ChatModelTier | null
+  t: ReturnType<typeof useLocale>['t']['chat']
+}) {
+  if (model) {
+    return modelDisplayName(model, catalog, model)
+  }
+  if (tier) {
+    const option = options.find((candidate) => candidate.tier === tier)
+    const label = option?.model
+      ? modelDisplayName(option.model, catalog, modelNameLabel(option, t.modelUnknown))
+      : modelNameLabel(option, t.modelUnknown)
+    return `${label} · ${modelTierLabel(tier, t)}`
+  }
+  const defaultLabel = defaultModel?.model
+    ? modelDisplayName(defaultModel.model, catalog, modelNameLabel(defaultModel, t.modelUnknown))
+    : modelNameLabel(defaultModel, t.modelUnknown)
+  return defaultModel?.model ? `${t.modelServerDefault} · ${defaultLabel}` : t.modelServerDefault
+}
+
+function modelDisplayName(
+  modelId: string,
+  modelCatalog: ModelCatalogEntry[],
+  fallback: string,
+) {
+  return modelCatalog.find((entry) => entry.model_id === modelId)?.card?.display_name ?? fallback
+}
+
+function chatMessageModelLabel(
+  modelResolution: ChatMessage['modelResolution'],
+  t: ReturnType<typeof useLocale>['t']['chat'],
+  modelCatalog: ModelCatalogEntry[] = [],
+) {
+  if (!modelResolution?.model) return null
+  const modelLabel = modelDisplayName(
+    modelResolution.model,
+    modelCatalog,
+    modelNameLabel(modelResolution, t.modelUnknown),
+  )
+  return `${modelLabel} · ${modelEffortLabelFromToken(modelResolution.effort, t)}`
+}
+
+function AssistantMessageMenu({
+  assistantModelLabel,
+  canBranch,
+  canRetry,
+  chatModelCatalog,
+  chatModelOptions,
+  chatModelOptionsStatus,
+  defaultChatModel,
+  messageId,
+  onBranch,
+  onRetry,
+  selectedChatEffort,
+  selectedChatModel,
+  selectedModelTier,
+  timestampLabel,
+}: {
+  assistantModelLabel: string | null
+  canBranch: boolean
+  canRetry: boolean
+  chatModelCatalog: ModelCatalogEntry[]
+  chatModelOptions: ChatModelOption[]
+  chatModelOptionsStatus: 'available' | 'missing' | 'unresolved'
+  defaultChatModel: NodeModelResolution | null
+  messageId: string
+  onBranch: (messageId: string) => void
+  onRetry: (messageId: string, mode: ChatRetryMode, options?: ChatRetryOptions) => void
+  selectedChatEffort: string | null
+  selectedChatModel: string | null
+  selectedModelTier: ChatModelTier | null
+  timestampLabel: string
+}) {
+  const { t } = useLocale()
+  const [retryModel, setRetryModel] = useState<string | null>(selectedChatModel)
+  const [retryTier, setRetryTier] = useState<ChatModelTier | null>(selectedModelTier)
+  const [retryEffort, setRetryEffort] = useState<string | null>(selectedChatEffort)
+
+  useEffect(() => {
+    setRetryModel(selectedChatModel)
+    setRetryTier(selectedModelTier)
+    setRetryEffort(selectedChatEffort)
+  }, [selectedChatEffort, selectedChatModel, selectedModelTier])
+
+  const retryOptions: ChatRetryOptions = {
+    effort: retryEffort,
+    model: retryModel,
+    modelTier: retryModel ? null : retryTier,
+  }
+  const modelLabel = retryModelLabel({
+    catalog: chatModelCatalog,
+    defaultModel: defaultChatModel,
+    model: retryModel,
+    options: chatModelOptions,
+    tier: retryTier,
+    t: t.chat,
+  })
+
+  function retry(mode: ChatRetryMode) {
+    if (!canRetry) return
+    onRetry(messageId, mode, retryOptions)
+  }
+
+  return (
+    <DropdownMenu modal={false}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>
+            <Button
+              aria-label={t.chat.messageOptions}
+              className="size-6 text-foreground/60 transition-colors hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0 data-[state=open]:bg-accent data-[state=open]:text-foreground"
+              onClick={(event) => event.stopPropagation()}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              <MoreHorizontal className="icon-sm" />
+            </Button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent>{t.chat.messageOptions}</TooltipContent>
+      </Tooltip>
+      <DropdownMenuContent
+        align="start"
+        className={assistantMenuContentClassName}
+        onClick={(event) => event.stopPropagation()}
+        side="top"
+        sideOffset={6}
+      >
+        <AssistantMenuHeader
+          primary={timestampLabel}
+          secondary={assistantModelLabel ? t.chat.usedModel(assistantModelLabel) : t.chat.modelUsedMissing}
+        />
+        <div className="p-1">
+          {canBranch && (
+            <DropdownMenuItem
+              className="group gap-2 rounded-md px-2 py-1.5"
+              onSelect={() => onBranch(messageId)}
+            >
+              <AssistantMenuIcon icon={GitBranchPlus} />
+              <AssistantMenuLabel>{t.chat.continueFromHere}</AssistantMenuLabel>
+            </DropdownMenuItem>
+          )}
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger
+              className="group gap-2 rounded-md px-2 py-1.5"
+              disabled={!canRetry}
+            >
+              <AssistantMenuIcon icon={RefreshCw} />
+              <AssistantMenuLabel>{t.chat.retryMessage}</AssistantMenuLabel>
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className={assistantMenuContentClassName}>
+              <AssistantMenuHeader
+                primary={assistantModelLabel ? t.chat.usedModel(assistantModelLabel) : t.chat.retryMessage}
+              />
+              <div className="p-1">
+                <RetryPresetItem icon={RefreshCw} label={t.chat.retryMessage} onSelect={() => retry('plain')} />
+                <RetryPresetItem icon={ListPlus} label={t.chat.retryAddDetails} onSelect={() => retry('details')} />
+                <RetryPresetItem icon={ListMinus} label={t.chat.retryShorter} onSelect={() => retry('shorter')} />
+              </div>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+          <DropdownMenuSeparator className="my-1" />
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger
+              className="group gap-2 rounded-md px-2 py-1.5"
+              disabled={!canRetry || (chatModelOptionsStatus !== 'available' && chatModelCatalog.length === 0)}
+            >
+              <AssistantMenuIcon icon={BrainCircuit} />
+              <AssistantMenuLabel>{t.chat.modelSwitch}</AssistantMenuLabel>
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent
+              className="flex max-h-[var(--radix-dropdown-menu-content-available-height)] w-72 max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg p-0 shadow-lg"
+              collisionPadding={12}
+              sideOffset={4}
+            >
+              <AssistantRetryModelMenu
+                catalog={chatModelCatalog}
+                defaultModel={defaultChatModel}
+                model={retryModel}
+                modelLabel={modelLabel}
+                onEffortChange={setRetryEffort}
+                onModelChange={(model) => {
+                  setRetryModel(model)
+                  setRetryTier(null)
+                  setRetryEffort(null)
+                }}
+                onTierChange={(tier) => {
+                  setRetryModel(null)
+                  setRetryTier(tier)
+                  setRetryEffort(null)
+                }}
+                options={chatModelOptions}
+                optionsStatus={chatModelOptionsStatus}
+                selectedEffort={retryEffort}
+                tier={retryTier}
+              />
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+function RetryPresetItem({
+  icon: Icon,
+  label,
+  onSelect,
+}: {
+  icon: LucideIcon
+  label: string
+  onSelect: () => void
+}) {
+  return (
+    <DropdownMenuItem className="group gap-2 rounded-md px-2 py-1.5" onSelect={onSelect}>
+      <AssistantMenuIcon icon={Icon} />
+      <AssistantMenuLabel>{label}</AssistantMenuLabel>
+    </DropdownMenuItem>
+  )
+}
+
+function AssistantRetryModelMenu({
+  catalog,
+  defaultModel,
+  model,
+  modelLabel,
+  onEffortChange,
+  onModelChange,
+  onTierChange,
+  options,
+  optionsStatus,
+  selectedEffort,
+  tier,
+}: {
+  catalog: ModelCatalogEntry[]
+  defaultModel: NodeModelResolution | null
+  model: string | null
+  modelLabel: string
+  onEffortChange: (effort: string | null) => void
+  onModelChange: (model: string | null) => void
+  onTierChange: (tier: ChatModelTier | null) => void
+  options: ChatModelOption[]
+  optionsStatus: 'available' | 'missing' | 'unresolved'
+  selectedEffort: string | null
+  tier: ChatModelTier | null
+}) {
+  const { t } = useLocale()
+  const catalogMode = catalog.length > 0
+  const selectedCatalogEntry = catalog.find((entry) => entry.model_id === model) ?? null
+  const effortLevels = selectedCatalogEntry?.card?.reasoning_levels ?? []
+  const defaultModelLabel = defaultModel?.model
+    ? modelDisplayName(defaultModel.model, catalog, modelNameLabel(defaultModel, t.chat.modelUnknown))
+    : t.chat.modelServerDefaultDescription
+  const modelCandidates = catalogMode
+    ? catalog.map((entry) => ({
+        active: model === entry.model_id,
+        key: `model:${entry.model_id}`,
+        label: entry.card?.display_name ?? entry.model_id,
+        onSelect: () => onModelChange(entry.model_id),
+      }))
+    : optionsStatus === 'available'
+      ? chatModelTierOrder.flatMap((candidateTier) => {
+          const option = options.find((item) => item.tier === candidateTier)
+          if (!option?.model) return []
+          return [{
+            active: model == null && tier === candidateTier,
+            key: `tier:${candidateTier}`,
+            label: modelDisplayName(option.model, catalog, modelNameLabel(option, t.chat.modelUnknown)),
+            onSelect: () => onTierChange(candidateTier),
+          }]
+        })
+      : []
+
+  return (
+    <>
+      <AssistantMenuHeader primary={t.chat.retryModelHeader} secondary={modelLabel} />
+      <div className="min-h-0 overflow-x-hidden overflow-y-auto p-1">
+        <RetryModelRow
+          active={model == null && tier == null}
+          label={t.chat.modelServerDefault}
+          secondaryLabel={defaultModelLabel}
+          onSelect={() => {
+            onModelChange(null)
+            onTierChange(null)
+            onEffortChange(null)
+          }}
+        />
+        {modelCandidates.length > 0 ? (
+          <>
+            <DropdownMenuSeparator className="mx-0 my-1" />
+            {modelCandidates.map((candidate) => (
+              <RetryModelRow
+                active={candidate.active}
+                key={candidate.key}
+                label={candidate.label}
+                onSelect={candidate.onSelect}
+              />
+            ))}
+          </>
+        ) : (
+          <DropdownMenuItem disabled className="w-full min-w-0 rounded-none px-2.5 py-2">
+            <span className="truncate text-muted-foreground">
+              {optionsStatus === 'unresolved' ? t.chat.modelMetadataMissing : t.chat.modelDiscoveryMissing}
+            </span>
+          </DropdownMenuItem>
+        )}
+      </div>
+      {effortLevels.length > 0 && (
+        <div className="border-t border-border bg-surface/40 px-2.5 py-1.5">
+          <div className="mb-1 t-caption text-muted-foreground/65">{t.chat.modelReasoningLabel}</div>
+          <div className="flex flex-wrap gap-1">
+            <RetryEffortButton
+              active={selectedEffort == null}
+              label={t.chat.modelEffortDefault}
+              onSelect={() => onEffortChange(null)}
+            />
+            {effortLevels.map((effort) => (
+              <RetryEffortButton
+                active={selectedEffort === effort}
+                key={effort}
+                label={effort}
+                onSelect={() => onEffortChange(effort)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
+function RetryModelRow({
+  active,
+  label,
+  onSelect,
+  secondaryLabel,
+}: {
+  active: boolean
+  label: string
+  onSelect: () => void
+  secondaryLabel?: string
+}) {
+  return (
+    <DropdownMenuItem
+      className={cn(
+        'group relative flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5',
+        active && 'bg-accent',
+      )}
+      onSelect={(event) => {
+        event.preventDefault()
+        onSelect()
+      }}
+    >
+      <BrainCircuit className={cn('icon-sm shrink-0', active ? 'text-brand' : 'text-foreground/80')} strokeWidth={2.35} />
+      <span className="flex min-w-0 flex-1 items-baseline gap-2">
+        <span className={cn('min-w-0 truncate t-list-regular text-foreground', active && 'font-semibold')}>
+          {label}
+        </span>
+        {secondaryLabel ? (
+          <span className="min-w-0 shrink truncate t-meta-sm text-muted-foreground">
+            {secondaryLabel}
+          </span>
+        ) : null}
+      </span>
+      <span className="flex size-4 shrink-0 items-center justify-center">
+        {active ? <Check className="size-3.5 text-brand" /> : null}
+      </span>
+    </DropdownMenuItem>
+  )
+}
+
+function RetryEffortButton({
+  active,
+  label,
+  onSelect,
+}: {
+  active: boolean
+  label: string
+  onSelect: () => void
+}) {
+  return (
+    <button
+      className={cn(
+        'h-7 rounded-md px-2 text-xs font-medium transition-colors',
+        active
+          ? 'bg-background text-foreground shadow-[0_1px_2px_var(--shadow-hairline)]'
+          : 'text-muted-foreground hover:bg-accent/70 hover:text-foreground',
+      )}
+      onClick={(event) => {
+        event.preventDefault()
+        onSelect()
+      }}
+      type="button"
+    >
+      {label}
+    </button>
+  )
+}
+
 function MessageActionButton({
   canCopy = true,
   copied = false,
@@ -1844,8 +2377,8 @@ function MessageActionButton({
         <Button
           aria-label={label}
           className={cn(
-            'size-6 text-foreground/65 opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/message:opacity-100',
-            copied && 'text-success opacity-100 hover:text-success',
+            'size-6 text-foreground/60 transition-colors hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0',
+            copied && 'text-success hover:text-success',
           )}
           disabled={!canCopy}
           onClick={(event) => {
@@ -1980,13 +2513,6 @@ function ChatMessageAttachments({
       })}
     </div>
   )
-}
-
-function formatTime(iso: string) {
-  return new Intl.DateTimeFormat('de-DE', {
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(iso))
 }
 
 function messageFromUnknown(error: unknown) {

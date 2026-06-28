@@ -17,6 +17,9 @@ _VALID_CONTRAST = frozenset({"standard", "high"})
 _VALID_LOCALE = frozenset({"de", "en"})
 _VALID_THEME = frozenset({"light", "dark", "system"})
 _VALID_PRESET = frozenset({"standard", "slate", "graphite", "sage"})
+_VALID_USER_BUBBLE_TONE = frozenset(
+    {"gray", "mint", "orange", "sky", "violet", "ink"}
+)
 
 
 class AccountPreferencesValidationError(ValueError):
@@ -42,7 +45,15 @@ class AccountPreferencesService:
         return await self._store.get_preferences(sub=sub)
 
     async def save_preferences(
-        self, *, sub, contrast_mode, locale, theme, theme_preset, updated_at
+        self,
+        *,
+        sub,
+        contrast_mode,
+        locale,
+        theme,
+        theme_preset,
+        user_bubble_tone,
+        updated_at,
     ) -> AccountPreferences:
         if contrast_mode not in _VALID_CONTRAST:
             raise AccountPreferencesValidationError(f"unknown contrast mode: {contrast_mode!r}")
@@ -52,7 +63,12 @@ class AccountPreferencesService:
             raise AccountPreferencesValidationError(f"unknown theme: {theme!r}")
         if theme_preset not in _VALID_PRESET:
             raise AccountPreferencesValidationError(f"unknown theme preset: {theme_preset!r}")
+        if user_bubble_tone not in _VALID_USER_BUBBLE_TONE:
+            raise AccountPreferencesValidationError(
+                f"unknown user bubble tone: {user_bubble_tone!r}"
+            )
         return await self._store.upsert_preferences(
             sub=sub, contrast_mode=contrast_mode, locale=locale, theme=theme,
-            theme_preset=theme_preset, updated_at=updated_at,
+            theme_preset=theme_preset, user_bubble_tone=user_bubble_tone,
+            updated_at=updated_at,
         )

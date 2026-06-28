@@ -25,6 +25,7 @@ class AccountPreferences:
         locale: ``de`` or ``en``.
         theme: ``light`` / ``dark`` / ``system``.
         theme_preset: ``standard`` / ``slate`` / ``graphite`` / ``sage``.
+        user_bubble_tone: User-message bubble tone selected in the desk UI.
         updated_at: Unix timestamp of the last save.
         tenant_id: The tenant scope (RLS).
     """
@@ -35,6 +36,7 @@ class AccountPreferences:
     theme: str
     theme_preset: str
     updated_at: float
+    user_bubble_tone: str = "gray"
     tenant_id: str = "default"
 
 
@@ -54,6 +56,7 @@ class AccountPreferencesStore(Protocol):
         locale: str,
         theme: str,
         theme_preset: str,
+        user_bubble_tone: str,
         updated_at: float,
     ) -> AccountPreferences:
         """Insert or replace the user's preferences row (whole-row upsert)."""

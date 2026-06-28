@@ -446,7 +446,7 @@ def test_deep_profile_first_round_queries_minimum():
     """Phase 13: DEEP profile must seed the first round with at least 10 queries.
 
     Rationale: when an over-confident evaluator stops the loop after Round 0
-    (e.g. GPT-4.1 reaching confidence_stop=9 immediately), Round 0 is the
+    (e.g. GPT-4.1 reaching confidence_stop=8 immediately), Round 0 is the
     ONLY chance to broaden the source pool. The previous default of 8
     queries left the answer with ~11 unique domains; 10 lifts it to ~14-15
     without exceeding sensible parallelization.

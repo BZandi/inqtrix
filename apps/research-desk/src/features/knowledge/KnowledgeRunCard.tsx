@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   ChevronDown,
   Sparkles,
+  Square,
 } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -15,7 +16,7 @@ import { KnowledgeStepList } from './KnowledgeStepList'
 import { knowledgeRunFacts, knowledgeRunHeaderStatus } from './knowledgeRunHeader'
 
 /**
- * Live surface for one running (or failed) knowledge ask. In the composer dock
+ * Live surface for one running or terminal knowledge ask. In the composer dock
  * it is intentionally text-first: the step ledger is the trust surface, while
  * facts stay as compact inline metadata.
  */
@@ -32,8 +33,10 @@ export function KnowledgeRunCard({
   const { t } = useLocale()
   const reduceMotion = Boolean(useReducedMotion())
   const failed = item.status === 'failed'
+  const cancelled = item.status === 'cancelled'
+  const terminal = failed || cancelled
   const isDock = presentation === 'dock'
-  const [isExpanded, setIsExpanded] = useState(isDock || failed)
+  const [isExpanded, setIsExpanded] = useState(isDock || terminal)
   const steps = item.progress.steps
   const activeStep = steps.find((step) => step.status === 'running') ?? steps[steps.length - 1] ?? null
   const activeStatus = knowledgeRunHeaderStatus({
@@ -52,7 +55,7 @@ export function KnowledgeRunCard({
         isDock
           ? 'inqtrix-rag-island rounded-b-none rounded-t-xl border-b-0 border-brand/25 px-3 pb-3 pt-3 shadow-[0_18px_42px_-28px_var(--brand)] md:px-4'
           : 'rounded-lg border-border p-4',
-        failed && 'border-destructive/35',
+        terminal && 'border-destructive/35',
       )}
       initial={reduceMotion ? false : {
         clipPath: isDock ? 'inset(18% 0% 0% 0%)' : 'inset(0% 0% 0% 0%)',
@@ -64,15 +67,15 @@ export function KnowledgeRunCard({
       transition={appMotion.card}
     >
       <div className="relative z-10 flex min-w-0 items-start gap-3">
-        <LiveGlyph failed={failed} reduceMotion={reduceMotion} />
+        <LiveGlyph cancelled={cancelled} failed={failed} reduceMotion={reduceMotion} />
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 flex-col gap-2 md:flex-row md:items-start md:justify-between">
             <div className="min-w-0">
               <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                <h3 className={cn('truncate t-section', failed ? 'text-destructive' : 'text-foreground')}>
-                  {failed ? t.knowledge.runFailed : t.knowledge.runTitle}
+                <h3 className={cn('truncate t-section', terminal ? 'text-destructive' : 'text-foreground')}>
+                  {cancelled ? t.knowledge.runCancelled : failed ? t.knowledge.runFailed : t.knowledge.runTitle}
                 </h3>
-                {!failed && (
+                {!terminal && (
                   <span className="inline-flex shrink-0 items-center gap-1 t-hint font-semibold text-brand">
                     <span
                       aria-hidden="true"
@@ -167,16 +170,18 @@ export function KnowledgeRunCard({
 }
 
 function LiveGlyph({
+  cancelled,
   failed,
   reduceMotion,
 }: {
+  cancelled: boolean
   failed: boolean
   reduceMotion: boolean
 }) {
-  if (failed) {
+  if (failed || cancelled) {
     return (
       <span className="grid size-8 shrink-0 place-items-center rounded-full border border-destructive/30 bg-background text-destructive">
-        <AlertTriangle className="size-4" />
+        {cancelled ? <Square className="size-3 fill-current" /> : <AlertTriangle className="size-4" />}
       </span>
     )
   }

@@ -40,8 +40,8 @@ class TestAgentConfig:
     def test_defaults(self):
         cfg = AgentConfig()
         assert cfg.report_profile == ReportProfile.COMPACT
-        assert cfg.max_rounds == 4
-        assert cfg.confidence_stop == 8
+        assert cfg.max_rounds == 2
+        assert cfg.confidence_stop == 7
         assert cfg.answer_prompt_citations_max == 60
         assert cfg.max_total_seconds == 300
         assert cfg.llm is None
@@ -357,14 +357,14 @@ class TestResearchResult:
 class TestResearchAgentConstruction:
     def test_default_config(self):
         agent = ResearchAgent()
-        assert agent.config.max_rounds == 4
+        assert agent.config.max_rounds == 2
 
     def test_direct_agent_settings_apply_report_profile_defaults(self):
         settings = AgentSettings(report_profile=ReportProfile.DEEP)
 
-        assert settings.max_rounds == 5
+        assert settings.max_rounds == 4
         assert settings.min_rounds == 2
-        assert settings.confidence_stop == 9
+        assert settings.confidence_stop == 8
         assert settings.first_round_queries == 10
         assert settings.answer_prompt_citations_max == 500
 
@@ -380,7 +380,7 @@ class TestResearchAgentConstruction:
         assert settings.report_profile == ReportProfile.DEEP
         assert settings.first_round_queries == 14
         assert settings.max_rounds == 7
-        assert settings.confidence_stop == 9
+        assert settings.confidence_stop == 8
 
     def test_default_initialisation_reads_dotenv(self, tmp_path, monkeypatch):
         import inqtrix.providers as providers_module

@@ -17,7 +17,6 @@ import {
   useLayoutEffect,
   useRef,
   useState,
-  type ReactNode,
   type SetStateAction,
   type FormEvent,
   type KeyboardEvent,
@@ -33,6 +32,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { OptionMenuHeader, OptionMenuItem, optionMenuContentClassName } from '@/components/ui/option-menu'
+import { StatusRow, SummaryGroup } from '@/components/ui/status-summary'
 import { Separator } from '@/components/ui/separator'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -54,7 +54,7 @@ type ComposerProps = {
 
 export type ComposerFormState = {
   confidenceStop: 7 | 8 | 9
-  firstRoundQueries: 4 | 6 | 8
+  firstRoundQueries: 4 | 6 | 8 | 10
   maxRounds: 2 | 3 | 4 | 5
   minRounds: 1 | 2
   question: string
@@ -62,13 +62,41 @@ export type ComposerFormState = {
   webSearch: boolean
 }
 
+type ComposerReportProfilePreset = Pick<
+  ComposerFormState,
+  'confidenceStop' | 'firstRoundQueries' | 'maxRounds' | 'minRounds' | 'reportProfile'
+>
+
+export const composerReportProfilePresets: Record<ComposerFormState['reportProfile'], ComposerReportProfilePreset> = {
+  compact: {
+    confidenceStop: 7,
+    firstRoundQueries: 6,
+    maxRounds: 2,
+    minRounds: 1,
+    reportProfile: 'compact',
+  },
+  deep: {
+    confidenceStop: 8,
+    firstRoundQueries: 10,
+    maxRounds: 4,
+    minRounds: 2,
+    reportProfile: 'deep',
+  },
+}
+
+export function applyComposerReportProfilePreset(
+  currentForm: ComposerFormState,
+  reportProfile: ComposerFormState['reportProfile'],
+): ComposerFormState {
+  return {
+    ...currentForm,
+    ...composerReportProfilePresets[reportProfile],
+  }
+}
+
 export const defaultComposerFormState: ComposerFormState = {
-  confidenceStop: 8,
-  firstRoundQueries: 6,
-  maxRounds: 4,
-  minRounds: 2,
+  ...composerReportProfilePresets.deep,
   question: '',
-  reportProfile: 'deep',
   webSearch: true,
 }
 
@@ -173,6 +201,11 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
       label: '8',
       value: '8',
     },
+    {
+      description: t.composer.optionQueries10Description,
+      label: '10',
+      value: '10',
+    },
   ]
   const maxRoundOptions: ComposerOption[] = [
     {
@@ -275,12 +308,13 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
                 label={t.composer.reportProfile}
                 menuKey="report"
                 onOpenMenuChange={setOpenMenu}
-                onValueChange={(value) => setForm((currentForm) => ({
-                  ...currentForm,
-                  reportProfile: value as ComposerFormState['reportProfile'],
-                }))}
+                onValueChange={(value) => setForm((currentForm) => applyComposerReportProfilePreset(
+                  currentForm,
+                  value as ComposerFormState['reportProfile'],
+                ))}
                 openMenu={openMenu}
                 options={reportProfileOptions}
+                showValue
                 value={form.reportProfile}
               />
               <ComposerParameterMenu
@@ -326,20 +360,6 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
                 options={maxRoundOptions}
                 value={String(form.maxRounds)}
               />
-            </div>
-            <div className="flex shrink-0 items-center gap-1">
-              <QuotaMeter />
-              <ComposerStatusMenu
-                confidenceStop={form.confidenceStop}
-                firstRoundQueries={form.firstRoundQueries}
-                maxRounds={form.maxRounds}
-                minRounds={form.minRounds}
-                onOpenMenuChange={setOpenMenu}
-                openMenu={openMenu}
-                reportProfile={form.reportProfile}
-                selectedStack={selectedStack}
-                webSearch={form.webSearch}
-              />
               <DropdownMenu
                 modal={false}
                 onOpenChange={(isOpen) => setOpenMenu(isOpen ? 'more' : null)}
@@ -367,7 +387,7 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
                   </DropdownMenuTrigger>
                   <TooltipContent>{t.composer.moreSettings}</TooltipContent>
                 </Tooltip>
-                <DropdownMenuContent align="end" className={optionMenuContentClassName} side="top" sideOffset={8}>
+                <DropdownMenuContent align="start" className={optionMenuContentClassName} side="top" sideOffset={8}>
                   <OptionMenuHeader count={2} title={t.composer.moreSettings} />
                   <div className="py-1">
                     <ComposerMenuToggle
@@ -422,6 +442,20 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
                   </div>
                 </DropdownMenuContent>
               </DropdownMenu>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <QuotaMeter />
+              <ComposerStatusMenu
+                confidenceStop={form.confidenceStop}
+                firstRoundQueries={form.firstRoundQueries}
+                maxRounds={form.maxRounds}
+                minRounds={form.minRounds}
+                onOpenMenuChange={setOpenMenu}
+                openMenu={openMenu}
+                reportProfile={form.reportProfile}
+                selectedStack={selectedStack}
+                webSearch={form.webSearch}
+              />
               <Button
                 aria-label={t.composer.send}
                 className={cn(
@@ -525,41 +559,6 @@ function ComposerStatusMenu({
   )
 }
 
-function SummaryGroup({ children, label }: { children: ReactNode; label: string }) {
-  return (
-    <div>
-      <div className="px-2.5 pb-0.5 pt-1.5 t-caption text-muted-foreground/60">{label}</div>
-      <div className="grid gap-0.5">{children}</div>
-    </div>
-  )
-}
-
-function StatusRow({
-  label,
-  tone = 'default',
-  value,
-}: {
-  label: string
-  tone?: 'default' | 'muted' | 'success'
-  value: string
-}) {
-  return (
-    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-2.5 py-1">
-      <span className="truncate t-meta-sm text-muted-foreground">{label}</span>
-      <span
-        className={cn(
-          'max-w-36 truncate rounded-md px-1.5 py-0.5 text-right t-meta-sm font-medium',
-          tone === 'success' && 'bg-success-subtle text-success',
-          tone === 'muted' && 'bg-surface text-muted-foreground',
-          tone === 'default' && 'bg-background text-foreground',
-        )}
-      >
-        {value}
-      </span>
-    </div>
-  )
-}
-
 function ComposerMenuToggle({
   checked,
   description,
@@ -624,6 +623,7 @@ function ComposerParameterMenu({
   onValueChange,
   openMenu,
   options,
+  showValue = false,
   value,
 }: {
   icon: LucideIcon
@@ -633,6 +633,7 @@ function ComposerParameterMenu({
   onValueChange: (value: string) => void
   openMenu: ComposerMenuKey | null
   options: ComposerOption[]
+  showValue?: boolean
   value: string
 }) {
   const selectedOption = options.find((option) => option.value === value)
@@ -650,7 +651,10 @@ function ComposerParameterMenu({
           <DropdownMenuTrigger asChild>
             <Button
               aria-label={triggerLabel}
-              className={cn(composerIconButtonClassName, 'w-10 gap-0.5 px-1')}
+              className={cn(
+                composerIconButtonClassName,
+                showValue ? 'w-auto gap-1 px-1.5' : 'w-10 gap-0.5 px-1',
+              )}
               onPointerDown={(event) => {
                 if (openMenu === menuKey) return
 
@@ -662,7 +666,11 @@ function ComposerParameterMenu({
               variant="ghost"
             >
               <Icon className="size-3.5 shrink-0" />
-              <span className="sr-only">{valueLabel}</span>
+              {showValue ? (
+                <span className="max-w-20 truncate text-xs">{valueLabel}</span>
+              ) : (
+                <span className="sr-only">{valueLabel}</span>
+              )}
             </Button>
           </DropdownMenuTrigger>
         </TooltipTrigger>

@@ -28,7 +28,8 @@ if TYPE_CHECKING:
 def _payload(p: AccountPreferences) -> dict[str, Any]:
     return {
         "contrast_mode": p.contrast_mode, "locale": p.locale, "theme": p.theme,
-        "theme_preset": p.theme_preset, "updated_at": p.updated_at,
+        "theme_preset": p.theme_preset, "user_bubble_tone": p.user_bubble_tone,
+        "updated_at": p.updated_at,
     }
 
 
@@ -60,6 +61,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 locale=str(body.get("locale", "en")),
                 theme=str(body.get("theme", "system")),
                 theme_preset=str(body.get("theme_preset", "standard")),
+                user_bubble_tone=str(body.get("user_bubble_tone", "gray")),
                 updated_at=float(body["updated_at"]),
             )
         except AccountPreferencesValidationError as exc:

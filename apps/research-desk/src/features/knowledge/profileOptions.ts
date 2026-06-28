@@ -13,6 +13,9 @@ export type KnowledgeProfileOption = {
   /** True for the delegating `auto` entry (no own stages). */
   isAuto: boolean
   delegatesTo: string[]
+  /** Multiplier on the request `top_k` for the effective `final_k` (1.0 unless
+   * the profile widens it, currently only `tief`). Defaults to 1. */
+  finalKFactor: number
   stages: {
     decompose: boolean
     gateRounds: number
@@ -41,6 +44,7 @@ export function knowledgeProfileOptionsFromManifest(
         delegatesTo: Array.isArray(entry.delegates_to)
           ? entry.delegates_to.filter((id): id is string => typeof id === 'string')
           : [],
+        finalKFactor: typeof entry.final_k_factor === 'number' ? entry.final_k_factor : 1,
         id: entry.id,
         isAuto,
         stages: entry.stages
@@ -55,4 +59,15 @@ export function knowledgeProfileOptionsFromManifest(
           : null,
       }
     })
+}
+
+export function resolveKnowledgeDefaultProfileId(
+  profileOptions: readonly KnowledgeProfileOption[],
+  serverDefaultProfileId: string | null | undefined,
+): string | null {
+  if (profileOptions.length === 0) return null
+  const ids = new Set(profileOptions.map((option) => option.id))
+  if (ids.has('tief')) return 'tief'
+  if (serverDefaultProfileId && ids.has(serverDefaultProfileId)) return serverDefaultProfileId
+  return profileOptions[0]?.id ?? null
 }

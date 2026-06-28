@@ -34,6 +34,7 @@ import type { Dispatch } from 'react'
 
 import {
   appendChatMessages,
+  deleteChatMessage,
   deleteChatThread,
   deleteChatThreadGroup,
   listChatMessages,
@@ -45,10 +46,12 @@ import {
 import {
   fingerprintThread,
   groupRecordFromServer,
+  messageIdsToDelete,
   messageRecordFromServer,
   serverGroupPayload,
   serverMessagePayload,
   serverThreadPayload,
+  shouldFetchMessageBaselineBeforePush,
   threadNeedsSync,
   threadRecordFromServer,
   type ThreadFingerprint,
@@ -136,6 +139,13 @@ export function useChatHistoryApi({
   // successful push, so the diff only writes genuinely-changed entities.
   const syncedThreadsRef = useRef(new Map<string, ThreadFingerprint>())
   const syncedGroupsRef = useRef(new Map<string, string>())
+  // The per-thread baseline of message ids the server is known to hold —
+  // the thread-fingerprint baseline extended to message granularity. The
+  // append push only upserts, so without this a locally-deleted message
+  // lingers on the server and a reload resurrects it; the push diffs this
+  // baseline against the current messages to delete the vanished ones by
+  // id. Seeded on load-on-open, advanced on every push, cleared on reset.
+  const syncedMessagesRef = useRef(new Map<string, Set<string>>())
   const loadedThreadsRef = useRef(new Set<string>())
   // The next-page cursor for on-demand thread loading; undefined = no more.
   const threadCursorRef = useRef<string | undefined>(undefined)
@@ -150,10 +160,55 @@ export function useChatHistoryApi({
 
   // -- pushing one entity (syncCollection advances the synced fingerprint) #
 
+  const fetchServerMessageIds = useCallback(async (threadId: string) => {
+    const ids = new Set<string>()
+    let cursor: string | undefined
+    do {
+      const page = await listChatMessages(threadId, {
+        ...optionsRef.current,
+        cursor,
+        limit: MESSAGE_PAGE_LIMIT,
+      })
+      for (const serverMessage of page.data) {
+        ids.add(serverMessage.id)
+      }
+      cursor = page.next_cursor ?? undefined
+    } while (cursor)
+    return ids
+  }, [])
+
+  const ensureMessageBaseline = useCallback(async (threadId: string) => {
+    const existing = syncedMessagesRef.current.get(threadId)
+    if (existing) return existing
+
+    const fetched = await fetchServerMessageIds(threadId)
+    const advancedWhileFetching = syncedMessagesRef.current.get(threadId)
+    if (advancedWhileFetching) {
+      const merged = new Set([...fetched, ...advancedWhileFetching])
+      syncedMessagesRef.current.set(threadId, merged)
+      return merged
+    }
+
+    syncedMessagesRef.current.set(threadId, fetched)
+    return fetched
+  }, [fetchServerMessageIds])
+
   const pushThread = useCallback(async (thread: ChatThreadRecord) => {
     const options = optionsRef.current
     const groupId = membershipsRef.current[thread.id] ?? null
     await saveChatThread(thread.id, serverThreadPayload(thread, groupId), options)
+    // Delete the messages that vanished locally before re-upserting the rest.
+    // The baseline is the only safe signal. For a local thread that already
+    // has messages but no loaded baseline, fetch the server ids first so a
+    // destructive local retry can delete the replaced answer/tail in the same
+    // push instead of letting old server-only messages resurrect on reload.
+    let known = syncedMessagesRef.current.get(thread.id)
+    if (shouldFetchMessageBaselineBeforePush(known, thread.messages)) {
+      known = await ensureMessageBaseline(thread.id)
+    }
+    for (const id of messageIdsToDelete(known, thread.messages)) {
+      await deleteChatMessage(thread.id, id, options)
+    }
     if (thread.messages.length > 0) {
       await appendChatMessages(
         thread.id,
@@ -161,7 +216,19 @@ export function useChatHistoryApi({
         options,
       )
     }
-  }, [])
+    // Advance the baseline to the now-synced set so the next push diffs
+    // against it. Only when the picture is definite: a known baseline, or a
+    // thread that actually pushed messages (a brand-new thread whose server
+    // set was empty). A metadata-only push of an un-opened thread (no
+    // baseline, no messages) must NOT seed an empty baseline — that would
+    // later read its un-fetched server messages as deletions.
+    if (known || thread.messages.length > 0) {
+      syncedMessagesRef.current.set(
+        thread.id,
+        new Set(thread.messages.map((message) => message.id)),
+      )
+    }
+  }, [ensureMessageBaseline])
 
   const pushGroup = useCallback(async (group: ChatThreadGroupRecord) => {
     await saveChatThreadGroup(
@@ -224,6 +291,7 @@ export function useChatHistoryApi({
     setHydrated(false)
     syncedThreadsRef.current.clear()
     syncedGroupsRef.current.clear()
+    syncedMessagesRef.current.clear()
     loadedThreadsRef.current.clear()
     threadCursorRef.current = undefined
     loadingMoreRef.current = false
@@ -330,6 +398,23 @@ export function useChatHistoryApi({
             type: 'upsertServerChatMessages',
           })
         }
+        // Seed the per-thread message baseline with the server set just
+        // fetched, UNIONED with any baseline a concurrent push already
+        // advanced (e.g. a message sent during this very first open). Both
+        // subsets are server-confirmed — the fetched ids by definition, a
+        // push-advanced baseline only after its append resolved — so the
+        // union can never invent a phantom id (no spurious delete), whereas
+        // a plain replace would clobber the pushed id and let a later delete
+        // of it be lost, resurrecting it on reload. An empty union still
+        // marks the thread as baseline-known.
+        const seededIds = syncedMessagesRef.current.get(selectedThreadId)
+        syncedMessagesRef.current.set(
+          selectedThreadId,
+          new Set([
+            ...(seededIds ?? []),
+            ...messages.map((message) => message.id),
+          ]),
+        )
         applied = true
         setError(null)
       } catch (caught) {

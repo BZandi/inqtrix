@@ -27,6 +27,8 @@ type LiveRunCallbacks = {
   onSummary: (summary: ResearchRunSummary, options?: { select?: boolean }) => void
 }
 
+type PerRunCallbacks = Partial<LiveRunCallbacks>
+
 type UseResearchRunApiOptions = LiveRunCallbacks & {
   apiKey?: string
   enabled: boolean
@@ -64,6 +66,7 @@ export function useResearchRunApi({
 }: UseResearchRunApiOptions) {
   const [lastError, setLastError] = useState<string | null>(null)
   const streamsRef = useRef(new Map<string, AbortController>())
+  const perRunCallbacksRef = useRef(new Map<string, PerRunCallbacks>())
   const callbacksRef = useRef<LiveRunCallbacks>({
     onEvent,
     onResult,
@@ -83,9 +86,13 @@ export function useResearchRunApi({
   const loadResult = useCallback(async (runId: string) => {
     try {
       const result = await fetchResearchRunResult(runId, { apiKey, workspaceId })
-      callbacksRef.current.onResult(result)
+      const callbacks = perRunCallbacksRef.current.get(runId) ?? callbacksRef.current
+      callbacks.onResult?.(result)
     } catch (error) {
-      callbacksRef.current.onRunError(runId, messageFromError(error))
+      const callbacks = perRunCallbacksRef.current.get(runId) ?? callbacksRef.current
+      callbacks.onRunError?.(runId, messageFromError(error))
+    } finally {
+      perRunCallbacksRef.current.delete(runId)
     }
   }, [apiKey, workspaceId])
 
@@ -94,6 +101,8 @@ export function useResearchRunApi({
     if (terminalStatus(summary.status)) {
       if (summary.status === 'completed') {
         void loadResult(summary.run_id)
+      } else {
+        perRunCallbacksRef.current.delete(summary.run_id)
       }
       return
     }
@@ -105,14 +114,19 @@ export function useResearchRunApi({
       signal: controller.signal,
       workspaceId,
       onEvent: (event) => {
-        callbacksRef.current.onEvent(event)
+        const callbacks = perRunCallbacksRef.current.get(event.run_id) ?? callbacksRef.current
+        callbacks.onEvent?.(event)
         if (event.type === 'inqtrix.run.completed') {
           void loadResult(event.run_id)
+        } else if (event.type === 'inqtrix.run.failed' || event.type === 'inqtrix.run.cancelled') {
+          perRunCallbacksRef.current.delete(event.run_id)
         }
       },
     }).catch((error) => {
       if (controller.signal.aborted) return
-      callbacksRef.current.onRunError(summary.run_id, messageFromError(error))
+      const callbacks = perRunCallbacksRef.current.get(summary.run_id) ?? callbacksRef.current
+      callbacks.onRunError?.(summary.run_id, messageFromError(error))
+      perRunCallbacksRef.current.delete(summary.run_id)
     }).finally(() => {
       streamsRef.current.delete(summary.run_id)
     })
@@ -128,12 +142,25 @@ export function useResearchRunApi({
        * starts, so callers can register run-id-keyed state without
        * racing the first SSE event. */
       onCreated?: (summary: ResearchRunSummary) => void
+      /** Per-run callback override for ephemeral surfaces such as incognito
+       * Knowledge asks. Omitted callbacks are intentionally not filled from the
+       * global store callbacks, so those runs stay out of persisted state. */
+      callbacks?: PerRunCallbacks
+      /** Prevent the accepted summary from entering the global run store. */
+      suppressSummary?: boolean
     },
   ): Promise<ResearchRunSummary | null> => {
     try {
       setLastError(null)
       const summary = await createResearchRun(request, { apiKey, workspaceId })
-      callbacksRef.current.onSummary(summary, { select: options?.select ?? true })
+      if (options?.callbacks) {
+        perRunCallbacksRef.current.set(summary.run_id, options.callbacks)
+      }
+      if (!options?.suppressSummary) {
+        callbacksRef.current.onSummary(summary, { select: options?.select ?? true })
+      } else {
+        options?.callbacks?.onSummary?.(summary, { select: options?.select ?? true })
+      }
       options?.onCreated?.(summary)
       startStream(summary)
       return summary
@@ -158,7 +185,7 @@ export function useResearchRunApi({
     }
   }, [apiKey, startStream, workspaceId])
 
-  const deleteRun = useCallback(async (runId: string) => {
+  const deleteRun = useCallback(async (runId: string, options?: { cancelIfActive?: boolean }) => {
     // Stop any live stream first, then delete durably on the server. The
     // caller removes it from local state only after this resolves, so a
     // failed delete never leaves the UI claiming a run is gone while the
@@ -168,6 +195,7 @@ export function useResearchRunApi({
       controller.abort()
       streamsRef.current.delete(runId)
     }
+    perRunCallbacksRef.current.delete(runId)
     try {
       setLastError(null)
       await deleteResearchRun(runId, { apiKey, workspaceId })
@@ -176,6 +204,21 @@ export function useResearchRunApi({
       // is idempotent success, not a failure to surface. Anything else (e.g.
       // 409 while still active) is a real error the caller must see.
       if (hasHttpStatus(error, 404)) return
+      if (options?.cancelIfActive && hasHttpStatus(error, 409)) {
+        try {
+          await cancelResearchRun(runId, { apiKey, workspaceId })
+        } catch (cancelError) {
+          if (!hasHttpStatus(cancelError, 404)) throw cancelError
+          return
+        }
+        try {
+          await deleteResearchRun(runId, { apiKey, workspaceId })
+          return
+        } catch (deleteError) {
+          if (hasHttpStatus(deleteError, 404)) return
+          throw deleteError
+        }
+      }
       const message = messageFromError(error)
       setLastError(message)
       throw new Error(message, { cause: error })
@@ -190,6 +233,7 @@ export function useResearchRunApi({
         controller.abort()
       }
       streamsRef.current.clear()
+      perRunCallbacksRef.current.clear()
       return undefined
     }
 
@@ -198,6 +242,7 @@ export function useResearchRunApi({
       controller.abort()
     }
     streamsRef.current.clear()
+    perRunCallbacksRef.current.clear()
 
     async function hydrate() {
       try {
@@ -225,6 +270,7 @@ export function useResearchRunApi({
         controller.abort()
       }
       streamsRef.current.clear()
+      perRunCallbacksRef.current.clear()
     }
   }, [])
 

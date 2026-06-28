@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { resolveVectorIndexesFromManifest } from './fileSystem'
+import { resolvePinnedExplorerFromManifest, resolveVectorIndexesFromManifest } from './fileSystem'
 import type { FileAssetRecord } from './types'
 
 function makeAsset(id: string): FileAssetRecord {
@@ -22,6 +22,43 @@ function makeAsset(id: string): FileAssetRecord {
     updatedAt: '2026-01-01T00:00:00.000Z',
   }
 }
+
+describe('resolvePinnedExplorerFromManifest', () => {
+  it('filters duplicate and stale pinned ids against known project ids', () => {
+    const result = resolvePinnedExplorerFromManifest({
+      chatThreadIds: ['ct-1', 'ct-1', 'missing'],
+      editorDocumentIds: ['doc-1', 42, 'missing'],
+      knowledgeSessionIds: ['ks-1', 'missing'],
+    }, {
+      chatThreadIds: ['ct-1'],
+      editorDocumentIds: ['doc-1'],
+      knowledgeSessionIds: ['ks-1'],
+    })
+
+    expect(result).toEqual({
+      chatThreadIds: ['ct-1'],
+      editorDocumentIds: ['doc-1'],
+      knowledgeSessionIds: ['ks-1'],
+    })
+  })
+
+  it('keeps knowledge pins when no valid server-session list is available yet', () => {
+    const result = resolvePinnedExplorerFromManifest({
+      chatThreadIds: ['missing'],
+      editorDocumentIds: ['missing'],
+      knowledgeSessionIds: ['ks-server'],
+    }, {
+      chatThreadIds: [],
+      editorDocumentIds: [],
+    })
+
+    expect(result).toEqual({
+      chatThreadIds: [],
+      editorDocumentIds: [],
+      knowledgeSessionIds: ['ks-server'],
+    })
+  })
+})
 
 describe('resolveVectorIndexesFromManifest', () => {
   const fileAssets: Record<string, FileAssetRecord> = { f1: makeAsset('f1'), f2: makeAsset('f2') }

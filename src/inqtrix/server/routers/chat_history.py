@@ -246,6 +246,26 @@ def build_router(container: "AppContainer") -> APIRouter:
             "data": [_message_payload(message) for message in stored],
         }
 
+    @router.delete(
+        "/v1/chat/threads/{thread_id}/messages/{message_id}", status_code=204
+    )
+    async def delete_message(
+        thread_id: str,
+        message_id: str,
+        req: Request,
+        visible_to: UserContext | None = Depends(user_context_dep),
+    ):
+        """Delete one message from a thread the caller may edit."""
+        try:
+            await service.delete_message(
+                thread_id,
+                message_id,
+                visible_to=visible_to,
+                request_workspace_id=workspace_id_from_request(req),
+            )
+        except ThreadNotFound:
+            return error_response(404, "Thread nicht gefunden", "not_found")
+
     # -- groups ----------------------------------------------------------- #
 
     @router.get("/v1/chat/thread-groups")

@@ -100,7 +100,7 @@ def create_template(client: TestClient, *, sub: str = OWNER) -> dict:
 
 
 def grant(client: TestClient, template_id: str, *, permission: str = "view"):
-    return client.post(
+    response = client.post(
         "/v1/shares",
         json={
             "resource_type": "prompt_template",
@@ -109,6 +109,17 @@ def grant(client: TestClient, template_id: str, *, permission: str = "view"):
         },
         headers=as_user(OWNER),
     )
+    # These tests assert post-acceptance access, so the recipient consents
+    # here. A re-grant carries consent forward (already-accepted -> 404), so
+    # both outcomes are valid; the pending/consent flow itself is pinned in
+    # tests/test_runs_sharing.py and tests/test_shares.py.
+    if response.status_code == 201:
+        share_id = response.json()["data"][0]["id"]
+        accepted = client.post(
+            f"/v1/shares/{share_id}/accept", headers=as_user(RECIPIENT)
+        )
+        assert accepted.status_code in (200, 404)
+    return response
 
 
 def seed_ownerless(container) -> str:

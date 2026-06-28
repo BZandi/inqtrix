@@ -1,7 +1,7 @@
 import { createIcon } from './createIcon'
 
 export type { IconProps, LucideIcon } from './createIcon'
-export { AlignCenter, AlignLeft, AlignRight, CalendarDays, FolderPlus, Gauge, SquarePen, WrapText, ZoomIn, ZoomOut } from 'lucide-react'
+export { AlignCenter, AlignLeft, AlignRight, BrainCircuit, CalendarDays, FolderPlus, Gauge, GitBranchPlus, ListMinus, ListPlus, ListTree, Pin, PinOff, RefreshCw, ScrollText, Share2, SquarePen, WrapText, ZoomIn, ZoomOut } from 'lucide-react'
 
 export const AlertTriangle = createIcon('AlertTriangle', 'lucide-alert-triangle', (
   <>
@@ -25,6 +25,15 @@ export const ArrowUpDown = createIcon('ArrowUpDown', 'lucide-arrow-up-down', (
     <path d="M17 20V4" />
     <path d="m3 8 4-4 4 4" />
     <path d="M7 4v16" />
+  </>
+))
+
+export const Coins = createIcon('Coins', 'lucide-coins', (
+  <>
+    <circle cx="8" cy="8" r="6" />
+    <path d="M18.09 10.37A6 6 0 1 1 10.34 18" />
+    <path d="M7 6h1v4" />
+    <path d="m16.71 13.88.7.71-2.82 2.82" />
   </>
 ))
 

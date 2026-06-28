@@ -29,6 +29,7 @@ import type {
   ChatMessageAttachmentRecord,
   ChatChainStepRecord,
   ChatMessageModelResolutionRecord,
+  ChatMessageRequestContextRecord,
   ChatMessageRecord,
   ChatRole,
   ChatThreadGroupRecord,
@@ -73,6 +74,7 @@ export function messageRecordFromServer(message: ServerChatMessage): ChatMessage
   const modelResolution = metadata.modelResolution as
     | ChatMessageModelResolutionRecord
     | undefined
+  const requestContext = messageRequestContextFromMetadata(metadata.requestContext)
   return {
     contentMarkdown: message.content_markdown,
     createdAt: isoFromUnixSeconds(message.created_at),
@@ -81,7 +83,18 @@ export function messageRecordFromServer(message: ServerChatMessage): ChatMessage
     ...(attachments ? { attachments } : {}),
     ...(chainTrace ? { chainTrace } : {}),
     ...(modelResolution ? { modelResolution } : {}),
+    ...(requestContext ? { requestContext } : {}),
   }
+}
+
+function messageRequestContextFromMetadata(value: unknown): ChatMessageRequestContextRecord | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const knowledgeCollectionIds = (value as { knowledgeCollectionIds?: unknown }).knowledgeCollectionIds
+  if (!Array.isArray(knowledgeCollectionIds)) return undefined
+  const ids = knowledgeCollectionIds.filter((id): id is string => (
+    typeof id === 'string' && id.trim().length > 0
+  ))
+  return ids.length > 0 ? { knowledgeCollectionIds: ids } : undefined
 }
 
 /** One server group -> its local record. */
@@ -129,6 +142,7 @@ export function serverMessagePayload(message: ChatMessageRecord): {
   if (message.attachments) metadata.attachments = message.attachments
   if (message.chainTrace) metadata.chainTrace = message.chainTrace
   if (message.modelResolution) metadata.modelResolution = message.modelResolution
+  if (message.requestContext) metadata.requestContext = message.requestContext
   return {
     content_markdown: message.contentMarkdown,
     created_at: unixSecondsFromIso(message.createdAt),
@@ -183,6 +197,43 @@ export function threadNeedsSync(
     previous.updatedAt !== current.updatedAt ||
     previous.groupId !== current.groupId
   )
+}
+
+/**
+ * Which message ids the server still holds but the local thread no longer
+ * does — the per-message counterpart to syncCollection's "synced minus
+ * current" delete detection, applied INSIDE a thread. The append push only
+ * upserts, so a locally-removed message survives on the server until it is
+ * deleted by id; this diff names exactly those ids.
+ *
+ * ``knownServerIds`` is the per-thread baseline the sync hook seeds on
+ * load-on-open and advances on every push. When it is ``undefined`` the
+ * server-side message set is unknown (a thread whose messages were never
+ * loaded — e.g. a metadata-only rename of an un-opened thread), so the
+ * function returns ``[]``: deleting against an unknown baseline would risk
+ * dropping messages the client simply has not fetched.
+ */
+export function messageIdsToDelete(
+  knownServerIds: ReadonlySet<string> | undefined,
+  currentMessages: readonly ChatMessageRecord[],
+): string[] {
+  if (knownServerIds === undefined) return []
+  const currentIds = new Set(currentMessages.map((message) => message.id))
+  return [...knownServerIds].filter((id) => !currentIds.has(id))
+}
+
+/**
+ * Whether a message push must first learn the server's current message ids.
+ *
+ * Unknown baseline + local messages is the destructive-retry danger zone:
+ * appending the local replacement without first fetching the server set would
+ * make old server-only tail messages invisible to delete detection.
+ */
+export function shouldFetchMessageBaselineBeforePush(
+  knownServerIds: ReadonlySet<string> | undefined,
+  currentMessages: readonly ChatMessageRecord[],
+): boolean {
+  return knownServerIds === undefined && currentMessages.length > 0
 }
 
 /** Push ALL of a local project's chat entities to the server (the one-time

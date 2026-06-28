@@ -15,6 +15,7 @@ from fastapi import APIRouter
 
 from inqtrix.embedding_cards import build_embedding_catalog
 from inqtrix.knowledge.profiles import (
+    EVIDENCE_K_MAX,
     KnowledgeProfile,
     build_profile_manifest,
 )
@@ -110,6 +111,9 @@ def build_router(container: "AppContainer") -> APIRouter:
                 context.contextualizer is not None
             )
             embeddings = context.embeddings
+            # The store's lexical-branch language is the single truth for both
+            # the normalized mode (bm25/off) and the language code.
+            sparse_language = getattr(context.store, "sparse_language", None)
             payload["knowledge"] = {
                 "default_embedding_model": embeddings.default_model,
                 "embedding_catalog": build_embedding_catalog(
@@ -117,6 +121,18 @@ def build_router(container: "AppContainer") -> APIRouter:
                     or [embeddings.default_model]
                 ),
                 "default_top_k": knowledge_service.knowledge.default_top_k,
+                # Hard ceiling on the FINAL evidence count (``final_k``), so a
+                # client can bound its ``final_k`` override field to the same
+                # cap the algorithm clamps to.
+                "evidence_k_max": EVIDENCE_K_MAX,
+                # Keyword (BM25) retrieval is language-bound and never
+                # cross-lingual; the cross-lingual lever is a multilingual
+                # cross-encoder reranker. Static facts so the UI can show the
+                # limitation honestly instead of silently expecting more.
+                "sparse_mode": "bm25" if sparse_language is not None else "off",
+                "sparse_language": sparse_language,
+                "sparse_multilingual": False,
+                "cross_lingual_recommendation": "reranker",
             }
             if container.knowledge_ceiling is not None:
                 # The SAME ceiling instance the algorithm runs against

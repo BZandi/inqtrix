@@ -8,7 +8,6 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
-import { seedQuotaUsage } from './demo'
 import {
   buildQuotaMeterModel,
   formatQuotaAmount,
@@ -19,8 +18,7 @@ import {
   type QuotaMeterDimension,
   type QuotaMeterThreshold,
 } from './model'
-import { useQuotaMeterGate } from './QuotaMeterContext'
-import { useQuotaUsage } from './useQuotaUsage'
+import { useQuotaMeterGate, useQuotaUsageData } from './QuotaMeterContext'
 
 type QuotaMeterProps = {
   disabled?: boolean
@@ -35,20 +33,12 @@ function thresholdTextClass(threshold: QuotaMeterThreshold): string {
 
 export function QuotaMeter({ disabled = false }: QuotaMeterProps) {
   const { t, locale } = useLocale()
-  const { enabled, demo } = useQuotaMeterGate()
-  const { state } = useQuotaUsage(enabled && !demo)
-  const now = useMemo(() => Math.floor(Date.now() / 1000), [])
-  // Memoised so the demo branch keeps a stable array identity (the model
-  // memo below would otherwise recompute every render).
-  const demoRows = useMemo(() => seedQuotaUsage(now), [now])
-  const rows = demo ? demoRows : state.rows
+  const { enabled } = useQuotaMeterGate()
+  const { rows, loadFailed } = useQuotaUsageData()
   const model = useMemo(() => buildQuotaMeterModel(rows), [rows])
 
   if (!enabled) return null
 
-  // A failed load must not masquerade as a genuinely empty/unlimited
-  // account (all-zero rows read identically); surface it instead.
-  const loadFailed = !demo && state.status === 'error'
   const labels: Record<QuotaDimensionKey, string> = {
     runs: t.quota.dimRuns,
     llm_tokens: t.quota.dimLlmTokens,

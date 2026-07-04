@@ -1,5 +1,5 @@
 import { type DragEvent } from 'react'
-import { Eye, Folder, Link, Sparkles, X } from '@/components/icons'
+import { Eye, Folder, Info, Link, Sparkles, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useLocale } from '@/i18n/LocaleProvider'
@@ -19,8 +19,7 @@ import {
 import { chunkEstimate, formatAddedAt, formatAddedAtFull, formatBytes, memberCellState, typeMeta } from './helpers'
 import { FILE_DRAG_TYPE } from './constants'
 
-export const LIBRARY_GRID = 'grid grid-cols-[minmax(0,1fr)_4.5rem_3rem_5rem_7rem_3.5rem_4rem] items-center gap-3'
-export const INDEX_GRID = 'grid grid-cols-[minmax(0,1fr)_4.5rem_7rem_5rem_7rem_minmax(6rem,9rem)_2.5rem] items-center gap-3'
+export const EXPLORER_GRID = 'grid grid-cols-[minmax(16rem,1fr)_4.5rem_5rem_5rem_7rem_minmax(6rem,9rem)_6.25rem] items-center gap-3'
 
 export type FileItemProps = {
   asset: FileAssetRecord
@@ -163,16 +162,107 @@ function AddedCell({ asset }: { asset: FileAssetRecord }) {
   )
 }
 
+function parserLabel(asset: FileAssetRecord, t: ReturnType<typeof useLocale>['t']): string {
+  if (asset.parsePending) return t.fileLibrary.parserRunning
+  if (asset.parserId === 'markitdown') return t.fileLibrary.parserMarkitdown
+  if (asset.parserId === 'client') return t.fileLibrary.parserClient
+  return t.fileLibrary.referencedNone
+}
+
+function fileHandle(asset: FileAssetRecord): string {
+  return `@files:${asset.label}`
+}
+
+function FileHandle({ asset }: { asset: FileAssetRecord }) {
+  const { t } = useLocale()
+  const handle = fileHandle(asset)
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="shrink-0 cursor-help t-mono text-muted-foreground/70 hover:text-foreground/80">@files:</span>
+      </TooltipTrigger>
+      <TooltipContent
+        className="max-w-[320px] border border-border bg-popover p-2.5 text-popover-foreground shadow-lg"
+        side="top"
+      >
+        <p className="truncate font-mono t-label text-foreground">{handle}</p>
+        <p className="mt-1 truncate t-meta-sm text-muted-foreground" title={asset.fileName}>
+          {asset.fileName}
+        </p>
+        <p className="mt-1.5 t-hint text-muted-foreground">{t.fileLibrary.handleTooltip}</p>
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+function FileDetails({
+  asset,
+  location,
+  mode,
+}: {
+  asset: FileAssetRecord
+  location?: string | null
+  mode: FileItemProps['mode']
+}) {
+  const { locale, t } = useLocale()
+  const meta = typeMeta(asset)
+  const detailRows: [string, string][] = [
+    [t.fileLibrary.detailHandle, fileHandle(asset)],
+    [t.fileLibrary.detailFileName, asset.fileName],
+    [t.fileLibrary.detailLocation, location || t.fileLibrary.referencedNone],
+    [t.fileLibrary.detailParser, parserLabel(asset, t)],
+    [
+      mode === 'index' ? t.fileLibrary.detailChunks : t.fileLibrary.columnPages,
+      mode === 'index'
+        ? chunkEstimate(asset).toLocaleString(locale)
+        : meta.paged && asset.pageCount != null
+          ? asset.pageCount.toLocaleString(locale)
+          : t.fileLibrary.noPages,
+    ],
+    [t.fileLibrary.columnSize, formatBytes(asset.sizeBytes, locale)],
+  ]
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex shrink-0 cursor-help items-center text-muted-foreground/70 hover:text-foreground">
+          <Info className="size-3.5" />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent
+        className="max-w-[320px] border border-border bg-popover p-2.5 text-popover-foreground shadow-lg"
+        side="top"
+      >
+        <p className="truncate t-label text-foreground">{asset.label}</p>
+        <div className="mt-2 grid gap-1.5">
+          {detailRows.map(([label, value]) => (
+            <div className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-2 t-meta-sm" key={label}>
+              <span className="text-muted-foreground">{label}</span>
+              <span className="min-w-0 truncate text-foreground" title={value}>{value}</span>
+            </div>
+          ))}
+          {asset.parseWarning ? (
+            <div className="border-t border-border/70 pt-1.5 t-meta-sm text-warning">
+              {asset.parseWarning}
+            </div>
+          ) : null}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
 function NameCell({
   asset,
   breadcrumb,
   mode,
   onRename,
+  source,
 }: {
   asset: FileAssetRecord
   breadcrumb?: string | null
   mode: FileItemProps['mode']
   onRename?: (fileId: string, label: string) => void
+  source?: string | null
 }) {
   const { t } = useLocale()
   const titleNode = onRename ? (
@@ -185,40 +275,22 @@ function NameCell({
   ) : (
     <span className="min-w-0 truncate t-list text-foreground">{asset.label}</span>
   )
-
-  const metaNode = (
-    <div className="flex min-w-0 items-center gap-1.5 t-meta-sm text-muted-foreground">
-      <span className="min-w-0 flex-1 truncate" title={asset.fileName}>{asset.fileName}</span>
-      {breadcrumb ? <span className="shrink-0 whitespace-nowrap text-muted-foreground/60">· {breadcrumb}</span> : null}
-    </div>
-  )
+  const location = breadcrumb || source || null
 
   return (
     <div className="flex min-w-0 items-center gap-2">
       <TypeTile asset={asset} size="sm" />
-      {mode === 'index' ? (
-        <div className="grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_7rem] items-start gap-x-2">
-          <div className="flex min-w-0 items-center gap-1.5">
-            <span className="shrink-0 t-mono text-muted-foreground/70">@files:</span>
-            {titleNode}
-            <StatusMark asset={asset} />
-          </div>
-          <div className="flex min-w-0 items-center justify-start">
-            <ParserBadge asset={asset} />
-          </div>
-          {metaNode}
+      <div className="grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_1.25rem] items-center gap-1.5">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <FileHandle asset={asset} />
+          {titleNode}
+          <StatusMark asset={asset} />
+          {asset.parsePending ? <ParserBadge asset={asset} /> : null}
         </div>
-      ) : (
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-1.5">
-            <span className="shrink-0 t-mono text-muted-foreground/70">@files:</span>
-            {titleNode}
-            <StatusMark asset={asset} />
-            <ParserBadge asset={asset} />
-          </div>
-          {metaNode}
-        </div>
-      )}
+        <span className="flex justify-center">
+          <FileDetails asset={asset} location={location} mode={mode} />
+        </span>
+      </div>
     </div>
   )
 }
@@ -324,16 +396,16 @@ export function FileRow(props: FileItemProps) {
   return (
     <div
       className={cn(
-        isIndex ? INDEX_GRID : LIBRARY_GRID,
-        'group rounded-md px-2 py-2 transition-colors hover:bg-accent/45',
+        EXPLORER_GRID,
+        'group min-h-9 rounded-md border-b border-border/45 px-2 py-1.5 transition-colors hover:bg-surface/55',
         !isIndex && 'cursor-grab active:cursor-grabbing',
       )}
       onClick={canPreview ? () => props.onPreview?.(asset.id) : undefined}
       {...dragHandlers(props)}
     >
-      <NameCell asset={asset} breadcrumb={breadcrumb} mode={mode} onRename={props.onRename} />
+      <NameCell asset={asset} breadcrumb={breadcrumb} mode={mode} onRename={props.onRename} source={source} />
       <div className="min-w-0"><TypeBadge asset={asset} /></div>
-      <div className="text-right t-meta tabular-nums text-muted-foreground">
+      <div className={cn('t-meta tabular-nums text-muted-foreground', isIndex ? 'flex justify-start' : 'text-right')}>
         {isIndex ? (
           <ChunkCell asset={asset} inRun={inRun} liveProgress={liveProgress} state={memberState ?? 'pending'} />
         ) : meta.paged && asset.pageCount != null ? (
@@ -353,7 +425,7 @@ export function FileRow(props: FileItemProps) {
         <div className="flex justify-end t-meta-sm"><UsedCell count={referenceCount ?? 0} /></div>
       )}
       <div
-        className="flex items-center justify-end gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100"
+        className="flex items-center justify-end gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100"
         onClick={(event) => event.stopPropagation()}
       >
         <RowActions {...props} />
@@ -383,7 +455,7 @@ export function FileCard(props: FileItemProps) {
           <TypeBadge asset={asset} />
         </div>
         <div
-          className="flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100"
+          className="flex items-center gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100"
           onClick={(event) => event.stopPropagation()}
         >
           <RowActions {...props} />

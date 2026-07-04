@@ -55,6 +55,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Chip } from '@/components/ui/chip'
+import { AnimatedFixedSidePanel } from '@/components/ui/animated-panel'
 import { PanelToggle } from '@/components/ui/panel-toggle'
 import { WelcomeState } from '@/components/ui/welcome-state'
 import { ComposerIconButton } from '@/features/composer/ComposerIconButton'
@@ -196,6 +197,9 @@ type EditorDocumentDropTarget = {
 }
 
 type EditorCopy = { [Key in keyof typeof editorCopy.de]: string }
+
+const EDITOR_TREE_PANEL_ID = 'editor-file-tree-panel'
+const EDITOR_COMMENTS_PANEL_ID = 'editor-comments-panel'
 
 const editorCopy = {
   de: {
@@ -708,7 +712,12 @@ export default function EditorWorkspace({
 
   return (
     <div className="flex h-[calc(100svh-var(--header-h))] min-w-0 bg-canvas text-foreground">
-      {state.editorUi.isTreeVisible && (
+      <AnimatedFixedSidePanel
+        controlsId={EDITOR_TREE_PANEL_ID}
+        expanded={state.editorUi.isTreeVisible}
+        expandedWidth="17.5rem"
+        side="left"
+      >
         <EditorFileTree
           activeDocumentId={activeDocument?.id ?? null}
           copy={copy}
@@ -723,7 +732,7 @@ export default function EditorWorkspace({
               : null
           }
         />
-      )}
+      </AnimatedFixedSidePanel>
       <main className="flex min-w-0 flex-1 flex-col border-r border-border bg-background">
         {activeDocument ? (
           <>
@@ -851,7 +860,12 @@ export default function EditorWorkspace({
           </div>
         )}
       </main>
-      {state.editorUi.isCommentPanelVisible && (
+      <AnimatedFixedSidePanel
+        controlsId={EDITOR_COMMENTS_PANEL_ID}
+        expanded={state.editorUi.isCommentPanelVisible}
+        expandedWidth="22rem"
+        side="right"
+      >
         <EditorCommentsPanel
           comments={comments}
           copy={copy}
@@ -867,7 +881,7 @@ export default function EditorWorkspace({
           selectedCommentId={state.editorUi.selectedCommentId}
           suggestions={documentSuggestions}
         />
-      )}
+      </AnimatedFixedSidePanel>
     </div>
   )
 }
@@ -1170,7 +1184,7 @@ function EditorFileTree({
   const ungroupedVisibleCount = visibleDocumentCount('__ungrouped__')
 
   return (
-    <aside className="flex w-[17.5rem] shrink-0 flex-col border-r border-border bg-surface">
+    <aside className="flex h-full w-full min-w-0 flex-col border-r border-border bg-surface">
       <div className="flex inqtrix-panel-header items-center justify-between border-b border-border px-3">
         <div className="flex min-w-0 items-center gap-2">
           <Folder className="size-4 text-muted-foreground" />
@@ -1692,6 +1706,7 @@ function EditorPanelToggle({
   return side === 'left' ? (
     <PanelToggle
       collapseLabel={copy.hideTree}
+      controlsId={EDITOR_TREE_PANEL_ID}
       expandLabel={copy.showTree}
       expanded={visible}
       onToggle={(next) => dispatch({ isVisible: next, type: 'setEditorTreeVisible' })}
@@ -1700,6 +1715,7 @@ function EditorPanelToggle({
   ) : (
     <PanelToggle
       collapseLabel={copy.hideAssistant}
+      controlsId={EDITOR_COMMENTS_PANEL_ID}
       expandLabel={copy.showAssistant}
       expanded={visible}
       onToggle={(next) => dispatch({ isVisible: next, type: 'setEditorCommentPanelVisible' })}
@@ -3206,7 +3222,7 @@ function EditorCommentsPanel({
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
 
   return (
-    <aside className="flex w-[22rem] shrink-0 flex-col bg-background">
+    <aside className="flex h-full w-full min-w-0 flex-col bg-background">
       <div className="flex inqtrix-panel-header items-center justify-between border-b border-border px-3">
         <div className="flex items-center gap-2">
           <MessageSquarePlus className="size-4 text-brand" />

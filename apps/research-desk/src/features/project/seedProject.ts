@@ -3,6 +3,7 @@ import { seedKnowledgeThreadItem } from '@/features/knowledge/demo'
 import { DEMO_SHARED_IN_RUN_ID, resetDemoShares } from '@/features/sharing/demoShares'
 import { parseChatRule, parseChatThread, parseResearchRun } from './markdown'
 import { DEFAULT_KNOWLEDGE_SESSION_ID, DEFAULT_KNOWLEDGE_SESSION_TITLE } from './knowledgeSessionDefaults'
+import { DEFAULT_PANEL_LAYOUT } from './panelLayout'
 import type {
   EditorCommentThreadRecord,
   EditorDocumentRecord,
@@ -34,6 +35,10 @@ const SEED_SECTION_LEGAL = 'file-section-legal'
 const SEED_SECTION_MARKET = 'file-section-market'
 const SEED_SECTION_OWN = 'file-section-own'
 const SEED_GROUP_EU_AI_ACT = 'file-group-eu-ai-act'
+const SEED_GROUP_PRIVACY = 'file-group-privacy-rights'
+const SEED_GROUP_STANDARDS = 'file-group-standards-security'
+const SEED_GROUP_CASE_LAW = 'file-group-case-law'
+const SEED_GROUP_SUPERVISION = 'file-group-supervision'
 
 const DEMO_CHAT_GROUP = 'chat-group-demos'
 const DEMO_KNOWLEDGE_SESSION_ID = 'knowledge-session-demo'
@@ -212,6 +217,7 @@ export function createEmptyProjectState(): ProjectState {
       isComposerVisible: true,
       isReportExpanded: false,
       isReportVisible: true,
+      panelLayout: DEFAULT_PANEL_LAYOUT,
       pendingChatAttachmentRefs: [],
       pendingChatReportRunId: null,
       pinnedExplorer: emptyPinnedExplorer,
@@ -371,6 +377,7 @@ export function createSeedProjectState(): ProjectState {
       isComposerVisible: true,
       isReportExpanded: false,
       isReportVisible: true,
+      panelLayout: DEFAULT_PANEL_LAYOUT,
       pendingChatAttachmentRefs: [],
       pendingChatReportRunId: null,
       pinnedExplorer: {
@@ -419,13 +426,11 @@ function seedFileLibrarySections(): FileLibrarySectionRecord[] {
 
 function seedFileGroups(): FileGroupRecord[] {
   return [
-    {
-      createdAt: seedCreatedAt,
-      id: SEED_GROUP_EU_AI_ACT,
-      sectionId: SEED_SECTION_LEGAL,
-      title: 'EU AI Act',
-      updatedAt: seedCreatedAt,
-    },
+    { createdAt: seedCreatedAt, id: SEED_GROUP_EU_AI_ACT, sectionId: SEED_SECTION_LEGAL, title: 'EU AI Act', updatedAt: seedCreatedAt },
+    { createdAt: seedCreatedAt, id: SEED_GROUP_PRIVACY, sectionId: SEED_SECTION_LEGAL, title: 'Datenschutz & Grundrechte', updatedAt: seedCreatedAt },
+    { createdAt: seedCreatedAt, id: SEED_GROUP_STANDARDS, sectionId: SEED_SECTION_LEGAL, title: 'Standards & Sicherheit', updatedAt: seedCreatedAt },
+    { createdAt: seedCreatedAt, id: SEED_GROUP_CASE_LAW, sectionId: SEED_SECTION_LEGAL, title: 'Rechtsprechung', updatedAt: seedCreatedAt },
+    { createdAt: seedCreatedAt, id: SEED_GROUP_SUPERVISION, sectionId: SEED_SECTION_LEGAL, title: 'Aufsicht & Umsetzung', updatedAt: seedCreatedAt },
   ]
 }
 
@@ -451,10 +456,84 @@ const MIME_DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingm
 const MIME_XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 const MIME_TXT = 'text/plain'
 
+type LegalDemoDocument = {
+  fileName: string
+  groupId: string | null
+  label: string
+  pageCount: number
+  sizeBytes: number
+}
+
+const LEGAL_DEMO_DOCUMENTS: LegalDemoDocument[] = [
+  { fileName: 'AI-Act-Umsetzungsleitfaden.pdf', groupId: SEED_GROUP_EU_AI_ACT, label: 'ai-act-umsetzung', pageCount: 31, sizeBytes: 714752 },
+  { fileName: 'AI-Act-Verbotene-Praktiken.pdf', groupId: SEED_GROUP_EU_AI_ACT, label: 'ai-act-verbote', pageCount: 18, sizeBytes: 428032 },
+  { fileName: 'AI-Act-Hochrisiko-Checkliste.pdf', groupId: SEED_GROUP_EU_AI_ACT, label: 'ai-act-hochrisiko', pageCount: 26, sizeBytes: 603136 },
+  { fileName: 'AI-Act-Konformitaetsbewertung.pdf', groupId: SEED_GROUP_EU_AI_ACT, label: 'konformitaetsbewertung', pageCount: 22, sizeBytes: 557056 },
+  { fileName: 'AI-Act-Transparenzpflichten.pdf', groupId: SEED_GROUP_EU_AI_ACT, label: 'transparenzpflichten', pageCount: 15, sizeBytes: 331776 },
+  { fileName: 'GPAI-Code-of-Practice.pdf', groupId: SEED_GROUP_EU_AI_ACT, label: 'gpai-code-practice', pageCount: 39, sizeBytes: 921600 },
+  { fileName: 'Systemic-Risk-Modelle.pdf', groupId: SEED_GROUP_EU_AI_ACT, label: 'systemic-risk-modelle', pageCount: 24, sizeBytes: 577536 },
+  { fileName: 'Provider-Deployer-Pflichten.pdf', groupId: SEED_GROUP_EU_AI_ACT, label: 'provider-deployer', pageCount: 21, sizeBytes: 512000 },
+  { fileName: 'Technische-Dokumentation-Template.pdf', groupId: SEED_GROUP_EU_AI_ACT, label: 'tech-doku-template', pageCount: 28, sizeBytes: 696320 },
+  { fileName: 'DSGVO-DPIA-KI-Systeme.pdf', groupId: SEED_GROUP_PRIVACY, label: 'dsgvo-dpia-ki', pageCount: 19, sizeBytes: 460800 },
+  { fileName: 'Besondere-Kategorien-Training.pdf', groupId: SEED_GROUP_PRIVACY, label: 'besondere-kategorien', pageCount: 14, sizeBytes: 320512 },
+  { fileName: 'EDPB-AI-Modelle-Notizen.pdf', groupId: SEED_GROUP_PRIVACY, label: 'edpb-ai-modelle', pageCount: 27, sizeBytes: 634880 },
+  { fileName: 'Automatisierte-Entscheidungen-Art-22.pdf', groupId: SEED_GROUP_PRIVACY, label: 'automatisierte-entscheidungen', pageCount: 16, sizeBytes: 376832 },
+  { fileName: 'Biometrische-Daten-Guidance.pdf', groupId: SEED_GROUP_PRIVACY, label: 'biometrische-daten', pageCount: 23, sizeBytes: 548864 },
+  { fileName: 'Fundamental-Rights-Impact-Assessment.pdf', groupId: SEED_GROUP_PRIVACY, label: 'fria-assessment', pageCount: 34, sizeBytes: 819200 },
+  { fileName: 'Datenminimierung-KI.pdf', groupId: SEED_GROUP_PRIVACY, label: 'datenminimierung-ki', pageCount: 11, sizeBytes: 245760 },
+  { fileName: 'Einwilligung-Beschaeftigtendaten.pdf', groupId: SEED_GROUP_PRIVACY, label: 'einwilligung-beschaeftigte', pageCount: 20, sizeBytes: 466944 },
+  { fileName: 'ISO-42001-AI-Management.pdf', groupId: SEED_GROUP_STANDARDS, label: 'iso-42001', pageCount: 30, sizeBytes: 704512 },
+  { fileName: 'ISO-23894-Risikomanagement.pdf', groupId: SEED_GROUP_STANDARDS, label: 'iso-23894', pageCount: 25, sizeBytes: 593920 },
+  { fileName: 'NIST-AI-RMF-Crosswalk.pdf', groupId: SEED_GROUP_STANDARDS, label: 'nist-ai-rmf', pageCount: 36, sizeBytes: 860160 },
+  { fileName: 'ENISA-AI-Cybersecurity.pdf', groupId: SEED_GROUP_STANDARDS, label: 'enisa-ai-security', pageCount: 29, sizeBytes: 688128 },
+  { fileName: 'Security-Logging-Standard.pdf', groupId: SEED_GROUP_STANDARDS, label: 'security-logging', pageCount: 12, sizeBytes: 282624 },
+  { fileName: 'Red-Teaming-Protokoll.pdf', groupId: SEED_GROUP_STANDARDS, label: 'red-teaming-protokoll', pageCount: 18, sizeBytes: 421888 },
+  { fileName: 'Datenqualitaet-Kontrollen.pdf', groupId: SEED_GROUP_STANDARDS, label: 'datenqualitaet-kontrollen', pageCount: 15, sizeBytes: 352256 },
+  { fileName: 'Audit-Trail-Anforderungen.pdf', groupId: SEED_GROUP_STANDARDS, label: 'audit-trail', pageCount: 10, sizeBytes: 235520 },
+  { fileName: 'EuGH-SCHUFA-Scoring.pdf', groupId: SEED_GROUP_CASE_LAW, label: 'eugh-schufa-scoring', pageCount: 18, sizeBytes: 430080 },
+  { fileName: 'EuGH-DSGVO-Schadensersatz.pdf', groupId: SEED_GROUP_CASE_LAW, label: 'eugh-dsgvo-schaden', pageCount: 16, sizeBytes: 393216 },
+  { fileName: 'BGH-KI-Haftung-Notizen.pdf', groupId: SEED_GROUP_CASE_LAW, label: 'bgh-ki-haftung', pageCount: 12, sizeBytes: 274432 },
+  { fileName: 'EuG-Plattformregulierung.pdf', groupId: SEED_GROUP_CASE_LAW, label: 'eug-plattformregulierung', pageCount: 21, sizeBytes: 503808 },
+  { fileName: 'Biometrie-Zugangskontrolle-Fallakte.pdf', groupId: SEED_GROUP_CASE_LAW, label: 'biometrie-fallakte', pageCount: 14, sizeBytes: 327680 },
+  { fileName: 'Employment-Screening-Case-Law.pdf', groupId: SEED_GROUP_CASE_LAW, label: 'employment-screening', pageCount: 17, sizeBytes: 401408 },
+  { fileName: 'Credit-Scoring-Rechtsprechung.pdf', groupId: SEED_GROUP_CASE_LAW, label: 'credit-scoring-cases', pageCount: 19, sizeBytes: 450560 },
+  { fileName: 'Public-Sector-AI-Case-Notes.pdf', groupId: SEED_GROUP_CASE_LAW, label: 'public-sector-cases', pageCount: 13, sizeBytes: 309248 },
+  { fileName: 'Software-Produkthaftung-KI.pdf', groupId: SEED_GROUP_CASE_LAW, label: 'software-produkthaftung', pageCount: 20, sizeBytes: 475136 },
+  { fileName: 'Commission-Implementation-Timeline.pdf', groupId: SEED_GROUP_SUPERVISION, label: 'implementation-timeline', pageCount: 11, sizeBytes: 253952 },
+  { fileName: 'Nationale-Aufsichtsbehoerden.pdf', groupId: SEED_GROUP_SUPERVISION, label: 'aufsichtsbehoerden', pageCount: 13, sizeBytes: 296960 },
+  { fileName: 'Sanktions-und-Bussgeldrahmen.pdf', groupId: SEED_GROUP_SUPERVISION, label: 'sanktionsrahmen', pageCount: 16, sizeBytes: 376832 },
+  { fileName: 'KI-Reallabore-Guidelines.pdf', groupId: SEED_GROUP_SUPERVISION, label: 'ki-reallabore', pageCount: 22, sizeBytes: 520192 },
+  { fileName: 'Incident-Reporting-Template.pdf', groupId: SEED_GROUP_SUPERVISION, label: 'incident-reporting', pageCount: 9, sizeBytes: 217088 },
+  { fileName: 'Post-Market-Monitoring.pdf', groupId: SEED_GROUP_SUPERVISION, label: 'post-market-monitoring', pageCount: 18, sizeBytes: 421888 },
+  { fileName: 'KI-Beschaffung-Vertragsklauseln.pdf', groupId: null, label: 'ki-beschaffung', pageCount: 12, sizeBytes: 286720 },
+  { fileName: 'Open-Source-Modelle-Briefing.pdf', groupId: null, label: 'open-source-modelle', pageCount: 14, sizeBytes: 335872 },
+  { fileName: 'Public-Sector-AI-Use.pdf', groupId: null, label: 'public-sector-ai', pageCount: 10, sizeBytes: 231424 },
+  { fileName: 'AI-Supply-Chain-Agreements.pdf', groupId: null, label: 'ai-supply-chain', pageCount: 17, sizeBytes: 397312 },
+  { fileName: 'Data-Retention-Policy-AI.pdf', groupId: null, label: 'data-retention-ai', pageCount: 9, sizeBytes: 212992 },
+  { fileName: 'Documentation-Gap-Analysis.pdf', groupId: null, label: 'documentation-gap', pageCount: 11, sizeBytes: 258048 },
+]
+
+function seedLegalDemoFileAssets(): FileAssetRecord[] {
+  return LEGAL_DEMO_DOCUMENTS.map((document) =>
+    seedFileAsset({
+      fileName: document.fileName,
+      groupId: document.groupId,
+      id: `file-asset-${document.label}`,
+      label: document.label,
+      mimeType: MIME_PDF,
+      pageCount: document.pageCount,
+      sectionId: SEED_SECTION_LEGAL,
+      sizeBytes: document.sizeBytes,
+      title: document.fileName,
+    }),
+  )
+}
+
 function seedFileAssets(): FileAssetRecord[] {
   return [
     seedFileAsset({
       fileName: 'BSI-Kriterienkatalog-KI.pdf',
+      groupId: SEED_GROUP_STANDARDS,
       id: 'file-asset-bsi-kriterien',
       label: 'bsi-kriterien',
       mimeType: MIME_PDF,
@@ -465,6 +544,7 @@ function seedFileAssets(): FileAssetRecord[] {
     }),
     seedFileAsset({
       fileName: 'DSGVO-Auszug-Art-22.pdf',
+      groupId: SEED_GROUP_PRIVACY,
       id: 'file-asset-dsgvo-art-22',
       label: 'dsgvo-art-22',
       mimeType: MIME_PDF,
@@ -495,6 +575,7 @@ function seedFileAssets(): FileAssetRecord[] {
       sizeBytes: 389120,
       title: 'AI-Act-Annex-III.pdf',
     }),
+    ...seedLegalDemoFileAssets(),
     seedFileAsset({
       fileName: 'Perplexity-Enterprise-Datenblatt.pdf',
       id: 'file-asset-perplexity-db',
@@ -620,10 +701,17 @@ function seedFileAssets(): FileAssetRecord[] {
 
 function seedVectorIndexes(): VectorIndexRecord[] {
   // Chunk/vector counts are derived in the UI from pageCount (helpers.ts);
-  // these members reproduce the design screenshots: EU-Recht 908 vectors
-  // (619 + 249 + 40, the embedded members), Anbieter-Wissen 329 (40 + 40 + 249).
+  // EU-Recht intentionally carries a large collection-sized member set so the
+  // database demo exercises the dense explorer layout, not just a showcase list.
   // rechtsgutachten stays `pending` to show the "läuft" embedding state while
   // the index already serves its embedded members.
+  const euRechtMembers = [
+    'file-asset-ai-act-volltext',
+    'file-asset-ai-act-annex-iii',
+    'file-asset-bsi-kriterien',
+    'file-asset-dsgvo-art-22',
+    ...LEGAL_DEMO_DOCUMENTS.map((document) => `file-asset-${document.label}`),
+  ].map((fileId) => ({ fileId, state: 'embedded' as const }))
   return [
     {
       createdAt: seedCreatedAt,
@@ -631,9 +719,7 @@ function seedVectorIndexes(): VectorIndexRecord[] {
       handle: 'eu-recht',
       id: 'vector-index-eu-recht',
       members: [
-        { fileId: 'file-asset-ai-act-volltext', state: 'embedded' },
-        { fileId: 'file-asset-bsi-kriterien', state: 'embedded' },
-        { fileId: 'file-asset-dsgvo-art-22', state: 'embedded' },
+        ...euRechtMembers,
         { fileId: 'file-asset-rechtsgutachten', state: 'pending' },
       ],
       model: 'text-embedding-3-large',

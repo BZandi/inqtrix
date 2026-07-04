@@ -84,7 +84,7 @@ function BandHeader({
   return (
     <div
       className={cn(
-        'group/band flex items-center gap-2 rounded-md px-2 py-1 transition-colors',
+        'group/band mt-3 flex min-h-8 items-center gap-2 rounded-md border-b border-border/60 px-2 py-1 transition-colors',
         dropOver && 'bg-brand-subtle/60 ring-1 ring-brand/30',
       )}
       onDragLeave={onDragLeave}
@@ -110,7 +110,7 @@ function BandHeader({
       ) : (
         <span className="t-list text-foreground">{band.title}</span>
       )}
-      <span className="shrink-0 rounded-full border border-border px-1.5 t-hint font-semibold leading-4 tabular-nums text-muted-foreground">{band.count}</span>
+      <span className="shrink-0 rounded-full border border-border bg-surface/45 px-1.5 t-hint font-semibold leading-4 tabular-nums text-muted-foreground">{band.count}</span>
       {band.isGroup ? (
         <Tooltip>
           <TooltipTrigger asChild>
@@ -303,7 +303,14 @@ export function FileLibraryWorkspace({
     }
     const sectionId = active.sectionId
     const ungrouped = sortAssets(pool.filter((asset) => asset.sectionId === sectionId && asset.groupId === null))
-    const out: Block[] = ungrouped.length > 0 ? [{ band: null, breadcrumb: false, items: ungrouped, key: `${sectionId}:ungrouped` }] : []
+    const out: Block[] = ungrouped.length > 0
+      ? [{
+          band: { count: ungrouped.length, groupId: null, isGroup: false, sectionId, title: t.fileLibrary.ungrouped },
+          breadcrumb: false,
+          items: ungrouped,
+          key: `${sectionId}:ungrouped`,
+        }]
+      : []
     groups
       .filter((group) => group.sectionId === sectionId)
       .forEach((group) => {
@@ -311,10 +318,13 @@ export function FileLibraryWorkspace({
         out.push({ band: { count: items.length, groupId: group.id, isGroup: true, sectionId, title: group.title }, breadcrumb: false, items, key: group.id })
       })
     return out
-  }, [active, assets, groups, railCollections, q, sort, locale])
+  }, [active, assets, groups, railCollections, q, sort, locale, t.fileLibrary.ungrouped])
 
   const activeIndex = active.kind === 'index' ? vectorIndexById(state, active.indexId) : null
-  const indexMembers = activeIndex ? sortMembersForSort(vectorIndexMembersResolved(state, activeIndex.id)) : []
+  const allIndexMembers = activeIndex ? vectorIndexMembersResolved(state, activeIndex.id) : []
+  const indexMembers = sortMembersForSort(
+    q ? allIndexMembers.filter((entry) => matchesQuery(entry.asset)) : allIndexMembers,
+  )
   const activeIndexJob = activeIndex ? state.indexingJobs[activeIndex.id] : null
   // The per-file "Index this file" action only makes sense when the click can
   // actually run the INCREMENTAL path (existing collection, same model). On a
@@ -839,7 +849,7 @@ export function FileLibraryWorkspace({
                   embeddingQuota={embeddingQuota}
                   index={activeIndex}
                   live={state.indexingJobs[activeIndex.id] ?? null}
-                  members={indexMembers}
+                  members={allIndexMembers}
                   onCancel={handleCancelReindex}
                   onDelete={(indexId) => dispatch({ indexId, type: 'deleteVectorIndex' })}
                   onModel={(indexId, model: EmbedModelId) => {
@@ -865,24 +875,33 @@ export function FileLibraryWorkspace({
                     sections={railCollections}
                   />
                 ) : null}
-                {indexMembers.length === 0 ? (
+                {allIndexMembers.length === 0 ? (
                   <IndexEmpty onAdd={() => setPickerIndexId(activeIndex.id)} />
+                ) : indexMembers.length === 0 ? (
+                  <EmptyState
+                    onUpload={() => openUpload({ groupId: null, indexId: activeIndex.id, sectionId: FILE_SECTION_TEMP_ID })}
+                    searching
+                  />
                 ) : view === 'list' ? (
-                  <div className="flex flex-col">
-                    {indexMembers.map(({ asset, member }) => (
-                      <FileRow
-                        asset={asset}
-                        inRun={memberInRun(asset.id)}
-                        indexing={activeIndex.status === 'indexing'}
-                        key={asset.id}
-                        liveProgress={memberLiveProgress(asset.id)}
-                        memberState={member.state}
-                        mode="index"
-                        onIndexMember={activeIndexCanIncrementalIndex ? (fileId) => triggerReindex(activeIndex.id, fileId) : undefined}
-                        onRemoveFromIndex={removeMember}
-                        source={sectionTitle(asset.sectionId)}
-                      />
-                    ))}
+                  <div className="min-w-0 overflow-x-auto">
+                    <div className="min-w-[54rem]">
+                      <div className="flex flex-col">
+                        {indexMembers.map(({ asset, member }) => (
+                          <FileRow
+                            asset={asset}
+                            inRun={memberInRun(asset.id)}
+                            indexing={activeIndex.status === 'indexing'}
+                            key={asset.id}
+                            liveProgress={memberLiveProgress(asset.id)}
+                            memberState={member.state}
+                            mode="index"
+                            onIndexMember={activeIndexCanIncrementalIndex ? (fileId) => triggerReindex(activeIndex.id, fileId) : undefined}
+                            onRemoveFromIndex={removeMember}
+                            source={sectionTitle(asset.sectionId)}
+                          />
+                        ))}
+                      </div>
+                    </div>
                   </div>
                 ) : (
                   <div className="grid grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-2.5">
@@ -916,72 +935,111 @@ export function FileLibraryWorkspace({
                     searching={Boolean(q)}
                   />
                 ) : (
-                  <div className="flex flex-col gap-5">
-                    {blocks.map((block) => {
-                      const key = block.band ? block.key : `${block.key}:list`
-                      const drop = block.band
-                        ? dropProps(block.key, block.band.sectionId, block.band.groupId)
-                        : active.kind === 'collection' && !q
-                          ? dropProps(block.key, active.sectionId, null)
-                          : null
-                      return (
-                        <section key={key}>
-                          {block.band ? (
-                            <BandHeader
-                              band={block.band}
-                              dropOver={drop?.dropOver ?? false}
-                              onDeleteGroup={(groupId) => dispatch({ groupId, type: 'deleteFileGroup' })}
-                              onDragLeave={drop?.onDragLeave ?? (() => undefined)}
-                              onDragOver={drop?.onDragOver ?? (() => undefined)}
-                              onDrop={drop?.onDrop ?? (() => undefined)}
-                              onNavigate={active.kind === 'all' ? () => setActive({ kind: 'collection', sectionId: block.band!.sectionId }) : undefined}
-                              onRenameGroup={(groupId, title) => dispatch({ groupId, title, type: 'renameFileGroup' })}
-                              onUpload={() => openUpload({ groupId: block.band!.groupId, sectionId: block.band!.sectionId })}
-                            />
-                          ) : null}
-                          {block.items.length === 0 ? (
-                            <p className="px-2 py-3 text-xs text-muted-foreground">{t.fileLibrary.emptyGroup}</p>
-                          ) : view === 'list' ? (
-                            <div
-                              className={cn('flex flex-col transition-colors', !block.band && drop?.dropOver && 'rounded-md bg-brand-subtle/40 ring-1 ring-brand/25')}
-                              onDragLeave={!block.band ? drop?.onDragLeave : undefined}
-                              onDragOver={!block.band ? drop?.onDragOver : undefined}
-                              onDrop={!block.band ? drop?.onDrop : undefined}
-                            >
-                              {block.band ? <div className="mt-1.5 border-t border-border/70" /> : null}
-                              {block.items.map((asset) => (
-                                <FileRow
-                                  asset={asset}
-                                  breadcrumb={block.breadcrumb ? breadcrumbFor(asset) : null}
-                                  key={asset.id}
-                                  mode="library"
-                                  referenceCount={fileAssetReferenceCount(state, asset.id)}
-                                  {...rowCallbacks}
+                  <div className="flex flex-col">
+                    {view === 'list' ? (
+                      <div className="min-w-0 overflow-x-auto">
+                        <div className="min-w-[54rem]">
+                          <div className="flex flex-col gap-1.5">
+                            {blocks.map((block) => {
+                              const key = block.band ? block.key : `${block.key}:list`
+                              const drop = block.band
+                                ? dropProps(block.key, block.band.sectionId, block.band.groupId)
+                                : active.kind === 'collection' && !q
+                                  ? dropProps(block.key, active.sectionId, null)
+                                  : null
+                              return (
+                                <section key={key}>
+                                  {block.band ? (
+                                    <BandHeader
+                                      band={block.band}
+                                      dropOver={drop?.dropOver ?? false}
+                                      onDeleteGroup={(groupId) => dispatch({ groupId, type: 'deleteFileGroup' })}
+                                      onDragLeave={drop?.onDragLeave ?? (() => undefined)}
+                                      onDragOver={drop?.onDragOver ?? (() => undefined)}
+                                      onDrop={drop?.onDrop ?? (() => undefined)}
+                                      onNavigate={active.kind === 'all' ? () => setActive({ kind: 'collection', sectionId: block.band!.sectionId }) : undefined}
+                                      onRenameGroup={(groupId, title) => dispatch({ groupId, title, type: 'renameFileGroup' })}
+                                      onUpload={() => openUpload({ groupId: block.band!.groupId, sectionId: block.band!.sectionId })}
+                                    />
+                                  ) : null}
+                                  {block.items.length === 0 ? (
+                                    <p className="px-2 py-3 t-meta-sm text-muted-foreground">{t.fileLibrary.emptyGroup}</p>
+                                  ) : (
+                                    <div
+                                      className={cn('flex flex-col transition-colors', !block.band && drop?.dropOver && 'rounded-md bg-brand-subtle/40 ring-1 ring-brand/25')}
+                                      onDragLeave={!block.band ? drop?.onDragLeave : undefined}
+                                      onDragOver={!block.band ? drop?.onDragOver : undefined}
+                                      onDrop={!block.band ? drop?.onDrop : undefined}
+                                    >
+                                      {block.items.map((asset) => (
+                                        <FileRow
+                                          asset={asset}
+                                          breadcrumb={block.breadcrumb ? breadcrumbFor(asset) : null}
+                                          key={asset.id}
+                                          mode="library"
+                                          referenceCount={fileAssetReferenceCount(state, asset.id)}
+                                          source={breadcrumbFor(asset)}
+                                          {...rowCallbacks}
+                                        />
+                                      ))}
+                                    </div>
+                                  )}
+                                </section>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col gap-5">
+                        {blocks.map((block) => {
+                          const key = block.band ? block.key : `${block.key}:list`
+                          const drop = block.band
+                            ? dropProps(block.key, block.band.sectionId, block.band.groupId)
+                            : active.kind === 'collection' && !q
+                              ? dropProps(block.key, active.sectionId, null)
+                              : null
+                          return (
+                            <section key={key}>
+                              {block.band ? (
+                                <BandHeader
+                                  band={block.band}
+                                  dropOver={drop?.dropOver ?? false}
+                                  onDeleteGroup={(groupId) => dispatch({ groupId, type: 'deleteFileGroup' })}
+                                  onDragLeave={drop?.onDragLeave ?? (() => undefined)}
+                                  onDragOver={drop?.onDragOver ?? (() => undefined)}
+                                  onDrop={drop?.onDrop ?? (() => undefined)}
+                                  onNavigate={active.kind === 'all' ? () => setActive({ kind: 'collection', sectionId: block.band!.sectionId }) : undefined}
+                                  onRenameGroup={(groupId, title) => dispatch({ groupId, title, type: 'renameFileGroup' })}
+                                  onUpload={() => openUpload({ groupId: block.band!.groupId, sectionId: block.band!.sectionId })}
                                 />
-                              ))}
-                            </div>
-                          ) : (
-                            <div
-                              className="grid grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-2.5"
-                              onDragLeave={!block.band ? drop?.onDragLeave : undefined}
-                              onDragOver={!block.band ? drop?.onDragOver : undefined}
-                              onDrop={!block.band ? drop?.onDrop : undefined}
-                            >
-                              {block.items.map((asset) => (
-                                <FileCard
-                                  asset={asset}
-                                  breadcrumb={block.breadcrumb ? breadcrumbFor(asset) : null}
-                                  key={asset.id}
-                                  mode="library"
-                                  referenceCount={fileAssetReferenceCount(state, asset.id)}
-                                  {...rowCallbacks}
-                                />
-                              ))}
-                            </div>
-                          )}
-                        </section>
-                      )
-                    })}
+                              ) : null}
+                              {block.items.length === 0 ? (
+                                <p className="px-2 py-3 t-meta-sm text-muted-foreground">{t.fileLibrary.emptyGroup}</p>
+                              ) : (
+                                <div
+                                  className="grid grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-2.5"
+                                  onDragLeave={!block.band ? drop?.onDragLeave : undefined}
+                                  onDragOver={!block.band ? drop?.onDragOver : undefined}
+                                  onDrop={!block.band ? drop?.onDrop : undefined}
+                                >
+                                  {block.items.map((asset) => (
+                                    <FileCard
+                                      asset={asset}
+                                      breadcrumb={block.breadcrumb ? breadcrumbFor(asset) : null}
+                                      key={asset.id}
+                                      mode="library"
+                                      referenceCount={fileAssetReferenceCount(state, asset.id)}
+                                      {...rowCallbacks}
+                                    />
+                                  ))}
+                                </div>
+                              )}
+                            </section>
+                          )
+                        })}
+                      </div>
+                    )}
                   </div>
                 )}
               </Dropzone>

@@ -45,13 +45,15 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react'
-import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer'
+import {
+  MarkdownRenderer,
+  preloadMarkdownCodeHighlights,
+} from '@/components/markdown/MarkdownRenderer'
 import { MarkdownSelectionCopyMenu } from '@/components/markdown/MarkdownSelectionCopyMenu'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { WelcomeState } from '@/components/ui/welcome-state'
 import {
-  ResizableHandle,
   ResizablePanel,
   ResizablePanelGroup,
 } from '@/components/ui/resizable'
@@ -121,8 +123,19 @@ import {
   type TextImprovementApiOptions,
 } from '@/features/textImprove'
 import { PanelToggle } from '@/components/ui/panel-toggle'
+import {
+  AnimatedPanelBody,
+  AnimatedResizableHandle,
+} from '@/components/ui/animated-panel'
+import { useAnimatedResizablePanelCollapse } from '@/components/ui/animated-panel-motion'
 import { ComposerIconButton, composerIconButtonClassName } from '@/features/composer/ComposerIconButton'
 import { ComposerStopButton } from '@/features/composer/ComposerStopButton'
+import {
+  chatScrollModeForUpdate,
+  isChatNearBottom,
+  type ChatScrollMetrics,
+  type ChatScrollMode,
+} from './chatScroll'
 import { ChatHistoryPanel } from './history/ChatHistoryPanel'
 import type { ChatMessage, ChatThread } from './types'
 import { ContextChipLegend } from '@/features/composer/ContextChipLegend'
@@ -131,6 +144,7 @@ import { type LabelResolver } from '@/features/composer/mentionDoc'
 import { resizeTextareaToRows } from '@/features/composer/textareaAutosize'
 import { OptionMenuHeader, OptionMenuItem, optionMenuContentClassName } from '@/components/ui/option-menu'
 import type { ChatRetryMode, ChatRetryOptions } from './retry'
+import { useTheme } from '@/theme/ThemeProvider'
 
 type ChatWorkspaceProps = {
   activeAssistantMessageId: string | null
@@ -146,6 +160,7 @@ type ChatWorkspaceProps = {
   defaultChatModel: NodeModelResolution | null
   fileGroupOptions: FileGroupMentionOption[]
   fileOptions: FileMentionOption[]
+  historyPanelSize: number
   isDesktop: boolean
   isHistoryVisible: boolean
   isIncognito: boolean
@@ -175,6 +190,7 @@ type ChatWorkspaceProps = {
   chainingEnabled: boolean
   onChainingEnabledChange: (enabled: boolean) => void
   onIncognitoChange: (enabled: boolean) => void
+  onHistoryPanelSizeChange: (size: number) => void
   onHistoryVisibleChange: (isVisible: boolean) => void
   onOpenPromptLibrary: () => void
   onMoveThreadGroup: (groupId: string, targetIndex: number) => void
@@ -240,6 +256,8 @@ export type KnowledgeIndexOption = {
 }
 
 const chatModelTierOrder: ChatModelTier[] = ['high', 'mid', 'fast']
+const CHAT_CONVERSATION_PANEL_ID = 'chat-conversation-panel'
+const CHAT_HISTORY_PANEL_ID = 'chat-history-panel'
 
 export default function ChatWorkspace({
   activeAssistantMessageId,
@@ -250,6 +268,7 @@ export default function ChatWorkspace({
   chatHistoryLoadingMore,
   onLoadMoreChatHistory,
   defaultChatModel,
+  historyPanelSize,
   isDesktop,
   isHistoryVisible,
   isIncognito,
@@ -268,6 +287,7 @@ export default function ChatWorkspace({
   chainingEnabled,
   onChainingEnabledChange,
   onIncognitoChange,
+  onHistoryPanelSizeChange,
   onHistoryVisibleChange,
   onOpenPromptLibrary,
   onMoveThreadGroup,
@@ -317,6 +337,7 @@ export default function ChatWorkspace({
   threads,
 }: ChatWorkspaceProps) {
   const { locale, t } = useLocale()
+  const { resolvedTheme } = useTheme()
   const [composerNotice, setComposerNotice] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [draftCommitPulseKey, setDraftCommitPulseKey] = useState(0)
@@ -346,11 +367,12 @@ export default function ChatWorkspace({
   const [pillRefs, setPillRefs] = useState<ChatContextReferenceRecord[]>([])
   const [selectedMessageIds, setSelectedMessageIds] = useState<ReadonlySet<string>>(() => new Set())
   const [titleDraft, setTitleDraft] = useState('')
-  const chatEndRef = useRef<HTMLDivElement | null>(null)
   const composerRef = useRef<MentionComposerHandle | null>(null)
   const didRestoreDraftRef = useRef(false)
+  const chatBottomLockCleanupRef = useRef<(() => void) | null>(null)
   const lastAutoFollowThreadIdRef = useRef<string | null>(null)
   const messageEditTextareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const messagesContentRef = useRef<HTMLDivElement | null>(null)
   const messagesScrollAreaRef = useRef<HTMLDivElement | null>(null)
   const shouldAutoFollowChatRef = useRef(true)
   const titleInputRef = useRef<HTMLInputElement | null>(null)
@@ -358,6 +380,25 @@ export default function ChatWorkspace({
   const selectedThread = isIncognito
     ? temporaryThread
     : threads.find((thread) => thread.id === selectedThreadId) ?? threads[0] ?? null
+  const chatMarkdownsForHighlight = useMemo(() => {
+    const markdowns = threads.flatMap((thread) =>
+      thread.messages
+        .map((message) => message.contentMarkdown)
+        .filter((markdown) => markdown.trim().length > 0),
+    )
+    if (temporaryThread) {
+      markdowns.push(
+        ...temporaryThread.messages
+          .map((message) => message.contentMarkdown)
+          .filter((markdown) => markdown.trim().length > 0),
+      )
+    }
+    return markdowns
+  }, [temporaryThread, threads])
+  useEffect(() => {
+    if (chatMarkdownsForHighlight.length === 0) return
+    void preloadMarkdownCodeHighlights(chatMarkdownsForHighlight, resolvedTheme)
+  }, [chatMarkdownsForHighlight, resolvedTheme])
   const lastMessage = selectedThread?.messages[selectedThread.messages.length - 1]
   const canAnswerLastUserMessage = Boolean(
     selectedThread
@@ -435,14 +476,19 @@ export default function ChatWorkspace({
     const scrollViewport = viewport
 
     function updateAutoFollow() {
-      const distanceFromBottom = scrollViewport.scrollHeight - scrollViewport.scrollTop - scrollViewport.clientHeight
-      shouldAutoFollowChatRef.current = distanceFromBottom < 96
+      if (chatBottomLockCleanupRef.current) return
+      shouldAutoFollowChatRef.current = isChatNearBottom(chatScrollMetrics(scrollViewport))
     }
 
     updateAutoFollow()
     scrollViewport.addEventListener('scroll', updateAutoFollow, { passive: true })
     return () => scrollViewport.removeEventListener('scroll', updateAutoFollow)
   }, [selectedThread?.id])
+
+  useEffect(() => () => {
+    chatBottomLockCleanupRef.current?.()
+    chatBottomLockCleanupRef.current = null
+  }, [])
 
   useLayoutEffect(() => {
     if (!isEditingTitle) return
@@ -459,15 +505,31 @@ export default function ChatWorkspace({
 
   useLayoutEffect(() => {
     const selectedId = selectedThread?.id ?? null
-    if (lastAutoFollowThreadIdRef.current !== selectedId) {
+    const viewport = messagesScrollAreaRef.current?.querySelector<HTMLElement>('[data-scroll-area-viewport]')
+    const didThreadChange = lastAutoFollowThreadIdRef.current !== selectedId
+    if (didThreadChange) {
       shouldAutoFollowChatRef.current = true
       lastAutoFollowThreadIdRef.current = selectedId
+      if (viewport) {
+        chatBottomLockCleanupRef.current?.()
+        chatBottomLockCleanupRef.current = startChatBottomLock(viewport, messagesContentRef.current, () => {
+          chatBottomLockCleanupRef.current = null
+        })
+      }
+      return () => {
+        chatBottomLockCleanupRef.current?.()
+        chatBottomLockCleanupRef.current = null
+      }
     }
-    if (!shouldAutoFollowChatRef.current) return
-    const behavior = reduceMotion || activeAssistantMessageId ? 'auto' : 'smooth'
-    window.requestAnimationFrame(() => {
-      chatEndRef.current?.scrollIntoView({ block: 'end', behavior })
+    if (!viewport) return
+
+    const behavior = chatScrollModeForUpdate({
+      hasActiveAssistantMessage: activeAssistantMessageId !== null,
+      nearBottom: shouldAutoFollowChatRef.current,
+      reduceMotion,
+      threadChanged: false,
     })
+    scrollChatViewportToBottom(viewport, behavior)
   }, [
     activeAssistantMessageId,
     lastMessage?.contentMarkdown,
@@ -657,6 +719,16 @@ export default function ChatWorkspace({
     onRemoveContext(ref)
   }
 
+  const historyPanelMotion = useAnimatedResizablePanelCollapse({
+    expanded: isHistoryVisible,
+    expandedSize: historyPanelSize,
+    reduceMotion,
+  })
+  const historyPanelLayout = {
+    [CHAT_CONVERSATION_PANEL_ID]: isHistoryVisible ? 100 - historyPanelSize : 100,
+    [CHAT_HISTORY_PANEL_ID]: isHistoryVisible ? historyPanelSize : 0,
+  }
+
   const historyPanel = (
     <ChatHistoryPanel
       chatHistorySections={chatHistorySections}
@@ -699,6 +771,7 @@ export default function ChatWorkspace({
               {isDesktop && (
                 <PanelToggle
                   collapseLabel={t.chat.hideHistory}
+                  controlsId={CHAT_HISTORY_PANEL_ID}
                   expandLabel={t.chat.showHistory}
                   expanded={isHistoryVisible}
                   onToggle={onHistoryVisibleChange}
@@ -895,8 +968,11 @@ export default function ChatWorkspace({
                 '[&_[data-scroll-area-viewport]>div]:h-full',
             )}
             ref={messagesScrollAreaRef}
-          >
-	            <div className="mx-auto flex min-h-full w-full max-w-5xl flex-col gap-5 px-4 py-6 md:px-8">
+	          >
+		            <div
+	              className="mx-auto flex min-h-full w-full max-w-5xl flex-col gap-5 px-4 py-6 [overflow-anchor:none] md:px-8"
+	              ref={messagesContentRef}
+	            >
               {selectedThread && selectedThread.messages.length > 0 ? (
                 selectedThread.messages.map((message, index) => {
                   const previousMessage = selectedThread.messages[index - 1]
@@ -944,9 +1020,8 @@ export default function ChatWorkspace({
               ) : (
                 <EmptyChatState subtitle={t.chat.emptyHint} title={t.chat.emptyTitle} />
               )}
-              <div ref={chatEndRef} />
-            </div>
-          </ScrollArea>
+	            </div>
+	          </ScrollArea>
 
           <div className="z-10 shrink-0 px-3 pb-4 pt-2 md:px-6">
             <form
@@ -1362,29 +1437,51 @@ export default function ChatWorkspace({
   return (
     <div className="flex min-h-[calc(100svh-var(--header-h))] w-full lg:h-full lg:min-h-0">
       {isDesktop ? (
-        isHistoryVisible ? (
-          <ResizablePanelGroup
-            className="min-h-0 w-full overflow-hidden bg-background"
-            orientation="horizontal"
+        <ResizablePanelGroup
+          className="min-h-0 w-full overflow-hidden bg-background"
+          defaultLayout={historyPanelLayout}
+          elementRef={historyPanelMotion.groupRef}
+          onLayoutChanged={(layout) => {
+            const size = layout[CHAT_HISTORY_PANEL_ID]
+            if (
+              isHistoryVisible
+              && !historyPanelMotion.isProgrammaticLayoutChange()
+              && Number.isFinite(size)
+              && size > 0
+            ) {
+              onHistoryPanelSizeChange(size)
+            }
+          }}
+          orientation="horizontal"
+        >
+          <ResizablePanel
+            className="min-h-0 min-w-0 overflow-hidden bg-surface/60"
+            collapsedSize="0%"
+            collapsible
+            defaultSize={historyPanelLayout[CHAT_HISTORY_PANEL_ID]}
+            elementRef={historyPanelMotion.panelElementRef}
+            id={CHAT_HISTORY_PANEL_ID}
+            maxSize="42%"
+            minSize={isHistoryVisible ? '18%' : '0%'}
+            panelRef={historyPanelMotion.panelRef}
           >
-            <ResizablePanel
-              className="min-h-0 min-w-0 overflow-hidden bg-surface/60"
-              defaultSize="26%"
-              maxSize="42%"
-              minSize="18%"
-            >
+            <AnimatedPanelBody expanded={isHistoryVisible} side="left">
               {historyPanel}
-            </ResizablePanel>
-            <ResizableHandle aria-label={t.chat.resizeHistory} />
-            <ResizablePanel className="min-h-0 min-w-0 overflow-hidden" defaultSize="74%" minSize="58%">
-              {conversationPanel}
-            </ResizablePanel>
-          </ResizablePanelGroup>
-        ) : (
-          <div className="flex min-h-0 w-full overflow-hidden bg-background">
-            <div className="min-h-0 min-w-0 flex-1 overflow-hidden">{conversationPanel}</div>
-          </div>
-        )
+            </AnimatedPanelBody>
+          </ResizablePanel>
+          <AnimatedResizableHandle
+            aria-label={t.chat.resizeHistory}
+            expanded={isHistoryVisible}
+          />
+          <ResizablePanel
+            className="min-h-0 min-w-0 overflow-hidden"
+            defaultSize={historyPanelLayout[CHAT_CONVERSATION_PANEL_ID]}
+            id={CHAT_CONVERSATION_PANEL_ID}
+            minSize="58%"
+          >
+            {conversationPanel}
+          </ResizablePanel>
+        </ResizablePanelGroup>
       ) : (
         <motion.section
           initial={reduceMotion ? false : { opacity: 0, y: 8 }}
@@ -1524,6 +1621,86 @@ function renderMentionHint(text: string) {
       part
     ),
   )
+}
+
+function chatScrollMetrics(viewport: HTMLElement): ChatScrollMetrics {
+  return {
+    clientHeight: viewport.clientHeight,
+    scrollHeight: viewport.scrollHeight,
+    scrollTop: viewport.scrollTop,
+  }
+}
+
+function scrollChatViewportToBottom(viewport: HTMLElement, mode: ChatScrollMode) {
+  if (mode === 'none') return
+
+  const top = viewport.scrollHeight
+  if (mode === 'smooth' && typeof viewport.scrollTo === 'function') {
+    viewport.scrollTo({ behavior: 'smooth', top })
+    return
+  }
+
+  viewport.scrollTop = top
+}
+
+function startChatBottomLock(
+  viewport: HTMLElement,
+  content: HTMLElement | null,
+  onSettled: () => void,
+): () => void {
+  const frameIds: number[] = []
+  const timeoutIds: number[] = []
+  let disposed = false
+  let observer: ResizeObserver | null = null
+
+  function syncToBottom() {
+    if (disposed) return
+    scrollChatViewportToBottom(viewport, 'auto')
+  }
+
+  function release() {
+    if (disposed) return
+    disposed = true
+    observer?.disconnect()
+    for (const frameId of frameIds) {
+      window.cancelAnimationFrame(frameId)
+    }
+    for (const timeoutId of timeoutIds) {
+      window.clearTimeout(timeoutId)
+    }
+    onSettled()
+  }
+
+  syncToBottom()
+
+  let remainingFrames = 8
+  function scheduleFrame() {
+    if (disposed) return
+    if (remainingFrames <= 0) {
+      release()
+      return
+    }
+    remainingFrames -= 1
+    const frameId = window.requestAnimationFrame(() => {
+      syncToBottom()
+      scheduleFrame()
+    })
+    frameIds.push(frameId)
+  }
+
+  scheduleFrame()
+  timeoutIds.push(window.setTimeout(() => {
+    syncToBottom()
+    release()
+  }, 700))
+
+  observer =
+    content && typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(syncToBottom)
+      : null
+  if (content && observer) observer.observe(content)
+
+  return release
 }
 
 function EmptyChatState({

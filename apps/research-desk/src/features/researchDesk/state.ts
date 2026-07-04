@@ -53,6 +53,10 @@ import {
   DEFAULT_KNOWLEDGE_SESSION_TITLE,
 } from '@/features/project/knowledgeSessionDefaults'
 import {
+  clampPanelLayoutSize,
+  type ProjectPanelLayoutKey,
+} from '@/features/project/panelLayout'
+import {
   applyRunEvent,
   attachRunResult,
   DEFAULT_EMBED_MODEL_ID,
@@ -217,6 +221,7 @@ export type ResearchDeskAction =
   | { type: 'setReportVisible'; isVisible: boolean }
   | { type: 'setChatHistoryVisible'; isVisible: boolean }
   | { type: 'setKnowledgeHistoryVisible'; isVisible: boolean }
+  | { key: ProjectPanelLayoutKey; size: number; type: 'setPanelLayoutSize' }
   | { enabled: boolean; type: 'setChatChainingEnabled' }
   | { type: 'setSelectedChatModelTier'; tier: ChatModelTier | null }
   | { type: 'setSelectedChatModel'; model: string | null }
@@ -437,6 +442,21 @@ export function researchDeskReducer(
   }
   if (action.type === 'setKnowledgeHistoryVisible') {
     return { ...state, dirty: true, ui: { ...state.ui, isKnowledgeHistoryVisible: action.isVisible } }
+  }
+  if (action.type === 'setPanelLayoutSize') {
+    const size = clampPanelLayoutSize(action.key, action.size)
+    if (state.ui.panelLayout[action.key] === size) return state
+    return {
+      ...state,
+      dirty: true,
+      ui: {
+        ...state.ui,
+        panelLayout: {
+          ...state.ui.panelLayout,
+          [action.key]: size,
+        },
+      },
+    }
   }
   if (action.type === 'setComposerVisible') {
     return { ...state, ui: { ...state.ui, isComposerVisible: action.isVisible } }

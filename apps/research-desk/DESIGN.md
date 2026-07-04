@@ -57,6 +57,7 @@ Easing is `cubic-bezier(0.22, 1, 0.36, 1)` (soft settle); UI transitions ≤ ~0.
 | Reasoning "thinking" mark | gentle sweep | `inqtrix-thinking-sweep` 1.9s |
 | Metric update | one-shot count/flash | `inqtrix-metric-flash` 0.6s |
 | Expand / collapse | soft height | `grid-template-rows 0fr→1fr`, ~0.3s |
+| Side panel collapse / expand | width/flex collapse + directed fade-slide (`x ±10px→0`) | `appMotion.panel` 0.26s; left panels originate left, right panels originate right |
 | Skeleton / loading | shimmer | loop **only while loading** |
 
 **Rules:** no endless animation on real content (loops only for "working" signals); everything is
@@ -337,6 +338,10 @@ so glued clusters like `K6K15` read as discrete badges. This is an **element sty
 surface**, not a `.t-*` role — no §2/§3 row; keep it in sync with `globals.css`.
 
 The `.t-*` roles apply to **non-Markdown UI text only**.
+
+Performance changes may adjust how this renderer warms up, caches syntax highlighting, or shows an
+intermediate structural fallback. Those changes must preserve the final Markdown typography and
+component styling above; they are not permission to introduce a second Markdown look.
 
 ---
 

@@ -1,13 +1,20 @@
 import {
-  ResizableHandle,
   ResizablePanel,
   ResizablePanelGroup,
 } from '@/components/ui/resizable'
+import {
+  AnimatedPanelBody,
+  AnimatedResizableHandle,
+} from '@/components/ui/animated-panel'
+import { useAnimatedResizablePanelCollapse } from '@/components/ui/animated-panel-motion'
 import type { CreateResearchRunRequest } from '@/features/researchRuns/types'
 import { ReportPanel } from '@/features/report/ReportPanel'
 import type { ResearchRunRecord } from '@/features/project/types'
 import type { JobFilter, ResearchJob } from '../types'
 import { ResearchRunColumn } from './ResearchRunColumn'
+
+const RESEARCH_REPORT_PANEL_ID = 'research-report-panel'
+const RESEARCH_RUN_PANEL_ID = 'research-run-panel'
 
 type ResearchWorkspaceProps = {
   activeFilter: JobFilter
@@ -28,12 +35,14 @@ type ResearchWorkspaceProps = {
   researchQuestion: string
   onDeleteJob: (jobId: string) => void
   onReportExpandedChange: (isExpanded: boolean) => void
+  onReportPanelSizeChange: (size: number) => void
   onReportVisibleChange: (isVisible: boolean) => void
   onSelectJob: (jobId: string) => void
   onShareJob?: (jobId: string) => void
   onToggleJob: (jobId: string) => void
   onUseReportInChat: (runId: string) => void
   reduceMotion: boolean | null
+  reportPanelSize: number
   selectedJobId: string | null
   selectedRun: ResearchRunRecord | null
   selectedStack: string
@@ -60,18 +69,29 @@ export function ResearchWorkspace({
   researchQuestion,
   onDeleteJob,
   onReportExpandedChange,
+  onReportPanelSizeChange,
   onReportVisibleChange,
   onSelectJob,
   onShareJob,
   onToggleJob,
   onUseReportInChat,
   reduceMotion,
+  reportPanelSize,
   selectedJobId,
   selectedRun,
   selectedStack,
   shareCountByRunId,
   sharedByLabelByRunId,
 }: ResearchWorkspaceProps) {
+  const reportPanelMotion = useAnimatedResizablePanelCollapse({
+    expandedSize: reportPanelSize,
+    expanded: isReportVisible,
+    reduceMotion,
+  })
+  const reportPanelLayout = {
+    [RESEARCH_REPORT_PANEL_ID]: isReportVisible ? reportPanelSize : 0,
+    [RESEARCH_RUN_PANEL_ID]: isReportVisible ? 100 - reportPanelSize : 100,
+  }
   const runColumn = (
     <ResearchRunColumn
       activeFilter={activeFilter}
@@ -87,6 +107,7 @@ export function ResearchWorkspace({
       onComposerSubmit={onComposerSubmit}
       onComposerVisibleChange={onComposerVisibleChange}
       onReportVisibleChange={onReportVisibleChange}
+      reportPanelId={RESEARCH_REPORT_PANEL_ID}
       onResearchQuestionChange={onResearchQuestionChange}
       researchQuestion={researchQuestion}
       onDeleteJob={onDeleteJob}
@@ -101,43 +122,61 @@ export function ResearchWorkspace({
     />
   )
 
-  if (isDesktop && isReportVisible) {
+  if (isDesktop) {
     return (
       <ResizablePanelGroup
         className="h-full w-full overflow-hidden lg:min-h-0"
+        defaultLayout={reportPanelLayout}
+        elementRef={reportPanelMotion.groupRef}
+        onLayoutChanged={(layout) => {
+          const size = layout[RESEARCH_REPORT_PANEL_ID]
+          if (
+            isReportVisible
+            && !reportPanelMotion.isProgrammaticLayoutChange()
+            && Number.isFinite(size)
+            && size > 0
+          ) {
+            onReportPanelSizeChange(size)
+          }
+        }}
         orientation="horizontal"
       >
         <ResizablePanel
           className="min-h-0 min-w-0 overflow-hidden"
-          defaultSize="58%"
-          maxSize="74%"
+          defaultSize={reportPanelLayout[RESEARCH_RUN_PANEL_ID]}
+          id={RESEARCH_RUN_PANEL_ID}
+          maxSize={isReportVisible ? '74%' : '100%'}
           minSize="42%"
         >
           {runColumn}
         </ResizablePanel>
-        <ResizableHandle aria-label="Resize report panel" />
+        <AnimatedResizableHandle
+          aria-label="Resize report panel"
+          expanded={isReportVisible}
+        />
         <ResizablePanel
           className="min-h-0 min-w-0 overflow-hidden"
-          defaultSize="42%"
+          collapsedSize="0%"
+          collapsible
+          defaultSize={reportPanelLayout[RESEARCH_REPORT_PANEL_ID]}
+          elementRef={reportPanelMotion.panelElementRef}
+          id={RESEARCH_REPORT_PANEL_ID}
           maxSize="58%"
-          minSize="26%"
+          minSize={isReportVisible ? '26%' : '0%'}
+          panelRef={reportPanelMotion.panelRef}
         >
-          <ReportPanel
-            isExpanded={isReportExpanded}
-            onExpandedChange={onReportExpandedChange}
-            onHide={() => { onReportExpandedChange(false); onReportVisibleChange(false) }}
-            onUseReportInChat={onUseReportInChat}
-            selectedRun={selectedRun}
-          />
+          <AnimatedPanelBody expanded={isReportVisible} side="right">
+            <ReportPanel
+              isExpanded={isReportVisible && isReportExpanded}
+              onExpandedChange={onReportExpandedChange}
+              onHide={() => { onReportExpandedChange(false); onReportVisibleChange(false) }}
+              onUseReportInChat={onUseReportInChat}
+              selectedRun={selectedRun}
+            />
+          </AnimatedPanelBody>
         </ResizablePanel>
       </ResizablePanelGroup>
     )
-  }
-
-  // Report collapsed: the run column takes the full width (no leftover rail);
-  // the report panel is reopened from the toggle in the run column's filter header.
-  if (isDesktop) {
-    return <div className="h-full min-h-0 overflow-hidden lg:min-h-0">{runColumn}</div>
   }
 
   return (

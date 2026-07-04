@@ -137,6 +137,41 @@ describe('serializeChatRule / parseChatRule', () => {
   })
 })
 
+describe('parseFrontmatter line-ending tolerance (Windows/CRLF)', () => {
+  const ruleLines = [
+    '---',
+    'created_at: 2026-01-01T00:00:00.000Z',
+    'kind: inqtrix.chat_rule',
+    'label: legacy',
+    'rule_id: rule-legacy',
+    'schema_version: 1',
+    'title: Legacy',
+    'updated_at: 2026-01-02T00:00:00.000Z',
+    '---',
+    'Legacy instruction.',
+  ]
+  const expected: ChatRuleRecord & Record<string, unknown> = {
+    category: 'instruction',
+    contentMarkdown: 'Legacy instruction.',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    id: 'rule-legacy',
+    includeInAutocomplete: true,
+    label: 'legacy',
+    linkedContextRefs: [],
+    title: 'Legacy',
+    updatedAt: '2026-01-02T00:00:00.000Z',
+    visibility: { chat: true, editor: true },
+  }
+
+  it('accepts CRLF frontmatter from a Windows autocrlf checkout', () => {
+    expect(parseChatRule(ruleLines.join('\r\n'))).toEqual(expected)
+  })
+
+  it('accepts lone-CR frontmatter from a legacy-Mac checkout', () => {
+    expect(parseChatRule(ruleLines.join('\r'))).toEqual(expected)
+  })
+})
+
 describe('serializeChatThread / parseChatThread', () => {
   it('round-trips assistant request context metadata additively', () => {
     const thread: ChatThreadRecord = {

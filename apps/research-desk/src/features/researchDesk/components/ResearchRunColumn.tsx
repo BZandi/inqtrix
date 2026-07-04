@@ -39,6 +39,7 @@ type ResearchRunColumnProps = {
   onShareJob?: (jobId: string) => void
   onToggleJob: (jobId: string) => void
   reduceMotion: boolean | null
+  reportPanelId?: string
   selectedJobId: string | null
   selectedStack: string
   shareCountByRunId?: Record<string, number>
@@ -66,6 +67,7 @@ export function ResearchRunColumn({
   onShareJob,
   onToggleJob,
   reduceMotion,
+  reportPanelId,
   selectedJobId,
   selectedStack,
   shareCountByRunId,
@@ -95,6 +97,7 @@ export function ResearchRunColumn({
         trailing={
           <PanelToggle
             collapseLabel={t.report.hide}
+            controlsId={reportPanelId}
             expandLabel={t.report.show}
             expanded={isReportVisible}
             onToggle={onReportVisibleChange}

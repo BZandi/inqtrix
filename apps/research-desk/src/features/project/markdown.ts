@@ -671,16 +671,22 @@ function serializeYamlValue(value: unknown) {
 }
 
 function parseFrontmatter(markdown: string) {
-  if (!markdown.startsWith('---\n')) {
+  // Normalize CRLF and lone-CR to LF before any structural parsing. The delimiter
+  // guard and the offset math below are LF-only; a Windows checkout (core.autocrlf)
+  // or a user-imported Windows project would otherwise throw here. Normalizing first
+  // keeps every offset correct and yields an LF body (all body consumers already
+  // tolerate either line ending).
+  const normalized = markdown.replace(/\r\n?/g, '\n')
+  if (!normalized.startsWith('---\n')) {
     throw new Error('Markdown file is missing YAML frontmatter.')
   }
-  const endIndex = markdown.indexOf('\n---', 4)
+  const endIndex = normalized.indexOf('\n---', 4)
   if (endIndex < 0) {
     throw new Error('Markdown file has an unterminated YAML frontmatter block.')
   }
 
-  const header = markdown.slice(4, endIndex)
-  const body = markdown.slice(endIndex + 5)
+  const header = normalized.slice(4, endIndex)
+  const body = normalized.slice(endIndex + 5)
   const data: Record<string, unknown> = {}
 
   for (const line of header.split(/\r?\n/)) {

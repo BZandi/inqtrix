@@ -44,6 +44,13 @@ export type PinnedExplorerState = {
   knowledgeSessionIds: string[]
 }
 
+export type ProjectPanelLayoutState = {
+  chatHistory: number
+  knowledgeHistory: number
+  knowledgeSource: number
+  researchReport: number
+}
+
 export type ProjectUiState = {
   activeFilter: JobFilter
   activeView: AppView
@@ -54,6 +61,7 @@ export type ProjectUiState = {
   isComposerVisible: boolean
   isReportExpanded: boolean
   isReportVisible: boolean
+  panelLayout: ProjectPanelLayoutState
   pendingChatAttachmentRefs: ChatContextReferenceRecord[]
   pendingChatReportRunId: string | null
   pinnedExplorer: PinnedExplorerState

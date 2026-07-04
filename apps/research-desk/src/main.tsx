@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from '@/app/App'
 import { AppProviders } from '@/app/AppProviders'
+import { RootErrorBoundary } from '@/app/RootErrorBoundary'
 import 'katex/dist/katex.min.css'
 import '@fontsource-variable/inter/index.css'
 import '@/styles/globals.css'
@@ -9,7 +10,9 @@ import '@/styles/globals.css'
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <AppProviders>
-      <App />
+      <RootErrorBoundary>
+        <App />
+      </RootErrorBoundary>
     </AppProviders>
   </StrictMode>,
 )

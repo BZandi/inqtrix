@@ -2636,6 +2636,11 @@ export function ResearchDesk({
                 isVisible,
                 type: 'setReportVisible',
               })}
+              onReportPanelSizeChange={(size) => dispatch({
+                key: 'researchReport',
+                size,
+                type: 'setPanelLayoutSize',
+              })}
               onSelectJob={(jobId) => dispatch({ jobId, type: 'selectJob' })}
               onToggleJob={(jobId) => dispatch({ jobId, type: 'toggleJob' })}
               onUseReportInChat={(runId) => dispatch({ runId, type: 'attachReportToNewChat' })}
@@ -2647,6 +2652,7 @@ export function ResearchDesk({
                 })
                 : undefined}
               reduceMotion={reduceMotion}
+              reportPanelSize={state.ui.panelLayout.researchReport}
               selectedJobId={state.ui.selectedJobId}
               selectedRun={selectedRun}
               selectedStack={displayedSelectedStack}
@@ -2663,6 +2669,7 @@ export function ResearchDesk({
               chatHistoryLoadingMore={chatHistoryLoadingMore}
               onLoadMoreChatHistory={loadMoreChatHistory}
               defaultChatModel={defaultChatModel}
+              historyPanelSize={state.ui.panelLayout.chatHistory}
               isDesktop={isDesktop}
               isHistoryVisible={state.ui.isChatHistoryVisible}
               isIncognito={isIncognitoChat}
@@ -2704,6 +2711,11 @@ export function ResearchDesk({
               chainingEnabled={state.ui.chatChainingEnabled}
               onChainingEnabledChange={(enabled) => dispatch({ enabled, type: 'setChatChainingEnabled' })}
               onIncognitoChange={handleIncognitoChange}
+              onHistoryPanelSizeChange={(size) => dispatch({
+                key: 'chatHistory',
+                size,
+                type: 'setPanelLayoutSize',
+              })}
               onHistoryVisibleChange={(isVisible) => dispatch({
                 isVisible,
                 type: 'setChatHistoryVisible',
@@ -2813,6 +2825,7 @@ export function ResearchDesk({
               evidenceKMax={knowledgeEvidenceKMax}
               rerankerProvider={knowledgeRerankerProvider}
               historyItems={knowledgeAllItems}
+              historyPanelSize={state.ui.panelLayout.knowledgeHistory}
               isAskDisabled={!isDemoMode && !authUnlocked}
               isAskRunning={isKnowledgeAskRunning}
               isHistoryVisible={state.ui.isKnowledgeHistoryVisible}
@@ -2834,6 +2847,11 @@ export function ResearchDesk({
 	              onDeleteSession={deleteKnowledgeAskSession}
               onDeleteItems={deleteKnowledgeAskItems}
               onDemoAsk={isDemoMode ? handleKnowledgeDemoAsk : undefined}
+              onHistoryPanelSizeChange={(size) => dispatch({
+                key: 'knowledgeHistory',
+                size,
+                type: 'setPanelLayoutSize',
+              })}
               onHistoryVisibleChange={(isVisible) => dispatch({ isVisible, type: 'setKnowledgeHistoryVisible' })}
               onIncognitoChange={setKnowledgeIncognito}
               onOpenDatabase={() => dispatch({ type: 'setActiveView', view: 'database' })}
@@ -2853,11 +2871,17 @@ export function ResearchDesk({
               onSelectedCollectionIdsChange={setKnowledgeCollectionIds}
               onTopKChange={setKnowledgeTopK}
               onFinalKChange={setKnowledgeFinalK}
+              onSourcePanelSizeChange={(size) => dispatch({
+                key: 'knowledgeSource',
+                size,
+                type: 'setPanelLayoutSize',
+              })}
               profileId={knowledgeProfileId}
               profileOptions={knowledgeProfileOptions}
               pinnedSessionIds={state.ui.pinnedExplorer.knowledgeSessionIds}
               selectedCollectionIds={knowledgeCollectionIds}
               selectedSessionId={state.selectedKnowledgeSessionId}
+              sourcePanelSize={state.ui.panelLayout.knowledgeSource}
               topK={knowledgeTopK}
               finalK={knowledgeFinalK}
             />

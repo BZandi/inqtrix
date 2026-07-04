@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ResearchRunEvent, ResearchRunSummary } from '@/features/researchRuns/types'
+import { DEFAULT_PANEL_LAYOUT } from '@/features/project/panelLayout'
 import { createEmptyProjectState } from '@/features/project/seedProject'
 import type {
   ChatRuleRecord,
@@ -198,6 +199,33 @@ describe('ui visibility reducer actions', () => {
       type: 'setKnowledgeHistoryVisible',
     })
     expect(shown.ui.isKnowledgeHistoryVisible).toBe(true)
+  })
+
+  it('persists clamped resizable panel sizes', () => {
+    const base = createEmptyProjectState()
+    expect(base.ui.panelLayout).toEqual(DEFAULT_PANEL_LAYOUT)
+
+    const resized = researchDeskReducer(base, {
+      key: 'chatHistory',
+      size: 37,
+      type: 'setPanelLayoutSize',
+    })
+    expect(resized.dirty).toBe(true)
+    expect(resized.ui.panelLayout.chatHistory).toBe(37)
+
+    const tooNarrow = researchDeskReducer(resized, {
+      key: 'chatHistory',
+      size: 0,
+      type: 'setPanelLayoutSize',
+    })
+    expect(tooNarrow.ui.panelLayout.chatHistory).toBe(18)
+
+    const tooWide = researchDeskReducer(base, {
+      key: 'researchReport',
+      size: 90,
+      type: 'setPanelLayoutSize',
+    })
+    expect(tooWide.ui.panelLayout.researchReport).toBe(58)
   })
 })
 

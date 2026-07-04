@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useCallback, useRef } from 'react'
 import { DragHandle } from '@tiptap/extension-drag-handle-react'
 import type { Editor } from '@tiptap/react'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
@@ -73,6 +73,19 @@ export function BlockHandle({ editor, labels }: { editor: Editor; labels: BlockH
   const nodeRef = useRef<ProseMirrorNode | null>(null)
   const posRef = useRef(-1)
 
+  // Stable identity is required. `@tiptap/extension-drag-handle-react` re-registers
+  // its ProseMirror plugin whenever `onNodeChange` changes identity, and a plugin
+  // unregister tears down ALL plugin views via EditorView.updateState — including an
+  // open slash/mention suggestion popup. An inline arrow would re-register on every
+  // parent re-render (e.g. a live run's progress tick re-rendering the editor subtree)
+  // and close the popup mid-interaction. The handler only writes refs, so deps are [].
+  const handleNodeChange = useCallback(({ node, pos }: { node: ProseMirrorNode | null; pos: number }) => {
+    if (node && pos >= 0) {
+      nodeRef.current = node
+      posRef.current = pos
+    }
+  }, [])
+
   const turnInto = (id: BlockActionId) => {
     if (posRef.current < 0) return
     editor.chain().focus().setTextSelection(posRef.current + 1).run()
@@ -113,12 +126,7 @@ export function BlockHandle({ editor, labels }: { editor: Editor; labels: BlockH
   return (
     <DragHandle
       editor={editor}
-      onNodeChange={({ node, pos }) => {
-        if (node && pos >= 0) {
-          nodeRef.current = node
-          posRef.current = pos
-        }
-      }}
+      onNodeChange={handleNodeChange}
     >
       <DropdownMenu>
         <DropdownMenuTrigger asChild>

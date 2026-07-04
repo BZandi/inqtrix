@@ -15,6 +15,7 @@ type PanelToggleProps = {
   /** Tooltip + aria-label while open (the "collapse it" affordance). */
   collapseLabel: string
   className?: string
+  controlsId?: string
 }
 
 /**
@@ -33,6 +34,7 @@ export function PanelToggle({
   expandLabel,
   collapseLabel,
   className,
+  controlsId,
 }: PanelToggleProps) {
   const label = expanded ? collapseLabel : expandLabel
   const Icon = side === 'left' ? ListTree : ScrollText
@@ -40,6 +42,7 @@ export function PanelToggle({
     <Tooltip>
       <TooltipTrigger asChild>
         <Button
+          aria-controls={controlsId}
           aria-expanded={expanded}
           aria-label={label}
           className={cn(

@@ -26,7 +26,12 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Chip } from '@/components/ui/chip'
 import { PanelToggle } from '@/components/ui/panel-toggle'
-import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
+import {
+  AnimatedPanelBody,
+  AnimatedResizableHandle,
+} from '@/components/ui/animated-panel'
+import { useAnimatedResizablePanelCollapse } from '@/components/ui/animated-panel-motion'
+import { ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { WelcomeState } from '@/components/ui/welcome-state'
@@ -82,6 +87,10 @@ const FIND_MIN_QUERY_LENGTH = 2
 const FIND_TOP_K = 20
 const KNOWLEDGE_ANSWER_ENTRY_MS = 1800
 const KNOWLEDGE_ANSWER_SCROLL_SETTLE_MS = 340
+const KNOWLEDGE_ASK_PANEL_ID = 'knowledge-ask-panel'
+const KNOWLEDGE_CENTER_PANEL_ID = 'knowledge-center-panel'
+const KNOWLEDGE_HISTORY_PANEL_ID = 'knowledge-history-panel'
+const KNOWLEDGE_SOURCE_PANEL_ID = 'knowledge-source-panel'
 
 type KnowledgeWorkspaceProps = {
   historyItems: KnowledgeThreadItemRecord[]
@@ -94,6 +103,7 @@ type KnowledgeWorkspaceProps = {
   rerankerProvider: string | null
   isAskDisabled: boolean
   isAskRunning: boolean
+  historyPanelSize: number
   isHistoryVisible: boolean
   isIncognito: boolean
   items: KnowledgeThreadItemRecord[]
@@ -109,6 +119,7 @@ type KnowledgeWorkspaceProps = {
   onDeleteSession: (sessionId: string) => void
   onDeleteItems: (itemIds: string[]) => void
   onOpenDatabase?: () => void
+  onHistoryPanelSizeChange: (size: number) => void
   onHistoryVisibleChange: (visible: boolean) => void
   onIncognitoChange: (enabled: boolean) => void
   onModeChange: (mode: KnowledgeMode) => void
@@ -123,6 +134,7 @@ type KnowledgeWorkspaceProps = {
   onSelectedCollectionIdsChange: (ids: string[]) => void
   onTopKChange: (topK: number | null) => void
   onFinalKChange: (finalK: number | null) => void
+  onSourcePanelSizeChange: (size: number) => void
   profileId: string | null
   profileOptions: KnowledgeProfileOption[]
   pinnedSessionIds: readonly string[]
@@ -130,6 +142,7 @@ type KnowledgeWorkspaceProps = {
   sessionSections: KnowledgeSessionHistorySection[]
   selectedSessionId: string | null
   sessions: KnowledgeSessionRecord[]
+  sourcePanelSize: number
   topK: number | null
   finalK: number | null
 }
@@ -150,6 +163,7 @@ export function KnowledgeWorkspace({
   rerankerProvider,
   isAskDisabled,
   isAskRunning,
+  historyPanelSize,
   isHistoryVisible,
   isIncognito,
   items,
@@ -164,6 +178,7 @@ export function KnowledgeWorkspace({
   onDeleteSessionGroup,
   onDeleteSession,
   onDeleteItems,
+  onHistoryPanelSizeChange,
   onHistoryVisibleChange,
   onOpenDatabase,
   onIncognitoChange,
@@ -179,6 +194,7 @@ export function KnowledgeWorkspace({
   onSelectedCollectionIdsChange,
   onTopKChange,
   onFinalKChange,
+  onSourcePanelSizeChange,
   profileId,
   profileOptions,
   pinnedSessionIds,
@@ -186,6 +202,7 @@ export function KnowledgeWorkspace({
   sessionSections,
   selectedSessionId,
   sessions,
+  sourcePanelSize,
   topK,
   finalK,
 }: KnowledgeWorkspaceProps) {
@@ -413,16 +430,37 @@ export function KnowledgeWorkspace({
     ? items.find((item) => item.id === panel.item?.id) ?? null
     : null
   const activePanel = activePanelItem ? { item: activePanelItem, target: panel?.target ?? null } : null
-  const sourcePanel = activePanel ? (
+  const sourcePanelExpanded = Boolean(activePanel)
+  const sourcePanelItem = activePanel?.item ?? latestPanelItem
+  const sourcePanelContent = sourcePanelItem ? (
     <KnowledgeSourcePanel
       dataSource={dataSource}
-      item={activePanel.item}
+      item={sourcePanelItem}
       onClose={() => setPanel(null)}
       onSelectReference={(reference) =>
         setPanel((prev) => (prev?.item ? { ...prev, target: targetFromReference(prev.item, reference) } : prev))}
-      target={activePanel.target}
+      target={activePanel?.target ?? null}
     />
   ) : null
+  const hasSourcePanelCandidate = Boolean(sourcePanelItem)
+  const historyPanelMotion = useAnimatedResizablePanelCollapse({
+    expanded: effectiveHistoryVisible,
+    expandedSize: historyPanelSize,
+    reduceMotion,
+  })
+  const sourcePanelMotion = useAnimatedResizablePanelCollapse({
+    expanded: sourcePanelExpanded,
+    expandedSize: sourcePanelSize,
+    reduceMotion,
+  })
+  const historyPanelLayout = {
+    [KNOWLEDGE_CENTER_PANEL_ID]: effectiveHistoryVisible ? 100 - historyPanelSize : 100,
+    [KNOWLEDGE_HISTORY_PANEL_ID]: effectiveHistoryVisible ? historyPanelSize : 0,
+  }
+  const sourcePanelLayout = {
+    [KNOWLEDGE_ASK_PANEL_ID]: sourcePanelExpanded ? 100 - sourcePanelSize : 100,
+    [KNOWLEDGE_SOURCE_PANEL_ID]: sourcePanelExpanded ? sourcePanelSize : 0,
+  }
 
   function openLatestPanel() {
     if (latestPanelItem) setPanel({ item: latestPanelItem, target: null })
@@ -552,6 +590,7 @@ export function KnowledgeWorkspace({
         {mode === 'ask' && !isIncognito && (
           <PanelToggle
             collapseLabel={t.knowledge.hideSessions}
+            controlsId={KNOWLEDGE_HISTORY_PANEL_ID}
             expandLabel={t.knowledge.showSessions}
             expanded={effectiveHistoryVisible}
             onToggle={onHistoryVisibleChange}
@@ -691,11 +730,12 @@ export function KnowledgeWorkspace({
             )
           })}
         </div>
-        {mode === 'ask' && (sourcePanel || latestPanelItem) && (
+        {mode === 'ask' && hasSourcePanelCandidate && (
           <PanelToggle
             collapseLabel={t.knowledge.panelCollapse}
+            controlsId={KNOWLEDGE_SOURCE_PANEL_ID}
             expandLabel={t.knowledge.showPanel}
-            expanded={Boolean(sourcePanel)}
+            expanded={sourcePanelExpanded}
             onToggle={(next) => (next ? openLatestPanel() : setPanel(null))}
             side="right"
           />
@@ -932,36 +972,100 @@ export function KnowledgeWorkspace({
   )
 
   const centerAndRight = (
-    <ResizablePanelGroup className="min-h-0 w-full overflow-hidden" orientation="horizontal">
-      <ResizablePanel className="min-h-0 min-w-0 overflow-hidden" defaultSize={sourcePanel ? '64%' : '100%'} minSize="48%">
+    <ResizablePanelGroup
+      className="min-h-0 w-full overflow-hidden"
+      defaultLayout={sourcePanelLayout}
+      elementRef={sourcePanelMotion.groupRef}
+      onLayoutChanged={(layout) => {
+        const size = layout[KNOWLEDGE_SOURCE_PANEL_ID]
+        if (
+          sourcePanelExpanded
+          && !sourcePanelMotion.isProgrammaticLayoutChange()
+          && Number.isFinite(size)
+          && size > 0
+        ) {
+          onSourcePanelSizeChange(size)
+        }
+      }}
+      orientation="horizontal"
+    >
+      <ResizablePanel
+        className="min-h-0 min-w-0 overflow-hidden"
+        defaultSize={sourcePanelLayout[KNOWLEDGE_ASK_PANEL_ID]}
+        id={KNOWLEDGE_ASK_PANEL_ID}
+        minSize="48%"
+      >
         {askCenter}
       </ResizablePanel>
-      {sourcePanel && (
-        <>
-          <ResizableHandle aria-label={t.knowledge.panelResize} />
-          <ResizablePanel className="min-h-0 min-w-0 overflow-hidden" defaultSize="36%" maxSize="48%" minSize="28%">
-            {sourcePanel}
-          </ResizablePanel>
-        </>
-      )}
+      <AnimatedResizableHandle
+        aria-label={t.knowledge.panelResize}
+        expanded={sourcePanelExpanded}
+      />
+      <ResizablePanel
+        className="min-h-0 min-w-0 overflow-hidden"
+        collapsedSize="0%"
+        collapsible
+        defaultSize={sourcePanelLayout[KNOWLEDGE_SOURCE_PANEL_ID]}
+        elementRef={sourcePanelMotion.panelElementRef}
+        id={KNOWLEDGE_SOURCE_PANEL_ID}
+        maxSize="48%"
+        minSize={sourcePanelExpanded ? '28%' : '0%'}
+        panelRef={sourcePanelMotion.panelRef}
+      >
+        <AnimatedPanelBody expanded={sourcePanelExpanded} side="right">
+          {sourcePanelContent}
+        </AnimatedPanelBody>
+      </ResizablePanel>
     </ResizablePanelGroup>
   )
 
-  const askDesktop = effectiveHistoryVisible ? (
+  const askDesktop = (
     <div className="hidden min-h-0 w-full flex-1 overflow-hidden bg-background lg:flex">
-      <ResizablePanelGroup className="min-h-0 min-w-0 flex-1 overflow-hidden" orientation="horizontal">
-        <ResizablePanel className="min-h-0 min-w-0 overflow-hidden" defaultSize="26%" maxSize="42%" minSize="18%">
-          {historyPanel}
+      <ResizablePanelGroup
+        className="min-h-0 min-w-0 flex-1 overflow-hidden"
+        defaultLayout={historyPanelLayout}
+        elementRef={historyPanelMotion.groupRef}
+        onLayoutChanged={(layout) => {
+          const size = layout[KNOWLEDGE_HISTORY_PANEL_ID]
+          if (
+            effectiveHistoryVisible
+            && !historyPanelMotion.isProgrammaticLayoutChange()
+            && Number.isFinite(size)
+            && size > 0
+          ) {
+            onHistoryPanelSizeChange(size)
+          }
+        }}
+        orientation="horizontal"
+      >
+        <ResizablePanel
+          className="min-h-0 min-w-0 overflow-hidden"
+          collapsedSize="0%"
+          collapsible
+          defaultSize={historyPanelLayout[KNOWLEDGE_HISTORY_PANEL_ID]}
+          elementRef={historyPanelMotion.panelElementRef}
+          id={KNOWLEDGE_HISTORY_PANEL_ID}
+          maxSize="42%"
+          minSize={effectiveHistoryVisible ? '18%' : '0%'}
+          panelRef={historyPanelMotion.panelRef}
+        >
+          <AnimatedPanelBody expanded={effectiveHistoryVisible} side="left">
+            {historyPanel}
+          </AnimatedPanelBody>
         </ResizablePanel>
-        <ResizableHandle aria-label={t.knowledge.resizeSessions} />
-        <ResizablePanel className="min-h-0 min-w-0 overflow-hidden" defaultSize="74%" minSize="58%">
+        <AnimatedResizableHandle
+          aria-label={t.knowledge.resizeSessions}
+          expanded={effectiveHistoryVisible}
+        />
+        <ResizablePanel
+          className="min-h-0 min-w-0 overflow-hidden"
+          defaultSize={historyPanelLayout[KNOWLEDGE_CENTER_PANEL_ID]}
+          id={KNOWLEDGE_CENTER_PANEL_ID}
+          minSize="58%"
+        >
           {centerAndRight}
         </ResizablePanel>
       </ResizablePanelGroup>
-    </div>
-  ) : (
-    <div className="hidden min-h-0 w-full flex-1 overflow-hidden bg-background lg:flex">
-      <div className="min-h-0 min-w-0 flex-1 overflow-hidden">{centerAndRight}</div>
     </div>
   )
 
@@ -969,9 +1073,9 @@ export function KnowledgeWorkspace({
     <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden lg:hidden">
       {effectiveHistoryVisible && <div className="h-56 shrink-0 border-b border-border">{historyPanel}</div>}
       <div className="min-h-0 flex-1 overflow-hidden">{askCenter}</div>
-      {sourcePanel && (
+      {sourcePanelExpanded && sourcePanelContent && (
         <div className="absolute inset-0 z-30 bg-background">
-          {sourcePanel}
+          {sourcePanelContent}
         </div>
       )}
     </div>

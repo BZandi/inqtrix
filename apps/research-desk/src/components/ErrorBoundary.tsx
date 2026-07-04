@@ -4,6 +4,12 @@ type Props = {
   children: ReactNode
   retryLabel: string
   title: string
+  /**
+   * Optional custom fallback. When provided it fully replaces the default inline
+   * error box (used e.g. as a full-page root fallback). Receives the caught error
+   * and the reset callback so the consumer can offer a retry/reload affordance.
+   */
+  fallback?: (error: Error, reset: () => void) => ReactNode
 }
 
 type State = {
@@ -30,6 +36,8 @@ export class ErrorBoundary extends Component<Props, State> {
   render(): ReactNode {
     const { error } = this.state
     if (!error) return this.props.children
+
+    if (this.props.fallback) return this.props.fallback(error, this.reset)
 
     return (
       <div className="my-2 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">

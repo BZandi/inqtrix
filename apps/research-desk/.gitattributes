@@ -1,0 +1,6 @@
+# Demo content under src/features/project/demoContent/ is bundled and parsed
+# verbatim via import.meta.glob(..., { query: '?raw' }). The frontmatter parser
+# normalizes line endings, but the bundled fixtures must still never ship CRLF on
+# a Windows (core.autocrlf) checkout. Pinning Markdown to LF keeps the committed
+# fixtures byte-stable across platforms (defense-in-depth, not the parser fix).
+*.md text eol=lf

@@ -105,6 +105,7 @@ export function IndexBar({
   const currentModel: EmbedModelDescriptor =
     embedModels.find((model) => model.id === index.model)
       ?? { dims: index.dims, id: index.model, label: index.model, provider: '' }
+  const modeLabel = serverBacked ? t.vectorIndex.modeServer : t.vectorIndex.modeDemo
 
   const quotaResetLabel =
     embeddingQuota && embeddingQuota.resetAt > 0
@@ -117,31 +118,60 @@ export function IndexBar({
 
   return (
     <div className="rounded-lg border border-border bg-card p-3.5 shadow-[0_1px_2px_var(--shadow-hairline)]">
-      <div className="flex flex-wrap items-start gap-3">
-        <span className="grid size-9 shrink-0 place-items-center rounded-lg border border-file/25 bg-file-subtle text-file">
-          <Layers className="size-4" />
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="grid size-10 shrink-0 place-items-center rounded-lg border border-file/25 bg-file-subtle text-file">
+          <Layers className="size-5" />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <h3 className="t-card text-foreground">{t.vectorIndex.title}</h3>
-            <span className={cn('inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 t-meta-sm font-semibold', style.badge)}>
-              <span className={cn('size-1.5 rounded-full', style.dot, style.pulse && !reduceMotion && 'inqtrix-running-dot')} />
-              {statusLabel}
-            </span>
-          </div>
-          <div className="mt-1 flex flex-wrap items-center gap-2 t-meta-sm text-muted-foreground">
+          <h3 className="t-card text-foreground">{t.vectorIndex.title}</h3>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
             <Tooltip>
               <TooltipTrigger asChild>
-                <span className="inline-flex shrink-0 cursor-help items-center gap-1 whitespace-nowrap rounded border border-border bg-surface px-1.5 py-0.5 font-mono">
+                <span className="inline-flex shrink-0 cursor-help items-center gap-1 whitespace-nowrap rounded border border-border bg-surface px-1.5 py-0.5 font-mono t-meta-sm text-muted-foreground">
                   <Link className="size-3" />@index:{index.handle}
                 </span>
               </TooltipTrigger>
               <TooltipContent side="top">{t.vectorIndex.indexHandleTooltip}</TooltipContent>
             </Tooltip>
-            <span className="hidden sm:inline">{t.vectorIndex.referenceHint}</span>
+            <span className={cn('inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 t-meta-sm font-semibold', style.badge)}>
+              <span className={cn('size-1.5 rounded-full', style.dot, style.pulse && !reduceMotion && 'inqtrix-running-dot')} />
+              {statusLabel}
+            </span>
+            <span
+              className={cn(
+                'inline-flex h-5 items-center rounded-md border px-1.5 t-hint font-semibold',
+                serverBacked
+                  ? 'border-success/20 bg-success-subtle text-success'
+                  : 'border-border bg-surface text-muted-foreground',
+              )}
+            >
+              {modeLabel}
+            </span>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="inline-flex cursor-help items-center text-muted-foreground/70 hover:text-foreground">
+                  <Info className="size-3.5" />
+                </span>
+              </TooltipTrigger>
+              <TooltipContent
+                className="max-w-[320px] border border-border bg-popover p-2.5 text-popover-foreground shadow-lg"
+                side="top"
+              >
+                <p className="t-label text-foreground">{modeLabel}</p>
+                <p className="mt-1 t-meta-sm text-muted-foreground">{t.vectorIndex.referenceHint}</p>
+                <p className="mt-1.5 t-meta-sm text-muted-foreground">
+                  {serverBacked ? t.vectorIndex.serverNote : t.vectorIndex.simulationNote}
+                </p>
+                {serverBacked && serverFeatureLabels && serverFeatureLabels.length > 0 ? (
+                  <p className="mt-1.5 t-hint text-muted-foreground">
+                    {t.vectorIndex.serverFeaturesLabel}: {serverFeatureLabels.join(' · ')}
+                  </p>
+                ) : null}
+              </TooltipContent>
+            </Tooltip>
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2 self-center">
           {/* When quotaBlocked, the reason is the always-visible exhausted
               banner below (keyboard/SR reachable) — no disabled-button tooltip. */}
           <Button
@@ -255,6 +285,19 @@ export function IndexBar({
             <p className="mt-0.5 truncate t-list font-semibold tabular-nums text-foreground">{value}</p>
           </div>
         ))}
+        {!indexing && history.length > 0 ? (
+          <button
+            aria-expanded={historyOpen}
+            className="ml-auto inline-flex h-7 items-center gap-1.5 rounded-md border border-border bg-surface px-2 t-hint font-semibold text-muted-foreground transition-colors hover:text-foreground"
+            onClick={() => setHistoryOpen((open) => !open)}
+            type="button"
+          >
+            <ChevronDown className={cn('size-3.5 transition-transform', !reduceMotion && 'duration-200', !historyOpen && '-rotate-90')} />
+            <Clock3 className="size-3.5" />
+            <span>{t.vectorIndex.historyHeading}</span>
+            <span className="text-muted-foreground/70">({history.length})</span>
+          </button>
+        ) : null}
         {indexing ? (
           <div className="ml-auto min-w-[10rem]">
             <RunningIndexProgress live={live} reduceMotion={reduceMotion} t={t} />
@@ -303,26 +346,15 @@ export function IndexBar({
         </div>
       ) : null}
 
-      {history.length > 0 ? (
+      {!indexing && history.length > 0 && historyOpen ? (
         <IndexHistory
           entries={history}
           locale={locale}
-          onToggle={() => setHistoryOpen((open) => !open)}
           open={historyOpen}
           reduceMotion={reduceMotion}
           t={t}
         />
       ) : null}
-
-      <p className="mt-2.5 inline-flex items-center gap-1.5 t-meta-sm text-muted-foreground">
-        <Info className="size-3 shrink-0" />
-        {serverBacked ? t.vectorIndex.serverNote : t.vectorIndex.simulationNote}
-        {serverBacked && serverFeatureLabels && serverFeatureLabels.length > 0 ? (
-          <span className="t-hint block text-muted-foreground">
-            {t.vectorIndex.serverFeaturesLabel}: {serverFeatureLabels.join(' · ')}
-          </span>
-        ) : null}
-      </p>
     </div>
   )
 }
@@ -391,14 +423,12 @@ function RunningIndexProgress({
 function IndexHistory({
   entries,
   locale,
-  onToggle,
   open,
   reduceMotion,
   t,
 }: {
   entries: VectorIndexRunHistoryEntry[]
   locale: Locale
-  onToggle: () => void
   open: boolean
   reduceMotion: boolean
   t: TranslationDictionary
@@ -411,17 +441,6 @@ function IndexHistory({
         : t.vectorIndex.historyResultOk
   return (
     <div className="mt-2.5 border-t border-border/70 pt-2.5">
-      <button
-        aria-expanded={open}
-        className="flex w-full items-center gap-1.5 t-hint font-semibold text-muted-foreground hover:text-foreground"
-        onClick={onToggle}
-        type="button"
-      >
-        <ChevronDown className={cn('size-3.5 transition-transform', !reduceMotion && 'duration-200', !open && '-rotate-90')} />
-        <Clock3 className="size-3.5" />
-        <span>{t.vectorIndex.historyHeading}</span>
-        <span className="text-muted-foreground/70">({entries.length})</span>
-      </button>
       <div
         className={cn(
           'grid transition-[grid-template-rows]',

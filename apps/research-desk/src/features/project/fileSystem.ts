@@ -29,6 +29,7 @@ import {
   isWorkspaceId,
   rememberBrowserWorkspaceId,
 } from './workspaceId'
+import { normalizePanelLayout } from './panelLayout'
 import { buildZip } from './zip'
 
 type DirectoryPickerMode = 'read' | 'readwrite'
@@ -475,6 +476,7 @@ function buildProjectStateFromFiles({
       isComposerVisible: booleanOrDefault((ui as Record<string, unknown>).isComposerVisible, true),
       isReportExpanded: booleanOrDefault((ui as Record<string, unknown>).isReportExpanded, false),
       isReportVisible: booleanOrDefault((ui as Record<string, unknown>).isReportVisible, true),
+      panelLayout: normalizePanelLayout((ui as Record<string, unknown>).panelLayout),
       pendingChatAttachmentRefs: pendingAttachmentRefsOrDefault(
         (ui as Record<string, unknown>).pendingChatAttachmentRefs,
         (ui as Record<string, unknown>).pendingChatReportRunId,

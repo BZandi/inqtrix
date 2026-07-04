@@ -2,26 +2,32 @@ import { Check, Copy } from '@/components/icons'
 import {
   isValidElement,
   memo,
+  useEffect,
   useRef,
   useState,
   type CSSProperties,
   type ComponentPropsWithoutRef,
   type ReactNode,
 } from 'react'
-import { MarkdownHooks, type Components } from 'react-markdown'
+import Markdown, { MarkdownHooks, type Components } from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
 import rehypePrettyCode, { type Options as RehypePrettyCodeOptions } from 'rehype-pretty-code'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
-import type { Highlighter } from 'shiki'
+import type { Highlighter, ThemedToken } from 'shiki'
 import { createBundledHighlighter } from 'shiki/core'
 import { createJavaScriptRegexEngine } from 'shiki/engine/javascript'
+import type { PluggableList } from 'unified'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import { useTheme } from '@/theme/ThemeProvider'
+import {
+  extractMarkdownCodeBlocks,
+  plainCodeLanguageFromClassName,
+} from './markdownLanguage'
 
 export type MarkdownRendererVariant = 'chat' | 'report'
 
@@ -56,6 +62,40 @@ const createMarkdownHighlighter = createBundledHighlighter({
   },
 })
 
+type MarkdownHighlighterOptions = Parameters<typeof createMarkdownHighlighter>[0]
+type MarkdownLoadLanguage = Parameters<Highlighter['loadLanguage']>[0]
+type MarkdownTokenizeLanguage = NonNullable<Parameters<Highlighter['codeToTokens']>[1]['lang']>
+type MarkdownCodeTheme = 'github-dark' | 'github-light'
+type MarkdownHighlightedLine = Array<Pick<ThemedToken, 'color' | 'content' | 'fontStyle'>>
+
+let markdownHighlighterPromise: Promise<Highlighter> | null = null
+const markdownTokenCache = new Map<string, MarkdownHighlightedLine[]>()
+const markdownTokenPending = new Set<string>()
+const markdownTokenListeners = new Map<string, Set<() => void>>()
+
+function getMarkdownHighlighter(options: MarkdownHighlighterOptions): Promise<Highlighter> {
+  markdownHighlighterPromise ??= createMarkdownHighlighter(options)
+    .then((highlighter) => highlighter as unknown as Highlighter)
+  return markdownHighlighterPromise
+}
+
+export function preloadMarkdownCodeHighlights(
+  markdowns: readonly string[],
+  resolvedTheme: 'light' | 'dark',
+): Promise<void> {
+  const theme = markdownCodeTheme(resolvedTheme)
+  const jobs = markdowns.flatMap((markdown) =>
+    extractMarkdownCodeBlocks(markdown).map((block) =>
+      ensureMarkdownCodeHighlight({
+        code: block.code,
+        language: block.language,
+        theme,
+      }),
+    ),
+  )
+  return Promise.allSettled(jobs).then(() => undefined)
+}
+
 const PRETTY_CODE_OPTIONS: RehypePrettyCodeOptions = {
   bypassInlineCode: true,
   defaultLang: {
@@ -63,8 +103,7 @@ const PRETTY_CODE_OPTIONS: RehypePrettyCodeOptions = {
     inline: 'plaintext',
   },
   getHighlighter: async (options) => {
-    const highlighter = await createMarkdownHighlighter(options)
-    return highlighter as unknown as Highlighter
+    return getMarkdownHighlighter(options)
   },
   keepBackground: false,
   theme: {
@@ -72,6 +111,13 @@ const PRETTY_CODE_OPTIONS: RehypePrettyCodeOptions = {
     light: 'github-light',
   },
 }
+
+const MARKDOWN_REMARK_PLUGINS: PluggableList = [remarkGfm, remarkMath]
+const MARKDOWN_FALLBACK_REHYPE_PLUGINS: PluggableList = [rehypeKatex]
+const MARKDOWN_REHYPE_PLUGINS: PluggableList = [
+  rehypeKatex,
+  [rehypePrettyCode, PRETTY_CODE_OPTIONS],
+]
 
 const MARKDOWN_COMPONENTS_BY_VARIANT: Record<MarkdownRendererVariant, Components> = {
   chat: {
@@ -298,15 +344,15 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
       title={t.markdownError.title}
       retryLabel={t.markdownError.retry}
     >
-      {streamParts.stableMarkdown && (
+      {streamParts.stableMarkdown && variant === 'chat' && (
+        <SynchronousMarkdown markdown={streamParts.stableMarkdown} variant={variant} />
+      )}
+      {streamParts.stableMarkdown && variant !== 'chat' && (
         <MarkdownHooks
           components={MARKDOWN_COMPONENTS_BY_VARIANT[variant]}
-          fallback={<MarkdownFallback markdown={streamParts.stableMarkdown} />}
-          rehypePlugins={[
-            rehypeKatex,
-            [rehypePrettyCode, PRETTY_CODE_OPTIONS],
-          ]}
-          remarkPlugins={[remarkGfm, remarkMath]}
+          fallback={<SynchronousMarkdown markdown={streamParts.stableMarkdown} variant={variant} />}
+          rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+          remarkPlugins={MARKDOWN_REMARK_PLUGINS}
           skipHtml
         >
           {streamParts.stableMarkdown}
@@ -394,10 +440,11 @@ function MarkdownSpan({
 
 function InlineCode({ children, className, ...props }: ComponentPropsWithoutRef<'code'>) {
   const isPrettyCodeBlock = 'data-theme' in props || 'data-language' in props
+  const isPlainCodeBlock = plainCodeLanguageFromClassName(className) !== null
   return (
     <code
       className={cn(
-        isPrettyCodeBlock
+        isPrettyCodeBlock || isPlainCodeBlock
           ? 'font-mono'
           : 'rounded bg-muted px-1 py-0.5 font-mono text-[0.85em] text-foreground',
         className,
@@ -426,11 +473,13 @@ function PrettyCodePre({
   const preRef = useRef<HTMLPreElement | null>(null)
   const dataProps = props as Record<string, unknown>
   const language = propToString(dataProps['data-language'] ?? node?.properties?.dataLanguage ?? node?.properties?.['data-language'])
+    ?? codeLanguageFromReactNode(children)
     ?? 'text'
+  const codeText = textFromReactNode(children)
 
   async function copyCode() {
     try {
-      await navigator.clipboard.writeText(readRenderedCodeText(preRef.current, children))
+      await navigator.clipboard.writeText(readRenderedCodeText(preRef.current, codeText))
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1200)
     } catch (error) {
@@ -477,17 +526,76 @@ function PrettyCodePre({
         {...props}
         ref={preRef}
       >
-        {children}
+        <HighlightedCode code={codeText} language={language} />
       </pre>
     </div>
   )
 }
 
-function MarkdownFallback({ markdown }: { markdown: string }) {
+function HighlightedCode({
+  code,
+  language,
+}: {
+  code: string
+  language: string
+}) {
+  const { resolvedTheme } = useTheme()
+  const theme = markdownCodeTheme(resolvedTheme)
+  const normalizedLanguage = shikiCodeLanguage(language)
+  const cacheKey = markdownCodeCacheKey(code, normalizedLanguage, theme)
+  const [, setHighlightVersion] = useState(0)
+
+  useEffect(() => {
+    if (markdownTokenCache.has(cacheKey)) return undefined
+
+    const unsubscribe = subscribeMarkdownCodeHighlight(cacheKey, () => {
+      setHighlightVersion((version) => version + 1)
+    })
+    void ensureMarkdownCodeHighlight({
+      code,
+      language: normalizedLanguage,
+      theme,
+    })
+    return unsubscribe
+  }, [cacheKey, code, normalizedLanguage, theme])
+
+  const lines = markdownTokenCache.get(cacheKey)
+  if (!lines) {
+    return <code className={`language-${normalizedLanguage}`}>{code}</code>
+  }
+
   return (
-    <span className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+    <code className={`language-${normalizedLanguage}`}>
+      {lines.map((line, lineIndex) => (
+        <span data-line="" key={lineIndex}>
+          {line.map((token, tokenIndex) => (
+            <span key={`${lineIndex}-${tokenIndex}`} style={markdownTokenStyle(token)}>
+              {token.content}
+            </span>
+          ))}
+          {lineIndex < lines.length - 1 ? '\n' : null}
+        </span>
+      ))}
+    </code>
+  )
+}
+
+function SynchronousMarkdown({
+  markdown,
+  variant,
+}: {
+  markdown: string
+  variant: MarkdownRendererVariant
+}) {
+  return (
+    <Markdown
+      components={MARKDOWN_COMPONENTS_BY_VARIANT[variant]}
+      rehypePlugins={MARKDOWN_FALLBACK_REHYPE_PLUGINS}
+      remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+      skipHtml
+    >
       {markdown}
-    </span>
+    </Markdown>
   )
 }
 
@@ -659,6 +767,111 @@ function parsePendingCodeFence(text: string) {
     body: text.slice(match[0].length),
     language,
   }
+}
+
+function markdownCodeTheme(resolvedTheme: 'light' | 'dark'): MarkdownCodeTheme {
+  return resolvedTheme === 'dark' ? 'github-dark' : 'github-light'
+}
+
+function shikiCodeLanguage(language: string): string {
+  return language === 'text' ? 'plaintext' : language
+}
+
+function markdownCodeCacheKey(code: string, language: string, theme: MarkdownCodeTheme): string {
+  return `${theme}\u0000${language}\u0000${code}`
+}
+
+function subscribeMarkdownCodeHighlight(cacheKey: string, listener: () => void) {
+  const listeners = markdownTokenListeners.get(cacheKey) ?? new Set<() => void>()
+  listeners.add(listener)
+  markdownTokenListeners.set(cacheKey, listeners)
+
+  return () => {
+    listeners.delete(listener)
+    if (listeners.size === 0) markdownTokenListeners.delete(cacheKey)
+  }
+}
+
+function notifyMarkdownCodeHighlight(cacheKey: string) {
+  const listeners = markdownTokenListeners.get(cacheKey)
+  if (!listeners) return
+  for (const listener of listeners) listener()
+}
+
+async function ensureMarkdownCodeHighlight({
+  code,
+  language,
+  theme,
+}: {
+  code: string
+  language: string
+  theme: MarkdownCodeTheme
+}): Promise<void> {
+  const normalizedLanguage = shikiCodeLanguage(language)
+  const cacheKey = markdownCodeCacheKey(code, normalizedLanguage, theme)
+  if (markdownTokenCache.has(cacheKey) || markdownTokenPending.has(cacheKey)) return
+
+  markdownTokenPending.add(cacheKey)
+  try {
+    const highlighter = await getMarkdownHighlighter({
+      langs: ['plaintext'],
+      themes: ['github-dark', 'github-light'],
+    })
+    if (normalizedLanguage !== 'plaintext') {
+      await highlighter.loadLanguage(normalizedLanguage as MarkdownLoadLanguage)
+    }
+    const result = highlighter.codeToTokens(code, {
+      lang: normalizedLanguage as MarkdownTokenizeLanguage,
+      theme,
+      tokenizeMaxLineLength: 900,
+      tokenizeTimeLimit: 200,
+    })
+    markdownTokenCache.set(
+      cacheKey,
+      result.tokens.map((line) =>
+        line.map((token) => ({
+          color: token.color,
+          content: token.content,
+          fontStyle: token.fontStyle,
+        })),
+      ),
+    )
+  } catch (error) {
+    console.warn('Inqtrix markdown code highlight failed.', error)
+  } finally {
+    markdownTokenPending.delete(cacheKey)
+    notifyMarkdownCodeHighlight(cacheKey)
+  }
+}
+
+function markdownTokenStyle(token: Pick<ThemedToken, 'color' | 'fontStyle'>): CSSProperties | undefined {
+  const style: CSSProperties = {}
+  if (token.color) style.color = token.color
+
+  if (typeof token.fontStyle === 'number' && token.fontStyle > 0) {
+    if (token.fontStyle & 1) style.fontStyle = 'italic'
+    if (token.fontStyle & 2) style.fontWeight = 700
+    if (token.fontStyle & 4) style.textDecoration = 'underline'
+  }
+
+  return Object.keys(style).length > 0 ? style : undefined
+}
+
+function codeLanguageFromReactNode(node: ReactNode): string | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const language = codeLanguageFromReactNode(child)
+      if (language) return language
+    }
+    return null
+  }
+
+  if (isValidElement<{ children?: ReactNode; className?: unknown }>(node)) {
+    return plainCodeLanguageFromClassName(node.props.className)
+      ?? codeLanguageFromReactNode(node.props.children)
+  }
+
+  return null
 }
 
 function propToString(value: unknown) {

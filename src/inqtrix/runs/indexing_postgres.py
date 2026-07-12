@@ -131,6 +131,12 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
             collection are deleted beyond this count.
         worker_id: Identity stamped into ``claimed_by`` for jobs this
             process executes or fences.
+        recover_orphans: Whether this instance may blanket-fail
+            queued/running rows left by a previous process. ``None``
+            infers from ``queue`` (no-queue single API process sweeps,
+            queue mode never); the queue-backed WORKER passes an
+            explicit ``False`` — its ``queue=None`` is claim-mode
+            wiring, stream reclaim owns crash recovery there.
 
     Tenancy: job rows live in the single deployment tenant (``default``)
     at the RLS layer — per-user visibility is the
@@ -153,6 +159,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         completed_ttl_seconds: int,
         history_limit: int,
         worker_id: str,
+        recover_orphans: bool | None = None,
     ) -> None:
         # The engine/session/loop/dispatch plumbing lives in
         # DurableJobStoreBase; this store adds only its sizing and
@@ -163,6 +170,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
             worker_id=worker_id,
             queue=queue,
             max_concurrent=max_concurrent,
+            recover_orphans=recover_orphans,
         )
         self._max_queue_size = max_queue_size
         self._completed_ttl_seconds = completed_ttl_seconds

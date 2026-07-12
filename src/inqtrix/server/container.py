@@ -23,6 +23,7 @@ from inqtrix.auth.api_key import CallableGateAuthProvider
 from inqtrix.auth.identity_memory import MemoryIdentityStore
 from inqtrix.auth.permissions import PermissionService
 from inqtrix.content.memory import MemoryFileRegistry
+from inqtrix.capabilities import build_capability_registry
 from inqtrix.services.file_service import FileService
 from inqtrix.auth.principal import (
     AuthProvider,
@@ -96,10 +97,13 @@ class PlatformPersistence:
     session_factory: Any | None
     workspace_admin: Any = None
     prompt_templates: Any = None
+    skills: Any = None
 
 
 def build_platform_persistence_bundle(
     settings: Settings,
+    *,
+    null_pool: bool = False,
 ) -> PlatformPersistence:
     """Settings bridge for the platform persistence layer.
 
@@ -109,6 +113,19 @@ def build_platform_persistence_bundle(
     the file registry on ONE shared engine/session factory; a missing
     URL is a contradiction and fails at startup instead of degrading
     silently.
+
+    Args:
+        null_pool: When ``True``, the shared platform engine is built
+            with :class:`NullPool` (loop-agnostic). The API keeps the
+            default pooled engine (one persistent request loop). The
+            worker MUST pass ``True``: the workspace agent drives the
+            permission/identity repositories from a sync worker thread
+            via per-call ``asyncio.run`` (``algorithm._run_async``), and
+            a pooled asyncpg connection cached on one closed loop then
+            reused on the next segment's loop crashes with "Future
+            attached to a different loop" — the same loop-affinity
+            hazard every other worker-reached store already avoids with
+            NullPool. Ignored on the ``memory`` backend.
     """
     if settings.storage.backend == "postgres":
         if not settings.storage.database_url.strip():
@@ -120,9 +137,15 @@ def build_platform_persistence_bundle(
         from inqtrix.storage.db import build_engine, build_session_factory
         from inqtrix.storage.identity_postgres import PostgresIdentityBackend
 
-        session_factory = build_session_factory(
-            build_engine(settings.storage.database_url)
+        engine = (
+            build_engine(settings.storage.database_url, null_pool=True)
+            if null_pool
+            else build_engine(
+                settings.storage.database_url,
+                **settings.storage.pool_kwargs(),
+            )
         )
+        session_factory = build_session_factory(engine)
         backend = PostgresIdentityBackend(
             session_factory=session_factory,
             app_role=settings.storage.app_role,
@@ -130,6 +153,7 @@ def build_platform_persistence_bundle(
         from inqtrix.storage.prompt_templates_postgres import (
             PostgresPromptTemplateRepository,
         )
+        from inqtrix.storage.skills_postgres import PostgresSkillRepository
 
         return PlatformPersistence(
             permissions=PermissionService(
@@ -146,10 +170,15 @@ def build_platform_persistence_bundle(
                 session_factory=session_factory,
                 app_role=settings.storage.app_role,
             ),
+            skills=PostgresSkillRepository(
+                session_factory=session_factory,
+                app_role=settings.storage.app_role,
+            ),
         )
     from inqtrix.content.prompt_templates import (
         MemoryPromptTemplateRepository,
     )
+    from inqtrix.content.skills import MemorySkillRepository
 
     store = MemoryIdentityStore()
     return PlatformPersistence(
@@ -161,6 +190,7 @@ def build_platform_persistence_bundle(
         session_factory=None,
         workspace_admin=store,
         prompt_templates=MemoryPromptTemplateRepository(),
+        skills=MemorySkillRepository(),
     )
 
 
@@ -228,7 +258,10 @@ def build_run_store(settings: Settings) -> "RunStorePort":
     from inqtrix.storage.db import build_engine, build_session_factory
     from inqtrix.storage.identity_postgres import PostgresIdentityBackend
 
-    engine = build_engine(settings.storage.database_url)
+    engine = build_engine(
+        settings.storage.database_url,
+        **settings.storage.pool_kwargs(),
+    )
     audit = PostgresIdentityBackend(
         session_factory=build_session_factory(engine),
         app_role=settings.storage.app_role,
@@ -254,6 +287,7 @@ def build_run_store(settings: Settings) -> "RunStorePort":
         completed_ttl_seconds=settings.server.run_durable_retention_seconds,
         worker_id=f"api-{socket.gethostname()}-{os.getpid()}",
         audit=audit,
+        max_concurrent_per_user=settings.server.run_max_concurrent_per_user,
     )
 
 
@@ -286,7 +320,10 @@ def build_indexing_store(settings: Settings) -> Any:
         )
     from inqtrix.storage.db import build_engine
 
-    engine = build_engine(settings.storage.database_url)
+    engine = build_engine(
+        settings.storage.database_url,
+        **settings.storage.pool_kwargs(),
+    )
     queue = None
     if settings.queue.backend == "valkey":
         from inqtrix.runs.indexing_queue import ValkeyIndexingQueue
@@ -353,6 +390,31 @@ def build_editor_store(settings: Settings) -> Any:
     from inqtrix.storage.db import build_engine
 
     return PostgresEditorStore(
+        engine=build_engine(settings.storage.database_url, null_pool=True),
+        app_role=settings.storage.app_role,
+    )
+
+
+def build_editor_patch_store(settings: Settings) -> Any:
+    """Settings bridge for the editor-patch store backend (M7).
+
+    Mirrors :func:`build_editor_store`: in-memory default (offline/test);
+    ``INQTRIX_STORAGE_BACKEND=postgres`` makes proposed/decided patches
+    durable on their OWN NullPool engine.
+    """
+    if settings.storage.backend != "postgres":
+        from inqtrix.project.editor_patch_memory import MemoryEditorPatchStore
+
+        return MemoryEditorPatchStore()
+    if not settings.storage.database_url.strip():
+        raise RuntimeError(
+            "INQTRIX_STORAGE_BACKEND=postgres verlangt eine gesetzte "
+            "INQTRIX_DATABASE_URL."
+        )
+    from inqtrix.storage.editor_patch_postgres import PostgresEditorPatchStore
+    from inqtrix.storage.db import build_engine
+
+    return PostgresEditorPatchStore(
         engine=build_engine(settings.storage.database_url, null_pool=True),
         app_role=settings.storage.app_role,
     )
@@ -468,6 +530,132 @@ def build_account_preferences_store(settings: Settings) -> Any:
     )
 
 
+def build_agent_memory_candidate_store(settings: Settings) -> Any:
+    """Settings bridge for reviewable agent-memory candidates.
+
+    Accepted memories live in the configured provider; candidates remain
+    Inqtrix-owned so user approval state is queryable and auditable.
+    """
+    if settings.storage.backend != "postgres":
+        from inqtrix.agents.memory_candidates_memory import (
+            MemoryAgentMemoryCandidateStore,
+        )
+
+        return MemoryAgentMemoryCandidateStore()
+    if not settings.storage.database_url.strip():
+        raise RuntimeError(
+            "INQTRIX_STORAGE_BACKEND=postgres verlangt eine gesetzte "
+            "INQTRIX_DATABASE_URL."
+        )
+    from inqtrix.storage.agent_memory_postgres import (
+        PostgresAgentMemoryCandidateStore,
+    )
+    from inqtrix.storage.db import build_engine
+
+    return PostgresAgentMemoryCandidateStore(
+        engine=build_engine(settings.storage.database_url, null_pool=True),
+        app_role=settings.storage.app_role,
+    )
+
+
+def build_agent_feedback_store(settings: Settings) -> Any:
+    """Settings bridge for personal workspace-agent feedback history."""
+    if settings.storage.backend != "postgres":
+        from inqtrix.agents.memory_candidates_memory import (
+            MemoryAgentFeedbackStore,
+        )
+
+        return MemoryAgentFeedbackStore()
+    if not settings.storage.database_url.strip():
+        raise RuntimeError(
+            "INQTRIX_STORAGE_BACKEND=postgres verlangt eine gesetzte "
+            "INQTRIX_DATABASE_URL."
+        )
+    from inqtrix.storage.agent_memory_postgres import (
+        PostgresAgentFeedbackStore,
+    )
+    from inqtrix.storage.db import build_engine
+
+    return PostgresAgentFeedbackStore(
+        engine=build_engine(settings.storage.database_url, null_pool=True),
+        app_role=settings.storage.app_role,
+    )
+
+
+def build_agent_memory_provider(settings: Settings) -> Any:
+    """Settings bridge for the optional long-term memory provider."""
+    provider = settings.agent_platform.memory_provider
+    if provider == "none" or settings.agent_platform.memory_mode == "off":
+        return None
+    if provider == "mem0":
+        if not settings.agent_platform.mem0_base_url.strip():
+            log.warning(
+                "INQTRIX_AGENT_MEMORY_PROVIDER=mem0 configured without "
+                "INQTRIX_MEM0_BASE_URL; memory is unavailable."
+            )
+            return None
+        from inqtrix.agents.memory_mem0 import Mem0AgentMemoryProvider
+
+        return Mem0AgentMemoryProvider(
+            base_url=settings.agent_platform.mem0_base_url,
+            api_key=settings.agent_platform.mem0_api_key,
+        )
+    raise RuntimeError(f"Unknown agent memory provider: {provider!r}")
+
+
+def build_agent_control_store(settings: Settings) -> Any:
+    """Settings bridge for the agent control store backend (M4).
+
+    Mirrors :func:`build_vector_index_store`: in-memory default
+    (offline/test); ``INQTRIX_STORAGE_BACKEND=postgres`` makes plans,
+    approvals, clarifications and artifacts durable on an own NullPool
+    engine (HTTP-loop only — the R9 decision writers run on the run
+    store's loop through its session).
+    """
+    if settings.storage.backend != "postgres":
+        from inqtrix.agents.control_memory import MemoryAgentControlStore
+
+        return MemoryAgentControlStore()
+    if not settings.storage.database_url.strip():
+        raise RuntimeError(
+            "INQTRIX_STORAGE_BACKEND=postgres verlangt eine gesetzte "
+            "INQTRIX_DATABASE_URL."
+        )
+    from inqtrix.storage.agent_control_postgres import (
+        PostgresAgentControlStore,
+    )
+    from inqtrix.storage.db import build_engine
+
+    return PostgresAgentControlStore(
+        engine=build_engine(settings.storage.database_url, null_pool=True),
+        app_role=settings.storage.app_role,
+    )
+
+
+def build_agent_session_store(settings: Settings) -> Any:
+    """Settings bridge for the agent-sessions store backend (M4, E15)."""
+    if settings.storage.backend != "postgres":
+        from inqtrix.project.agent_sessions_memory import (
+            MemoryAgentSessionStore,
+        )
+
+        return MemoryAgentSessionStore()
+    if not settings.storage.database_url.strip():
+        raise RuntimeError(
+            "INQTRIX_STORAGE_BACKEND=postgres verlangt eine gesetzte "
+            "INQTRIX_DATABASE_URL."
+        )
+    from inqtrix.project.agent_sessions_postgres import (
+        PostgresAgentSessionStore,
+    )
+    from inqtrix.storage.db import build_engine
+
+    return PostgresAgentSessionStore(
+        engine=build_engine(settings.storage.database_url, null_pool=True),
+        app_role=settings.storage.app_role,
+    )
+
+
 def build_permission_service(settings: Settings) -> PermissionService:
     """Permission-service half of :func:`build_platform_persistence`.
 
@@ -477,14 +665,37 @@ def build_permission_service(settings: Settings) -> PermissionService:
     return build_platform_persistence(settings)[0]
 
 
+def _require_shareable_object_store(settings: Settings) -> None:
+    """Reject per-replica-disk blobs behind a load balancer.
+
+    The ``local`` backend writes to THIS replica's filesystem: with more
+    than one replica, a blob uploaded on replica A 404s on replica B —
+    a silent data-availability split-brain. Refusing at startup mirrors
+    :func:`_require_valid_queue_storage` (No Silent Fallbacks); the
+    single-replica default stays zero-infrastructure.
+    """
+    storage = settings.storage
+    if storage.object_store_backend == "local" and storage.replica_count > 1:
+        raise RuntimeError(
+            "INQTRIX_OBJECT_STORE_BACKEND=local ist per-Replica-"
+            "Festplatte und kann nicht ueber INQTRIX_REPLICA_COUNT="
+            f"{storage.replica_count} Replicas geteilt werden — "
+            "INQTRIX_OBJECT_STORE_BACKEND=s3 verwenden (S3-kompatibler "
+            "Endpunkt, z. B. MinIO/SeaweedFS)."
+        )
+
+
 def build_object_store(settings: Settings) -> "ObjectStore":
     """Settings bridge for the blob store (env-coupled surface).
 
     ``local`` (default) needs nothing; ``s3`` without endpoint or
-    credentials is a contradiction and fails at startup.
+    credentials is a contradiction and fails at startup — as does
+    ``local`` with more than one declared replica (blobs would be
+    invisible across replicas).
     """
     from inqtrix.storage.object_store import LocalFSObjectStore, S3ObjectStore
 
+    _require_shareable_object_store(settings)
     storage = settings.storage
     if storage.object_store_backend == "s3":
         if (
@@ -560,6 +771,7 @@ def build_knowledge_context(
             selectable_models=(
                 settings.knowledge.selectable_embedding_model_list()
             ),
+            timeout=settings.agent.reasoning_timeout,
         )
     else:
         embeddings = LiteLLMEmbeddings(
@@ -575,6 +787,7 @@ def build_knowledge_context(
             selectable_models=(
                 settings.knowledge.selectable_embedding_model_list()
             ),
+            timeout=settings.agent.reasoning_timeout,
         )
     if settings.storage.backend == "postgres":
         # Postgres-canonical tier: collections/documents/chunks live
@@ -640,6 +853,7 @@ def build_knowledge_context(
             api_key=settings.knowledge.reranker_api_key,
             base_url=settings.knowledge.reranker_base_url,
             default_model=settings.knowledge.reranker_model,
+            timeout=settings.agent.reasoning_timeout,
         )
     elif settings.knowledge.reranker_provider == "llm":
         from inqtrix.model_routing import resolve_model
@@ -658,6 +872,7 @@ def build_knowledge_context(
                 if provider_models is not None
                 else ""
             ),
+            timeout=settings.agent.reasoning_timeout,
         )
 
     if (
@@ -766,15 +981,27 @@ class AppContainer:
     workspace_admin: Any = None
     share_service: Any = None
     prompt_template_service: Any = None
+    skill_service: Any = None
     quota_service: Any = None
     indexing_service: Any = None
     chat_history_service: Any = None
     editor_persistence_service: Any = None
+    editor_patch_service: Any = None
+    """Editor-patch lifecycle (propose/apply/reject over the patch store
+    pair, M7); consumed by the patch router and the workspace-agent
+    patch phase. ``None`` only in hand-built test containers."""
+    agent_control_service: Any = None
+    """Agent run control orchestration (plans/approvals/clarifications/
+    artifacts, M4); ``None`` only in hand-built test containers."""
+    agent_sessions_service: Any = None
+    """Agent-desk saved sessions (knowledge-sessions clone, E15)."""
     asset_records_service: Any = None
     knowledge_sessions_service: Any = None
     document_parser: Any = None
     vector_index_service: Any = None
     account_preferences_service: Any = None
+    agent_memory_service: Any = None
+    capability_registry: Any = None
     object_store_backend: str = "none"
     stacks: dict[str, Any] | None = None
     default_stack: str = ""
@@ -798,6 +1025,8 @@ def build_container(
     file_service: FileService | None = None,
     workspace_admin: Any = None,
     object_store_impl: "ObjectStore | None" = None,
+    document_parser: Any = None,
+    platform_persistence_null_pool: bool = False,
 ) -> AppContainer:
     """Assemble the container from resolved collaborators.
 
@@ -812,6 +1041,12 @@ def build_container(
        (callers that want env-driven mode resolution build the
        provider via :func:`inqtrix.auth.api_key.build_auth_provider`
        and pass it in — ``create_app`` does exactly that).
+
+    ``platform_persistence_null_pool`` is forwarded to
+    :func:`build_platform_persistence_bundle`; the worker sets it so the
+    permission/identity/file/prompt repositories it drives from sync
+    threads via ``asyncio.run`` use a loop-agnostic NullPool engine
+    (the API leaves it ``False`` and keeps the pooled engine).
     """
     if auth_provider is None:
         if api_key_dependency is not None:
@@ -822,8 +1057,11 @@ def build_container(
     active_knowledge = knowledge or build_knowledge_context(
         settings, llm=providers.llm
     )
-    document_parser = None
-    if (
+    # An injected parser wins over the settings-derived ladder (the
+    # Baukasten seam for a custom/stub parser, mirroring object_store_impl).
+    # It reaches BOTH the knowledge service and the file service, so the
+    # /v1/files/{id}/text route and the file.text.read capability share it.
+    if document_parser is None and (
         active_knowledge is not None
         and settings.knowledge.document_parser == "markitdown"
     ):
@@ -887,7 +1125,9 @@ def build_container(
         else settings.storage.object_store_backend
     )
     bundle = (
-        build_platform_persistence_bundle(settings)
+        build_platform_persistence_bundle(
+            settings, null_pool=platform_persistence_null_pool
+        )
         if needs_persistence
         else None
     )
@@ -902,6 +1142,7 @@ def build_container(
             object_store=object_store_impl or build_object_store(settings),
             permissions=active_permissions,
             max_file_bytes=settings.storage.max_file_bytes,
+            document_parser=document_parser,
         )
     else:
         active_permissions = permissions
@@ -928,6 +1169,18 @@ def build_container(
         # Only the Postgres backend survives restarts; the capability
         # manifest must not invite browsers to sync against a store
         # that reads as "everything deleted" after a bounce.
+        durable=settings.storage.backend == "postgres",
+    )
+    from inqtrix.services.skill_service import SkillService
+
+    if bundle is not None and bundle.skills is not None:
+        skill_repository = bundle.skills
+    else:
+        from inqtrix.content.skills import MemorySkillRepository
+
+        skill_repository = MemorySkillRepository()
+    skill_service = SkillService(
+        repository=skill_repository,
         durable=settings.storage.backend == "postgres",
     )
     share_service = None
@@ -1001,6 +1254,15 @@ def build_container(
         owner_resolvers["prompt_template"] = _template_owner
         title_resolvers["prompt_template"] = _template_title
 
+        async def _skill_owner(tenant_id: str, resource_id: str):
+            return await skill_service.owner_sub(tenant_id, resource_id)
+
+        async def _skill_title(tenant_id: str, resource_id: str):
+            return await skill_service.title(tenant_id, resource_id)
+
+        owner_resolvers["skill_template"] = _skill_owner
+        title_resolvers["skill_template"] = _skill_title
+
         share_service = ShareService(
             shares=active_workspace_admin,
             permissions=active_permissions,
@@ -1066,6 +1328,16 @@ def build_container(
         store=build_editor_store(settings),
         durable=settings.storage.backend == "postgres",
     )
+    # Editor patches (M7): the persisted proposal/decision lifecycle over
+    # the documents above; audit through the platform sink.
+    from inqtrix.services.editor_patch_service import EditorPatchService
+
+    editor_patch_service = EditorPatchService(
+        store=build_editor_patch_store(settings),
+        editor_persistence=editor_persistence_service,
+        audit=active_workspace_admin,
+        durable=settings.storage.backend == "postgres",
+    )
     from inqtrix.services.asset_records_service import AssetRecordsService
 
     asset_records_service = AssetRecordsService(
@@ -1094,6 +1366,128 @@ def build_container(
         store=build_account_preferences_store(settings),
         durable=settings.storage.backend == "postgres",
     )
+    from inqtrix.services.agent_memory_service import AgentMemoryService
+
+    agent_memory_service = AgentMemoryService(
+        candidate_store=build_agent_memory_candidate_store(settings),
+        feedback_store=build_agent_feedback_store(settings),
+        provider=build_agent_memory_provider(settings),
+        provider_name=settings.agent_platform.memory_provider,
+        mode=settings.agent_platform.memory_mode,
+        durable=settings.storage.backend == "postgres",
+        # Long-term memory is opt-in per user (privacy default OFF): the
+        # service reads the flag from the account-preferences store (its own
+        # NullPool engine, safe to read from the sync worker thread).
+        account_preferences=account_preferences_service.store,
+    )
+    # Agent control persistence (M4): plans/approvals/clarifications/
+    # artifacts, composed with the run store for the R9 one-transaction
+    # interrupt resolutions; audit through the platform sink.
+    from inqtrix.services.agent_control_service import AgentControlService
+    from inqtrix.services.agent_sessions_service import AgentSessionsService
+
+    agent_control_service = AgentControlService(
+        store=build_agent_control_store(settings),
+        run_store=active_run_store,
+        audit=active_workspace_admin,
+        editor_persistence=editor_persistence_service,
+        # The ONE E5 gate, so an edited plan's rag tasks are visibility-
+        # checked at approval time (plan §4), not only at task-run time.
+        knowledge=knowledge_service,
+        durable=settings.storage.backend == "postgres",
+        max_plan_tasks=settings.agent_platform.max_plan_tasks,
+    )
+    agent_sessions_service = AgentSessionsService(
+        store=build_agent_session_store(settings),
+        run_store=active_run_store,
+        durable=settings.storage.backend == "postgres",
+    )
+    run_service = RunService(
+        registry=active_registry,
+        runtime=runtime,
+        run_store=active_run_store,
+        quota_service=quota_service,
+    )
+    capability_registry_instance = build_capability_registry(
+        knowledge_service=knowledge_service,
+        file_service=active_file_service,
+        editor_service=editor_persistence_service,
+        # Web instant uses the default stack's search provider; multi-
+        # stack per-request resolution is a later concern (wave-1
+        # capabilities are read-only discovery tools).
+        search_provider=getattr(providers, "search", None),
+        editor_patch_service=editor_patch_service,
+    )
+    # Workspace-agent registration (M5, decision E8): only with a real
+    # checkpointer (Postgres) or the explicit volatile escape — a missing
+    # gate keeps mode=workspace_agent a loud 400 listing available modes,
+    # and /v1/capabilities reports features.workspace_agent=false.
+    from inqtrix.agents.checkpointing import build_checkpointer_handle
+
+    agent_checkpointer = build_checkpointer_handle(settings)
+    if agent_checkpointer is not None and "workspace_agent" not in (
+        active_registry.ids()
+    ):
+        from inqtrix.agents.algorithm import WorkspaceAgentAlgorithm
+
+        active_registry.register(
+            WorkspaceAgentAlgorithm(
+                control_store=agent_control_service.store,
+                run_service=run_service,
+                resolver=resolver,
+                capability_registry=capability_registry_instance,
+                checkpointer=agent_checkpointer,
+                platform=settings.agent_platform,
+                permission_service=active_permissions,
+                knowledge_service=knowledge_service,
+                editor_patch_service=editor_patch_service,
+                editor_persistence_service=editor_persistence_service,
+                agent_memory_service=agent_memory_service,
+                skill_service=skill_service,
+            )
+        )
+    # Cognitive-kernel registration (plan M2, ADR-PLAT-2): opt-in via
+    # INQTRIX_AGENT_KERNEL_ENABLED and additionally gated on the same
+    # checkpointer rule plus native tool calling on the default LLM —
+    # a failed gate WARNS instead of silently dropping the mode.
+    if settings.agent_platform.kernel_enabled and "agent_kernel" not in (
+        active_registry.ids()
+    ):
+        from inqtrix.agents.harness import deepagents_available
+
+        llm_tool_calls = bool(
+            providers.llm is not None
+            and providers.llm.supports_tool_calls()
+        )
+        harness_ready = deepagents_available()
+        if (
+            agent_checkpointer is None
+            or not llm_tool_calls
+            or not harness_ready
+        ):
+            log.warning(
+                "Agent-Kernel ist aktiviert, aber nicht registrierbar "
+                "(checkpointer=%s, tool_calls=%s, deepagents=%s) — "
+                "mode=agent_kernel bleibt deaktiviert.",
+                "ok" if agent_checkpointer is not None else "fehlt",
+                "ok" if llm_tool_calls else "fehlt",
+                "ok" if harness_ready else "fehlt",
+            )
+        else:
+            from inqtrix.agents.kernel.algorithm import KernelAgentAlgorithm
+
+            active_registry.register(
+                KernelAgentAlgorithm(
+                    control_store=agent_control_service.store,
+                    checkpointer=agent_checkpointer,
+                    platform=settings.agent_platform,
+                    capability_registry=capability_registry_instance,
+                    permission_service=active_permissions,
+                    run_service=run_service,
+                    resolver=resolver,
+                    skill_service=skill_service,
+                )
+            )
     principal_dependency = auth_provider.build_principal_dependency()
 
     return AppContainer(
@@ -1110,12 +1504,7 @@ def build_container(
         ),
         resolver=resolver,
         chat_service=ChatService(registry=active_registry, runtime=runtime),
-        run_service=RunService(
-            registry=active_registry,
-            runtime=runtime,
-            run_store=active_run_store,
-            quota_service=quota_service,
-        ),
+        run_service=run_service,
         health_service=HealthService(
             providers=providers,
             settings=settings,
@@ -1131,15 +1520,21 @@ def build_container(
         workspace_admin=active_workspace_admin,
         share_service=share_service,
         prompt_template_service=prompt_template_service,
+        skill_service=skill_service,
         quota_service=quota_service,
         indexing_service=indexing_service,
         chat_history_service=chat_history_service,
         editor_persistence_service=editor_persistence_service,
+        editor_patch_service=editor_patch_service,
         asset_records_service=asset_records_service,
         knowledge_sessions_service=knowledge_sessions_service,
+        agent_control_service=agent_control_service,
+        agent_sessions_service=agent_sessions_service,
         document_parser=document_parser,
         vector_index_service=vector_index_service,
         account_preferences_service=account_preferences_service,
+        agent_memory_service=agent_memory_service,
+        capability_registry=capability_registry_instance,
         object_store_backend=active_object_store_backend,
         stacks=stacks,
         default_stack=default_stack,

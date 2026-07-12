@@ -58,7 +58,9 @@ from inqtrix.providers._azure_common import (
     extract_azure_api_error_details,
     normalize_openai_v1_base_url,
 )
+from inqtrix.providers._schema import strictify_json_schema
 from inqtrix.providers.base import (
+    ChatTurn,
     LLMProvider,
     LLMResponse,
     REASONING_EFFORT_LEVELS,
@@ -68,6 +70,8 @@ from inqtrix.providers.base import (
     _bounded_timeout,
     _call_openai_chat_completion_with_retries,
     _check_deadline,
+    _operation_deadline,
+    chat_turn_from_openai_response,
     is_model_capacity_error,
     _normalize_completion_response,
     normalize_reasoning_effort,
@@ -210,7 +214,7 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         token_budget_parameter: Literal["max_completion_tokens",
                                         "max_tokens"] = "max_completion_tokens",
         proxy_url: str | None = None,
-        timeout: float = 60.0,
+        timeout: float = REASONING_TIMEOUT,
         default_headers: Mapping[str, str] | None = None,
         request_params: Mapping[str, Any] | None = None,
         default_reasoning_effort: str | None = None,
@@ -659,6 +663,7 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         create_kwargs: dict[str, Any],
         model: str,
         operation: str,
+        timeout: float,
         deadline: float | None,
     ) -> Any:
         """Call Chat Completions with visible transient-error retries."""
@@ -676,12 +681,21 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                 return str(details.get("request_id") or "")
             return ""
 
+        operation_deadline = _operation_deadline(timeout, deadline)
         return _call_openai_chat_completion_with_retries(
             provider_label="AzureOpenAI",
             model=model,
             operation=operation,
-            deadline=deadline,
-            create=lambda: self._client.chat.completions.create(**create_kwargs),
+            deadline=operation_deadline,
+            outer_deadline=deadline,
+            timeout_label=f"Azure-OpenAI-Aufruf ({operation})",
+            configured_timeout_seconds=timeout,
+            create=lambda: self._client.chat.completions.create(
+                **{
+                    **create_kwargs,
+                    "timeout": _bounded_timeout(timeout, operation_deadline),
+                }
+            ),
             append_retry_notice=self._append_retry_notice,
             error_code_for=_error_code,
             request_id_for=_request_id,
@@ -816,6 +830,7 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                 create_kwargs=create_kwargs,
                 model=use_model,
                 operation="complete",
+                timeout=timeout,
                 deadline=deadline,
             )
             normalized = _normalize_completion_response(r)
@@ -875,6 +890,115 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                     original=e,
                 ) from e
             log.error("Azure-OpenAI-Aufruf fehlgeschlagen (%s): %s", use_model, e)
+            raise AzureOpenAIAPIError(
+                model=use_model,
+                message=str(e),
+                original=e,
+            ) from e
+
+    def supports_tool_calls(self, *, model: str | None = None) -> bool:
+        """Native function calling is a core Azure OpenAI chat feature
+        across current deployments, so the provider opts in
+        unconditionally; a deployment without tool support surfaces its
+        own API error on the first :meth:`chat` call (visible, never
+        silently degraded)."""
+        return True
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_output_tokens: int | None = None,
+        timeout: float = REASONING_TIMEOUT,
+        deadline: float | None = None,
+        reasoning_effort: str | None = None,
+    ) -> ChatTurn:
+        """Run one native tool-calling chat turn (plan M2 step 1).
+
+        Same transport, retry loop, request-parameter merging,
+        reasoning-effort mapping, and error mapping as
+        :meth:`complete_with_metadata` — the only differences are the
+        caller-owned message array and the OpenAI ``tools`` parameter.
+        Response parsing goes through the shared
+        :func:`chat_turn_from_openai_response` so tool-call rules cannot
+        drift between OpenAI-compatible providers.
+        """
+        if deadline is not None:
+            _check_deadline(deadline)
+        use_model = model or self._default_model
+        create_kwargs: dict[str, Any] = {
+            "model": use_model,
+            "messages": list(messages),
+            "timeout": _bounded_timeout(timeout, deadline),
+            "stream": False,
+        }
+        create_kwargs[self._token_budget_parameter] = (
+            max_output_tokens or self._default_max_tokens
+        )
+        if self._temperature is not None:
+            create_kwargs["temperature"] = self._temperature
+        create_kwargs = self._merge_request_params(
+            create_kwargs, self._request_params
+        )
+        create_kwargs = self._apply_call_reasoning_effort(
+            create_kwargs, reasoning_effort, use_model=use_model
+        )
+        if tools:
+            create_kwargs["tools"] = list(tools)
+        try:
+            r = self._create_chat_completion_with_retry(
+                create_kwargs=create_kwargs,
+                model=use_model,
+                operation="chat",
+                timeout=timeout,
+                deadline=deadline,
+            )
+            return chat_turn_from_openai_response(r, model=use_model)
+        except RateLimitError as e:
+            log.error("FATAL Rate-Limit (%s): %s", use_model, e)
+            raise AgentRateLimited(use_model, e)
+        except APIStatusError as e:
+            if e.status_code == 429:
+                log.error("FATAL Rate-Limit (%s): %s", use_model, e)
+                raise AgentRateLimited(use_model, e)
+            if is_model_capacity_error(e):
+                log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, e)
+                raise AgentModelCapacityError(
+                    use_model,
+                    "llm_chat",
+                    str(e),
+                    original=e,
+                ) from e
+            details = self._extract_api_error_details(e)
+            log.error(
+                "Azure-OpenAI-Chat fehlgeschlagen (%s, status=%s, code=%s, request-id=%s): %s",
+                use_model,
+                details.get("status_code"),
+                details.get("error_code") or "-",
+                details.get("request_id") or "-",
+                e,
+            )
+            raise AzureOpenAIAPIError(
+                model=use_model,
+                status_code=details.get("status_code") if isinstance(
+                    details.get("status_code"), int) else None,
+                error_code=str(details.get("error_code") or "").strip(),
+                request_id=str(details.get("request_id") or "").strip() or None,
+                message=str(details.get("message") or "").strip() or str(e),
+                original=e,
+            ) from e
+        except OpenAIError as e:
+            if is_model_capacity_error(e):
+                log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, e)
+                raise AgentModelCapacityError(
+                    use_model,
+                    "llm_chat",
+                    str(e),
+                    original=e,
+                ) from e
+            log.error("Azure-OpenAI-Chat fehlgeschlagen (%s): %s", use_model, e)
             raise AzureOpenAIAPIError(
                 model=use_model,
                 message=str(e),
@@ -970,7 +1094,11 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             "json_schema": {
                 "name": schema_name,
                 "strict": True,
-                "schema": schema,
+                # Strict outputs require every property in `required`, no
+                # `default`, and additionalProperties:false. The generic caller
+                # hands a canonical Pydantic schema; the provider owns adapting
+                # it to ITS endpoint contract (keyed on strict, not on a model).
+                "schema": strictify_json_schema(schema),
             },
         }
 
@@ -979,6 +1107,7 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                 create_kwargs=create_kwargs,
                 model=use_model,
                 operation="structured_response",
+                timeout=timeout,
                 deadline=deadline,
             )
             normalized = _normalize_completion_response(r)

@@ -17,12 +17,18 @@ import logging
 import random
 import threading
 import time
+import uuid
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Iterator
+from typing import TYPE_CHECKING, Any, Callable, ContextManager, Iterator
 
-from inqtrix.exceptions import AgentStructuredOutputError, AgentTimeout
+from inqtrix.constants import REASONING_TIMEOUT
+from inqtrix.exceptions import (
+    AgentProviderTimeout,
+    AgentStructuredOutputError,
+    AgentTimeout,
+)
 from inqtrix.search_result import GroundedSearchResult
 
 if TYPE_CHECKING:
@@ -33,14 +39,39 @@ log = logging.getLogger("inqtrix")
 # =========================================================
 # Retry budget for OpenAI-SDK-based providers
 # =========================================================
-# Inqtrix disables hidden SDK retries for LLM providers and runs its own
-# visible retry loop. 4 retries = 5 total attempts, matching the direct
-# Anthropic provider's _MAX_ANTHROPIC_ATTEMPTS.
-_SDK_MAX_RETRIES = 4
+# Inqtrix disables hidden SDK retries and owns one visible retry authority.
+# The contract is three TOTAL attempts inside one logical-operation deadline,
+# not three retries per layer.  The ``*_MAX_RETRIES`` aliases remain because
+# replay tests and provider modules intentionally patch them to zero.
+MAX_PROVIDER_ATTEMPTS = 3
+_SDK_MAX_RETRIES = MAX_PROVIDER_ATTEMPTS - 1
 _RETRYABLE_SDK_STATUS_CODES = frozenset({408, 409, 500, 502, 503, 504})
 _RETRYABLE_SDK_ERROR_TYPES = frozenset({"APIConnectionError", "APITimeoutError"})
 
+# Rate-limit (HTTP 429) handling retains a separately patchable ceiling for
+# replay tests, but it shares the operation's single attempt counter with
+# transport and 5xx failures. Retry-After is honoured and every sleep is
+# clamped to the same operation/run deadline; mixed failures can therefore
+# never stack independent retry budgets.
+_SDK_RATE_LIMIT_MAX_RETRIES = MAX_PROVIDER_ATTEMPTS - 1
+
 ProviderRetryCallback = Callable[[dict[str, Any]], None]
+
+
+def observe_provider_retries(
+    provider: object,
+    callback: ProviderRetryCallback | None,
+) -> ContextManager[object]:
+    """Bind one retry observer when the provider exposes the shared seam.
+
+    Adapters that do not implement retry diagnostics remain compatible and
+    simply return a no-op context. Keeping this duck-typed binding here lets
+    Research nodes and capability-backed Agent tools share one retry bridge.
+    """
+    observer = getattr(provider, "observe_retries", None)
+    if callback is None or not callable(observer):
+        return nullcontext()
+    return observer(callback)
 
 # =========================================================
 # Shared retry / backoff constants
@@ -51,6 +82,12 @@ ProviderRetryCallback = Callable[[dict[str, Any]], None]
 _BACKOFF_BASE_SECONDS: float = 1.0
 _BACKOFF_MAX_SECONDS: float = 8.0
 _JITTER_RANGE: tuple[float, float] = (0.5, 1.5)
+# Additive spread (seconds) layered ON TOP of a honoured Retry-After. The
+# server hint is a floor we must respect, so this only ever ADDS delay -- it
+# desynchronises concurrent callers (e.g. the claim-extraction fan-out) that
+# would otherwise receive the same Retry-After and wake in lockstep, re-bursting
+# the endpoint. Kept small so it barely extends the honoured wait.
+_RETRY_AFTER_JITTER_RANGE: tuple[float, float] = (0.0, 1.0)
 
 # Floor for max_tokens when extended thinking is enabled.  Anthropic
 # counts thinking tokens *inside* max_tokens, so a low budget leaves
@@ -96,6 +133,45 @@ def _bounded_timeout(
     return min(float(default_timeout), remaining)
 
 
+def _operation_deadline(
+    timeout: int | float,
+    outer_deadline: float | None = None,
+) -> float:
+    """Return one absolute deadline shared by all attempts of an operation.
+
+    ``timeout`` is the budget for the complete logical provider operation,
+    including retries and backoff.  ``outer_deadline`` is an optional run
+    ceiling; the earlier boundary wins.  Computing this once at operation
+    entry prevents a retry from silently receiving a fresh full timeout.
+    """
+    local_deadline = time.monotonic() + max(0.0, float(timeout))
+    return (
+        min(local_deadline, outer_deadline)
+        if outer_deadline is not None
+        else local_deadline
+    )
+
+
+def _check_provider_operation_deadline(
+    operation_deadline: float,
+    outer_deadline: float | None,
+    *,
+    label: str,
+) -> None:
+    """Raise the correctly typed timeout for one provider operation.
+
+    An outer run deadline remains :class:`AgentTimeout`; expiry of the local
+    logical-operation budget is :class:`AgentProviderTimeout`.  Keeping the
+    distinction here prevents a slow provider call from being misreported as
+    exhaustion of the complete research run.
+    """
+    if time.monotonic() <= operation_deadline:
+        return
+    if outer_deadline is not None and outer_deadline <= operation_deadline:
+        _check_deadline(outer_deadline)
+    raise AgentProviderTimeout(f"{label} hat das Operationszeitlimit erreicht.")
+
+
 class _NonFatalNoticeMixin:
     """Thread-local helper for surfacing provider fallback notices."""
 
@@ -112,24 +188,58 @@ class _NonFatalNoticeMixin:
                     self._nonfatal_notice_state = state
         return state
 
-    def _set_nonfatal_notice(self, message: str) -> None:
-        """Store a fallback notice for the current thread."""
+    def _set_nonfatal_notice(
+        self,
+        message: str,
+        *,
+        code: str = "",
+        http_status: int | None = None,
+    ) -> None:
+        """Store one structured fallback notice for the current thread.
+
+        ``consume_nonfatal_notice()`` remains the compatibility surface used
+        by the research graph. Capability adapters may consume the additive
+        detail shape in the SAME provider thread to distinguish a genuine
+        upstream failure from an honest empty result.
+        """
         if message:
-            self._notice_state().message = message
+            self._notice_state().notice = {
+                "message": message,
+                **({"code": code} if code else {}),
+                **(
+                    {"http_status": int(http_status)}
+                    if http_status is not None
+                    else {}
+                ),
+            }
 
     def _clear_nonfatal_notice(self) -> None:
         """Clear any pending notice for the current thread."""
         state = self._notice_state()
+        if hasattr(state, "notice"):
+            delattr(state, "notice")
+        # Compatibility with provider instances that were populated by an
+        # older implementation before a hot reload.
         if hasattr(state, "message"):
             delattr(state, "message")
 
     def consume_nonfatal_notice(self) -> str | None:
         """Return and clear the pending notice, or ``None`` if none exists."""
+        detail = self.consume_nonfatal_notice_detail()
+        return str(detail.get("message")) if detail else None
+
+    def consume_nonfatal_notice_detail(self) -> dict[str, Any] | None:
+        """Return and clear the current thread's structured fallback fact."""
         state = self._notice_state()
+        raw = getattr(state, "notice", None)
+        if hasattr(state, "notice"):
+            delattr(state, "notice")
+        if isinstance(raw, dict) and raw.get("message"):
+            return dict(raw)
         message = getattr(state, "message", None)
         if hasattr(state, "message"):
             delattr(state, "message")
-        return str(message) if message else None
+        return {"message": str(message)} if message else None
 
 
 class _RetryNoticeMixin:
@@ -270,6 +380,63 @@ def get_search_provider_capabilities(provider: object) -> SearchProviderCapabili
     )
 
 
+DEFAULT_LLM_FANOUT = 4
+"""Fallback simultaneous LLM-call width when a provider declares no
+``max_llm_concurrency``. Deliberately modest — the per-round claim
+extraction fans out one LLM call per search result, and against a
+provider with a per-minute request/token ceiling a wide unpaced burst is
+exactly what trips a 429. Sized to sit comfortably under typical
+provider RPM headroom; a provider that knows its real limit overrides it
+via the capability below (constructor-first — providers never read env)."""
+
+
+@dataclass(frozen=True, slots=True)
+class LLMProviderCapabilities:
+    """Describe generic LLM-call hints a provider supports.
+
+    Additive Baukasten helper, parallel to
+    :class:`SearchProviderCapabilities`: a provider may advertise its
+    real simultaneous-call ceiling without changing the stable
+    :class:`LLMProvider` contract. Callers treat an omitted cap as
+    "use :data:`DEFAULT_LLM_FANOUT`" so existing providers and custom
+    adapters keep working unchanged.
+
+    Attributes:
+        max_concurrency: Provider-declared cap for simultaneous LLM
+            calls (e.g. the claim-extraction fan-out). ``0`` means the
+            provider declares none — callers fall back to
+            :data:`DEFAULT_LLM_FANOUT`, never to 0 workers.
+    """
+
+    max_concurrency: int = 0
+
+
+def get_llm_provider_capabilities(provider: object) -> LLMProviderCapabilities:
+    """Resolve optional LLM capability metadata from a provider.
+
+    Mirrors :func:`get_search_provider_capabilities`: a provider may
+    expose an ``llm_capabilities`` attribute returning a
+    :class:`LLMProviderCapabilities`, or the simpler
+    ``max_llm_concurrency`` scalar attribute. Neither present → an empty
+    capability (``max_concurrency=0``), i.e. defer to
+    :data:`DEFAULT_LLM_FANOUT`.
+    """
+
+    def _max_concurrency() -> int:
+        try:
+            raw = int(getattr(provider, "max_llm_concurrency", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, raw)
+
+    raw_capabilities = getattr(provider, "llm_capabilities", None)
+    if callable(raw_capabilities):
+        raw_capabilities = raw_capabilities()
+    if isinstance(raw_capabilities, LLMProviderCapabilities):
+        return raw_capabilities
+    return LLMProviderCapabilities(max_concurrency=_max_concurrency())
+
+
 # --------------------------------------------------------------------------- #
 # Per-call reasoning-effort helpers (provider-neutral)
 # --------------------------------------------------------------------------- #
@@ -340,10 +507,11 @@ def _retry_delay_seconds(
 ) -> float:
     """Compute retry delay with exponential backoff and jitter.
 
-    If the server sent a ``Retry-After`` header, honour it.
-    Otherwise use exponential backoff (base * 2^attempt, capped)
-    multiplied by a random jitter factor to desynchronise parallel
-    threads.
+    If the server sent a ``Retry-After`` header, honour it as a floor and
+    add a small positive jitter on top, so concurrent callers handed the
+    same header still desynchronise instead of waking in lockstep and
+    re-bursting the endpoint. Otherwise use exponential backoff
+    (base * 2^attempt, capped) multiplied by a random jitter factor.
     """
     if retry_after:
         try:
@@ -351,7 +519,7 @@ def _retry_delay_seconds(
         except ValueError:
             parsed = 0.0
         if parsed > 0:
-            return parsed
+            return parsed + random.uniform(*_RETRY_AFTER_JITTER_RANGE)
     base = min(_BACKOFF_BASE_SECONDS * (2 ** attempt), _BACKOFF_MAX_SECONDS)
     return base * random.uniform(*_JITTER_RANGE)
 
@@ -387,6 +555,32 @@ def _sdk_error_code(exc: BaseException) -> str:
     return type(exc).__name__
 
 
+def _sdk_retry_after(exc: BaseException) -> str | None:
+    """Extract the ``Retry-After`` header from an OpenAI-SDK exception.
+
+    The SDK's ``APIStatusError``/``RateLimitError`` carry the HTTP
+    ``response``; its headers hold the server's back-off hint. Returned
+    verbatim so :func:`_retry_delay_seconds` can honour it (and fall
+    back to exponential backoff on absent/non-numeric values).
+    """
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    try:
+        return headers.get("retry-after")
+    except Exception:  # noqa: BLE001 — a hostile headers object is not fatal
+        return None
+
+
+def _is_sdk_rate_limit(exc: BaseException) -> bool:
+    """Return whether an OpenAI-SDK exception is a 429 / rate limit."""
+    return (
+        _sdk_error_status_code(exc) == 429
+        or type(exc).__name__ == "RateLimitError"
+    )
+
+
 def _is_retryable_sdk_error(exc: BaseException) -> bool:
     """Return whether an OpenAI-SDK style exception is transient."""
     status = _sdk_error_status_code(exc)
@@ -401,25 +595,53 @@ def _call_openai_chat_completion_with_retries(
     model: str,
     operation: str,
     deadline: float | None,
+    outer_deadline: float | None = None,
+    timeout_label: str = "Provider-Aufruf",
+    configured_timeout_seconds: float | None = None,
     create: Callable[[], Any],
     append_retry_notice: Callable[[dict[str, Any]], None],
     error_code_for: Callable[[BaseException], str] | None = None,
     request_id_for: Callable[[BaseException], str] | None = None,
 ) -> Any:
-    """Call an OpenAI-SDK style operation with visible transient retries."""
-    max_attempts = _SDK_MAX_RETRIES + 1
-    for attempt in range(max_attempts):
+    """Call an OpenAI-SDK style operation with visible transient retries.
+
+    Transient and rate-limit failures share one total attempt counter. Their
+    separately patchable retry ceilings remain useful for replay tests, but a
+    mixed sequence can never exceed the larger ceiling (three attempts in
+    production). Every sleep and request is clamped to ``deadline``.
+    """
+    effective_timeout_seconds = (
+        max(0.0, deadline - time.monotonic())
+        if deadline is not None
+        else None
+    )
+    attempt = 1
+    while True:
         if deadline is not None:
-            _check_deadline(deadline)
+            _check_provider_operation_deadline(
+                deadline,
+                outer_deadline,
+                label=timeout_label,
+            )
         try:
             return create()
         except Exception as exc:
             status_code = _sdk_error_status_code(exc)
-            if status_code == 429 or type(exc).__name__ == "RateLimitError":
-                raise
-            if not _is_retryable_sdk_error(exc) or attempt >= _SDK_MAX_RETRIES:
-                raise
-            delay = _retry_delay_seconds(attempt)
+            if _is_sdk_rate_limit(exc):
+                max_attempts = _SDK_RATE_LIMIT_MAX_RETRIES + 1
+                if attempt >= max_attempts:
+                    raise
+                delay = _retry_delay_seconds(
+                    attempt - 1, _sdk_retry_after(exc)
+                )
+            else:
+                max_attempts = _SDK_MAX_RETRIES + 1
+                if (
+                    not _is_retryable_sdk_error(exc)
+                    or attempt >= max_attempts
+                ):
+                    raise
+                delay = _retry_delay_seconds(attempt - 1)
             error_code = (
                 error_code_for(exc)
                 if error_code_for is not None
@@ -437,9 +659,27 @@ def _call_openai_chat_completion_with_retries(
                 "error_code": error_code,
                 "status_code": status_code,
                 "request_id": request_id,
-                "attempt": attempt + 1,
+                "attempt": attempt,
                 "max_attempts": max_attempts,
                 "delay_seconds": round(delay, 3),
+                **(
+                    {
+                        "configured_timeout_seconds": round(
+                            float(configured_timeout_seconds), 3
+                        )
+                    }
+                    if configured_timeout_seconds is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "effective_timeout_seconds": round(
+                            effective_timeout_seconds, 3
+                        )
+                    }
+                    if effective_timeout_seconds is not None
+                    else {}
+                ),
             })
             if status_code is not None:
                 log.warning(
@@ -449,7 +689,7 @@ def _call_openai_chat_completion_with_retries(
                     error_code,
                     status_code,
                     request_id or "-",
-                    attempt + 1,
+                    attempt,
                     max_attempts,
                     delay,
                 )
@@ -459,13 +699,21 @@ def _call_openai_chat_completion_with_retries(
                     provider_label,
                     model,
                     error_code,
-                    attempt + 1,
+                    attempt,
                     max_attempts,
                     delay,
                     exc,
                 )
-            _sleep_before_retry(delay, deadline)
-    raise RuntimeError(f"{provider_label} retry loop exhausted without result")
+            try:
+                _sleep_before_retry(delay, deadline)
+            except AgentTimeout:
+                _check_provider_operation_deadline(
+                    deadline,
+                    outer_deadline,
+                    label=timeout_label,
+                )
+                raise
+            attempt += 1
 
 
 # =========================================================
@@ -536,6 +784,131 @@ class StructuredLLMResponse:
     raw: dict[str, Any] | None = None
     request_max_tokens: int = 0
     schema_name: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallRequest:
+    """One tool invocation the model requested in a chat turn.
+
+    Attributes:
+        id: Provider tool-call id, passed back verbatim on the follow-up
+            ``tool`` message so the backend can correlate result to call.
+            Providers synthesize a stable id when the backend omits one —
+            the kernel derives deterministic interrupt ids from it, so it
+            must never be empty.
+        name: Registered tool name the model wants to invoke.
+        arguments: Parsed JSON arguments object. Providers parse the
+            backend's argument STRING and surface a parse failure loudly
+            (empty dict + ``finish_reason`` untouched is never silent —
+            the adapter raises instead).
+    """
+
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ChatTurn:
+    """One assistant turn of a tool-calling chat conversation.
+
+    The native function-calling counterpart of :class:`LLMResponse`
+    (plan M2 step 1): carries the assistant text AND any requested tool
+    calls, so an agent loop can decide whether to execute tools or
+    finish. Exactly one of ``text``/``tool_calls`` may be empty; both
+    empty means the backend produced nothing visible (callers treat that
+    as a loud failure, not a silent stop).
+
+    Attributes:
+        text: Visible assistant text ('' when the turn is tool-calls
+            only).
+        tool_calls: Tool invocations requested by the model, in call
+            order (empty for a final answer).
+        finish_reason: Provider stop signal (``stop``, ``tool_calls``,
+            ``length``, ...).
+        model: Effective model identifier reported by the backend.
+        prompt_tokens: Input tokens billed by the backend.
+        completion_tokens: Output tokens billed by the backend.
+        raw: Original payload for diagnostics.
+    """
+
+    text: str
+    tool_calls: tuple[ToolCallRequest, ...] = ()
+    finish_reason: str = ""
+    model: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    raw: dict[str, Any] | None = None
+
+
+def chat_turn_from_openai_response(
+    response: Any,
+    *,
+    model: str,
+) -> "ChatTurn":
+    """Map an OpenAI-SDK chat-completions response to a :class:`ChatTurn`.
+
+    Shared by every OpenAI-compatible provider (LiteLLM, Azure) so the
+    tool-call parsing rules cannot drift (Designprinzip 4):
+
+    - tool-call ids pass through verbatim; a missing id is synthesized
+      ONCE here (``call_<hex>``) — the kernel freezes it into the
+      checkpointed message, so later re-executions see the same id;
+    - argument strings are parsed strictly; invalid JSON or a non-object
+      value raises :class:`AgentStructuredOutputError` loudly instead of
+      degrading to an empty argument dict.
+
+    Args:
+        response: The SDK response object (``choices[0].message``).
+        model: Effective model identifier for diagnostics.
+
+    Returns:
+        ChatTurn with text, tool calls, finish reason, and token counts.
+
+    Raises:
+        AgentStructuredOutputError: On unparsable tool-call arguments.
+    """
+    choice = response.choices[0] if getattr(response, "choices", None) else None
+    message = getattr(choice, "message", None)
+    tool_calls: list[ToolCallRequest] = []
+    for call in getattr(message, "tool_calls", None) or []:
+        function = getattr(call, "function", None)
+        name = str(getattr(function, "name", "") or "")
+        raw_arguments = str(getattr(function, "arguments", "") or "")
+        if raw_arguments.strip():
+            try:
+                arguments = json.loads(raw_arguments)
+            except json.JSONDecodeError as exc:
+                raise AgentStructuredOutputError(
+                    model,
+                    f"tool:{name}",
+                    "provider returned invalid tool-call arguments JSON",
+                    original=exc,
+                ) from exc
+            if not isinstance(arguments, dict):
+                raise AgentStructuredOutputError(
+                    model,
+                    f"tool:{name}",
+                    f"tool-call arguments are {type(arguments).__name__}, "
+                    "expected object",
+                )
+        else:
+            arguments = {}
+        call_id = str(getattr(call, "id", "") or "")
+        if not call_id:
+            call_id = f"call_{uuid.uuid4().hex[:12]}"
+        tool_calls.append(
+            ToolCallRequest(id=call_id, name=name, arguments=arguments)
+        )
+    usage = getattr(response, "usage", None)
+    return ChatTurn(
+        text=str(getattr(message, "content", "") or ""),
+        tool_calls=tuple(tool_calls),
+        finish_reason=str(getattr(choice, "finish_reason", "") or ""),
+        model=model,
+        prompt_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
+        completion_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
+    )
 
 
 def parse_structured_response_content(
@@ -1013,7 +1386,7 @@ class LLMProvider(ABC):
         system: str | None = None,
         model: str | None = None,
         max_output_tokens: int | None = None,
-        timeout: float = 120.0,
+        timeout: float = REASONING_TIMEOUT,
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
@@ -1038,7 +1411,7 @@ class LLMProvider(ABC):
                 answer. Providers may ignore it when unsupported.
             timeout: Per-call timeout budget in seconds. Providers may
                 shorten this further when ``deadline`` leaves less time.
-                The default is ``120.0`` seconds.
+                The default is ``600.0`` seconds.
             state: Optional mutable agent state used for token tracking
                 in non-parallel code paths. Omit this in helper threads or
                 whenever shared state would be unsafe to mutate.
@@ -1074,7 +1447,7 @@ class LLMProvider(ABC):
         system: str | None = None,
         model: str | None = None,
         max_output_tokens: int | None = None,
-        timeout: float = 120.0,
+        timeout: float = REASONING_TIMEOUT,
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
@@ -1097,7 +1470,7 @@ class LLMProvider(ABC):
             max_output_tokens: Optional output-token budget for the visible
                 answer. Providers may ignore it when unsupported.
             timeout: Per-call timeout budget in seconds before deadline
-                clamping. The default is ``120.0`` seconds.
+                clamping. The default is ``600.0`` seconds.
             state: Optional mutable agent state for token aggregation in
                 non-parallel code paths. Omit it when no shared token
                 accounting is needed.
@@ -1162,7 +1535,7 @@ class LLMProvider(ABC):
         system: str | None = None,
         model: str | None = None,
         max_output_tokens: int | None = None,
-        timeout: float = 120.0,
+        timeout: float = REASONING_TIMEOUT,
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
@@ -1200,6 +1573,81 @@ class LLMProvider(ABC):
                 a structured response cannot be parsed into an object.
         """
         raise NotImplementedError("Provider does not implement structured output.")
+
+    def supports_tool_calls(self, *, model: str | None = None) -> bool:
+        """Return whether native function calling is available.
+
+        The cognitive kernel (plan M2) registers only against providers
+        that opt in here — the capabilities endpoint then reports the
+        kernel as unavailable instead of failing mid-run. The default is
+        intentionally ``False`` so existing custom providers stay on the
+        prompt-only surface until they implement :meth:`chat`.
+
+        Args:
+            model: Optional per-call model or deployment identifier for
+                backends where support depends on the model role.
+
+        Returns:
+            ``True`` only when :meth:`chat` is expected to work for the
+            requested model.
+        """
+        return False
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_output_tokens: int | None = None,
+        timeout: float = REASONING_TIMEOUT,
+        deadline: float | None = None,
+        reasoning_effort: str | None = None,
+    ) -> "ChatTurn":
+        """Run ONE native tool-calling chat turn (plan M2 step 1).
+
+        This is the message-array counterpart of :meth:`complete`: the
+        caller owns the conversation (system/user/assistant/tool
+        messages in the OpenAI chat shape, assistant messages carrying
+        ``tool_calls``, tool results as ``role='tool'`` messages with
+        ``tool_call_id``) and the provider returns the next assistant
+        turn — text, tool-call requests, or both. Callers must check
+        :meth:`supports_tool_calls` first; the base implementation
+        raises loudly so a missing opt-in can never look like an empty
+        answer (Designprinzip 1).
+
+        Args:
+            messages: Conversation so far in the OpenAI chat-completions
+                message shape. The provider sends it verbatim (it never
+                rewrites history — the agent loop owns trimming).
+            tools: Tool definitions in the OpenAI function-tool shape
+                (``{"type": "function", "function": {"name", "description",
+                "parameters"}}``). ``None``/empty runs a plain chat turn.
+            model: Optional per-call model override; ``None`` uses the
+                provider's default reasoning model.
+            max_output_tokens: Optional output-token budget for the
+                visible answer; providers may ignore it when unsupported.
+            timeout: Per-call timeout budget in seconds before deadline
+                clamping.
+            deadline: Optional absolute monotonic deadline for the whole
+                run — the hard ceiling for retries and backoff.
+            reasoning_effort: Optional per-call reasoning-effort override
+                with the same vocabulary as :meth:`complete`.
+
+        Returns:
+            ChatTurn: The next assistant turn with tool-call requests,
+            token counts, and the effective model label.
+
+        Raises:
+            NotImplementedError: Always raised by the base class — check
+                :meth:`supports_tool_calls` before calling.
+            AgentTimeout: If the absolute run deadline is exceeded.
+            AgentRateLimited: On a fatal backend rate-limit condition.
+        """
+        raise NotImplementedError(
+            "Provider does not implement native tool calling; check "
+            "supports_tool_calls() before calling chat()."
+        )
 
     @abstractmethod
     def is_available(self) -> bool:
@@ -1382,6 +1830,27 @@ class ConfiguredLLMProvider(LLMProvider):
         raw = getattr(self._provider, "_context_window_tokens", None)
         return raw if isinstance(raw, int) and raw > 0 else None
 
+    @property
+    def llm_capabilities(self):
+        """Forward the wrapped provider's structured LLM capabilities.
+
+        Without this the claim-fan-out limiter probes the WRAPPER (which
+        has no capability of its own) and silently loses a custom
+        provider's declared ``max_llm_concurrency``, falling back to
+        :data:`DEFAULT_LLM_FANOUT`. Returns ``None`` when the inner
+        provider declares none, so :func:`get_llm_provider_capabilities`
+        then tries the scalar attribute below.
+        """
+        return getattr(self._provider, "llm_capabilities", None)
+
+    @property
+    def max_llm_concurrency(self) -> int:
+        """Forward the wrapped provider's LLM-concurrency cap (0 = defer)."""
+        try:
+            return int(getattr(self._provider, "max_llm_concurrency", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
     def complete(
         self,
         prompt: str,
@@ -1389,7 +1858,7 @@ class ConfiguredLLMProvider(LLMProvider):
         system: str | None = None,
         model: str | None = None,
         max_output_tokens: int | None = None,
-        timeout: float = 120.0,
+        timeout: float = REASONING_TIMEOUT,
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
@@ -1444,7 +1913,7 @@ class ConfiguredLLMProvider(LLMProvider):
         system: str | None = None,
         model: str | None = None,
         max_output_tokens: int | None = None,
-        timeout: float = 120.0,
+        timeout: float = REASONING_TIMEOUT,
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,
@@ -1508,6 +1977,73 @@ class ConfiguredLLMProvider(LLMProvider):
         except TypeError:
             return bool(checker())
 
+    def supports_tool_calls(self, *, model: str | None = None) -> bool:
+        """Forward tool-calling capability checks to the wrapped provider.
+
+        Same capability-swallowing hazard as
+        :meth:`supports_structured_output`: without this forward a
+        wrapped tool-capable provider inherits the base ``False`` and
+        the kernel gate reads a capable stack as tool-incapable.
+        """
+        checker = getattr(self._provider, "supports_tool_calls", None)
+        if not callable(checker):
+            return False
+        effective_model = model or self._models.reasoning_model
+        try:
+            return bool(checker(model=effective_model))
+        except TypeError:
+            return bool(checker())
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_output_tokens: int | None = None,
+        timeout: float = REASONING_TIMEOUT,
+        deadline: float | None = None,
+        reasoning_effort: str | None = None,
+    ) -> "ChatTurn":
+        """Forward a native tool-calling chat turn to the wrapped provider.
+
+        Args:
+            messages: OpenAI-shaped conversation, forwarded VERBATIM.
+            tools: Optional OpenAI function schemas, forwarded unchanged.
+            model: Optional per-call model override. When ``None``, the
+                adapter forwards ``self.models.reasoning_model`` when it
+                is non-empty (same defaulting rule as :meth:`complete`).
+            max_output_tokens: Optional output-token budget.
+            timeout: Per-call timeout in seconds.
+            deadline: Optional absolute monotonic deadline.
+            reasoning_effort: Optional per-call reasoning-effort
+                override; forwarded only when non-empty.
+
+        Returns:
+            The wrapped provider's :class:`ChatTurn`.
+
+        Raises:
+            NotImplementedError: The wrapped provider has no ``chat``
+                (check :meth:`supports_tool_calls` first).
+        """
+        inner_chat = getattr(self._provider, "chat", None)
+        if not callable(inner_chat):
+            raise NotImplementedError(
+                "Wrapped provider does not implement native tool calling."
+            )
+        call_kwargs: dict[str, object] = {
+            "tools": tools,
+            "max_output_tokens": max_output_tokens,
+            "timeout": timeout,
+            "deadline": deadline,
+        }
+        effective_model = model or self._models.reasoning_model
+        if effective_model:
+            call_kwargs["model"] = effective_model
+        if reasoning_effort:
+            call_kwargs["reasoning_effort"] = reasoning_effort
+        return inner_chat(messages, **call_kwargs)
+
     def complete_structured(
         self,
         prompt: str,
@@ -1518,7 +2054,7 @@ class ConfiguredLLMProvider(LLMProvider):
         system: str | None = None,
         model: str | None = None,
         max_output_tokens: int | None = None,
-        timeout: float = 120.0,
+        timeout: float = REASONING_TIMEOUT,
         state: dict | None = None,
         deadline: float | None = None,
         reasoning_effort: str | None = None,

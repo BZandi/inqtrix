@@ -29,7 +29,7 @@ def _settings(**overrides: int) -> AgentSettings:
     # editor_assistant_timeout is set DISTINCT from reasoning_timeout so the
     # editor-wait assertions actually pin the derivation to the editor budget
     # and cannot pass by coincidental default equality (editor_assistant_timeout
-    # defaults to the reasoning_timeout default of 120).
+    # defaults to the same 600-second value as reasoning_timeout).
     base = {
         "max_total_seconds": 300,
         "reasoning_timeout": 120,

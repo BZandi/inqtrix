@@ -41,12 +41,30 @@ from inqtrix.auth.permissions import (
 )
 from inqtrix.auth.principal import Principal
 from inqtrix.content.ports import FileNotFound, FileRecord, FileRegistry
+from inqtrix.knowledge.parsing import DocumentParseError, DocumentParser
 from inqtrix.storage.object_store import ObjectStore
 
 log = logging.getLogger("inqtrix")
 
 FILE_RESOURCE_TYPE = "file"
 """``resource_shares.resource_type`` value for uploaded files."""
+
+
+@dataclass(frozen=True)
+class ExtractedFileText:
+    """The parsed text of one file plus the parser that produced it."""
+
+    file_id: str
+    parser_id: str
+    text: str
+
+
+class FileParserUnavailable(RuntimeError):
+    """Raised when text extraction runs without a configured parser."""
+
+
+class FileTextExtractionError(ValueError):
+    """Raised when a file cannot be parsed to text (visible, never empty)."""
 
 _SAFE_KEY_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
 """Allowed shape for server-generated object-key segments. Tenant ids
@@ -89,11 +107,13 @@ class FileService:
         object_store: ObjectStore,
         permissions: PermissionService,
         max_file_bytes: int,
+        document_parser: DocumentParser | None = None,
     ) -> None:
         self._registry = registry
         self._object_store = object_store
         self._permissions = permissions
         self._max_file_bytes = max_file_bytes
+        self._document_parser = document_parser
 
     async def object_store_available(self) -> bool:
         """Return whether the configured blob store is reachable now.
@@ -217,6 +237,42 @@ class FileService:
             self._object_store.stream, record.object_key
         )
         return record, chunks
+
+    async def extract_text(
+        self, file_id: str, *, principal: Principal
+    ) -> ExtractedFileText:
+        """Server-side extracted text of one file via the parser.
+
+        The single implementation behind both the ``/v1/files/{id}/text``
+        route and the ``file.text.read`` capability: read-access check,
+        blob fetch, and parse all live here so the two consumers cannot
+        drift. Blocking blob read and parse run off the event loop.
+
+        Raises:
+            FileParserUnavailable: No parser configured (route → 501).
+            FileNotFound / ObjectStoreError: Propagated from the stream.
+            FileTextExtractionError: The parser could not convert the
+                file (route → 422); never a silent empty body.
+        """
+        if self._document_parser is None:
+            raise FileParserUnavailable(
+                "Server-Parsing ist nicht verfuegbar "
+                "(kein Dokument-Parser konfiguriert)"
+            )
+        record, chunks = await self.open_stream(file_id, principal=principal)
+        content = await asyncio.to_thread(lambda: b"".join(chunks))
+        parser = self._document_parser
+        try:
+            text = await asyncio.to_thread(
+                lambda: parser.parse(
+                    file_name=record.file_name, content=content
+                )
+            )
+        except DocumentParseError as exc:
+            raise FileTextExtractionError(str(exc)) from exc
+        return ExtractedFileText(
+            file_id=record.id, parser_id=parser.parser_id, text=text
+        )
 
     async def list(
         self,

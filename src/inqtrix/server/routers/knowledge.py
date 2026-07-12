@@ -41,6 +41,7 @@ from inqtrix.server.routers import (
     quota_record,
 )
 from inqtrix.services.knowledge_service import (
+    ChunkNotFound,
     KnowledgeValidationError,
     collection_access,
 )
@@ -79,13 +80,40 @@ def _document_payload(document: KnowledgeDocument) -> dict[str, Any]:
     }
 
 
-def _candidate_payload(candidate: RetrievalCandidate) -> dict[str, Any]:
+_SEARCH_TOP_K_MAX = 50
+"""Upper bound for the debug-search ``top_k`` (mirrors the agent_context
+retrieval-width validator); requests above it are rejected, not silently
+clamped."""
+
+_CHUNK_CONTEXT_MAX = 3
+"""Upper bound for the chunk-detail ``context`` query parameter
+(neighbour chunks per side). Three chunks each way already exceed what
+the evidence view renders; larger windows should read the document text
+endpoint instead. Requests above it are rejected, not silently
+clamped."""
+
+
+def _candidate_payload(candidate: RetrievalCandidate, *, rank: int) -> dict[str, Any]:
+    """One search hit.
+
+    Additive identity/provenance fields (``chunk_id``, ``rank``,
+    ``page_number``, ``source_text``) let an agent cite a hit durably:
+    the citation key stays ``(document_id, chunk_index)`` (stable across
+    reindex), while ``chunk_id`` and ``source_text`` support exact
+    provenance and verbatim-quote checks. Legacy consumers ignore the
+    extra keys; the historical fields keep their shape.
+    """
+    chunk = candidate.chunk
     return {
-        "document_id": candidate.chunk.document_id,
-        "collection_id": candidate.chunk.collection_id,
+        "document_id": chunk.document_id,
+        "collection_id": chunk.collection_id,
         "document_title": candidate.document_title,
-        "chunk_index": candidate.chunk.chunk_index,
-        "text": candidate.chunk.text,
+        "chunk_index": chunk.chunk_index,
+        "chunk_id": chunk.id,
+        "rank": rank,
+        "text": chunk.text,
+        "source_text": chunk.source_text or chunk.text,
+        "page_number": chunk.page_number,
         "score": round(candidate.score, 6),
     }
 
@@ -434,6 +462,63 @@ def build_router(container: "AppContainer") -> APIRouter:
         payload["text"] = document.text
         return payload
 
+    @router.get("/v1/knowledge/documents/{document_id}/chunks/{chunk_index}")
+    async def document_chunk(
+        document_id: str,
+        chunk_index: int,
+        req: Request,
+        principal: Principal = Depends(principal_dep),
+        visible_to: UserContext | None = Depends(user_context_dep),
+        also_visible=Depends(shared_collections_dep),
+    ):
+        """One chunk plus optional neighbour context (the evidence view).
+
+        ``?context=N`` (0..3, default 0) additionally returns up to N
+        chunks before and after the target so a cited quote can be read
+        in its surroundings. Scoping mirrors the document text route:
+        an unknown and an invisible document stay byte-identical 404s.
+        """
+        raw_context = req.query_params.get("context")
+        context = 0
+        if raw_context is not None:
+            try:
+                context = int(raw_context)
+            except ValueError:
+                context = -1
+            if not 0 <= context <= _CHUNK_CONTEXT_MAX:
+                return error_response(
+                    400,
+                    (
+                        "Parameter 'context' muss zwischen 0 und "
+                        f"{_CHUNK_CONTEXT_MAX} liegen"
+                    ),
+                    "invalid_request_error",
+                )
+        try:
+            chunk, neighbors = await service.get_chunk(
+                document_id,
+                chunk_index,
+                context=context,
+                visible_to=visible_to,
+                also_visible=also_visible,
+            )
+        except DocumentNotFound:
+            return error_response(404, "Dokument nicht gefunden", "not_found")
+        except ChunkNotFound:
+            return error_response(404, "Chunk nicht gefunden", "not_found")
+        return {
+            "chunk_id": chunk.id,
+            "document_id": chunk.document_id,
+            "chunk_index": chunk.chunk_index,
+            "text": chunk.text,
+            "source_text": chunk.source_text or chunk.text,
+            "page_number": chunk.page_number,
+            "neighbors": [
+                {"chunk_index": neighbor.chunk_index, "text": neighbor.text}
+                for neighbor in neighbors
+            ],
+        }
+
     @router.post("/v1/knowledge/search")
     async def search(
         req: Request,
@@ -462,15 +547,16 @@ def build_router(container: "AppContainer") -> APIRouter:
         )
         raw_top_k = body.get("top_k")
         if raw_top_k is not None and (
-            not isinstance(raw_top_k, int) or raw_top_k < 1
+            not isinstance(raw_top_k, int)
+            or not 1 <= raw_top_k <= _SEARCH_TOP_K_MAX
         ):
             return error_response(
                 400,
-                "Feld 'top_k' muss eine positive Ganzzahl sein",
+                f"Feld 'top_k' muss zwischen 1 und {_SEARCH_TOP_K_MAX} liegen",
                 "invalid_request_error",
             )
         try:
-            candidates = await service.search(
+            outcome = await service.search_reported(
                 query=str(body.get("query", "")),
                 collection_ids=collection_ids,
                 top_k=raw_top_k,
@@ -486,9 +572,25 @@ def build_router(container: "AppContainer") -> APIRouter:
         except EmbeddingProviderError as exc:
             log.warning("Knowledge-Suche scheiterte am Embedding-Backend: %s", exc)
             return error_response(502, str(exc), "server_error")
+        warnings: list[dict[str, Any]] = []
+        if outcome.filtered_collection_ids:
+            warnings.append(
+                {
+                    "code": "collections_filtered",
+                    "message": (
+                        "Einzelne angefragte Sammlungen sind nicht sichtbar "
+                        "und wurden aus der Suche ausgeschlossen."
+                    ),
+                    "filtered_ids": outcome.filtered_collection_ids,
+                }
+            )
         return {
             "object": "list",
-            "data": [_candidate_payload(candidate) for candidate in candidates],
+            "data": [
+                _candidate_payload(candidate, rank=index)
+                for index, candidate in enumerate(outcome.candidates, start=1)
+            ],
+            "warnings": warnings,
         }
 
     return router

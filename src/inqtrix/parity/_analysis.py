@@ -187,9 +187,11 @@ def generate_llm_analysis_report(
         settings = Settings()
         llm_provider = create_providers(settings).llm
         default_model = settings.models.reasoning_model
+        configured_timeout = settings.agent.reasoning_timeout
+    else:
+        configured_timeout = DEFAULT_ANALYSIS_TIMEOUT
 
     configured_model = ""
-    configured_timeout = DEFAULT_ANALYSIS_TIMEOUT
     used_model = resolve_analysis_model_name(
         configured_model, default_model or "", analysis_model)
     timeout = analysis_timeout or configured_timeout

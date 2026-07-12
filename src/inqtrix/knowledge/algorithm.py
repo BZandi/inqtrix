@@ -24,6 +24,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
+from inqtrix.auth.principal import ANONYMOUS_PRINCIPAL, STATIC_PRINCIPAL
 from inqtrix.core.results import AgentResult, RunRequest
 from inqtrix.i18n import detect_ui_language_confident
 from inqtrix.knowledge.contextualize import contextualize_followup_question
@@ -265,11 +266,11 @@ class KnowledgeAlgorithm:
     def capabilities(self) -> dict:
         """Manifest entry for the capability endpoint and clients.
 
-        Deliberately WITHOUT ``streams_via_research_graph``: the
-        streamed chat path executes the research graph directly, which
-        would be the wrong engine — the chat router rejects
-        ``stream=true`` for this algorithm loudly until streaming
-        dispatches through the registry.
+        ``supports_chat_completions`` makes this algorithm streamable on
+        ``/v1/chat/completions`` (streaming dispatches through the registry).
+        It emits structured events for the native ``/v1/runs`` surface; the
+        chat SSE surface streams the answer without granular progress lines
+        (no ``event_sink`` there).
         """
         return {
             "requires": ["llm", "embeddings", "knowledge_store"],
@@ -483,6 +484,37 @@ class KnowledgeAlgorithm:
         )
 
         collection_ids = _resolve_collection_ids(request)
+        # Defense in depth: an authenticated ask MUST arrive pre-scoped —
+        # the admission gate (KnowledgeService.resolve_ask_scope in the
+        # chat/runs routers) pins an omitted filter to the caller-visible
+        # set BEFORE the run is stored. An unbounded scope reaching this
+        # point with a known principal means a caller bypassed that gate;
+        # retrieval would then range over every tenant collection. Surface
+        # it LOUDLY (No Silent Fallbacks) instead of silently answering
+        # from foreign documents — behaviour is unchanged, the marker just
+        # makes a future re-opening impossible to miss. The sentinel
+        # principals of the none/apikey modes are excluded (same rule as
+        # the worker's created_by_sub check): there the unbounded scope IS
+        # the deliberate see-everything contract, not a bypass.
+        if (
+            context.principal is not None
+            and context.principal.sub
+            not in (ANONYMOUS_PRINCIPAL.sub, STATIC_PRINCIPAL.sub)
+            and collection_ids is None
+        ):
+            log.warning(
+                "_knowledge_unscoped_principal: authenticated ask reached "
+                "retrieval without a pinned collection scope; the admission "
+                "gate did not run. Retrieval will range over all tenant "
+                "collections."
+            )
+            emit(
+                "inqtrix.knowledge.scope.unscoped_principal",
+                {
+                    "marker": "_knowledge_unscoped_principal",
+                    "scope": "all_collections",
+                },
+            )
         # Make the BM25 tokenizer-language limitation visible (No Silent
         # Fallbacks). Returns None on the same-language default path, so
         # result_state stays field-identical there.

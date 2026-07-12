@@ -269,15 +269,15 @@ def _build_agent() -> ResearchAgent:
         # Behaviour
         max_rounds=4,
         confidence_stop=8,
-        first_round_queries=6,
-        answer_prompt_citations_max=60,
-        max_total_seconds=600,
+        first_round_queries=8,
+        answer_prompt_citations_max=500,
+        max_total_seconds=3600,
         max_question_length=60_000,
 
         # Per-call timeouts (seconds)
-        reasoning_timeout=120,
-        search_timeout=60,
-        claim_extract_timeout=60,
+        reasoning_timeout=600,
+        search_timeout=600,
+        claim_extract_timeout=600,
 
         # Risk scoring (domain-neutral). high_risk is an observability
         # signal only; it does NOT change model selection. Use model

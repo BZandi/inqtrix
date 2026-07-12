@@ -168,6 +168,7 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
         handle = FencedIndexingJobHandle(
             self._store, job.job_id, cancel_event, claimed.attempt
         )
+        old_message_acked = False
         try:
             try:
                 # Reconstruct the metered subject from the persisted job
@@ -199,6 +200,7 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
                 # Terminal state is committed; only now may the stream
                 # forget the job.
                 self._queue.ack(job.message_id)
+                old_message_acked = True
             else:
                 # Fenced out: a superseding attempt owns the job AND this
                 # very message id — acking here would strip the new
@@ -218,5 +220,6 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
                 job.job_id,
             )
         finally:
-            with self._lock:
-                self._active.pop(job.job_id, None)
+            self._finish_active(
+                job, allow_successor=old_message_acked
+            )

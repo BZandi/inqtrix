@@ -1,0 +1,92 @@
+{{- if .Values.pgbouncer.enabled }}
+{{- if not .Values.postgres.enabled }}
+{{- fail "pgbouncer.enabled requires postgres.enabled: the bundled pooler fronts the bundled database only. For an external database run your own pooler and point secret.data.INQTRIX_DATABASE_URL at it (with ?prepared_statement_cache_size=0)." }}
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-pgbouncer
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "pgbouncer") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "inqtrix.selectorLabels" (dict "root" . "component" "pgbouncer") | nindent 4 }}
+  ports:
+    - name: pgbouncer
+      port: 6432
+      targetPort: pgbouncer
+      protocol: TCP
+---
+{{- /* Stateless pooler: a Deployment, unlike the data-bearing StatefulSets.
+       Transaction mode multiplexes the app's many engine pools onto
+       defaultPoolSize server connections; maxPreparedStatements (pgbouncer
+       >= 1.21) keeps asyncpg's named prepared statements safe, paired with
+       ?prepared_statement_cache_size=0 in the derived app URL. */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "inqtrix.fullname" . }}-pgbouncer
+  labels:
+    {{- include "inqtrix.labels" (dict "root" . "component" "pgbouncer") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "inqtrix.selectorLabels" (dict "root" . "component" "pgbouncer") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "inqtrix.labels" (dict "root" . "component" "pgbouncer") | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "inqtrix.bundledPodSecurityContext" (dict "root" . "svc" .Values.pgbouncer.podSecurityContext) | nindent 8 }}
+      containers:
+        - name: pgbouncer
+          image: {{ .Values.pgbouncer.image }}
+          imagePullPolicy: {{ .Values.pgbouncer.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: DB_HOST
+              value: {{ printf "%s-postgres" (include "inqtrix.fullname" .) | quote }}
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_USER
+              value: {{ .Values.postgres.auth.username | quote }}
+            - name: DB_PASSWORD
+              value: {{ .Values.postgres.auth.password | quote }}
+            - name: DB_NAME
+              value: {{ .Values.postgres.auth.database | quote }}
+            - name: POOL_MODE
+              value: {{ .Values.pgbouncer.poolMode | quote }}
+            - name: MAX_CLIENT_CONN
+              value: {{ .Values.pgbouncer.maxClientConn | quote }}
+            - name: DEFAULT_POOL_SIZE
+              value: {{ .Values.pgbouncer.defaultPoolSize | quote }}
+            - name: MAX_PREPARED_STATEMENTS
+              value: {{ .Values.pgbouncer.maxPreparedStatements | quote }}
+            - name: AUTH_TYPE
+              value: scram-sha-256
+          ports:
+            - name: pgbouncer
+              containerPort: 6432
+          readinessProbe:
+            tcpSocket:
+              port: pgbouncer
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: pgbouncer
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.pgbouncer.resources | nindent 12 }}
+{{- end }}

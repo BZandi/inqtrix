@@ -18,6 +18,10 @@ describe('panel layout state', () => {
     expect(clampPanelLayoutSize('knowledgeSource', 20)).toBe(28)
     expect(clampPanelLayoutSize('knowledgeSource', 52)).toBe(48)
     expect(clampPanelLayoutSize('researchReport', Number.NaN)).toBe(42)
+    expect(clampPanelLayoutSize('editorTree', 8)).toBe(16)
+    expect(clampPanelLayoutSize('editorTree', 50)).toBe(34)
+    expect(clampPanelLayoutSize('editorComments', 12)).toBe(20)
+    expect(clampPanelLayoutSize('editorComments', 60)).toBe(38)
   })
 
   it('keeps valid imported sizes and repairs missing or invalid keys', () => {
@@ -31,6 +35,10 @@ describe('panel layout state', () => {
       knowledgeHistory: DEFAULT_PANEL_LAYOUT.knowledgeHistory,
       knowledgeSource: 48,
       researchReport: 38,
+      agentSessions: DEFAULT_PANEL_LAYOUT.agentSessions,
+      agentCanvas: DEFAULT_PANEL_LAYOUT.agentCanvas,
+      editorTree: DEFAULT_PANEL_LAYOUT.editorTree,
+      editorComments: DEFAULT_PANEL_LAYOUT.editorComments,
     })
   })
 })

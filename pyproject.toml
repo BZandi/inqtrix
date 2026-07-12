@@ -22,7 +22,7 @@ dependencies = [
     "fastapi>=0.115,<1.0",
     "uvicorn[standard]>=0.34,<1.0",
     "openai>=2.0,<3.0",
-    "langgraph>=1.0,<2.0",
+    "langgraph>=1.2.5,<2.0",
     "cachetools>=5.5,<6.0",
     "pydantic-settings>=2.7,<3.0",
     "python-dotenv>=1.0,<2.0",
@@ -78,6 +78,24 @@ knowledge-qdrant = [
 queue-valkey = [
     "valkey>=6.1,<7.0",
 ]
+# Prometheus /metrics endpoint (INQTRIX_METRICS_ENABLED=1). Off by default;
+# without this extra the server logs loudly and leaves /metrics unmounted.
+# prometheus-client only: the HTTP histograms are served by an in-tree ASGI
+# middleware, so we avoid prometheus-fastapi-instrumentator's starlette<1.0 pin.
+metrics = [
+    "prometheus-client>=0.20,<1.0",
+]
+# Workspace-agent runtime (mode=workspace_agent, plan decision E10):
+# deepagents is the sub-agent harness, the Postgres checkpointer keeps
+# interrupted phase machines resumable across workers. deepagents pulls
+# langchain-anthropic + langchain-google-genai unconditionally (see
+# THIRD_PARTY_NOTICES).
+agent = [
+    "deepagents>=0.6.12,<0.7",
+    "langchain>=1.3.11,<2.0",
+    "langgraph-checkpoint-postgres>=3.1.0,<4",
+    "psycopg[binary,pool]>=3.2",
+]
 dev = [
     "pytest>=7.4",
     "pytest-asyncio>=0.23",
@@ -110,6 +128,9 @@ dev = [
     # In-process Valkey/Redis fake for offline queue tests (tests-use-stubs policy).
     "fakeredis>=2.26",
     "valkey>=6.1,<7.0",
+    # The optional 'metrics' extra, pulled into dev so tests/test_metrics.py
+    # exercises the real /metrics endpoint instead of skipping.
+    "prometheus-client>=0.20,<1.0",
 ]
 
 [tool.pytest.ini_options]

@@ -15,7 +15,7 @@ import {
 import type { BlockActionId } from './blockActions'
 
 /** Localized strings for the `/` menu, assembled from `editorCopy` in
- * `EditorWorkspace` so all copy stays in one place (DE + EN). */
+ * `editorCopy.ts` so all copy stays in one place (DE + EN). */
 export type SlashLabels = {
   title: string
   empty: string

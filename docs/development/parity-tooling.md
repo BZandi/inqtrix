@@ -50,8 +50,12 @@ Each `compare` run writes three deterministic artefacts into the report director
 `--llm-analysis` auto-creates the default LLM provider from `Settings()`.
 By default it uses `REASONING_MODEL`; pass `--analysis-model <model>` to
 override the model name for the diagnostic pass. The analysis timeout uses the
-parity helper default and remains a soft per-question cap: if one analysis call
-times out, the compare command keeps processing the rest.
+effective `REASONING_TIMEOUT` (600 seconds by default) for the single optional
+analysis call that summarizes the complete comparison. If that call fails or
+times out, the deterministic comparison remains available. The HTTP run client
+defaults to the active research-run budget plus the shared 30-second client
+margin (3,630 seconds by default), so a valid slow run is not abandoned before
+the server's own deadline.
 
 ## Minimal local parity run
 

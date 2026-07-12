@@ -28,19 +28,11 @@ from inqtrix.model_routing import (
 )
 from inqtrix.settings import AgentSettings, ModelSettings
 
-ALL_NODES = (
-    "classify",
-    "plan",
-    "evaluate",
-    "answer",
-    "claim_extract",
-    "direct_chat",
-    "knowledge_answer",
-    "knowledge_gate",
-    "knowledge_contextualize",
-    "knowledge_decompose",
-    "knowledge_rerank",
-)
+# Derived from the source of truth so a newly-assigned node (e.g. the
+# agent/knowledge call sites cannot silently fall out of the resolver's
+# coverage: the `set(descs) == set(ALL_NODES)` assertions then verify
+# describe_node_resolutions returns EXACTLY the assigned node set.
+ALL_NODES = tuple(NODE_TIER_ASSIGNMENT)
 
 
 def _models(**kwargs: str) -> SimpleNamespace:

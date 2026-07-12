@@ -386,6 +386,41 @@ class PostgresKnowledgeStore:
             row = await self._document_row(session, document_id)
         return self._document_from_row(row)
 
+    async def get_chunks(self, document_id: str) -> list[DocumentChunk]:
+        """One document's chunks ordered by ``chunk_index`` (no vectors)."""
+        async with self._session() as session:
+            await self._document_row(session, document_id)  # 404 if unknown
+            rows = (
+                await session.execute(
+                    select(
+                        knowledge_chunks.c.id,
+                        knowledge_chunks.c.document_id,
+                        knowledge_chunks.c.collection_id,
+                        knowledge_chunks.c.chunk_index,
+                        knowledge_chunks.c.text,
+                        knowledge_chunks.c.source_text,
+                        knowledge_chunks.c.page_number,
+                    )
+                    .where(
+                        knowledge_chunks.c.tenant_id == _DEFAULT_TENANT,
+                        knowledge_chunks.c.document_id == document_id,
+                    )
+                    .order_by(knowledge_chunks.c.chunk_index)
+                )
+            ).all()
+        return [
+            DocumentChunk(
+                id=row[0],
+                document_id=row[1],
+                collection_id=row[2],
+                chunk_index=row[3],
+                text=row[4],
+                source_text=row[5],
+                page_number=row[6],
+            )
+            for row in rows
+        ]
+
     async def delete_document(self, document_id: str) -> None:
         """Delete one document and its chunks (DB cascade + vectors)."""
         async with self._session() as session:
@@ -417,6 +452,25 @@ class PostgresKnowledgeStore:
             collection = await self._collection_row(session, document.collection_id)
             self._validate_embeddings(chunks, embeddings, collection.embedding_dim)
             created_at = time.time()
+            # Reuse chunk ids by position so a re-embed keeps exact
+            # provenance links alive across reindex ((document_id,
+            # chunk_index) is the citation key, but a stable chunk_id is
+            # the durable provenance anchor). Delete-then-insert within
+            # one transaction reinserts the reused ids; positions beyond
+            # the prior count get fresh ids, a shrunk doc drops the tail.
+            prior_ids = [
+                row.id
+                for row in (
+                    await session.execute(
+                        select(knowledge_chunks.c.id)
+                        .where(
+                            knowledge_chunks.c.tenant_id == _DEFAULT_TENANT,
+                            knowledge_chunks.c.document_id == document_id,
+                        )
+                        .order_by(knowledge_chunks.c.chunk_index)
+                    )
+                ).all()
+            ]
             chunk_rows = self._build_chunk_rows(
                 document_id=document_id,
                 collection_id=document.collection_id,
@@ -424,6 +478,7 @@ class PostgresKnowledgeStore:
                 source_chunks=source_chunks,
                 page_numbers=page_numbers,
                 created_at=created_at,
+                reuse_ids=prior_ids,
             )
             await session.execute(
                 delete(knowledge_chunks).where(
@@ -599,12 +654,18 @@ class PostgresKnowledgeStore:
         source_chunks: list[str] | None,
         created_at: float,
         page_numbers: list[int | None] | None = None,
+        reuse_ids: list[str] | None = None,
     ) -> list[dict]:
         sources = source_chunks or []
         pages = page_numbers or []
+        prior_ids = reuse_ids or []
         return [
             {
-                "id": _new_id("kch"),
+                "id": (
+                    prior_ids[index]
+                    if index < len(prior_ids)
+                    else _new_id("kch")
+                ),
                 "document_id": document_id,
                 "collection_id": collection_id,
                 "tenant_id": _DEFAULT_TENANT,

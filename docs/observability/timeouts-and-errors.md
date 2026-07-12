@@ -9,18 +9,19 @@ The deadline model, per-layer timeouts, the exception hierarchy, and the gracefu
 ## Deadline model
 
 ```
-Global:  deadline = time.monotonic() + MAX_TOTAL_SECONDS (default 300s)
-Per-call: effective_timeout = min(default_timeout, remaining_until_deadline)
+Run:       deadline = time.monotonic() + MAX_TOTAL_SECONDS (default 3600s)
+Operation: deadline = min(now + configured_timeout, run_deadline)
 ```
 
 Every node entry calls `_check_deadline(state["deadline"])`; if the deadline is already past, the node raises `AgentTimeout`. Every provider call receives the effective per-call timeout so a late-round call cannot silently burn the remaining budget.
 
 | Layer | Env variable | Default | Purpose |
 |-------|--------------|---------|---------|
-| Agent total | `MAX_TOTAL_SECONDS` | 300s | Hard wall-clock budget for the whole run |
-| LLM reasoning | `REASONING_TIMEOUT` | 120s | Per-call budget for classify/plan/evaluate/answer |
-| Perplexity / other search | `SEARCH_TIMEOUT` | 60s | Per-call budget for a single `search()` |
-| Claim extraction | `CLAIM_EXTRACT_TIMEOUT` | 60s | Per-call budget for claim extraction |
+| Active research run | `MAX_TOTAL_SECONDS` | 3600s | Outer wall-clock budget checked at graph boundaries and passed into provider calls. Time parked for Agent Desk approval/input is not active research time. |
+| LLM reasoning | `REASONING_TIMEOUT` | 600s | Logical-operation budget for classify/plan/evaluate/answer, including retries and backoff. |
+| Editor assistant | `EDITOR_ASSISTANT_TIMEOUT` | 600s | Logical-operation budget for editor suggest/instruct calls. |
+| Perplexity / other search | `SEARCH_TIMEOUT` | 600s | Logical-operation budget for one `search()`, including retries and backoff. |
+| Claim extraction | `CLAIM_EXTRACT_TIMEOUT` | 600s | Logical-operation budget for one extraction, including retries and backoff. |
 
 All four are configurable via environment variables (see [Settings and env](../configuration/settings-and-env.md)) or via `AgentConfig`.
 
@@ -29,7 +30,8 @@ All four are configurable via environment variables (see [Settings and env](../c
 | Exception | Parent | Trigger | Behaviour |
 |-----------|--------|---------|-----------|
 | `AgentTimeout` | `RuntimeError` | `time.monotonic() > deadline` at a node boundary or inside a provider | Graceful: `answer` is called with accumulated context even when downstream nodes have not completed. |
-| `AgentRateLimited` | `RuntimeError` | HTTP 429 or daily token limit | Immediate abort. Partial token counts are preserved on the result. |
+| `AgentProviderTimeout` | `AgentTimeout` | One logical provider operation exhausts its own timeout before the outer run deadline | Visible provider-operation failure; retry metadata records the operation, configured/effective budget, and attempt. |
+| `AgentRateLimited` | `RuntimeError` | HTTP 429 remains after the shared three-attempt budget, or the provider reports a hard daily/token cap | Visible terminal provider failure. Partial token counts are preserved on the result. |
 | `AgentCancelled` | `RuntimeError` | `_cancel_event` set (via disconnect watcher) | Abort at next node boundary and return a cancelled result state. |
 | `AnthropicAPIError`, `AzureOpenAIAPIError`, `AzureFoundryWebSearchAPIError`, `BedrockAPIError`, `PerplexityAPIError` | `RuntimeError` | Per-provider HTTP error (400s, 500s, schema mismatches) | Graceful degradation per node (see below). |
 
@@ -49,18 +51,29 @@ The invariant across all of them: a partial result is always returned to the cal
 
 ## Provider retry behaviour
 
-The built-in providers implement visible retry loops on top of the deadline model:
+The built-in providers implement one visible retry authority on top of the
+deadline model. A logical operation has at most three attempts in total; a
+mixed sequence of transport, 5xx, and 429 failures cannot reset that counter:
 
-- `AnthropicLLM` — up to 5 attempts with exponential backoff and jitter on 5xx and 529 (overloaded). Rate-limit responses raise `AgentRateLimited` directly.
-- `BedrockLLM` — up to 5 attempts on transient Converse errors; throttling after the last attempt is translated to `AgentRateLimited`.
+- `AnthropicLLM` — up to 3 total attempts with exponential backoff and jitter on transient transport, 5xx/529, and 429 responses.
+- `BedrockLLM` — up to 3 total attempts on transient Converse/transport errors; throttling after the final attempt becomes `AgentRateLimited`.
 - `AzureOpenAILLM` and `LiteLLM` — OpenAI SDK retries are disabled and Inqtrix retries transient 408/409/5xx plus SDK timeout/connection errors itself.
 - `AzureFoundryWebSearch` — OpenAI SDK retries are disabled and Inqtrix retries transient Responses API 408/409/5xx plus SDK timeout/connection errors itself.
 
-Every retry emits a warning log and a live progress event. Search retries also include the parallel query position in the operation label, for example `Websuche 2/6`, so operators can see which concurrent query is retrying.
+Every retry emits a warning log and a live progress/activity event. Research
+search retries include the parallel query position (for example
+`Websuche 2/6`); Agent Desk instant-search retries carry the task/query,
+attempt `n/3`, delay, error code, and configured/effective timeout in the
+existing `inqtrix.agent.activity` stream. Mission phase calls and Kernel model
+calls use that same stream with a human-readable phase purpose; no separate
+model-progress channel is created.
 
 ## Deadline interaction with retries
 
-Each retry consults the deadline. If the remaining time is smaller than the next backoff interval, the provider aborts immediately with the underlying error instead of sleeping past the deadline. This keeps `MAX_TOTAL_SECONDS` as a real wall-clock bound.
+All attempts and backoff sleeps share the operation deadline computed before
+attempt one. A retry never receives another 600 seconds. The outer run
+deadline may shorten this budget further; whichever deadline expires first
+determines whether `AgentProviderTimeout` or `AgentTimeout` is surfaced.
 
 ## Related docs
 

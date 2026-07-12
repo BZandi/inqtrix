@@ -12,7 +12,6 @@ import json
 import pytest
 
 import inqtrix.research.web_research as web_research_module
-import inqtrix.server.streaming as streaming_module
 from inqtrix.settings import AgentSettings, ServerSettings
 
 from tests.contract._app import (
@@ -105,7 +104,7 @@ def test_streaming_sse_chunk_sequence(monkeypatch):
             model_resolution=resolution,
         )
 
-    monkeypatch.setattr(streaming_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
 
     with make_contract_client() as client:
         with client.stream(
@@ -171,7 +170,7 @@ def test_streaming_without_progress_skips_progress_and_separator(monkeypatch):
         assert kwargs.get("progress_queue") is None
         return minimal_agent_result(answer="Nur Antwort.")
 
-    monkeypatch.setattr(streaming_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
 
     with make_contract_client() as client:
         with client.stream(
@@ -229,17 +228,19 @@ def test_missing_messages_envelope():
     }
 
 
-def test_unknown_mode_envelope():
+@pytest.mark.parametrize("mode", ["knowledge", "reflect"])
+def test_unknown_mode_envelope(mode: str):
     with make_contract_client() as client:
         response = client.post(
             "/v1/chat/completions",
             json={
                 "messages": [{"role": "user", "content": "Hallo"}],
-                "mode": "knowledge",
+                "mode": mode,
             },
         )
 
     assert response.status_code == 400
+    # The listing is registry-driven; removed modes fail loudly.
     assert response.json() == {
         "error": {
             "message": "mode muss 'research' oder 'direct_llm' sein",

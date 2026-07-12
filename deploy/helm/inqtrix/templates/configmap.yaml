@@ -8,11 +8,35 @@ precedence: config > extraConfig > derived).
 {{- if and (eq (.Values.config.INQTRIX_STORAGE_BACKEND | toString) "postgres") (not .Values.postgres.enabled) (not .Values.secret.existingSecret) (not (hasKey .Values.secret.data "INQTRIX_DATABASE_URL")) }}
 {{- fail "INQTRIX_STORAGE_BACKEND is \"postgres\" but no database is configured. Set ONE of: --set postgres.enabled=true (bundled demo DB), --set secret.existingSecret=<name> (a Secret carrying INQTRIX_DATABASE_URL), or --set-string secret.data.INQTRIX_DATABASE_URL=<url>. For a stateless trial: --set config.INQTRIX_STORAGE_BACKEND=memory --set migrations.enabled=false." }}
 {{- end }}
+{{- /* Effective replica count: static replicaCount, or the autoscaler ceiling
+       when enabled; a worker pod counts as one more sharer of the object store. */}}
+{{- $apiReplicas := int .Values.api.replicaCount }}
+{{- if .Values.api.autoscaling.enabled }}
+{{- $apiReplicas = int .Values.api.autoscaling.maxReplicas }}
+{{- end }}
+{{- $storeSharers := $apiReplicas }}
+{{- if .Values.worker.enabled }}
+{{- $storeSharers = add $storeSharers 1 }}
+{{- end }}
+{{- /* Fail fast: the local object store is per-pod disk. More than one sharer
+       (api replicas and/or a worker) silently 404s every blob on the pods that
+       did not write it -- refuse the render, mirroring the app's own startup
+       guard on INQTRIX_REPLICA_COUNT. */}}
+{{- $explicitStore := coalesce .Values.config.INQTRIX_OBJECT_STORE_BACKEND .Values.extraConfig.INQTRIX_OBJECT_STORE_BACKEND "" }}
+{{- $effectiveStore := $explicitStore }}
+{{- if not $effectiveStore }}
+{{- $effectiveStore = ternary "s3" "local" .Values.s3.enabled }}
+{{- end }}
+{{- if and (eq ($effectiveStore | toString) "local") (gt (int $storeSharers) 1) }}
+{{- fail (printf "Object store backend \"local\" is per-pod disk but %d pods would share it (api replicas/autoscaling max + worker). Enable an S3 backend: --set s3.enabled=true (bundled MinIO demo) or set config.INQTRIX_OBJECT_STORE_BACKEND=s3 with an external endpoint." (int $storeSharers)) }}
+{{- end }}
 {{- /* Object-store backend default lives in the derived layer (not the config
        defaults) so s3.enabled can flip it to "s3" -- a baked-in config default would
        always win over the derived value. The app default is "local" too. An explicit
-       config/extraConfig value still wins (e.g. to point at an external S3). */}}
-{{- $derived := dict "INQTRIX_OBJECT_STORE_BACKEND" "local" }}
+       config/extraConfig value still wins (e.g. to point at an external S3). The
+       replica hint feeds the app's own startup guard (defense in depth for
+       non-Helm deploys). */}}
+{{- $derived := dict "INQTRIX_OBJECT_STORE_BACKEND" "local" "INQTRIX_REPLICA_COUNT" (printf "%d" (int $storeSharers)) }}
 {{- if .Values.qdrant.enabled }}
 {{- $_ := set $derived "INQTRIX_KNOWLEDGE_ENABLED" "true" }}
 {{- $_ := set $derived "INQTRIX_VECTOR_BACKEND" "qdrant" }}
@@ -31,6 +55,11 @@ precedence: config > extraConfig > derived).
 {{- $_ := set $derived "INQTRIX_OBJECT_STORE_BACKEND" "s3" }}
 {{- $_ := set $derived "INQTRIX_S3_ENDPOINT_URL" (printf "http://%s-minio:9000" (include "inqtrix.fullname" .)) }}
 {{- $_ := set $derived "INQTRIX_S3_BUCKET" .Values.s3.bucket }}
+{{- end }}
+{{- /* Prometheus /metrics: the image bakes in the metrics extra, so this flag
+       alone mounts the endpoint (scrape wiring lives on the api pod annotations). */}}
+{{- if .Values.metrics.enabled }}
+{{- $_ := set $derived "INQTRIX_METRICS_ENABLED" "true" }}
 {{- end }}
 {{- $merged := merge (deepCopy .Values.config) .Values.extraConfig $derived }}
 apiVersion: v1

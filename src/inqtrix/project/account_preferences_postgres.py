@@ -25,6 +25,7 @@ _MUTABLE = [
     "theme",
     "theme_preset",
     "user_bubble_tone",
+    "enable_agent_memory",
     "updated_at",
 ]
 
@@ -54,11 +55,13 @@ class PostgresAccountPreferencesStore(BaseSessionStore):
         theme_preset,
         user_bubble_tone,
         updated_at,
+        enable_agent_memory=False,
     ) -> AccountPreferences:
         stmt = pg_insert(account_preferences).values(
             tenant_id=_DEFAULT_TENANT, sub=sub, contrast_mode=contrast_mode,
             locale=locale, theme=theme, theme_preset=theme_preset,
             user_bubble_tone=user_bubble_tone,
+            enable_agent_memory=enable_agent_memory,
             updated_at=updated_at,
         )
         stmt = stmt.on_conflict_do_update(
@@ -74,6 +77,8 @@ class PostgresAccountPreferencesStore(BaseSessionStore):
         return AccountPreferences(
             sub=row.sub, contrast_mode=row.contrast_mode, locale=row.locale,
             theme=row.theme, theme_preset=row.theme_preset,
-            user_bubble_tone=row.user_bubble_tone, updated_at=row.updated_at,
+            user_bubble_tone=row.user_bubble_tone,
+            enable_agent_memory=row.enable_agent_memory,
+            updated_at=row.updated_at,
             tenant_id=row.tenant_id,
         )

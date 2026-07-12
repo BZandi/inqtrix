@@ -20,7 +20,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from queue import Queue
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from inqtrix.core.events import EventSink
 
@@ -62,12 +62,17 @@ class RunContext:
         agent_settings: Agent settings after stack, override, and mode
             resolution. Algorithms never re-apply overrides.
         principal: The verified request identity for HTTP-served
-            executions (anonymous/static in the legacy modes).
-            ``None`` only for callers outside the HTTP surface
-            (library mode, the streaming chat seam until it routes
-            through the registry).
+            executions (anonymous/static in the legacy modes). ``None``
+            only for callers outside the HTTP surface (library mode,
+            i.e. ``ResearchAgent``); streamed chat is HTTP-served and
+            carries the resolved principal like every other registry
+            dispatch.
         run_id: Native run id when executing under ``/v1/runs``;
             ``None`` for request/response protocols.
+        workspace_id: Client-side project namespace persisted on a native
+            run. Agent children inherit this value from their parent so
+            authenticated event and result reads stay in the same namespace.
+            ``None`` for request/response and library protocols.
         cancel_token: Threading event observed by the graph at node
             boundaries; ``None`` when the protocol offers no cancel.
         event_sink: Structured event emitter for native runs; ``None``
@@ -80,6 +85,14 @@ class RunContext:
             tokens reach it (a graceful stop, the opt-in quota cap).
             Set only by the native-run path; request/response
             protocols leave it at ``0``.
+        park: Optional park hook (``park(status: str) -> None``) — the
+            run-store handle's ``wait`` threaded in by
+            ``execute_run_request``. A segmented algorithm
+            (workspace_agent) calls it to park the run in a waiting
+            status and then RETURNS a parked result; ``None`` on
+            surfaces that cannot park (chat completions), where an
+            algorithm that needs interrupts must fail loudly instead of
+            running without them.
     """
 
     providers: "ProviderContext"
@@ -87,7 +100,9 @@ class RunContext:
     agent_settings: "AgentSettings"
     principal: "Principal | None" = None
     run_id: str | None = None
+    workspace_id: str | None = None
     cancel_token: threading.Event | None = None
     event_sink: EventSink | None = None
     progress_queue: Queue | None = field(default=None, repr=False)
     token_budget: int = 0
+    park: Any = None

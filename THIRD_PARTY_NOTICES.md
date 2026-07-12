@@ -11,9 +11,9 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 
 | Surface | Packages |
 |---|---:|
-| python | 88 |
-| python-dev | 14 |
-| react-prod | 333 |
+| python | 89 |
+| python-dev | 30 |
+| react-prod | 450 |
 | react-dev | 143 |
 
 ## Python Dependencies
@@ -54,13 +54,13 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | python | `joserfc` | 1.7.1 | BSD License | python package metadata: classifiers |
 | python | `jsonpatch` | 1.33 | BSD License | python package metadata: classifiers |
 | python | `jsonpointer` | 3.1.1 | BSD License | python package metadata: classifiers |
-| python | `langchain-core` | 1.3.2 | MIT License | python package metadata: classifiers |
-| python | `langchain-protocol` | 0.0.11 | MIT License | python package metadata: classifiers |
-| python | `langgraph` | 1.1.9 | MIT | python package metadata: License-Expression |
-| python | `langgraph-checkpoint` | 3.0.1 | MIT | python package metadata: License-Expression |
-| python | `langgraph-prebuilt` | 1.0.10 | MIT | python package metadata: License-Expression |
-| python | `langgraph-sdk` | 0.3.13 | MIT | python package metadata: License-Expression |
-| python | `langsmith` | 0.7.22 | MIT | python package metadata: License |
+| python | `langchain-core` | 1.4.8 | MIT License | python package metadata: classifiers |
+| python | `langchain-protocol` | 0.0.18 | MIT License | python package metadata: classifiers |
+| python | `langgraph` | 1.2.7 | MIT | python package metadata: License-Expression |
+| python | `langgraph-checkpoint` | 4.1.1 | MIT | python package metadata: License-Expression |
+| python | `langgraph-prebuilt` | 1.1.0 | MIT | python package metadata: License-Expression |
+| python | `langgraph-sdk` | 0.4.2 | MIT | python package metadata: License-Expression |
+| python | `langsmith` | 0.9.6 | MIT | python package metadata: License |
 | python | `ldap3` | 2.9.1 | GNU Lesser General Public License v3 (LGPLv3) | python package metadata: classifiers |
 | python | `magika` | 0.6.2 | Apache Software License | python package metadata: classifiers |
 | python | `mako` | 1.3.12 | MIT License | python package metadata: classifiers |
@@ -106,13 +106,29 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | python | `urllib3` | 2.6.3 | MIT | python package metadata: License-Expression |
 | python | `uuid-utils` | 0.14.1 | BSD-3-Clause | python package metadata: License-Expression |
 | python | `uvicorn` | 0.42.0 | BSD-3-Clause | python package metadata: License-Expression |
+| python | `websockets` | 15.0.1 | BSD License | python package metadata: classifiers |
 | python | `xxhash` | 3.6.0 | BSD License | python package metadata: classifiers |
 | python | `zstandard` | 0.25.0 | BSD-3-Clause | python package metadata: License-Expression |
+| python-dev | `anthropic` | 0.115.1 | MIT License | python package metadata: classifiers |
+| python-dev | `bracex` | 3.0 | MIT | python package metadata: License-Expression |
+| python-dev | `deepagents` | 0.6.12 | MIT License | python package metadata: classifiers |
+| python-dev | `docstring-parser` | 0.18.0 | MIT License | python package metadata: classifiers |
 | python-dev | `fakeredis` | 2.36.1 | BSD-3-Clause | python package metadata: License-Expression |
+| python-dev | `filetype` | 1.2.0 | MIT License | python package metadata: classifiers |
+| python-dev | `google-auth` | 2.55.1 | Apache Software License | python package metadata: classifiers |
+| python-dev | `google-genai` | 2.10.0 | Apache-2.0 | python package metadata: License-Expression |
 | python-dev | `grpcio` | 1.81.1 | Apache-2.0 | python package metadata: License-Expression |
 | python-dev | `iniconfig` | 2.3.0 | MIT | python package metadata: License-Expression |
+| python-dev | `langchain` | 1.3.11 | MIT License | python package metadata: classifiers |
+| python-dev | `langchain-anthropic` | 1.4.8 | MIT License | python package metadata: classifiers |
+| python-dev | `langchain-google-genai` | 4.2.6 | MIT | python package metadata: License |
+| python-dev | `langgraph-checkpoint-postgres` | 3.1.0 | MIT | python package metadata: License-Expression |
 | python-dev | `pluggy` | 1.6.0 | MIT License | python package metadata: classifiers |
 | python-dev | `portalocker` | 3.2.0 | BSD-3-Clause | python package metadata: License-Expression |
+| python-dev | `prometheus-client` | 0.25.0 | Apache-2.0 AND BSD-2-Clause | python package metadata: License-Expression |
+| python-dev | `psycopg` | 3.3.4 | LGPL-3.0-only | python package metadata: License-Expression |
+| python-dev | `psycopg-pool` | 3.3.1 | LGPL-3.0-only | python package metadata: License-Expression |
+| python-dev | `pyasn1-modules` | 0.4.2 | BSD License | python package metadata: classifiers |
 | python-dev | `pytest` | 9.0.2 | MIT | python package metadata: License-Expression |
 | python-dev | `pytest-asyncio` | 1.3.0 | Apache-2.0 | python package metadata: License-Expression |
 | python-dev | `pytest-recording` | 0.13.4 | MIT | python package metadata: License-Expression |
@@ -121,12 +137,16 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | python-dev | `sortedcontainers` | 2.4.0 | Apache Software License | python package metadata: classifiers |
 | python-dev | `valkey` | 6.1.1 | MIT License | python package metadata: classifiers |
 | python-dev | `vcrpy` | 8.1.1 | MIT License | python package metadata: classifiers |
+| python-dev | `wcmatch` | 10.2 | MIT | python package metadata: License-Expression |
 | python-dev | `wrapt` | 2.1.2 | BSD-2-Clause | python package metadata: License-Expression |
 
 ## React Dependencies
 
 | Surface | Package | Version | License | Metadata source |
 |---|---|---:|---|---|
+| react-prod | `@antfu/install-pkg` | 1.1.0 | MIT | pnpm package metadata |
+| react-prod | `@braintree/sanitize-url` | 7.1.2 | MIT | pnpm package metadata |
+| react-prod | `@chevrotain/types` | 11.1.2 | Apache-2.0 | pnpm package metadata |
 | react-prod | `@codemirror/autocomplete` | 6.20.3 | MIT | pnpm package metadata |
 | react-prod | `@codemirror/commands` | 6.10.3 | MIT | pnpm package metadata |
 | react-prod | `@codemirror/lang-css` | 6.3.1 | MIT | pnpm package metadata |
@@ -143,6 +163,8 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `@floating-ui/react-dom` | 2.1.8 | MIT | pnpm package metadata |
 | react-prod | `@floating-ui/utils` | 0.2.11 | MIT | pnpm package metadata |
 | react-prod | `@fontsource-variable/inter` | 5.2.8 | OFL-1.1 | pnpm package metadata |
+| react-prod | `@iconify/types` | 2.0.0 | MIT | pnpm package metadata |
+| react-prod | `@iconify/utils` | 3.1.4 | MIT | pnpm package metadata |
 | react-prod | `@lezer/common` | 1.5.2 | MIT | pnpm package metadata |
 | react-prod | `@lezer/css` | 1.3.3 | MIT | pnpm package metadata |
 | react-prod | `@lezer/highlight` | 1.2.3 | MIT | pnpm package metadata |
@@ -151,6 +173,7 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `@lezer/lr` | 1.4.10 | MIT | pnpm package metadata |
 | react-prod | `@lezer/markdown` | 1.6.4 | MIT | pnpm package metadata |
 | react-prod | `@marijn/find-cluster-break` | 1.0.2 | MIT | pnpm package metadata |
+| react-prod | `@mermaid-js/parser` | 1.2.0 | MIT | pnpm package metadata |
 | react-prod | `@napi-rs/canvas` | 0.1.100 | MIT | pnpm package metadata |
 | react-prod | `@napi-rs/canvas-darwin-arm64` | 0.1.100 | MIT | pnpm package metadata |
 | react-prod | `@radix-ui/number` | 1.1.1 | MIT | pnpm package metadata |
@@ -240,19 +263,53 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `@tiptap/react` | 3.23.6 | MIT | pnpm package metadata |
 | react-prod | `@tiptap/starter-kit` | 3.23.6 | MIT | pnpm package metadata |
 | react-prod | `@tiptap/suggestion` | 3.23.6 | MIT | pnpm package metadata |
+| react-prod | `@types/d3` | 7.4.3 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-array` | 3.2.2 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-axis` | 3.0.6 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-brush` | 3.0.6 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-chord` | 3.0.6 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-color` | 3.1.3 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-contour` | 3.0.6 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-delaunay` | 6.0.4 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-dispatch` | 3.0.7 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-drag` | 3.0.7 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-dsv` | 3.0.7 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-ease` | 3.0.2 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-fetch` | 3.0.7 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-force` | 3.0.10 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-format` | 3.0.4 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-geo` | 3.1.0 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-hierarchy` | 3.1.7 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-interpolate` | 3.0.4 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-path` | 3.1.1 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-polygon` | 3.0.2 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-quadtree` | 3.0.6 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-random` | 3.0.4 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-scale` | 4.0.9 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-scale-chromatic` | 3.1.0 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-selection` | 3.0.11 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-shape` | 3.1.8 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-time` | 3.0.4 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-time-format` | 4.0.3 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-timer` | 3.0.2 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-transition` | 3.0.9 | MIT | pnpm package metadata |
+| react-prod | `@types/d3-zoom` | 3.0.8 | MIT | pnpm package metadata |
 | react-prod | `@types/debug` | 4.1.13 | MIT | pnpm package metadata |
 | react-prod | `@types/estree` | 1.0.9 | MIT | pnpm package metadata |
 | react-prod | `@types/estree-jsx` | 1.0.5 | MIT | pnpm package metadata |
+| react-prod | `@types/geojson` | 7946.0.16 | MIT | pnpm package metadata |
 | react-prod | `@types/hast` | 3.0.4 | MIT | pnpm package metadata |
 | react-prod | `@types/katex` | 0.16.8 | MIT | pnpm package metadata |
 | react-prod | `@types/mdast` | 4.0.4 | MIT | pnpm package metadata |
 | react-prod | `@types/ms` | 2.1.0 | MIT | pnpm package metadata |
 | react-prod | `@types/node` | 24.12.4 | MIT | pnpm package metadata |
 | react-prod | `@types/node` | 25.9.1 | MIT | pnpm package metadata |
+| react-prod | `@types/trusted-types` | 2.0.7 | MIT | pnpm package metadata |
 | react-prod | `@types/unist` | 2.0.11 | MIT | pnpm package metadata |
 | react-prod | `@types/unist` | 3.0.3 | MIT | pnpm package metadata |
 | react-prod | `@types/use-sync-external-store` | 0.0.6 | MIT | pnpm package metadata |
 | react-prod | `@ungap/structured-clone` | 1.3.1 | ISC | pnpm package metadata |
+| react-prod | `@upsetjs/venn.js` | 2.0.0 | MIT | pnpm package metadata |
 | react-prod | `@xmldom/xmldom` | 0.8.13 | MIT | pnpm package metadata |
 | react-prod | `argparse` | 1.0.10 | MIT | pnpm package metadata |
 | react-prod | `aria-hidden` | 1.2.6 | MIT | pnpm package metadata |
@@ -268,19 +325,65 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `clsx` | 2.1.1 | MIT | pnpm package metadata |
 | react-prod | `codemirror` | 6.0.2 | MIT | pnpm package metadata |
 | react-prod | `comma-separated-tokens` | 2.0.3 | MIT | pnpm package metadata |
+| react-prod | `commander` | 7.2.0 | MIT | pnpm package metadata |
 | react-prod | `commander` | 8.3.0 | MIT | pnpm package metadata |
 | react-prod | `core-util-is` | 1.0.3 | MIT | pnpm package metadata |
+| react-prod | `cose-base` | 1.0.3 | MIT | pnpm package metadata |
+| react-prod | `cose-base` | 2.2.0 | MIT | pnpm package metadata |
 | react-prod | `crelt` | 1.0.6 | MIT | pnpm package metadata |
+| react-prod | `cytoscape` | 3.34.0 | MIT | pnpm package metadata |
+| react-prod | `cytoscape-cose-bilkent` | 4.1.0 | MIT | pnpm package metadata |
+| react-prod | `cytoscape-fcose` | 2.2.0 | MIT | pnpm package metadata |
+| react-prod | `d3` | 7.9.0 | ISC | pnpm package metadata |
+| react-prod | `d3-array` | 2.12.1 | BSD-3-Clause | pnpm package metadata |
+| react-prod | `d3-array` | 3.2.4 | ISC | pnpm package metadata |
+| react-prod | `d3-axis` | 3.0.0 | ISC | pnpm package metadata |
+| react-prod | `d3-brush` | 3.0.0 | ISC | pnpm package metadata |
+| react-prod | `d3-chord` | 3.0.1 | ISC | pnpm package metadata |
+| react-prod | `d3-color` | 3.1.0 | ISC | pnpm package metadata |
+| react-prod | `d3-contour` | 4.0.2 | ISC | pnpm package metadata |
+| react-prod | `d3-delaunay` | 6.0.4 | ISC | pnpm package metadata |
+| react-prod | `d3-dispatch` | 3.0.1 | ISC | pnpm package metadata |
+| react-prod | `d3-drag` | 3.0.0 | ISC | pnpm package metadata |
+| react-prod | `d3-dsv` | 3.0.1 | ISC | pnpm package metadata |
+| react-prod | `d3-ease` | 3.0.1 | BSD-3-Clause | pnpm package metadata |
+| react-prod | `d3-fetch` | 3.0.1 | ISC | pnpm package metadata |
+| react-prod | `d3-force` | 3.0.0 | ISC | pnpm package metadata |
+| react-prod | `d3-format` | 3.1.2 | ISC | pnpm package metadata |
+| react-prod | `d3-geo` | 3.1.1 | ISC | pnpm package metadata |
+| react-prod | `d3-hierarchy` | 3.1.2 | ISC | pnpm package metadata |
+| react-prod | `d3-interpolate` | 3.0.1 | ISC | pnpm package metadata |
+| react-prod | `d3-path` | 1.0.9 | BSD-3-Clause | pnpm package metadata |
+| react-prod | `d3-path` | 3.1.0 | ISC | pnpm package metadata |
+| react-prod | `d3-polygon` | 3.0.1 | ISC | pnpm package metadata |
+| react-prod | `d3-quadtree` | 3.0.1 | ISC | pnpm package metadata |
+| react-prod | `d3-random` | 3.0.1 | ISC | pnpm package metadata |
+| react-prod | `d3-sankey` | 0.12.3 | BSD-3-Clause | pnpm package metadata |
+| react-prod | `d3-scale` | 4.0.2 | ISC | pnpm package metadata |
+| react-prod | `d3-scale-chromatic` | 3.1.0 | ISC | pnpm package metadata |
+| react-prod | `d3-selection` | 3.0.0 | ISC | pnpm package metadata |
+| react-prod | `d3-shape` | 1.3.7 | BSD-3-Clause | pnpm package metadata |
+| react-prod | `d3-shape` | 3.2.0 | ISC | pnpm package metadata |
+| react-prod | `d3-time` | 3.1.0 | ISC | pnpm package metadata |
+| react-prod | `d3-time-format` | 4.1.0 | ISC | pnpm package metadata |
+| react-prod | `d3-timer` | 3.0.1 | ISC | pnpm package metadata |
+| react-prod | `d3-transition` | 3.0.1 | ISC | pnpm package metadata |
+| react-prod | `d3-zoom` | 3.0.0 | ISC | pnpm package metadata |
+| react-prod | `dagre-d3-es` | 7.0.14 | MIT | pnpm package metadata |
+| react-prod | `dayjs` | 1.11.21 | MIT | pnpm package metadata |
 | react-prod | `debug` | 4.4.3 | MIT | pnpm package metadata |
 | react-prod | `decode-named-character-reference` | 1.3.0 | MIT | pnpm package metadata |
+| react-prod | `delaunator` | 5.1.0 | ISC | pnpm package metadata |
 | react-prod | `dequal` | 2.0.3 | MIT | pnpm package metadata |
 | react-prod | `detect-node-es` | 1.1.0 | MIT | pnpm package metadata |
 | react-prod | `devlop` | 1.1.0 | MIT | pnpm package metadata |
 | react-prod | `diff` | 9.0.0 | BSD-3-Clause | pnpm package metadata |
 | react-prod | `dingbat-to-unicode` | 1.0.1 | BSD-2-Clause | pnpm package metadata |
 | react-prod | `docx` | 9.7.1 | MIT | pnpm package metadata |
+| react-prod | `dompurify` | 3.4.11 | (MPL-2.0 OR Apache-2.0) | pnpm package metadata |
 | react-prod | `duck` | 0.1.12 | BSD | pnpm package metadata |
 | react-prod | `entities` | 6.0.1 | BSD-2-Clause | pnpm package metadata |
+| react-prod | `es-toolkit` | 1.49.0 | MIT | pnpm package metadata |
 | react-prod | `escape-string-regexp` | 4.0.0 | MIT | pnpm package metadata |
 | react-prod | `escape-string-regexp` | 5.0.0 | MIT | pnpm package metadata |
 | react-prod | `estree-util-is-identifier-name` | 3.0.0 | MIT | pnpm package metadata |
@@ -288,6 +391,7 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `fast-equals` | 5.4.0 | MIT | pnpm package metadata |
 | react-prod | `framer-motion` | 12.38.0 | MIT | pnpm package metadata |
 | react-prod | `get-nonce` | 1.0.1 | MIT | pnpm package metadata |
+| react-prod | `hachure-fill` | 0.5.2 | MIT | pnpm package metadata |
 | react-prod | `hash.js` | 1.1.7 | MIT | pnpm package metadata |
 | react-prod | `hast-util-from-dom` | 5.0.1 | ISC | pnpm package metadata |
 | react-prod | `hast-util-from-html` | 2.0.3 | MIT | pnpm package metadata |
@@ -303,24 +407,37 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `hastscript` | 9.0.1 | MIT | pnpm package metadata |
 | react-prod | `html-url-attributes` | 3.0.1 | MIT | pnpm package metadata |
 | react-prod | `html-void-elements` | 3.0.0 | MIT | pnpm package metadata |
+| react-prod | `iconv-lite` | 0.6.3 | MIT | pnpm package metadata |
 | react-prod | `immediate` | 3.0.6 | MIT | pnpm package metadata |
+| react-prod | `import-meta-resolve` | 4.2.0 | MIT | pnpm package metadata |
 | react-prod | `inherits` | 2.0.4 | ISC | pnpm package metadata |
 | react-prod | `inline-style-parser` | 0.2.7 | MIT | pnpm package metadata |
+| react-prod | `internmap` | 1.0.1 | ISC | pnpm package metadata |
+| react-prod | `internmap` | 2.0.3 | ISC | pnpm package metadata |
 | react-prod | `is-alphabetical` | 2.0.1 | MIT | pnpm package metadata |
 | react-prod | `is-alphanumerical` | 2.0.1 | MIT | pnpm package metadata |
 | react-prod | `is-decimal` | 2.0.1 | MIT | pnpm package metadata |
 | react-prod | `is-hexadecimal` | 2.0.1 | MIT | pnpm package metadata |
 | react-prod | `is-plain-obj` | 4.1.0 | MIT | pnpm package metadata |
 | react-prod | `isarray` | 1.0.0 | MIT | pnpm package metadata |
+| react-prod | `js-tokens` | 4.0.0 | MIT | pnpm package metadata |
 | react-prod | `jszip` | 3.10.1 | (MIT OR GPL-3.0-or-later) | pnpm package metadata |
 | react-prod | `katex` | 0.16.46 | MIT | pnpm package metadata |
+| react-prod | `khroma` | 2.1.0 | MIT | manual override: bundled LICENSE file; package.json omits the field |
+| react-prod | `layout-base` | 1.0.2 | MIT | pnpm package metadata |
+| react-prod | `layout-base` | 2.0.1 | MIT | pnpm package metadata |
 | react-prod | `lie` | 3.3.0 | MIT | pnpm package metadata |
 | react-prod | `linkifyjs` | 4.3.3 | MIT | pnpm package metadata |
+| react-prod | `lodash-es` | 4.18.1 | MIT | pnpm package metadata |
 | react-prod | `longest-streak` | 3.1.0 | MIT | pnpm package metadata |
+| react-prod | `loose-envify` | 1.4.0 | MIT | pnpm package metadata |
 | react-prod | `lop` | 0.4.2 | BSD-2-Clause | pnpm package metadata |
 | react-prod | `lucide-react` | 1.17.0 | ISC | pnpm package metadata |
+| react-prod | `make-cancellable-promise` | 2.0.0 | MIT | pnpm package metadata |
+| react-prod | `make-event-props` | 2.0.0 | MIT | pnpm package metadata |
 | react-prod | `mammoth` | 1.12.0 | BSD-2-Clause | pnpm package metadata |
 | react-prod | `markdown-table` | 3.0.4 | MIT | pnpm package metadata |
+| react-prod | `marked` | 16.4.2 | MIT | pnpm package metadata |
 | react-prod | `marked` | 17.0.6 | MIT | pnpm package metadata |
 | react-prod | `mdast-util-find-and-replace` | 3.0.2 | MIT | pnpm package metadata |
 | react-prod | `mdast-util-from-markdown` | 2.0.3 | MIT | pnpm package metadata |
@@ -338,6 +455,8 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `mdast-util-to-hast` | 13.2.1 | MIT | pnpm package metadata |
 | react-prod | `mdast-util-to-markdown` | 2.1.2 | MIT | pnpm package metadata |
 | react-prod | `mdast-util-to-string` | 4.0.0 | MIT | pnpm package metadata |
+| react-prod | `merge-refs` | 2.0.0 | MIT | pnpm package metadata |
+| react-prod | `mermaid` | 11.16.0 | MIT | pnpm package metadata |
 | react-prod | `micromark` | 4.0.2 | MIT | pnpm package metadata |
 | react-prod | `micromark-core-commonmark` | 2.0.3 | MIT | pnpm package metadata |
 | react-prod | `micromark-extension-gfm` | 3.0.0 | MIT | pnpm package metadata |
@@ -378,12 +497,16 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `oniguruma-to-es` | 4.3.6 | MIT | pnpm package metadata |
 | react-prod | `option` | 0.2.4 | BSD-2-Clause | pnpm package metadata |
 | react-prod | `orderedmap` | 2.1.1 | MIT | pnpm package metadata |
+| react-prod | `package-manager-detector` | 1.7.0 | MIT | pnpm package metadata |
 | react-prod | `pako` | 1.0.11 | (MIT AND Zlib) | pnpm package metadata |
 | react-prod | `parse-entities` | 4.0.2 | MIT | pnpm package metadata |
 | react-prod | `parse-numeric-range` | 1.3.0 | ISC | pnpm package metadata |
 | react-prod | `parse5` | 7.3.0 | MIT | pnpm package metadata |
+| react-prod | `path-data-parser` | 0.1.0 | MIT | pnpm package metadata |
 | react-prod | `path-is-absolute` | 1.0.1 | MIT | pnpm package metadata |
-| react-prod | `pdfjs-dist` | 5.7.284 | Apache-2.0 | pnpm package metadata |
+| react-prod | `pdfjs-dist` | 5.4.296 | Apache-2.0 | pnpm package metadata |
+| react-prod | `points-on-curve` | 0.2.0 | MIT | pnpm package metadata |
+| react-prod | `points-on-path` | 0.2.1 | MIT | pnpm package metadata |
 | react-prod | `process-nextick-args` | 2.0.1 | MIT | pnpm package metadata |
 | react-prod | `property-information` | 7.1.0 | MIT | pnpm package metadata |
 | react-prod | `prosemirror-changeset` | 2.4.1 | MIT | pnpm package metadata |
@@ -401,6 +524,7 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `react` | 19.2.6 | MIT | pnpm package metadata |
 | react-prod | `react-dom` | 19.2.6 | MIT | pnpm package metadata |
 | react-prod | `react-markdown` | 10.1.0 | MIT | pnpm package metadata |
+| react-prod | `react-pdf` | 10.4.1 | MIT | pnpm package metadata |
 | react-prod | `react-remove-scroll` | 2.7.2 | MIT | pnpm package metadata |
 | react-prod | `react-remove-scroll-bar` | 2.3.8 | MIT | pnpm package metadata |
 | react-prod | `react-resizable-panels` | 4.11.0 | MIT | pnpm package metadata |
@@ -417,8 +541,12 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `remark-parse` | 11.0.0 | MIT | pnpm package metadata |
 | react-prod | `remark-rehype` | 11.1.2 | MIT | pnpm package metadata |
 | react-prod | `remark-stringify` | 11.0.0 | MIT | pnpm package metadata |
+| react-prod | `robust-predicates` | 3.0.3 | Unlicense | pnpm package metadata |
 | react-prod | `rope-sequence` | 1.3.4 | MIT | pnpm package metadata |
+| react-prod | `roughjs` | 4.6.6 | MIT | pnpm package metadata |
+| react-prod | `rw` | 1.3.3 | BSD-3-Clause | pnpm package metadata |
 | react-prod | `safe-buffer` | 5.1.2 | MIT | pnpm package metadata |
+| react-prod | `safer-buffer` | 2.1.2 | MIT | pnpm package metadata |
 | react-prod | `sax` | 1.6.0 | BlueOak-1.0.0 | pnpm package metadata |
 | react-prod | `scheduler` | 0.27.0 | MIT | pnpm package metadata |
 | react-prod | `setimmediate` | 1.0.5 | MIT | pnpm package metadata |
@@ -430,10 +558,14 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `style-mod` | 4.1.3 | MIT | pnpm package metadata |
 | react-prod | `style-to-js` | 1.1.21 | MIT | pnpm package metadata |
 | react-prod | `style-to-object` | 1.0.14 | MIT | pnpm package metadata |
+| react-prod | `stylis` | 4.4.0 | MIT | pnpm package metadata |
 | react-prod | `tailwind-merge` | 3.6.0 | MIT | pnpm package metadata |
+| react-prod | `tiny-invariant` | 1.3.3 | MIT | pnpm package metadata |
+| react-prod | `tinyexec` | 1.2.3 | MIT | pnpm package metadata |
 | react-prod | `tokenx` | 1.3.0 | MIT | pnpm package metadata |
 | react-prod | `trim-lines` | 3.0.1 | MIT | pnpm package metadata |
 | react-prod | `trough` | 2.2.0 | MIT | pnpm package metadata |
+| react-prod | `ts-dedent` | 2.3.0 | MIT | pnpm package metadata |
 | react-prod | `tslib` | 2.8.1 | 0BSD | pnpm package metadata |
 | react-prod | `tw-animate-css` | 1.4.0 | MIT | pnpm package metadata |
 | react-prod | `underscore` | 1.13.8 | MIT | pnpm package metadata |
@@ -451,10 +583,12 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-prod | `use-sidecar` | 1.1.3 | MIT | pnpm package metadata |
 | react-prod | `use-sync-external-store` | 1.6.0 | MIT | pnpm package metadata |
 | react-prod | `util-deprecate` | 1.0.2 | MIT | pnpm package metadata |
+| react-prod | `uuid` | 14.0.1 | MIT | pnpm package metadata |
 | react-prod | `vfile` | 6.0.3 | MIT | pnpm package metadata |
 | react-prod | `vfile-location` | 5.0.3 | MIT | pnpm package metadata |
 | react-prod | `vfile-message` | 4.0.3 | MIT | pnpm package metadata |
 | react-prod | `w3c-keyname` | 2.2.8 | MIT | pnpm package metadata |
+| react-prod | `warning` | 4.0.3 | MIT | pnpm package metadata |
 | react-prod | `web-namespaces` | 2.0.1 | MIT | pnpm package metadata |
 | react-prod | `xml` | 1.0.1 | MIT | pnpm package metadata |
 | react-prod | `xml-js` | 1.6.11 | MIT | pnpm package metadata |
@@ -478,8 +612,8 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-dev | `@jridgewell/resolve-uri` | 3.1.2 | MIT | pnpm package metadata |
 | react-dev | `@jridgewell/sourcemap-codec` | 1.5.5 | MIT | pnpm package metadata |
 | react-dev | `@jridgewell/trace-mapping` | 0.3.31 | MIT | pnpm package metadata |
-| react-dev | `@oxc-project/types` | 0.129.0 | MIT | pnpm package metadata |
-| react-dev | `@rolldown/binding-darwin-arm64` | 1.0.0 | MIT | pnpm package metadata |
+| react-dev | `@oxc-project/types` | 0.133.0 | MIT | pnpm package metadata |
+| react-dev | `@rolldown/binding-darwin-arm64` | 1.0.3 | MIT | pnpm package metadata |
 | react-dev | `@rolldown/pluginutils` | 1.0.0 | MIT | pnpm package metadata |
 | react-dev | `@rolldown/pluginutils` | 1.0.0-rc.7 | MIT | pnpm package metadata |
 | react-dev | `@standard-schema/spec` | 1.1.0 | MIT | pnpm package metadata |
@@ -575,10 +709,10 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-dev | `pathe` | 2.0.3 | MIT | pnpm package metadata |
 | react-dev | `picocolors` | 1.1.1 | ISC | pnpm package metadata |
 | react-dev | `picomatch` | 4.0.4 | MIT | pnpm package metadata |
-| react-dev | `postcss` | 8.5.14 | MIT | pnpm package metadata |
+| react-dev | `postcss` | 8.5.15 | MIT | pnpm package metadata |
 | react-dev | `prelude-ls` | 1.2.1 | MIT | pnpm package metadata |
 | react-dev | `punycode` | 2.3.1 | MIT | pnpm package metadata |
-| react-dev | `rolldown` | 1.0.0 | MIT | pnpm package metadata |
+| react-dev | `rolldown` | 1.0.3 | MIT | pnpm package metadata |
 | react-dev | `semver` | 7.8.0 | ISC | pnpm package metadata |
 | react-dev | `shebang-command` | 2.0.0 | MIT | pnpm package metadata |
 | react-dev | `shebang-regex` | 3.0.0 | MIT | pnpm package metadata |
@@ -589,15 +723,15 @@ React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;
 | react-dev | `tailwindcss` | 4.3.0 | MIT | pnpm package metadata |
 | react-dev | `tapable` | 2.3.3 | MIT | pnpm package metadata |
 | react-dev | `tinybench` | 2.9.0 | MIT | pnpm package metadata |
-| react-dev | `tinyexec` | 1.2.3 | MIT | pnpm package metadata |
 | react-dev | `tinyglobby` | 0.2.16 | MIT | pnpm package metadata |
+| react-dev | `tinyglobby` | 0.2.17 | MIT | pnpm package metadata |
 | react-dev | `tinyrainbow` | 3.1.0 | MIT | pnpm package metadata |
 | react-dev | `ts-api-utils` | 2.5.0 | MIT | pnpm package metadata |
 | react-dev | `type-check` | 0.4.0 | MIT | pnpm package metadata |
 | react-dev | `typescript` | 6.0.3 | Apache-2.0 | pnpm package metadata |
 | react-dev | `typescript-eslint` | 8.59.3 | MIT | pnpm package metadata |
 | react-dev | `uri-js` | 4.4.1 | BSD-2-Clause | pnpm package metadata |
-| react-dev | `vite` | 8.0.12 | MIT | pnpm package metadata |
+| react-dev | `vite` | 8.0.16 | MIT | pnpm package metadata |
 | react-dev | `vitest` | 4.1.7 | MIT | pnpm package metadata |
 | react-dev | `which` | 2.0.2 | ISC | pnpm package metadata |
 | react-dev | `why-is-node-running` | 2.3.0 | MIT | pnpm package metadata |

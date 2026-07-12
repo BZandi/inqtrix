@@ -95,7 +95,18 @@ def create_providers(settings: "Settings") -> "ProviderContext":
         >>> providers.llm.models.reasoning_model
         'gpt-4o'
     """
-    from inqtrix.providers.base import ProviderContext
+    from inqtrix.providers.base import MAX_PROVIDER_ATTEMPTS, ProviderContext
+
+    log.info(
+        "CONFIG: AI operation policy reasoning=%ss editor=%ss search=%ss "
+        "claim_extract=%ss research_run=%ss max_attempts=%s",
+        settings.agent.reasoning_timeout,
+        settings.agent.editor_assistant_timeout,
+        settings.agent.search_timeout,
+        settings.agent.claim_extract_timeout,
+        settings.agent.max_total_seconds,
+        MAX_PROVIDER_ATTEMPTS,
+    )
 
     providers_cfg = getattr(settings, "providers", None)
     llm = _build_llm_provider(settings, providers_cfg)
@@ -339,6 +350,7 @@ def _make_bedrock(
     kwargs.update(
         profile_name=_sel(providers_cfg, "aws_profile", "") or None,
         region_name=_sel(providers_cfg, "aws_region", "eu-central-1"),
+        timeout=settings.agent.reasoning_timeout,
     )
     temperature = _sel(providers_cfg, "temperature", None)
     if temperature is not None:
@@ -368,6 +380,7 @@ def _make_perplexity(
         "model": settings.models.search_model or None,
         "cache_maxsize": settings.agent.search_cache_maxsize,
         "cache_ttl": settings.agent.search_cache_ttl,
+        "timeout": settings.agent.search_timeout,
     }
     preset = _sel(providers_cfg, "search_preset", "")
     if preset:
@@ -394,6 +407,10 @@ def _make_azure_foundry(
             _sel(providers_cfg, "web_search_agent_name", ""),
             "WEB_SEARCH_AGENT_NAME",
             "azure_foundry",
+        ),
+        "timeout": settings.agent.search_timeout,
+        "max_concurrency": _sel(
+            providers_cfg, "azure_foundry_max_concurrency", 6
         ),
     }
     agent_version = _sel(providers_cfg, "web_search_agent_version", "")

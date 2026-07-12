@@ -8,14 +8,25 @@ const ResizablePanelGroup = ({
 }: React.ComponentProps<typeof ResizablePrimitive.Group>) => (
   <ResizablePrimitive.Group
     className={cn(
-      "flex h-full w-full data-[panel-group-direction=vertical]:flex-col",
+      "flex h-full min-h-0 w-full min-w-0 overflow-hidden data-[panel-group-direction=vertical]:flex-col",
       className
     )}
     {...props}
   />
 )
 
-const ResizablePanel = ResizablePrimitive.Panel
+const ResizablePanel = ({
+  className,
+  ...props
+}: React.ComponentProps<typeof ResizablePrimitive.Panel>) => (
+  <ResizablePrimitive.Panel
+    className={cn(
+      "min-h-0 min-w-0 !overflow-hidden",
+      className
+    )}
+    {...props}
+  />
+)
 
 /**
  * Minimalist split divider: a 1px hairline seam (so an adjacent panel reads as

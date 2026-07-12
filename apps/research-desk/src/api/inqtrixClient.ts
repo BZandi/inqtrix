@@ -8,6 +8,10 @@ import type {
   PromptTemplatePayload,
 } from '@/features/promptLibrary/templateSync'
 import type {
+  SkillInfo,
+  SkillPayload,
+} from '@/features/skills/skillLibrary'
+import type {
   QuotaAdminSnapshot,
   WorkspaceMembership,
 } from '@/features/quota/admin'
@@ -20,6 +24,20 @@ import type {
   SharingInbox,
   UserSearchResult,
 } from '@/features/sharing/types'
+import type {
+  AgentApprovalDecisionRequest,
+  AgentApprovalWire,
+  AgentPatchWire,
+  AgentArtifactDetailWire,
+  AgentArtifactMetaWire,
+  AgentTaskCancelWire,
+  AgentTaskResultWire,
+  AgentClarificationAnswerRequest,
+  AgentClarificationWire,
+  AgentPlanWire,
+  ServerAgentSession,
+  ServerAgentSessionGroup,
+} from '@/features/agent/types'
 import type {
   AgentOverrides,
   CreateResearchRunRequest,
@@ -47,6 +65,9 @@ export type ClientOptions = {
 }
 
 type StreamRunEventsOptions = ClientOptions & {
+  /** Fires for every received SSE byte chunk, including comment
+   * heartbeats that intentionally contain no data event. */
+  onActivity?: () => void
   onEvent: (event: ResearchRunEvent) => void
 }
 
@@ -133,6 +154,9 @@ const CHAT_MODEL_NAME = 'research-agent'
 
 export type InqtrixRequestError = Error & {
   status?: number
+  /** Full error payload beyond message/type — 409 conflicts carry extras
+   * like `current_revision` / `locked_by` the caller branches on. */
+  detail?: Record<string, unknown>
 }
 
 export function hasHttpStatus(error: unknown, status: number) {
@@ -439,6 +463,74 @@ export async function deletePromptTemplate(
   await request(`/v1/prompt-templates/${templateId}`, {
     ...options,
     method: 'DELETE',
+  })
+}
+
+// --- Skills (plan M3): thin wire wrappers over /v1/skills ------------------
+
+/** List the caller's visible skills, newest first. */
+export async function listSkills(options: ClientOptions = {}) {
+  const payload = await requestJson<{ data: SkillInfo[] }>(
+    '/v1/skills',
+    options,
+  )
+  return payload.data
+}
+
+/** Create one skill on the server. */
+export async function createSkill(
+  payload: SkillPayload,
+  options: ClientOptions = {},
+) {
+  return requestJson<SkillInfo>('/v1/skills', {
+    ...options,
+    body: payload,
+    method: 'POST',
+  })
+}
+
+/** Replace one skill's writable fields.
+
+ * `expected_updated_at` (in the payload) is the optimistic-concurrency
+ * precondition — a stale value answers 409. */
+export async function updateSkill(
+  skillId: string,
+  payload: SkillPayload & { expected_updated_at?: number },
+  options: ClientOptions = {},
+) {
+  return requestJson<SkillInfo>(`/v1/skills/${skillId}`, {
+    ...options,
+    body: payload,
+    method: 'PUT',
+  })
+}
+
+/** Delete one skill (owner-only; revokes its shares server-side). */
+export async function deleteSkill(
+  skillId: string,
+  options: ClientOptions = {},
+) {
+  await request(`/v1/skills/${skillId}`, { ...options, method: 'DELETE' })
+}
+
+/** One skill as its SKILL.md document (text, server-serialized). */
+export async function exportSkillMarkdown(
+  skillId: string,
+  options: ClientOptions = {},
+) {
+  const response = await request(`/v1/skills/${skillId}/markdown`, options)
+  return response.text()
+}
+
+/** Create one skill from a SKILL.md document (server-parsed + validated). */
+export async function importSkillMarkdown(
+  markdown: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<SkillInfo>('/v1/skills/import', {
+    ...options,
+    body: { markdown },
+    method: 'POST',
   })
 }
 
@@ -1130,6 +1222,7 @@ export type ServerAccountPreferences = {
   theme: string
   theme_preset: string
   user_bubble_tone?: string
+  agent_memory_enabled?: boolean
   updated_at: number
 }
 
@@ -1153,6 +1246,7 @@ export async function saveAccountPreferences(
     theme: string
     theme_preset: string
     user_bubble_tone: string
+    agent_memory_enabled: boolean
     updated_at: number
   },
   options: ClientOptions = {},
@@ -1269,12 +1363,12 @@ export async function fetchOutgoingShareCounts(
   return payload.data
 }
 
-export async function listResearchRuns(options: ClientOptions = {}) {
-  const payload = await requestJson<{ data: ResearchRunSummary[] }>(
-    '/v1/runs',
+/** One keyset page of visible research runs (newest first). */
+export async function listResearchRuns(options: PageOptions = {}) {
+  return requestJson<{ data: ResearchRunSummary[]; next_cursor: string | null }>(
+    `/v1/runs${pageQuery(options)}`,
     options,
   )
-  return payload.data
 }
 
 export async function createResearchRun(
@@ -1292,6 +1386,14 @@ export async function createResearchRun(
       workspace_id: options.workspaceId,
       agent_overrides: serializeOverrides(request.agentOverrides),
       knowledge_filters: serializeKnowledgeFilters(request.knowledgeFilters),
+      autonomy: request.autonomy,
+      session_id: request.sessionId,
+      document_id: request.documentId,
+      response_form: request.responseForm,
+      skill_ids: request.skillIds,
+      tool_directives: request.toolDirectives,
+      source_policy: request.sourcePolicy,
+      execution_directive: request.executionDirective,
     },
   })
 }
@@ -1352,6 +1454,465 @@ export async function fetchResearchRunResult(
   options: ClientOptions = {},
 ) {
   return requestJson<ResearchRunResult>(`/v1/runs/${runId}/result`, options)
+}
+
+/** One knowledge chunk + optional neighbour context (canvas evidence view). */
+export type KnowledgeChunkDetail = {
+  chunk_id: string
+  document_id: string
+  chunk_index: number
+  text: string
+  source_text: string
+  page_number: number | null
+  neighbors?: { chunk_index: number; text: string }[]
+}
+
+export async function getKnowledgeChunk(
+  documentId: string,
+  chunkIndex: number,
+  context: number,
+  options: ClientOptions = {},
+) {
+  const query = context > 0 ? `?context=${context}` : ''
+  return requestJson<KnowledgeChunkDetail>(
+    `/v1/knowledge/documents/${documentId}/chunks/${chunkIndex}${query}`,
+    options,
+  )
+}
+
+// --- Workspace-agent control surfaces (M4/M5) -------------------------------
+// Rows are the truth (rule R1): SSE events are signals to (re-)fetch these.
+
+export async function listRunChildren(
+  runId: string,
+  options: ClientOptions = {},
+) {
+  const payload = await requestJson<{ data: ResearchRunSummary[] }>(
+    `/v1/runs/${runId}/children`,
+    options,
+  )
+  return payload.data
+}
+
+export async function getAgentRunPlan(
+  runId: string,
+  version: number | undefined,
+  options: ClientOptions = {},
+) {
+  const query = version === undefined ? '' : `?version=${version}`
+  return requestJson<AgentPlanWire>(`/v1/runs/${runId}/plan${query}`, options)
+}
+
+export async function getAgentRunTaskResult(
+  runId: string,
+  taskId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<AgentTaskResultWire>(
+    `/v1/runs/${runId}/tasks/${taskId}/result`,
+    options,
+  )
+}
+
+export async function cancelAgentRunTask(
+  runId: string,
+  taskId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<AgentTaskCancelWire>(
+    `/v1/runs/${runId}/tasks/${taskId}/cancel`,
+    { ...options, method: 'POST' },
+  )
+}
+
+export async function listAgentRunApprovals(
+  runId: string,
+  options: ClientOptions = {},
+) {
+  const payload = await requestJson<{ data: AgentApprovalWire[] }>(
+    `/v1/runs/${runId}/approvals`,
+    options,
+  )
+  return payload.data
+}
+
+/** Decide a pending approval. The response embeds the RESUMED run summary
+ * under `run` — callers must upsert it (status flips waiting -> queued). */
+export async function decideAgentRunApproval(
+  runId: string,
+  approvalId: string,
+  decision: AgentApprovalDecisionRequest,
+  options: ClientOptions = {},
+) {
+  return requestJson<AgentApprovalWire & { run: ResearchRunSummary }>(
+    `/v1/runs/${runId}/approvals/${approvalId}`,
+    { ...options, method: 'POST', body: decision },
+  )
+}
+
+export async function listAgentRunClarifications(
+  runId: string,
+  options: ClientOptions = {},
+) {
+  const payload = await requestJson<{ data: AgentClarificationWire[] }>(
+    `/v1/runs/${runId}/clarifications`,
+    options,
+  )
+  return payload.data
+}
+
+/** Answer a clarification: whole-round free text, a preset option, or the
+ * structured per-question `answers` map (exactly one of the three). */
+export async function answerAgentRunClarification(
+  runId: string,
+  clarificationId: string,
+  answer: AgentClarificationAnswerRequest,
+  options: ClientOptions = {},
+) {
+  return requestJson<AgentClarificationWire & { run: ResearchRunSummary }>(
+    `/v1/runs/${runId}/clarifications/${clarificationId}`,
+    { ...options, method: 'POST', body: answer },
+  )
+}
+
+export async function listAgentRunArtifacts(
+  runId: string,
+  options: ClientOptions = {},
+) {
+  const payload = await requestJson<{ data: AgentArtifactMetaWire[] }>(
+    `/v1/runs/${runId}/artifacts`,
+    options,
+  )
+  return payload.data
+}
+
+export async function getAgentRunArtifact(
+  runId: string,
+  artifactId: string,
+  revision: number | undefined,
+  options: ClientOptions = {},
+) {
+  const query = revision === undefined ? '' : `?revision=${revision}`
+  return requestJson<AgentArtifactDetailWire>(
+    `/v1/runs/${runId}/artifacts/${artifactId}${query}`,
+    options,
+  )
+}
+
+/** Optimistic-concurrency canvas edit. 409 `conflict` carries either
+ * `current_revision` (stale edit) or `locked_by: 'agent'` (agent writing);
+ * callers branch on those extras via the thrown error's payload. */
+export async function updateAgentRunArtifact(
+  runId: string,
+  artifactId: string,
+  body: { content_markdown: string; expected_revision: number },
+  options: ClientOptions = {},
+) {
+  return requestJson<{ id: string; revision: number; updated_by: string }>(
+    `/v1/runs/${runId}/artifacts/${artifactId}`,
+    { ...options, method: 'PUT', body },
+  )
+}
+
+export async function exportAgentRunArtifact(
+  runId: string,
+  artifactId: string,
+  body: { target?: 'editor_document'; title?: string; folder_id?: string },
+  options: ClientOptions = {},
+) {
+  return requestJson<Record<string, unknown>>(
+    `/v1/runs/${runId}/artifacts/${artifactId}/export`,
+    {
+      ...options,
+      method: 'POST',
+      body: { ...body, workspace_id: options.workspaceId },
+    },
+  )
+}
+
+// --- Editor patches (M7) -----------------------------------------------------
+
+export async function getEditorPatch(
+  patchId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<AgentPatchWire>(
+    `/v1/editor/patches/${patchId}`,
+    options,
+  )
+}
+
+/** Apply a pending patch server-side. 409 `conflict` carries
+ * `current_revision`/`revision_before` on a stale precondition. */
+export async function applyEditorPatch(
+  patchId: string,
+  expectedRevision: number,
+  options: ClientOptions = {},
+) {
+  return requestJson<{
+    document_id: string
+    revision: number
+    applied_edit_ids: string[]
+  }>(`/v1/editor/patches/${patchId}:apply`, {
+    ...options,
+    method: 'POST',
+    body: { expected_revision: expectedRevision },
+  })
+}
+
+export async function rejectEditorPatch(
+  patchId: string,
+  note: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<AgentPatchWire>(
+    `/v1/editor/patches/${patchId}:reject`,
+    { ...options, method: 'POST', body: note ? { note } : {} },
+  )
+}
+
+// --- Agent sessions (shape-identical clone of knowledge sessions) ----------
+
+export async function listAgentSessions(options: ClientOptions = {}) {
+  const payload = await requestJson<{ data: ServerAgentSession[] }>(
+    '/v1/agent-sessions',
+    options,
+  )
+  return payload.data
+}
+
+export async function getAgentSession(
+  sessionId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<ServerAgentSession>(
+    `/v1/agent-sessions/${sessionId}`,
+    options,
+  )
+}
+
+export async function saveAgentSession(
+  sessionId: string,
+  payload: {
+    title: string
+    items_json: string
+    group_id: string | null
+    created_at: number
+    updated_at: number
+  },
+  options: ClientOptions = {},
+) {
+  return requestJson<ServerAgentSession>(`/v1/agent-sessions/${sessionId}`, {
+    ...options,
+    body: payload,
+    method: 'PUT',
+  })
+}
+
+export async function deleteAgentSession(
+  sessionId: string,
+  options: ClientOptions = {},
+) {
+  await request(`/v1/agent-sessions/${sessionId}`, {
+    ...options,
+    method: 'DELETE',
+  })
+}
+
+export async function listAgentSessionGroups(options: ClientOptions = {}) {
+  const payload = await requestJson<{ data: ServerAgentSessionGroup[] }>(
+    '/v1/agent-session-groups',
+    options,
+  )
+  return payload.data
+}
+
+export async function saveAgentSessionGroup(
+  groupId: string,
+  payload: { title: string; created_at: number; updated_at: number },
+  options: ClientOptions = {},
+) {
+  return requestJson<ServerAgentSessionGroup>(
+    `/v1/agent-session-groups/${groupId}`,
+    { ...options, body: payload, method: 'PUT' },
+  )
+}
+
+export async function deleteAgentSessionGroup(
+  groupId: string,
+  options: ClientOptions = {},
+) {
+  await request(`/v1/agent-session-groups/${groupId}`, {
+    ...options,
+    method: 'DELETE',
+  })
+}
+
+export type AgentMemoryStatus = {
+  available: boolean
+  degraded_reason?: string
+  durable: boolean
+  effective_mode?: string
+  mode: string
+  principal_eligible: boolean
+  provider: string
+}
+
+export type AgentMemoryWire = {
+  category: string
+  confidence: number
+  content: string
+  created_at: string
+  id: string
+  metadata: Record<string, unknown>
+  scope: string
+  source_run_id: string
+  updated_at: string
+}
+
+export type AgentMemoryCandidateWire = {
+  category: string
+  confidence: number
+  content: string
+  created_at: number
+  id: string
+  memory_id: string
+  reason: string
+  scope: string
+  source_run_id: string
+  status: 'accepted' | 'pending' | 'rejected'
+  updated_at: number
+}
+
+export type AgentFeedbackWire = {
+  created_at: number
+  feedback: 'positive' | 'negative' | 'neutral'
+  id: string
+  memory_id: string
+  reason: string
+  run_id: string
+}
+
+export type AgentMemoryListFilters = {
+  limit?: number
+  q?: string
+  scope?: 'user' | 'workspace' | 'project' | 'agent'
+}
+
+export type AgentFeedbackListFilters = {
+  limit?: number
+  runId?: string
+}
+
+function agentMemoryQuery(filters: AgentMemoryListFilters = {}): string {
+  const params = new URLSearchParams()
+  if (filters.q?.trim()) params.set('q', filters.q.trim())
+  if (filters.scope) params.set('scope', filters.scope)
+  if (filters.limit !== undefined) params.set('limit', String(filters.limit))
+  const query = params.toString()
+  return query ? `?${query}` : ''
+}
+
+function agentFeedbackQuery(filters: AgentFeedbackListFilters = {}): string {
+  const params = new URLSearchParams()
+  if (filters.runId?.trim()) params.set('run_id', filters.runId.trim())
+  if (filters.limit !== undefined) params.set('limit', String(filters.limit))
+  const query = params.toString()
+  return query ? `?${query}` : ''
+}
+
+export async function listAgentMemories(
+  options: ClientOptions = {},
+  filters: AgentMemoryListFilters = {},
+) {
+  return requestJson<{
+    data: AgentMemoryWire[]
+    object: 'list'
+    status: AgentMemoryStatus
+  }>(`/v1/agent/memory${agentMemoryQuery(filters)}`, options)
+}
+
+export async function updateAgentMemory(
+  memoryId: string,
+  body: { category: string; content: string; scope: string },
+  options: ClientOptions = {},
+) {
+  return requestJson<AgentMemoryWire>(
+    `/v1/agent/memory/${encodeURIComponent(memoryId)}`,
+    { ...options, method: 'PATCH', body },
+  )
+}
+
+export async function deleteAgentMemory(
+  memoryId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<{ deleted: boolean }>(
+    `/v1/agent/memory/${encodeURIComponent(memoryId)}`,
+    { ...options, method: 'DELETE' },
+  )
+}
+
+export async function clearAgentMemories(options: ClientOptions = {}) {
+  return requestJson<{ deleted: number }>('/v1/agent/memory:clear', {
+    ...options,
+    body: {},
+    method: 'POST',
+  })
+}
+
+export async function listAgentMemoryCandidates(options: ClientOptions = {}) {
+  return requestJson<{
+    data: AgentMemoryCandidateWire[]
+    object: 'list'
+    status: AgentMemoryStatus
+  }>('/v1/agent/memory/candidates', options)
+}
+
+export async function acceptAgentMemoryCandidate(
+  candidateId: string,
+  body: { content?: string } = {},
+  options: ClientOptions = {},
+) {
+  return requestJson<AgentMemoryCandidateWire>(
+    `/v1/agent/memory/candidates/${encodeURIComponent(candidateId)}:accept`,
+    { ...options, body, method: 'POST' },
+  )
+}
+
+export async function rejectAgentMemoryCandidate(
+  candidateId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<AgentMemoryCandidateWire>(
+    `/v1/agent/memory/candidates/${encodeURIComponent(candidateId)}:reject`,
+    { ...options, body: {}, method: 'POST' },
+  )
+}
+
+export async function listAgentMemoryFeedback(
+  options: ClientOptions = {},
+  filters: AgentFeedbackListFilters = {},
+) {
+  return requestJson<{
+    data: AgentFeedbackWire[]
+    object: 'list'
+  }>(`/v1/agent/memory/feedback${agentFeedbackQuery(filters)}`, options)
+}
+
+export async function submitAgentRunFeedback(
+  runId: string,
+  body: {
+    feedback: 'positive' | 'negative' | 'neutral'
+    memory_id?: string
+    reason?: string
+  },
+  options: ClientOptions = {},
+) {
+  return requestJson<AgentFeedbackWire>(
+    `/v1/agent/runs/${encodeURIComponent(runId)}/feedback`,
+    { ...options, body, method: 'POST' },
+  )
 }
 
 export async function createChatCompletion(
@@ -1550,6 +2111,8 @@ export async function streamChatCompletion(
 }
 
 type StreamEventsOptions<T> = ClientOptions & {
+  /** Transport liveness, including comment-only heartbeat frames. */
+  onActivity?: () => void
   onEvent: (event: T) => void
 }
 
@@ -1576,6 +2139,7 @@ export async function streamServerSentEvents<T>(
   for (;;) {
     const { value, done } = await reader.read()
     if (done) break
+    options.onActivity?.()
     buffer += value
     const frames = buffer.split('\n\n')
     buffer = frames.pop() ?? ''
@@ -1593,6 +2157,23 @@ export async function streamResearchRunEvents(
   options: StreamRunEventsOptions,
 ) {
   return streamServerSentEvents<ResearchRunEvent>(eventsUrl, options)
+}
+
+/** One keyset page of buffered run events (the T2 polling fallback):
+ * the SAME replay buffer as the SSE route, returned immediately as
+ * JSON. `terminal` tells the poller the run is settled. */
+export async function fetchRunEventsPage(
+  eventsUrl: string,
+  afterSequence: number | null,
+  options: ClientOptions = {},
+) {
+  const separator = eventsUrl.includes('?') ? '&' : '?'
+  const after
+    = afterSequence === null ? '' : `&after=${encodeURIComponent(afterSequence)}`
+  return requestJson<{ data: ResearchRunEvent[]; terminal: boolean }>(
+    `${eventsUrl}${separator}format=json${after}`,
+    options,
+  )
 }
 
 export async function startIndexingJob(
@@ -2122,6 +2703,7 @@ async function requestError(response: Response) {
       const enrichedError = new Error(error.message) as InqtrixRequestError
       enrichedError.name = error.type || 'InqtrixRequestError'
       enrichedError.status = response.status
+      enrichedError.detail = error as unknown as Record<string, unknown>
       return enrichedError
     }
   } catch {
@@ -2159,6 +2741,8 @@ function serializeOverrides(overrides?: AgentOverrides) {
     model_tier: overrides.modelTier,
     model: overrides.model,
     effort: overrides.effort,
+    depth: overrides.depth,
+    agent_tier: overrides.agentTier,
   }
 }
 

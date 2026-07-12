@@ -104,7 +104,12 @@ export type InqtrixStack = {
   search_provider?: string
 }
 
-export type ResearchRunMode = 'direct_llm' | 'knowledge' | 'research'
+export type ResearchRunMode =
+  | 'agent_kernel'
+  | 'direct_llm'
+  | 'knowledge'
+  | 'research'
+  | 'workspace_agent'
 
 export type ResearchRunMessage = {
   content: string
@@ -194,6 +199,34 @@ export type AlgorithmManifestEntry = {
   [key: string]: unknown
 }
 
+/** One capability-registry manifest entry (`capabilities.agent.tools`). */
+export type AgentToolManifestEntry = {
+  id: string
+  summary: string
+  effect: 'read' | 'write' | 'destructive'
+  read_only: boolean
+  idempotent: boolean
+}
+
+/** What ONE permission mode gates (`capabilities.agent.permission_modes`).
+ * Generated server-side from the ENFORCING policy code (published ==
+ * enforced) — the composer's run overview renders this verbatim and
+ * never re-derives gating semantics client-side. */
+export type AgentPermissionModeEntry = {
+  /** The initial plan parks for approval (E16). */
+  plan_gate: boolean
+  /** A replan that ADDS web queries parks again (E16 amendment). */
+  web_replan_regate: boolean
+  /** Editor patches always park — invariant across modes (E14). */
+  patch_gate: boolean
+  /** Kernel tools that unconditionally gate in this mode. */
+  kernel_gated_tools: string[]
+  /** Kernel tools that gate conditionally (e.g. only UN-scoped search). */
+  kernel_conditional_tools: string[]
+  /** Kernel tools gated in EVERY mode (write effects). */
+  kernel_always_gated: string[]
+}
+
 /** GET /v1/capabilities — feature discovery so the UI never hardcodes
  * which algorithms/backends a deployment offers. `null` from the hook
  * means the endpoint is absent (older backend) and every knowledge
@@ -223,6 +256,9 @@ export type InqtrixCapabilities = {
     /** Configured reranker provider id, shown in the run overview when the
      * rerank stage is active. */
     reranker_provider?: string
+    /** Configured vector backend NAME (e.g. "qdrant") — a descriptive
+     * label for retrieval-source displays, not a reachability claim. */
+    vector_backend?: string
   }
   /** Effective server-side HTTP wait deadlines (seconds). The client derives
    * its own AbortController timeouts from these (server wait + margin) instead
@@ -232,6 +268,61 @@ export type InqtrixCapabilities = {
     editor_wait_seconds: number
     chat_wait_seconds: number
     text_wait_seconds: number
+    reasoning_operation_seconds?: number
+    editor_operation_seconds?: number
+    search_operation_seconds?: number
+    claim_extract_operation_seconds?: number
+    research_run_seconds?: number
+    max_attempts?: number
+  }
+  /** Workspace-agent limits + vocabulary (M5). Absent on backends without
+   * the agent platform -> the Agent Desk stays hidden. */
+  agent?: {
+    autonomy_modes: string[]
+    default_autonomy: string
+    /** The EFFECTIVE desk algorithm (plan M2 rollout): `workspace_agent`
+     * (phase machine) or `agent_kernel`; absent on older servers ->
+     * workspace_agent. */
+    default_mode?: string
+    /** Two-mode UI presets (plan M1 S7, Cowork pattern): the composer
+     * shows Standard/Auto mapped onto the unchanged wire vocabulary.
+     * Absent on older servers -> legacy three-way control. */
+    mode_presets?: { id: string; autonomy: string }[]
+    depth_modes?: { id: string }[]
+    default_depth?: string
+    /** Stufen ladder (speed/depth tiers), published from the server's
+     * tier policy table (published == enforced). A tiers-aware composer
+     * renders the Stufe control instead of the depth toggle; absent on
+     * older servers -> legacy depth toggle. */
+    tiers?: AgentTierCapability[]
+    default_tier?: AgentTierId
+    /** True republishes the legacy three-way control (incl. strict). */
+    advanced_autonomy?: boolean
+    max_parallel_children: number
+    discovery_max_tool_calls: number
+    max_plan_tasks: number
+    durable: boolean
+    tools: AgentToolManifestEntry[]
+    /** Source controls and direct routes are optional for compatibility with
+     * servers predating the Agent Desk source dock. */
+    source_controls?: Array<{
+      id: 'web' | 'knowledge'
+      default: 'available' | 'disabled'
+      available: boolean
+    }>
+    execution_directives?: Array<{
+      id: 'quick_web' | 'knowledge_only'
+      available: boolean
+    }>
+    /** Per-mode gating facts for the run overview; absent on older
+     * servers -> the overview hides its approvals group (never guesses). */
+    permission_modes?: Record<string, AgentPermissionModeEntry>
+    /** Skill LIMITS (plan M3); the skill list itself comes from the
+     * authenticated GET /v1/skills. */
+    skills?: {
+      max_attached: number
+      disclosure_budget_chars: number
+    }
   }
 }
 
@@ -253,11 +344,30 @@ export type KnowledgeDocumentInfo = {
   title: string
 }
 
+export const DEEP_RESEARCH_FIRST_ROUND_QUERIES = 8
+export const DEEP_RESEARCH_MAX_ROUNDS = 4
+
+export type AgentTierId = 'schnell' | 'gruendlich' | 'tief'
+
+/** One published Stufe (wire projection of the server's tier policy). */
+export type AgentTierCapability = {
+  id: AgentTierId
+  clarification_rounds: number
+  plan_gate: 'per_autonomy' | 'skip_unless_strict'
+  web_research: boolean
+  web_child_profile: string | null
+  web_child_ceiling: string | null
+  rag_default_profile: string
+  verify: string
+  response_form: 'auto' | 'chat' | 'canvas'
+  latency_hint: string
+}
+
 export type AgentOverrides = {
   maxRounds?: number
   minRounds?: number
   confidenceStop?: number
-  reportProfile?: 'compact' | 'deep'
+  reportProfile?: 'schnell' | 'compact' | 'deep'
   maxTotalSeconds?: number
   firstRoundQueries?: number
   skipSearch?: boolean
@@ -266,6 +376,13 @@ export type AgentOverrides = {
   model?: string
   /** Reasoning effort for the picked model (model-dependent). */
   effort?: string
+  /** Thoroughness (plan M4): 'deep' = high effort, raised budgets,
+   * DEEP child research and one verification pass. Legacy knob — a
+   * tiers-aware composer sends `agentTier` instead (never both). */
+  depth?: 'normal' | 'deep'
+  /** Agent-Desk Stufe (speed/depth ladder); the server bridges it into
+   * depth and reads the budgets from its tier policy table. */
+  agentTier?: 'schnell' | 'gruendlich' | 'tief'
 }
 
 export type CreateResearchRunRequest = {
@@ -276,11 +393,35 @@ export type CreateResearchRunRequest = {
   agentOverrides?: AgentOverrides
   /** Retrieval scope + profile; only meaningful with `mode: 'knowledge'`. */
   knowledgeFilters?: KnowledgeChatFilters
+  /** Approval policy for `mode: 'workspace_agent'` (server default when
+   * omitted; vocabulary from `capabilities.agent.autonomy_modes`). */
+  autonomy?: string
+  /** Agent-session id linking follow-up turns to one memo canvas. */
+  sessionId?: string
+  /** Target editor document for a patch assignment (M7); the agent
+   * proposes always-gated edits against it instead of only a memo. */
+  documentId?: string
+  /** Output-form override for `mode: 'workspace_agent'` (plan M1):
+   * `chat` forces the inline answer, `canvas` the memo; `auto` (or
+   * omitted) lets the agent's intake decide. */
+  responseForm?: 'auto' | 'chat' | 'canvas'
+  /** Explicitly attached skills (plan M3, composer chips); the server
+   * admits them (visibility + count cap). Agent modes only. */
+  skillIds?: string[]
+  /** Whitelisted composer tool hints (plan M3, `/`-functions group). */
+  toolDirectives?: string[]
+  /** Per-session availability policy for optional agent sources. */
+  sourcePolicy?: import('@/features/agent/executionPolicy').AgentSourcePolicy
+  /** One-message route selected through a direct slash command. */
+  executionDirective?: import('@/features/agent/executionPolicy').AgentExecutionDirective
 }
 
 export type ResearchRunStatus =
   | 'queued'
   | 'running'
+  | 'waiting_for_approval'
+  | 'waiting_for_input'
+  | 'waiting_for_children'
   | 'completed'
   | 'failed'
   | 'cancelled'
@@ -307,6 +448,22 @@ export type ResearchRunSnapshot = {
   done?: boolean
   progress_estimate?: number
   last_message?: string
+  /** Effective Agent Desk route metadata. Older runs omit this block. */
+  execution?: {
+    execution_directive?: 'quick_web' | 'knowledge_only' | null
+    directive?: 'quick_web' | 'knowledge_only' | null
+    effective_mode?: string
+    response_form?: string
+    depth?: string
+    model?: string | null
+    reasoning_effort?: string | null
+    source_policy?: {
+      web: 'available' | 'disabled'
+      knowledge: 'available' | 'disabled'
+    }
+    consent_reason?: string | null
+    tool_use_counts?: { web?: number; knowledge?: number }
+  }
 }
 
 /**
@@ -337,6 +494,14 @@ export type ResearchRunSummary = {
   events_url: string
   result_url: string
   access?: ResearchRunAccess
+  /** Run tree/session extras — emitted only when non-default (agent runs). */
+  kind?: 'standard' | 'agent' | 'agent_child'
+  parent_run_id?: string
+  root_run_id?: string
+  session_id?: string
+  children_url?: string
+  plan_url?: string
+  artifacts_url?: string
 }
 
 export type ResearchRunEvent = {
@@ -445,6 +610,7 @@ export type ResearchRunResult = {
     chunk_index?: number | null
     excerpt?: string | null
     source_text?: string | null
+    grounded_support?: string | null
     page_number?: number | null
   }>
   knowledge_profile?: {

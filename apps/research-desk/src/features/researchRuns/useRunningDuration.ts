@@ -18,10 +18,13 @@ export function useRunningDuration(status: string, startedAtIso?: string): strin
   const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
-    if (status !== 'running') return undefined
+    // Only tick once there is a start time to measure from — and re-arm when it
+    // arrives (it lands one render after `status` flips to running for a fresh
+    // run, so `startedAtIso` must be a dependency).
+    if (status !== 'running' || !startedAtIso) return undefined
     const intervalId = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(intervalId)
-  }, [status])
+  }, [status, startedAtIso])
 
   if (status !== 'running' || !startedAtIso) return '00:00:00'
   return formatDuration((now - new Date(startedAtIso).getTime()) / 1000)

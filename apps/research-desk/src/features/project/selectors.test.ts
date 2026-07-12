@@ -5,6 +5,7 @@ import {
   chatAttachmentsFromRefs,
   chatContextRefKey,
   completedReportOptions,
+  mentionableReportOptions,
   dedupeChatContextRefs,
   displayRelativeAge,
   isResearchDeskRun,
@@ -387,5 +388,22 @@ describe('completedReportOptions', () => {
     // The editor "import report" + chat @research lists must match the desk:
     // knowledge runs (the "Wissen" thread) never leak in as importable reports.
     expect(runIds).toEqual(['r1', 'r2', 'r4'])
+  })
+})
+
+describe('mentionableReportOptions', () => {
+  it('hides an opted-out report from the @-source but keeps it resolvable as an attached chip', () => {
+    const state = createEmptyProjectState()
+    state.researchRuns = {
+      r1: makeReportRun('r1', 'research'),
+      r2: { ...makeReportRun('r2', 'research'), includeInAutocomplete: false },
+    }
+    state.researchRunOrder = ['r1', 'r2']
+
+    // The @-mention source drops the opted-out report...
+    expect(mentionableReportOptions(state).map((option) => option.runId)).toEqual(['r1'])
+    // ...but the shared selector still resolves it, so a chat that already
+    // attached r2 keeps rendering its chip (gate the source, not the resolver).
+    expect(completedReportOptions(state).map((option) => option.runId)).toEqual(['r1', 'r2'])
   })
 })

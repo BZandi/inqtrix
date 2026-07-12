@@ -17,11 +17,13 @@ import queue
 
 import pytest
 
+from inqtrix.core.results import WebRecency
 from inqtrix.evidence import assemble_evidence_records
 from inqtrix.graph import run
 from inqtrix.report_profiles import ReportProfile
 from inqtrix.providers.base import ProviderContext
 from inqtrix.result import ResearchResult
+from inqtrix.search_result import GroundedSearchResult
 from inqtrix.runtime_logging import normalize_source_provenance
 from inqtrix.settings import AgentSettings
 from inqtrix.strategies import StrategyContext, create_default_strategies
@@ -106,6 +108,7 @@ def _run_scenario(
     search: FakeSearch,
     settings: AgentSettings | None = None,
     strategies: StrategyContext | None = None,
+    web_recency: WebRecency | None = None,
 ) -> tuple[dict, list[tuple[str, str]]]:
     """Execute the real graph with the given fakes and capture progress."""
     settings = settings or _settings()
@@ -122,6 +125,7 @@ def _run_scenario(
         providers=providers,
         strategies=strategies,
         settings=settings,
+        web_recency=web_recency,
     )
     return raw, _drain(progress_queue)
 
@@ -161,6 +165,31 @@ def _clean_answer_bindings() -> list[dict[str, str]]:
 # --------------------------------------------------------------------------- #
 # Scenario: clean
 # --------------------------------------------------------------------------- #
+
+
+def test_explicit_year_recency_overrides_classification_and_reaches_search() -> None:
+    """Delegated freshness remains authoritative through the real graph."""
+    fixture = load_search_result_fixture(_FIXTURE_SLUG)
+
+    class RecordingSearch(FakeSearch):
+        def __init__(self) -> None:
+            super().__init__(fixture)
+            self.kwargs: list[dict[str, object]] = []
+
+        def search(self, query: str, **kwargs: object) -> GroundedSearchResult:
+            self.kwargs.append(dict(kwargs))
+            return super().search(query, **kwargs)
+
+    search = RecordingSearch()
+    raw, _events = _run_scenario(
+        FakeLLM(classify_recency="NONE"),
+        search,
+        web_recency="year",
+    )
+
+    assert raw["result_state"]["recency"] == "year"
+    assert search.kwargs
+    assert all(call["recency_filter"] == "year" for call in search.kwargs)
 
 
 def test_clean_contract_from_verified_bound_claim() -> None:

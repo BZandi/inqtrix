@@ -124,6 +124,12 @@ def register_routes(
         )
 
         _router.include_router(build_prompt_templates_router(container))
+    if container.skill_service is not None:
+        from inqtrix.server.routers.skills import (
+            build_router as build_skills_router,
+        )
+
+        _router.include_router(build_skills_router(container))
     _router.include_router(test.build_router(container))
     _router.include_router(chat.build_router(container))
     if container.chat_history_service is not None:
@@ -138,6 +144,12 @@ def register_routes(
         )
 
         _router.include_router(build_editor_persistence_router(container))
+    if container.editor_patch_service is not None:
+        from inqtrix.server.routers.editor_patches import (
+            build_router as build_editor_patches_router,
+        )
+
+        _router.include_router(build_editor_patches_router(container))
     if container.asset_records_service is not None:
         from inqtrix.server.routers.asset_records import (
             build_router as build_asset_records_router,
@@ -150,6 +162,18 @@ def register_routes(
         )
 
         _router.include_router(build_knowledge_sessions_router(container))
+    if container.agent_control_service is not None:
+        from inqtrix.server.routers.agent_runs import (
+            build_router as build_agent_runs_router,
+        )
+
+        _router.include_router(build_agent_runs_router(container))
+    if container.agent_sessions_service is not None:
+        from inqtrix.server.routers.agent_sessions import (
+            build_router as build_agent_sessions_router,
+        )
+
+        _router.include_router(build_agent_sessions_router(container))
     if container.vector_index_service is not None:
         from inqtrix.server.routers.vector_indexes import (
             build_router as build_vector_indexes_router,
@@ -162,6 +186,12 @@ def register_routes(
         )
 
         _router.include_router(build_account_preferences_router(container))
+    if container.agent_memory_service is not None:
+        from inqtrix.server.routers.agent_memory import (
+            build_router as build_agent_memory_router,
+        )
+
+        _router.include_router(build_agent_memory_router(container))
     if container.file_service is not None:
         _router.include_router(files.build_router(container))
     if container.knowledge_service is not None:

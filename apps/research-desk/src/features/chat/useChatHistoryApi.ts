@@ -72,6 +72,10 @@ const AUTOSAVE_DEBOUNCE_MS = 1_500
 // history sidebar), so the page is sidebar-sized rather than a bulk walk.
 const THREAD_PAGE_LIMIT = 50
 const MESSAGE_PAGE_LIMIT = 200
+/** How many most-recently-updated threads to warm at startup so opening a recent
+ * conversation shows real messages instantly (the skeleton then only covers
+ * older threads). A handful of first-page fetches — cheap. */
+const PREFETCH_RECENT_THREAD_COUNT = 5
 
 function messageFromError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -102,6 +106,11 @@ export type ChatHistoryApiHandle = {
   hasMoreThreads: boolean
   /** A load-older page request is in flight (drives the button's busy state). */
   isLoadingMore: boolean
+  /** True while the SELECTED server thread's messages are still being fetched
+   * (lazy load-on-open). Lets the message view show a skeleton instead of the
+   * empty-state hero during the gap. False for local/demo threads and once the
+   * fetch settles. */
+  isSelectedThreadMessagesLoading: boolean
   /** Load the next page of older threads (cursor-based; appends to the list). */
   loadMoreThreads: () => Promise<void>
 }
@@ -123,6 +132,10 @@ export function useChatHistoryApi({
   // not), while hydratedRef keeps the value readable from the debounced
   // flush callback outside React's render cycle.
   const [hydrated, setHydrated] = useState(false)
+  // Threads whose load-on-open has completed (fetched, or confirmed-empty, or
+  // errored). Drives the "still fetching?" signal so the message view can show a
+  // skeleton instead of the empty-state hero while a thread's history loads.
+  const [messageLoadResolved, setMessageLoadResolved] = useState<ReadonlySet<string>>(() => new Set())
 
   // Latest state read by the async flush without stale closures.
   const threadsRef = useRef(chatThreads)
@@ -293,6 +306,7 @@ export function useChatHistoryApi({
     syncedGroupsRef.current.clear()
     syncedMessagesRef.current.clear()
     loadedThreadsRef.current.clear()
+    setMessageLoadResolved(new Set())
     threadCursorRef.current = undefined
     loadingMoreRef.current = false
     setIsLoadingMore(false)
@@ -363,24 +377,25 @@ export function useChatHistoryApi({
 
   // -- load a thread's messages on open ---------------------------------- #
 
-  useEffect(() => {
-    // Gate on the `hydrated` STATE (not the ref) so this re-runs when an
-    // async hydration completes AFTER the selected thread was already
-    // restored from the manifest — otherwise the landed thread would stay
-    // visibly empty until the user clicked away and back.
-    if (!syncActive || !hydrated || !selectedThreadId) return
-    const thread = threadsRef.current[selectedThreadId]
-    if (!thread || thread.messages.length > 0) return
-    if (loadedThreadsRef.current.has(selectedThreadId)) return
-    loadedThreadsRef.current.add(selectedThreadId)
-    let cancelled = false
-    let applied = false
-    void (async () => {
+  // Fetch (and cache) one thread's messages if not already loaded. Shared by the
+  // load-on-open effect and the startup prefetch so the fetch + baseline-seed
+  // logic lives in exactly one place. Applying is idempotent, so no cancellation
+  // is needed — an in-flight load simply caches for the next open. `surfaceErrors`
+  // is false for background prefetch so it never clobbers the visible thread's
+  // error state.
+  const loadThreadMessages = useCallback(
+    async (threadId: string, { surfaceErrors }: { surfaceErrors: boolean }) => {
+      const thread = threadsRef.current[threadId]
+      if (!thread || thread.messages.length > 0) return
+      if (loadedThreadsRef.current.has(threadId)) return
+      loadedThreadsRef.current.add(threadId)
+      const markResolved = () =>
+        setMessageLoadResolved((prev) => (prev.has(threadId) ? prev : new Set(prev).add(threadId)))
       try {
         const messages: ReturnType<typeof messageRecordFromServer>[] = []
         let cursor: string | undefined
         do {
-          const page = await listChatMessages(selectedThreadId, {
+          const page = await listChatMessages(threadId, {
             ...optionsRef.current,
             cursor,
             limit: MESSAGE_PAGE_LIMIT,
@@ -390,46 +405,55 @@ export function useChatHistoryApi({
           }
           cursor = page.next_cursor ?? undefined
         } while (cursor)
-        if (cancelled) return
         if (messages.length > 0) {
-          dispatch({
-            messages,
-            threadId: selectedThreadId,
-            type: 'upsertServerChatMessages',
-          })
+          dispatch({ messages, threadId, type: 'upsertServerChatMessages' })
         }
-        // Seed the per-thread message baseline with the server set just
-        // fetched, UNIONED with any baseline a concurrent push already
-        // advanced (e.g. a message sent during this very first open). Both
-        // subsets are server-confirmed — the fetched ids by definition, a
-        // push-advanced baseline only after its append resolved — so the
-        // union can never invent a phantom id (no spurious delete), whereas
-        // a plain replace would clobber the pushed id and let a later delete
-        // of it be lost, resurrecting it on reload. An empty union still
-        // marks the thread as baseline-known.
-        const seededIds = syncedMessagesRef.current.get(selectedThreadId)
+        // Seed the per-thread message baseline with the server set just fetched,
+        // UNIONED with any baseline a concurrent push already advanced (e.g. a
+        // message sent during this very first open). Both subsets are
+        // server-confirmed, so the union can never invent a phantom id (no
+        // spurious delete), whereas a plain replace would clobber the pushed id
+        // and let a later delete of it be lost, resurrecting it on reload. An
+        // empty union still marks the thread as baseline-known.
+        const seededIds = syncedMessagesRef.current.get(threadId)
         syncedMessagesRef.current.set(
-          selectedThreadId,
-          new Set([
-            ...(seededIds ?? []),
-            ...messages.map((message) => message.id),
-          ]),
+          threadId,
+          new Set([...(seededIds ?? []), ...messages.map((message) => message.id)]),
         )
-        applied = true
-        setError(null)
+        markResolved()
+        if (surfaceErrors) setError(null)
       } catch (caught) {
-        if (!cancelled) {
-          loadedThreadsRef.current.delete(selectedThreadId)
-          setError(messageFromError(caught))
-        }
+        loadedThreadsRef.current.delete(threadId)
+        // Stop the loading skeleton even on failure — the error surfaces through
+        // `error` for the open thread; a stuck skeleton would be worse.
+        markResolved()
+        if (surfaceErrors) setError(messageFromError(caught))
       }
-    })()
-    return () => {
-      cancelled = true
-      // Released if interrupted before applying, so re-opening re-fetches.
-      if (!applied) loadedThreadsRef.current.delete(selectedThreadId)
+    },
+    [dispatch],
+  )
+
+  useEffect(() => {
+    // Gate on the `hydrated` STATE (not the ref) so this re-runs when an async
+    // hydration completes AFTER the selected thread was restored from the
+    // manifest — otherwise the landed thread would stay visibly empty.
+    if (!syncActive || !hydrated || !selectedThreadId) return
+    void loadThreadMessages(selectedThreadId, { surfaceErrors: true })
+  }, [syncActive, hydrated, selectedThreadId, loadThreadMessages])
+
+  // Warm the most-recently-updated threads at startup so opening a recent
+  // conversation shows real messages instantly (the skeleton then only appears
+  // for older, un-warmed threads). Deduped by the same loaded-guard as
+  // load-on-open; errors stay silent (background work).
+  useEffect(() => {
+    if (!syncActive || !hydrated) return
+    const recent = Object.values(threadsRef.current)
+      .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0))
+      .slice(0, PREFETCH_RECENT_THREAD_COUNT)
+    for (const thread of recent) {
+      void loadThreadMessages(thread.id, { surfaceErrors: false })
     }
-  }, [syncActive, hydrated, selectedThreadId, dispatch])
+  }, [syncActive, hydrated, loadThreadMessages])
 
   // -- debounced autosave trigger ---------------------------------------- #
 
@@ -502,5 +526,16 @@ export function useChatHistoryApi({
     }
   }, [dispatch])
 
-  return { error, hasMoreThreads, isLoadingMore, loadMoreThreads }
+  const selectedThreadRecord = selectedThreadId ? chatThreads[selectedThreadId] : undefined
+  const isSelectedThreadMessagesLoading = Boolean(
+    syncActive
+    && hydrated
+    && selectedThreadId
+    && selectedThreadRecord
+    && selectedThreadRecord.source === 'api'
+    && selectedThreadRecord.messages.length === 0
+    && !messageLoadResolved.has(selectedThreadId),
+  )
+
+  return { error, hasMoreThreads, isLoadingMore, isSelectedThreadMessagesLoading, loadMoreThreads }
 }

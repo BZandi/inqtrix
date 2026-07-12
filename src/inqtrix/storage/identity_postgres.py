@@ -18,7 +18,7 @@ import uuid
 from contextlib import AbstractAsyncContextManager
 from typing import Sequence
 
-from sqlalchemy import delete, func, insert, select, tuple_, update
+from sqlalchemy import delete, func, insert, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -133,7 +133,7 @@ class PostgresIdentityBackend:
         permission: "SharePermission",
         granted_by_sub: str,
     ) -> "ShareRecord":
-        """Grant or re-grant in one transaction.
+        """Grant or re-grant in one transaction (idempotent under races).
 
         The partial unique index allows one ACTIVE row per tuple, so a
         re-grant soft-revokes the existing row first — the caller's
@@ -141,6 +141,24 @@ class PostgresIdentityBackend:
         the prior row's ``accepted_at`` forward, so changing the permission on
         an already-accepted share keeps access live (a brand-new grant has no
         prior row and starts pending).
+
+        The INSERT is an idempotent upsert on the active partial index
+        (1.6): two concurrent grants of the same tuple — a double-click,
+        or two co-owners granting at once — both soft-revoke, then race
+        the INSERT; without the ``ON CONFLICT`` the loser hit the unique
+        index and raised a bare 500. Now the loser UPDATEs the existing
+        active row instead, so the two collapse to ONE active row
+        (last-writer-wins on permission) with no 500. The index_where
+        must match the partial index predicate BYTE-for-byte or Postgres
+        cannot select it as the conflict arbiter.
+
+        Acceptance survives that race: the ON CONFLICT branch COALESCEs the
+        EXISTING row's ``accepted_at`` rather than the value captured from
+        this transaction's own soft-revoke. A racing grant can revoke the
+        active row before this one's soft-revoke runs (capturing ``None``),
+        yet the row this INSERT then conflicts on is the racer's fresh
+        ACTIVE row carrying the true acceptance — so a previously accepted
+        grantee is never silently reverted to pending.
         """
         from inqtrix.auth.shares import ShareRecord
 
@@ -162,23 +180,71 @@ class PostgresIdentityBackend:
                 )
             ).first()
             carried_accepted_at = prior.accepted_at if prior is not None else None
-            await session.execute(
-                insert(resource_shares).values(
-                    id=share_id,
-                    tenant_id=tenant_id,
-                    subject_type=subject_type,
-                    subject_id=subject_id,
-                    resource_type=resource_type,
-                    resource_id=resource_id,
-                    permission=permission.value,
-                    granted_by_sub=granted_by_sub,
-                    accepted_at=carried_accepted_at,
+            # RETURNING the persisted id/created_at, not the minted share_id:
+            # on the ON CONFLICT DO UPDATE path (a true INSERT-INSERT race) the
+            # SURVIVING row keeps its ORIGINAL id, so echoing share_id would hand
+            # the racing caller an id that does not exist (a later accept_share
+            # would 404). created_at likewise comes from the row, not a fabricated
+            # clock read, so the two racers return byte-identical records.
+            persisted = (
+                await session.execute(
+                    pg_insert(resource_shares)
+                    .values(
+                        id=share_id,
+                        tenant_id=tenant_id,
+                        subject_type=subject_type,
+                        subject_id=subject_id,
+                        resource_type=resource_type,
+                        resource_id=resource_id,
+                        permission=permission.value,
+                        granted_by_sub=granted_by_sub,
+                        accepted_at=carried_accepted_at,
+                    )
+                    .on_conflict_do_update(
+                        index_elements=[
+                            resource_shares.c.tenant_id,
+                            resource_shares.c.subject_type,
+                            resource_shares.c.subject_id,
+                            resource_shares.c.resource_type,
+                            resource_shares.c.resource_id,
+                        ],
+                        index_where=text("revoked_at IS NULL"),
+                        set_={
+                            "permission": permission.value,
+                            "granted_by_sub": granted_by_sub,
+                            # COALESCE the EXISTING row's acceptance, never the
+                            # captured ``carried_accepted_at``: under a concurrent
+                            # re-grant this txn's own soft-revoke can match zero
+                            # rows (a racing grant already revoked the active row)
+                            # and capture ``None``, while the row this INSERT now
+                            # conflicts on is the racer's freshly-inserted ACTIVE
+                            # row that already carries the true acceptance. Writing
+                            # the captured None would silently revert a previously
+                            # accepted grantee to pending (the consent gate then
+                            # grants nothing). Keep any live acceptance; fall back
+                            # to the captured value only when the existing row has
+                            # none (a genuinely fresh, still-pending tuple).
+                            "accepted_at": func.coalesce(
+                                resource_shares.c.accepted_at, carried_accepted_at
+                            ),
+                            "revoked_at": None,
+                            "revoked_by_sub": None,
+                        },
+                    )
+                    .returning(
+                        resource_shares.c.id,
+                        resource_shares.c.created_at,
+                        resource_shares.c.accepted_at,
+                    )
                 )
-            )
-        import time as _time
+            ).one()
 
+        # Echo the PERSISTED acceptance, not ``carried_accepted_at``: on the
+        # COALESCE'd DO UPDATE path the surviving row may keep a live
+        # acceptance this transaction never captured, so the returned record
+        # must mirror the row (same reason id/created_at come from RETURNING).
         return ShareRecord(
-            id=str(share_id),
+            id=str(persisted.id),
             tenant_id=tenant_id,
             subject_type=subject_type,
             subject_id=subject_id,
@@ -186,10 +252,10 @@ class PostgresIdentityBackend:
             resource_id=resource_id,
             permission=permission,
             granted_by_sub=granted_by_sub,
-            created_at=_time.time(),
+            created_at=persisted.created_at.timestamp(),
             accepted_at=(
-                carried_accepted_at.timestamp()
-                if carried_accepted_at is not None
+                persisted.accepted_at.timestamp()
+                if persisted.accepted_at is not None
                 else None
             ),
         )
@@ -742,6 +808,7 @@ class PostgresIdentityBackend:
                 insert(audit_log).values(
                     tenant_id=entry.tenant_id,
                     actor_sub=entry.actor_sub,
+                    actor_type=entry.actor_type,
                     action=entry.action,
                     resource_type=entry.resource_type,
                     resource_id=entry.resource_id,

@@ -38,7 +38,10 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
+from bisect import bisect_right
+from collections import OrderedDict
 from typing import Any
 
 from inqtrix.constants import (
@@ -54,11 +57,14 @@ from inqtrix.exceptions import (
 from inqtrix.providers.base import (
     LLMProvider,
     LLMResponse,
+    MAX_PROVIDER_ATTEMPTS,
     StructuredLLMResponse,
     _NonFatalNoticeMixin,
     _RetryNoticeMixin,
     _THINKING_MIN_MAX_TOKENS,
     _check_deadline,
+    _check_provider_operation_deadline,
+    _operation_deadline,
     is_model_capacity_error,
     _retry_delay_seconds,
     _sleep_before_retry,
@@ -67,6 +73,7 @@ from inqtrix.providers.base import (
     parse_structured_response_content,
     validate_reasoning_effort,
 )
+from inqtrix.providers._schema import strictify_json_schema
 from inqtrix.settings import ModelSettings
 from inqtrix.state import track_tokens
 
@@ -101,8 +108,8 @@ _RETRYABLE_BEDROCK_ERRORS = frozenset({
     "ServiceUnavailableException",
     "ModelNotReadyException",
 })
-_MAX_BEDROCK_ATTEMPTS = 5
-_MAX_BEDROCK_TRANSPORT_ATTEMPTS = 2
+_MAX_BEDROCK_ATTEMPTS = MAX_PROVIDER_ATTEMPTS
+_MAX_BEDROCK_TRANSPORT_ATTEMPTS = MAX_PROVIDER_ATTEMPTS
 _RETRYABLE_BEDROCK_TRANSPORT_ERRORS = (
     BotoConnectionError,
     ConnectionClosedError,
@@ -110,6 +117,28 @@ _RETRYABLE_BEDROCK_TRANSPORT_ERRORS = (
     ReadTimeoutError,
     ConnectTimeoutError,
 )
+
+# ---------------------------------------------------------------------------
+# Transport-client cache
+#
+# botocore fixes read_timeout at client construction, so honoring a
+# deadline at the socket layer requires one client per timeout class.
+# Remaining budgets are rounded DOWN onto this fixed rung ladder: the
+# socket bound never outlives the deadline, and a continuously shrinking
+# outer run budget (agent deep runs) maps onto a handful of reusable
+# clients instead of one fresh client — with its own connection pool —
+# per whole second of remaining budget. Rungs are denser near the top so
+# the down-rounding loss on long default budgets (REASONING_TIMEOUT=600)
+# stays within one minute; sub-second rungs only bound how long a doomed
+# call may hang. The LRU cap is a backstop that bounds live clients even
+# if the ladder grows.
+# ---------------------------------------------------------------------------
+_TRANSPORT_TIMEOUT_RUNGS: tuple[float, ...] = (
+    0.001, 0.01, 0.1, 0.5,
+    1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 45.0, 60.0, 90.0, 120.0, 180.0,
+    240.0, 300.0, 360.0, 420.0, 480.0, 540.0, 600.0,
+)
+_MAX_TRANSPORT_CLIENTS = 8
 
 # ---------------------------------------------------------------------------
 # Effort capability blacklist
@@ -209,6 +238,7 @@ class BedrockLLM(
         thinking: dict[str, Any] | None = None,
         effort: str | None = None,
         selectable_models: list[str] | None = None,
+        timeout: float = REASONING_TIMEOUT,
     ) -> None:
         """Initialize the Bedrock provider.
 
@@ -262,6 +292,8 @@ class BedrockLLM(
                 Works with or without ``thinking`` enabled. ``"xhigh"`` is
                 only supported on Claude Opus 4.7+. The Anthropic API
                 default is ``"high"`` (= same as omitting the parameter).
+            timeout: Socket-read and logical-operation timeout in seconds.
+                Retries share this one budget.
 
         Raises:
             ValueError: If both ``temperature`` and ``thinking`` are set,
@@ -298,6 +330,7 @@ class BedrockLLM(
         self._temperature = temperature
         self._thinking = thinking
         self._effort = effort
+        self._timeout = float(timeout)
         self._models = ModelSettings(
             reasoning_model=default_model,
             search_model="",
@@ -321,13 +354,11 @@ class BedrockLLM(
             profile_name=profile_name,
             region_name=region_name,
         )
-        self._client = session.client(
-            "bedrock-runtime",
-            config=BotoConfig(
-                retries={"max_attempts": 0},
-                read_timeout=180,
-            ),
-        )
+        self._session = session
+        self._client_lock = threading.Lock()
+        self._clients_by_read_timeout: OrderedDict[float, Any] = OrderedDict()
+        self._client = self._build_client(self._timeout)
+        self._clients_by_read_timeout[self._timeout] = self._client
 
         # Phase 12: surface effort/model incompatibilities up front (mirrors
         # AnthropicLLM). Drained by classify on the first run.
@@ -339,6 +370,54 @@ class BedrockLLM(
         )
         for warning in self._effort_config_warnings:
             log.warning(warning)
+
+    def _build_client(self, read_timeout: float) -> Any:
+        """Build one retry-free transport client for a deadline-bound class."""
+        return self._session.client(
+            "bedrock-runtime",
+            config=BotoConfig(
+                retries={"max_attempts": 0},
+                connect_timeout=read_timeout,
+                read_timeout=read_timeout,
+            ),
+        )
+
+    def _client_for_deadline(self, deadline: float) -> tuple[Any, float]:
+        """Return a client whose socket timeout cannot outlive *deadline*.
+
+        Botocore fixes ``read_timeout`` at client construction. A single
+        provider-wide client therefore cannot honor a shorter request override
+        or a nearly exhausted outer run budget. The remaining budget is
+        rounded down onto :data:`_TRANSPORT_TIMEOUT_RUNGS`, so the transport
+        bound stays honest while a shrinking deadline reuses a bounded set of
+        clients instead of building one per whole second. Budgets above the
+        top rung are capped at the top rung: still deadline-honest, at the
+        cost of limiting one transport attempt to that rung. The cache evicts
+        least-recently-used clients beyond :data:`_MAX_TRANSPORT_CLIENTS`;
+        ``self._client`` stays referenced for availability checks even when
+        its cache entry is evicted.
+
+        Args:
+            deadline: Absolute monotonic deadline the socket timeout must
+                not outlive.
+
+        Returns:
+            A ``(client, read_timeout)`` tuple where ``read_timeout`` is the
+            rung actually configured on the returned client's transport.
+        """
+        remaining = max(0.001, deadline - time.monotonic())
+        rung_index = bisect_right(_TRANSPORT_TIMEOUT_RUNGS, remaining) - 1
+        read_timeout = _TRANSPORT_TIMEOUT_RUNGS[max(0, rung_index)]
+        with self._client_lock:
+            client = self._clients_by_read_timeout.get(read_timeout)
+            if client is None:
+                client = self._build_client(read_timeout)
+                self._clients_by_read_timeout[read_timeout] = client
+            else:
+                self._clients_by_read_timeout.move_to_end(read_timeout)
+            while len(self._clients_by_read_timeout) > _MAX_TRANSPORT_CLIENTS:
+                self._clients_by_read_timeout.popitem(last=False)
+        return client, read_timeout
 
     def _collect_effort_warnings(
         self,
@@ -449,6 +528,7 @@ class BedrockLLM(
         self,
         *,
         params: dict[str, Any],
+        timeout: float,
         deadline: float | None = None,
         operation: str = "converse",
     ) -> dict[str, Any]:
@@ -462,13 +542,34 @@ class BedrockLLM(
         """
         self._clear_retry_notices()
         use_model = str(params.get("modelId") or self._default_model)
+        operation_deadline = _operation_deadline(timeout, deadline)
+        def _sleep(delay: float) -> None:
+            try:
+                _sleep_before_retry(delay, operation_deadline)
+            except AgentTimeout:
+                _check_provider_operation_deadline(
+                    operation_deadline,
+                    deadline,
+                    label="Bedrock-Aufruf",
+                )
+                raise
 
         for attempt in range(_MAX_BEDROCK_ATTEMPTS):
-            if deadline is not None:
-                _check_deadline(deadline)
+            _check_provider_operation_deadline(
+                operation_deadline,
+                deadline,
+                label="Bedrock-Aufruf",
+            )
+            client, transport_timeout_seconds = self._client_for_deadline(
+                operation_deadline
+            )
+            effective_timeout_seconds = max(
+                0.0,
+                operation_deadline - time.monotonic(),
+            )
 
             try:
-                response = self._client.converse(**params)
+                response = client.converse(**params)
                 return response if isinstance(response, dict) else {}
             except ClientError as exc:
                 details = self._extract_error_details(exc)
@@ -500,6 +601,13 @@ class BedrockLLM(
                         "attempt": attempt + 1,
                         "max_attempts": _MAX_BEDROCK_ATTEMPTS,
                         "delay_seconds": round(delay, 3),
+                        "configured_timeout_seconds": round(timeout, 3),
+                        "effective_timeout_seconds": round(
+                            effective_timeout_seconds, 3
+                        ),
+                        "transport_timeout_seconds": round(
+                            transport_timeout_seconds, 3
+                        ),
                     })
                     log.warning(
                         "Bedrock transient error (%s, code=%s, request-id=%s, attempt=%d/%d). Retrying in %.2fs.",
@@ -510,7 +618,7 @@ class BedrockLLM(
                         _MAX_BEDROCK_ATTEMPTS,
                         delay,
                     )
-                    _sleep_before_retry(delay, deadline)
+                    _sleep(delay)
                     continue
 
                 raise api_error from exc
@@ -531,6 +639,13 @@ class BedrockLLM(
                         "attempt": attempt + 1,
                         "max_attempts": _MAX_BEDROCK_TRANSPORT_ATTEMPTS,
                         "delay_seconds": round(delay, 3),
+                        "configured_timeout_seconds": round(timeout, 3),
+                        "effective_timeout_seconds": round(
+                            effective_timeout_seconds, 3
+                        ),
+                        "transport_timeout_seconds": round(
+                            transport_timeout_seconds, 3
+                        ),
                     })
                     log.warning(
                         "Bedrock transport error (%s, attempt=%d/%d). Retrying in %.2fs: %s",
@@ -540,7 +655,7 @@ class BedrockLLM(
                         delay,
                         exc,
                     )
-                    _sleep_before_retry(delay, deadline)
+                    _sleep(delay)
                     continue
                 raise api_error from exc
 
@@ -770,6 +885,7 @@ class BedrockLLM(
 
         raw = self._converse_with_retry(
             params=params,
+            timeout=timeout,
             deadline=deadline,
             operation="complete",
         )
@@ -846,7 +962,6 @@ class BedrockLLM(
             AgentStructuredOutputError: If the visible structured JSON
                 cannot be parsed into a dictionary.
         """
-        del timeout
         if deadline is not None:
             _check_deadline(deadline)
 
@@ -877,7 +992,13 @@ class BedrockLLM(
                     "type": "json_schema",
                     "structure": {
                         "jsonSchema": {
-                            "schema": json.dumps(schema, ensure_ascii=False),
+                            # Adapt the canonical schema to the strict json_schema
+                            # contract (every property required, no `default`) —
+                            # the provider owns its endpoint's schema shape.
+                            "schema": json.dumps(
+                                strictify_json_schema(schema),
+                                ensure_ascii=False,
+                            ),
                             "name": schema_name,
                             "description": schema_description or schema_name,
                         }
@@ -900,6 +1021,7 @@ class BedrockLLM(
 
         raw = self._converse_with_retry(
             params=params,
+            timeout=timeout,
             deadline=deadline,
             operation="structured_response",
         )

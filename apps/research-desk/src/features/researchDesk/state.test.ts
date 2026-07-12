@@ -11,8 +11,61 @@ import type {
   KnowledgeSessionGroupRecord,
   KnowledgeSessionRecord,
   KnowledgeThreadItemRecord,
+  ResearchRunRecord,
 } from '@/features/project/types'
+import { applyRunEvent, fromRunSummary, mergeRunSummary } from '@/features/project/types'
 import { researchDeskReducer } from './state'
+
+function makeRunEvent(overrides: Partial<ResearchRunEvent> = {}): ResearchRunEvent {
+  return {
+    created_at: Date.parse('2026-01-01T00:00:05.000Z') / 1000,
+    data: {},
+    run_id: 'run-1',
+    sequence: 1,
+    type: 'inqtrix.run.started',
+    ...overrides,
+  }
+}
+
+describe('applyRunEvent startedAt', () => {
+  it('derives startedAt from the running-transition event when the summary had none', () => {
+    // A fresh run is created `queued` with started_at null; the running event
+    // carries no started_at, so without deriving it the live timer sticks at
+    // 00:00:00 (status flips to running while startedAt stays undefined).
+    const queued = fromRunSummary(makeRunSummary(), 'test-stack')
+    expect(queued.startedAt).toBeUndefined()
+
+    const next = applyRunEvent(queued, makeRunEvent())
+    expect(next.status).toBe('running')
+    expect(next.startedAt).toBe('2026-01-01T00:00:05.000Z')
+  })
+
+  it('does not overwrite an already-set startedAt on later running events', () => {
+    const running = applyRunEvent(fromRunSummary(makeRunSummary(), 'test-stack'), makeRunEvent())
+    const later = applyRunEvent(
+      running,
+      makeRunEvent({
+        created_at: Date.parse('2026-01-01T00:00:42.000Z') / 1000,
+        data: { status: 'running' },
+        sequence: 2,
+        type: 'inqtrix.progress',
+      }),
+    )
+    expect(later.startedAt).toBe('2026-01-01T00:00:05.000Z')
+  })
+
+  it('preserves an authoritative summary startedAt from a hydrated running run', () => {
+    // listResearchRuns already carries started_at for in-flight runs — an event
+    // must never clobber that with a (later) event timestamp.
+    const hydrated = fromRunSummary(
+      makeRunSummary({ started_at: Date.parse('2026-01-01T00:00:01.000Z') / 1000, status: 'running' }),
+      'test-stack',
+    )
+    expect(hydrated.startedAt).toBe('2026-01-01T00:00:01.000Z')
+    const next = applyRunEvent(hydrated, makeRunEvent({ created_at: Date.parse('2026-01-01T00:00:09.000Z') / 1000 }))
+    expect(next.startedAt).toBe('2026-01-01T00:00:01.000Z')
+  })
+})
 
 function makeAsset(id: string, label: string, overrides: Partial<FileAssetRecord> = {}): FileAssetRecord {
   return {
@@ -157,6 +210,49 @@ function makeEditorDocument(
   }
 }
 
+describe('setResearchRunAutocomplete', () => {
+  it('toggles a run\'s @-mention availability and marks the project dirty', () => {
+    const base = createEmptyProjectState()
+    base.researchRuns = {
+      'run-1': { events: [], runId: 'run-1', status: 'completed', summary: { title: 'r' } } as unknown as ResearchRunRecord,
+    }
+    base.researchRunOrder = ['run-1']
+
+    const hidden = researchDeskReducer(base, {
+      includeInAutocomplete: false,
+      runId: 'run-1',
+      type: 'setResearchRunAutocomplete',
+    })
+    expect(hidden.researchRuns['run-1'].includeInAutocomplete).toBe(false)
+    expect(hidden.dirty).toBe(true)
+
+    // An unknown run id is a no-op and returns the same state reference.
+    const noop = researchDeskReducer(hidden, {
+      includeInAutocomplete: true,
+      runId: 'missing',
+      type: 'setResearchRunAutocomplete',
+    })
+    expect(noop).toBe(hidden)
+  })
+})
+
+describe('mergeRunSummary', () => {
+  it('preserves the local @-mention availability across an API summary refresh', () => {
+    const prior = {
+      events: [],
+      includeInAutocomplete: false,
+      runId: 'run-1',
+      status: 'completed',
+      summary: { title: 'r' },
+    } as unknown as ResearchRunRecord
+
+    const merged = mergeRunSummary(prior, makeRunSummary({ run_id: 'run-1', status: 'completed' }), 'fallback-stack')
+
+    // A run-list refresh must not silently re-enable a report the user hid.
+    expect(merged.includeInAutocomplete).toBe(false)
+  })
+})
+
 describe('ui visibility reducer actions', () => {
   it('hides and shows the chat history panel', () => {
     const hidden = researchDeskReducer(createEmptyProjectState(), {
@@ -226,6 +322,21 @@ describe('ui visibility reducer actions', () => {
       type: 'setPanelLayoutSize',
     })
     expect(tooWide.ui.panelLayout.researchReport).toBe(58)
+
+    const editorResized = researchDeskReducer(base, {
+      key: 'editorComments',
+      size: 30,
+      type: 'setPanelLayoutSize',
+    })
+    expect(editorResized.dirty).toBe(true)
+    expect(editorResized.ui.panelLayout.editorComments).toBe(30)
+
+    const editorTooNarrow = researchDeskReducer(base, {
+      key: 'editorComments',
+      size: 5,
+      type: 'setPanelLayoutSize',
+    })
+    expect(editorTooNarrow.ui.panelLayout.editorComments).toBe(20)
   })
 })
 
@@ -297,6 +408,7 @@ describe('pinned explorer reducer actions', () => {
           chatThreadIds: ['ct-1'],
           editorDocumentIds: ['doc-1'],
           knowledgeSessionIds: [sessionId],
+          agentSessionIds: [],
         },
         selectedChatThreadId: 'ct-1',
       },
@@ -319,6 +431,7 @@ describe('pinned explorer reducer actions', () => {
       chatThreadIds: [],
       editorDocumentIds: [],
       knowledgeSessionIds: [],
+      agentSessionIds: [],
     })
   })
 })
@@ -1499,5 +1612,534 @@ describe('live indexing-job lifecycle', () => {
     expect(next).toBe(settled)
     expect(next.vectorIndexes[id].status).toBe('ready')
     expect(next.vectorIndexes[id].history ?? []).toHaveLength(1)
+  })
+})
+
+describe('editor document revision = server base (A2 CAS contract)', () => {
+  it('does NOT bump revision on rename/move; only updatedAt moves', () => {
+    const base = {
+      ...createEmptyProjectState(),
+      editorDocumentOrder: ['doc-1'],
+      editorDocuments: { 'doc-1': makeEditorDocument('doc-1', 'Doc') },
+    }
+    // revision is the last-synced server base and stays put across local
+    // edits; only updatedAt moves so the debounced autosave fires. The save
+    // sends base+1 and the store CAS is against the base — a per-edit bump
+    // would be the old, race-prone counter that P1 exploited.
+    const renamed = researchDeskReducer(base, {
+      documentId: 'doc-1',
+      title: 'Neuer Titel',
+      type: 'renameEditorDocument',
+    })
+    expect(renamed.editorDocuments['doc-1'].revision).toBe(1)
+    expect(renamed.editorDocuments['doc-1'].updatedAt).not.toBe(
+      base.editorDocuments['doc-1'].updatedAt,
+    )
+    expect(renamed.dirty).toBe(true)
+
+    const moved = researchDeskReducer(renamed, {
+      documentId: 'doc-1',
+      folderId: 'edf_x',
+      targetIndex: 0,
+      type: 'moveEditorDocumentToFolder',
+    })
+    expect(moved.editorDocuments['doc-1'].revision).toBe(1)
+  })
+
+  it('leaves revision put on documents orphaned by a folder delete', () => {
+    const base = {
+      ...createEmptyProjectState(),
+      editorDocumentOrder: ['doc-1'],
+      editorDocuments: {
+        'doc-1': makeEditorDocument('doc-1', 'Doc', { folderId: 'edf_1' }),
+      },
+      editorFolders: {
+        edf_1: {
+          createdAt: '2026-01-01T00:00:00.000Z',
+          id: 'edf_1',
+          title: 'Ordner',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      },
+      editorFolderOrder: ['edf_1'],
+    }
+    const next = researchDeskReducer(base, {
+      folderId: 'edf_1',
+      type: 'deleteEditorFolder',
+    })
+    expect(next.editorDocuments['doc-1'].folderId).toBeNull()
+    expect(next.editorDocuments['doc-1'].revision).toBe(1)
+  })
+
+  it('adopts the server revision after a successful save (base tracks server)', () => {
+    const base = {
+      ...createEmptyProjectState(),
+      editorDocumentOrder: ['doc-1'],
+      editorDocuments: { 'doc-1': makeEditorDocument('doc-1', 'Doc') },
+    }
+    // A save based on base 1 advanced the server to 2; adopt it, revision-only.
+    const adopted = researchDeskReducer(base, {
+      documentId: 'doc-1',
+      revision: 2,
+      type: 'adoptEditorDocumentRevision',
+    })
+    expect(adopted.editorDocuments['doc-1'].revision).toBe(2)
+    expect(adopted.editorDocuments['doc-1'].updatedAt).toBe(
+      base.editorDocuments['doc-1'].updatedAt,
+    )
+    expect(adopted.dirty).toBe(base.dirty)
+    // A late/duplicate adopt must never rewind a fresher base.
+    const noop = researchDeskReducer(adopted, {
+      documentId: 'doc-1',
+      revision: 1,
+      type: 'adoptEditorDocumentRevision',
+    })
+    expect(noop).toBe(adopted)
+  })
+
+  it('rebase (no live edit) adopts the server base, keeps updatedAt', () => {
+    const base = {
+      ...createEmptyProjectState(),
+      editorDocumentOrder: ['doc-1'],
+      editorDocuments: { 'doc-1': makeEditorDocument('doc-1', 'Doc') },
+    }
+    const rebased = researchDeskReducer(base, {
+      contentMarkdown: 'server body',
+      documentId: 'doc-1',
+      pushedContentMarkdown: base.editorDocuments['doc-1'].contentMarkdown,
+      revision: 7,
+      type: 'rebaseServerEditorDocument',
+    })
+    expect(rebased.editorDocuments['doc-1'].revision).toBe(7)
+    expect(rebased.editorDocuments['doc-1'].contentMarkdown).toBe('server body')
+    expect(rebased.editorDocuments['doc-1'].updatedAt).toBe(
+      base.editorDocuments['doc-1'].updatedAt,
+    )
+  })
+
+  it('rebase keeps a live keystroke and adopts the server base (no silent loss)', () => {
+    const base = {
+      ...createEmptyProjectState(),
+      editorDocumentOrder: ['doc-1'],
+      editorDocuments: { 'doc-1': makeEditorDocument('doc-1', 'Doc') },
+    }
+    // The flush PUT "# Doc"; during the PUT->GET window the user typed.
+    const typed = researchDeskReducer(base, {
+      documentId: 'doc-1',
+      contentMarkdown: '# Doc + live edit',
+      type: 'updateEditorDocumentMarkdown',
+    })
+    const rebased = researchDeskReducer(typed, {
+      contentMarkdown: 'server body from agent patch',
+      documentId: 'doc-1',
+      pushedContentMarkdown: '# Doc', // what the failed PUT carried
+      revision: 7,
+      type: 'rebaseServerEditorDocument',
+    })
+    // The live keystroke is NOT overwritten by the server body…
+    expect(rebased.editorDocuments['doc-1'].contentMarkdown).toBe(
+      '# Doc + live edit',
+    )
+    // …and revision rebases onto the server BASE (7); the next flush re-pushes
+    // the live edit as base+1 (8), staying dirty. No silent loss.
+    expect(rebased.editorDocuments['doc-1'].revision).toBe(7)
+    expect(rebased.dirty).toBe(true)
+  })
+})
+
+describe('agent canvas is reconciled on session switch', () => {
+  it('clears canvas tabs when a different session is selected', () => {
+    const base = createEmptyProjectState()
+    const withSessions = {
+      ...base,
+      agentSessions: {
+        's1': {
+          id: 's1', title: 'A', groupId: null, createdAt: '', updatedAt: '', runIds: [],
+          sourcePolicy: { web: 'available' as const, knowledge: 'available' as const },
+        },
+        's2': {
+          id: 's2', title: 'B', groupId: null, createdAt: '', updatedAt: '', runIds: [],
+          sourcePolicy: { web: 'available' as const, knowledge: 'available' as const },
+        },
+      },
+      selectedAgentSessionId: 's1',
+    }
+    // Open a pinned plan tab in session s1.
+    const withTab = researchDeskReducer(withSessions, {
+      descriptor: { runId: 'r1', view: 'plan' },
+      source: 'user',
+      type: 'openAgentCanvasView',
+    })
+    expect(withTab.agentCanvas.tabs).toHaveLength(1)
+    expect(withTab.agentCanvas.open).toBe(true)
+
+    // Switching to s2 must clear the canvas so s1's tab does not leak.
+    const switched = researchDeskReducer(withTab, {
+      sessionId: 's2',
+      type: 'selectAgentSession',
+    })
+    expect(switched.selectedAgentSessionId).toBe('s2')
+    expect(switched.agentCanvas.tabs).toEqual([])
+    expect(switched.agentCanvas.open).toBe(false)
+    expect(switched.agentCanvas.activeTabId).toBeNull()
+
+    // Re-selecting the SAME session is a no-op (canvas preserved).
+    const withTabAgain = researchDeskReducer(switched, {
+      descriptor: { runId: 'r2', view: 'run' },
+      source: 'user',
+      type: 'openAgentCanvasView',
+    })
+    const same = researchDeskReducer(withTabAgain, {
+      sessionId: 's2',
+      type: 'selectAgentSession',
+    })
+    expect(same).toBe(withTabAgain)
+  })
+
+  it('clears canvas when creating (auto-selecting) a new session', () => {
+    const base = { ...createEmptyProjectState(), selectedAgentSessionId: 's1' }
+    const withTab = researchDeskReducer(base, {
+      descriptor: { runId: 'r1', view: 'plan' },
+      source: 'user',
+      type: 'openAgentCanvasView',
+    })
+    expect(withTab.agentCanvas.tabs).toHaveLength(1)
+    const created = researchDeskReducer(withTab, {
+      session: {
+        id: 's2',
+        title: 'New',
+        groupId: null,
+        createdAt: '',
+        updatedAt: '',
+        runIds: [],
+        sourcePolicy: { web: 'available', knowledge: 'available' },
+      },
+      type: 'createAgentSession',
+    })
+    expect(created.selectedAgentSessionId).toBe('s2')
+    expect(created.agentCanvas.tabs).toEqual([])
+  })
+
+  it('clears canvas when a select=true run summary switches sessions', () => {
+    const base = { ...createEmptyProjectState(), selectedAgentSessionId: 's1' }
+    const withTab = researchDeskReducer(base, {
+      descriptor: { runId: 'r1', view: 'plan' },
+      source: 'user',
+      type: 'openAgentCanvasView',
+    })
+    const summary: ResearchRunSummary = {
+      run_id: 'r-new',
+      status: 'running',
+      queue_position: null,
+      question: 'Neue Analyse',
+      stack: 'default',
+      mode: 'workspace_agent',
+      kind: 'agent',
+      session_id: 's-other',
+      agent_overrides: {},
+      created_at: 1_700_000_000,
+      started_at: 1_700_000_000,
+      finished_at: null,
+      elapsed_seconds: null,
+      snapshot: {},
+      error: null,
+      events_url: '/v1/runs/r-new/events',
+      result_url: '/v1/runs/r-new/result',
+    }
+    const upserted = researchDeskReducer(withTab, {
+      select: true,
+      summary,
+      type: 'upsertAgentRunSummary',
+    })
+    expect(upserted.selectedAgentSessionId).toBe('s-other')
+    expect(upserted.agentCanvas.tabs).toEqual([])
+  })
+})
+
+describe('agent plan stale re-flag (plan tab on-open fetch)', () => {
+  const summary: ResearchRunSummary = {
+    run_id: 'r-plan',
+    status: 'waiting_for_approval',
+    queue_position: null,
+    question: 'Planlauf',
+    stack: 'default',
+    mode: 'workspace_agent',
+    kind: 'agent',
+    session_id: 's-plan',
+    agent_overrides: {},
+    created_at: 1_700_000_000,
+    started_at: 1_700_000_000,
+    finished_at: null,
+    elapsed_seconds: null,
+    snapshot: {},
+    error: null,
+    events_url: '/v1/runs/r-plan/events',
+    result_url: '/v1/runs/r-plan/result',
+  }
+
+  it('re-flags a cleared plan as stale without dirtying the project', () => {
+    const base = researchDeskReducer(createEmptyProjectState(), {
+      summary,
+      type: 'upsertAgentRunSummary',
+    })
+    // The 404 path clears the flag with no content (pre-planning).
+    const cleared = researchDeskReducer(base, {
+      plan: null,
+      runId: 'r-plan',
+      type: 'setAgentRunPlan',
+    })
+    expect(cleared.agentRuns['r-plan'].planStale).toBe(false)
+    expect(cleared.agentRuns['r-plan'].plan).toBeUndefined()
+    const reflagged = researchDeskReducer(cleared, {
+      runId: 'r-plan',
+      type: 'markAgentRunPlanStale',
+    })
+    expect(reflagged.agentRuns['r-plan'].planStale).toBe(true)
+    expect(reflagged.dirty).toBe(false)
+  })
+
+  it('is an identity no-op while the flag is already set', () => {
+    const base = researchDeskReducer(createEmptyProjectState(), {
+      summary,
+      type: 'upsertAgentRunSummary',
+    })
+    expect(base.agentRuns['r-plan'].planStale).toBe(true)
+    const again = researchDeskReducer(base, {
+      runId: 'r-plan',
+      type: 'markAgentRunPlanStale',
+    })
+    expect(again).toBe(base)
+  })
+})
+
+describe('gate-tray root fixes (P6): approvals reconcile + exclusive membership', () => {
+  const agentSummary = (
+    overrides: Partial<ResearchRunSummary> = {},
+  ): ResearchRunSummary => ({
+    run_id: 'r-gate',
+    status: 'waiting_for_approval',
+    queue_position: null,
+    question: 'Gate-Lauf',
+    stack: 'default',
+    mode: 'workspace_agent',
+    kind: 'agent',
+    session_id: 's-gate',
+    agent_overrides: {},
+    created_at: 1_700_000_000,
+    started_at: 1_700_000_000,
+    finished_at: null,
+    elapsed_seconds: null,
+    snapshot: {},
+    error: null,
+    events_url: '/v1/runs/r-gate/events',
+    result_url: '/v1/runs/r-gate/result',
+    ...overrides,
+  })
+  const approvalWire = (status: 'pending' | 'approved') => ({
+    approval_id: 'ap-1',
+    run_id: 'r-gate',
+    kind: 'plan' as const,
+    status,
+    subject_type: 'plan',
+    subject_id: 'p1',
+    payload: {},
+    decision: status === 'approved' ? 'approve' : '',
+    note: '',
+    decided_by_sub: '',
+    created_at: 1_700_000_000,
+    decided_at: status === 'approved' ? 1_700_000_100 : null,
+  })
+
+  it('never regresses a decided approval back to pending (stale refetch race)', () => {
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      summary: agentSummary(),
+      type: 'upsertAgentRunSummary',
+    })
+    state = researchDeskReducer(state, {
+      approvals: [approvalWire('approved')],
+      runId: 'r-gate',
+      type: 'setAgentRunApprovals',
+    })
+    // The approval.decided event triggers a full-list refetch that can
+    // observe the row still pending — it must not re-open the gate.
+    state = researchDeskReducer(state, {
+      approvals: [approvalWire('pending')],
+      runId: 'r-gate',
+      type: 'setAgentRunApprovals',
+    })
+    expect(state.agentRuns['r-gate'].approvals).toHaveLength(1)
+    expect(state.agentRuns['r-gate'].approvals[0].status).toBe('approved')
+  })
+
+  it('never regresses an answered clarification back to pending', () => {
+    const clarificationWire = (status: 'pending' | 'answered') => ({
+      clarification_id: 'cl-1',
+      run_id: 'r-gate',
+      question: 'Welcher Markt?',
+      options: [],
+      default_assumption: '',
+      status,
+      answer: status === 'answered' ? 'DACH' : '',
+      option_id: '',
+      answered_by_sub: '',
+      created_at: 1_700_000_000,
+      answered_at: status === 'answered' ? 1_700_000_050 : null,
+    })
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      summary: agentSummary(),
+      type: 'upsertAgentRunSummary',
+    })
+    state = researchDeskReducer(state, {
+      clarifications: [clarificationWire('answered')],
+      runId: 'r-gate',
+      type: 'setAgentRunClarifications',
+    })
+    // The clarification.answered event refetch can race the commit and
+    // observe the round still pending — the gate must stay closed.
+    state = researchDeskReducer(state, {
+      clarifications: [clarificationWire('pending')],
+      runId: 'r-gate',
+      type: 'setAgentRunClarifications',
+    })
+    expect(state.agentRuns['r-gate'].clarifications).toHaveLength(1)
+    expect(state.agentRuns['r-gate'].clarifications[0].status).toBe('answered')
+  })
+
+  it('sweeps a run out of its phantom session once the real session hydrates', () => {
+    // First sighting without session_id: phantom session keyed by runId.
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      select: true,
+      summary: agentSummary({ session_id: undefined }),
+      type: 'upsertAgentRunSummary',
+    })
+    expect(state.agentSessions['r-gate'].runIds).toEqual(['r-gate'])
+    expect(state.selectedAgentSessionId).toBe('r-gate')
+    // Later summary carries the real session: exclusive membership, the
+    // emptied phantom shell disappears and selection follows the run.
+    state = researchDeskReducer(state, {
+      summary: agentSummary(),
+      type: 'upsertAgentRunSummary',
+    })
+    expect(state.agentSessions['r-gate']).toBeUndefined()
+    expect(state.agentSessionOrder).not.toContain('r-gate')
+    expect(state.agentSessions['s-gate'].runIds).toEqual(['r-gate'])
+    expect(state.selectedAgentSessionId).toBe('s-gate')
+    expect(state.ui.selectedAgentSessionId).toBe('s-gate')
+  })
+
+  it('keeps an empty-string session_id from stomping the known session', () => {
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      summary: agentSummary(),
+      type: 'upsertAgentRunSummary',
+    })
+    state = researchDeskReducer(state, {
+      summary: agentSummary({ session_id: '', status: 'running' }),
+      type: 'upsertAgentRunSummary',
+    })
+    expect(state.agentRuns['r-gate'].sessionId).toBe('s-gate')
+    expect(state.agentSessions['s-gate'].runIds).toEqual(['r-gate'])
+    expect(state.agentSessions['r-gate']).toBeUndefined()
+  })
+})
+
+describe('agent session selection mirrors into persisted ui intent', () => {
+  it('select, create, run-summary select and delete all write ui.selectedAgentSessionId', () => {
+    const base = {
+      ...createEmptyProjectState(),
+      agentSessionOrder: ['s1'],
+      agentSessions: {
+        s1: {
+          id: 's1', title: 'A', groupId: null, createdAt: '', updatedAt: '', runIds: [],
+          sourcePolicy: { web: 'available' as const, knowledge: 'available' as const },
+        },
+      },
+    }
+    const selected = researchDeskReducer(base, {
+      sessionId: 's1',
+      type: 'selectAgentSession',
+    })
+    expect(selected.ui.selectedAgentSessionId).toBe('s1')
+
+    const created = researchDeskReducer(selected, {
+      session: {
+        id: 's2', title: 'B', groupId: null, createdAt: '', updatedAt: '', runIds: [],
+        sourcePolicy: { web: 'available' as const, knowledge: 'available' as const },
+      },
+      type: 'createAgentSession',
+    })
+    expect(created.ui.selectedAgentSessionId).toBe('s2')
+
+    const deleted = researchDeskReducer(created, {
+      sessionId: 's2',
+      type: 'deleteAgentSession',
+    })
+    expect(deleted.selectedAgentSessionId).toBe(deleted.ui.selectedAgentSessionId)
+  })
+})
+
+describe('agent session source-policy hydration', () => {
+  it('does not reset local policy when a metadata-only list row omits items_json', () => {
+    const base = createEmptyProjectState()
+    const withSession = researchDeskReducer(base, {
+      session: {
+        id: 's-source',
+        title: 'Sources',
+        groupId: null,
+        createdAt: '2026-07-10T10:00:00.000Z',
+        updatedAt: '2026-07-10T10:00:00.000Z',
+        runIds: [],
+        sourcePolicy: { web: 'disabled', knowledge: 'available' },
+      },
+      type: 'createAgentSession',
+    })
+    const metadataOnly = researchDeskReducer(withSession, {
+      groups: [],
+      sessions: [{
+        id: 's-source',
+        title: 'Sources',
+        group_id: null,
+        created_at: Date.parse('2026-07-10T10:00:00.000Z') / 1000,
+        updated_at: Date.parse('2026-07-10T10:01:00.000Z') / 1000,
+      }],
+      type: 'upsertServerAgentSessions',
+    })
+    expect(metadataOnly.agentSessions['s-source'].sourcePolicy).toEqual({
+      web: 'disabled',
+      knowledge: 'available',
+    })
+  })
+})
+
+describe('agent model selection actions (R3)', () => {
+  it('keeps the chat-picker exclusivity contract on the agent fields', () => {
+    let state = createEmptyProjectState()
+    state = researchDeskReducer(state, {
+      model: 'claude-opus-4-8',
+      type: 'setSelectedAgentModel',
+    })
+    state = researchDeskReducer(state, {
+      effort: 'high',
+      type: 'setSelectedAgentEffort',
+    })
+    expect(state.ui.selectedAgentModel).toBe('claude-opus-4-8')
+    expect(state.ui.selectedAgentEffort).toBe('high')
+    expect(state.ui.selectedAgentModelTier).toBeNull()
+    // Tier pick clears model AND effort (effort is model-dependent).
+    state = researchDeskReducer(state, {
+      tier: 'mid',
+      type: 'setSelectedAgentModelTier',
+    })
+    expect(state.ui.selectedAgentModelTier).toBe('mid')
+    expect(state.ui.selectedAgentModel).toBeNull()
+    expect(state.ui.selectedAgentEffort).toBeNull()
+    // Model pick clears the tier again.
+    state = researchDeskReducer(state, {
+      model: 'claude-haiku-4-5',
+      type: 'setSelectedAgentModel',
+    })
+    expect(state.ui.selectedAgentModelTier).toBeNull()
+    // The AGENT selection never touches the chat fields.
+    expect(state.ui.selectedChatModel).toBeNull()
+    expect(state.ui.selectedChatModelTier).toBeNull()
   })
 })

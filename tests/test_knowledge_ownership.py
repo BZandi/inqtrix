@@ -24,7 +24,7 @@ from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
 from inqtrix.knowledge.stores.ports import KnowledgeProviderContext
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server.container import build_container
-from inqtrix.server.routers import chat, knowledge, runs
+from inqtrix.server.routers import chat, knowledge, runs, sources
 from inqtrix.server.routers.shares import build_router as build_shares_router
 from inqtrix.settings import ServerSettings, Settings, StorageSettings
 
@@ -73,6 +73,7 @@ def make_world() -> tuple[TestClient, MemoryKnowledgeStore]:
     assert "knowledge_collection" in container.share_service.resource_types
     app = FastAPI()
     app.include_router(knowledge.build_router(container))
+    app.include_router(sources.build_router(container))
     app.include_router(runs.build_router(container))
     app.include_router(chat.build_router(container))
     app.include_router(build_shares_router(container))
@@ -176,6 +177,75 @@ def test_document_reads_deny_via_parent(world):
     # Denial and absence are byte-identical.
     assert denied_text.json() == missing.json()
 
+    # The chunk view scopes exactly like the text route.
+    denied_chunk = client.get(
+        f"/v1/knowledge/documents/{document_id}/chunks/0",
+        headers=as_user(RECIPIENT),
+    )
+    assert denied_chunk.status_code == 404
+    assert denied_chunk.json() == missing.json()
+
+
+def test_source_view_denies_stranger_via_parent(world):
+    """``/v1/sources/{id}`` is scoped exactly like the document
+    endpoints: the owner reads the citable view, a stranger gets the
+    same 404 an unknown id produces."""
+    client, _store = world
+    collection_id = create_collection(client, sub=OWNER)
+    document_id = add_document(client, collection_id, sub=OWNER).json()["id"]
+
+    owner_view = client.get(
+        f"/v1/sources/{document_id}", headers=as_user(OWNER)
+    )
+    assert owner_view.status_code == 200
+    assert owner_view.json()["collection_id"] == collection_id
+
+    denied = client.get(
+        f"/v1/sources/{document_id}", headers=as_user(RECIPIENT)
+    )
+    assert denied.status_code == 404
+    missing = client.get(
+        "/v1/sources/kd_does_not_exist", headers=as_user(RECIPIENT)
+    )
+    # Denial and absence are byte-identical.
+    assert denied.json() == missing.json()
+
+
+def test_source_view_admits_accepted_share_not_pending(world):
+    """A pending grant admits nothing; acceptance opens the source
+    view via the parent collection's view grant."""
+    client, _store = world
+    collection_id = create_collection(client, sub=OWNER)
+    document_id = add_document(client, collection_id, sub=OWNER).json()["id"]
+
+    granted = client.post(
+        "/v1/shares",
+        json={
+            "resource_type": "knowledge_collection",
+            "resource_id": collection_id,
+            "invitees": [{"subject_id": RECIPIENT, "permission": "view"}],
+        },
+        headers=as_user(OWNER),
+    )
+    assert granted.status_code == 201
+
+    pending_denied = client.get(
+        f"/v1/sources/{document_id}", headers=as_user(RECIPIENT)
+    )
+    assert pending_denied.status_code == 404
+
+    share_id = granted.json()["data"][0]["id"]
+    accepted = client.post(
+        f"/v1/shares/{share_id}/accept", headers=as_user(RECIPIENT)
+    )
+    assert accepted.status_code == 200
+
+    admitted = client.get(
+        f"/v1/sources/{document_id}", headers=as_user(RECIPIENT)
+    )
+    assert admitted.status_code == 200
+    assert "Frist" in admitted.json()["text"]
+
 
 def test_legacy_collections_stay_open_to_everyone(world):
     client, store = world
@@ -276,9 +346,18 @@ def test_search_filters_to_visible_collections(world):
         headers=as_user(RECIPIENT),
     )
     assert mixed.status_code == 200
+    mixed_body = mixed.json()
     assert all(
-        hit["collection_id"] == legacy.id for hit in mixed.json()["data"]
+        hit["collection_id"] == legacy.id for hit in mixed_body["data"]
     )
+    # The silent filter is no longer silent: the dropped id surfaces as
+    # a warning so an agent planning against the results sees it (E5).
+    filtered = [
+        warning
+        for warning in mixed_body["warnings"]
+        if warning["code"] == "collections_filtered"
+    ]
+    assert filtered and filtered[0]["filtered_ids"] == [owned]
 
     # Asking ONLY for the invisible collection is the indistinct 404.
     denied = client.post(

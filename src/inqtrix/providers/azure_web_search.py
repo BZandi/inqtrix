@@ -24,15 +24,19 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+import time
 from typing import Any
 
 from openai import APIStatusError, OpenAI, OpenAIError, RateLimitError
 
 from inqtrix.exceptions import (
     AgentRateLimited,
+    AgentProviderTimeout,
     AgentTimeout,
     AzureFoundryWebSearchAPIError,
 )
+from inqtrix.constants import SEARCH_TIMEOUT
 from inqtrix.providers._azure_common import (
     extract_azure_api_error_details,
     resolve_azure_credential,
@@ -46,6 +50,8 @@ from inqtrix.providers.base import (
     _build_recency_language_hints,
     _call_openai_chat_completion_with_retries,
     _check_deadline,
+    _check_provider_operation_deadline,
+    _operation_deadline,
 )
 from inqtrix.search_result import GroundedSearchResult, GroundedSource
 from inqtrix.urls import extract_urls
@@ -77,8 +83,6 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
         "language_filter",
         "domain_filter",
     })
-    max_search_concurrency = 2
-
     def __init__(
         self,
         *,
@@ -90,7 +94,8 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
         tenant_id: str | None = None,
         client_id: str | None = None,
         client_secret: str | None = None,
-        timeout: float = 60.0,
+        timeout: float = SEARCH_TIMEOUT,
+        max_concurrency: int = 6,
         # Internal: accept a pre-built OpenAI client from tests.
         _client: Any | None = None,
     ) -> None:
@@ -113,6 +118,8 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
             client_secret: Optional Entra client secret for Service
                 Principal auth.
             timeout: Default per-call timeout budget in seconds.
+            max_concurrency: Maximum simultaneous calls on this provider
+                instance. Research and Agent Desk callers share this gate.
             _client: Optional prebuilt OpenAI client used by tests.
 
         Raises:
@@ -134,11 +141,17 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
             raise ValueError("project_endpoint ist erforderlich")
         if not agent_name:
             raise ValueError("agent_name ist erforderlich")
+        if max_concurrency < 1:
+            raise ValueError("max_concurrency muss mindestens 1 sein")
 
         self._project_endpoint = project_endpoint.rstrip("/")
         self._agent_name = agent_name
         self._agent_version = agent_version
         self._timeout = timeout
+        self.max_search_concurrency = int(max_concurrency)
+        self._concurrency_gate = threading.BoundedSemaphore(
+            self.max_search_concurrency
+        )
 
         if _client is not None:
             self._client = _client
@@ -196,6 +209,47 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
         return_related: bool = False,
         deadline: float | None = None,
     ) -> GroundedSearchResult:
+        """Execute one deadline-bounded search through the shared gate."""
+        operation_deadline = _operation_deadline(self._timeout, deadline)
+        remaining = max(0.0, operation_deadline - time.monotonic())
+        if not self._concurrency_gate.acquire(timeout=remaining):
+            _check_provider_operation_deadline(
+                operation_deadline,
+                deadline,
+                label="Azure-Foundry-WebSearch",
+            )
+            raise AgentProviderTimeout(
+                "Azure-Foundry-WebSearch wartete bis zum Operationslimit "
+                "auf einen freien Parallelitaetsplatz."
+            )
+        try:
+            return self._search_with_slot(
+                query,
+                search_context_size=search_context_size,
+                recency_filter=recency_filter,
+                language_filter=language_filter,
+                domain_filter=domain_filter,
+                search_mode=search_mode,
+                return_related=return_related,
+                deadline=operation_deadline,
+                outer_deadline=deadline,
+            )
+        finally:
+            self._concurrency_gate.release()
+
+    def _search_with_slot(
+        self,
+        query: str,
+        *,
+        search_context_size: str = "high",
+        recency_filter: str | None = None,
+        language_filter: list[str] | None = None,
+        domain_filter: list[str] | None = None,
+        search_mode: str | None = None,
+        return_related: bool = False,
+        deadline: float | None = None,
+        outer_deadline: float | None = None,
+    ) -> GroundedSearchResult:
         """Execute a search through the Foundry agent's Responses API.
 
         Args:
@@ -243,6 +297,9 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
                 model=self.search_model,
                 operation="web_search",
                 deadline=deadline,
+                outer_deadline=outer_deadline,
+                timeout_label="Azure-Foundry-WebSearch",
+                configured_timeout_seconds=self._timeout,
                 create=lambda: self._client.responses.create(
                     input=[{"role": "user", "content": user_content}],
                     extra_body={"agent_reference": agent_ref},
@@ -256,12 +313,23 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
             details = self._extract_api_error_details(exc)
             if details["status_code"] == 429:
                 raise AgentRateLimited(self._agent_name, exc) from exc
+            status_code = int(details["status_code"] or 502)
             log.error(
                 "Azure-Foundry-WebSearch fehlgeschlagen fuer '%s': %s", query[:80], exc
             )
             self._set_nonfatal_notice(
                 f"Azure-Foundry-WebSearch fehlgeschlagen fuer Query '{query[:80]}': "
-                f"{details['message'] or exc}; leeres Ergebnis wird weiterverwendet."
+                f"{details['message'] or exc}; leeres Ergebnis wird weiterverwendet.",
+                code=(
+                    "provider_timeout"
+                    if status_code == 408
+                    else (
+                        "upstream_5xx"
+                        if status_code >= 500
+                        else "provider_error"
+                    )
+                ),
+                http_status=status_code,
             )
             return GroundedSearchResult()
         except AgentTimeout:
@@ -269,7 +337,7 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
         except OpenAIError as exc:
             exc_text = str(exc).lower()
             if "timeout" in exc_text or "timed out" in exc_text:
-                raise AgentTimeout(
+                raise AgentProviderTimeout(
                     f"Azure-Foundry-WebSearch Timeout fuer '{query[:80]}'"
                 ) from exc
             log.error(
@@ -277,7 +345,9 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
             )
             self._set_nonfatal_notice(
                 f"Azure-Foundry-WebSearch fehlgeschlagen fuer Query '{query[:80]}': "
-                f"{exc}; leeres Ergebnis wird weiterverwendet."
+                f"{exc}; leeres Ergebnis wird weiterverwendet.",
+                code="temporary_transport",
+                http_status=503,
             )
             return GroundedSearchResult()
         except Exception as exc:  # noqa: BLE001 -- non-fatal degrade (see gotcha #11)
@@ -286,7 +356,9 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
             )
             self._set_nonfatal_notice(
                 f"Azure-Foundry-WebSearch fehlgeschlagen fuer Query '{query[:80]}': "
-                f"{exc}; leeres Ergebnis wird weiterverwendet."
+                f"{exc}; leeres Ergebnis wird weiterverwendet.",
+                code="provider_error",
+                http_status=502,
             )
             return GroundedSearchResult()
 

@@ -18,11 +18,13 @@ import type { InqtrixCapabilities } from './types'
 /** Grace (ms) the browser waits beyond the server's HTTP deadline. */
 export const CLIENT_WAIT_MARGIN_MS = 30_000
 
-/** Editor-run abort used only when the backend exposes no timeouts block. */
-export const EDITOR_FALLBACK_TIMEOUT_MS = 180_000
+/** Editor-run abort used only when the backend exposes no timeouts block.
+ * Mirrors the shipped 600s operation + 30s server wait + client margin. */
+export const EDITOR_FALLBACK_TIMEOUT_MS = 660_000
 
-/** Chat-chain step abort used only when the backend exposes no timeouts block. */
-export const CHAT_STEP_FALLBACK_TIMEOUT_MS = 120_000
+/** Chat-chain abort used only when the backend exposes no timeouts block.
+ * Mirrors the shipped 3600s run + 30s server wait + client margin. */
+export const CHAT_STEP_FALLBACK_TIMEOUT_MS = 3_660_000
 
 export function deriveEditorAbortMs(capabilities: InqtrixCapabilities | null): number {
   const waitSeconds = capabilities?.timeouts?.editor_wait_seconds

@@ -7,10 +7,12 @@ import {
   parseChatRule,
   parseFileAsset,
   parseProjectManifest,
+  parseResearchRun,
   serializeChatThread,
   serializeChatRule,
   serializeFileAsset,
   serializeProjectManifest,
+  serializeResearchRun,
 } from './markdown'
 import type {
   ChatRuleRecord,
@@ -81,6 +83,20 @@ function makeResearchRun(id: string, overrides: Partial<ResearchRunRecord> = {})
     ...overrides,
   }
 }
+
+describe('serializeResearchRun / parseResearchRun', () => {
+  it('round-trips an opted-out @-mention availability flag; default-on stays default', () => {
+    const hidden = makeResearchRun('run-hidden', { includeInAutocomplete: false })
+    const parsedHidden = parseResearchRun(serializeResearchRun(hidden).contents)
+    expect(parsedHidden.includeInAutocomplete).toBe(false)
+
+    // A default-on run carries no explicit flag; the round-trip must not invent
+    // a `false`, so availability stays the default (treated as available).
+    const shown = makeResearchRun('run-shown')
+    const parsedShown = parseResearchRun(serializeResearchRun(shown).contents)
+    expect(parsedShown.includeInAutocomplete).not.toBe(false)
+  })
+})
 
 describe('serializeChatRule / parseChatRule', () => {
   it('parses legacy rule files with prompt-library defaults', () => {
@@ -261,6 +277,7 @@ describe('project manifest file library', () => {
           chatThreadIds: ['ct-1'],
           editorDocumentIds: ['doc-1'],
           knowledgeSessionIds: ['ks-1'],
+          agentSessionIds: [],
         },
       },
     }
@@ -271,7 +288,22 @@ describe('project manifest file library', () => {
       chatThreadIds: ['ct-1'],
       editorDocumentIds: ['doc-1'],
       knowledgeSessionIds: ['ks-1'],
+      agentSessionIds: [],
     })
+  })
+
+  it('round-trips the agent session selection intent', () => {
+    const base = createEmptyProjectState()
+    const state: ProjectState = {
+      ...base,
+      ui: { ...base.ui, selectedAgentSessionId: 'agent-session-x' },
+    }
+
+    const data = parseProjectManifest(serializeProjectManifest(state).contents)
+
+    expect((data.ui as Record<string, unknown>).selectedAgentSessionId).toBe(
+      'agent-session-x',
+    )
   })
 
   it('serializes and re-parses sections, groups and asset order', () => {

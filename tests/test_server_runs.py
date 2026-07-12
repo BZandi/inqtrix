@@ -14,6 +14,8 @@ from inqtrix.server.runs import (
     RunHandle,
     RunNotFound,
     RunQueueFull,
+    RunParentInactive,
+    RunSessionActive,
     RunStatus,
     RunStore,
     format_sse_event,
@@ -443,12 +445,17 @@ def test_completed_result_and_ttl_cleanup(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_subscribe_replays_buffered_events_and_receives_live_events() -> None:
     store = _store()
-    run = store.submit(
-        question="q",
-        stack_name="default",
-        work=lambda handle: handle.emit("inqtrix.progress.message", {"message": "ready"}),
-    )
-    _wait_until(lambda: store.get(run["run_id"])["status"] == "completed")
+    started = threading.Event()
+    release = threading.Event()
+
+    def observable_work(handle: RunHandle) -> None:
+        handle.emit("inqtrix.progress.message", {"message": "ready"})
+        started.set()
+        release.wait(timeout=2)
+        handle.complete({})
+
+    run = store.submit(question="q", stack_name="default", work=observable_work)
+    _wait_until(lambda: started.is_set())
 
     subscription = store.subscribe(run["run_id"])
     try:
@@ -456,6 +463,8 @@ def test_subscribe_replays_buffered_events_and_receives_live_events() -> None:
         assert "inqtrix.run.queued" in event_types
         assert "inqtrix.progress.message" in event_types
 
+        # Live emit while the run still executes (a terminal run's log is
+        # closed -- see test_emit_after_terminal_is_dropped_loudly).
         store.emit(run["run_id"], "inqtrix.debug", {"snapshot": {"round": 1}})
         snapshot_event: dict[str, Any] = subscription.queue.get(timeout=1)
         live_event: dict[str, Any] = subscription.queue.get(timeout=1)
@@ -465,7 +474,9 @@ def test_subscribe_replays_buffered_events_and_receives_live_events() -> None:
         assert live_event["data"]["snapshot"]["round"] == 1
         assert store.get(run["run_id"])["snapshot"]["round"] == 1
     finally:
+        release.set()
         subscription.close()
+    _wait_until(lambda: store.get(run["run_id"])["status"] == "completed")
 
 
 def test_format_sse_event_uses_event_type_and_json_payload() -> None:
@@ -489,3 +500,796 @@ def _raises_not_found(action: Callable[[], object]) -> bool:
     except RunNotFound:
         return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# M3: agent run tree + waiting statuses
+# ---------------------------------------------------------------------------
+
+
+def test_standard_run_summary_keeps_historical_key_set() -> None:
+    store = _store()
+
+    summary = store.submit(
+        question="q",
+        stack_name="default",
+        work=lambda handle: handle.complete({}),
+    )
+
+    for key in (
+        "kind",
+        "children_url",
+        "plan_url",
+        "artifacts_url",
+        "parent_run_id",
+        "root_run_id",
+        "session_id",
+    ):
+        assert key not in summary
+    _wait_until(lambda: store.get(summary["run_id"])["status"] == "completed")
+
+
+def test_agent_run_summary_carries_tree_keys() -> None:
+    store = _store(max_concurrent=2, max_queue_size=4)
+    release_parent = threading.Event()
+
+    parent = store.submit(
+        question="auftrag",
+        stack_name="default",
+        work=lambda handle: (
+            release_parent.wait(timeout=2),
+            handle.complete({}),
+        ),
+        kind="agent",
+        session_id="sess-1",
+    )
+    _wait_until(lambda: store.get(parent["run_id"])["status"] == "running")
+    child = store.submit(
+        question="teilaufgabe",
+        stack_name="default",
+        work=lambda handle: handle.complete({}),
+        kind="agent_child",
+        parent_run_id=parent["run_id"],
+        root_run_id=parent["run_id"],
+    )
+    release_parent.set()
+
+    assert parent["kind"] == "agent"
+    assert parent["children_url"] == f"/v1/runs/{parent['run_id']}/children"
+    assert parent["plan_url"] == f"/v1/runs/{parent['run_id']}/plan"
+    assert parent["artifacts_url"] == f"/v1/runs/{parent['run_id']}/artifacts"
+    assert parent["session_id"] == "sess-1"
+    assert child["kind"] == "agent_child"
+    assert child["parent_run_id"] == parent["run_id"]
+    assert child["root_run_id"] == parent["run_id"]
+    _wait_until(lambda: store.get(child["run_id"])["status"] == "completed")
+    _wait_until(lambda: store.get(parent["run_id"])["status"] == "completed")
+
+
+def test_one_active_root_agent_run_per_session() -> None:
+    store = _store(max_concurrent=2, max_queue_size=4)
+    release = threading.Event()
+
+    first = store.submit(
+        question="first",
+        stack_name="default",
+        work=lambda handle: (
+            release.wait(timeout=2),
+            handle.complete({"answer": "done"}),
+        ),
+        kind="agent",
+        session_id="sess-exclusive",
+    )
+    _wait_until(lambda: store.get(first["run_id"])["status"] == "running")
+
+    with pytest.raises(RunSessionActive):
+        store.submit(
+            question="second",
+            stack_name="default",
+            work=lambda handle: handle.complete({}),
+            kind="agent",
+            session_id="sess-exclusive",
+        )
+
+    child = store.submit(
+        question="child",
+        stack_name="default",
+        work=lambda handle: handle.complete({}),
+        kind="agent_child",
+        parent_run_id=first["run_id"],
+        root_run_id=first["run_id"],
+        session_id="sess-exclusive",
+    )
+    _wait_until(lambda: store.get(child["run_id"])["status"] == "completed")
+    release.set()
+    _wait_until(lambda: store.get(first["run_id"])["status"] == "completed")
+
+    next_run = store.submit(
+        question="next",
+        stack_name="default",
+        work=lambda handle: handle.complete({}),
+        kind="agent",
+        session_id="sess-exclusive",
+    )
+    _wait_until(
+        lambda: store.get(next_run["run_id"])["status"] == "completed"
+    )
+
+
+def test_waiting_lifecycle_parks_resumes_and_completes() -> None:
+    store = _store(max_concurrent=1, max_queue_size=2)
+    calls = {"count": 0}
+
+    def segmented_work(handle: RunHandle) -> None:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            handle.wait(RunStatus.WAITING_FOR_APPROVAL)
+            return
+        handle.complete({"answer": "resumed"})
+
+    summary = store.submit(
+        question="agentlauf", stack_name="default", work=segmented_work
+    )
+    run_id = summary["run_id"]
+    _wait_until(
+        lambda: store.get(run_id)["status"] == "waiting_for_approval"
+    )
+    # The auto-complete safety net must NOT complete a parked run.
+    time.sleep(0.05)
+    assert store.get(run_id)["status"] == "waiting_for_approval"
+
+    resumed = store.resume_run(run_id)
+
+    # The in-memory store dispatches synchronously, so the returned
+    # summary may already say running (same tolerance as submit).
+    assert resumed["status"] in {"queued", "running"}
+    _wait_until(lambda: store.get(run_id)["status"] == "completed")
+    assert calls["count"] == 2
+    assert store.result(run_id)["answer"] == "resumed"
+
+    subscription = store.subscribe(run_id)
+    try:
+        types = [event["type"] for event in subscription.replay]
+        assert "inqtrix.run.waiting" in types
+        queued_events = [
+            event
+            for event in subscription.replay
+            if event["type"] == "inqtrix.run.queued"
+        ]
+        assert queued_events[-1]["data"].get("resumed") is True
+    finally:
+        subscription.close()
+
+
+def test_mark_waiting_rejects_non_running_and_bad_status() -> None:
+    store = _store()
+    summary = store.submit(
+        question="q",
+        stack_name="default",
+        work=lambda handle: handle.complete({}),
+    )
+    run_id = summary["run_id"]
+    _wait_until(lambda: store.get(run_id)["status"] == "completed")
+
+    with pytest.raises(ValueError, match="not a waiting status"):
+        store.mark_waiting(run_id, status=RunStatus.RUNNING)
+    with pytest.raises(RunActive):
+        store.mark_waiting(run_id, status=RunStatus.WAITING_FOR_INPUT)
+    with pytest.raises(RunNotFound):
+        store.mark_waiting("run_unbekannt", status=RunStatus.WAITING_FOR_INPUT)
+
+
+def test_worker_write_methods_accept_fence_attempt_for_port_parity() -> None:
+    """P7: the worker (FencedRunHandle) calls ALL FIVE store write methods
+    through RunStorePort with ``fence_attempt`` — emit/complete/fail/
+    mark_cancelled/mark_waiting. The in-memory store must accept it on every
+    one (ignored — no claim/reclaim in-process), NOT raise TypeError on an
+    unexpected kwarg, which is exactly what a parity regression would do.
+
+    On a terminal run the first four are absorbing no-ops; mark_waiting hits
+    the RUNNING guard (RunActive). Either way the kwarg must be accepted and
+    control flow must reach the method body.
+    """
+    store = _store()
+    summary = store.submit(
+        question="q",
+        stack_name="default",
+        work=lambda handle: handle.complete({}),
+    )
+    run_id = summary["run_id"]
+    _wait_until(lambda: store.get(run_id)["status"] == "completed")
+
+    # Absorbing on a terminal run — accepted and no-op, never TypeError.
+    store.emit(run_id, "inqtrix.test", {}, fence_attempt=7)
+    store.complete(run_id, {}, fence_attempt=7)
+    store.fail(run_id, "boom", fence_attempt=7)
+    store.mark_cancelled(run_id, reason="x", fence_attempt=7)
+
+    # Accepted and reaches the RUNNING guard (RunActive), not a TypeError.
+    with pytest.raises(RunActive):
+        store.mark_waiting(
+            run_id, status=RunStatus.WAITING_FOR_INPUT, fence_attempt=7
+        )
+
+
+def test_resume_requires_a_waiting_run() -> None:
+    store = _store()
+    summary = store.submit(
+        question="q",
+        stack_name="default",
+        work=lambda handle: handle.complete({}),
+    )
+    _wait_until(lambda: store.get(summary["run_id"])["status"] == "completed")
+
+    with pytest.raises(RunActive):
+        store.resume_run(summary["run_id"])
+    with pytest.raises(RunNotFound):
+        store.resume_run("run_unbekannt")
+
+
+def test_cancel_while_waiting_is_immediate_with_visible_reason() -> None:
+    store = _store(max_concurrent=1, max_queue_size=2)
+
+    def parking_work(handle: RunHandle) -> None:
+        handle.wait("waiting_for_input")
+
+    summary = store.submit(
+        question="agentlauf", stack_name="default", work=parking_work
+    )
+    run_id = summary["run_id"]
+    _wait_until(lambda: store.get(run_id)["status"] == "waiting_for_input")
+
+    cancelled = store.cancel(run_id)
+
+    assert cancelled["status"] == "cancelled"
+    subscription = store.subscribe(run_id)
+    try:
+        last = subscription.replay[-1]
+        assert last["type"] == "inqtrix.run.cancelled"
+        assert last["data"]["reason"] == "cancelled_while_waiting"
+    finally:
+        subscription.close()
+    with pytest.raises(RunActive):
+        store.resume_run(run_id)
+
+
+def test_cancel_cascades_over_the_child_tree() -> None:
+    store = _store(max_concurrent=1, max_queue_size=4)
+    parent_started = threading.Event()
+
+    def parent_work(handle: RunHandle) -> None:
+        parent_started.set()
+        handle.cancel_event.wait(timeout=2)
+        handle.cancel("client_requested_cancel")
+
+    parent = store.submit(
+        question="auftrag",
+        stack_name="default",
+        work=parent_work,
+        kind="agent",
+    )
+    _wait_until(lambda: parent_started.is_set())
+    child = store.submit(
+        question="teilaufgabe",
+        stack_name="default",
+        work=lambda handle: handle.complete({}),
+        kind="agent_child",
+        parent_run_id=parent["run_id"],
+        root_run_id=parent["run_id"],
+    )
+    assert store.get(child["run_id"])["status"] == "queued"
+
+    store.cancel(parent["run_id"])
+
+    assert store.get(child["run_id"])["status"] == "cancelled"
+    _wait_until(lambda: store.get(parent["run_id"])["status"] == "cancelled")
+
+
+def test_children_lists_direct_children_newest_first() -> None:
+    store = _store(max_concurrent=2, max_queue_size=6)
+    release_parent = threading.Event()
+
+    def parent_work(handle: RunHandle) -> None:
+        release_parent.wait(timeout=2)
+        handle.complete({})
+
+    parent = store.submit(
+        question="auftrag",
+        stack_name="default",
+        work=parent_work,
+        kind="agent",
+    )
+    first = store.submit(
+        question="erste",
+        stack_name="default",
+        work=lambda handle: handle.complete({}),
+        kind="agent_child",
+        parent_run_id=parent["run_id"],
+    )
+    time.sleep(0.02)
+    second = store.submit(
+        question="zweite",
+        stack_name="default",
+        work=lambda handle: handle.complete({}),
+        kind="agent_child",
+        parent_run_id=parent["run_id"],
+    )
+    unrelated = store.submit(
+        question="fremd",
+        stack_name="default",
+        work=lambda handle: handle.complete({}),
+    )
+    for summary in (first, second, unrelated):
+        _wait_until(
+            lambda run_id=summary["run_id"]: store.get(run_id)["status"]
+            == "completed"
+        )
+
+    children = store.children(parent["run_id"])
+
+    assert [child["run_id"] for child in children] == [
+        second["run_id"],
+        first["run_id"],
+    ]
+    release_parent.set()
+    _wait_until(
+        lambda: store.get(parent["run_id"])["status"] == "completed"
+    )
+
+
+def test_nested_children_use_canonical_root_and_cancel_recursively() -> None:
+    """Caller lineage cannot split a tree; root cancel reaches every level."""
+    store = _store(max_concurrent=3, max_queue_size=6)
+    release = threading.Event()
+
+    def blocking_work(handle: RunHandle) -> None:
+        release.wait(timeout=2)
+        if handle.cancel_event.is_set():
+            handle.cancel("client_requested_cancel")
+        else:
+            handle.complete({})
+
+    root = store.submit(
+        question="root",
+        stack_name="default",
+        work=blocking_work,
+        kind="agent",
+    )
+    child = store.submit(
+        question="child",
+        stack_name="default",
+        work=blocking_work,
+        kind="agent_child",
+        parent_run_id=root["run_id"],
+        root_run_id="caller-controlled-wrong-root",
+    )
+    grandchild = store.submit(
+        question="grandchild",
+        stack_name="default",
+        work=blocking_work,
+        kind="agent_child",
+        parent_run_id=child["run_id"],
+        root_run_id=child["run_id"],
+    )
+
+    assert child["root_run_id"] == root["run_id"]
+    assert grandchild["root_run_id"] == root["run_id"]
+    _summary, affected = store.cancel_tree(root["run_id"])
+    assert set(affected) == {
+        root["run_id"],
+        child["run_id"],
+        grandchild["run_id"],
+    }
+    release.set()
+    for run in (root, child, grandchild):
+        _wait_until(
+            lambda run_id=run["run_id"]: store.get(run_id)["status"]
+            == "cancelled"
+        )
+
+
+def test_origin_key_submit_or_find_is_atomic_in_memory() -> None:
+    store = _store(max_concurrent=1, max_queue_size=6)
+    release = threading.Event()
+
+    def root_work(handle: RunHandle) -> None:
+        release.wait(timeout=2)
+        if handle.cancel_event.is_set():
+            handle.cancel("client_requested_cancel")
+        else:
+            handle.complete({})
+
+    root = store.submit(
+        question="root",
+        stack_name="default",
+        work=root_work,
+        kind="agent",
+    )
+    barrier = threading.Barrier(3)
+    results: list[dict[str, Any]] = []
+    errors: list[BaseException] = []
+
+    def submit_same_origin() -> None:
+        barrier.wait()
+        try:
+            results.append(
+                store.submit(
+                    question="same child",
+                    stack_name="default",
+                    work=lambda handle: handle.complete({}),
+                    kind="agent_child",
+                    parent_run_id=root["run_id"],
+                    origin_key="task-1:attempt-1",
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001 - thread handoff
+            errors.append(exc)
+
+    threads = [threading.Thread(target=submit_same_origin) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert not errors
+    assert len(results) == 2
+    assert results[0]["run_id"] == results[1]["run_id"]
+    assert len(store.children(root["run_id"])) == 1
+    store.cancel(root["run_id"])
+    release.set()
+    _wait_until(
+        lambda: store.get(root["run_id"])["status"] == "cancelled"
+    )
+
+
+def test_child_submit_racing_root_cancel_cannot_leave_active_descendant() -> None:
+    store = _store(max_concurrent=1, max_queue_size=6)
+    release = threading.Event()
+
+    def root_work(handle: RunHandle) -> None:
+        release.wait(timeout=2)
+        if handle.cancel_event.is_set():
+            handle.cancel("client_requested_cancel")
+        else:
+            handle.complete({})
+
+    root = store.submit(
+        question="root",
+        stack_name="default",
+        work=root_work,
+        kind="agent",
+    )
+    barrier = threading.Barrier(3)
+    submitted: list[dict[str, Any]] = []
+    rejected: list[RunParentInactive] = []
+    errors: list[BaseException] = []
+
+    def submit_child() -> None:
+        barrier.wait()
+        try:
+            submitted.append(
+                store.submit(
+                    question="racing child",
+                    stack_name="default",
+                    work=lambda handle: handle.complete({}),
+                    kind="agent_child",
+                    parent_run_id=root["run_id"],
+                    origin_key="racing-origin",
+                )
+            )
+        except RunParentInactive as exc:
+            rejected.append(exc)
+        except BaseException as exc:  # noqa: BLE001 - thread handoff
+            errors.append(exc)
+
+    def cancel_root() -> None:
+        barrier.wait()
+        try:
+            store.cancel(root["run_id"])
+        except BaseException as exc:  # noqa: BLE001 - thread handoff
+            errors.append(exc)
+
+    submit_thread = threading.Thread(target=submit_child)
+    cancel_thread = threading.Thread(target=cancel_root)
+    submit_thread.start()
+    cancel_thread.start()
+    barrier.wait()
+    submit_thread.join(timeout=2)
+    cancel_thread.join(timeout=2)
+
+    assert not errors
+    assert len(submitted) + len(rejected) == 1
+    if submitted:
+        assert store.get(submitted[0]["run_id"])["status"] == "cancelled"
+    else:
+        assert store.children(root["run_id"]) == []
+    release.set()
+    _wait_until(
+        lambda: store.get(root["run_id"])["status"] == "cancelled"
+    )
+
+
+def test_waiting_ttl_auto_cancels_with_approval_timeout() -> None:
+    store = RunStore(
+        max_concurrent=1,
+        max_queue_size=2,
+        completed_ttl_seconds=30,
+        event_buffer_size=10,
+        waiting_ttl_seconds=0.05,
+    )
+
+    summary = store.submit(
+        question="agentlauf",
+        stack_name="default",
+        work=lambda handle: handle.wait("waiting_for_approval"),
+    )
+    run_id = summary["run_id"]
+    _wait_until(lambda: store.get(run_id)["status"] == "waiting_for_approval")
+    time.sleep(0.1)
+
+    # Any store touch runs the sweep.
+    assert store.get(run_id)["status"] == "cancelled"
+    subscription = store.subscribe(run_id)
+    try:
+        last = subscription.replay[-1]
+        assert last["type"] == "inqtrix.run.cancelled"
+        assert last["data"]["reason"] == "approval_timeout"
+    finally:
+        subscription.close()
+
+
+def test_replay_after_filters_replay_only_by_sequence() -> None:
+    from inqtrix.runs.shared import replay_after
+
+    replay = [
+        {"type": "a", "sequence": 1},
+        {"type": "b", "sequence": 2},
+        {"type": "c", "sequence": 3},
+    ]
+
+    assert replay_after(replay, None) == replay
+    assert replay_after(replay, 1) == replay[1:]
+    assert replay_after(replay, 3) == []
+    assert replay_after(replay, 99) == []
+    # Events without a sequence must never be dropped silently.
+    unmarked = [{"type": "x"}]
+    assert replay_after(unmarked, 5) == unmarked
+
+
+def test_resume_during_park_unwind_defers_to_the_worker() -> None:
+    """A resume racing the parking worker's unwind must not double-run.
+
+    The closure parks, then keeps running briefly (simulated post-wait
+    work). resume_run lands INSIDE that window: the dispatch must be
+    deferred to the worker's unwind, the run must complete exactly once
+    with exactly two closure invocations, never two concurrent ones.
+    """
+    store = _store(max_concurrent=2, max_queue_size=2)
+    calls = {"count": 0}
+    parked = threading.Event()
+    release_unwind = threading.Event()
+
+    def segmented_work(handle: RunHandle) -> None:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            handle.wait(RunStatus.WAITING_FOR_APPROVAL)
+            parked.set()
+            # Post-wait work: the worker has NOT unwound yet.
+            release_unwind.wait(timeout=2)
+            return
+        handle.complete({"answer": "resumed"})
+
+    summary = store.submit(
+        question="agentlauf", stack_name="default", work=segmented_work
+    )
+    run_id = summary["run_id"]
+    _wait_until(lambda: parked.is_set())
+
+    resumed = store.resume_run(run_id)
+    assert resumed["status"] == "queued"
+    # Deferred: nothing dispatched while the first worker is alive.
+    time.sleep(0.05)
+    assert calls["count"] == 1
+    assert store.get(run_id)["status"] == "queued"
+
+    release_unwind.set()
+    _wait_until(lambda: store.get(run_id)["status"] == "completed")
+    assert calls["count"] == 2
+
+
+def test_wait_with_pending_cancel_cancels_instead_of_parking() -> None:
+    store = _store(max_concurrent=1, max_queue_size=2)
+    running = threading.Event()
+    proceed = threading.Event()
+
+    def cancelled_then_waits(handle: RunHandle) -> None:
+        running.set()
+        proceed.wait(timeout=2)
+        handle.wait("waiting_for_approval")
+
+    summary = store.submit(
+        question="agentlauf", stack_name="default", work=cancelled_then_waits
+    )
+    run_id = summary["run_id"]
+    _wait_until(lambda: running.is_set())
+    store.cancel(run_id)
+    proceed.set()
+
+    _wait_until(lambda: store.get(run_id)["status"] == "cancelled")
+    subscription = store.subscribe(run_id)
+    try:
+        last = subscription.replay[-1]
+        assert last["type"] == "inqtrix.run.cancelled"
+        assert last["data"]["reason"] == "cancelled_while_waiting"
+    finally:
+        subscription.close()
+    with pytest.raises(RunActive):
+        store.resume_run(run_id)
+
+
+def test_emit_after_terminal_is_dropped_loudly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The event log ends with the terminal event — a post-terminal
+    signal (e.g. an artifact edit after completion) must not reopen it,
+    or SSE replays would never terminate."""
+    store = _store()
+    summary = store.submit(
+        question="q",
+        stack_name="default",
+        work=lambda handle: handle.complete({}),
+    )
+    run_id = summary["run_id"]
+    _wait_until(lambda: store.get(run_id)["status"] == "completed")
+
+    with caplog.at_level("WARNING", logger="inqtrix"):
+        store.emit(run_id, "inqtrix.agent.artifact.updated", {"revision": 2})
+
+    assert any("verworfen" in record.message for record in caplog.records)
+    subscription = store.subscribe(run_id)
+    try:
+        assert subscription.replay[-1]["type"] == "inqtrix.run.completed"
+    finally:
+        subscription.close()
+
+
+def test_list_page_walks_the_full_history_without_gaps() -> None:
+    """2.2: keyset paging returns every run exactly once, newest first."""
+    store = _store(max_concurrent=5, max_queue_size=20)
+    ids = []
+    for i in range(7):
+        summary = store.submit(
+            question=f"q{i}",
+            stack_name="default",
+            work=lambda handle: handle.complete({}),
+        )
+        ids.append(summary["run_id"])
+    _wait_until(
+        lambda: all(
+            store.get(rid)["status"] == "completed" for rid in ids
+        )
+    )
+
+    seen: list[str] = []
+    after = None
+    pages = 0
+    while True:
+        summaries, cursor = store.list_page(limit=3, after=after)
+        pages += 1
+        seen.extend(s["run_id"] for s in summaries)
+        if cursor is None:
+            break
+        from inqtrix.pagination import decode_cursor
+
+        after = decode_cursor(cursor)
+        assert pages < 10  # guard against a non-terminating cursor
+    # Every run once, newest-first (submission order reversed).
+    assert seen == list(reversed(ids))
+    assert len(seen) == len(set(seen))
+    # Last page carries no cursor.
+    assert store.list_page(limit=100)[1] is None
+
+
+def test_list_page_matches_unbounded_list_ordering() -> None:
+    store = _store(max_concurrent=5, max_queue_size=20)
+    for i in range(4):
+        store.submit(
+            question=f"q{i}",
+            stack_name="default",
+            work=lambda handle: handle.complete({}),
+        )
+    unbounded = [s["run_id"] for s in store.list()]
+    paged, cursor = store.list_page(limit=100)
+    assert [s["run_id"] for s in paged] == unbounded
+    assert cursor is None
+
+
+def test_child_projection_is_bounded_and_preserves_parent_snapshot() -> None:
+    store = _store(
+        max_concurrent=1,
+        max_queue_size=4,
+        event_buffer_size=64,
+    )
+    release_parent = threading.Event()
+
+    def parent_work(handle: RunHandle) -> None:
+        handle.emit(
+            "inqtrix.agent.phase.changed",
+            {
+                "phase": "execution",
+                "snapshot": {
+                    "current_node": "agent_execute",
+                    "phase": "execution",
+                },
+            },
+        )
+        release_parent.wait(timeout=2)
+        handle.complete({"answer": "done"})
+
+    parent = store.submit(
+        question="parent",
+        stack_name="default",
+        work=parent_work,
+        kind="agent",
+        session_id="session-projection",
+    )
+    _wait_until(
+        lambda: store.get(parent["run_id"])["snapshot"].get("current_node")
+        == "agent_execute"
+    )
+    child = store.submit(
+        question="child",
+        stack_name="default",
+        work=lambda handle: handle.complete({"answer": "child"}),
+        kind="agent_child",
+        parent_run_id=parent["run_id"],
+        root_run_id=parent["run_id"],
+        session_id="session-projection",
+        request_payload={
+            "question": "child",
+            "body": {
+                "mode": "research",
+                "parent_task_id": "task-1",
+                "parent_task_attempt": 2,
+            },
+        },
+    )
+
+    def projected_events() -> list[dict[str, Any]]:
+        subscription = store.subscribe(parent["run_id"])
+        try:
+            return [
+                event
+                for event in subscription.replay
+                if event["type"] == "inqtrix.agent.child.progress"
+            ]
+        finally:
+            subscription.close()
+
+    queued_count = len(projected_events())
+    assert queued_count == 1
+    store.emit(
+        child["run_id"],
+        "inqtrix.output_text.delta",
+        {"delta": "provider output"},
+    )
+    assert len(projected_events()) == queued_count
+    store.emit(
+        child["run_id"],
+        "inqtrix.node.started",
+        {"node": "search", "snapshot": {"current_node": "search"}},
+    )
+    projected = projected_events()
+    assert len(projected) == queued_count + 1
+    assert projected[-1]["data"]["task_id"] == "task-1"
+    assert projected[-1]["data"]["attempt"] == 2
+    assert projected[-1]["data"]["snapshot"]["current_node"] == "search"
+    assert store.get(parent["run_id"])["snapshot"]["current_node"] == (
+        "agent_execute"
+    )
+
+    release_parent.set()
+    _wait_until(
+        lambda: store.get(parent["run_id"])["status"] == "completed"
+    )

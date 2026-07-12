@@ -13,9 +13,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import inqtrix.research.web_research as web_research_module
-import inqtrix.server.streaming as streaming_module
+from inqtrix.core.results import RunRequest
 from inqtrix.exceptions import AgentCancelled
 from inqtrix.providers.base import ProviderContext
+from inqtrix.research.web_research import WebResearchAlgorithm
 from inqtrix.search_result import GroundedSearchResult
 from inqtrix.server.app import create_app
 from inqtrix.server.streaming import stream_response
@@ -107,22 +108,29 @@ class _DummySearch:
 
 
 @pytest.mark.asyncio
-async def test_stream_response_passes_cancel_event_to_agent_run(monkeypatch):
-    """Verify the cancel_event arrives in agent_run as a kwarg."""
+async def test_stream_response_passes_cancel_event_to_run_web_graph(monkeypatch):
+    """Verify the cancel_event arrives at the graph seam as a kwarg.
+
+    Streaming dispatches through ``WebResearchAlgorithm.run`` -> ``_execute_graph``
+    -> ``run_web_graph``; the RunContext's ``cancel_token`` becomes the graph's
+    ``cancel_event`` kwarg, so the disconnect probe still reaches node boundaries.
+    """
     captured: dict[str, Any] = {}
 
-    def fake_run(question, *, history, progress_queue,
-                 providers, strategies, settings, cancel_event=None):
-        captured["cancel_event"] = cancel_event
+    def fake_run_web_graph(question, **kwargs):
+        captured["cancel_event"] = kwargs.get("cancel_event")
         return {"answer": "Hallo Welt", "result_state": {}}
 
-    monkeypatch.setattr(streaming_module, "agent_run", fake_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run_web_graph)
 
     event = threading.Event()
     chunks = [
         chunk
         async for chunk in stream_response(
-            "Frage", "",
+            "Frage",
+            algorithm=WebResearchAlgorithm(),
+            runtime=None,
+            run_request=RunRequest(mode="research", question="Frage", history=""),
             providers=None, strategies=None, settings=AgentSettings(),
             cancel_event=event,
         )
@@ -143,9 +151,10 @@ async def test_stream_response_sets_cancel_event_on_disconnect(monkeypatch):
     chance to enter the progress-read path before the cancel fires.
     """
 
-    def slow_run(question, *, history, progress_queue,
-                 providers, strategies, settings, cancel_event=None):
+    def slow_run(question, **kwargs):
         # Simulate a long-running agent: keep emitting progress until cancelled.
+        progress_queue = kwargs.get("progress_queue")
+        cancel_event = kwargs.get("cancel_event")
         if progress_queue is not None:
             for i in range(200):
                 if cancel_event is not None and cancel_event.is_set():
@@ -154,7 +163,7 @@ async def test_stream_response_sets_cancel_event_on_disconnect(monkeypatch):
                 time.sleep(0.05)
         return {"answer": "never delivered", "result_state": {}}
 
-    monkeypatch.setattr(streaming_module, "agent_run", slow_run)
+    monkeypatch.setattr(web_research_module, "run_web_graph", slow_run)
 
     class _FakeRequest:
         def __init__(self):
@@ -183,7 +192,10 @@ async def test_stream_response_sets_cancel_event_on_disconnect(monkeypatch):
 
     chunks: list[str] = []
     async for chunk in stream_response(
-        "Frage", "",
+        "Frage",
+        algorithm=WebResearchAlgorithm(),
+        runtime=None,
+        run_request=RunRequest(mode="research", question="Frage", history=""),
         providers=None, strategies=None, settings=AgentSettings(),
         request=request,
         cancel_event=event,
@@ -254,12 +266,9 @@ async def test_watch_disconnect_cancellation_propagates():
 async def test_stream_response_cleans_up_watcher_on_normal_completion(monkeypatch):
     """Normal stream completion must cancel the watcher task without leaking."""
     monkeypatch.setattr(
-        streaming_module,
-        "agent_run",
-        lambda question, *, history, progress_queue,
-        providers, strategies, settings, cancel_event=None: {
-            "answer": "ok", "result_state": {},
-        },
+        web_research_module,
+        "run_web_graph",
+        lambda question, **kwargs: {"answer": "ok", "result_state": {}},
     )
 
     class _NeverDisconnectRequest:
@@ -270,7 +279,10 @@ async def test_stream_response_cleans_up_watcher_on_normal_completion(monkeypatc
     request = _NeverDisconnectRequest()
     chunks: list[str] = []
     async for chunk in stream_response(
-        "Frage", "",
+        "Frage",
+        algorithm=WebResearchAlgorithm(),
+        runtime=None,
+        run_request=RunRequest(mode="research", question="Frage", history=""),
         providers=None, strategies=None, settings=AgentSettings(),
         request=request,
     ):

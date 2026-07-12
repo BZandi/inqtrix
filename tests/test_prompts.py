@@ -442,20 +442,10 @@ def test_language_directive_applies_to_section_prompt_too():
     assert "ALWAYS respond in English" in prompt
 
 
-def test_deep_profile_first_round_queries_minimum():
-    """Phase 13: DEEP profile must seed the first round with at least 10 queries.
-
-    Rationale: when an over-confident evaluator stops the loop after Round 0
-    (e.g. GPT-4.1 reaching confidence_stop=8 immediately), Round 0 is the
-    ONLY chance to broaden the source pool. The previous default of 8
-    queries left the answer with ~11 unique domains; 10 lifts it to ~14-15
-    without exceeding sensible parallelization.
-    """
+def test_deep_profile_first_round_queries_are_bounded_to_eight():
+    """Deep starts with the operator-approved eight-query evidence wave."""
     overrides = tuning_for_report_profile(ReportProfile.DEEP).settings_overrides
-    assert overrides.get("first_round_queries", 0) >= 10, (
-        "DEEP must seed the first round with >= 10 queries; otherwise an "
-        "early evaluator stop would leave the answer under-diversified."
-    )
+    assert overrides.get("first_round_queries") == 8
 
 
 def test_report_profiles_do_not_carry_provider_token_budgets():

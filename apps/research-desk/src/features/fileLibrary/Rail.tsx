@@ -155,6 +155,7 @@ function UsageMeters({
 
 export function Rail({
   active,
+  className,
   collections,
   indexes,
   onDropToCollection,
@@ -170,6 +171,7 @@ export function Rail({
   totalDocCount,
 }: {
   active: ActiveTarget
+  className?: string
   collections: RailCollection[]
   embeddingQuota: EmbeddingQuota | null
   indexes: RailIndex[]
@@ -206,7 +208,7 @@ export function Rail({
   })
 
   return (
-    <aside className="hidden min-h-0 min-w-0 flex-col border-r border-border bg-surface/50 lg:flex">
+    <aside className={cn('min-h-0 min-w-0 flex-col border-r border-border bg-surface/50', className)}>
       <div className="flex items-center gap-2.5 px-4 pb-3 pt-4">
         <span className="grid size-9 shrink-0 place-items-center rounded-lg border border-file/25 bg-file-subtle text-file">
           <Database className="size-4" />

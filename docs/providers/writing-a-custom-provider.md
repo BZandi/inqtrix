@@ -126,7 +126,7 @@ class MyLLM(LLMProvider):
         *,
         system: str | None = None,
         model: str | None = None,
-        timeout: float = 120.0,
+        timeout: float = 600.0,
         state: dict | None = None,
         deadline: float | None = None,
     ) -> str:
@@ -175,7 +175,7 @@ class MyLLM(LLMProvider):
         system: str | None = None,
         model: str | None = None,
         max_output_tokens: int | None = None,
-        timeout: float = 120.0,
+        timeout: float = 600.0,
         state: dict | None = None,
         deadline: float | None = None,
     ) -> StructuredLLMResponse:

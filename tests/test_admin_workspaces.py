@@ -125,6 +125,31 @@ def test_create_list_rename_delete_workspace():
         assert client.get("/v1/admin/workspaces").json()["data"] == []
 
 
+def test_non_string_names_rejected_on_create_and_rename():
+    """Create and rename share one name validator: non-string JSON
+    values are a uniform 400 on both, never a repr-leaked "None"."""
+    client, _container, idp, _identity, _users = make_world()
+    with client:
+        csrf = login(client, idp)
+        workspace_id = create_workspace(client, csrf, "Research")
+        for bad_name in (None, 0, False):
+            created = client.post(
+                "/v1/admin/workspaces",
+                json={"name": bad_name},
+                headers={"X-CSRF-Token": csrf},
+            )
+            assert created.status_code == 400, bad_name
+            renamed = client.patch(
+                f"/v1/admin/workspaces/{workspace_id}",
+                json={"name": bad_name},
+                headers={"X-CSRF-Token": csrf},
+            )
+            assert renamed.status_code == 400, bad_name
+        # The workspace kept its original name through every rejection.
+        listing = client.get("/v1/admin/workspaces").json()["data"]
+        assert listing[0]["name"] == "Research"
+
+
 def test_assign_change_and_remove_member():
     client, _container, idp, _identity, users = make_world()
     with client:

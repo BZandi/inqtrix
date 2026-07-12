@@ -32,6 +32,7 @@ from inqtrix.storage.editor_orm import editor_metadata
 from inqtrix.storage.asset_records_orm import asset_metadata
 from inqtrix.storage.vector_index_orm import vector_index_metadata
 from inqtrix.storage.account_orm import account_metadata
+from inqtrix.storage.agent_memory_orm import agent_memory_metadata
 
 config = context.config
 
@@ -47,6 +48,7 @@ target_metadata = [
     asset_metadata,
     vector_index_metadata,
     account_metadata,
+    agent_memory_metadata,
 ]
 
 

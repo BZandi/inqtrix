@@ -91,7 +91,7 @@ AzureOpenAILLM(
     request_params: Mapping[str, Any] | None = None,
     default_reasoning_effort: str | None = None,
     api_version: str = "v1",
-    timeout_seconds: float = 120.0,
+    timeout: float = 600.0,
 )
 ```
 

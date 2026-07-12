@@ -9,7 +9,8 @@ from queue import Queue
 from typing import Any, Callable, NotRequired, TypedDict
 
 from inqtrix.constants import MAX_TOTAL_SECONDS
-from inqtrix.exceptions import AgentCancelled
+from inqtrix.core.results import WebRecency
+from inqtrix.exceptions import AgentCancelled, AgentTokenBudgetExceeded
 from inqtrix.i18n import detect_ui_language
 from inqtrix.runtime_logging import (
     log_iteration_entry,
@@ -108,6 +109,15 @@ class AgentState(TypedDict):
     # ``0`` / absent = off; a positive value makes check_cancel_event
     # raise AgentCancelled once cumulative tokens reach it.
     _token_budget: NotRequired[int]
+    # Optional server-validated recency filter supplied by a parent agent.
+    # It remains separate from the classifier result so success and fallback
+    # paths cannot accidentally replace the explicit execution contract.
+    _web_recency: NotRequired[WebRecency]
+    # A graph may preserve its historical library-mode diagnostic answer while
+    # telling the native run service that the execution is terminally failed.
+    # The native service lifts this marker into the shared typed failure path;
+    # it is never used for planner/task control flow.
+    _terminal_failure: NotRequired[dict[str, str]]
 
 
 def initial_state(
@@ -121,6 +131,7 @@ def initial_state(
     run_id: str | None = None,
     run_event_sink: Callable[[str, dict[str, Any]], None] | None = None,
     token_budget: int = 0,
+    web_recency: WebRecency | None = None,
 ) -> dict[str, Any]:
     """Create the initial AgentState for a run.
 
@@ -140,7 +151,7 @@ def initial_state(
         "history": history,
         "language": initial_language,
         "search_language": "",
-        "recency": "",
+        "recency": web_recency or "",
         "query_type": "general",
         "answer_contract": "general",
         "queries": [],
@@ -208,6 +219,8 @@ def initial_state(
         state["_cancel_event"] = cancel_event
     if token_budget > 0:
         state["_token_budget"] = int(token_budget)
+    if web_recency is not None:
+        state["_web_recency"] = web_recency
     return state
 
 
@@ -252,7 +265,7 @@ def check_cancel_event(state: dict[str, Any]) -> None:
                 used,
                 budget,
             )
-            raise AgentCancelled(
+            raise AgentTokenBudgetExceeded(
                 "Lauf wegen Token-Budget (max_tokens_per_run) gestoppt."
             )
 
@@ -371,7 +384,7 @@ def build_run_snapshot(
     }
     evidence_ledger = state.get("evidence_ledger", []) or []
     consolidated_claims = state.get("consolidated_claims", []) or []
-    return {
+    snapshot: dict[str, Any] = {
         "current_node": node,
         "completed_rounds": completed_rounds,
         "active_round": active_round,
@@ -393,6 +406,27 @@ def build_run_snapshot(
         "progress_estimate": progress_estimate,
         "last_message": last_message,
     }
+    execution = state.get("execution")
+    if execution is not None:
+        from pydantic import ValidationError
+
+        from inqtrix.result import AgentExecution
+
+        try:
+            snapshot["execution"] = AgentExecution.model_validate(
+                execution
+            ).model_dump()
+        except ValidationError as exc:
+            log.warning(
+                "Ungueltiger Agent-Ausfuehrungsblock aus Run-Snapshot "
+                "kann nicht veroeffentlicht werden: %s",
+                sanitize_error(str(exc)),
+            )
+            raise RuntimeError(
+                "Run-Snapshot enthaelt einen ungueltigen "
+                "Agent-Ausfuehrungsblock."
+            ) from exc
+    return snapshot
 
 
 def _estimate_progress(

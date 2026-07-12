@@ -29,6 +29,32 @@ class DocumentNotFound(KeyError):
     """Raised when a document id is unknown to the store (maps to HTTP 404)."""
 
 
+class DocumentRevisionConflict(RuntimeError):
+    """Raised when a document save loses the revision guard (HTTP 409).
+
+    The store accepts a save only when it carries a STRICTLY newer
+    revision than the stored row (monotonic guard, not base+1-exact —
+    debounced autosave legitimately jumps several revisions per flush).
+    A concurrent writer — human autosave vs. agent patch apply — whose
+    counter is stale-or-equal gets this instead of silently overwriting
+    the newer content or moving the revision backwards. The carried
+    ``current_revision`` lets the client refetch and rebase precisely.
+
+    Attributes:
+        current_revision: The revision actually stored right now.
+        expected_revision: The base the losing writer assumed
+            (its ``revision - 1``).
+    """
+
+    def __init__(self, *, current_revision: int, expected_revision: int) -> None:
+        super().__init__(
+            f"document revision moved to {current_revision}, "
+            f"writer assumed base {expected_revision}"
+        )
+        self.current_revision = current_revision
+        self.expected_revision = expected_revision
+
+
 class FolderNotFound(KeyError):
     """Raised when a folder id is unknown to the store (maps to HTTP 404)."""
 

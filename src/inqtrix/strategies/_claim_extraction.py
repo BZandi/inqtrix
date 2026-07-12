@@ -11,6 +11,7 @@ from typing import Any
 
 from openai import OpenAIError
 
+from inqtrix.constants import CLAIM_EXTRACT_TIMEOUT
 from inqtrix.exceptions import (
     AgentModelCapacityError,
     AgentRateLimited,
@@ -331,7 +332,7 @@ class LLMClaimExtractor(_NonFatalNoticeMixin, ClaimExtractionStrategy):
         self,
         llm: LLMProvider | None,
         claim_extract_model: str,
-        claim_extract_timeout: int = 60,
+        claim_extract_timeout: int = CLAIM_EXTRACT_TIMEOUT,
     ) -> None:
         """Bind the underlying LLM and per-call defaults to the extractor.
 

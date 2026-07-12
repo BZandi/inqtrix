@@ -89,7 +89,7 @@ export function ResearchRunColumn({
   const { own: ownJobs, shared: sharedJobs } = partitionJobsByAccess(jobs)
 
   return (
-    <section className="relative flex min-h-[calc(100svh-var(--header-h))] min-w-0 flex-col overflow-hidden bg-background lg:h-full lg:min-h-0">
+    <section className="inqtrix-contained-panel relative flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden bg-background">
       <JobFilterMenu
         activeFilter={activeFilter}
         jobs={allJobs}

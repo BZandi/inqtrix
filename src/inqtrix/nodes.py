@@ -15,7 +15,6 @@ import json
 import logging
 import re
 import time
-from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, ContextManager, NamedTuple
 
@@ -56,9 +55,11 @@ from inqtrix.prompts import (
     build_answer_section_user_prompt,
 )
 from inqtrix.providers.base import (
+    DEFAULT_LLM_FANOUT,
     LLMResponse,
     ProviderContext,
     _check_deadline,
+    get_llm_provider_capabilities,
     get_search_provider_capabilities,
     is_model_capacity_error,
 )
@@ -812,6 +813,23 @@ def _claim_extract_accepts_routing(strategy: ClaimExtractionStrategy) -> bool:
     return "model" in params and "reasoning_effort" in params
 
 
+def _claim_fanout_width(n_inputs: int, llm_provider: object) -> int:
+    """Simultaneous claim-extraction LLM calls to run (3.3).
+
+    Bounded by the LLM provider's OWN declared concurrency
+    (``max_llm_concurrency``), NOT the search provider's width — pacing
+    the per-result LLM fan-out to the search cap is what bursts the LLM
+    endpoint into a 429. A provider that declares no cap falls back to
+    :data:`~inqtrix.providers.base.DEFAULT_LLM_FANOUT` (never 0). Never
+    exceeds the input count, never below 1.
+    """
+    cap = (
+        get_llm_provider_capabilities(llm_provider).max_concurrency
+        or DEFAULT_LLM_FANOUT
+    )
+    return max(1, min(n_inputs, cap))
+
+
 def _strict_algorithm_failure_mode(settings: AgentSettings) -> bool:
     """Return whether core algorithm failures must block normal reports."""
     return (
@@ -1165,9 +1183,7 @@ def _provider_retry_progress_context(
     testing_mode: bool = False,
 ) -> ContextManager[object]:
     """Bind provider retry attempts to live progress events for one call."""
-    observer = getattr(provider, "observe_retries", None)
-    if not callable(observer):
-        return nullcontext()
+    from inqtrix.providers.base import observe_provider_retries
 
     def _on_retry(notice: dict[str, Any]) -> None:
         provider_label = str(notice.get("provider") or type(provider).__name__)
@@ -1204,11 +1220,20 @@ def _provider_retry_progress_context(
                 "max_attempts": max_attempts,
                 "delay_seconds": delay,
                 "reason": reason,
+                "configured_timeout_seconds": notice.get(
+                    "configured_timeout_seconds"
+                ),
+                "effective_timeout_seconds": notice.get(
+                    "effective_timeout_seconds"
+                ),
+                "transport_timeout_seconds": notice.get(
+                    "transport_timeout_seconds"
+                ),
             },
             testing_mode=testing_mode,
         )
 
-    return observer(_on_retry)
+    return observe_provider_retries(provider, _on_retry)
 
 
 def _repair_answer_markdown_tail(answer: str) -> str:
@@ -2129,6 +2154,11 @@ def _build_answer_claim_bindings(
 # ======================================================================= #
 
 
+def _effective_web_recency(s: dict[str, Any], inferred: str) -> str:
+    """Resolve explicit delegated recency ahead of classifier inference."""
+    return str(s.get("_web_recency") or inferred)
+
+
 def classify(
     s: dict,
     *,
@@ -2228,6 +2258,7 @@ def classify(
                 deadline=s["deadline"],
                 model=classify_model,
                 reasoning_effort=classify_effort,
+                timeout=settings.reasoning_timeout,
                 state=s,
             )
         s["done"] = bool(re.search(r"DECISION:\s*DIRECT", d, re.IGNORECASE))
@@ -2254,7 +2285,9 @@ def classify(
             "MONTH": "month",
             "NONE": "",
         }
-        s["recency"] = recency_map.get(recency_raw, "")
+        s["recency"] = _effective_web_recency(
+            s, recency_map.get(recency_raw, "")
+        )
 
         # Extract query type
         m_type = re.search(r"TYPE:\s*(\w+)", d)
@@ -2366,7 +2399,9 @@ def classify(
             if callable(infer_answer_contract)
             else "general"
         )
-        s["recency"] = "month" if s["query_type"] == "news" else ""
+        s["recency"] = _effective_web_recency(
+            s, "month" if s["query_type"] == "news" else ""
+        )
         s["sub_questions"] = [s["question"]]
         s["required_aspects"] = strategies.risk_scoring.derive_required_aspects(
             s["question"],
@@ -2713,6 +2748,7 @@ def plan(
                 deadline=s["deadline"],
                 model=plan_model,
                 reasoning_effort=plan_effort,
+                timeout=settings.reasoning_timeout,
                 state=s,
             )
     except AgentRateLimited:
@@ -3367,7 +3403,15 @@ def search(
                 _consume_retry_notices(providers.llm),
             )
 
-        with ThreadPoolExecutor(max_workers=min(len(_claim_inputs), _n_workers)) as ex:
+        # Size the claim fan-out by the LLM provider's OWN concurrency,
+        # NOT the search width (_n_workers, derived from the search
+        # provider): claim extraction is one LLM call per search result,
+        # and pacing it to the search cap (up to first_round_queries)
+        # bursts the LLM endpoint into a 429. The pool width IS the
+        # limiter (one fan-out at a time, sequential with the already-
+        # finished search pool), so no separate semaphore is needed.
+        _llm_workers = _claim_fanout_width(len(_claim_inputs), providers.llm)
+        with ThreadPoolExecutor(max_workers=_llm_workers) as ex:
             for idx, result_tuple, warning, metadata, retry_notices in ex.map(
                 _do_claim_extract,
                 _claim_inputs,
@@ -4488,6 +4532,7 @@ def evaluate(
                 deadline=s["deadline"],
                 model=evaluate_model,
                 reasoning_effort=evaluate_effort,
+                timeout=settings.reasoning_timeout,
                 state=s,
             )
         _eval_raw = a

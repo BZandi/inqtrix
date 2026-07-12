@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
-import asyncio
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
@@ -17,13 +16,16 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.content.ports import FileNotFound, FileRecord
-from inqtrix.knowledge.parsing import DocumentParseError
 from inqtrix.quota.models import QuotaDimension, QuotaSubject
 from inqtrix.server.routers import (
     quota_admission,
     quota_record_for_subject,
 )
-from inqtrix.services.file_service import FileTooLarge
+from inqtrix.services.file_service import (
+    FileParserUnavailable,
+    FileTextExtractionError,
+    FileTooLarge,
+)
 from inqtrix.services.request_parsing import (
     error_response,
     workspace_id_from_request,
@@ -82,9 +84,6 @@ def build_router(container: "AppContainer") -> APIRouter:
     principal_dep = container.principal_dependency
     user_context_dep = container.user_context_dependency
     quota_service = container.quota_service
-    # The server-side document parser ladder (MarkItDown by default), or None
-    # when no parser is configured — the client then keeps its local parse.
-    document_parser = container.document_parser
 
     def _owner_subject(record: FileRecord) -> QuotaSubject | None:
         """The metered owner of a file's stored bytes, or ``None``.
@@ -250,17 +249,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         local parse) and ``422`` when the file cannot be converted -- a visible
         error, never a silent empty body (Designprinzip 1).
         """
-        if document_parser is None:
-            return error_response(
-                501,
-                "Server-Parsing ist nicht verfuegbar "
-                "(kein Dokument-Parser konfiguriert)",
-                "not_implemented",
-            )
         try:
-            record, chunks = await service.open_stream(
-                file_id, principal=principal
-            )
+            extracted = await service.extract_text(file_id, principal=principal)
+        except FileParserUnavailable as exc:
+            return error_response(501, str(exc), "not_implemented")
         except FileNotFound:
             return error_response(404, "Datei nicht gefunden", "not_found")
         except ObjectStoreError:
@@ -269,19 +261,12 @@ def build_router(container: "AppContainer") -> APIRouter:
                 "Dateiinhalt nicht abrufbar (Object Store)",
                 "server_error",
             )
-        content = await asyncio.to_thread(lambda: b"".join(chunks))
-        try:
-            text = await asyncio.to_thread(
-                lambda: document_parser.parse(
-                    file_name=record.file_name, content=content
-                )
-            )
-        except DocumentParseError as exc:
+        except FileTextExtractionError as exc:
             return error_response(422, str(exc), "unprocessable_entity")
         return {
-            "file_id": record.id,
-            "parser_id": document_parser.parser_id,
-            "text": text,
+            "file_id": extracted.file_id,
+            "parser_id": extracted.parser_id,
+            "text": extracted.text,
         }
 
     @router.delete("/v1/files/{file_id}", status_code=204)

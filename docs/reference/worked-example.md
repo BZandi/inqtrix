@@ -219,7 +219,7 @@ EVIDENCE_SUFFICIENCY: 5
 `plan()` differences in round 1:
 
 - Prompt builds one concrete research slot per later-round query.
-- With the default COMPACT profile, round 1 asks for 6 precise questions; with DEEP and `first_round_queries=10`, it asks for 8.
+- With the default COMPACT profile, round 1 asks for 6 precise questions; DEEP starts with 8.
 - STORM perspectives fill remaining slots after gaps, cross-checks, primary-source, counterevidence, and data-verification slots.
 - Temporal-recency instruction added (round 1 specific).
 - Alternative-hypothesis instruction added.

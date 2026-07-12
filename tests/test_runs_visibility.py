@@ -368,3 +368,37 @@ def test_cancel_of_running_run_denies_before_mutating():
         assert owner_summary["status"] == "running"
     finally:
         release.set()
+
+
+def test_run_list_route_paginates_with_cursor(monkeypatch):
+    """2.2: /v1/runs pages via ?limit/?cursor and exposes next_cursor."""
+    client = make_visibility_client(monkeypatch)
+    with client:
+        ids = []
+        for _ in range(5):
+            ids.append(submit_run(client, sub="user-a")["run_id"])
+        for rid in ids:
+            wait_for_run_status_as(client, rid, "completed", sub="user-a")
+
+        seen = []
+        cursor = None
+        for _ in range(10):
+            url = "/v1/runs?limit=2" + (f"&cursor={cursor}" if cursor else "")
+            body = client.get(url, headers={SUB_HEADER: "user-a"}).json()
+            assert body["object"] == "list"
+            assert "next_cursor" in body
+            seen.extend(item["run_id"] for item in body["data"])
+            cursor = body["next_cursor"]
+            if cursor is None:
+                break
+        assert set(seen) == set(ids)
+        assert len(seen) == len(set(seen))
+        assert seen == list(reversed(ids))  # newest first
+
+        # A malformed cursor is a 400, never a silent first-page.
+        bad = client.get(
+            "/v1/runs?cursor=not-a-real-cursor",
+            headers={SUB_HEADER: "user-a"},
+        )
+        assert bad.status_code == 400
+        assert bad.json()["error"]["type"] == "invalid_cursor"

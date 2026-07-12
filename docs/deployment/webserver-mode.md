@@ -28,6 +28,7 @@ server/routers/*          thin, one module per surface (chat, runs, knowledge, f
 | Route | Method | Purpose |
 |---|---|---|
 | `/health` | GET | Liveness, active providers/models, `auth_required` + `auth_mode`, legal block. |
+| `/readyz` | GET | Readiness for load balancers: 503 while the database or queue is unreachable (bounded 2s probes), 200 `degraded` when only the vector store is down (knowledge fails per-request, everything else serves). Memory backends answer `ready`/`skipped`. The Helm chart keys its `readinessProbe` on this; liveness stays on `/health`. |
 | `/v1/models` | GET | OpenAI-style model discovery (`research-agent`). |
 | `/v1/capabilities` | GET | Feature manifest — see [the feature-gating contract](#v1capabilities-the-feature-gating-contract). |
 | `/v1/stacks` | GET | Multi-stack deployments only; per-stack provider/model discovery (5-second cache). |
@@ -45,13 +46,31 @@ server/routers/*          thin, one module per surface (chat, runs, knowledge, f
 
 | Route | Method | Purpose |
 |---|---|---|
-| `/v1/runs` | POST | Submit a run (`question`/`messages`, optional `mode`, `agent_overrides`, `knowledge_filters`, `workspace_id`). |
+| `/v1/runs` | POST | Submit a run (`question`/`messages`, optional `mode`, `agent_overrides`, `knowledge_filters`, `workspace_id`; agent runs also accept `source_policy` and `execution_directive`). |
 | `/v1/runs` | GET | List runs, filtered by workspace namespace when one is sent. |
 | `/v1/runs/{run_id}` | GET | Current run summary. |
 | `/v1/runs/{run_id}/events` | GET | Buffered + live SSE event stream — the UI contract. |
-| `/v1/runs/{run_id}/result` | GET | Final result export after completion. |
-| `/v1/runs/{run_id}/cancel` | POST | Cancel queued immediately; running runs stop at the next node boundary. |
+| `/v1/runs/{run_id}/result` | GET | Final result export after completion; Agent Desk results include the canonical effective `execution` block. |
+| `/v1/runs/{run_id}/cancel` | POST | Cancel the complete run tree: queued/waiting rows become terminal immediately; running rows stop at the next node boundary. |
 | `/v1/runs/{run_id}` | DELETE | Permanently delete a terminal run (owner-only); 409 while still active. Revokes any shares on the run. |
+
+### Agent memory (gated; personal, when the agent platform is mounted)
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/v1/agent/memory` | GET | List personal accepted memories; optional `?q=&scope=&limit=` searches the same personal namespace via recall. |
+| `/v1/agent/memory/{memory_id}` | PATCH / DELETE | Edit or delete one memory. Foreign ids are indistinguishable 404s. |
+| `/v1/agent/memory:clear` | POST | Clear all personal memories, optionally one `scope`. |
+| `/v1/agent/memory/candidates` | GET | List personal memory candidates staged by completed agent runs. |
+| `/v1/agent/memory/candidates/{id}:accept` | POST | Accept a candidate, optionally with edited `content`. |
+| `/v1/agent/memory/candidates/{id}:reject` | POST | Reject a candidate. |
+| `/v1/agent/memory/feedback` | GET | Read personal run-feedback history; optional `?run_id=&limit=`. |
+| `/v1/agent/runs/{run_id}/feedback` | POST | Store personal run feedback: `feedback=positive|negative|neutral`, optional `reason`, optional owner-checked `memory_id`. |
+
+The memory routes never accept client owner fields (`sub`, `tenant_id`,
+`user_id`, `owner`, `namespace`, ...). Ownership is derived from the
+authenticated principal; anonymous/static-key principals cannot use
+long-term memory.
 
 ### Knowledge (gated; registered only when `INQTRIX_KNOWLEDGE_ENABLED=true`)
 
@@ -62,6 +81,7 @@ server/routers/*          thin, one module per surface (chat, runs, knowledge, f
 | `/v1/knowledge/collections/{id}/documents` | POST / GET | Ingest one document (`text` OR `file_id`) / list documents. |
 | `/v1/knowledge/documents/{id}` | DELETE | Delete one document and its chunks. |
 | `/v1/knowledge/documents/{id}/text` | GET | Full extracted text (the document viewer's source). |
+| `/v1/knowledge/documents/{id}/chunks/{chunk_index}` | GET | One chunk plus up to `?context=0..3` neighbour chunks per side (the evidence view). |
 | `/v1/knowledge/search` | POST | Synchronous retrieval search (debug/evaluation surface). |
 | `/v1/sources/{document_id}` | GET | Citable source view — the target of HTTP knowledge citations. |
 
@@ -83,6 +103,14 @@ See [Knowledge engine](../knowledge/overview.md) for the data model, ingestion c
 | `/v1/knowledge-session-groups/{group_id}` | PUT / DELETE | Upsert or delete one Knowledge Desk folder. Delete orphans member sessions to `group_id=null`. |
 | `/v1/knowledge-sessions` | GET | List Knowledge Desk session metadata. Rows include `group_id`; `items_json` is excluded. |
 | `/v1/knowledge-sessions/{session_id}` | GET / PUT / DELETE | Load, upsert, or delete one Knowledge Desk session. PUT accepts `title`, `items_json`, `created_at`, `updated_at`, and `group_id` (`string` or `null`). |
+| `/v1/agent-session-groups*` | GET / PUT / DELETE | List and manage private Agent Desk session folders. |
+| `/v1/agent-sessions` | GET | List Agent Desk session metadata; `items_json` is excluded so the session body remains load-on-open. |
+| `/v1/agent-sessions/{session_id}` | GET / PUT / DELETE | Load, upsert, or delete one Agent Desk session. The UI-owned `items_json` includes the session source policy; PUT also carries `title`, `created_at`, `updated_at`, and optional `group_id`. |
+| `/v1/editor/documents/{document_id}` | PUT | Autosave upsert of one editor document. The save must carry a STRICTLY newer `revision` than the stored row (monotonic guard; debounced multi-edit flushes legitimately jump several revisions) — a stale-or-equal counter answers 409 `conflict` with `current_revision`, and the client refetches and rebases instead of silently overwriting a concurrent writer (e.g. an applied agent patch). |
+| `/v1/editor/documents/{document_id}/patches` | GET | Patch metadata of one editor document (no edit bodies), newest first; `?status=pending\|accepted\|rejected` filters. |
+| `/v1/editor/patches/{patch_id}` | GET | One patch with its anchored edits, warnings, and the document's CURRENT revision. |
+| `/v1/editor/patches/{patch_id}:apply` | POST | Apply a pending patch server-side. Body `{"expected_revision": int}` (CAS against the document); stale revision answers 409 with `current_revision` + `revision_before`; replaying the same apply answers 200 with the stored outcome. |
+| `/v1/editor/patches/{patch_id}:reject` | POST | Reject a pending patch. Body `{"note"?: string}`; already-applied answers 409, a reject replay 200. |
 
 These routes are wired with the project-persistence tier's private
 owner/workspace scoping. The volatile memory implementation is available for
@@ -129,9 +157,15 @@ See [Auth modes](auth-modes.md) for the full mode reference and the OIDC variabl
 
 - `research` — the classify/plan/search/evaluate/answer web-research graph.
 - `direct_llm` — straight to the active LLM provider (same path as the legacy `agent_overrides.skip_search=true`, which remains supported; conflicts return 400).
-- `knowledge` — retrieval over knowledge collections, only registered when the engine is enabled. Scope and profile travel in `knowledge_filters` (see [Retrieval profiles](../configuration/knowledge-profiles.md)). On the chat-completions surface `stream=true` is rejected with 400 for this mode — the streamed chat path still executes the research graph directly; native runs are the streaming surface for knowledge.
+- `knowledge` — retrieval over knowledge collections, only registered when the engine is enabled. Scope and profile travel in `knowledge_filters` (see [Retrieval profiles](../configuration/knowledge-profiles.md)). Streaming (`stream=true`) is supported: streamed chat dispatches through the `AlgorithmRegistry` like every other mode, so the cited answer streams as content chunks. The granular progress (gate rounds, grounding) is emitted only on the native `/v1/runs` SSE surface — the chat-completions stream carries the answer, not the progress narration.
+- `workspace_agent` — the staged Mission engine with plan, approval,
+  execution, synthesis, and optional canvas/editor delivery. It is registered
+  only when the agent-platform durability gate passes.
+- `agent_kernel` — the automatic conversational front door. It may answer
+  directly, use instant tools, or delegate a Mission. Registration additionally
+  requires the kernel rollout gate and a tool-calling-capable provider.
 
-`agent_overrides` is a strict whitelist (`extra="forbid"`, unknown keys → 400): `max_rounds`, `min_rounds`, `confidence_stop`, `report_profile`, `max_total_seconds`, `first_round_queries`, `skip_search`, `model_tier`, `model`, `effort`. `model_tier` selects among operator-configured tiers; `model`/`effort` pick a concrete model for the direct-chat answer only (the UI model picker) — research-node model names remain operator configuration. See [LLM calls, model tiers, and reasoning effort](../architecture/llm-calls.md) for tier wiring and `/health`'s `chat_model_options` discovery.
+`agent_overrides` is a strict whitelist (`extra="forbid"`, unknown keys → 400): `max_rounds`, `min_rounds`, `confidence_stop`, `report_profile`, `max_total_seconds`, `first_round_queries`, `skip_search`, `model_tier`, `model`, `effort`. `model_tier` selects among operator-configured tiers; `model`/`effort` pick a concrete model for direct chat and the Agent Desk's scoped thinking nodes. In the kernel this includes the conversation turn and both quick-web LLM calls; in a Mission it includes planning, synthesis, and answer nodes while assembly-line classifiers stay on the operator tier map. Ordinary research-graph node names remain operator configuration. See [LLM calls, model tiers, and reasoning effort](../architecture/llm-calls.md) for tier wiring and `/health`'s `chat_model_options` discovery.
 
 ```json
 {
@@ -142,6 +176,54 @@ See [Auth modes](auth-modes.md) for the full mode reference and the OIDC variabl
 }
 ```
 
+Agent-native runs may add a session-selected source policy and a one-message
+enforced route:
+
+```json
+{
+  "question": "Who won today's final?",
+  "mode": "agent_kernel",
+  "source_policy": {"web": "available", "knowledge": "available"},
+  "execution_directive": "quick_web"
+}
+```
+
+Each source value is `available` or `disabled`; omission means both available.
+`execution_directive` is `quick_web` (one `web.search.instant` call, no plan,
+child, RAG, or canvas) or `knowledge_only` (project-knowledge reads only).
+Either route forces `agent_kernel`, `response_form=chat`, and normal depth for
+that one message. An explicit model and effort in `agent_overrides` still apply
+to quick-web query preparation and grounded answer synthesis. The legacy
+`tool_directives` hint surface remains compatible on its own, but sending both
+fields is HTTP 400. Directives also reject `document_id`; a requested route
+whose capability is not published fails instead of falling back.
+
+Source enforcement is common to the kernel, phase-machine planner/executor,
+and child submission. Effective precedence is deployment/identity/strict and
+write gates, activated skill restrictions, one-shot directive, session source
+policy, then automatic model choice.
+
+Mission plan tasks use one server-validated web contract. A normal plan uses
+`web_instant`; its `queries` array must contain exactly one self-contained
+question, and that question becomes exactly one capability call. Independent
+tasks in the same dependency wave may execute concurrently. `web_research`
+means one delegated child whose strings are joint guidance questions. It is
+accepted only for Deep, an admitted `tool_directives=["web_research"]`, or a
+user-edited plan; the child profile is server-selected as `compact` or `deep`.
+Task `params.recency` accepts only `day`, `week`, `month`, `year`, or omission.
+Task resource budgets are deployment-owned: non-empty `budget` objects on new
+or edited plans fail with `task_budget_server_managed` instead of silently
+changing execution limits.
+
+Completed Agent Desk results expose one evidence shape through
+`result.references`. Each entry retains its stable `K#`/`W#` label, canonical
+URL or knowledge identity, exact `excerpt`/`source_text` when available, and
+optional `grounded_support`. The latter is bounded provider-answer context for
+a cited web URL, not a quote from the linked page; clients must label it
+accordingly. `report_references` remains the canonical internal state key, with
+the older Agent `references` key accepted only as an export compatibility
+alias.
+
 ## Native runs and the SSE event stream (the UI contract)
 
 `POST /v1/runs` accepts a run into a FIFO queue and returns immediately; `GET /v1/runs/{run_id}/events` replays the buffered events (up to `RUN_EVENT_BUFFER_SIZE`, default 200) and then streams live named SSE events. This stream is the contract the React Research Desk renders from:
@@ -149,6 +231,10 @@ See [Auth modes](auth-modes.md) for the full mode reference and the OIDC variabl
 - Lifecycle: `inqtrix.run.queued`, `inqtrix.run.started`, `inqtrix.run.snapshot`, `inqtrix.run.cancel_requested`, `inqtrix.run.cancelled`, `inqtrix.run.failed`, `inqtrix.run.completed`.
 - Progress: `inqtrix.node.started`, `inqtrix.progress.message`, `inqtrix.output_text.delta`.
 - Knowledge steps (`mode=knowledge`): `inqtrix.knowledge.profile.resolved`, `decomposition.completed`, `retrieval.completed`, `evidence.truncated`, `gate.evaluated`, `grounding.checked`.
+- Agent execution facts: every state-bearing agent snapshot exposes the
+  canonical `execution` block; kernel tool events report actual usage, and
+  quick-web emits one `web_instant` started/finished pair. See [Run
+  events](../observability/run-events.md) for the block and consent semantics.
 
 See [Run events](../observability/run-events.md) for payload schemas. With the in-memory store, terminal runs remain fetchable for `RUN_COMPLETED_TTL_SECONDS` (default 300); the Postgres backend makes records, events, and results durable.
 
@@ -162,10 +248,11 @@ Clients discover features here instead of hardcoding them; the manifest is unaut
 
 | Block | Content |
 |---|---|
-| `algorithms` | Manifest of registered algorithm ids (`research`, `direct_llm`, and `knowledge` when enabled) with their capability dicts. |
+| `algorithms` | Manifest of registered algorithm ids (`research`, `direct_llm`, plus `knowledge`, `workspace_agent`, and `agent_kernel` when their gates pass) with their capability dicts. |
 | `features` | Booleans: `knowledge`, `files`, `openapi`, `embedding_provider`; plus, when knowledge is on: `hybrid_retrieval`, `reranker`, `contextual_retrieval`, `document_parser`. Infrastructure-backed flags are false when the configured object store/vector store is not reachable. |
 | `files` | `max_file_bytes` (when files are enabled). |
 | `knowledge` | `default_embedding_model`, the annotated `embedding_catalog`, `default_top_k`, `evidence_k_max` (the final-evidence ceiling that bounds a `final_k` override), `default_profile`, `reranker_provider`, and `profiles[]` — the effective stage plan per retrieval profile including each profile's `final_k_factor` and its `degraded` stages, derived from the SAME ceiling instance the algorithm runs against. |
+| `agent` | Agent modes, permission/depth presets, tools, and the source-routing surface. `source_controls[]` publishes `web`/`knowledge` entries with `default` and effective `available`; `execution_directives[]` publishes `quick_web`/`knowledge_only` with effective `available`. Clients must not render a server-disabled route as selectable. |
 
 A capability flag never downgrades silently: a profile stage the operator ceiling forbids appears in `profiles[].degraded`, and unreachable S3/Qdrant backends clear the affected feature flags so the UI renders what would actually run.
 
@@ -178,7 +265,7 @@ A capability flag never downgrades silently: a profile stage the operator ceilin
 | Run execution | `INQTRIX_QUEUE_BACKEND` | `memory` (in-process, default) / `valkey` (Valkey Stream consumed by `inqtrix-worker` processes; requires `INQTRIX_STORAGE_BACKEND=postgres` — the run row is the source of truth, the stream only the dispatch channel). |
 | Vectors (knowledge) | `INQTRIX_VECTOR_BACKEND` | `memory` / `qdrant` — see [Knowledge engine](../knowledge/overview.md). |
 
-Contradictory combinations (`valkey` without postgres, `s3` without credentials, `postgres` without a URL) fail loudly at startup. The worker (`uv run inqtrix-worker`) executes runs with at-least-once delivery: `INQTRIX_WORKER_CONCURRENCY` bounds parallel runs per process, heartbeats keep long runs from being reclaimed, and `INQTRIX_WORKER_MAX_ATTEMPTS` dead-letters crash loops. The dev compose stack at `deploy/compose/compose.dev.yaml` provides `postgres`, `seaweedfs`, `qdrant`, and `valkey`, plus `dex` behind the `oidc` profile — see [Local infrastructure](../development/local-infrastructure.md).
+Contradictory combinations (`valkey` without postgres, `s3` without credentials, `postgres` without a URL) fail loudly at startup. The worker (`uv run inqtrix-worker`) executes runs with at-least-once delivery: `INQTRIX_WORKER_CONCURRENCY` bounds parallel runs per process, heartbeats keep long runs from being reclaimed, and `INQTRIX_WORKER_MAX_ATTEMPTS` dead-letters crash loops. One Valkey queue instance is injected into both the Postgres run store and worker loop, so child submission, child-terminal parent wake, resume, and ordinary dispatch share the same path. Claiming a durable run row and dispatching its stream message remain separate operations: a successor message is held unacknowledged until the older delivery is acknowledged, which prevents a fast resume from being mistaken for a duplicate and dropped. The dev compose stack at `deploy/compose/compose.dev.yaml` provides `postgres`, `seaweedfs`, `qdrant`, and `valkey`, plus `dex` behind the `oidc` profile — see [Local infrastructure](../development/local-infrastructure.md).
 
 When the knowledge engine is enabled, the same `inqtrix-worker` process also consumes a **second Valkey stream** (`inqtrix:index:jobs`, dead-letter `inqtrix:index:dead`) for background vector-index reindex (re-embed) jobs, using the identical fencing/heartbeat/reclaim/dead-letter machinery on a separate consumer group. This makes a reindex durable — it survives a server restart, not just closing the browser. Two consequences for operators: in queue mode (`postgres` + `valkey`) durable reindex **requires at least one running worker** (the API only persists and enqueues the job); and a worker started with knowledge disabled has no reindex consumer (logged at startup: `Knowledge-Engine deaktiviert — kein Reindex-Consumer`, never a silent no-op). Reindex sizing reuses `INQTRIX_REINDEX_*` (concurrency, queue size, TTL, per-collection history) and the worker mechanics reuse `INQTRIX_WORKER_*` — there are no separate indexing-worker knobs. Monitor the `inqtrix:index:dead` dead-letter stream alongside `inqtrix:runs:dead`.
 
@@ -202,7 +289,7 @@ the run path only — the reindex consumer rides the same
 
 The research graph and document re-embedding are **synchronous work on a bounded thread pool**, not unbounded async coroutines: each active job holds one OS thread for its full duration. That is deliberate and fine for this app's scaling model — the work is I/O-bound on the LLM/embedding/search providers, the concurrency caps keep thread count small, and you scale *out* (more worker processes) rather than *up* (thousands of threads in one process). The practical ceiling on any single process is the upstream provider's rate limit and host CPU/RAM, not the thread model; rewriting the agent graph to async would be a large, risky change across every node, provider, and strategy and would not raise that ceiling (horizontal scaling does).
 
-Streaming disconnects and `POST /v1/runs/{run_id}/cancel` set the same cancel event; execution stops at the next node boundary (typically 5-60 seconds, the remainder of the in-flight provider call). Queued runs cancel immediately. Hard cancel through in-flight provider calls is out of scope.
+Streaming disconnects and `POST /v1/runs/{run_id}/cancel` set the same cancel event; execution stops at the next safe boundary (the current logical provider operation may use up to its configured 600-second budget). Explicit cancellation locks and transitions the complete descendant tree, then reconciles every affected Agent plan task from the terminal run rows. A read of an older partially reconciled plan repeats that idempotent settlement, covering a process failure after the run transaction committed. Queued and waiting rows cancel immediately. Agent Desk additionally exposes `POST /v1/runs/{run_id}/tasks/{task_id}/cancel`: pending work ends immediately, research children reuse run cancellation, and an in-flight synchronous instant request records `cancel_requested`, performs no retry or result commit, and ends naturally. Hard network interruption of that synchronous provider request is out of scope.
 
 ## Deployment sizing: with or without Valkey
 

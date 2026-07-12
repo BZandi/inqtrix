@@ -1029,7 +1029,8 @@ class QdrantKnowledgeStore:
 
     def _resolve_target(self, collection_ids, embedding_model):
         _client, models = _require_qdrant()
-        if collection_ids:
+        explicit = bool(collection_ids)
+        if explicit:
             collections = [self._sync_get_collection(cid) for cid in collection_ids]
         else:
             collections = self._sync_list_collections()
@@ -1037,18 +1038,24 @@ class QdrantKnowledgeStore:
                 raise KnowledgeError("no knowledge collections exist")
         models_in_scope = {c.embedding_model for c in collections}
         active_model = embedding_model or collections[0].embedding_model
-        if embedding_model is not None and models_in_scope - {embedding_model}:
+        if explicit:
+            # Canonical contract (Postgres + memory parity): an explicit
+            # multi-model selection is a HARD error, never a silently narrowed
+            # result set (Designprinzip 1). The narrowing below belongs only to
+            # the implicit search-all path, where per-model narrowing is
+            # required because the vector index is per embedding model.
+            if len(models_in_scope) > 1:
+                raise KnowledgeError(
+                    "scoped collections use different embedding models "
+                    f"({sorted(models_in_scope)}); query one model scope at a time"
+                )
+        elif embedding_model is not None and models_in_scope - {embedding_model}:
             scoped = [c for c in collections if c.embedding_model == embedding_model]
             if not scoped:
                 raise KnowledgeError(
                     f"no scoped collection uses embedding model {embedding_model!r}"
                 )
             collections = scoped
-        elif len(models_in_scope) > 1:
-            raise KnowledgeError(
-                "scoped collections use different embedding models "
-                f"({sorted(models_in_scope)}); query one model scope at a time"
-            )
         return _model_slug(active_model), _scope_filter(
             models, [c.id for c in collections]
         )

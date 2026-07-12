@@ -101,6 +101,9 @@ def test_runs_return_429_envelope_when_queue_full(monkeypatch):
         "error": {
             "message": "Zu viele wartende Recherche-Auftraege. Bitte warten.",
             "type": "rate_limit_error",
+            # Additive discriminator: the global queue is full, as opposed
+            # to the per-user fairness cap (reason=per_user_limit).
+            "reason": "queue_full",
         }
     }
 

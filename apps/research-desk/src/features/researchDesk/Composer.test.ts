@@ -16,7 +16,7 @@ describe('Research Desk composer profile presets', () => {
     expect(request).toMatchObject({
       agentOverrides: {
         confidenceStop: 8,
-        firstRoundQueries: 10,
+        firstRoundQueries: 8,
         maxRounds: 4,
         minRounds: 2,
         reportProfile: 'deep',
@@ -27,13 +27,12 @@ describe('Research Desk composer profile presets', () => {
     })
   })
 
-  it('switches profile presets while preserving the draft and strategy toggles', () => {
+  it('switches profile presets while preserving the draft', () => {
     const base = {
       ...defaultComposerFormState,
       firstRoundQueries: 4,
       maxRounds: 3,
       question: 'Keep this draft',
-      webSearch: false,
     } as const
 
     expect(applyComposerReportProfilePreset(base, 'compact')).toMatchObject({
@@ -43,26 +42,32 @@ describe('Research Desk composer profile presets', () => {
       minRounds: 1,
       question: 'Keep this draft',
       reportProfile: 'compact',
-      webSearch: false,
     })
-    expect(applyComposerReportProfilePreset(base, 'deep')).toMatchObject({
-      confidenceStop: 8,
-      firstRoundQueries: 10,
-      maxRounds: 4,
-      minRounds: 2,
+    expect(applyComposerReportProfilePreset(base, 'schnell')).toMatchObject({
+      maxRounds: 1,
+      minRounds: 1,
       question: 'Keep this draft',
-      reportProfile: 'deep',
-      webSearch: false,
+      reportProfile: 'schnell',
     })
   })
 
-  it('serializes ten first-round queries as an explicit user-visible value', () => {
+  it('always submits a full research run', () => {
     const request = buildComposerRequest(
-      { ...defaultComposerFormState, firstRoundQueries: 10, question: 'Deep run' },
+      { ...defaultComposerFormState, question: 'Q' },
+      'Q',
+      'default',
+    )
+
+    expect(request.mode).toBe('research')
+  })
+
+  it('serializes the visible eight-query maximum', () => {
+    const request = buildComposerRequest(
+      { ...defaultComposerFormState, firstRoundQueries: 8, question: 'Deep run' },
       'Deep run',
       'research',
     )
 
-    expect(request.agentOverrides?.firstRoundQueries).toBe(10)
+    expect(request.agentOverrides?.firstRoundQueries).toBe(8)
   })
 })

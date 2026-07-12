@@ -8,10 +8,14 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
-from perplexity import APIError, RateLimitError
+from perplexity import APIError, APIStatusError, APITimeoutError, RateLimitError
 
 from inqtrix.exceptions import AgentRateLimited
-from inqtrix.providers.base import get_search_provider_capabilities
+from inqtrix.providers.base import (
+    DEFAULT_LLM_FANOUT,
+    get_llm_provider_capabilities,
+    get_search_provider_capabilities,
+)
 from inqtrix.providers.litellm import LiteLLM
 from inqtrix.providers.perplexity import PerplexitySearch
 from inqtrix.providers.base import _bounded_timeout
@@ -297,6 +301,34 @@ def test_perplexity_agent_api_error_degrades_to_empty() -> None:
     assert notice is not None and "Perplexity-Suche fehlgeschlagen" in notice
 
 
+def test_perplexity_agent_timeout_keeps_provider_timeout_notice() -> None:
+    req = httpx.Request("POST", "https://api.perplexity.ai/responses")
+    search, _ = _agent_search(side_effect=APITimeoutError(request=req))
+
+    result = search.search("frage")
+    notice = search.consume_nonfatal_notice_detail()
+
+    assert result.sources == []
+    assert notice is not None
+    assert notice["code"] == "provider_timeout"
+    assert notice["http_status"] == 504
+
+
+def test_perplexity_agent_http_408_keeps_provider_timeout_notice() -> None:
+    req = httpx.Request("POST", "https://api.perplexity.ai/responses")
+    response = httpx.Response(408, request=req)
+    error = APIStatusError("timeout", response=response, body=None)
+    search, _ = _agent_search(side_effect=error)
+
+    result = search.search("frage")
+    notice = search.consume_nonfatal_notice_detail()
+
+    assert result.sources == []
+    assert notice is not None
+    assert notice["code"] == "provider_timeout"
+    assert notice["http_status"] == 408
+
+
 def test_bounded_timeout_respects_small_remaining_deadline() -> None:
     deadline = time.monotonic() + 0.2
     bounded = _bounded_timeout(120, deadline)
@@ -331,3 +363,161 @@ def test_search_provider_capabilities_resolve_provider_attribute() -> None:
     assert capabilities.supports("domain_filter") is True
     assert capabilities.supports("search_mode") is False
     assert capabilities.supports("return_related") is False
+
+
+def test_llm_capabilities_default_to_no_declared_cap() -> None:
+    # A provider that declares nothing -> 0, and callers must fall back to
+    # DEFAULT_LLM_FANOUT (never to 0 workers).
+    capabilities = get_llm_provider_capabilities(object())
+    assert capabilities.max_concurrency == 0
+    assert (capabilities.max_concurrency or DEFAULT_LLM_FANOUT) == DEFAULT_LLM_FANOUT
+
+
+def test_llm_capabilities_resolve_provider_attribute() -> None:
+    class _CappedLLM:
+        max_llm_concurrency = 2
+
+    assert get_llm_provider_capabilities(_CappedLLM()).max_concurrency == 2
+
+
+def test_llm_capabilities_ignore_garbage_values() -> None:
+    class _BadLLM:
+        max_llm_concurrency = "not-a-number"
+
+    assert get_llm_provider_capabilities(_BadLLM()).max_concurrency == 0
+
+
+def test_configured_llm_provider_forwards_concurrency_cap() -> None:
+    """3.3: wrapping a capped provider must not lose its declared cap.
+
+    Without forwarding, get_llm_provider_capabilities probes the WRAPPER
+    (which declares nothing) and silently falls back to DEFAULT_LLM_FANOUT,
+    defeating a custom provider's constructor-first cap.
+    """
+    from inqtrix.providers.base import ConfiguredLLMProvider
+    from inqtrix.settings import ModelSettings
+
+    class _CappedLLM:
+        max_llm_concurrency = 2
+
+        def complete(self, *a, **k):  # pragma: no cover - not called here
+            return ""
+
+    wrapped = ConfiguredLLMProvider(_CappedLLM(), ModelSettings())
+    assert get_llm_provider_capabilities(wrapped).max_concurrency == 2
+
+
+def test_claim_fanout_width_bounds_by_llm_cap_not_search() -> None:
+    """3.3: the claim fan-out honours the LLM provider's own cap."""
+    from inqtrix.nodes import _claim_fanout_width
+
+    class _CappedLLM:
+        max_llm_concurrency = 2
+
+    class _UncappedLLM:
+        pass
+
+    # Provider cap wins over a large input count (would previously fan out
+    # as wide as the search width and burst the LLM into a 429).
+    assert _claim_fanout_width(10, _CappedLLM()) == 2
+    # Fewer inputs than the cap: never over-provision.
+    assert _claim_fanout_width(1, _CappedLLM()) == 1
+    # No declared cap: modest default, never 0.
+    assert _claim_fanout_width(10, _UncappedLLM()) == DEFAULT_LLM_FANOUT
+    assert _claim_fanout_width(0, _UncappedLLM()) == 1
+
+
+def test_litellm_rate_limit_retries_then_succeeds() -> None:
+    """1.1a: a transient 429 is retried with backoff, not aborted."""
+    from openai import APIStatusError
+
+    ok = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="ok"), finish_reason="stop")],
+        usage=MagicMock(prompt_tokens=1, completion_tokens=1),
+        model_dump=MagicMock(return_value={
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }),
+    )
+    rl_response = MagicMock()
+    rl_response.status_code = 429
+    rl_response.headers = {"retry-after": "2"}
+    rate_limited = APIStatusError(
+        message="rate limited", response=rl_response, body=None
+    )
+    client = MagicMock()
+    client.chat.completions.create.side_effect = [rate_limited, rate_limited, ok]
+    provider = LiteLLM(api_key="k", default_model="gpt-4o")
+    provider._client = client
+    observed = []
+
+    with patch("inqtrix.providers.base._sleep_before_retry") as sleep:
+        with provider.observe_retries(lambda n: observed.append(n)):
+            result = provider.complete_with_metadata("Hello")
+
+    assert result.content == "ok"
+    assert client.chat.completions.create.call_count == 3  # 2 x 429 + success
+    assert sleep.call_count == 2
+    assert all(n["status_code"] == 429 for n in observed)
+    # Server Retry-After is honoured as a FLOOR over exponential backoff, plus a
+    # small additive jitter so concurrent callers do not wake in lockstep.
+    assert 2.0 <= observed[0]["delay_seconds"] < 3.0
+
+
+def test_litellm_rate_limit_escalates_when_budget_exhausted() -> None:
+    from openai import APIStatusError
+
+    rl_response = MagicMock()
+    rl_response.status_code = 429
+    rl_response.headers = {}
+    rate_limited = APIStatusError(
+        message="rate limited", response=rl_response, body=None
+    )
+    client = MagicMock()
+    client.chat.completions.create.side_effect = rate_limited
+    provider = LiteLLM(api_key="k", default_model="gpt-4o")
+    provider._client = client
+
+    with patch("inqtrix.providers.base._sleep_before_retry"):
+        with pytest.raises(AgentRateLimited):
+            provider.complete("Hello")
+    # initial + _SDK_RATE_LIMIT_MAX_RETRIES retries.
+    from inqtrix.providers.base import _SDK_RATE_LIMIT_MAX_RETRIES
+
+    assert (
+        client.chat.completions.create.call_count
+        == _SDK_RATE_LIMIT_MAX_RETRIES + 1
+    )
+
+
+def test_rate_limit_and_transient_failures_share_three_attempts() -> None:
+    """Mixed provider failures must not stack independent retry budgets."""
+    from openai import APIStatusError
+
+    def _status(code: int) -> APIStatusError:
+        response = MagicMock()
+        response.status_code = code
+        response.headers = {}
+        return APIStatusError(message=str(code), response=response, body=None)
+
+    ok = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="ok"), finish_reason="stop")],
+        usage=MagicMock(prompt_tokens=1, completion_tokens=1),
+        model_dump=MagicMock(return_value={
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }),
+    )
+    client = MagicMock()
+    # The fourth response must never be reached: all failure categories share
+    # the same three-attempt logical operation.
+    client.chat.completions.create.side_effect = [
+        _status(429), _status(503), _status(429), _status(503), _status(429), ok,
+    ]
+    provider = LiteLLM(api_key="k", default_model="gpt-4o")
+    provider._client = client
+
+    with patch("inqtrix.providers.base._sleep_before_retry"):
+        with pytest.raises(AgentRateLimited):
+            provider.complete_with_metadata("Hello")
+    assert client.chat.completions.create.call_count == 3

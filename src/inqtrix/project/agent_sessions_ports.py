@@ -1,0 +1,159 @@
+"""Contracts of the agent-session store (Agent-Desk saved sessions).
+
+Mirrors :mod:`inqtrix.project.asset_records_ports`: the store owns persistence
+only; scoping lives in
+:class:`~inqtrix.services.agent_sessions_service.AgentSessionsService`
+and the wire shape in the router. Two implementations behind one port:
+:class:`~inqtrix.project.agent_sessions_memory.MemoryAgentSessionStore`
+(offline/test) and
+:class:`~inqtrix.project.agent_sessions_postgres.PostgresAgentSessionStore`.
+
+A session carries a heavy ``items_json`` body: ``list_sessions`` returns
+metadata only (``items_json="[]"``); ``get_session`` returns the full row with
+the items (load-on-open).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Protocol, runtime_checkable
+
+
+class AgentSessionNotFound(KeyError):
+    """Raised when a session id is unknown to the store (HTTP 404)."""
+
+
+class AgentSessionGroupNotFound(KeyError):
+    """Raised when a session group id is unknown to the store (HTTP 404)."""
+
+
+@dataclass(frozen=True)
+class AgentSessionGroup:
+    """One grouping of a user's agent sessions.
+
+    Attributes:
+        id: Client-supplied id (``agent-session-group-...``), the primary
+            key.
+        title: User-facing folder label in the Agent Desk history panel.
+        created_at/updated_at: Unix timestamps.
+        tenant_id/created_by_sub/workspace_id: The owner scope.
+    """
+
+    id: str
+    title: str
+    created_at: float
+    updated_at: float
+    tenant_id: str = "default"
+    created_by_sub: str | None = None
+    workspace_id: str | None = None
+
+
+@dataclass(frozen=True)
+class AgentSession:
+    """One saved agent-desk session: a titled assignment timeline.
+
+    Attributes:
+        id: Client-supplied id (``as_...``), the primary key.
+        title: Session label shown in the history panel.
+        group_id: Owning :class:`AgentSessionGroup` id, or ``None`` when
+            ungrouped.
+        items_json: The ordered timeline items serialized as a JSON array
+            (question + the rendered answer record). ``"[]"`` on list rows
+            (load-on-open); the full array on get.
+        created_at/updated_at: Unix timestamps.
+        tenant_id/created_by_sub/workspace_id: The owner scope.
+    """
+
+    id: str
+    title: str
+    created_at: float
+    updated_at: float
+    group_id: str | None = None
+    items_json: str = field(repr=False, default="[]")
+    tenant_id: str = "default"
+    created_by_sub: str | None = None
+    workspace_id: str | None = None
+
+
+@runtime_checkable
+class AgentSessionStore(Protocol):
+    """Persistence port for agent sessions."""
+
+    async def claim_session(
+        self,
+        *,
+        id: str,
+        title: str,
+        created_at: float,
+        created_by_sub: str | None,
+        workspace_id: str | None,
+    ) -> AgentSession:
+        """Insert a session when absent and otherwise return it unchanged.
+
+        The operation is atomic at the store boundary.  In particular, a
+        losing concurrent claimant must never rewrite ownership, title, or
+        the saved timeline of the row that won.
+        """
+        ...
+
+    async def upsert_session(
+        self,
+        *,
+        id: str,
+        title: str,
+        items_json: str,
+        group_id: str | None,
+        created_at: float,
+        updated_at: float,
+        created_by_sub: str | None,
+        workspace_id: str | None,
+    ) -> AgentSession: ...
+
+    async def list_sessions(
+        self, *, created_by_sub: str | None, workspace_id: str | None
+    ) -> list[AgentSession]:
+        """Sessions for the scope (newest-updated first), METADATA ONLY
+        (``items_json="[]"`` — the items load via get_session)."""
+        ...
+
+    async def get_session(self, session_id: str) -> AgentSession:
+        """One session WITH its items (load-on-open), or
+        :class:`AgentSessionNotFound`."""
+        ...
+
+    async def delete_session(self, session_id: str) -> None: ...
+
+    async def upsert_group(
+        self,
+        *,
+        id: str,
+        title: str,
+        created_at: float,
+        updated_at: float,
+        created_by_sub: str | None,
+        workspace_id: str | None,
+    ) -> AgentSessionGroup: ...
+
+    async def claim_group(
+        self,
+        *,
+        id: str,
+        title: str,
+        created_at: float,
+        created_by_sub: str | None,
+        workspace_id: str | None,
+    ) -> AgentSessionGroup:
+        """Insert a group when absent and otherwise return it unchanged."""
+        ...
+
+    async def list_groups(
+        self, *, created_by_sub: str | None, workspace_id: str | None
+    ) -> list[AgentSessionGroup]:
+        """Groups for the scope, newest-created first."""
+        ...
+
+    async def delete_group(self, group_id: str) -> None:
+        """Delete a group; its sessions orphan to ungrouped."""
+        ...
+
+    async def aclose(self) -> None: ...

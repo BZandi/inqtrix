@@ -58,7 +58,7 @@
   --radius: 0.5rem;
   /* Single source for the sticky Topbar height; AppRail's offset and the
      full-height workspaces subtract it, so it must only change here. */
-  --header-h: 2.75rem;
+  --header-h: 2.625rem;
   --background: oklch(0.985 0 0);
   --brand: oklch(0.5 0.18 262);
   --brand-foreground: oklch(0.99 0 0);
@@ -540,6 +540,13 @@
     font-family: var(--font-sans);
   }
 
+  html[data-theme-transition-suppressed],
+  html[data-theme-transition-suppressed] *,
+  html[data-theme-transition-suppressed] *::before,
+  html[data-theme-transition-suppressed] *::after {
+    transition: none !important;
+  }
+
   html[data-contrast-mode="high"] :where(:focus, :focus-visible, :focus-within) {
     outline: none !important;
     box-shadow: none !important;
@@ -610,6 +617,14 @@
     flex-shrink: 0;
   }
 
+  /* Isolates a panel's layout/paint so churn inside it cannot force layout or
+     paint outside it during window/panel resize. NEVER apply to a subtree that
+     renders inline position:fixed elements (they would anchor to the panel
+     instead of the viewport) — Radix portals to body are unaffected. */
+  .inqtrix-contained-panel {
+    contain: layout paint style;
+  }
+
   .inqtrix-resizable-panel-motion > [data-panel] {
     transition:
       flex-grow 260ms cubic-bezier(0.22, 1, 0.36, 1),
@@ -632,6 +647,263 @@
     .inqtrix-resizable-panel-handle {
       transition: none;
     }
+  }
+
+  /* Agent Desk composer — source availability, one-message directives and
+     execution settings stay distinct while sharing one compact footer. The
+     container follows the actual timeline width, including a split Canvas. */
+  .agent-composer-container {
+    container: agent-composer / inline-size;
+  }
+
+  .agent-source-toggle {
+    transition:
+      background-color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+      color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+      box-shadow 160ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .agent-source-toggle-label {
+    grid-template-columns: 0fr;
+    opacity: 0;
+    transform: translateX(-2px);
+    transition:
+      grid-template-columns 160ms cubic-bezier(0.22, 1, 0.36, 1),
+      opacity 120ms cubic-bezier(0.22, 1, 0.36, 1),
+      transform 160ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .agent-source-glyph > svg {
+    transform-origin: center;
+    transition:
+      filter 180ms cubic-bezier(0.22, 1, 0.36, 1),
+      transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .agent-source-glyph-tracer {
+    position: absolute;
+    pointer-events: none;
+    opacity: 0;
+  }
+
+  .agent-source-glyph-web .agent-source-glyph-tracer {
+    inset: -0.125rem;
+    border: 1px solid transparent;
+    border-top-color: currentColor;
+    border-radius: 999px;
+  }
+
+  .agent-source-glyph-knowledge .agent-source-glyph-tracer {
+    right: 0.1rem;
+    bottom: -0.05rem;
+    left: 0.1rem;
+    height: 1px;
+    border-radius: 999px;
+    background: currentColor;
+    transform: scaleX(0);
+    transform-origin: left;
+  }
+
+  .agent-source-toggle:not([aria-disabled='true']):is(:hover, :focus-visible)
+    .agent-source-glyph-web > svg {
+    filter: drop-shadow(0 0 3px color-mix(in oklab, currentColor 28%, transparent));
+    transform: rotate(-8deg) scale(1.04);
+  }
+
+  .agent-source-toggle:not([aria-disabled='true']):is(:hover, :focus-visible)
+    .agent-source-glyph-web .agent-source-glyph-tracer {
+    animation: inqtrix-source-orbit 440ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .agent-source-toggle:not([aria-disabled='true']):is(:hover, :focus-visible)
+    .agent-source-glyph-knowledge > svg {
+    filter: drop-shadow(0 1px 2px color-mix(in oklab, currentColor 22%, transparent));
+    transform: translateY(-1px) scaleX(1.04);
+  }
+
+  .agent-source-toggle:not([aria-disabled='true']):is(:hover, :focus-visible)
+    .agent-source-glyph-knowledge .agent-source-glyph-tracer {
+    animation: inqtrix-knowledge-scan 360ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  @container agent-composer (min-width: 704px) {
+    .agent-source-toggle:is(:hover, :focus-visible) .agent-source-toggle-label {
+      grid-template-columns: 1fr;
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  .agent-source-toggle-forced .agent-source-glyph > svg {
+    animation: inqtrix-source-settle 160ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .agent-source-toggle-active:not(.agent-source-toggle-forced) {
+    animation: inqtrix-source-activate 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .agent-source-force-mark {
+    animation: inqtrix-source-force 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .agent-execution-rail {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    height: 1px;
+    border: 0 !important;
+    background: var(--brand);
+    box-shadow: 0 0 5px color-mix(in oklab, var(--brand) 46%, transparent);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(-72%) scaleX(0.3);
+  }
+
+  .agent-execution-capsule:is(:hover, :focus-within) .agent-execution-rail,
+  .agent-execution-capsule:has([data-state='open']) .agent-execution-rail {
+    animation: inqtrix-execution-route 520ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .agent-route-icon,
+  .agent-model-icon {
+    transform-origin: center;
+    transition:
+      color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+      filter 180ms cubic-bezier(0.22, 1, 0.36, 1),
+      transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .agent-run-setup-trigger:is(:hover, :focus-visible, [data-state='open'])
+    .agent-route-icon {
+    color: var(--brand);
+    filter: drop-shadow(0 0 3px color-mix(in oklab, var(--brand) 32%, transparent));
+    transform: translateX(1px) scale(1.06);
+  }
+
+  .agent-model-trigger:is(:hover, :focus-visible, [data-state='open'])
+    .agent-model-icon {
+    color: var(--brand);
+    filter: drop-shadow(0 0 3px color-mix(in oklab, var(--brand) 32%, transparent));
+    transform: rotate(7deg) scale(1.06);
+  }
+
+  @container agent-composer (max-width: 703px) {
+    .agent-run-setup-label,
+    .agent-model-trigger-label,
+    .agent-model-trigger > svg:last-child {
+      display: none;
+    }
+
+    .agent-execution-capsule {
+      flex-shrink: 0;
+    }
+
+    .agent-run-setup-trigger,
+    .agent-model-trigger {
+      width: 1.75rem;
+      min-width: 1.75rem;
+      padding-inline: 0;
+    }
+  }
+
+  @container agent-composer (max-width: 575px) {
+    .agent-composer-footer,
+    .agent-composer-primary,
+    .agent-composer-actions {
+      gap: 0.25rem;
+    }
+
+    .agent-composer-quota .t-mono {
+      display: none;
+    }
+  }
+
+  @keyframes inqtrix-source-settle {
+    0% { transform: scale(0.88); }
+    100% { transform: scale(1); }
+  }
+
+  @keyframes inqtrix-source-force {
+    0% { opacity: 0; transform: scale(0.5); }
+    100% { opacity: 1; transform: scale(1); }
+  }
+
+  @keyframes inqtrix-source-activate {
+    0% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--brand) 22%, transparent); }
+    55% { box-shadow: 0 0 0 2px color-mix(in oklab, var(--brand) 14%, transparent); }
+    100% { box-shadow: 0 1px 2px var(--shadow-hairline); }
+  }
+
+  @keyframes inqtrix-source-orbit {
+    0% { opacity: 0; transform: rotate(-95deg) scale(0.72); }
+    35% { opacity: 0.8; }
+    100% { opacity: 0; transform: rotate(210deg) scale(1.08); }
+  }
+
+  @keyframes inqtrix-knowledge-scan {
+    0% { opacity: 0; transform: translateX(-28%) scaleX(0); }
+    38% { opacity: 0.9; transform: translateX(0) scaleX(0.62); }
+    100% { opacity: 0; transform: translateX(18%) scaleX(1); }
+  }
+
+  @keyframes inqtrix-execution-route {
+    0% { opacity: 0; transform: translateX(-72%) scaleX(0.28); }
+    34% { opacity: 0.9; }
+    100% { opacity: 0; transform: translateX(72%) scaleX(0.38); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .agent-source-toggle,
+    .agent-source-toggle-label {
+      transition: none;
+    }
+
+    .agent-source-toggle-forced .agent-source-glyph > svg,
+    .agent-source-toggle-active:not(.agent-source-toggle-forced),
+    .agent-source-force-mark,
+    .agent-source-glyph-tracer,
+    .agent-execution-rail {
+      animation: none;
+    }
+
+    .agent-source-glyph > svg,
+    .agent-route-icon,
+    .agent-model-icon {
+      transition: none;
+    }
+
+    .agent-source-glyph-tracer,
+    .agent-execution-rail {
+      display: none;
+    }
+
+    .agent-source-glyph > svg,
+    .agent-route-icon,
+    .agent-model-icon {
+      filter: none !important;
+      transform: none !important;
+    }
+  }
+
+  /* Mermaid diagrams are document-native, not card widgets. Mermaid injects
+     per-SVG styles, so edge rules use !important to keep connectors and
+     arrowheads at body-ink contrast in both themes. */
+  .inqtrix-mermaid svg :where(
+    .flowchart-link,
+    .messageLine0,
+    .messageLine1,
+    .loopLine,
+    .actor-line,
+    .transition,
+    .relation
+  ) {
+    stroke: var(--foreground) !important;
+  }
+
+  .inqtrix-mermaid svg marker path {
+    fill: var(--foreground) !important;
+    stroke: var(--foreground) !important;
   }
 
   /* Surface tiers (applied during component migration, kept here as the
@@ -1914,6 +2186,24 @@
     animation: inqtrix-metric-flash 600ms ease-out;
   }
 
+  /* Agent pulse track: a light packet drifts along the connector between
+   * the last completed station and the active one — the Agent Desk's
+   * "working" signature. Loop = working signal only; the base color IS
+   * the visible reduced-motion end-state. */
+  .inqtrix-agent-flow {
+    background-color: color-mix(in oklab, var(--brand) 22%, transparent);
+    background-image: linear-gradient(
+      90deg,
+      transparent 0%,
+      color-mix(in oklab, var(--brand) 72%, transparent) 50%,
+      transparent 100%
+    );
+    background-repeat: no-repeat;
+    background-size: 45% 100%;
+    animation: inqtrix-agent-flow 2.4s cubic-bezier(0.45, 0, 0.2, 1) infinite;
+    will-change: background-position;
+  }
+
   .inqtrix-rag-island::before {
     animation: inqtrix-rag-island-sheen 900ms cubic-bezier(0.22, 1, 0.36, 1) 1;
     background:
@@ -2069,6 +2359,7 @@
     .inqtrix-segment-breathe,
     .inqtrix-running-dot,
     .inqtrix-metric-flash,
+    .inqtrix-agent-flow,
     .inqtrix-step-complete-motion,
     .inqtrix-step-complete-motion::before,
     .inqtrix-step-complete-check-motion path,
@@ -2220,6 +2511,18 @@
 
   100% {
     color: var(--foreground);
+  }
+}
+
+/* Agent pulse track: one light packet travels the connector, rests, repeats. */
+@keyframes inqtrix-agent-flow {
+  0% {
+    background-position: -45% 0;
+  }
+
+  70%,
+  100% {
+    background-position: 145% 0;
   }
 }
 

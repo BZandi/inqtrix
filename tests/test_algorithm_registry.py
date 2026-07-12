@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from inqtrix.core.algorithms import AlgorithmRegistry, UnknownAlgorithm
+from inqtrix.core.results import RunRequest
 from inqtrix.research.web_research import DirectLlmAlgorithm, WebResearchAlgorithm
 from inqtrix.server.container import build_default_registry
 
@@ -55,3 +56,38 @@ def test_custom_algorithm_registration_is_supported():
     registry = AlgorithmRegistry()
     registry.register(_CustomAlgorithm())
     assert registry.ids() == ("custom_mode",)
+
+
+def test_web_research_child_enforces_inherited_source_policy(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A disabled inherited web source cannot reach the child graph."""
+    invoked = False
+
+    def fake_execute(request, context):
+        nonlocal invoked
+        invoked = True
+        return {"answer": "should not run"}
+
+    monkeypatch.setattr(
+        "inqtrix.research.web_research._execute_graph", fake_execute
+    )
+    request = RunRequest(
+        mode="research",
+        question="x",
+        source_policy={"web": "disabled", "knowledge": "available"},
+    )
+
+    with pytest.raises(PermissionError, match="source_policy.web=disabled"):
+        WebResearchAlgorithm().run(request, runtime=None, context=None)
+
+    assert invoked is False
+
+
+def test_run_request_rejects_unsupported_delegated_web_recency() -> None:
+    with pytest.raises(ValueError, match="web_recency"):
+        RunRequest(
+            mode="research",
+            question="x",
+            web_recency="hour",  # type: ignore[arg-type]
+        )

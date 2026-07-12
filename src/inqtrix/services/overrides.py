@@ -91,25 +91,25 @@ class AgentOverridesRequest(BaseModel):
     silently ignoring typos.
 
     Args:
-        max_rounds: Hard upper bound for the research loop. ``1``-``10``.
+        max_rounds: Hard upper bound for the research loop. ``1``-``4``.
             See :attr:`AgentConfig.max_rounds` for tuning guidance.
         min_rounds: Lower bound for the research loop. ``1``-``10`` and
             must not exceed ``max_rounds`` when both are present in the
             same request.
         confidence_stop: Minimum evaluator confidence (1-10) at which
             the stop cascade may emit ``done``.
-        report_profile: ``"compact"`` or ``"deep"``. Triggers the
-            profile preset cascade for non-explicit fields, see module
-            docstring for the merge semantics.
+        report_profile: ``"schnell"``, ``"compact"`` or ``"deep"``.
+            Triggers the profile preset cascade for non-explicit fields,
+            see module docstring for the merge semantics.
         max_total_seconds: Wall-clock deadline for the entire run, in
-            seconds. ``30``-``1800``.
+            seconds. ``30``-``3600``.
         first_round_queries: Number of broad queries generated in
-            Round 0 by the plan node. ``1``-``20``.
+            Round 0 by the plan node. ``1``-``8``.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    max_rounds: int | None = Field(default=None, ge=1, le=10)
+    max_rounds: int | None = Field(default=None, ge=1, le=4)
     """Hard upper bound for the research loop."""
 
     min_rounds: int | None = Field(default=None, ge=1, le=10)
@@ -119,12 +119,25 @@ class AgentOverridesRequest(BaseModel):
     """Minimum evaluator confidence (1-10) before the stop cascade may emit done."""
 
     report_profile: ReportProfile | None = None
-    """Report style preset (``compact`` or ``deep``)."""
+    """Report style preset (``schnell``, ``compact`` or ``deep``)."""
 
-    max_total_seconds: int | None = Field(default=None, ge=30, le=1800)
+    depth: Literal["normal", "deep"] | None = None
+    """Agent-mode thoroughness (plan M4): ``deep`` = high kernel effort,
+    raised iteration ceiling, DEEP child research profile and one
+    verification pass. Distinct from ``report_profile``. Legacy knob —
+    new clients send ``agent_tier`` instead; sending BOTH is a 400."""
+
+    agent_tier: Literal["schnell", "gruendlich", "tief"] | None = None
+    """Agent-Desk speed/depth tier (Stufen). Bridges into ``depth``
+    (``tief`` -> ``deep``) so depth consumers keep working; the budget/
+    gate semantics come from :data:`inqtrix.agents.tier_policy
+    .TIER_POLICIES`. Mutually exclusive with ``depth`` — no silent
+    precedence guessing."""
+
+    max_total_seconds: int | None = Field(default=None, ge=30, le=3600)
     """Wall-clock deadline for the entire run, in seconds."""
 
-    first_round_queries: int | None = Field(default=None, ge=1, le=20)
+    first_round_queries: int | None = Field(default=None, ge=1, le=8)
     """Number of broad queries generated in Round 0."""
 
     skip_search: bool | None = Field(default=None)
@@ -188,6 +201,25 @@ def parse_overrides_payload(payload: Any) -> AgentOverridesRequest | None:
                 }
             },
         ) from exc
+    if overrides.agent_tier is not None and overrides.depth is not None:
+        # Loud instead of a precedence rule: the two knobs answer the
+        # same question ("how deep"), and a client mixing them
+        # CONTRADICTORILY is a bug. The consistent pair stays valid —
+        # the worker replays the resolved (tier, bridged depth) body.
+        bridged = "deep" if overrides.agent_tier == "tief" else "normal"
+        if overrides.depth != bridged:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": {
+                        "message": (
+                            "agent_overrides: depth widerspricht "
+                            "agent_tier — nur eines von beiden setzen"
+                        ),
+                        "type": "invalid_request_error",
+                    }
+                },
+            )
     return overrides
 
 
@@ -218,9 +250,41 @@ def apply_overrides(
         Emits an ``INFO`` log line for each applied override field so
         the audit trail tracks which slider moved which value.
     """
-    if overrides is None:
-        return base
-    update = overrides.model_dump(exclude_none=True)
+    update = (
+        {} if overrides is None else overrides.model_dump(exclude_none=True)
+    )
+    # Tier -> depth bridge: a selected tier drives the SAME depth switch
+    # every existing consumer (kernel ceilings, verify pass, child
+    # profiles) already reads — additive, no consumer changes. The
+    # mutual-exclusion check in parse_overrides_payload guarantees no
+    # caller-supplied depth is overwritten here.
+    if "agent_tier" in update and "depth" not in update:
+        update["depth"] = "deep" if update["agent_tier"] == "tief" else "normal"
+    if "agent_tier" not in update and base.agent_tier:
+        # The bridge must also hold for an ENV-level AGENT_TIER: without
+        # it the resolved pair is contradictory and the durable replay
+        # body 400s at worker claim time. An explicit request depth that
+        # contradicts the env tier wins (request beats env everywhere in
+        # this module) — the run then keeps legacy depth semantics.
+        bridged = "deep" if base.agent_tier == "tief" else "normal"
+        if "depth" in update:
+            if update["depth"] != bridged:
+                log.info(
+                    "Per-request depth=%r overrides env AGENT_TIER=%r; "
+                    "the run uses legacy depth semantics.",
+                    update["depth"],
+                    base.agent_tier,
+                )
+                update["agent_tier"] = ""
+        elif base.depth != bridged:
+            log.info(
+                "Env AGENT_TIER=%r bridges depth to %r (env DEPTH=%r "
+                "is superseded by the tier).",
+                base.agent_tier,
+                bridged,
+                base.depth,
+            )
+            update["depth"] = bridged
     if not update:
         return base
     for field_name, value in update.items():

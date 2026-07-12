@@ -32,6 +32,25 @@ SEARCH_MODEL=perplexity-sonar-pro-agent
 
 To run Azure / Anthropic / Bedrock instead, copy the matching block from [Provider recipes](provider-recipes.md) — it is purely an `.env` change.
 
+The committed stack example also exposes the shared long-operation policy used
+by API and worker containers. Keep these values aligned unless you intentionally
+tune the deployment:
+
+```dotenv
+REASONING_TIMEOUT=600
+EDITOR_ASSISTANT_TIMEOUT=600
+SEARCH_TIMEOUT=600
+CLAIM_EXTRACT_TIMEOUT=600
+MAX_TOTAL_SECONDS=3600
+INQTRIX_AGENT_MAX_PARALLEL_CHILDREN=6
+INQTRIX_AZURE_FOUNDRY_MAX_CONCURRENCY=6
+INQTRIX_QUOTA_MAX_TOKENS_PER_RUN=900000
+```
+
+The first four values budget one logical operation including every retry;
+retries do not receive another full timeout. The optional 900,000-token run
+quota stops at the next safe graph boundary and never shortens a stored answer.
+
 That minimum (secrets + one LLM + one search) gets you research + chat. The same `deploy/.env.stack` file has **commented blocks** for the optional pieces — uncomment the ones you want and run the matching profile in step 2:
 
 | Want | Uncomment in `deploy/.env.stack` | Run with |

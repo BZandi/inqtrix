@@ -3,10 +3,10 @@
 Builds the app through the public :func:`inqtrix.server.app.create_app`
 factory (not ``register_routes`` directly) so the tests exercise exactly
 the surface a deployment sees. Providers are network-free stubs; the
-agent entry point is monkeypatched per test at the module that binds
-it: ``inqtrix.research.web_research.run_web_graph`` for non-streaming
-chat, native runs, and test runs; ``inqtrix.server.streaming.agent_run``
-for streamed chat (the two engine seams).
+agent entry point is monkeypatched per test at the ONE graph seam
+``inqtrix.research.web_research.run_web_graph`` — streamed AND non-streamed
+chat, native runs, and test runs all dispatch through the registry and reach
+the engine there (streaming no longer has a separate binding).
 """
 
 from __future__ import annotations

@@ -11,7 +11,7 @@ description: >-
 type: application
 
 # Chart version: bump on any chart change (independent of the app version).
-version: 0.1.3
+version: 0.1.4
 
 # Application version: tracks src/inqtrix/__init__.py. Used as the default image
 # tag when image.<component>.tag is left empty.

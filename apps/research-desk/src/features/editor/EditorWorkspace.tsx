@@ -1,5 +1,4 @@
 import {
-  Fragment,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -12,10 +11,8 @@ import {
   type RefObject,
   type ReactNode,
 } from 'react'
-import { EditorContent, useEditor, type Editor } from '@tiptap/react'
-import { BubbleMenu } from '@tiptap/react/menus'
+import type { Editor } from '@tiptap/react'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
-import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer'
 import {
   AlertTriangle,
   Anchor,
@@ -32,18 +29,17 @@ import {
   FolderPlus,
   ListFilter,
   LoaderCircle,
-  MessageSquarePlus,
   MessageSquareText,
   MessagesSquare,
   MoreHorizontal,
   PanelBottomClose,
   PanelBottomOpen,
+  PanelRightClose,
   Paperclip,
   PencilLine,
   Pin,
   PinOff,
   Redo2,
-  SearchCheck,
   SendHorizontal,
   Scale,
   Sparkles,
@@ -55,8 +51,11 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Chip } from '@/components/ui/chip'
-import { AnimatedFixedSidePanel } from '@/components/ui/animated-panel'
+import { AnimatedPanelBody, AnimatedResizableHandle } from '@/components/ui/animated-panel'
+import { useAnimatedResizablePanelCollapse } from '@/components/ui/animated-panel-motion'
+import { ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
 import { PanelToggle } from '@/components/ui/panel-toggle'
+import { ResponsiveSidePanel } from '@/components/ui/responsive-side-panel'
 import { WelcomeState } from '@/components/ui/welcome-state'
 import { ComposerIconButton } from '@/features/composer/ComposerIconButton'
 import {
@@ -73,7 +72,8 @@ import {
   EXPLORER_REVEAL_STEP,
   ExplorerFolderRow,
   ExplorerFolderToggle,
-  ExplorerItemRow,
+  ExplorerHistoryRow,
+  ExplorerHistoryTitleInput,
   ExplorerRevealControls,
   ExplorerRunningIndicator,
   ExplorerSearchField,
@@ -134,22 +134,13 @@ import type {
 } from '@/features/project/types'
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
 import { useLocale } from '@/i18n/LocaleProvider'
+import { useMediaQuery } from '@/features/researchDesk/hooks/useMediaQuery'
 import { cn } from '@/lib/utils'
-import { commentDecorationPluginKey, createEditorExtensions, normalizeEditorMarkdownForTiptap, serializeEditorMarkdown, suggestionDecorationPluginKey } from './tiptap'
-import { BlockHandle } from './BlockHandle'
-import { TableControls } from './TableControls'
-import { SelectionToolbar } from './SelectionToolbar'
-import { MarkdownSourceEditor } from './MarkdownSourceEditor'
-import { documentDiffPlan, suggestionDiffPlan, type DocumentDiffBlock, type SuggestionDiffSegment } from './suggestionDiff'
-import {
-  blockInsertionPositionForRange,
-  blockWidgetPositionForRange,
-  clampAnchor,
-  createCommentFromSelection,
-  resolveMaterializedAnchor,
-  resolveAnchorRange,
-  shouldParsePastedMarkdown,
-} from './anchoring'
+import { MarkdownEditorSurface } from './core/MarkdownEditorSurface'
+import { COMMENT_KIND_ORDER, commentKindMeta, type CommentKindMeta } from './commentKinds'
+import { editorCopy, type EditorCopy } from './editorCopy'
+import { escapeCssIdentifier } from './editorDom'
+import { suggestionDiffPlan } from './suggestionDiff'
 import { resizeTextareaToRows } from '@/features/composer/textareaAutosize'
 import {
   TextImproveButton,
@@ -196,355 +187,14 @@ type EditorDocumentDropTarget = {
   targetIndex: number
 }
 
-type EditorCopy = { [Key in keyof typeof editorCopy.de]: string }
-
 const EDITOR_TREE_PANEL_ID = 'editor-file-tree-panel'
 const EDITOR_COMMENTS_PANEL_ID = 'editor-comments-panel'
-
-const editorCopy = {
-  de: {
-    exportWord: 'Als Word exportieren',
-    exportWordFailed: 'Word-Export fehlgeschlagen',
-    assistant: 'Editor-Assistent',
-    assistantPlaceholder: 'Beschreiben Sie, was am Dokument geändert werden soll...',
-    attachComments: 'Kommentare anhängen',
-    attachedComments: 'Kommentare angehängt',
-    assistantDone: 'Antwort',
-    assistantThinking: 'Denke nach',
-    documentChanges: 'Dokument-Änderungen',
-    setDiffAnchor: 'Vergleichsanker setzen',
-    showDiff: 'Diff-Ansicht einschalten',
-    hideDiff: 'Diff-Ansicht ausschalten',
-    diffView: 'Diff-Ansicht',
-    noDiffAnchor: 'Setzen Sie zuerst einen Vergleichsanker.',
-    acceptAll: 'Alle übernehmen',
-    rejectAll: 'Alle verwerfen',
-    noDocumentChanges: 'Noch keine Dokument-Änderungen.',
-    refineSuggestion: 'Vorschlag verfeinern',
-    editSuggestion: 'Vorschlag bearbeiten',
-    saveSuggestion: 'Speichern',
-    cancelEdit: 'Abbrechen',
-    sendRefinement: 'Senden',
-    refinementPlaceholder: 'Was soll am Vorschlag geändert werden?',
-    refiningSuggestion: 'Überarbeite Vorschlag …',
-    revision: 'Revision',
-    removeFromQueue: 'Aus Warteschlange entfernen',
-    removeFormatting: 'Formatierung entfernen',
-    placeholderEmpty: 'Schreibe, oder tippe / für Befehle …',
-    placeholderHeading: 'Überschrift',
-    slashTitle: 'Befehle',
-    slashEmpty: 'Keine Treffer',
-    slashNav: 'Navigieren',
-    slashSelect: 'Auswählen',
-    slashClose: 'Schließen',
-    slashGroupStyle: 'Stil',
-    slashGroupInsert: 'Einfügen',
-    slashText: 'Text',
-    slashHeading1: 'Überschrift 1',
-    slashHeading2: 'Überschrift 2',
-    slashHeading3: 'Überschrift 3',
-    slashBulletList: 'Aufzählung',
-    slashOrderedList: 'Nummerierte Liste',
-    slashTaskList: 'Aufgabenliste',
-    slashBlockquote: 'Zitat',
-    slashCodeBlock: 'Codeblock',
-    bubbleComment: 'Kommentar',
-    bubbleBold: 'Fett',
-    bubbleItalic: 'Kursiv',
-    bubbleUnderline: 'Unterstrichen',
-    bubbleStrike: 'Durchgestrichen',
-    bubbleCode: 'Code',
-    bubbleHighlight: 'Hervorheben',
-    slashTable: 'Tabelle',
-    slashDivider: 'Trenner',
-    blockHandleAria: 'Block-Optionen',
-    blockTurnInto: 'Umwandeln in',
-    blockDuplicate: 'Block duplizieren',
-    blockDelete: 'Block löschen',
-    blockMoveUp: 'Nach oben verschieben',
-    blockMoveDown: 'Nach unten verschieben',
-    tableColumnOptions: 'Spalten-Optionen',
-    tableRowOptions: 'Zeilen-Optionen',
-    tableColInsertLeft: 'Spalte links einfügen',
-    tableColInsertRight: 'Spalte rechts einfügen',
-    tableColMoveLeft: 'Spalte nach links',
-    tableColMoveRight: 'Spalte nach rechts',
-    tableSortAsc: 'Sortieren A–Z',
-    tableSortDesc: 'Sortieren Z–A',
-    tableColDuplicate: 'Spalte duplizieren',
-    tableColClear: 'Spalteninhalt leeren',
-    tableToggleHeaderRow: 'Kopfzeile umschalten',
-    tableRowInsertAbove: 'Zeile oben einfügen',
-    tableRowInsertBelow: 'Zeile unten einfügen',
-    tableRowMoveUp: 'Zeile nach oben',
-    tableRowMoveDown: 'Zeile nach unten',
-    tableRowDuplicate: 'Zeile duplizieren',
-    templates: 'Vorlagen',
-    runSuggestion: 'Vorschlag erzeugen',
-    runningSuggestion: 'Wird erzeugt …',
-    accept: 'Übernehmen',
-    reject: 'Verwerfen',
-    proposedChange: 'Vorgeschlagene Änderung',
-    proposedText: 'Vorschlag',
-    warnings: 'Hinweise',
-    changeSummary: 'Änderungen',
-    reviewInEditor: 'Im Dokument übernehmen oder verwerfen',
-    reviewInPanel: 'In der Karte übernehmen oder verwerfen',
-    sources: 'Quellen',
-    suggestionStale: 'Textstelle hat sich geändert. Bitte Vorschlag neu erzeugen.',
-    regenerate: 'Neu erzeugen',
-    changeKind: 'Typ ändern',
-    comments: 'Kommentare',
-    filterAll: 'Alle',
-    kindCollect: 'Sammeln',
-    kindEvidence: 'Beleg',
-    kindInline: 'Direkt',
-    preset: 'Preset',
-    presetAddSources: 'Quellen ergänzen',
-    presetFactCheck: 'Fakten prüfen',
-    presetVerifyCitations: 'Zitate prüfen',
-    reopen: 'Wieder öffnen',
-    tabOpen: 'Offen',
-    tabResolved: 'Erledigt',
-    createDocument: 'Neue Datei',
-    cancel: 'Abbrechen',
-    createFolder: 'Neuer Ordner',
-    deleteComment: 'Kommentar löschen',
-    deleteDocument: 'Dokument löschen',
-    editComment: 'Kommentar bearbeiten',
-    save: 'Speichern',
-    deleteFolder: 'Ordner löschen',
-    documents: 'Dokumente',
-    dropIntoFolder: 'In Ordner verschieben',
-    emptyBody: 'Arbeitsfläche für Markdown, importierte Research Reports und KI-gestützte Überarbeitung.',
-    emptyGuidance: 'Starten Sie mit einer leeren Datei zum Schreiben oder importieren Sie einen abgeschlossenen Research Report, um daraus ein bearbeitbares Dokument zu machen.',
-    emptyExample: 'Der Editor-Assistent unterstützt beim Umformulieren, Prüfen von Aussagen und Arbeiten mit Kommentaren.',
-    emptyKicker: 'Editor',
-    emptyTitle: 'Kein Dokument geöffnet',
-    focus: 'Fokus',
-    hideAssistant: 'Editor-Assistent ausblenden',
-    hideComments: 'Kommentare ausblenden',
-    hideTree: 'Dateibaum ausblenden',
-    importReport: 'Research Report importieren',
-    importedFrom: 'Importiert aus Research-Run',
-    inlineComment: 'Kommentar hinzufügen...',
-    inlineCommentSubmit: 'Kommentar',
-    addColumn: 'Spalte hinzufügen',
-    addRow: 'Zeile hinzufügen',
-    closeTableEditor: 'Tabelleneditor schließen',
-    columnLabel: 'Spalte',
-    deleteColumn: 'Spalte löschen',
-    deleteRow: 'Zeile löschen',
-    formatTables: 'Markdown-Tabellen bereinigen',
-    insertOrEditTable: 'Tabelle einfügen oder bearbeiten',
-    sourceEditor: 'Markdown Source',
-    sourceLineWrap: 'Zeilenumbruch umschalten',
-    tableAlignmentCenter: 'Spalte zentrieren',
-    tableAlignmentLeft: 'Spalte linksbündig ausrichten',
-    tableAlignmentRight: 'Spalte rechtsbündig ausrichten',
-    tableColumn: 'Spalten',
-    tableEditor: 'Tabelleneditor',
-    tableLines: 'Zeilen',
-    tableRows: 'Datenzeilen',
-    live: 'Live',
-    markdown: 'Markdown',
-    noComments: 'Noch keine Kommentare in diesem Dokument.',
-    noDocuments: 'Noch keine Dokumente.',
-    noReports: 'Keine abgeschlossenen Reports verfügbar.',
-    options: 'Optionen',
-    searchDocuments: 'Dokumente suchen',
-    searchClear: 'Suche zurücksetzen',
-    searchNoResults: 'Keine passenden Dokumente.',
-    moveDocument: 'Dokument verschieben',
-    moveFolder: 'Ordner verschieben',
-    pinned: 'Angeheftet',
-    pinDocument: 'Dokument anheften',
-    renameDocument: 'Dokument umbenennen',
-    renameFolder: 'Ordner umbenennen',
-    resolve: 'Erledigen',
-    send: 'Senden',
-    showAssistant: 'Editor-Assistent einblenden',
-    showComments: 'Kommentare einblenden',
-    showLess: 'Weniger anzeigen',
-    showMore: 'Mehr anzeigen',
-    showTree: 'Dateibaum einblenden',
-    source: 'Source',
-    stopRun: 'Lauf abbrechen',
-    unpinDocument: 'Dokument lösen',
-    updated: 'zuletzt bearbeitet',
-  },
-  en: {
-    exportWord: 'Export to Word',
-    exportWordFailed: 'Word export failed',
-    assistant: 'Editor assistant',
-    assistantPlaceholder: 'Describe what should change in this document...',
-    attachComments: 'Attach comments',
-    attachedComments: 'comments attached',
-    assistantDone: 'Response',
-    assistantThinking: 'Thinking',
-    documentChanges: 'Document changes',
-    setDiffAnchor: 'Set comparison anchor',
-    showDiff: 'Show diff view',
-    hideDiff: 'Hide diff view',
-    diffView: 'Diff view',
-    noDiffAnchor: 'Set a comparison anchor first.',
-    acceptAll: 'Accept all',
-    rejectAll: 'Reject all',
-    noDocumentChanges: 'No document changes yet.',
-    refineSuggestion: 'Refine suggestion',
-    editSuggestion: 'Edit suggestion',
-    saveSuggestion: 'Save',
-    cancelEdit: 'Cancel',
-    sendRefinement: 'Send',
-    refinementPlaceholder: 'What should change in this suggestion?',
-    refiningSuggestion: 'Refining suggestion …',
-    revision: 'Revision',
-    removeFromQueue: 'Remove from queue',
-    removeFormatting: 'Remove formatting',
-    placeholderEmpty: 'Write, or type / for commands …',
-    placeholderHeading: 'Heading',
-    slashTitle: 'Commands',
-    slashEmpty: 'No matches',
-    slashNav: 'Navigate',
-    slashSelect: 'Select',
-    slashClose: 'Close',
-    slashGroupStyle: 'Style',
-    slashGroupInsert: 'Insert',
-    slashText: 'Text',
-    slashHeading1: 'Heading 1',
-    slashHeading2: 'Heading 2',
-    slashHeading3: 'Heading 3',
-    slashBulletList: 'Bullet list',
-    slashOrderedList: 'Numbered list',
-    slashTaskList: 'To-do list',
-    slashBlockquote: 'Quote',
-    slashCodeBlock: 'Code block',
-    bubbleComment: 'Comment',
-    bubbleBold: 'Bold',
-    bubbleItalic: 'Italic',
-    bubbleUnderline: 'Underline',
-    bubbleStrike: 'Strikethrough',
-    bubbleCode: 'Code',
-    bubbleHighlight: 'Highlight',
-    slashTable: 'Table',
-    slashDivider: 'Divider',
-    blockHandleAria: 'Block options',
-    blockTurnInto: 'Turn into',
-    blockDuplicate: 'Duplicate block',
-    blockDelete: 'Delete block',
-    blockMoveUp: 'Move up',
-    blockMoveDown: 'Move down',
-    tableColumnOptions: 'Column options',
-    tableRowOptions: 'Row options',
-    tableColInsertLeft: 'Insert column left',
-    tableColInsertRight: 'Insert column right',
-    tableColMoveLeft: 'Move column left',
-    tableColMoveRight: 'Move column right',
-    tableSortAsc: 'Sort A–Z',
-    tableSortDesc: 'Sort Z–A',
-    tableColDuplicate: 'Duplicate column',
-    tableColClear: 'Clear column contents',
-    tableToggleHeaderRow: 'Toggle header row',
-    tableRowInsertAbove: 'Insert row above',
-    tableRowInsertBelow: 'Insert row below',
-    tableRowMoveUp: 'Move row up',
-    tableRowMoveDown: 'Move row down',
-    tableRowDuplicate: 'Duplicate row',
-    templates: 'Templates',
-    runSuggestion: 'Generate suggestion',
-    runningSuggestion: 'Generating …',
-    accept: 'Accept',
-    reject: 'Reject',
-    proposedChange: 'Proposed change',
-    proposedText: 'Suggestion',
-    warnings: 'Warnings',
-    changeSummary: 'Changes',
-    reviewInEditor: 'Accept or reject it in the document',
-    reviewInPanel: 'Accept or reject it in this card',
-    sources: 'Sources',
-    suggestionStale: 'The passage changed. Please regenerate the suggestion.',
-    regenerate: 'Regenerate',
-    changeKind: 'Change type',
-    comments: 'Comments',
-    filterAll: 'All',
-    kindCollect: 'Collect',
-    kindEvidence: 'Evidence',
-    kindInline: 'Direct',
-    preset: 'Preset',
-    presetAddSources: 'Add sources',
-    presetFactCheck: 'Fact-check',
-    presetVerifyCitations: 'Verify citations',
-    reopen: 'Reopen',
-    tabOpen: 'Open',
-    tabResolved: 'Resolved',
-    createDocument: 'New file',
-    cancel: 'Cancel',
-    createFolder: 'New folder',
-    deleteComment: 'Delete comment',
-    deleteDocument: 'Delete document',
-    editComment: 'Edit comment',
-    save: 'Save',
-    deleteFolder: 'Delete folder',
-    documents: 'Documents',
-    dropIntoFolder: 'Move into folder',
-    emptyBody: 'Workspace for Markdown, imported research reports, and AI-assisted revision.',
-    emptyGuidance: 'Start with a blank file for writing, or import a completed research report to turn it into an editable document.',
-    emptyExample: 'The editor assistant helps rewrite passages, check claims, and work through comments.',
-    emptyKicker: 'Editor',
-    emptyTitle: 'No document open',
-    focus: 'Focus',
-    hideAssistant: 'Hide editor assistant',
-    hideComments: 'Hide comments',
-    hideTree: 'Hide file tree',
-    importReport: 'Import research report',
-    importedFrom: 'Imported from research run',
-    inlineComment: 'Add comment...',
-    inlineCommentSubmit: 'Comment',
-    addColumn: 'Add column',
-    addRow: 'Add row',
-    closeTableEditor: 'Close table editor',
-    columnLabel: 'Column',
-    deleteColumn: 'Delete column',
-    deleteRow: 'Delete row',
-    formatTables: 'Clean up Markdown tables',
-    insertOrEditTable: 'Insert or edit table',
-    sourceEditor: 'Markdown source',
-    sourceLineWrap: 'Toggle line wrap',
-    tableAlignmentCenter: 'Center column',
-    tableAlignmentLeft: 'Align column left',
-    tableAlignmentRight: 'Align column right',
-    tableColumn: 'Columns',
-    tableEditor: 'Table editor',
-    tableLines: 'Lines',
-    tableRows: 'Data rows',
-    live: 'Live',
-    markdown: 'Markdown',
-    noComments: 'No comments in this document yet.',
-    noDocuments: 'No documents yet.',
-    noReports: 'No completed reports available.',
-    options: 'Options',
-    searchDocuments: 'Search documents',
-    searchClear: 'Clear search',
-    searchNoResults: 'No matching documents.',
-    moveDocument: 'Move document',
-    moveFolder: 'Move folder',
-    pinned: 'Pinned',
-    pinDocument: 'Pin document',
-    renameDocument: 'Rename document',
-    renameFolder: 'Rename folder',
-    resolve: 'Resolve',
-    send: 'Send',
-    showAssistant: 'Show editor assistant',
-    showComments: 'Show comments',
-    showLess: 'Show less',
-    showMore: 'Show more',
-    showTree: 'Show file tree',
-    source: 'Source',
-    stopRun: 'Cancel run',
-    unpinDocument: 'Unpin document',
-    updated: 'last edited',
-  },
-} as const
+// The center column and the center+comments subtree of the nested resizable
+// groups. The tree collapses in the OUTER group, the comments panel in the
+// INNER group -- mirroring the Knowledge Desk so the two side panels never
+// share one percentage space and fight during independent collapse.
+const EDITOR_CENTER_PANEL_ID = 'editor-center-panel'
+const EDITOR_CENTER_COMMENTS_PANEL_ID = 'editor-center-comments-panel'
 
 export default function EditorWorkspace({
   apiKey,
@@ -562,10 +212,13 @@ export default function EditorWorkspace({
 }: EditorWorkspaceProps) {
   const { locale } = useLocale()
   const copy = editorCopy[locale]
+  const isDesktop = useMediaQuery('(min-width: 1024px)')
   const folders = useMemo(() => projectEditorFolders(state), [state.editorFolderOrder, state.editorFolders])
   const documents = useMemo(() => projectEditorDocuments(state), [state.editorDocumentOrder, state.editorDocuments])
   const activeDocument = selectedEditorDocument(state)
   const [activeEditor, setActiveEditor] = useState<Editor | null>(null)
+  const [isMobileTreeOpen, setIsMobileTreeOpen] = useState(false)
+  const [isMobileCommentsOpen, setIsMobileCommentsOpen] = useState(false)
   const comments = useMemo(
     () => editorCommentsForDocument(state, activeDocument?.id ?? null),
     [activeDocument?.id, state.editorComments],
@@ -710,178 +363,342 @@ export default function EditorWorkspace({
     }, 0)
   }, [dispatch, state.editorUi.isDiffVisible])
 
-  return (
-    <div className="flex h-[calc(100svh-var(--header-h))] min-w-0 bg-canvas text-foreground">
-      <AnimatedFixedSidePanel
-        controlsId={EDITOR_TREE_PANEL_ID}
-        expanded={state.editorUi.isTreeVisible}
-        expandedWidth="17.5rem"
-        side="left"
-      >
-        <EditorFileTree
-          activeDocumentId={activeDocument?.id ?? null}
-          copy={copy}
-          dispatch={dispatch}
-          documents={documents}
-          folders={folders}
-          pinnedDocumentIds={state.ui.pinnedExplorer.editorDocumentIds}
-          reportOptions={reportOptions}
-          runningDocumentId={
-            (isGlobalRunning || runningCommentIds.length > 0 || runningSuggestionIds.length > 0)
-              ? activeDocument?.id ?? null
-              : null
-          }
-        />
-      </AnimatedFixedSidePanel>
-      <main className="flex min-w-0 flex-1 flex-col border-r border-border bg-background">
-        {activeDocument ? (
-          <>
-            <EditorTopBar
-              commentCount={comments.length}
+  // Both side panels drag-resize + persist their width (like Knowledge/Chat),
+  // while the existing `isTreeVisible`/`isCommentPanelVisible` booleans keep
+  // driving collapse/expand (already persisted). Nested groups: the tree lives
+  // in the outer group, the comments panel in the inner group.
+  const reduceMotion = useReducedMotion()
+  const treeVisible = state.editorUi.isTreeVisible
+  const commentsVisible = state.editorUi.isCommentPanelVisible
+  const treeSize = state.ui.panelLayout.editorTree
+  const commentsSize = state.ui.panelLayout.editorComments
+  const treePanelMotion = useAnimatedResizablePanelCollapse({
+    expanded: treeVisible,
+    expandedSize: treeSize,
+    reduceMotion,
+  })
+  const commentsPanelMotion = useAnimatedResizablePanelCollapse({
+    expanded: commentsVisible,
+    expandedSize: commentsSize,
+    reduceMotion,
+  })
+  const treeLayout = {
+    [EDITOR_CENTER_PANEL_ID]: treeVisible ? 100 - treeSize : 100,
+    [EDITOR_TREE_PANEL_ID]: treeVisible ? treeSize : 0,
+  }
+  const commentsLayout = {
+    [EDITOR_CENTER_COMMENTS_PANEL_ID]: commentsVisible ? 100 - commentsSize : 100,
+    [EDITOR_COMMENTS_PANEL_ID]: commentsVisible ? commentsSize : 0,
+  }
+
+  const handleTreeVisibleChange = useCallback((isVisible: boolean) => {
+    if (isDesktop) {
+      dispatch({ isVisible, type: 'setEditorTreeVisible' })
+      return
+    }
+    setIsMobileTreeOpen(isVisible)
+  }, [dispatch, isDesktop])
+
+  const handleCommentsVisibleChange = useCallback((isVisible: boolean) => {
+    if (isDesktop) {
+      dispatch({ isVisible, type: 'setEditorCommentPanelVisible' })
+      return
+    }
+    setIsMobileCommentsOpen(isVisible)
+  }, [dispatch, isDesktop])
+
+  const fileTreePanel = (
+    <EditorFileTree
+      activeDocumentId={activeDocument?.id ?? null}
+      copy={copy}
+      dispatch={dispatch}
+      documents={documents}
+      folders={folders}
+      pinnedDocumentIds={state.ui.pinnedExplorer.editorDocumentIds}
+      reportOptions={reportOptions}
+      runningDocumentId={
+        (isGlobalRunning || runningCommentIds.length > 0 || runningSuggestionIds.length > 0)
+          ? activeDocument?.id ?? null
+          : null
+      }
+    />
+  )
+
+  const commentsPanel = (
+    <EditorCommentsPanel
+      comments={comments}
+      copy={copy}
+      dispatch={dispatch}
+      onClose={() => handleCommentsVisibleChange(false)}
+      onAcceptSuggestionGroup={handleAcceptSuggestionGroup}
+      onAcceptSuggestion={handleAcceptSuggestion}
+      onRejectSuggestionGroup={handleRejectSuggestionGroup}
+      onRejectSuggestion={handleRejectSuggestion}
+      onRunComment={handleRunComment}
+      onSelectSuggestion={handleSelectSuggestion}
+      runErrors={runErrors}
+      runningCommentIds={runningCommentIds}
+      selectedCommentId={state.editorUi.selectedCommentId}
+      suggestions={documentSuggestions}
+    />
+  )
+
+  const editorContent = (
+    <main className="flex h-full w-full min-w-0 flex-col bg-background">
+      {activeDocument ? (
+        <>
+          <EditorTopBar
+            commentCount={comments.length}
+            copy={copy}
+            dispatch={dispatch}
+            document={activeDocument}
+            editor={activeEditor}
+            isCommentPanelVisible={isDesktop ? state.editorUi.isCommentPanelVisible : isMobileCommentsOpen}
+            isDiffVisible={state.editorUi.isDiffVisible}
+            isDirty={state.dirty}
+            isTreeVisible={isDesktop ? state.editorUi.isTreeVisible : isMobileTreeOpen}
+            onCommentPanelVisibleChange={handleCommentsVisibleChange}
+            onTreeVisibleChange={handleTreeVisibleChange}
+            viewMode={state.editorUi.viewMode}
+          />
+          <div className="flex min-h-0 flex-1 flex-col">
+            <MarkdownEditorSurface
+              comments={comments}
+              copy={copy}
+              document={activeDocument}
+              diffAnchorMarkdown={activeDocument.diffAnchorMarkdown ?? null}
+              isDiffVisible={state.editorUi.isDiffVisible}
+              mode={state.editorUi.viewMode}
+              onChange={(contentMarkdown) => {
+                dispatch({
+                  contentMarkdown,
+                  documentId: activeDocument.id,
+                  type: 'updateEditorDocumentMarkdown',
+                })
+              }}
+              onCreateComment={handleCreateComment}
+              onEditorReady={setActiveEditor}
+              onAcceptSuggestion={handleAcceptSuggestion}
+              onEditSuggestion={handleEditSuggestionProposal}
+              onMarkSuggestionStale={handleMarkSuggestionStale}
+              onRefineSuggestion={handleRefineSuggestion}
+              onRejectSuggestion={handleRejectSuggestion}
+              onSelectComment={(commentId) => dispatch({ commentId, type: 'selectEditorComment' })}
+              onStopSuggestion={handleStopSuggestionRun}
+              runningSuggestionIds={runningSuggestionIds}
+              selectedCommentId={state.editorUi.selectedCommentId}
+              suggestionErrors={suggestionErrors}
+              suggestions={documentSuggestions.filter((suggestion) => suggestion.status === 'pending')}
+              textImprovement={textImprovement}
+            />
+            <EditorAssistantComposer
+              attachedCommentIds={attachedCommentIds}
+              attachmentChips={attachmentChips}
+              chatModelOptions={chatModelOptions}
+              chatModelOptionsStatus={chatModelOptionsStatus}
+              comments={comments}
+              composerRef={composerRef}
+              copy={copy}
+              defaultChatModel={defaultChatModel}
+              dispatch={dispatch}
+              draft={state.editorUi.assistantDraft}
+              fileGroupOptions={fileGroupOptions}
+              fileOptions={fileOptions}
+              reportOptions={reportOptions}
+              isAttachActive={isAttachActive}
+              instructionFeedback={instructionFeedback}
+              isRunning={isGlobalRunning}
+              isVisible={state.editorUi.isAssistantVisible}
+              isWideCanvas={isDesktop ? !state.editorUi.isTreeVisible && !state.editorUi.isCommentPanelVisible : true}
+              onAttachFiles={(files) => void handleAttachEditorFiles(files)}
+              onAttachRule={(ruleId) => addExtraRef({ kind: 'chat-rule', ruleId })}
+              onRefsChange={setPillRefs}
+              onReorderPending={handleReorderEditorPending}
+              onReorderPill={handleReorderEditorPill}
+              onRemoveAttachedComment={(commentId) =>
+                setAttachedCommentIds((prev) => prev.filter((id) => id !== commentId))}
+              onRemoveChip={handleRemoveEditorChip}
+              pendingKeys={editorPendingKeys}
+              pillKeys={editorPillKeys}
+              onToggleAttach={() => {
+                const openCollectIds = comments
+                  .filter((comment) => comment.status === 'open' && comment.kind === 'collect')
+                  .map((comment) => comment.id)
+                setAttachedCommentIds(isAttachActive ? [] : openCollectIds)
+                setIsAttachActive(!isAttachActive)
+              }}
+              onDismissInstructionFeedback={clearInstructionFeedback}
+              onSend={() => {
+                const instruction = composerRef.current?.getInstructionText().trim() ?? ''
+                const hasAttachedComments = comments.some((comment) =>
+                  comment.status === 'open'
+                  && comment.kind === 'collect'
+                  && attachedCommentIds.includes(comment.id))
+                if (hasAttachedComments) {
+                  void handleGlobalRun(instruction)
+                } else {
+                  void handleInstructionRun(instruction)
+                }
+              }}
+              onStop={handleStopRun}
+              ruleOptions={ruleOptions}
+              selectedModelTier={selectedModelTier}
+              chatModelCatalog={chatModelCatalog}
+              selectedModel={state.ui.selectedChatModel}
+              selectedEffort={state.ui.selectedChatEffort}
+              editorContextBase={editorContextBase}
+              editorContextCapacity={editorContextCapacity}
+              textImprovement={textImprovement}
+            />
+          </div>
+        </>
+      ) : (
+        <div className="relative flex min-h-0 flex-1 bg-background">
+          <header className="absolute inset-x-0 top-0 z-10 grid inqtrix-panel-header grid-cols-[auto_1fr_auto] items-center gap-2 border-b border-border bg-background px-3">
+            <EditorPanelToggle
               copy={copy}
               dispatch={dispatch}
-              document={activeDocument}
-              editor={activeEditor}
-              isCommentPanelVisible={state.editorUi.isCommentPanelVisible}
-              isDiffVisible={state.editorUi.isDiffVisible}
-              isDirty={state.dirty}
-              isTreeVisible={state.editorUi.isTreeVisible}
-              viewMode={state.editorUi.viewMode}
+              onToggle={handleTreeVisibleChange}
+              side="left"
+              visible={isDesktop ? state.editorUi.isTreeVisible : isMobileTreeOpen}
             />
-            <div className="flex min-h-0 flex-1 flex-col">
-              <MarkdownLiveEditor
-                comments={comments}
-                copy={copy}
-                document={activeDocument}
-                diffAnchorMarkdown={activeDocument.diffAnchorMarkdown ?? null}
-                isDiffVisible={state.editorUi.isDiffVisible}
-                mode={state.editorUi.viewMode}
-                onChange={(contentMarkdown) => {
-                  dispatch({
-                    contentMarkdown,
-                    documentId: activeDocument.id,
-                    type: 'updateEditorDocumentMarkdown',
-                  })
-                }}
-                onCreateComment={handleCreateComment}
-                onEditorReady={setActiveEditor}
-                onAcceptSuggestion={handleAcceptSuggestion}
-                onEditSuggestion={handleEditSuggestionProposal}
-                onMarkSuggestionStale={handleMarkSuggestionStale}
-                onRefineSuggestion={handleRefineSuggestion}
-                onRejectSuggestion={handleRejectSuggestion}
-                onSelectComment={(commentId) => dispatch({ commentId, type: 'selectEditorComment' })}
-                onStopSuggestion={handleStopSuggestionRun}
-                runningSuggestionIds={runningSuggestionIds}
-                selectedCommentId={state.editorUi.selectedCommentId}
-                suggestionErrors={suggestionErrors}
-                suggestions={documentSuggestions.filter((suggestion) => suggestion.status === 'pending')}
-                textImprovement={textImprovement}
-              />
-              <EditorAssistantComposer
-                attachedCommentIds={attachedCommentIds}
-                attachmentChips={attachmentChips}
-                chatModelOptions={chatModelOptions}
-                chatModelOptionsStatus={chatModelOptionsStatus}
-                comments={comments}
-                composerRef={composerRef}
-                copy={copy}
-                defaultChatModel={defaultChatModel}
-                dispatch={dispatch}
-                draft={state.editorUi.assistantDraft}
-                fileGroupOptions={fileGroupOptions}
-                fileOptions={fileOptions}
-                reportOptions={reportOptions}
-                isAttachActive={isAttachActive}
-                instructionFeedback={instructionFeedback}
-                isRunning={isGlobalRunning}
-                isVisible={state.editorUi.isAssistantVisible}
-                isWideCanvas={!state.editorUi.isTreeVisible && !state.editorUi.isCommentPanelVisible}
-                onAttachFiles={(files) => void handleAttachEditorFiles(files)}
-                onAttachRule={(ruleId) => addExtraRef({ kind: 'chat-rule', ruleId })}
-                onRefsChange={setPillRefs}
-                onReorderPending={handleReorderEditorPending}
-                onReorderPill={handleReorderEditorPill}
-                onRemoveAttachedComment={(commentId) =>
-                  setAttachedCommentIds((prev) => prev.filter((id) => id !== commentId))}
-                onRemoveChip={handleRemoveEditorChip}
-                pendingKeys={editorPendingKeys}
-                pillKeys={editorPillKeys}
-                onToggleAttach={() => {
-                  const openCollectIds = comments
-                    .filter((comment) => comment.status === 'open' && comment.kind === 'collect')
-                    .map((comment) => comment.id)
-                  setAttachedCommentIds(isAttachActive ? [] : openCollectIds)
-                  setIsAttachActive(!isAttachActive)
-                }}
-                onDismissInstructionFeedback={clearInstructionFeedback}
-                onSend={() => {
-                  const instruction = composerRef.current?.getInstructionText().trim() ?? ''
-                  const hasAttachedComments = comments.some((comment) =>
-                    comment.status === 'open'
-                    && comment.kind === 'collect'
-                    && attachedCommentIds.includes(comment.id))
-                  if (hasAttachedComments) {
-                    void handleGlobalRun(instruction)
-                  } else {
-                    void handleInstructionRun(instruction)
-                  }
-                }}
-                onStop={handleStopRun}
-                ruleOptions={ruleOptions}
-                selectedModelTier={selectedModelTier}
-                chatModelCatalog={chatModelCatalog}
-                selectedModel={state.ui.selectedChatModel}
-                selectedEffort={state.ui.selectedChatEffort}
-                editorContextBase={editorContextBase}
-                editorContextCapacity={editorContextCapacity}
-                textImprovement={textImprovement}
-              />
-            </div>
-          </>
-        ) : (
-          <div className="relative flex min-h-0 flex-1 bg-background">
-            <header className="absolute inset-x-0 top-0 z-10 grid inqtrix-panel-header grid-cols-[auto_1fr_auto] items-center gap-2 border-b border-border bg-background px-3">
-              <EditorPanelToggle
-                copy={copy}
-                dispatch={dispatch}
-                side="left"
-                visible={state.editorUi.isTreeVisible}
-              />
-              <span aria-hidden />
-              <EditorPanelToggle
-                copy={copy}
-                dispatch={dispatch}
-                side="right"
-                visible={state.editorUi.isCommentPanelVisible}
-              />
-            </header>
-            <EditorEmptyState copy={copy} dispatch={dispatch} reportOptions={reportOptions} />
-          </div>
-        )}
-      </main>
-      <AnimatedFixedSidePanel
-        controlsId={EDITOR_COMMENTS_PANEL_ID}
-        expanded={state.editorUi.isCommentPanelVisible}
-        expandedWidth="22rem"
-        side="right"
+            <span aria-hidden />
+            <EditorPanelToggle
+              copy={copy}
+              dispatch={dispatch}
+              onToggle={handleCommentsVisibleChange}
+              side="right"
+              visible={isDesktop ? state.editorUi.isCommentPanelVisible : isMobileCommentsOpen}
+            />
+          </header>
+          <EditorEmptyState copy={copy} dispatch={dispatch} reportOptions={reportOptions} />
+        </div>
+      )}
+    </main>
+  )
+
+  return (
+    <div className="relative flex h-full min-h-0 min-w-0 overflow-hidden bg-canvas text-foreground">
+      <ResizablePanelGroup
+        className="min-h-0 min-w-0 flex-1 overflow-hidden"
+        defaultLayout={treeLayout}
+        elementRef={treePanelMotion.groupRef}
+        onLayoutChanged={(layout) => {
+          const size = layout[EDITOR_TREE_PANEL_ID]
+          if (
+            treeVisible
+            && !treePanelMotion.isProgrammaticLayoutChange()
+            && Number.isFinite(size)
+            && size > 0
+          ) {
+            dispatch({ key: 'editorTree', size, type: 'setPanelLayoutSize' })
+          }
+        }}
+        orientation="horizontal"
       >
-        <EditorCommentsPanel
-          comments={comments}
-          copy={copy}
-          dispatch={dispatch}
-          onAcceptSuggestionGroup={handleAcceptSuggestionGroup}
-          onAcceptSuggestion={handleAcceptSuggestion}
-          onRejectSuggestionGroup={handleRejectSuggestionGroup}
-          onRejectSuggestion={handleRejectSuggestion}
-          onRunComment={handleRunComment}
-          onSelectSuggestion={handleSelectSuggestion}
-          runErrors={runErrors}
-          runningCommentIds={runningCommentIds}
-          selectedCommentId={state.editorUi.selectedCommentId}
-          suggestions={documentSuggestions}
-        />
-      </AnimatedFixedSidePanel>
+        {isDesktop && (
+          <>
+            <ResizablePanel
+              className="min-h-0 min-w-0 overflow-hidden"
+              collapsedSize="0%"
+              collapsible
+              defaultSize={treeLayout[EDITOR_TREE_PANEL_ID]}
+              id={EDITOR_TREE_PANEL_ID}
+              maxSize="34%"
+              minSize={treeVisible ? '16%' : '0%'}
+              panelRef={treePanelMotion.panelRef}
+            >
+              <AnimatedPanelBody expanded={treeVisible} side="left">
+                {fileTreePanel}
+              </AnimatedPanelBody>
+            </ResizablePanel>
+            <AnimatedResizableHandle aria-label={copy.resizeTree} expanded={treeVisible} />
+          </>
+        )}
+        <ResizablePanel
+          className="min-h-0 min-w-0 overflow-hidden"
+          defaultSize={treeLayout[EDITOR_CENTER_PANEL_ID]}
+          id={EDITOR_CENTER_PANEL_ID}
+          // Identity anchor — must stay unconditional so the TipTap editor
+          // (instance, selection, undo history) survives the desktop/mobile flip.
+          key={EDITOR_CENTER_PANEL_ID}
+          minSize="40%"
+        >
+          <ResizablePanelGroup
+            className="min-h-0 w-full overflow-hidden"
+            defaultLayout={commentsLayout}
+            elementRef={commentsPanelMotion.groupRef}
+            onLayoutChanged={(layout) => {
+              const size = layout[EDITOR_COMMENTS_PANEL_ID]
+              if (
+                commentsVisible
+                && !commentsPanelMotion.isProgrammaticLayoutChange()
+                && Number.isFinite(size)
+                && size > 0
+              ) {
+                dispatch({ key: 'editorComments', size, type: 'setPanelLayoutSize' })
+              }
+            }}
+            orientation="horizontal"
+          >
+            <ResizablePanel
+              className="min-h-0 min-w-0 overflow-hidden"
+              defaultSize={commentsLayout[EDITOR_CENTER_COMMENTS_PANEL_ID]}
+              id={EDITOR_CENTER_COMMENTS_PANEL_ID}
+              // Identity anchor — must stay unconditional (see above).
+              key={EDITOR_CENTER_COMMENTS_PANEL_ID}
+              minSize="50%"
+            >
+              {editorContent}
+            </ResizablePanel>
+            {isDesktop && (
+              <>
+                <AnimatedResizableHandle aria-label={copy.resizeComments} expanded={commentsVisible} />
+                <ResizablePanel
+                  className="min-h-0 min-w-0 overflow-hidden"
+                  collapsedSize="0%"
+                  collapsible
+                  defaultSize={commentsLayout[EDITOR_COMMENTS_PANEL_ID]}
+                  id={EDITOR_COMMENTS_PANEL_ID}
+                  maxSize="38%"
+                  minSize={commentsVisible ? '20%' : '0%'}
+                  panelRef={commentsPanelMotion.panelRef}
+                >
+                  <AnimatedPanelBody expanded={commentsVisible} side="right">
+                    {commentsPanel}
+                  </AnimatedPanelBody>
+                </ResizablePanel>
+              </>
+            )}
+          </ResizablePanelGroup>
+        </ResizablePanel>
+      </ResizablePanelGroup>
+      {!isDesktop && (
+        <>
+          <ResponsiveSidePanel
+            closeLabel={copy.hideTree}
+            controlsId={EDITOR_TREE_PANEL_ID}
+            onOpenChange={setIsMobileTreeOpen}
+            open={isMobileTreeOpen}
+            showHeader={false}
+            side="left"
+            title={copy.documents}
+          >
+            {fileTreePanel}
+          </ResponsiveSidePanel>
+          <ResponsiveSidePanel
+            closeLabel={copy.hideAssistant}
+            controlsId={EDITOR_COMMENTS_PANEL_ID}
+            onOpenChange={setIsMobileCommentsOpen}
+            open={isMobileCommentsOpen}
+            showHeader={false}
+            side="right"
+            title={copy.assistant}
+          >
+            {commentsPanel}
+          </ResponsiveSidePanel>
+        </>
+      )}
     </div>
   )
 }
@@ -1184,10 +1001,9 @@ function EditorFileTree({
   const ungroupedVisibleCount = visibleDocumentCount('__ungrouped__')
 
   return (
-    <aside className="flex h-full w-full min-w-0 flex-col border-r border-border bg-surface">
+    <aside className="inqtrix-contained-panel flex h-full w-full min-w-0 flex-col bg-surface">
       <div className="flex inqtrix-panel-header items-center justify-between border-b border-border px-3">
         <div className="flex min-w-0 items-center gap-2">
-          <Folder className="size-4 text-muted-foreground" />
           <h2 className="t-section truncate">{copy.documents}</h2>
         </div>
         <div className="flex items-center gap-1">
@@ -1527,85 +1343,41 @@ function EditorDocumentTreeItem({
     <div className="relative" data-editor-document-id={document.id}>
       {showBeforeIndicator ? <DropIndicator className="-top-1" /> : null}
       {showAfterIndicator ? <DropIndicator className="-bottom-1" /> : null}
-      <ExplorerItemRow
+      <ExplorerHistoryRow
+        actions={[
+          {
+            icon: isPinned ? <PinOff className="icon-sm" /> : <Pin className="icon-sm" />,
+            label: isPinned ? copy.unpinDocument : copy.pinDocument,
+            onSelect: onTogglePinned,
+          },
+          {
+            destructive: true,
+            icon: <Trash2 className="icon-sm" />,
+            label: copy.deleteDocument,
+            onSelect: onDelete,
+          },
+        ]}
         active={isActive}
         dragging={isDragging}
+        indicator={isRunning ? <ExplorerRunningIndicator label={copy.runningSuggestion} /> : undefined}
         nested={isNested}
         onPointerDown={(event) => beginDocumentDrag(event, document.id)}
-      >
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              aria-label={isPinned ? copy.unpinDocument : copy.pinDocument}
-              className="absolute right-7 top-1/2 size-6 -translate-y-1/2 text-foreground/55 opacity-0 transition hover:text-foreground focus-visible:opacity-100 group-hover/explorer-item:opacity-100"
-              data-explorer-action
-              onClick={onTogglePinned}
-              size="icon"
-              type="button"
-              variant="ghost"
-            >
-              {isPinned ? <PinOff className="icon-sm" /> : <Pin className="icon-sm" />}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>{isPinned ? copy.unpinDocument : copy.pinDocument}</TooltipContent>
-        </Tooltip>
-        {isEditing ? (
-          <div
-            className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-left"
-            data-explorer-action
-          >
-            <input
-              aria-label={copy.renameDocument}
-              className="t-list-regular min-w-0 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              onBlur={commitTitleEdit}
-              onChange={(event) => onDraftChange(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  event.preventDefault()
-                  commitTitleEdit()
-                }
-                if (event.key === 'Escape') {
-                  event.preventDefault()
-                  cancelTitleEdit()
-                }
-              }}
-              ref={titleInputRef}
-              value={titleDraft}
-            />
-            <span className="shrink-0 t-hint tabular-nums text-muted-foreground transition-opacity group-hover/explorer-item:opacity-0 group-focus-within/explorer-item:opacity-0">
-              {timeLabel}
-            </span>
-          </div>
-        ) : (
-          <button
-            aria-pressed={isActive}
-            className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            onClick={onOpen}
-            onDoubleClick={() => startTitleEdit(document)}
-            title={copy.renameDocument}
-            type="button"
-          >
-            <span className="t-list-regular min-w-0 truncate text-foreground">
-              {document.title}
-            </span>
-            <span className="flex shrink-0 items-center gap-1.5 t-hint tabular-nums text-muted-foreground transition-opacity group-hover/explorer-item:opacity-0 group-focus-within/explorer-item:opacity-0">
-              {isRunning ? <ExplorerRunningIndicator label={copy.runningSuggestion} /> : null}
-              {timeLabel}
-            </span>
-          </button>
-        )}
-        <Button
-          aria-label={copy.deleteDocument}
-          className="absolute right-1 top-1/2 size-6 -translate-y-1/2 text-foreground/55 opacity-0 transition hover:text-destructive focus-visible:opacity-100 group-hover/explorer-item:opacity-100"
-          data-explorer-action
-          onClick={onDelete}
-          size="icon"
-          type="button"
-          variant="ghost"
-        >
-          <Trash2 className="icon-sm" />
-        </Button>
-      </ExplorerItemRow>
+        onSelect={onOpen}
+        onStartRename={() => startTitleEdit(document)}
+        renameEditor={isEditing ? (
+          <ExplorerHistoryTitleInput
+            inputRef={titleInputRef}
+            label={copy.renameDocument}
+            onCancel={cancelTitleEdit}
+            onChange={onDraftChange}
+            onCommit={commitTitleEdit}
+            value={titleDraft}
+          />
+        ) : undefined}
+        renameLabel={copy.renameDocument}
+        timeLabel={timeLabel}
+        title={document.title}
+      />
     </div>
   )
 }
@@ -1695,11 +1467,13 @@ function ImportReportMenu({
 function EditorPanelToggle({
   copy,
   dispatch,
+  onToggle,
   side,
   visible,
 }: {
   copy: EditorCopy
   dispatch: Dispatch<ResearchDeskAction>
+  onToggle?: (visible: boolean) => void
   side: 'left' | 'right'
   visible: boolean
 }) {
@@ -1709,7 +1483,13 @@ function EditorPanelToggle({
       controlsId={EDITOR_TREE_PANEL_ID}
       expandLabel={copy.showTree}
       expanded={visible}
-      onToggle={(next) => dispatch({ isVisible: next, type: 'setEditorTreeVisible' })}
+      onToggle={(next) => {
+        if (onToggle) {
+          onToggle(next)
+          return
+        }
+        dispatch({ isVisible: next, type: 'setEditorTreeVisible' })
+      }}
       side="left"
     />
   ) : (
@@ -1718,7 +1498,13 @@ function EditorPanelToggle({
       controlsId={EDITOR_COMMENTS_PANEL_ID}
       expandLabel={copy.showAssistant}
       expanded={visible}
-      onToggle={(next) => dispatch({ isVisible: next, type: 'setEditorCommentPanelVisible' })}
+      onToggle={(next) => {
+        if (onToggle) {
+          onToggle(next)
+          return
+        }
+        dispatch({ isVisible: next, type: 'setEditorCommentPanelVisible' })
+      }}
       side="right"
     />
   )
@@ -1734,6 +1520,8 @@ function EditorTopBar({
   isDiffVisible,
   isDirty,
   isTreeVisible,
+  onCommentPanelVisibleChange,
+  onTreeVisibleChange,
   viewMode,
 }: {
   commentCount: number
@@ -1745,6 +1533,8 @@ function EditorTopBar({
   isDiffVisible: boolean
   isDirty: boolean
   isTreeVisible: boolean
+  onCommentPanelVisibleChange?: (visible: boolean) => void
+  onTreeVisibleChange?: (visible: boolean) => void
   viewMode: ProjectState['editorUi']['viewMode']
 }) {
   const [isEditingTitle, setIsEditingTitle] = useState(false)
@@ -1789,15 +1579,27 @@ function EditorTopBar({
     }
   }
 
-  const documentStatusText = document.source === 'imported-research-report' && document.sourceRunId
-    ? `${copy.importedFrom} ${document.sourceRunId} · ${copy.updated} ${formatEditorTime(document.updatedAt)}`
+  const provenanceLabel = document.sourceRunId
+    ? document.source === 'agent-artifact'
+      ? copy.importedFromAgent
+      : document.source === 'imported-research-report'
+        ? copy.importedFrom
+        : null
+    : null
+  const documentStatusText = provenanceLabel
+    ? `${provenanceLabel} ${document.sourceRunId} · ${copy.updated} ${formatEditorTime(document.updatedAt)}`
     : `${copy.updated} ${formatEditorTime(document.updatedAt)}`
 
   return (
     <header className="grid inqtrix-panel-header grid-cols-[minmax(12rem,1fr)_auto_minmax(12rem,1fr)] items-center gap-2 border-b border-border bg-background px-3">
       <div className="flex min-w-0 items-center gap-2">
-        <EditorPanelToggle copy={copy} dispatch={dispatch} side="left" visible={isTreeVisible} />
-        <FileText className="size-4 shrink-0 text-muted-foreground" />
+        <EditorPanelToggle
+          copy={copy}
+          dispatch={dispatch}
+          onToggle={onTreeVisibleChange}
+          side="left"
+          visible={isTreeVisible}
+        />
         <div className="min-w-0" title={documentStatusText}>
           <div className="flex min-w-0 items-center gap-1.5">
             {isEditingTitle ? (
@@ -1875,557 +1677,16 @@ function EditorTopBar({
           <Trash2 className="size-4" />
         </TooltipButton>
         <Separator className="mx-0.5 h-5" orientation="vertical" />
-        <EditorPanelToggle copy={copy} dispatch={dispatch} side="right" visible={isCommentPanelVisible} />
+        <EditorPanelToggle
+          copy={copy}
+          dispatch={dispatch}
+          onToggle={onCommentPanelVisibleChange}
+          side="right"
+          visible={isCommentPanelVisible}
+        />
       </div>
     </header>
   )
-}
-
-function MarkdownLiveEditor({
-  comments,
-  copy,
-  diffAnchorMarkdown,
-  document,
-  isDiffVisible,
-  mode,
-  onChange,
-  onCreateComment,
-  onEditorReady,
-  onAcceptSuggestion,
-  onEditSuggestion,
-  onRejectSuggestion,
-  onMarkSuggestionStale,
-  onRefineSuggestion,
-  onSelectComment,
-  onStopSuggestion,
-  runningSuggestionIds,
-  selectedCommentId,
-  suggestionErrors,
-  suggestions,
-  textImprovement,
-}: {
-  comments: EditorCommentThreadRecord[]
-  copy: EditorCopy
-  diffAnchorMarkdown: string | null
-  document: EditorDocumentRecord
-  isDiffVisible: boolean
-  mode: ProjectState['editorUi']['viewMode']
-  onChange: (contentMarkdown: string) => void
-  onCreateComment: (comment: EditorCommentThreadRecord) => void
-  onEditorReady: (editor: Editor | null) => void
-  onAcceptSuggestion: (suggestion: EditorSuggestionRecord) => void
-  onEditSuggestion: (suggestionId: string, proposedText: string) => void
-  onMarkSuggestionStale: (suggestionId: string) => void
-  onRefineSuggestion: (suggestionId: string, instruction: string) => Promise<void>
-  onRejectSuggestion: (suggestionId: string) => void
-  onSelectComment: (commentId: string) => void
-  onStopSuggestion: (suggestionId: string) => void
-  runningSuggestionIds: readonly string[]
-  selectedCommentId: string | null
-  suggestionErrors: Record<string, string>
-  suggestions: EditorSuggestionRecord[]
-  textImprovement: Omit<TextImprovementApiOptions, 'locale'>
-}) {
-  const documentIdRef = useRef(document.id)
-  const editorInstanceRef = useRef<Editor | null>(null)
-  const isApplyingExternalContentRef = useRef(false)
-  const onAcceptSuggestionRef = useRef(onAcceptSuggestion)
-  const onEditSuggestionRef = useRef(onEditSuggestion)
-  const onMarkSuggestionStaleRef = useRef(onMarkSuggestionStale)
-  const onRefineSuggestionRef = useRef(onRefineSuggestion)
-  const onRejectSuggestionRef = useRef(onRejectSuggestion)
-  const onSelectCommentRef = useRef(onSelectComment)
-  const onStopSuggestionRef = useRef(onStopSuggestion)
-  const suggestionsRef = useRef(suggestions)
-  const previousModeRef = useRef(mode)
-  const commentsSignature = comments.map((comment) => `${comment.id}:${comment.status}:${comment.kind}:${comment.anchor.from}:${comment.anchor.to}`).join('|')
-  const suggestionsSignature = suggestions.map((suggestion) =>
-    `${suggestion.id}:${suggestion.revision ?? 1}:${suggestion.editPosition ?? 'replace'}:${suggestion.anchorText ?? ''}:${suggestion.originalText.length}:${suggestion.proposedText}`).join('|')
-  const suggestionUiSignature = suggestions.map((suggestion) =>
-    `${suggestion.id}:${runningSuggestionIds.includes(suggestion.id) ? 'running' : 'idle'}:${suggestionErrors[suggestion.id] ?? ''}`).join('|')
-  const tiptapContentMarkdown = normalizeEditorMarkdownForTiptap(document.contentMarkdown)
-
-  useEffect(() => {
-    suggestionsRef.current = suggestions
-  }, [suggestions])
-
-  useEffect(() => {
-    onAcceptSuggestionRef.current = onAcceptSuggestion
-    onEditSuggestionRef.current = onEditSuggestion
-    onMarkSuggestionStaleRef.current = onMarkSuggestionStale
-    onRefineSuggestionRef.current = onRefineSuggestion
-    onRejectSuggestionRef.current = onRejectSuggestion
-    onSelectCommentRef.current = onSelectComment
-    onStopSuggestionRef.current = onStopSuggestion
-  }, [onAcceptSuggestion, onEditSuggestion, onMarkSuggestionStale, onRefineSuggestion, onRejectSuggestion, onSelectComment, onStopSuggestion])
-
-  const editor = useEditor({
-    content: tiptapContentMarkdown,
-    contentType: 'markdown',
-    editable: mode === 'live',
-    editorProps: {
-      attributes: {
-        class: 'editor-prose min-h-full focus:outline-none',
-      },
-      handlePaste: (_view, event) => {
-        const pastedMarkdown = event.clipboardData?.getData('text/plain') ?? ''
-        const currentEditor = editorInstanceRef.current
-        if (!currentEditor?.isEditable || !shouldParsePastedMarkdown(pastedMarkdown)) return false
-        event.preventDefault()
-        currentEditor.commands.insertContent(normalizeEditorMarkdownForTiptap(pastedMarkdown), {
-          contentType: 'markdown',
-        })
-        return true
-      },
-    },
-    extensions: createEditorExtensions({
-      syntaxMarkerRemoveLabel: copy.removeFormatting,
-      placeholderEmpty: copy.placeholderEmpty,
-      placeholderHeading: copy.placeholderHeading,
-      slash: {
-        labels: {
-          title: copy.slashTitle,
-          empty: copy.slashEmpty,
-          navHint: copy.slashNav,
-          selectHint: copy.slashSelect,
-          closeHint: copy.slashClose,
-          groupStyle: copy.slashGroupStyle,
-          groupInsert: copy.slashGroupInsert,
-          text: copy.slashText,
-          heading1: copy.slashHeading1,
-          heading2: copy.slashHeading2,
-          heading3: copy.slashHeading3,
-          bulletList: copy.slashBulletList,
-          orderedList: copy.slashOrderedList,
-          taskList: copy.slashTaskList,
-          blockquote: copy.slashBlockquote,
-          codeBlock: copy.slashCodeBlock,
-          table: copy.slashTable,
-          divider: copy.slashDivider,
-        },
-      },
-      onClick: (commentId) => onSelectCommentRef.current(commentId),
-      onSuggestionAccept: (suggestionId) => {
-        const suggestion = suggestionsRef.current.find((item) => item.id === suggestionId)
-        if (suggestion) onAcceptSuggestionRef.current(suggestion)
-      },
-      onSuggestionReject: (suggestionId) => onRejectSuggestionRef.current(suggestionId),
-      onSuggestionEdit: (suggestionId, proposedText) => onEditSuggestionRef.current(suggestionId, proposedText),
-      onSuggestionRefine: (suggestionId, instruction) => {
-        void onRefineSuggestionRef.current(suggestionId, instruction)
-      },
-      onSuggestionCancel: (suggestionId) => onStopSuggestionRef.current(suggestionId),
-      onSuggestionSelect: (suggestionId) => {
-        const suggestion = suggestionsRef.current.find((item) => item.id === suggestionId)
-        if (suggestion?.origin.commentId) onSelectCommentRef.current(suggestion.origin.commentId)
-      },
-    }),
-    immediatelyRender: false,
-    onCreate: ({ editor: createdEditor }) => {
-      editorInstanceRef.current = createdEditor
-    },
-    onDestroy: () => {
-      editorInstanceRef.current = null
-    },
-    onUpdate: ({ editor: currentEditor }) => {
-      if (isApplyingExternalContentRef.current || !currentEditor.isEditable) return
-      onChange(serializeEditorMarkdown(currentEditor))
-    },
-  })
-
-  useEffect(() => {
-    onEditorReady(editor)
-    return () => onEditorReady(null)
-  }, [editor, onEditorReady])
-
-  useEffect(() => {
-    if (!editor || documentIdRef.current === document.id) return
-    documentIdRef.current = document.id
-    isApplyingExternalContentRef.current = true
-    editor.commands.setContent(tiptapContentMarkdown, {
-      contentType: 'markdown',
-      emitUpdate: false,
-    })
-    resetExternalContentFlag(isApplyingExternalContentRef)
-  }, [document.id, editor, tiptapContentMarkdown])
-
-  useEffect(() => {
-    if (!editor) return
-    const previousMode = previousModeRef.current
-    previousModeRef.current = mode
-    if (mode !== 'live') return
-    const shouldReparseMarkdown = previousMode === 'source'
-    if (!shouldReparseMarkdown && serializeEditorMarkdown(editor) === tiptapContentMarkdown) return
-    isApplyingExternalContentRef.current = true
-    editor.commands.setContent(tiptapContentMarkdown, {
-      contentType: 'markdown',
-      emitUpdate: false,
-    })
-    resetExternalContentFlag(isApplyingExternalContentRef)
-  }, [editor, mode, tiptapContentMarkdown])
-
-  useEffect(() => {
-    editor?.setEditable(mode === 'live')
-  }, [editor, mode])
-
-  useEffect(() => {
-    if (!editor || mode !== 'live') return
-    const items = comments
-      .filter((comment) => comment.status !== 'resolved')
-      .map((comment) => {
-        const resolved = resolveMaterializedAnchor(editor, comment.anchor)
-        if (!resolved) return null
-        return {
-          from: resolved.range.from,
-          id: comment.id,
-          kind: comment.kind,
-          selected: selectedCommentId === comment.id,
-          status: comment.status,
-          to: resolved.range.to,
-        }
-      })
-      .filter((item): item is NonNullable<typeof item> => Boolean(item))
-      .filter((item) => item.from < item.to)
-    isApplyingExternalContentRef.current = true
-    editor.view.dispatch(editor.state.tr.setMeta(commentDecorationPluginKey, { items }))
-    resetExternalContentFlag(isApplyingExternalContentRef)
-  }, [commentsSignature, document.revision, editor, mode, selectedCommentId])
-
-  useEffect(() => {
-    if (!editor || mode !== 'live') return
-    const staleSuggestionIds: string[] = []
-    const items = suggestions.flatMap((suggestion) => {
-      const target = resolveSuggestionDecorationTarget(editor, suggestion)
-      if (!target) {
-        staleSuggestionIds.push(suggestion.id)
-        return []
-      }
-      const plan = suggestionDiffPlan(suggestion.originalText, suggestion.proposedText)
-      return [{
-        acceptLabel: copy.accept,
-        active: selectedCommentId === suggestion.origin.commentId,
-        display: plan.display,
-        editLabel: copy.editSuggestion,
-        error: suggestionErrors[suggestion.id],
-        from: target.from,
-        id: suggestion.id,
-        isRunning: runningSuggestionIds.includes(suggestion.id),
-        proposedLabel: copy.proposedText,
-        proposedText: suggestion.proposedText,
-        refineLabel: copy.refineSuggestion,
-        refinementPlaceholder: copy.refinementPlaceholder,
-        rejectLabel: copy.reject,
-        revision: suggestion.revision ?? 1,
-        revisionLabel: copy.revision,
-        reviewSurface: plan.reviewSurface,
-        saveLabel: copy.saveSuggestion,
-        segments: plan.segments,
-        cancelLabel: copy.cancelEdit,
-        sendLabel: copy.sendRefinement,
-        runningLabel: copy.refiningSuggestion,
-        stopLabel: copy.stopRun,
-        to: target.to,
-        widgetAt: plan.display === 'block' ? target.widgetAt : undefined,
-      }]
-    })
-    isApplyingExternalContentRef.current = true
-    editor.view.dispatch(editor.state.tr.setMeta(suggestionDecorationPluginKey, { items }))
-    resetExternalContentFlag(isApplyingExternalContentRef)
-    for (const suggestionId of staleSuggestionIds) onMarkSuggestionStaleRef.current(suggestionId)
-  }, [copy.accept, copy.cancelEdit, copy.editSuggestion, copy.proposedText, copy.refineSuggestion, copy.refinementPlaceholder, copy.reject, copy.revision, copy.saveSuggestion, copy.sendRefinement, copy.refiningSuggestion, copy.stopRun, document.revision, editor, mode, selectedCommentId, suggestionUiSignature, suggestionsSignature])
-
-  useEffect(() => {
-    if (!selectedCommentId) return
-    const target = globalThis.document?.querySelector<HTMLElement>(
-      `[data-editor-comment-anchor="${escapeCssIdentifier(selectedCommentId)}"]`,
-    )
-    target?.scrollIntoView({ block: 'center', behavior: 'smooth' })
-  }, [selectedCommentId])
-
-  if (mode === 'source') {
-    return (
-      <MarkdownSourceEditor
-        labels={{
-          addColumn: copy.addColumn,
-          addRow: copy.addRow,
-          closeTableEditor: copy.closeTableEditor,
-          columnLabel: copy.columnLabel,
-          deleteColumn: copy.deleteColumn,
-          deleteRow: copy.deleteRow,
-          editor: copy.sourceEditor,
-          formatTables: copy.formatTables,
-          insertOrEditTable: copy.insertOrEditTable,
-          lineWrap: copy.sourceLineWrap,
-          tableAlignmentCenter: copy.tableAlignmentCenter,
-          tableAlignmentLeft: copy.tableAlignmentLeft,
-          tableAlignmentRight: copy.tableAlignmentRight,
-          tableColumn: copy.tableColumn,
-          tableEditor: copy.tableEditor,
-          tableLines: copy.tableLines,
-          tableRows: copy.tableRows,
-        }}
-        onChange={onChange}
-        value={document.contentMarkdown}
-      />
-    )
-  }
-
-  if (isDiffVisible) {
-    return (
-      <EditorDocumentDiffView
-        anchorMarkdown={diffAnchorMarkdown}
-        copy={copy}
-        currentMarkdown={document.contentMarkdown}
-      />
-    )
-  }
-
-  return (
-    <ScrollArea className="min-h-0 flex-1 bg-background">
-      <div className="min-h-[calc(100svh-var(--header-h)-10rem)] w-full px-10 py-8">
-        {editor ? (
-          <EditorBubbleMenu
-            copy={copy}
-            editor={editor}
-            onCreateComment={(commentMarkdown, kind) => {
-              const comment = createCommentFromSelection(editor, document.id, commentMarkdown, kind)
-              if (!comment) return
-              onCreateComment(comment)
-            }}
-            textImprovement={textImprovement}
-          />
-        ) : null}
-        {editor && mode === 'live' ? (
-          <BlockHandle
-            editor={editor}
-            labels={{
-              ariaLabel: copy.blockHandleAria,
-              turnInto: copy.blockTurnInto,
-              duplicate: copy.blockDuplicate,
-              deleteBlock: copy.blockDelete,
-              moveUp: copy.blockMoveUp,
-              moveDown: copy.blockMoveDown,
-              text: copy.slashText,
-              heading1: copy.slashHeading1,
-              heading2: copy.slashHeading2,
-              heading3: copy.slashHeading3,
-              bulletList: copy.slashBulletList,
-              orderedList: copy.slashOrderedList,
-              taskList: copy.slashTaskList,
-              blockquote: copy.slashBlockquote,
-              codeBlock: copy.slashCodeBlock,
-            }}
-          />
-        ) : null}
-        {editor && mode === 'live' ? (
-          <TableControls
-            editor={editor}
-            labels={{
-              columnOptions: copy.tableColumnOptions,
-              rowOptions: copy.tableRowOptions,
-              addColumn: copy.addColumn,
-              addRow: copy.addRow,
-              colInsertLeft: copy.tableColInsertLeft,
-              colInsertRight: copy.tableColInsertRight,
-              colMoveLeft: copy.tableColMoveLeft,
-              colMoveRight: copy.tableColMoveRight,
-              sortAsc: copy.tableSortAsc,
-              sortDesc: copy.tableSortDesc,
-              colDuplicate: copy.tableColDuplicate,
-              colClear: copy.tableColClear,
-              toggleHeaderRow: copy.tableToggleHeaderRow,
-              colDelete: copy.deleteColumn,
-              rowInsertAbove: copy.tableRowInsertAbove,
-              rowInsertBelow: copy.tableRowInsertBelow,
-              rowMoveUp: copy.tableRowMoveUp,
-              rowMoveDown: copy.tableRowMoveDown,
-              rowDuplicate: copy.tableRowDuplicate,
-              rowDelete: copy.deleteRow,
-            }}
-          />
-        ) : null}
-        <EditorContent className="min-h-full" editor={editor} />
-      </div>
-    </ScrollArea>
-  )
-}
-
-function resolveSuggestionDecorationTarget(
-  editor: Editor,
-  suggestion: EditorSuggestionRecord,
-): { from: number; to: number; widgetAt: number } | null {
-  const position = suggestion.editPosition ?? 'replace'
-  if (position === 'append') {
-    const end = editor.state.doc.content.size
-    return { from: end, to: end, widgetAt: end }
-  }
-  const anchorText = (suggestion.anchorText ?? suggestion.originalText).trim()
-  if (!anchorText) return null
-  const range = resolveAnchorRange(editor, {
-    hint: clampAnchor(suggestion.anchor, editor).from,
-    quoteAfter: suggestion.anchor.quoteAfter,
-    quoteBefore: suggestion.anchor.quoteBefore,
-    text: anchorText,
-  })
-  if (!range) return null
-  if (position === 'replace') {
-    return { ...range, widgetAt: blockWidgetPositionForRange(editor, range) }
-  }
-  const at = blockInsertionPositionForRange(editor, range, position)
-  return { from: at, to: at, widgetAt: at }
-}
-
-function EditorDocumentDiffView({
-  anchorMarkdown,
-  copy,
-  currentMarkdown,
-}: {
-  anchorMarkdown: string | null
-  copy: EditorCopy
-  currentMarkdown: string
-}) {
-  if (!anchorMarkdown) {
-    return (
-      <div className="flex min-h-0 flex-1 items-center justify-center bg-background p-8">
-        <div className="rounded-md border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
-          {copy.noDiffAnchor}
-        </div>
-      </div>
-    )
-  }
-  const blocks = documentDiffPlan(anchorMarkdown, currentMarkdown)
-  return (
-    <ScrollArea className="min-h-0 flex-1 bg-background">
-      <div className="editor-document-diff mx-auto min-h-full max-w-[72rem] px-4 py-6 sm:px-10 sm:py-8">
-        <div className="t-caption mb-3 flex items-center gap-2 text-brand">
-          <Scale className="size-3.5" />
-          {copy.diffView}
-        </div>
-        <div className="editor-document-diff-body editor-prose">
-          {blocks.map((block, index) => (
-            <EditorDocumentDiffBlock block={block} index={index} key={documentDiffBlockKey(block, index)} />
-          ))}
-        </div>
-      </div>
-    </ScrollArea>
-  )
-}
-
-function EditorDocumentDiffBlock({ block, index }: { block: DocumentDiffBlock; index: number }) {
-  if (block.kind === 'replace') {
-    if (block.inlineSegments) {
-      return (
-        <div className="editor-document-diff-replace editor-document-diff-replace-inline">
-          <p className="editor-document-diff-inline-row">
-            {block.inlineSegments.map((segment, segmentIndex) => (
-              <EditorDocumentDiffInlineSegment
-                key={`${index}-${segmentIndex}-${segment.type}-${segment.text.length}`}
-                segment={segment}
-              />
-            ))}
-          </p>
-        </div>
-      )
-    }
-
-    return (
-      <div className="editor-document-diff-replace editor-document-diff-replace-structured">
-        <div className="editor-document-diff-layer editor-document-diff-delete">
-          <MarkdownRenderer markdown={block.beforeMarkdown} variant="report" />
-        </div>
-        <div className="editor-document-diff-layer editor-document-diff-insert">
-          <MarkdownRenderer markdown={block.afterMarkdown} variant="report" />
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div
-      className={cn(
-        'editor-document-diff-chunk',
-        block.kind === 'equal' && 'editor-document-diff-equal',
-        block.kind === 'insert' && 'editor-document-diff-layer editor-document-diff-insert',
-        block.kind === 'delete' && 'editor-document-diff-layer editor-document-diff-delete',
-      )}
-    >
-      <MarkdownRenderer markdown={block.markdown} variant="report" />
-    </div>
-  )
-}
-
-function EditorDocumentDiffInlineSegment({ segment }: { segment: SuggestionDiffSegment }) {
-  if (segment.type === 'insert') {
-    return (
-      <ins className="editor-document-diff-token editor-document-diff-token-insert">
-        {renderInlineMarkdownText(segment.text)}
-      </ins>
-    )
-  }
-  if (segment.type === 'delete') {
-    return (
-      <del className="editor-document-diff-token editor-document-diff-token-delete">
-        {renderInlineMarkdownText(segment.text)}
-      </del>
-    )
-  }
-  return (
-    <span className="editor-document-diff-token">
-      {renderInlineMarkdownText(segment.text)}
-    </span>
-  )
-}
-
-function documentDiffBlockKey(block: DocumentDiffBlock, index: number): string {
-  if (block.kind === 'replace') {
-    return `${block.kind}-${index}-${block.beforeMarkdown.length}-${block.afterMarkdown.length}`
-  }
-  return `${block.kind}-${index}-${block.markdown.length}`
-}
-
-function renderInlineMarkdownText(text: string): ReactNode[] {
-  const nodes: ReactNode[] = []
-  const tokenPattern = /(\[[^\]\n]+\]\([^) \n]+(?:\s+"[^"\n]*")?\)|`[^`\n]+`|\*\*[^*\n][^*\n]*\*\*|\*[^*\n][^*\n]*\*)/g
-  let cursor = 0
-  let match: RegExpExecArray | null
-  while ((match = tokenPattern.exec(text))) {
-    if (match.index > cursor) {
-      nodes.push(<Fragment key={`text-${cursor}`}>{text.slice(cursor, match.index)}</Fragment>)
-    }
-    nodes.push(renderInlineMarkdownToken(match[0], match.index))
-    cursor = match.index + match[0].length
-  }
-  if (cursor < text.length) {
-    nodes.push(<Fragment key={`text-${cursor}`}>{text.slice(cursor)}</Fragment>)
-  }
-  return nodes
-}
-
-function renderInlineMarkdownToken(token: string, index: number): ReactNode {
-  const link = token.match(/^\[([^\]\n]+)\]\(([^) \n]+)(?:\s+"[^"\n]*")?\)$/)
-  if (link) {
-    return (
-      <a
-        className="editor-document-diff-inline-link"
-        href={link[2]}
-        key={`link-${index}`}
-        rel="noreferrer"
-        target="_blank"
-      >
-        {link[1]}
-      </a>
-    )
-  }
-  if (token.startsWith('`') && token.endsWith('`')) {
-    return <code className="editor-document-diff-inline-code" key={`code-${index}`}>{token.slice(1, -1)}</code>
-  }
-  if (token.startsWith('**') && token.endsWith('**')) {
-    return <strong key={`strong-${index}`}>{token.slice(2, -2)}</strong>
-  }
-  if (token.startsWith('*') && token.endsWith('*')) {
-    return <em key={`em-${index}`}>{token.slice(1, -1)}</em>
-  }
-  return <Fragment key={`token-${index}`}>{token}</Fragment>
 }
 
 function EditorCommandToolbar({
@@ -2442,232 +1703,6 @@ function EditorCommandToolbar({
       <ToolbarButton disabled={disabled} icon={Undo2} label="Undo" onClick={() => editor?.chain().focus().undo().run()} />
       <ToolbarButton disabled={disabled} icon={Redo2} label="Redo" onClick={() => editor?.chain().focus().redo().run()} />
     </div>
-  )
-}
-
-function EditorBubbleMenu({
-  copy,
-  editor,
-  onCreateComment,
-  textImprovement,
-}: {
-  copy: EditorCopy
-  editor: Editor
-  onCreateComment: (commentMarkdown: string, kind: EditorCommentKind) => void
-  textImprovement: Omit<TextImprovementApiOptions, 'locale'>
-}) {
-  const { locale, t } = useLocale()
-  const reduceMotion = useReducedMotion()
-  const [isCommenting, setIsCommenting] = useState(false)
-  const [commentDraft, setCommentDraft] = useState('')
-  const [commentKind, setCommentKind] = useState<EditorCommentKind>('collect')
-  const [commentImproveError, setCommentImproveError] = useState<string | null>(null)
-  const commentTextareaRef = useRef<HTMLTextAreaElement | null>(null)
-  // Keeps the bubble open while the "Turn into" dropdown is open (a transaction
-  // could otherwise re-run shouldShow and hide it mid-interaction).
-  const toolbarInteractingRef = useRef(false)
-  const commentTextImprove = useTextImprovement({
-    ...textImprovement,
-    locale,
-    messages: {
-      requestFailed: (message) => `${t.textImprove.requestFailed}: ${message}`,
-      sensitiveText: t.textImprove.sensitiveText,
-      unavailable: t.textImprove.unavailable,
-    },
-  })
-
-  useLayoutEffect(() => {
-    if (!isCommenting) return
-    resizeTextareaToRows(commentTextareaRef.current, 6)
-  }, [commentDraft, isCommenting])
-
-  function closeCommentComposer() {
-    const collapseAt = editor.state.selection.to
-    editor.commands.setTextSelection(collapseAt)
-    editor.commands.blur()
-    setCommentDraft('')
-    setCommentKind('collect')
-    setCommentImproveError(null)
-    commentTextImprove.clearProposal()
-    setIsCommenting(false)
-  }
-
-  function cancelComment() {
-    closeCommentComposer()
-  }
-
-  function submitComment() {
-    const value = commentDraft.trim()
-    if (!value) return
-    onCreateComment(value, commentKind)
-    closeCommentComposer()
-  }
-
-  function handleCommentDraftChange(value: string) {
-    setCommentDraft(value)
-    setCommentImproveError(null)
-    commentTextImprove.clearProposal()
-  }
-
-  async function improveCommentDraft() {
-    setCommentImproveError(null)
-    try {
-      await commentTextImprove.improve('chat_input', commentDraft)
-    } catch (error) {
-      setCommentImproveError(messageFromUnknown(error))
-    }
-  }
-
-  function acceptCommentImprovement(text: string) {
-    handleCommentDraftChange(text)
-    window.requestAnimationFrame(() => {
-      commentTextareaRef.current?.focus()
-      resizeTextareaToRows(commentTextareaRef.current, 6)
-    })
-  }
-
-  return (
-    <BubbleMenu
-      editor={editor}
-      appendTo={() => globalThis.document.body}
-      options={{
-        flip: { padding: { bottom: 132, left: 12, right: 12, top: 12 } },
-        inline: true,
-        offset: 8,
-        placement: 'top-start',
-        shift: { padding: { bottom: 132, left: 12, right: 12, top: 12 } },
-        strategy: 'fixed',
-      }}
-      shouldShow={({ editor: currentEditor, state }) => {
-        const { empty } = state.selection
-        return currentEditor.isEditable && (!empty || toolbarInteractingRef.current)
-      }}
-    >
-      <div className="z-50 flex min-w-0 items-center gap-1 rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-lg">
-        {isCommenting ? (
-          <form
-            className="relative flex w-[26rem] max-w-[calc(100vw-5rem)] flex-col gap-2 p-1.5"
-            onKeyDown={(event) => {
-              if (event.key === 'Escape') {
-                event.preventDefault()
-                cancelComment()
-              }
-            }}
-            onSubmit={(event) => {
-              event.preventDefault()
-              submitComment()
-            }}
-          >
-            <button
-              aria-label={copy.cancel}
-              className="absolute right-2 top-2 z-10 inline-grid size-6 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              onClick={cancelComment}
-              type="button"
-            >
-              <X className="size-3.5" />
-            </button>
-            <TextImproveFloatingLayer
-              labels={{
-                accept: t.textImprove.accept,
-                changes: t.textImprove.changes,
-                noChanges: t.textImprove.noChanges,
-                reject: t.textImprove.reject,
-                title: t.textImprove.title,
-                warnings: t.textImprove.warnings,
-              }}
-              onAccept={acceptCommentImprovement}
-              onReject={commentTextImprove.clearProposal}
-              proposal={commentTextImprove.proposal}
-              reduceMotion={reduceMotion}
-            />
-            <Textarea
-              autoFocus
-              className="t-body min-h-16 resize-none border-border/70 bg-background/60 pr-16 focus-visible:ring-1 [scrollbar-width:thin]"
-              onChange={(event) => handleCommentDraftChange(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                  event.preventDefault()
-                  submitComment()
-                }
-              }}
-              placeholder={copy.inlineComment}
-              ref={commentTextareaRef}
-              value={commentDraft}
-            />
-            <TextImproveButton
-              className="absolute right-9 top-2 z-10"
-              disabled={!commentDraft.trim()}
-              isLoading={commentTextImprove.isImproving}
-              label={t.textImprove.improve}
-              loadingLabel={t.textImprove.improving}
-              onClick={() => void improveCommentDraft()}
-              reduceMotion={reduceMotion}
-            />
-            {commentImproveError ? (
-              <p className="t-meta-sm rounded-md border border-destructive/20 bg-destructive/5 px-2 py-1 text-destructive">
-                {commentImproveError}
-              </p>
-            ) : null}
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1">
-                {COMMENT_KIND_ORDER.map((kind) => {
-                  const kindMeta = commentKindMeta(kind, copy)
-                  const KindIcon = kindMeta.Icon
-                  const active = commentKind === kind
-                  return (
-                    <button
-                      aria-pressed={active}
-                      className={cn(
-                        'inline-flex h-6 shrink-0 items-center gap-1 rounded-full border px-2 t-meta-sm font-medium transition-colors',
-                        active
-                          ? cn(kindMeta.selectedBorderClass, kindMeta.selectedBgClass, kindMeta.accentText)
-                          : 'border-border text-muted-foreground hover:text-foreground',
-                      )}
-                      key={kind}
-                      onClick={() => setCommentKind(kind)}
-                      type="button"
-                    >
-                      <KindIcon className="size-3" />
-                      {kindMeta.label}
-                    </button>
-                  )
-                })}
-              </div>
-              <Button disabled={!commentDraft.trim()} size="sm" type="submit">
-                {copy.inlineCommentSubmit}
-              </Button>
-            </div>
-          </form>
-        ) : (
-          <SelectionToolbar
-            editor={editor}
-            labels={{
-              comment: copy.bubbleComment,
-              turnInto: copy.blockTurnInto,
-              bold: copy.bubbleBold,
-              italic: copy.bubbleItalic,
-              underline: copy.bubbleUnderline,
-              strike: copy.bubbleStrike,
-              code: copy.bubbleCode,
-              highlight: copy.bubbleHighlight,
-              text: copy.slashText,
-              heading1: copy.slashHeading1,
-              heading2: copy.slashHeading2,
-              heading3: copy.slashHeading3,
-              bulletList: copy.slashBulletList,
-              orderedList: copy.slashOrderedList,
-              taskList: copy.slashTaskList,
-              blockquote: copy.slashBlockquote,
-              codeBlock: copy.slashCodeBlock,
-            }}
-            onInteractingChange={(interacting) => {
-              toolbarInteractingRef.current = interacting
-            }}
-            onStartComment={() => setIsCommenting(true)}
-          />
-        )}
-      </div>
-    </BubbleMenu>
   )
 }
 
@@ -3118,56 +2153,7 @@ function EditorAssistantComposer({
   )
 }
 
-const COMMENT_KIND_ORDER: EditorCommentKind[] = ['collect', 'inline_edit', 'evidence_review']
 const EVIDENCE_PRESET_ORDER: EditorEvidencePreset[] = ['add_sources', 'fact_check', 'verify_citations']
-
-type CommentKindMeta = {
-  Icon: typeof MessagesSquare
-  accentText: string
-  bgClass: string
-  borderClass: string
-  dotClass: string
-  label: string
-  selectedBgClass: string
-  selectedBorderClass: string
-}
-
-function commentKindMeta(kind: EditorCommentKind, copy: EditorCopy): CommentKindMeta {
-  if (kind === 'inline_edit') {
-    return {
-      Icon: Sparkles,
-      accentText: 'text-warning',
-      bgClass: 'bg-warning-subtle/20',
-      borderClass: 'border-l-warning',
-      dotClass: 'bg-warning',
-      label: copy.kindInline,
-      selectedBgClass: 'bg-warning-subtle/45',
-      selectedBorderClass: 'border-warning',
-    }
-  }
-  if (kind === 'evidence_review') {
-    return {
-      Icon: SearchCheck,
-      accentText: 'text-success',
-      bgClass: 'bg-success-subtle/20',
-      borderClass: 'border-l-success',
-      dotClass: 'bg-success',
-      label: copy.kindEvidence,
-      selectedBgClass: 'bg-success-subtle/45',
-      selectedBorderClass: 'border-success',
-    }
-  }
-  return {
-    Icon: MessagesSquare,
-    accentText: 'text-brand',
-    bgClass: 'bg-brand-subtle/25',
-    borderClass: 'border-l-brand',
-    dotClass: 'bg-brand',
-    label: copy.kindCollect,
-    selectedBgClass: 'bg-brand-subtle/45',
-    selectedBorderClass: 'border-brand',
-  }
-}
 
 function evidencePresetLabel(preset: EditorEvidencePreset, copy: EditorCopy) {
   if (preset === 'fact_check') return copy.presetFactCheck
@@ -3179,6 +2165,7 @@ function EditorCommentsPanel({
   comments,
   copy,
   dispatch,
+  onClose,
   onAcceptSuggestionGroup,
   onAcceptSuggestion,
   onRejectSuggestionGroup,
@@ -3193,6 +2180,7 @@ function EditorCommentsPanel({
   comments: EditorCommentThreadRecord[]
   copy: EditorCopy
   dispatch: Dispatch<ResearchDeskAction>
+  onClose: () => void
   onAcceptSuggestionGroup: (groupId: string) => void
   onAcceptSuggestion: (suggestion: EditorSuggestionRecord) => void
   onRejectSuggestionGroup: (groupId: string) => void
@@ -3222,12 +2210,26 @@ function EditorCommentsPanel({
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
 
   return (
-    <aside className="flex h-full w-full min-w-0 flex-col bg-background">
+    <aside className="inqtrix-contained-panel flex h-full w-full min-w-0 flex-col bg-background">
       <div className="flex inqtrix-panel-header items-center justify-between border-b border-border px-3">
         <div className="flex items-center gap-2">
-          <MessageSquarePlus className="size-4 text-brand" />
           <h2 className="t-section">{copy.assistant}</h2>
         </div>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              aria-label={copy.hideAssistant}
+              className="size-7 shrink-0 text-muted-foreground hover:text-foreground"
+              onClick={onClose}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              <PanelRightClose className="size-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">{copy.hideAssistant}</TooltipContent>
+        </Tooltip>
       </div>
       <div className="flex flex-col gap-2 border-b border-border px-3 py-2">
         <div className="grid grid-cols-2 gap-0.5 rounded-md bg-muted/60 p-0.5">
@@ -3819,18 +2821,6 @@ function TooltipButton({
   )
 }
 
-function resetExternalContentFlag(ref: { current: boolean }) {
-  if (globalThis.queueMicrotask) {
-    globalThis.queueMicrotask(() => {
-      ref.current = false
-    })
-    return
-  }
-  globalThis.setTimeout(() => {
-    ref.current = false
-  }, 0)
-}
-
 function formatEditorTime(value: string) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
@@ -3840,9 +2830,4 @@ function formatEditorTime(value: string) {
 function messageFromUnknown(error: unknown) {
   if (error instanceof Error) return error.message
   return String(error)
-}
-
-function escapeCssIdentifier(value: string) {
-  if (globalThis.CSS?.escape) return globalThis.CSS.escape(value)
-  return value.replace(/["\\]/g, '\\$&')
 }

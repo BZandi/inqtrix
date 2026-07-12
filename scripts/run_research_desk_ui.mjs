@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process'
 
 const scriptName = process.argv[2]
-const allowedScripts = new Set(['dev', 'build', 'lint', 'typecheck', 'preview'])
+const allowedScripts = new Set(['dev', 'build', 'lint', 'test', 'typecheck', 'preview'])
 
 if (!allowedScripts.has(scriptName)) {
   console.error(`Unknown Research Desk script: ${scriptName ?? '<missing>'}`)

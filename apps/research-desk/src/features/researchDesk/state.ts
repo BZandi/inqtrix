@@ -1,3 +1,4 @@
+import { DEEP_RESEARCH_MAX_ROUNDS } from '@/features/researchRuns/types'
 import type {
   ChatModelTier,
   CreateResearchRunRequest,
@@ -57,6 +58,7 @@ import {
   type ProjectPanelLayoutKey,
 } from '@/features/project/panelLayout'
 import {
+  appendRunEventRecord,
   applyRunEvent,
   attachRunResult,
   DEFAULT_EMBED_MODEL_ID,
@@ -64,6 +66,52 @@ import {
   mergeRunSummary,
   VECTOR_INDEX_HISTORY_LIMIT,
 } from '@/features/project/types'
+import {
+  acknowledgeAgentTaskCancellation,
+  applyAgentRunEvent,
+} from '@/features/agent/events'
+import type { AgentPlanDraft as AgentPlanDraftState } from '@/features/agent/plan/usePlanApproval'
+import {
+  agentApprovalFromWire,
+  mergeAgentRunApprovals,
+  mergeAgentRunClarifications,
+  agentArtifactFromWire,
+  agentClarificationFromWire,
+  agentPatchFromWire,
+  agentPlanFromWire,
+  isAgentRunSummary,
+  mergeAgentRunSummary,
+  type AgentRunRecord,
+  type AgentSessionGroupRecord,
+  type AgentSessionRecord,
+} from '@/features/agent/model'
+import { agentSessionMetadataFromJson } from '@/features/agent/agentSessionSync'
+import {
+  DEFAULT_AGENT_SOURCE_POLICY,
+  type AgentSourcePolicy,
+} from '@/features/agent/executionPolicy'
+import type {
+  AgentApprovalWire,
+  AgentArtifactDetailWire,
+  AgentArtifactMetaWire,
+  AgentClarificationWire,
+  AgentPatchWire,
+  AgentPlanWire,
+  ServerAgentSession,
+  ServerAgentSessionGroup,
+} from '@/features/agent/types'
+import {
+  activateCanvasTab,
+  closeCanvasTab,
+  openCanvasTab,
+  pinCanvasTab,
+} from '@/features/canvas/tabs'
+import {
+  EMPTY_CANVAS_STATE,
+  type CanvasOpenSource,
+  type CanvasState,
+  type CanvasViewDescriptor,
+} from '@/features/canvas/types'
 import { moveItem } from '@/features/composer/reorder'
 import { knowledgeAnswerFromRunResult } from '@/features/knowledge/answer'
 import { applyKnowledgeRunEvent } from '@/features/knowledge/runSteps'
@@ -81,6 +129,7 @@ export type ResearchDeskAction =
   | { ref: ChatContextReferenceRecord; type: 'attachChatContextToDraft' }
   | { type: 'attachReportToChatDraft'; runId: string }
   | { type: 'attachReportToNewChat'; runId: string }
+  | { type: 'setResearchRunAutocomplete'; runId: string; includeInAutocomplete: boolean }
   | { ref: ChatContextReferenceRecord; type: 'removeChatContextFromDraft' }
   | { fromIndex: number; toIndex: number; type: 'reorderChatContextInDraft' }
   | { type: 'clearChatDraftAttachment' }
@@ -144,6 +193,42 @@ export type ResearchDeskAction =
   | { contentMarkdown: string; messageId: string; threadId: string; type: 'editChatUserMessage' }
   | { type: 'hydrateProject'; state: ProjectState }
   | { type: 'appendApiRunEvent'; event: ResearchRunEvent }
+  | { select?: boolean; summary: ResearchRunSummary; type: 'upsertAgentRunSummary' }
+  | { plan: AgentPlanWire | null; runId: string; type: 'setAgentRunPlan' }
+  | { runId: string; type: 'markAgentRunPlanStale' }
+  | {
+    childRunId: string | null
+    runId: string
+    status: 'cancel_requested' | 'cancelled'
+    taskId: string
+    type: 'ackAgentTaskCancel'
+  }
+  | { approvals: AgentApprovalWire[]; runId: string; type: 'setAgentRunApprovals' }
+  | { clarifications: AgentClarificationWire[]; runId: string; type: 'setAgentRunClarifications' }
+  | { artifacts: AgentArtifactMetaWire[]; runId: string; type: 'setAgentRunArtifacts' }
+  | { artifact: AgentArtifactDetailWire; runId: string; type: 'setAgentRunArtifactDetail' }
+  | { patch: AgentPatchWire; runId: string; type: 'setAgentRunPatch' }
+  | { message: string; runId: string; surface?: 'plan' | 'approvals' | 'clarifications' | 'artifacts' | 'answer' | 'patch'; type: 'markAgentRunError' }
+  | { session: AgentSessionRecord; type: 'createAgentSession' }
+  | { sessionId: string; sourcePolicy: AgentSourcePolicy; type: 'setAgentSessionSourcePolicy' }
+  | { sessionId: string; title: string; type: 'renameAgentSession' }
+  | { sessionId: string; type: 'deleteAgentSession' }
+  | { sessionId: string | null; type: 'selectAgentSession' }
+  | { sessionId: string; type: 'togglePinnedAgentSession' }
+  | { groupId: string | null; sessionId: string; type: 'moveAgentSessionToGroup' }
+  | { title: string; type: 'createAgentSessionGroup' }
+  | { groupId: string; title: string; type: 'renameAgentSessionGroup' }
+  | { groupId: string; type: 'deleteAgentSessionGroup' }
+  | { groups: ServerAgentSessionGroup[]; sessions: ServerAgentSession[]; type: 'upsertServerAgentSessions' }
+  | { draft: AgentPlanDraftState | null; runId: string; type: 'setAgentPlanDraft' }
+  | { descriptor: CanvasViewDescriptor; source: CanvasOpenSource; type: 'openAgentCanvasView' }
+  | { key: string; type: 'activateAgentCanvasTab' }
+  | { key: string; type: 'closeAgentCanvasTab' }
+  | { key: string; type: 'pinAgentCanvasTab' }
+  | { pinned: boolean; type: 'setAgentCanvasPinned' }
+  | { type: 'toggleAgentCanvasFocus' }
+  | { type: 'closeAgentCanvas' }
+  | { type: 'toggleAgentSessionsVisible' }
   | { type: 'attachApiRunResult'; result: ResearchRunResult }
   | { type: 'markApiRunError'; message: string; runId: string }
   | { type: 'upsertApiRunSummary'; select?: boolean; summary: ResearchRunSummary }
@@ -160,6 +245,14 @@ export type ResearchDeskAction =
   | { enabled: boolean; persistLocal?: boolean; type: 'setServerSyncEnabled' }
   | { documents: EditorDocumentRecord[]; type: 'upsertServerEditorDocuments' }
   | { contentMarkdown: string; documentId: string; type: 'setServerEditorDocumentBody' }
+  | { documentId: string; revision: number; type: 'adoptEditorDocumentRevision' }
+  | {
+      contentMarkdown: string
+      documentId: string
+      pushedContentMarkdown: string
+      revision: number
+      type: 'rebaseServerEditorDocument'
+    }
   | { folders: EditorFolderRecord[]; type: 'upsertServerEditorFolders' }
   | { comments: EditorCommentThreadRecord[]; type: 'upsertServerEditorComments' }
   | { sections: FileLibrarySectionRecord[]; type: 'upsertServerAssetSections' }
@@ -226,6 +319,9 @@ export type ResearchDeskAction =
   | { type: 'setSelectedChatModelTier'; tier: ChatModelTier | null }
   | { type: 'setSelectedChatModel'; model: string | null }
   | { type: 'setSelectedChatEffort'; effort: string | null }
+  | { type: 'setSelectedAgentModelTier'; tier: ChatModelTier | null }
+  | { type: 'setSelectedAgentModel'; model: string | null }
+  | { type: 'setSelectedAgentEffort'; effort: string | null }
   | { type: 'setSelectedStack'; stack: string }
   | { rule: ChatRuleRecord; type: 'upsertChatRule' }
   | { type: 'toggleJob'; jobId: string }
@@ -421,6 +517,39 @@ export function researchDeskReducer(
       ui: { ...state.ui, selectedChatEffort: action.effort },
     }
   }
+  if (action.type === 'setSelectedAgentModelTier') {
+    // Same exclusivity contract as the chat picker: a tier pick clears
+    // the explicit model AND the effort (effort is model-dependent).
+    return {
+      ...state,
+      dirty: true,
+      ui: {
+        ...state.ui,
+        selectedAgentModelTier: action.tier,
+        selectedAgentModel: null,
+        selectedAgentEffort: null,
+      },
+    }
+  }
+  if (action.type === 'setSelectedAgentModel') {
+    return {
+      ...state,
+      dirty: true,
+      ui: {
+        ...state.ui,
+        selectedAgentModel: action.model,
+        selectedAgentModelTier: null,
+        selectedAgentEffort: null,
+      },
+    }
+  }
+  if (action.type === 'setSelectedAgentEffort') {
+    return {
+      ...state,
+      dirty: true,
+      ui: { ...state.ui, selectedAgentEffort: action.effort },
+    }
+  }
   if (action.type === 'setChatChainingEnabled') {
     return {
       ...state,
@@ -562,6 +691,9 @@ export function researchDeskReducer(
         Object.entries(state.editorDocuments).map(([documentId, document]) => [
           documentId,
           document.folderId === action.folderId
+            // Dirtying edit bumps updatedAt (the autosave trigger), NOT the
+            // revision: revision is the last-synced server base, and the save
+            // sends base+1 (see updateEditorDocumentMarkdown / editorSync).
             ? { ...document, folderId: null, updatedAt }
             : document,
         ]),
@@ -685,6 +817,9 @@ export function researchDeskReducer(
         [document.id]: {
           ...document,
           title,
+          // Only updatedAt moves (the autosave trigger); revision stays the
+          // last-synced server base. The save sends base+1, so a rename off
+          // the current base still CAS-matches -- no revision bump needed.
           updatedAt: new Date().toISOString(),
         },
       },
@@ -702,7 +837,11 @@ export function researchDeskReducer(
         [document.id]: {
           ...document,
           contentMarkdown: action.contentMarkdown,
-          revision: document.revision + 1,
+          // revision is the last-synced server base and stays put across
+          // local edits; the save sends base+1 and the CAS is against that
+          // base, so a stale writer whose base is behind the server 409s
+          // (real optimistic concurrency, not a monotonic counter). updatedAt
+          // is the local-edit signal the autosave debounce reads.
           updatedAt,
         },
       },
@@ -1065,6 +1204,12 @@ export function researchDeskReducer(
     // the global run store prevents deleted/incognito Q&A from reappearing via
     // run-list hydration or project export.
     if (action.summary.mode === 'knowledge') return state
+    // Agent runs live on the Agent Desk (own record model); child runs are
+    // internal to their parent and never surface as standalone cards.
+    if (isAgentRunSummary(action.summary)) {
+      return withAgentRunSummary(state, action.summary, Boolean(action.select))
+    }
+    if (action.summary.kind === 'agent_child') return state
     const current = state.researchRuns[action.summary.run_id]
     const run = mergeRunSummary(current, action.summary, state.ui.selectedStack)
     const researchRunOrder = state.researchRunOrder.includes(run.runId)
@@ -1089,6 +1234,448 @@ export function researchDeskReducer(
         activeFilter: shouldSelect ? 'all' : state.ui.activeFilter,
         expandedJobId: shouldSelect ? run.runId : state.ui.expandedJobId,
         selectedJobId,
+      },
+    }
+  }
+  if (action.type === 'upsertAgentRunSummary') {
+    // Server-derived rows: never dirty (session-scoped, not project files).
+    return withAgentRunSummary(state, action.summary, Boolean(action.select))
+  }
+  if (action.type === 'setAgentRunPlan') {
+    // `plan: null` = the server has no plan yet (pre-planning 404); the
+    // stale flag still clears so the fetch effect cannot loop.
+    return updateAgentRun(state, action.runId, (run) => ({
+      ...run,
+      plan: action.plan ? agentPlanFromWire(action.plan) : run.plan,
+      planStale: false,
+    }))
+  }
+  if (action.type === 'markAgentRunPlanStale') {
+    // View-open re-flags the plan through the ONE background fetch path
+    // (useAgentControlApi); idempotent while already flagged, and never
+    // `dirty` (server-derived state).
+    return updateAgentRun(state, action.runId, (run) =>
+      run.planStale ? run : { ...run, planStale: true })
+  }
+  if (action.type === 'ackAgentTaskCancel') {
+    return updateAgentRun(state, action.runId, (run) => (
+      acknowledgeAgentTaskCancellation(
+        run,
+        action.taskId,
+        action.status,
+        action.childRunId,
+      )
+    ))
+  }
+  if (action.type === 'setAgentRunApprovals') {
+    // Reconcile instead of replace: a stale full-list refetch (racing the
+    // decide commit) must not regress a locally decided approval back to
+    // pending — that re-opened the composer gate tray after the decision.
+    return updateAgentRun(state, action.runId, (run) => ({
+      ...run,
+      approvals: mergeAgentRunApprovals(
+        run.approvals,
+        action.approvals.map(agentApprovalFromWire),
+      ),
+      approvalsStale: false,
+    }))
+  }
+  if (action.type === 'setAgentRunClarifications') {
+    // Same reconcile-not-replace contract as approvals: a stale
+    // full-list refetch must never regress an answered round back to
+    // pending (that re-opened the gate tray after the answer).
+    return updateAgentRun(state, action.runId, (run) => ({
+      ...run,
+      clarifications: mergeAgentRunClarifications(
+        run.clarifications,
+        action.clarifications.map(agentClarificationFromWire),
+      ),
+      clarificationsStale: false,
+    }))
+  }
+  if (action.type === 'setAgentRunArtifacts') {
+    return updateAgentRun(state, action.runId, (run) => {
+      const artifacts = { ...run.artifacts }
+      const artifactOrder: string[] = []
+      for (const wire of action.artifacts) {
+        const record = agentArtifactFromWire(wire)
+        const existing = artifacts[record.artifactId]
+        // The list row carries no body — keep a fetched body while it is
+        // not older than the row's revision.
+        artifacts[record.artifactId] =
+          existing?.contentMarkdown !== undefined
+            && existing.revision >= record.revision
+            ? {
+              ...record,
+              contentMarkdown: existing.contentMarkdown,
+              refs: existing.refs,
+              revisions: existing.revisions,
+            }
+            : record
+        artifactOrder.push(record.artifactId)
+      }
+      return { ...run, artifacts, artifactOrder, artifactsStale: false }
+    })
+  }
+  if (action.type === 'setAgentRunArtifactDetail') {
+    return updateAgentRun(state, action.runId, (run) => {
+      const record = agentArtifactFromWire(action.artifact)
+      return {
+        ...run,
+        artifacts: { ...run.artifacts, [record.artifactId]: record },
+        artifactOrder: run.artifactOrder.includes(record.artifactId)
+          ? run.artifactOrder
+          : [...run.artifactOrder, record.artifactId],
+      }
+    })
+  }
+  if (action.type === 'setAgentRunPatch') {
+    return updateAgentRun(state, action.runId, (run) => ({
+      ...run,
+      patch: agentPatchFromWire(action.patch),
+      patchId: action.patch.patch_id,
+      patchStale: false,
+    }))
+  }
+  if (action.type === 'markAgentRunError') {
+    // A failed control fetch clears its stale flag: retrying on the next
+    // render would hammer the endpoint in a tight loop — the next SSE
+    // signal re-flags the surface, which is the honest retry moment.
+    return updateAgentRun(state, action.runId, (run) => ({
+      ...run,
+      error: action.message,
+      ...(action.surface === 'plan' ? { planStale: false } : {}),
+      ...(action.surface === 'approvals' ? { approvalsStale: false } : {}),
+      ...(action.surface === 'clarifications'
+        ? { clarificationsStale: false }
+        : {}),
+      ...(action.surface === 'artifacts' ? { artifactsStale: false } : {}),
+      ...(action.surface === 'patch' ? { patchStale: false } : {}),
+    }))
+  }
+  if (action.type === 'createAgentSession') {
+    const exists = state.agentSessions[action.session.id]
+    return {
+      ...state,
+      dirty: true,
+      // Creating (and selecting) a new session clears the canvas so a
+      // pinned tab from the prior session does not leak (root: the reset
+      // is bound to the selection transition, not to one action).
+      agentCanvas: agentCanvasForSelection(state, action.session.id),
+      agentSessionOrder: exists
+        ? state.agentSessionOrder
+        : [action.session.id, ...state.agentSessionOrder],
+      agentSessions: {
+        ...state.agentSessions,
+        [action.session.id]: action.session,
+      },
+      ...withSelectedAgentSession(state, action.session.id),
+    }
+  }
+  if (action.type === 'renameAgentSession') {
+    const session = state.agentSessions[action.sessionId]
+    if (!session) return state
+    const title = action.title.trim()
+    if (!title || title === session.title) return state
+    return {
+      ...state,
+      dirty: true,
+      agentSessions: {
+        ...state.agentSessions,
+        [action.sessionId]: {
+          ...session,
+          title,
+          updatedAt: new Date().toISOString(),
+        },
+      },
+    }
+  }
+  if (action.type === 'setAgentSessionSourcePolicy') {
+    const session = state.agentSessions[action.sessionId]
+    if (!session) return state
+    if (
+      session.sourcePolicy?.web === action.sourcePolicy.web
+      && session.sourcePolicy?.knowledge === action.sourcePolicy.knowledge
+    ) return state
+    return {
+      ...state,
+      dirty: true,
+      agentSessions: {
+        ...state.agentSessions,
+        [action.sessionId]: {
+          ...session,
+          sourcePolicy: action.sourcePolicy,
+          updatedAt: new Date().toISOString(),
+        },
+      },
+    }
+  }
+  if (action.type === 'deleteAgentSession') {
+    const session = state.agentSessions[action.sessionId]
+    if (!session) return state
+    const agentSessions = { ...state.agentSessions }
+    delete agentSessions[action.sessionId]
+    const agentRuns = { ...state.agentRuns }
+    for (const runId of session.runIds) delete agentRuns[runId]
+    const agentSessionOrder = state.agentSessionOrder.filter(
+      (id) => id !== action.sessionId,
+    )
+    const nextSelected =
+      state.selectedAgentSessionId === action.sessionId
+        ? agentSessionOrder[0] ?? null
+        : state.selectedAgentSessionId
+    const selection = withSelectedAgentSession(state, nextSelected)
+    return {
+      ...state,
+      dirty: true,
+      // Deleting the ACTIVE session reassigns the selection — clear the
+      // canvas so it does not keep the deleted session's tabs.
+      agentCanvas: agentCanvasForSelection(state, nextSelected),
+      agentRuns,
+      agentSessionOrder,
+      agentSessions,
+      ...selection,
+      ui: {
+        ...selection.ui,
+        pinnedExplorer: {
+          ...state.ui.pinnedExplorer,
+          agentSessionIds: removeExplorerPin(
+            state.ui.pinnedExplorer.agentSessionIds,
+            action.sessionId,
+          ),
+        },
+      },
+    }
+  }
+  if (action.type === 'selectAgentSession') {
+    if (state.selectedAgentSessionId === action.sessionId) return state
+    // A session switch clears the canvas (see agentCanvasForSelection).
+    return {
+      ...state,
+      agentCanvas: agentCanvasForSelection(state, action.sessionId),
+      ...withSelectedAgentSession(state, action.sessionId),
+    }
+  }
+  if (action.type === 'togglePinnedAgentSession') {
+    return {
+      ...state,
+      dirty: true,
+      ui: {
+        ...state.ui,
+        pinnedExplorer: {
+          ...state.ui.pinnedExplorer,
+          agentSessionIds: toggleExplorerPin(
+            state.ui.pinnedExplorer.agentSessionIds,
+            action.sessionId,
+          ),
+        },
+      },
+    }
+  }
+  if (action.type === 'moveAgentSessionToGroup') {
+    const session = state.agentSessions[action.sessionId]
+    if (!session || session.groupId === action.groupId) return state
+    return {
+      ...state,
+      dirty: true,
+      agentSessions: {
+        ...state.agentSessions,
+        [action.sessionId]: {
+          ...session,
+          groupId: action.groupId,
+          updatedAt: new Date().toISOString(),
+        },
+      },
+    }
+  }
+  if (action.type === 'createAgentSessionGroup') {
+    const now = new Date().toISOString()
+    const group: AgentSessionGroupRecord = {
+      createdAt: now,
+      id: createId('agent-session-group'),
+      title: action.title.trim() || 'Neuer Ordner',
+      updatedAt: now,
+    }
+    return {
+      ...state,
+      dirty: true,
+      agentSessionGroupOrder: [group.id, ...state.agentSessionGroupOrder],
+      agentSessionGroups: {
+        ...state.agentSessionGroups,
+        [group.id]: group,
+      },
+    }
+  }
+  if (action.type === 'renameAgentSessionGroup') {
+    const group = state.agentSessionGroups[action.groupId]
+    if (!group) return state
+    const title = action.title.trim()
+    if (!title || title === group.title) return state
+    return {
+      ...state,
+      dirty: true,
+      agentSessionGroups: {
+        ...state.agentSessionGroups,
+        [action.groupId]: {
+          ...group,
+          title,
+          updatedAt: new Date().toISOString(),
+        },
+      },
+    }
+  }
+  if (action.type === 'deleteAgentSessionGroup') {
+    if (!state.agentSessionGroups[action.groupId]) return state
+    const agentSessionGroups = { ...state.agentSessionGroups }
+    delete agentSessionGroups[action.groupId]
+    const agentSessions = { ...state.agentSessions }
+    let sessionsChanged = false
+    for (const [id, session] of Object.entries(agentSessions)) {
+      if (session.groupId === action.groupId) {
+        agentSessions[id] = { ...session, groupId: null }
+        sessionsChanged = true
+      }
+    }
+    return {
+      ...state,
+      dirty: true,
+      agentSessionGroupOrder: state.agentSessionGroupOrder.filter(
+        (id) => id !== action.groupId,
+      ),
+      agentSessionGroups,
+      agentSessions: sessionsChanged ? agentSessions : state.agentSessions,
+    }
+  }
+  if (action.type === 'upsertServerAgentSessions') {
+    // Server hydrate: additive, local-newer-wins, NEVER dirty (re-save loop).
+    if (action.sessions.length === 0 && action.groups.length === 0) {
+      return state
+    }
+    const agentSessions = { ...state.agentSessions }
+    let agentSessionOrder = state.agentSessionOrder
+    for (const wire of action.sessions) {
+      const existing = agentSessions[wire.id]
+      const serverUpdatedAt = new Date(wire.updated_at * 1000).toISOString()
+      if (!existing) {
+        const metadata = agentSessionMetadataFromJson(wire.items_json)
+        agentSessions[wire.id] = {
+          id: wire.id,
+          title: wire.title,
+          groupId: wire.group_id,
+          createdAt: new Date(wire.created_at * 1000).toISOString(),
+          updatedAt: serverUpdatedAt,
+          runIds: [],
+          sourcePolicy: metadata.sourcePolicy,
+        }
+        if (!agentSessionOrder.includes(wire.id)) {
+          agentSessionOrder = [...agentSessionOrder, wire.id]
+        }
+      } else if (existing.updatedAt <= serverUpdatedAt) {
+        const metadata = wire.items_json === undefined
+          ? null
+          : agentSessionMetadataFromJson(wire.items_json)
+        agentSessions[wire.id] = {
+          ...existing,
+          title: wire.title,
+          groupId: wire.group_id,
+          updatedAt: serverUpdatedAt,
+          sourcePolicy:
+            metadata?.sourcePolicy
+            ?? existing.sourcePolicy
+            ?? { ...DEFAULT_AGENT_SOURCE_POLICY },
+        }
+      }
+    }
+    const agentSessionGroups = { ...state.agentSessionGroups }
+    let agentSessionGroupOrder = state.agentSessionGroupOrder
+    for (const wire of action.groups) {
+      agentSessionGroups[wire.id] = {
+        id: wire.id,
+        title: wire.title,
+        createdAt: new Date(wire.created_at * 1000).toISOString(),
+        updatedAt: new Date(wire.updated_at * 1000).toISOString(),
+      }
+      if (!agentSessionGroupOrder.includes(wire.id)) {
+        agentSessionGroupOrder = [...agentSessionGroupOrder, wire.id]
+      }
+    }
+    return {
+      ...state,
+      agentSessionGroupOrder,
+      agentSessionGroups,
+      agentSessionOrder,
+      agentSessions,
+    }
+  }
+  if (action.type === 'setAgentPlanDraft') {
+    const drafts = { ...state.agentPlanDrafts }
+    if (action.draft === null) delete drafts[action.runId]
+    else drafts[action.runId] = action.draft
+    return { ...state, agentPlanDrafts: drafts }
+  }
+  if (action.type === 'openAgentCanvasView') {
+    // Tab semantics live in the pure helpers (features/canvas/tabs.ts):
+    // user opens create/focus pinned tabs, agent opens drive the one
+    // preview tab under the follow rules.
+    const next = openCanvasTab(
+      state.agentCanvas,
+      action.descriptor,
+      action.source,
+    )
+    if (next === state.agentCanvas) return state
+    return { ...state, agentCanvas: next }
+  }
+  if (action.type === 'activateAgentCanvasTab') {
+    const next = activateCanvasTab(state.agentCanvas, action.key)
+    if (next === state.agentCanvas) return state
+    return { ...state, agentCanvas: next }
+  }
+  if (action.type === 'closeAgentCanvasTab') {
+    const next = closeCanvasTab(state.agentCanvas, action.key)
+    if (next === state.agentCanvas) return state
+    return { ...state, agentCanvas: next }
+  }
+  if (action.type === 'pinAgentCanvasTab') {
+    const next = pinCanvasTab(state.agentCanvas, action.key)
+    if (next === state.agentCanvas) return state
+    return { ...state, agentCanvas: next }
+  }
+  if (action.type === 'setAgentCanvasPinned') {
+    if (state.agentCanvas.pinned === action.pinned) return state
+    return {
+      ...state,
+      agentCanvas: { ...state.agentCanvas, pinned: action.pinned },
+    }
+  }
+  if (action.type === 'toggleAgentCanvasFocus') {
+    if (!state.agentCanvas.open) return state
+    return {
+      ...state,
+      agentCanvas: {
+        ...state.agentCanvas,
+        focus: !state.agentCanvas.focus,
+      },
+    }
+  }
+  if (action.type === 'closeAgentCanvas') {
+    // Tabs survive a panel close: reopening restores the row as left.
+    if (!state.agentCanvas.open) return state
+    return {
+      ...state,
+      agentCanvas: {
+        ...state.agentCanvas,
+        open: false,
+        focus: false,
+        pinned: false,
+      },
+    }
+  }
+  if (action.type === 'toggleAgentSessionsVisible') {
+    return {
+      ...state,
+      ui: {
+        ...state.ui,
+        isAgentSessionsVisible: !state.ui.isAgentSessionsVisible,
       },
     }
   }
@@ -1240,6 +1827,65 @@ export function researchDeskReducer(
         [action.documentId]: {
           ...document,
           contentMarkdown: action.contentMarkdown,
+        },
+      },
+    }
+  }
+  if (action.type === 'adoptEditorDocumentRevision') {
+    // A successful save advanced the server to this revision; adopt it as the
+    // new base. Revision-only — never touches content/updatedAt/dirty, so a
+    // live keystroke made during the save keeps its newer body and the flush
+    // fingerprint (updatedAt) stays put. No-op if the revision did not move
+    // forward (a late/duplicate adopt must not rewind a fresher base).
+    const document = state.editorDocuments[action.documentId]
+    if (!document || action.revision <= document.revision) return state
+    return {
+      ...state,
+      editorDocuments: {
+        ...state.editorDocuments,
+        [action.documentId]: {
+          ...document,
+          revision: action.revision,
+        },
+      },
+    }
+  }
+  if (action.type === 'rebaseServerEditorDocument') {
+    // Autosave lost the server's revision guard (a concurrent writer —
+    // typically an agent patch apply — advanced the document). Two cases,
+    // distinguished by whether the user kept typing during the PUT->GET
+    // window (pushedContentMarkdown is what the failed PUT carried):
+    const document = state.editorDocuments[action.documentId]
+    if (!document) return state
+    if (document.contentMarkdown === action.pushedContentMarkdown) {
+      // No local edit since the failed push: adopt the server body +
+      // revision. Never touches updatedAt / dirty (mirror of
+      // setServerEditorDocumentBody) — this window is now in sync.
+      return {
+        ...state,
+        editorDocuments: {
+          ...state.editorDocuments,
+          [action.documentId]: {
+            ...document,
+            contentMarkdown: action.contentMarkdown,
+            revision: action.revision,
+          },
+        },
+      }
+    }
+    // The user typed during the window: those keystrokes are a genuinely
+    // newer local edit. KEEP them and rebase the revision onto the server
+    // (the base), so the next flush re-pushes the live edit as base+1 — the
+    // interactive user wins over the concurrent writer for this narrow
+    // overlap, and nothing is silently discarded (the A2 guarantee).
+    return {
+      ...state,
+      dirty: true,
+      editorDocuments: {
+        ...state.editorDocuments,
+        [action.documentId]: {
+          ...document,
+          revision: action.revision,
         },
       },
     }
@@ -1440,6 +2086,20 @@ export function researchDeskReducer(
     // Knowledge thread items consume the same event stream as the run
     // records: demo asks have no run record, live asks have both.
     const withKnowledge = applyEventToKnowledgeItem(state, action.event)
+    // Agent runs own their events entirely (separate record model);
+    // server-derived state never marks the project dirty.
+    const agentRun = withKnowledge.agentRuns[action.event.run_id]
+    if (agentRun) {
+      const applied = applyAgentRunEvent(agentRun, action.event)
+      if (applied === agentRun) return withKnowledge
+      return {
+        ...withKnowledge,
+        agentRuns: {
+          ...withKnowledge.agentRuns,
+          [applied.runId]: applied,
+        },
+      }
+    }
     const current = withKnowledge.researchRuns[action.event.run_id]
     if (!current) return withKnowledge
     const run = applyRunEvent(current, action.event)
@@ -1908,11 +2568,12 @@ export function researchDeskReducer(
         ...state.researchRuns,
         [action.runId]: {
           ...current,
-          events: [
-            ...current.events.map((event) => ({ ...event, active: false })),
-            ...cancelRequested,
-            cancelledEvent,
-          ],
+          // Shared O(1)-tail-flip append (0.2): clears the previous live step
+          // and appends the cancel markers without re-spreading every event.
+          events: [...cancelRequested, cancelledEvent].reduce(
+            (events, event) => appendRunEventRecord(events, event),
+            current.events,
+          ),
           finishedAt: now,
           queuePosition: null,
           status: 'cancelled',
@@ -1928,6 +2589,19 @@ export function researchDeskReducer(
     return {
       ...state,
       ui: { ...state.ui, selectedChatThreadId: action.threadId },
+    }
+  }
+  if (action.type === 'setResearchRunAutocomplete') {
+    const current = state.researchRuns[action.runId]
+    if (!current || current.includeInAutocomplete === action.includeInAutocomplete) return state
+
+    return {
+      ...state,
+      dirty: true,
+      researchRuns: {
+        ...state.researchRuns,
+        [action.runId]: { ...current, includeInAutocomplete: action.includeInAutocomplete },
+      },
     }
   }
   if (action.type === 'attachReportToChatDraft') {
@@ -3192,7 +3866,7 @@ function createLocalResearchRun(
   fallbackStack: string,
 ): ResearchRunRecord {
   const now = new Date().toISOString()
-  const maxRounds = request.agentOverrides?.maxRounds ?? 10
+  const maxRounds = request.agentOverrides?.maxRounds ?? DEEP_RESEARCH_MAX_ROUNDS
   const firstRoundQueries = request.agentOverrides?.firstRoundQueries ?? 0
   const question = request.question.trim()
 
@@ -3443,7 +4117,9 @@ function createEditorDocument(options: {
     createdAt: now,
     folderId: options.folderId ?? null,
     id: createId('editor-doc'),
-    revision: 1,
+    // Base 0 = never synced to the server; the first save sends base+1 and
+    // INSERTs at revision 1. Revision then tracks the server, not local edits.
+    revision: 0,
     source: options.source,
     sourceRunId: options.sourceRunId,
     title: normalizeEditorDocumentTitle(options.title ?? 'Untitled.md'),
@@ -3534,6 +4210,7 @@ function moveEditorDocumentToFolder(
       [document.id]: {
         ...document,
         folderId,
+        // updatedAt only (autosave trigger); revision stays the server base.
         updatedAt: new Date().toISOString(),
       },
     },
@@ -4047,4 +4724,130 @@ function resolveVisibleSelection(
   const selectedJobIsVisible = visibleRunIds.some((runId) => runId === selectedJobId)
 
   return selectedJobIsVisible ? selectedJobId : visibleRunIds[0] ?? null
+}
+
+/** Merge an agent-run summary and keep its session's turn list in sync.
+ * Runs without a session id get a synthetic one keyed by the run id so
+ * they stay visible. Never sets `dirty` (server-derived rows). */
+/**
+ * The canvas slice to carry when the selected agent session becomes
+ * *nextSessionId*. The canvas is a workspace-global slice whose tabs
+ * address ONE session's runs (plan/run/document by runId); the timeline
+ * is strictly per-session. So EVERY transition that changes the selected
+ * session to a different value must clear the canvas — otherwise a
+ * pinned tab from the previous session keeps rendering its content
+ * beside the new session's timeline (follow is inert while pinned).
+ * Binding the reset to this state transition (not to one action) covers
+ * selectAgentSession, createAgentSession, run-summary select, and the
+ * delete-reassignment uniformly.
+ */
+function agentCanvasForSelection(
+  state: ProjectState,
+  nextSessionId: string | null,
+): CanvasState {
+  return nextSessionId === state.selectedAgentSessionId
+    ? state.agentCanvas
+    : EMPTY_CANVAS_STATE
+}
+
+/**
+ * Every selection write mirrors into `ui.selectedAgentSessionId` — the
+ * persisted intent the workspace restores after a reload. One helper on
+ * ALL write paths (create, select, delete-reassign, run-summary select),
+ * bound to the state transition rather than to one action, so no path
+ * can leak a stale persisted selection.
+ */
+function withSelectedAgentSession(
+  state: ProjectState,
+  sessionId: string | null,
+): Pick<ProjectState, 'selectedAgentSessionId' | 'ui'> {
+  return {
+    selectedAgentSessionId: sessionId,
+    ui: state.ui.selectedAgentSessionId === sessionId
+      ? state.ui
+      : { ...state.ui, selectedAgentSessionId: sessionId },
+  }
+}
+
+function withAgentRunSummary(
+  state: ProjectState,
+  summary: ResearchRunSummary,
+  select: boolean,
+): ProjectState {
+  const current = state.agentRuns[summary.run_id]
+  const run = mergeAgentRunSummary(current, summary)
+  const sessionId = run.sessionId || run.runId
+  let agentSessions = state.agentSessions
+  let agentSessionOrder = state.agentSessionOrder
+  const existing = agentSessions[sessionId]
+  if (!existing) {
+    const session: AgentSessionRecord = {
+      id: sessionId,
+      title: run.question.trim().slice(0, 80) || sessionId,
+      groupId: null,
+      createdAt: run.createdAt,
+      updatedAt: run.createdAt,
+      runIds: [run.runId],
+      sourcePolicy: { ...DEFAULT_AGENT_SOURCE_POLICY },
+    }
+    agentSessions = { ...agentSessions, [sessionId]: session }
+    agentSessionOrder = [sessionId, ...agentSessionOrder]
+  } else if (!existing.runIds.includes(run.runId)) {
+    // No updatedAt stamp: run membership is server-derived, and a fresh
+    // stamp would win the local-newer-wins merge against a server-side
+    // rename that has not hydrated yet.
+    agentSessions = {
+      ...agentSessions,
+      [sessionId]: {
+        ...existing,
+        runIds: [...existing.runIds, run.runId],
+      },
+    }
+  }
+  // Membership is EXCLUSIVE: a summary that (re)attributes the run sweeps
+  // it out of every other session. Without this, a run first seen without
+  // session_id lives on in its runId-keyed phantom session after the real
+  // session hydrates — and its parked gate then surfaces under the wrong
+  // selected session. An emptied phantom shell (id === runId) is dropped
+  // outright; if it was selected, selection follows the run.
+  let selectedOverride: string | null = null
+  for (const [id, session] of Object.entries(agentSessions)) {
+    if (id === sessionId || !session.runIds.includes(run.runId)) continue
+    const runIds = session.runIds.filter((item) => item !== run.runId)
+    if (id === run.runId && runIds.length === 0) {
+      agentSessions = Object.fromEntries(
+        Object.entries(agentSessions).filter(([key]) => key !== id),
+      )
+      agentSessionOrder = agentSessionOrder.filter((item) => item !== id)
+      if (state.selectedAgentSessionId === id) selectedOverride = sessionId
+    } else {
+      agentSessions = { ...agentSessions, [id]: { ...session, runIds } }
+    }
+  }
+  return {
+    ...state,
+    // A select=true summary switches the active session (run creation /
+    // demo) — clear the canvas on the transition like every other path.
+    agentCanvas: select
+      ? agentCanvasForSelection(state, sessionId)
+      : state.agentCanvas,
+    agentRuns: { ...state.agentRuns, [run.runId]: run },
+    agentSessionOrder,
+    agentSessions,
+    ...(select || selectedOverride
+      ? withSelectedAgentSession(state, selectedOverride ?? sessionId)
+      : {}),
+  }
+}
+
+function updateAgentRun(
+  state: ProjectState,
+  runId: string,
+  update: (run: AgentRunRecord) => AgentRunRecord,
+): ProjectState {
+  const current = state.agentRuns[runId]
+  if (!current) return state
+  const next = update(current)
+  if (next === current) return state
+  return { ...state, agentRuns: { ...state.agentRuns, [runId]: next } }
 }

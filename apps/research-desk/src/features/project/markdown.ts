@@ -25,6 +25,7 @@ import type {
 import type { JobStatus } from '@/features/researchDesk/types'
 import { PROJECT_SCHEMA_VERSION } from './types'
 import { normalizeReportReferences } from './reportReferences'
+import { asNonEmptyString, asString } from '@/lib/coerce'
 import {
   chatRuleAutocompleteOrDefault,
   chatRuleCategoryOrDefault,
@@ -171,6 +172,9 @@ export function serializeResearchRun(
     // Additive shared-in marker — dropping it on round-trip would
     // silently relabel shared-in runs as owned after a reload.
     access: run.access ?? null,
+    // Default-on mention availability; only an explicit false hides the report
+    // from the @-autocomplete, so it must survive the round-trip.
+    include_in_autocomplete: run.includeInAutocomplete ?? true,
     top_claims: run.result?.topClaims ?? [],
     top_sources: run.result?.topSources ?? [],
     usage: run.result?.usage ?? null,
@@ -476,7 +480,7 @@ export function parseResearchRun(markdown: string): ResearchRunRecord {
     createdAt: stringValue(data.created_at),
     durationSeconds: optionalNumber(data.duration_seconds),
     events: normalizeRunEvents(data.events, submittedAt),
-    finishedAt: optionalString(data.finished_at),
+    finishedAt: asString(data.finished_at),
     metrics: objectValue(data.metrics),
     phaseState: objectValue(data.phase_state),
     result: {
@@ -491,11 +495,14 @@ export function parseResearchRun(markdown: string): ResearchRunRecord {
     snapshot: nullableObject(data.snapshot),
     source: data.source === 'api' || data.source === 'mock' ? data.source : 'imported',
     stack: stringValue(data.stack),
-    startedAt: optionalString(data.started_at),
+    startedAt: asString(data.started_at),
     status: researchRunStatusOrDefault(data.status),
     submittedAt,
     summary: objectValue(data.summary),
     ...(isRunAccess(data.access) ? { access: data.access } : {}),
+    // Default-on: absent or true means available, so only an explicit false is
+    // carried onto the record (matching the optional-field shape of `access`).
+    ...(data.include_in_autocomplete === false ? { includeInAutocomplete: false } : {}),
   }
 }
 
@@ -575,11 +582,11 @@ function linkedContextRefsFromUnknown(value: unknown): ChatContextReferenceRecor
     if (!item || typeof item !== 'object' || Array.isArray(item)) return []
     const record = item as Record<string, unknown>
     if (record.kind === 'file-asset') {
-      const fileId = optionalString(record.fileId) ?? optionalString(record.file_id)
+      const fileId = asString(record.fileId) ?? asString(record.file_id)
       return fileId ? [{ fileId, kind: 'file-asset' }] : []
     }
     if (record.kind === 'file-group') {
-      const groupId = optionalString(record.groupId) ?? optionalString(record.group_id)
+      const groupId = asString(record.groupId) ?? asString(record.group_id)
       return groupId ? [{ groupId, kind: 'file-group' }] : []
     }
     return []
@@ -596,14 +603,14 @@ export function parseFileAsset(markdown: string): FileAssetRecord {
     createdAt: stringValue(data.created_at),
     extractedText: parsed.body.trimStart(),
     fileName: stringValue(data.file_name),
-    groupId: optionalString(data.group_id) ?? null,
+    groupId: asString(data.group_id) ?? null,
     id: stringValue(data.file_id),
     label: stringValue(data.label),
     mimeType: stringValue(data.mime_type),
     origin: fileAssetOriginOrDefault(data.origin),
     pageCount: optionalNumber(data.page_count) ?? null,
     parseStatus: fileParseStatusOrDefault(data.parse_status),
-    parseWarning: optionalString(data.parse_warning) ?? null,
+    parseWarning: asString(data.parse_warning) ?? null,
     sectionId: stringValue(data.section_id),
     sizeBytes: optionalNumber(data.size_bytes) ?? 0,
     textTruncated: data.text_truncated === true,
@@ -637,13 +644,13 @@ export function parseEditorDocument(markdown: string): {
     document: {
       contentMarkdown: parsed.body.trimStart(),
       createdAt: stringValue(data.created_at),
-      diffAnchorMarkdown: optionalString(data.diff_anchor_markdown),
-      diffAnchorUpdatedAt: optionalString(data.diff_anchor_updated_at),
-      folderId: optionalString(data.folder_id) ?? null,
+      diffAnchorMarkdown: asString(data.diff_anchor_markdown),
+      diffAnchorUpdatedAt: asString(data.diff_anchor_updated_at),
+      folderId: asString(data.folder_id) ?? null,
       id: documentId,
       revision: typeof data.revision === 'number' ? data.revision : 1,
       source: editorDocumentSourceOrDefault(data.source),
-      sourceRunId: optionalString(data.source_run_id),
+      sourceRunId: asString(data.source_run_id),
       title: normalizeEditorTitle(stringValue(data.title)),
       updatedAt: stringValue(data.updated_at),
     },
@@ -847,7 +854,7 @@ function renderMessageModelResolutionAttrs(
 function parseMessageModelResolutionAttrs(
   attrs: Record<string, string>,
 ): ChatMessageModelResolutionRecord | undefined {
-  const model = stringValueOrUndefined(attrs.model)
+  const model = asNonEmptyString(attrs.model)
   if (!model) return undefined
   return {
     effort: attrs.model_effort ?? '',
@@ -951,7 +958,7 @@ function parseAttachmentBlock(
       attachedAt: stringValue(attrs.attached_at),
       contentMarkdown: content.join('\n').trim(),
       kind: 'research-report',
-      label: stringValueOrUndefined(attrs.label),
+      label: asNonEmptyString(attrs.label),
       runId: stringValue(attrs.run_id),
       title: stringValue(attrs.title),
     }
@@ -1043,14 +1050,6 @@ function stringValue(value: unknown) {
   return value
 }
 
-function stringValueOrUndefined(value: unknown) {
-  return typeof value === 'string' && value.trim() ? value : undefined
-}
-
-function optionalString(value: unknown) {
-  return typeof value === 'string' ? value : undefined
-}
-
 function stringOrNow(value: unknown) {
   return typeof value === 'string' && value.trim()
     ? value
@@ -1078,6 +1077,7 @@ function editorDocumentSourceOrDefault(value: unknown): EditorDocumentRecord['so
     value === 'blank'
     || value === 'imported-research-report'
     || value === 'pasted'
+    || value === 'agent-artifact'
   ) {
     return value
   }
@@ -1098,15 +1098,15 @@ function normalizeEditorComments(
     if (!item || typeof item !== 'object' || Array.isArray(item)) return []
     const record = item as Record<string, unknown>
     const anchor = normalizeEditorCommentAnchor(record.anchor)
-    const id = optionalString(record.id)
-    const commentMarkdown = optionalString(record.commentMarkdown ?? record.comment_markdown)
+    const id = asString(record.id)
+    const commentMarkdown = asString(record.commentMarkdown ?? record.comment_markdown)
     if (!id || !anchor || !commentMarkdown) return []
     const evidencePreset = editorEvidencePresetOrUndefined(record.evidencePreset ?? record.evidence_preset)
     return [{
       anchor,
       commentMarkdown,
       createdAt: stringOrNow(record.createdAt ?? record.created_at),
-      documentId: optionalString(record.documentId ?? record.document_id) ?? fallbackDocumentId,
+      documentId: asString(record.documentId ?? record.document_id) ?? fallbackDocumentId,
       ...(evidencePreset ? { evidencePreset } : {}),
       id,
       kind: editorCommentKindOrDefault(record.kind),
@@ -1122,15 +1122,15 @@ function normalizeEditorCommentAnchor(value: unknown): EditorCommentAnchorRecord
   const from = typeof record.from === 'number' ? record.from : null
   const to = typeof record.to === 'number' ? record.to : null
   if (from === null || to === null || from >= to) return null
-  const blockId = optionalString(record.blockId ?? record.block_id)
-  const selectedMarkdown = optionalString(record.selectedMarkdown ?? record.selected_markdown)
+  const blockId = asString(record.blockId ?? record.block_id)
+  const selectedMarkdown = asString(record.selectedMarkdown ?? record.selected_markdown)
   return {
     ...(blockId ? { blockId } : {}),
     from,
-    quoteAfter: optionalString(record.quoteAfter ?? record.quote_after) ?? '',
-    quoteBefore: optionalString(record.quoteBefore ?? record.quote_before) ?? '',
+    quoteAfter: asString(record.quoteAfter ?? record.quote_after) ?? '',
+    quoteBefore: asString(record.quoteBefore ?? record.quote_before) ?? '',
     ...(selectedMarkdown ? { selectedMarkdown } : {}),
-    selectedText: optionalString(record.selectedText ?? record.selected_text) ?? '',
+    selectedText: asString(record.selectedText ?? record.selected_text) ?? '',
     to,
   }
 }
@@ -1163,13 +1163,13 @@ function normalizeRunEvents(
   return value.flatMap((item, index) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return []
     const record = item as Record<string, unknown>
-    const title = optionalString(record.title)?.trim()
+    const title = asString(record.title)?.trim()
     if (!title) return []
 
-    const createdAt = optionalString(record.createdAt)
-      ?? optionalString(record.created_at)
+    const createdAt = asString(record.createdAt)
+      ?? asString(record.created_at)
       ?? fallbackCreatedAt
-    const id = optionalString(record.id)
+    const id = asString(record.id)
       ?? `imported-event-${index}-${createdAt}`
     const active = typeof record.active === 'boolean' ? record.active : undefined
     const phase = normalizeEventPhase(record.phase)

@@ -185,23 +185,27 @@ def test_modeless_request_on_custom_registry_returns_400_envelope():
 
 
 # ------------------------------------------------------------------ #
-# Finding: streaming must not silently run a non-graph algorithm
+# Finding: streaming must reject an algorithm that is not a chat peer
 # ------------------------------------------------------------------ #
 
 
-def test_streaming_rejects_algorithm_without_graph_capability():
-    class _KnowledgeLike:
+def test_streaming_rejects_algorithm_without_chat_completions_capability():
+    """Streaming dispatches through the registry, so the gate is now
+    ``supports_chat_completions``. An algorithm that is not a chat peer (e.g.
+    workspace_agent, which needs run_id + park) is rejected with a loud 400
+    rather than dispatched into a context it will fail in."""
+    class _NonChatAlgorithm:
         id = "research"
-        display_name = "Custom non-graph research"
+        display_name = "Custom non-chat algorithm"
 
         def capabilities(self) -> dict:
-            return {"supports_chat_completions": True}
+            return {"supports_chat_completions": False}
 
         def run(self, request, *, runtime, context):
             raise NotImplementedError
 
     registry = AlgorithmRegistry()
-    registry.register(_KnowledgeLike())
+    registry.register(_NonChatAlgorithm())
     client = _client_with_registry(registry)
 
     response = client.post(

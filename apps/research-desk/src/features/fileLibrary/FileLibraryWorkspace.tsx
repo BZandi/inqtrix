@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type Dispatch } from 'react'
-import { ChevronRight, Folder, FolderOpen, Inbox, Plus, Upload } from '@/components/icons'
+import { ChevronLeft, ChevronRight, Folder, FolderOpen, Inbox, Plus, Upload } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -220,6 +220,7 @@ export function FileLibraryWorkspace({
   const [dropKey, setDropKey] = useState<string | null>(null)
   const [pickerIndexId, setPickerIndexId] = useState<string | null>(null)
   const [previewAssetId, setPreviewAssetId] = useState<string | null>(null)
+  const [isMobileDetailOpen, setIsMobileDetailOpen] = useState(false)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const targetRef = useRef<UploadTarget>({ groupId: null, sectionId: FILE_SECTION_TEMP_ID })
   const reindexTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
@@ -233,14 +234,22 @@ export function FileLibraryWorkspace({
     }
   }, [])
 
-  const sections = projectFileLibrarySections(state)
-  const groups = projectFileGroups(state)
-  const assets = projectFileAssets(state)
-  const indexes = projectVectorIndexes(state)
+  // Base projections are memoised on the raw state slices they read (not on
+  // `state`, whose identity changes on every reducer dispatch): the selectors
+  // rebuild fresh arrays each call, so without this every unrelated tick (e.g.
+  // the demo run simulator) would re-run the whole derivation chain below.
+  const sections = useMemo(() => projectFileLibrarySections(state), [state.fileLibrarySections, state.fileLibrarySectionOrder])
+  const groups = useMemo(() => projectFileGroups(state), [state.fileGroups, state.fileGroupOrder])
+  const assets = useMemo(() => projectFileAssets(state), [state.fileAssets, state.fileAssetOrder])
+  const indexes = useMemo(() => projectVectorIndexes(state), [state.vectorIndexes, state.vectorIndexOrder])
+  const storageTotalBytes = useMemo(() => projectStorageTotalBytes(state), [state.fileAssets, state.fileAssetOrder])
 
   const assetsInSection = (sectionId: string) => assets.filter((asset) => asset.sectionId === sectionId)
-  const customCollections = sections.filter((section) => section.kind === 'custom')
-  const railCollections = sections.filter((section) => section.kind === 'custom' || assetsInSection(section.id).length > 0)
+  const customCollections = useMemo(() => sections.filter((section) => section.kind === 'custom'), [sections])
+  const railCollections = useMemo(
+    () => sections.filter((section) => section.kind === 'custom' || assets.some((asset) => asset.sectionId === section.id)),
+    [sections, assets],
+  )
 
   // Reset selection if the active collection/index was deleted.
   useEffect(() => {
@@ -263,12 +272,15 @@ export function FileLibraryWorkspace({
   const sectionTitle = (sectionId: string) => sections.find((section) => section.id === sectionId)?.title ?? ''
   const groupTitle = (groupId: string | null) => (groupId ? groups.find((group) => group.id === groupId)?.title ?? null : null)
 
-  const moveTargets: MoveTarget[] = customCollections.flatMap((collection) => [
-    { groupId: null, key: `${collection.id}:root`, label: `${collection.title} · ${t.fileLibrary.ungrouped}`, sectionId: collection.id },
-    ...groups
-      .filter((group) => group.sectionId === collection.id)
-      .map((group) => ({ groupId: group.id, key: `${collection.id}:${group.id}`, label: `${collection.title} · ${group.title}`, sectionId: collection.id })),
-  ])
+  const moveTargets: MoveTarget[] = useMemo(
+    () => customCollections.flatMap((collection) => [
+      { groupId: null, key: `${collection.id}:root`, label: `${collection.title} · ${t.fileLibrary.ungrouped}`, sectionId: collection.id },
+      ...groups
+        .filter((group) => group.sectionId === collection.id)
+        .map((group) => ({ groupId: group.id, key: `${collection.id}:${group.id}`, label: `${collection.title} · ${group.title}`, sectionId: collection.id })),
+    ]),
+    [customCollections, groups, t.fileLibrary.ungrouped],
+  )
 
   const sortAssets = (list: FileAssetRecord[]): FileAssetRecord[] => {
     if (sort === 'recent') return list
@@ -320,10 +332,17 @@ export function FileLibraryWorkspace({
     return out
   }, [active, assets, groups, railCollections, q, sort, locale, t.fileLibrary.ungrouped])
 
-  const activeIndex = active.kind === 'index' ? vectorIndexById(state, active.indexId) : null
-  const allIndexMembers = activeIndex ? vectorIndexMembersResolved(state, activeIndex.id) : []
-  const indexMembers = sortMembersForSort(
-    q ? allIndexMembers.filter((entry) => matchesQuery(entry.asset)) : allIndexMembers,
+  const activeIndex = useMemo(
+    () => (active.kind === 'index' ? vectorIndexById(state, active.indexId) : null),
+    [active, state.vectorIndexes],
+  )
+  const allIndexMembers = useMemo(
+    () => (activeIndex ? vectorIndexMembersResolved(state, activeIndex.id) : []),
+    [activeIndex, state.vectorIndexes, state.fileAssets],
+  )
+  const indexMembers = useMemo(
+    () => sortMembersForSort(q ? allIndexMembers.filter((entry) => matchesQuery(entry.asset)) : allIndexMembers),
+    [allIndexMembers, q, sort, locale, sections, groups],
   )
   const activeIndexJob = activeIndex ? state.indexingJobs[activeIndex.id] : null
   // The per-file "Index this file" action only makes sense when the click can
@@ -730,6 +749,11 @@ export function FileLibraryWorkspace({
         : activeIndex?.title ?? ''
   const crumbRoot = active.kind === 'index' ? t.vectorIndex.title : t.fileLibrary.sectionCollections
 
+  function selectActiveTarget(target: ActiveTarget) {
+    setActive(target)
+    setIsMobileDetailOpen(true)
+  }
+
   return (
     <div className="grid h-[calc(100svh-var(--header-h))] grid-cols-1 bg-background lg:grid-cols-[17rem_minmax(0,1fr)]">
       <input
@@ -745,6 +769,7 @@ export function FileLibraryWorkspace({
 
       <Rail
         active={active}
+        className={cn('lg:flex', isMobileDetailOpen ? 'hidden' : 'flex')}
         collections={railCollections.map((collection) => ({ count: assetsInSection(collection.id).length, id: collection.id, title: collection.title }))}
         embeddingQuota={embeddingQuota}
         indexes={indexes.map((index) => ({ count: index.members.length, id: index.id, status: index.status, title: index.title }))}
@@ -752,18 +777,28 @@ export function FileLibraryWorkspace({
         onNewCollection={handleNewCollection}
         onNewIndex={handleNewIndex}
         onQueryChange={setQuery}
-        onSelectAll={() => setActive({ kind: 'all' })}
-        onSelectCollection={(sectionId) => setActive({ kind: 'collection', sectionId })}
-        onSelectIndex={(indexId) => setActive({ indexId, kind: 'index' })}
+        onSelectAll={() => selectActiveTarget({ kind: 'all' })}
+        onSelectCollection={(sectionId) => selectActiveTarget({ kind: 'collection', sectionId })}
+        onSelectIndex={(indexId) => selectActiveTarget({ indexId, kind: 'index' })}
         query={query}
-        storage={{ collectionCount: railCollections.length, docCount: assets.length, indexCount: indexes.length, usedBytes: projectStorageTotalBytes(state) }}
+        storage={{ collectionCount: railCollections.length, docCount: assets.length, indexCount: indexes.length, usedBytes: storageTotalBytes }}
         totalDocCount={assets.length}
       />
 
-      <div className="flex min-h-0 min-w-0 flex-col">
+      <div className={cn('min-h-0 min-w-0 flex-col lg:flex', isMobileDetailOpen ? 'flex' : 'hidden')}>
         {/* No bottom divider on the workspace header (deliberate, departs from DESIGN
             §8): the only line per section is the hairline under its section title. */}
         <header className="flex shrink-0 flex-wrap items-center gap-3 px-4 py-3 md:px-6">
+          <Button
+            aria-label={t.common.back}
+            className="size-8 lg:hidden"
+            onClick={() => setIsMobileDetailOpen(false)}
+            size="icon"
+            type="button"
+            variant="ghost"
+          >
+            <ChevronLeft className="size-4" />
+          </Button>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5 t-meta text-muted-foreground">
               <span>{crumbRoot}</span>
@@ -840,27 +875,36 @@ export function FileLibraryWorkspace({
           </div>
         </header>
 
-        <ScrollArea className="min-h-0 flex-1">
-          <div className="flex flex-col gap-4 p-4 md:p-6">
-            {active.kind === 'index' && activeIndex ? (
-              <>
-                <IndexBar
-                  embedModels={embedModels}
-                  embeddingQuota={embeddingQuota}
-                  index={activeIndex}
-                  live={state.indexingJobs[activeIndex.id] ?? null}
-                  members={allIndexMembers}
-                  onCancel={handleCancelReindex}
-                  onDelete={(indexId) => dispatch({ indexId, type: 'deleteVectorIndex' })}
-                  onModel={(indexId, model: EmbedModelId) => {
-                    const descriptor = embedModels.find((entry) => entry.id === model)
-                    dispatch({ dims: descriptor?.dims, indexId, model, type: 'setVectorIndexModel' })
-                  }}
-                  onReindex={triggerReindex}
-                  onRebuild={(indexId) => triggerReindex(indexId, undefined, true)}
-                  serverBacked={knowledgeSync !== null}
-                  serverFeatureLabels={serverFeatureLabels}
-                />
+        {active.kind === 'index' && activeIndex ? (
+          <div className="flex min-h-0 flex-1 flex-col">
+            {/* Sticky sub-header: the IndexBar stays put; only the member list
+                below scrolls. Kept OUTSIDE the ScrollArea (shrink-0), matching the
+                header/scroll idiom in KnowledgeSourcePanel and ChatWorkspace. The
+                pt-0.5 aligns the card's top border with the sidebar "Im Index
+                suchen" field: the workspace header is measured 2px shorter than
+                the rail header, so this 2px (same fine-tune as the header's
+                mt-0.5) makes the two top borders meet. */}
+            <div className="shrink-0 px-4 pt-0.5 md:px-6">
+              <IndexBar
+                embedModels={embedModels}
+                embeddingQuota={embeddingQuota}
+                index={activeIndex}
+                live={state.indexingJobs[activeIndex.id] ?? null}
+                members={allIndexMembers}
+                onCancel={handleCancelReindex}
+                onDelete={(indexId) => dispatch({ indexId, type: 'deleteVectorIndex' })}
+                onModel={(indexId, model: EmbedModelId) => {
+                  const descriptor = embedModels.find((entry) => entry.id === model)
+                  dispatch({ dims: descriptor?.dims, indexId, model, type: 'setVectorIndexModel' })
+                }}
+                onReindex={triggerReindex}
+                onRebuild={(indexId) => triggerReindex(indexId, undefined, true)}
+                serverBacked={knowledgeSync !== null}
+                serverFeatureLabels={serverFeatureLabels}
+              />
+            </div>
+            <ScrollArea className="min-h-0 flex-1">
+              <div className="flex flex-col gap-4 px-4 pb-4 pt-4 md:px-6 md:pb-6">
                 {pickerIndexId === activeIndex.id ? (
                   <AddDocsPanel
                     docs={assets}
@@ -921,8 +965,12 @@ export function FileLibraryWorkspace({
                     ))}
                   </div>
                 )}
-              </>
-            ) : (
+              </div>
+            </ScrollArea>
+          </div>
+        ) : (
+          <ScrollArea className="min-h-0 flex-1">
+            <div className="flex flex-col gap-4 p-4 md:p-6">
               <Dropzone
                 label={t.fileLibrary.dropFiles}
                 onFiles={(files) =>
@@ -957,7 +1005,7 @@ export function FileLibraryWorkspace({
                                       onDragLeave={drop?.onDragLeave ?? (() => undefined)}
                                       onDragOver={drop?.onDragOver ?? (() => undefined)}
                                       onDrop={drop?.onDrop ?? (() => undefined)}
-                                      onNavigate={active.kind === 'all' ? () => setActive({ kind: 'collection', sectionId: block.band!.sectionId }) : undefined}
+                                      onNavigate={active.kind === 'all' ? () => selectActiveTarget({ kind: 'collection', sectionId: block.band!.sectionId }) : undefined}
                                       onRenameGroup={(groupId, title) => dispatch({ groupId, title, type: 'renameFileGroup' })}
                                       onUpload={() => openUpload({ groupId: block.band!.groupId, sectionId: block.band!.sectionId })}
                                     />
@@ -1009,7 +1057,7 @@ export function FileLibraryWorkspace({
                                   onDragLeave={drop?.onDragLeave ?? (() => undefined)}
                                   onDragOver={drop?.onDragOver ?? (() => undefined)}
                                   onDrop={drop?.onDrop ?? (() => undefined)}
-                                  onNavigate={active.kind === 'all' ? () => setActive({ kind: 'collection', sectionId: block.band!.sectionId }) : undefined}
+                                  onNavigate={active.kind === 'all' ? () => selectActiveTarget({ kind: 'collection', sectionId: block.band!.sectionId }) : undefined}
                                   onRenameGroup={(groupId, title) => dispatch({ groupId, title, type: 'renameFileGroup' })}
                                   onUpload={() => openUpload({ groupId: block.band!.groupId, sectionId: block.band!.sectionId })}
                                 />
@@ -1043,9 +1091,9 @@ export function FileLibraryWorkspace({
                   </div>
                 )}
               </Dropzone>
-            )}
-          </div>
-        </ScrollArea>
+            </div>
+          </ScrollArea>
+        )}
       </div>
       {previewAsset ? (
         <FilePreviewPanel

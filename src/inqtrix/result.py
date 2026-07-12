@@ -9,10 +9,11 @@ tooling, custom integrations).
 from __future__ import annotations
 
 import re
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from inqtrix.core.results import SourcePolicy
 from inqtrix.urls import normalize_url
 
 
@@ -30,6 +31,78 @@ def _empty_tier_counts() -> dict[str, int]:
 
 
 T = TypeVar("T")
+
+
+class AgentToolUseCounts(BaseModel):
+    """Successful source-tool invocations split by source family."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    web: int = Field(
+        0,
+        ge=0,
+        description="Successful web-source tool invocations.",
+    )
+    """Successful web-source tool invocations; never negative."""
+    knowledge: int = Field(
+        0,
+        ge=0,
+        description="Successful project-knowledge tool invocations.",
+    )
+    """Successful project-knowledge tool invocations; never negative."""
+
+
+class AgentExecution(BaseModel):
+    """Canonical effective execution state shown by the Agent Desk."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    execution_directive: Literal["", "quick_web", "knowledge_only"] = Field(
+        description="One-shot execution directive, or an empty string."
+    )
+    """One-shot execution directive, or an empty string for normal routing."""
+    effective_mode: Literal["agent_kernel", "workspace_agent"] = Field(
+        description="Algorithm mode that actually executed the run."
+    )
+    """Algorithm mode that actually executed the run."""
+    response_form: Literal["auto", "chat", "canvas"] = Field(
+        description="Effective response form: auto, chat, or canvas."
+    )
+    """Effective response form: auto, chat, or canvas."""
+    depth: Literal["normal", "deep"] = Field(
+        description="Effective run depth: normal or deep."
+    )
+    """Effective run depth: normal or deep."""
+    model: str = Field(
+        description="Resolved model id, or an empty string when unresolved."
+    )
+    """Resolved model id, or an empty string when unresolved."""
+    reasoning_effort: str = Field(
+        description=(
+            "Resolved reasoning-effort token, or an empty string when the "
+            "provider default applies."
+        )
+    )
+    """Resolved reasoning-effort token, or an empty string when the provider default applies."""
+    source_policy: SourcePolicy = Field(
+        description="Effective web and project-knowledge availability."
+    )
+    """Effective source availability keyed by web and knowledge."""
+    consent_reason: Literal[
+        "explicit_directive",
+        "strict_approval_required",
+        "strict_approval",
+        "strict_rejected",
+        "autonomous_policy",
+        "permission_policy",
+    ] = Field(
+        description="Stable reason why source-tool execution was permitted."
+    )
+    """Stable reason why source-tool execution was permitted or still requires approval."""
+    tool_use_counts: AgentToolUseCounts = Field(
+        description="Actual source-tool invocation counts keyed by source."
+    )
+    """Actual source-tool invocation counts keyed by web and knowledge."""
 
 
 def _limit_items(items: list[T], limit: int | None) -> list[T]:
@@ -80,9 +153,6 @@ def _report_references_from_state(
     for index, reference in enumerate(references, 1):
         if not isinstance(reference, dict):
             continue
-        url = normalize_url(str(reference.get("url", "") or ""))
-        if not url:
-            continue
         document_id_raw = reference.get("document_id")
         document_id = str(document_id_raw) if document_id_raw else None
         chunk_index_raw = reference.get("chunk_index")
@@ -91,6 +161,13 @@ def _report_references_from_state(
             if isinstance(chunk_index_raw, (int, float))
             else None
         )
+        url = normalize_url(str(reference.get("url", "") or ""))
+        if not url and document_id:
+            url = f"inqtrix://documents/{document_id}"
+            if chunk_index is not None:
+                url += f"#chunk-{chunk_index}"
+        if not url:
+            continue
         # Knowledge citations are identified by (document_id, chunk_index):
         # distinct chunks of the SAME document must NOT collapse, but the
         # default `inqtrix://documents/{id}#chunk-{n}` URL loses its fragment to
@@ -111,6 +188,7 @@ def _report_references_from_state(
         title = str(title_raw) if title_raw else None
         excerpt_raw = reference.get("excerpt")
         source_text_raw = reference.get("source_text")
+        grounded_support_raw = reference.get("grounded_support")
         page_number_raw = reference.get("page_number")
         report_references.append(
             ReportReference(
@@ -122,6 +200,11 @@ def _report_references_from_state(
                 chunk_index=chunk_index,
                 excerpt=str(excerpt_raw) if excerpt_raw else None,
                 source_text=str(source_text_raw) if source_text_raw else None,
+                grounded_support=(
+                    str(grounded_support_raw)
+                    if grounded_support_raw
+                    else None
+                ),
                 page_number=(
                     int(page_number_raw)
                     if isinstance(page_number_raw, (int, float))
@@ -245,6 +328,16 @@ class ReportReference(BaseModel):
         ),
     )
     """The chunk's original source text (sans contextualization prefix), for verifying a quoted span. ``None`` for web references."""
+    grounded_support: str | None = Field(
+        None,
+        description=(
+            "Bounded prose from a provider-grounded answer surrounding this "
+            "web citation. It records the provider answer's support context "
+            "and is not a verbatim source excerpt. ``None`` when an exact "
+            "excerpt exists or the provider supplied no grounded context."
+        ),
+    )
+    """Bounded provider-answer context for a web citation; never presented as a verbatim source excerpt."""
     page_number: int | None = Field(
         None,
         description=(
@@ -752,6 +845,14 @@ class ResearchResult(BaseModel):
         ),
     )
     """Key consolidated claims with their verification metadata. Capped at 30 items by :meth:`from_raw`; tighten further via :class:`ResearchResultExportOptions.max_claims`."""
+    execution: AgentExecution | None = Field(
+        None,
+        description=(
+            "Effective Agent Desk execution state. Present only for agent "
+            "algorithms; legacy research/direct results omit it."
+        ),
+    )
+    """Effective Agent Desk execution state; ``None`` for non-agent and legacy results."""
 
     def to_export_payload(
         self,
@@ -772,8 +873,9 @@ class ResearchResult(BaseModel):
         Returns:
             A new ``dict`` with the selected top-level keys
             (``answer``, ``metrics``, ``top_sources``, ``references``,
-            ``top_claims``), each value already converted from the
-            Pydantic model via :meth:`pydantic.BaseModel.model_dump`.
+            ``top_claims`` and, for agent runs, ``execution``), each value
+            already converted from the Pydantic model via
+            :meth:`pydantic.BaseModel.model_dump`.
             Caller may mutate freely — the dict is independent of the
             source model.
 
@@ -812,6 +914,9 @@ class ResearchResult(BaseModel):
                 claim.model_dump()
                 for claim in _limit_items(self.top_claims, export_options.max_claims)
             ]
+
+        if self.execution is not None:
+            payload["execution"] = self.execution.model_dump()
 
         return payload
 
@@ -870,7 +975,8 @@ class ResearchResult(BaseModel):
             for u in ordered_urls[:60]
         ]
         references = _report_references_from_state(
-            result_state.get("report_references", []),
+            result_state.get("report_references")
+            or result_state.get("references", []),
             tier_by_url=tier_by_url,
             tiering=tiering,
         )
@@ -947,4 +1053,9 @@ class ResearchResult(BaseModel):
             top_sources=top_sources,
             references=references,
             top_claims=top_claims,
+            execution=(
+                AgentExecution.model_validate(result_state["execution"])
+                if isinstance(result_state.get("execution"), dict)
+                else None
+            ),
         )

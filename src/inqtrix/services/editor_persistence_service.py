@@ -34,7 +34,9 @@ from inqtrix.project.editor_ports import (
 if TYPE_CHECKING:
     from inqtrix.auth.principal import UserContext
 
-_VALID_SOURCES = frozenset({"blank", "imported-research-report", "pasted"})
+_VALID_SOURCES = frozenset(
+    {"blank", "imported-research-report", "pasted", "agent-artifact"}
+)
 _VALID_COMMENT_KINDS = frozenset({"collect", "inline_edit", "evidence_review"})
 _VALID_COMMENT_STATUSES = frozenset({"open", "resolved", "stale"})
 _VALID_EVIDENCE_PRESETS = frozenset({"add_sources", "fact_check", "verify_citations"})
@@ -315,6 +317,32 @@ class EditorPersistenceService:
         return await self._store.list_comments_page(
             document_id, limit=limit, after=after
         )
+
+    async def get_document_context(
+        self,
+        document_id: str,
+        *,
+        comment_limit: int = 200,
+        visible_to: "UserContext | None",
+        also_visible: "Mapping[str, SharePermission] | None" = None,
+    ) -> tuple[EditorDocument, list[EditorComment]]:
+        """One document plus its comments in a single access-checked call.
+
+        The read bundle an agent needs to understand a document before
+        proposing changes: it saves the two-round-trip dance of
+        ``get_document`` + ``list_comments`` and applies the same
+        owner/share visibility once. Comments are the newest page up to
+        *comment_limit* (documents carry few comments in practice); the
+        cursor is intentionally not surfaced here — a caller needing
+        pagination uses :meth:`list_comments` directly.
+        """
+        document = await self.get_document(
+            document_id, visible_to=visible_to, also_visible=also_visible
+        )
+        comments, _cursor = await self._store.list_comments_page(
+            document_id, limit=comment_limit, after=None
+        )
+        return document, comments
 
     async def delete_comment(
         self,

@@ -1,6 +1,5 @@
 import {
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -8,13 +7,13 @@ import {
 } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import {
-  BookOpenCheck,
   Check,
   Copy,
   Database,
   Eraser,
   EyeOff,
   ListChecks,
+  MoreVertical,
   PencilLine,
   Search,
   SendHorizontal,
@@ -25,6 +24,12 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Chip } from '@/components/ui/chip'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { PanelToggle } from '@/components/ui/panel-toggle'
 import {
   AnimatedPanelBody,
@@ -32,13 +37,22 @@ import {
 } from '@/components/ui/animated-panel'
 import { useAnimatedResizablePanelCollapse } from '@/components/ui/animated-panel-motion'
 import { ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
+import { ResponsiveSidePanel } from '@/components/ui/responsive-side-panel'
+import { ConversationSkeleton } from '@/components/ui/conversation-skeleton'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { WelcomeState } from '@/components/ui/welcome-state'
+import { useMarkdownCodePreload } from '@/components/markdown/useMarkdownCodePreload'
 import { useLocale } from '@/i18n/LocaleProvider'
+import {
+  decideConversationAppend,
+  type ConversationContentSnapshot,
+} from '@/features/scroll/conversationAppend'
+import { useScrollRestoration } from '@/features/scroll/useScrollRestoration'
 import { formatMessageTimestamp } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
+import { useMediaQuery } from '@/features/researchDesk/hooks/useMediaQuery'
 import type {
   KnowledgeReferenceRecord,
   KnowledgeSessionRecord,
@@ -85,8 +99,8 @@ type AskPanelState = {
 const FIND_DEBOUNCE_MS = 300
 const FIND_MIN_QUERY_LENGTH = 2
 const FIND_TOP_K = 20
+const knowledgeHeaderMenuItemClassName = 'h-8 gap-2 rounded-md px-2 py-1 text-xs font-medium'
 const KNOWLEDGE_ANSWER_ENTRY_MS = 1800
-const KNOWLEDGE_ANSWER_SCROLL_SETTLE_MS = 340
 const KNOWLEDGE_ASK_PANEL_ID = 'knowledge-ask-panel'
 const KNOWLEDGE_CENTER_PANEL_ID = 'knowledge-center-panel'
 const KNOWLEDGE_HISTORY_PANEL_ID = 'knowledge-history-panel'
@@ -106,6 +120,9 @@ type KnowledgeWorkspaceProps = {
   historyPanelSize: number
   isHistoryVisible: boolean
   isIncognito: boolean
+  /** True while the selected server session's items are still lazy-loading;
+   * shows a skeleton instead of the empty-state hero during the gap. */
+  isItemsLoading: boolean
   items: KnowledgeThreadItemRecord[]
   mode: KnowledgeMode
   knowledgeQuestion: string
@@ -166,6 +183,7 @@ export function KnowledgeWorkspace({
   historyPanelSize,
   isHistoryVisible,
   isIncognito,
+  isItemsLoading,
   items,
   mode,
   knowledgeQuestion,
@@ -213,44 +231,77 @@ export function KnowledgeWorkspace({
   const [panel, setPanel] = useState<AskPanelState | null>(null)
   const [completedHandoffItemId, setCompletedHandoffItemId] = useState<string | null>(null)
   const [isItemSelectionMode, setIsItemSelectionMode] = useState(false)
+  const [isMobileHistoryOpen, setIsMobileHistoryOpen] = useState(false)
   const [isRunDockExiting, setIsRunDockExiting] = useState(false)
+  const isDesktop = useMediaQuery('(min-width: 1024px)')
+  useEffect(() => {
+    if (isDesktop) setIsMobileHistoryOpen(false)
+  }, [isDesktop])
   const [localNotice, setLocalNotice] = useState<string | null>(null)
   const [rerunTargetItemId, setRerunTargetItemId] = useState<string | null>(null)
   const [selectedItemIds, setSelectedItemIds] = useState<ReadonlySet<string>>(() => new Set())
   const completedHandoffTimeoutRef = useRef<number | null>(null)
+  const knowledgeAppendSnapshotRef = useRef<ConversationContentSnapshot | null>(null)
   const previousItemStatusesRef = useRef(knowledgeItemStatusSnapshot(items))
   const threadEndRef = useRef<HTMLDivElement | null>(null)
-  const itemCount = items.length
   const lastItemStatus = items[items.length - 1]?.status
   const selectedItemCount = selectedItemIds.size
   const canManageItems = items.length > 0 && !isAskRunning
   const hasKnowledgeCollections = collections.length > 0
+  const knowledgeScrollKey = mode === 'ask'
+    ? (isIncognito
+      ? 'knowledge:incognito'
+      : selectedSessionId ? `knowledge:${selectedSessionId}` : 'knowledge:pending')
+    : null
+  const knowledgeContentReady = !isItemsLoading
+  const knowledgeContentVersion = useMemo(
+    () => items.map((item) => [
+      item.id,
+      item.status,
+      item.question,
+      item.answer?.answerMarkdown ?? '',
+      item.error ?? '',
+      item.progress.steps.length,
+    ].join('\u0001')).join('\u0000'),
+    [items],
+  )
+  const knowledgeAnswerMarkdownsForHighlight = useMemo(
+    () => items.flatMap((item) => {
+      const markdown = item.answer?.answerMarkdown?.trim()
+      return markdown ? [markdown] : []
+    }),
+    [items],
+  )
+  useMarkdownCodePreload(knowledgeAnswerMarkdownsForHighlight)
 
-  function scrollKnowledgeThreadToEnd(behavior: ScrollBehavior) {
-    const viewports = document.querySelectorAll<HTMLElement>(
-      '[data-knowledge-ask-scroll] [data-scroll-area-viewport]',
-    )
-    if (viewports.length > 0) {
-      viewports.forEach((viewport) => {
-        viewport.scrollTo({ top: viewport.scrollHeight, behavior })
-      })
-      return
-    }
-    const viewport = threadEndRef.current
-      ?.closest('[data-scroll-area-viewport]') as HTMLElement | null | undefined
-    if (viewport) {
-      viewport.scrollTo({ top: viewport.scrollHeight, behavior })
-      return
-    }
-    threadEndRef.current?.scrollIntoView({ behavior, block: 'end' })
-  }
+  const knowledgeScroll = useScrollRestoration({
+    contentReady: knowledgeContentReady,
+    getViewport: () =>
+      document.querySelector<HTMLElement>(
+        '[data-knowledge-ask-scroll] [data-scroll-area-viewport]',
+      ),
+    isStreaming: lastItemStatus === 'running',
+    memoryKey: knowledgeScrollKey,
+    reduceMotion,
+  })
 
-  useLayoutEffect(() => {
-    if (mode !== 'ask') return
-    const behavior: ScrollBehavior = reduceMotion || lastItemStatus === 'running' ? 'auto' : 'smooth'
-    const frameId = window.requestAnimationFrame(() => scrollKnowledgeThreadToEnd(behavior))
-    return () => window.cancelAnimationFrame(frameId)
-  }, [itemCount, lastItemStatus, mode, reduceMotion])
+  // Same-session growth (a completed answer, or streaming tokens) follows to the
+  // bottom only when the user is already there; switching sessions is restored by
+  // useScrollRestoration itself.
+  useEffect(() => {
+    const decision = decideConversationAppend(knowledgeAppendSnapshotRef.current, {
+      contentReady: knowledgeContentReady,
+      contentVersion: knowledgeContentVersion,
+      key: knowledgeScrollKey,
+    })
+    knowledgeAppendSnapshotRef.current = decision.next
+    if (decision.shouldAppend) knowledgeScroll.onContentAppended()
+  }, [
+    knowledgeContentReady,
+    knowledgeContentVersion,
+    knowledgeScroll,
+    knowledgeScrollKey,
+  ])
 
   useEffect(() => {
     if (mode !== 'ask') {
@@ -277,22 +328,7 @@ export function KnowledgeWorkspace({
       completedHandoffTimeoutRef.current = null
     }, reduceMotion ? 600 : KNOWLEDGE_ANSWER_ENTRY_MS)
 
-    const behavior: ScrollBehavior = reduceMotion ? 'auto' : 'smooth'
-    let secondFrameId: number | null = null
-    const firstFrameId = window.requestAnimationFrame(() => {
-      scrollKnowledgeThreadToEnd(behavior)
-      secondFrameId = window.requestAnimationFrame(() => scrollKnowledgeThreadToEnd(behavior))
-    })
-    const settleTimeoutId = window.setTimeout(
-      () => scrollKnowledgeThreadToEnd(behavior),
-      reduceMotion ? 0 : KNOWLEDGE_ANSWER_SCROLL_SETTLE_MS,
-    )
-
-    return () => {
-      window.cancelAnimationFrame(firstFrameId)
-      if (secondFrameId !== null) window.cancelAnimationFrame(secondFrameId)
-      window.clearTimeout(settleTimeoutId)
-    }
+    return undefined
   }, [items, mode, reduceMotion])
 
   useEffect(() => () => {
@@ -405,6 +441,11 @@ export function KnowledgeWorkspace({
     ? t.knowledge.itemsSelectedOne
     : t.knowledge.itemsSelectedOther
 
+  const handleSelectSession = (sessionId: string) => {
+    onSelectSession(sessionId)
+    if (!isDesktop) setIsMobileHistoryOpen(false)
+  }
+
   const historyPanel = (
     <KnowledgeHistoryPanel
       items={historyItems}
@@ -416,7 +457,7 @@ export function KnowledgeWorkspace({
       onMoveSessionToGroup={onMoveSessionToGroup}
       onRenameSessionGroup={onRenameSessionGroup}
       onRenameSession={onRenameSession}
-      onSelectSession={onSelectSession}
+      onSelectSession={handleSelectSession}
       onTogglePinnedSession={onTogglePinnedSession}
       pinnedSessionIds={pinnedSessionIds}
       reduceMotion={reduceMotion}
@@ -578,11 +619,15 @@ export function KnowledgeWorkspace({
       ? t.knowledge.title
       : selectedSession?.title ?? t.knowledge.title
     : t.knowledge.title
+  const setHistoryPanelOpen = (open: boolean) => {
+    onHistoryVisibleChange(open)
+    setIsMobileHistoryOpen(open)
+  }
 
   const workspaceHeader = (
     <div
       className={cn(
-        'z-10 flex inqtrix-panel-header items-center justify-between gap-2 border-b border-border bg-background px-4 transition-colors md:px-6',
+        'z-10 flex inqtrix-panel-header items-center justify-between gap-2 border-b border-border bg-background px-3 transition-colors',
         mode === 'ask' && isIncognito && 'inqtrix-chat-header--incognito',
       )}
     >
@@ -592,12 +637,11 @@ export function KnowledgeWorkspace({
             collapseLabel={t.knowledge.hideSessions}
             controlsId={KNOWLEDGE_HISTORY_PANEL_ID}
             expandLabel={t.knowledge.showSessions}
-            expanded={effectiveHistoryVisible}
-            onToggle={onHistoryVisibleChange}
+            expanded={isDesktop ? effectiveHistoryVisible : isMobileHistoryOpen}
+            onToggle={setHistoryPanelOpen}
             side="left"
           />
         )}
-        <BookOpenCheck className="size-4 shrink-0 text-foreground/80" />
         <div className="min-w-0 flex-1 overflow-hidden">
           <div className="flex min-w-0 items-center gap-2 overflow-hidden">
             <h1 className="truncate t-section text-foreground">
@@ -615,10 +659,77 @@ export function KnowledgeWorkspace({
           </div>
         </div>
       </div>
-      <div className="flex shrink-0 items-center gap-2">
+      <div className="flex min-w-0 max-w-full shrink items-center justify-end gap-2 overflow-hidden">
+        {mode === 'ask' && (
+          <DropdownMenu modal={false}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                aria-label={t.common.menu}
+                className="size-7 text-foreground/75 hover:text-foreground sm:hidden"
+                size="icon"
+                type="button"
+                variant="ghost"
+              >
+                <MoreVertical className="size-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56 rounded-lg p-1 shadow-lg" sideOffset={6}>
+              {onDemoAsk ? (
+                <DropdownMenuItem
+                  className={knowledgeHeaderMenuItemClassName}
+                  disabled={isAskRunning}
+                  onSelect={onDemoAsk}
+                >
+                  <Sparkles className="icon-sm" />
+                  <span className="min-w-0 truncate">{t.knowledge.demoSearchStart}</span>
+                </DropdownMenuItem>
+              ) : null}
+              <DropdownMenuItem
+                className={cn(
+                  knowledgeHeaderMenuItemClassName,
+                  isIncognito && 'bg-brand-subtle text-brand focus:bg-brand-subtle focus:text-brand',
+                )}
+                disabled={isAskRunning}
+                onSelect={() => onIncognitoChange(!isIncognito)}
+              >
+                <EyeOff className="icon-sm" />
+                <span className="min-w-0 truncate">{t.knowledge.incognito}</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className={cn(
+                  knowledgeHeaderMenuItemClassName,
+                  isItemSelectionMode && 'bg-brand-subtle text-brand focus:bg-brand-subtle focus:text-brand',
+                )}
+                disabled={!canManageItems && !isItemSelectionMode}
+                onSelect={toggleItemSelectionMode}
+              >
+                <ListChecks className="icon-sm" />
+                <span className="min-w-0 truncate">
+                  {isItemSelectionMode ? t.knowledge.exitItemSelection : t.knowledge.selectItems}
+                </span>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className={knowledgeHeaderMenuItemClassName}
+                disabled={items.length === 0 || isAskRunning}
+                onSelect={clearCurrentSession}
+              >
+                <Eraser className="icon-sm" />
+                <span className="min-w-0 truncate">{t.knowledge.clearSession}</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className={cn(knowledgeHeaderMenuItemClassName, 'text-destructive focus:text-destructive')}
+                disabled={!selectedSessionId || isIncognito || isAskRunning}
+                onSelect={deleteSelectedSession}
+              >
+                <Trash2 className="icon-sm" />
+                <span className="min-w-0 truncate">{t.knowledge.deleteSession}</span>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
         {onDemoAsk && mode === 'ask' && (
           <Button
-            className="gap-1.5"
+            className="hidden gap-1.5 sm:inline-flex"
             disabled={isAskRunning}
             onClick={onDemoAsk}
             size="sm"
@@ -636,7 +747,7 @@ export function KnowledgeWorkspace({
                 aria-label={t.knowledge.incognito}
                 aria-pressed={isIncognito}
                 className={cn(
-                  'size-7 text-foreground/75',
+                  'hidden size-7 text-foreground/75 sm:inline-flex',
                   isIncognito && 'bg-brand-subtle text-brand hover:bg-brand-subtle',
                 )}
                 disabled={isAskRunning}
@@ -652,7 +763,7 @@ export function KnowledgeWorkspace({
           </Tooltip>
         )}
         {mode === 'ask' && (
-          <div className="flex h-7 overflow-hidden rounded-md border border-border bg-card shadow-[0_1px_2px_var(--shadow-hairline)]">
+          <div className="hidden h-7 overflow-hidden rounded-md border border-border bg-card shadow-[0_1px_2px_var(--shadow-hairline)] sm:flex">
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -694,9 +805,9 @@ export function KnowledgeWorkspace({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
-	                  aria-label={t.knowledge.deleteSession}
-	                  className="h-7 w-7 rounded-none text-foreground/75 hover:text-destructive"
-	                  disabled={!selectedSessionId || isIncognito || isAskRunning}
+                    aria-label={t.knowledge.deleteSession}
+                    className="h-7 w-7 rounded-none text-foreground/75 hover:text-destructive"
+                    disabled={!selectedSessionId || isIncognito || isAskRunning}
                   onClick={deleteSelectedSession}
                   size="icon"
                   type="button"
@@ -730,7 +841,7 @@ export function KnowledgeWorkspace({
             )
           })}
         </div>
-        {mode === 'ask' && hasSourcePanelCandidate && (
+        {mode === 'ask' && hasSourcePanelCandidate && !sourcePanelExpanded && (
           <PanelToggle
             collapseLabel={t.knowledge.panelCollapse}
             controlsId={KNOWLEDGE_SOURCE_PANEL_ID}
@@ -805,12 +916,14 @@ export function KnowledgeWorkspace({
       <ScrollArea
         className={cn(
           'min-h-0 flex-1',
-          items.length === 0 && '[&_[data-scroll-area-viewport]>div]:h-full',
+          items.length === 0 && !isItemsLoading && '[&_[data-scroll-area-viewport]>div]:h-full',
         )}
         data-knowledge-ask-scroll=""
       >
         <div className="mx-auto flex min-h-full w-full max-w-5xl flex-col gap-5 px-4 py-6 md:px-8">
-          {items.length === 0 ? (
+          {items.length === 0 && isItemsLoading ? (
+            <ConversationSkeleton reduceMotion={reduceMotion} />
+          ) : items.length === 0 ? (
             <div className="flex flex-1 flex-col items-center justify-center px-6 py-8 text-center">
               <WelcomeState
                 actions={!hasKnowledgeCollections && onOpenDatabase ? (
@@ -993,34 +1106,40 @@ export function KnowledgeWorkspace({
         className="min-h-0 min-w-0 overflow-hidden"
         defaultSize={sourcePanelLayout[KNOWLEDGE_ASK_PANEL_ID]}
         id={KNOWLEDGE_ASK_PANEL_ID}
+        // Identity anchor — must stay unconditional so the ask surface DOM
+        // survives the desktop/mobile flip.
+        key={KNOWLEDGE_ASK_PANEL_ID}
         minSize="48%"
       >
         {askCenter}
       </ResizablePanel>
-      <AnimatedResizableHandle
-        aria-label={t.knowledge.panelResize}
-        expanded={sourcePanelExpanded}
-      />
-      <ResizablePanel
-        className="min-h-0 min-w-0 overflow-hidden"
-        collapsedSize="0%"
-        collapsible
-        defaultSize={sourcePanelLayout[KNOWLEDGE_SOURCE_PANEL_ID]}
-        elementRef={sourcePanelMotion.panelElementRef}
-        id={KNOWLEDGE_SOURCE_PANEL_ID}
-        maxSize="48%"
-        minSize={sourcePanelExpanded ? '28%' : '0%'}
-        panelRef={sourcePanelMotion.panelRef}
-      >
-        <AnimatedPanelBody expanded={sourcePanelExpanded} side="right">
-          {sourcePanelContent}
-        </AnimatedPanelBody>
-      </ResizablePanel>
+      {isDesktop && (
+        <>
+          <AnimatedResizableHandle
+            aria-label={t.knowledge.panelResize}
+            expanded={sourcePanelExpanded}
+          />
+          <ResizablePanel
+            className="min-h-0 min-w-0 overflow-hidden"
+            collapsedSize="0%"
+            collapsible
+            defaultSize={sourcePanelLayout[KNOWLEDGE_SOURCE_PANEL_ID]}
+            id={KNOWLEDGE_SOURCE_PANEL_ID}
+            maxSize="48%"
+            minSize={sourcePanelExpanded ? '28%' : '0%'}
+            panelRef={sourcePanelMotion.panelRef}
+          >
+            <AnimatedPanelBody expanded={sourcePanelExpanded} side="right">
+              {sourcePanelContent}
+            </AnimatedPanelBody>
+          </ResizablePanel>
+        </>
+      )}
     </ResizablePanelGroup>
   )
 
-  const askDesktop = (
-    <div className="hidden min-h-0 w-full flex-1 overflow-hidden bg-background lg:flex">
+  const askSurface = (
+    <div className="relative flex min-h-0 w-full flex-1 overflow-hidden bg-background">
       <ResizablePanelGroup
         className="min-h-0 min-w-0 flex-1 overflow-hidden"
         defaultLayout={historyPanelLayout}
@@ -1038,59 +1157,75 @@ export function KnowledgeWorkspace({
         }}
         orientation="horizontal"
       >
-        <ResizablePanel
-          className="min-h-0 min-w-0 overflow-hidden"
-          collapsedSize="0%"
-          collapsible
-          defaultSize={historyPanelLayout[KNOWLEDGE_HISTORY_PANEL_ID]}
-          elementRef={historyPanelMotion.panelElementRef}
-          id={KNOWLEDGE_HISTORY_PANEL_ID}
-          maxSize="42%"
-          minSize={effectiveHistoryVisible ? '18%' : '0%'}
-          panelRef={historyPanelMotion.panelRef}
-        >
-          <AnimatedPanelBody expanded={effectiveHistoryVisible} side="left">
-            {historyPanel}
-          </AnimatedPanelBody>
-        </ResizablePanel>
-        <AnimatedResizableHandle
-          aria-label={t.knowledge.resizeSessions}
-          expanded={effectiveHistoryVisible}
-        />
+        {isDesktop && (
+          <>
+            <ResizablePanel
+              className="min-h-0 min-w-0 overflow-hidden"
+              collapsedSize="0%"
+              collapsible
+              defaultSize={historyPanelLayout[KNOWLEDGE_HISTORY_PANEL_ID]}
+              id={KNOWLEDGE_HISTORY_PANEL_ID}
+              maxSize="42%"
+              minSize={effectiveHistoryVisible ? '18%' : '0%'}
+              panelRef={historyPanelMotion.panelRef}
+            >
+              <AnimatedPanelBody expanded={effectiveHistoryVisible} side="left">
+                {historyPanel}
+              </AnimatedPanelBody>
+            </ResizablePanel>
+            <AnimatedResizableHandle
+              aria-label={t.knowledge.resizeSessions}
+              expanded={effectiveHistoryVisible}
+            />
+          </>
+        )}
         <ResizablePanel
           className="min-h-0 min-w-0 overflow-hidden"
           defaultSize={historyPanelLayout[KNOWLEDGE_CENTER_PANEL_ID]}
           id={KNOWLEDGE_CENTER_PANEL_ID}
+          // Identity anchor — must stay unconditional so the ask surface DOM
+          // survives the desktop/mobile flip.
+          key={KNOWLEDGE_CENTER_PANEL_ID}
           minSize="58%"
         >
           {centerAndRight}
         </ResizablePanel>
       </ResizablePanelGroup>
-    </div>
-  )
-
-  const askMobile = (
-    <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden lg:hidden">
-      {effectiveHistoryVisible && <div className="h-56 shrink-0 border-b border-border">{historyPanel}</div>}
-      <div className="min-h-0 flex-1 overflow-hidden">{askCenter}</div>
-      {sourcePanelExpanded && sourcePanelContent && (
-        <div className="absolute inset-0 z-30 bg-background">
-          {sourcePanelContent}
-        </div>
+      {!isDesktop && (
+        <>
+          <ResponsiveSidePanel
+            closeLabel={t.knowledge.hideSessions}
+            controlsId={KNOWLEDGE_HISTORY_PANEL_ID}
+            onOpenChange={setHistoryPanelOpen}
+            open={isMobileHistoryOpen}
+            showHeader={false}
+            side="left"
+            title={t.knowledge.sessions}
+          >
+            {historyPanel}
+          </ResponsiveSidePanel>
+          <ResponsiveSidePanel
+            closeLabel={t.knowledge.panelCollapse}
+            controlsId={KNOWLEDGE_SOURCE_PANEL_ID}
+            onOpenChange={(open) => {
+              if (!open) setPanel(null)
+              else openLatestPanel()
+            }}
+            open={sourcePanelExpanded && Boolean(sourcePanelContent)}
+            showHeader={false}
+            side="right"
+            title={t.common.sources}
+          >
+            {sourcePanelContent}
+          </ResponsiveSidePanel>
+        </>
       )}
     </div>
   )
 
   return (
-    <section className="flex min-h-[620px] min-w-0 flex-col bg-background lg:h-full lg:min-h-0 lg:overflow-hidden">
-      {mode === 'ask' ? (
-        <>
-          {askDesktop}
-          {askMobile}
-        </>
-      ) : (
-        findCenter
-      )}
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-background">
+      {mode === 'ask' ? askSurface : findCenter}
 
       {viewerTarget && (
         <DocumentViewer

@@ -1,4 +1,5 @@
 import type { ReportReference, ResearchSource } from '@/features/researchRuns/types'
+import { asString } from '@/lib/coerce'
 
 export function normalizeReportReferences(
   value: unknown,
@@ -9,11 +10,11 @@ export function normalizeReportReferences(
     return value.flatMap((item) => {
       if (!item || typeof item !== 'object' || Array.isArray(item)) return []
       const record = item as Record<string, unknown>
-      const url = optionalString(record.url)?.trim()
+      const url = asString(record.url)?.trim()
       if (!url) return []
       return [{
-        label: optionalString(record.label)?.trim() || 'Quelle',
-        tier: optionalString(record.tier)?.trim() || tierForUrl(url, topSources),
+        label: asString(record.label)?.trim() || 'Quelle',
+        tier: asString(record.tier)?.trim() || tierForUrl(url, topSources),
         url,
       }]
     })
@@ -52,8 +53,4 @@ export function reportReferencesFromMarkdown(
 
 function tierForUrl(url: string, topSources: readonly ResearchSource[]) {
   return topSources.find((source) => source.url === url)?.tier ?? 'unknown'
-}
-
-function optionalString(value: unknown) {
-  return typeof value === 'string' ? value : undefined
 }

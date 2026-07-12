@@ -30,13 +30,16 @@ from fastapi import APIRouter, Request
 from inqtrix.auth.permissions import AuditEntry, WorkspaceRole
 from inqtrix.server.routers._admin_guard import require_instance_admin
 from inqtrix.services.request_parsing import error_response
+from inqtrix.services.workspace_administration import (
+    WorkspaceNameError,
+    create_workspace_for_admin,
+    normalize_workspace_name,
+)
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
 log = logging.getLogger("inqtrix")
-
-_MAX_NAME_LEN = 120
 
 
 def _parse_role(value: object) -> WorkspaceRole | None:
@@ -150,21 +153,14 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(
                 400, "Ungueltiger JSON-Body", "invalid_request_error"
             )
-        name = str((body or {}).get("name", "")).strip()
-        if not name or len(name) > _MAX_NAME_LEN:
-            return error_response(
-                400,
-                f"Feld 'name' muss 1 bis {_MAX_NAME_LEN} Zeichen lang sein",
-                "invalid_request_error",
+        try:
+            workspace_id, created_name = await create_workspace_for_admin(
+                workspace_admin,
+                principal=principal,
+                name=(body or {}).get("name", ""),
             )
-        workspace_id, created_name = await workspace_admin.create_workspace(
-            tenant_id=principal.tenant_id,
-            name=name,
-            created_by_sub=principal.sub,
-        )
-        await _audit(
-            principal, "workspace.created", workspace_id, {"name": created_name}
-        )
+        except WorkspaceNameError as exc:
+            return error_response(400, str(exc), "invalid_request_error")
         return {"workspace_id": workspace_id, "name": created_name}
 
     @router.patch("/v1/admin/workspaces/{workspace_id}")
@@ -179,13 +175,10 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(
                 400, "Ungueltiger JSON-Body", "invalid_request_error"
             )
-        name = str((body or {}).get("name", "")).strip()
-        if not name or len(name) > _MAX_NAME_LEN:
-            return error_response(
-                400,
-                f"Feld 'name' muss 1 bis {_MAX_NAME_LEN} Zeichen lang sein",
-                "invalid_request_error",
-            )
+        try:
+            name = normalize_workspace_name((body or {}).get("name", ""))
+        except WorkspaceNameError as exc:
+            return error_response(400, str(exc), "invalid_request_error")
         renamed = await workspace_admin.rename_workspace(
             tenant_id=principal.tenant_id, workspace_id=workspace_id, name=name
         )

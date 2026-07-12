@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator
 from fastapi import Request
 
 from inqtrix.core.constants import MODEL_NAME
-from inqtrix.graph import run as agent_run
+from inqtrix.core.context import RunContext
 from inqtrix.i18n import detect_ui_language, t
 from inqtrix.providers.base import ProviderContext
 from inqtrix.quota.models import QuotaDimension, consumed_tokens
@@ -27,6 +27,9 @@ from inqtrix.urls import sanitize_error
 
 if TYPE_CHECKING:
     from inqtrix.auth.principal import Principal
+    from inqtrix.core.algorithms import AgentAlgorithm
+    from inqtrix.core.context import RuntimeContext
+    from inqtrix.core.results import RunRequest
     from inqtrix.services.quota_service import QuotaService
 
 log = logging.getLogger("inqtrix")
@@ -116,21 +119,29 @@ async def _watch_disconnect(
 
 async def stream_response(
     question: str,
-    history: str,
     *,
+    algorithm: "AgentAlgorithm",
+    runtime: "RuntimeContext",
+    run_request: "RunRequest",
     providers: ProviderContext,
     strategies: StrategyContext,
     settings: AgentSettings,
-    messages: list[dict] | None = None,
     include_progress: bool = True,
     request: Request | None = None,
     cancel_event: threading.Event | None = None,
-    stack_name: str = "",
-    workspace_id: str = "",
     quota_service: "QuotaService | None" = None,
     principal: "Principal | None" = None,
 ) -> AsyncIterator[str]:
     """Execute the agent and yield progress updates + answer as SSE chunks.
+
+    The algorithm is dispatched through the registry (``algorithm.run`` with a
+    per-request :class:`~inqtrix.core.context.RunContext`), exactly like the
+    non-streamed chat path and native ``/v1/runs`` — there is no longer a
+    separate graph binding for streaming. Graph-backed modes (research,
+    direct_llm) stream their coarse progress through the ``progress_queue`` as
+    before, byte-identically; event-only modes (knowledge) carry no
+    ``event_sink`` here and stream the answer without granular progress lines
+    (the rich progress surface for those is native ``/v1/runs`` SSE).
 
     When ``request`` is supplied (server route path), a background
     :func:`_watch_disconnect` task is spawned. It blocks on
@@ -174,19 +185,27 @@ async def stream_response(
     progress_queue: Queue | None = Queue() if include_progress else None
     loop = asyncio.get_running_loop()
 
-    # Start agent in a separate thread
+    # The per-request execution bundle, identical in spirit to the native-run
+    # RunContext (run_service.py). event_sink stays None: the chat SSE surface
+    # renders coarse progress from the queue only. run_id/park are None (chat
+    # cannot park — a parking algorithm fails loudly), token_budget 0 (no cap).
+    run_context = RunContext(
+        providers=providers,
+        strategies=strategies,
+        agent_settings=settings,
+        principal=principal,
+        run_id=None,
+        cancel_token=cancel_event,
+        event_sink=None,
+        progress_queue=progress_queue,
+        token_budget=0,
+        park=None,
+    )
+
+    # Start the algorithm in a separate thread, dispatched through the registry.
     agent_future = loop.run_in_executor(
         None,
-        partial(
-            agent_run,
-            question,
-            history=history,
-            progress_queue=progress_queue,
-            providers=providers,
-            strategies=strategies,
-            settings=settings,
-            cancel_event=cancel_event,
-        ),
+        partial(algorithm.run, run_request, runtime=runtime, context=run_context),
     )
 
     # Spawn the disconnect watcher when we have a real request. Tests
@@ -207,7 +226,11 @@ async def stream_response(
         except (asyncio.CancelledError, Exception):  # noqa: BLE001 — cleanup-only
             pass
 
-    # Read progress updates and stream them as SSE chunks
+    # Read progress updates and stream them as SSE chunks. Track whether ANY
+    # progress chunk actually streamed, so the answer/progress separator is
+    # emitted only when there was a progress section to separate from (event-only
+    # modes emit no queue progress -> their stream stays answer-only).
+    progress_emitted = False
     while include_progress and progress_queue is not None and not agent_future.done():
         if time.monotonic() >= request_deadline:
             await _shutdown_watcher()
@@ -223,6 +246,7 @@ async def stream_response(
                 None, partial(progress_queue.get, True, 0.3),
             )
             if msg_type == "progress" and msg_content != "done":
+                progress_emitted = True
                 yield make_chunk(chat_id, f"> `{msg_content}`\n>\n")
         except Empty:
             continue
@@ -238,6 +262,7 @@ async def stream_response(
         try:
             msg_type, msg_content = progress_queue.get_nowait()
             if msg_type == "progress" and msg_content != "done":
+                progress_emitted = True
                 yield make_chunk(chat_id, f"> `{msg_content}`\n>\n")
         except Empty:
             break
@@ -253,8 +278,9 @@ async def stream_response(
         remaining = max(0.0, request_deadline - time.monotonic())
         if remaining <= 0.0:
             raise asyncio.TimeoutError
-        result = await asyncio.wait_for(agent_future, timeout=remaining)
-        answer_text = result["answer"]
+        agent_result = await asyncio.wait_for(agent_future, timeout=remaining)
+        result = agent_result.raw
+        answer_text = agent_result.answer
     except asyncio.TimeoutError:
         await _shutdown_watcher()
         # The agent thread keeps running to completion (it cannot be
@@ -309,8 +335,9 @@ async def stream_response(
         log.info("Run finished in cancelled state; stopping stream.")
         return
 
-    # Separator between progress and answer
-    if include_progress:
+    # Separator between progress and answer — only when progress actually
+    # streamed (event-only modes emit none, so their stream is answer-only).
+    if progress_emitted:
         yield make_chunk(chat_id, "\n\n---\n\n")
 
     model_resolution = (
@@ -341,15 +368,15 @@ async def guarded_stream(
     history: str,
     sem: asyncio.Semaphore,
     *,
+    algorithm: "AgentAlgorithm",
+    runtime: "RuntimeContext",
+    run_request: "RunRequest",
     providers: ProviderContext,
     strategies: StrategyContext,
     settings: AgentSettings,
-    messages: list[dict] | None = None,
     include_progress: bool = True,
     request: Request | None = None,
     cancel_event: threading.Event | None = None,
-    stack_name: str = "",
-    workspace_id: str = "",
     quota_service: "QuotaService | None" = None,
     principal: "Principal | None" = None,
 ) -> AsyncIterator[str]:
@@ -360,21 +387,22 @@ async def guarded_stream(
     are forwarded to :func:`stream_response` so the disconnect probe
     and the implicit cancel pathway take effect; ``quota_service`` and
     ``principal`` let the inner generator book the streamed run's token
-    spend once it knows the usage.
+    spend once it knows the usage. ``history`` stays a leading positional
+    for the historical call shape; the algorithm reads it from
+    ``run_request.history``.
     """
     async with sem:
         async for chunk in stream_response(
             question,
-            history,
+            algorithm=algorithm,
+            runtime=runtime,
+            run_request=run_request,
             providers=providers,
             strategies=strategies,
             settings=settings,
-            messages=messages,
             include_progress=include_progress,
             request=request,
             cancel_event=cancel_event,
-            stack_name=stack_name,
-            workspace_id=workspace_id,
             quota_service=quota_service,
             principal=principal,
         ):

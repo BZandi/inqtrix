@@ -7,8 +7,9 @@ import logging
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.exc import IntegrityError
 
 from inqtrix.auth.api_key import build_auth_provider
 from inqtrix.providers import create_providers
@@ -24,6 +25,49 @@ if TYPE_CHECKING:
     from inqtrix.storage.object_store import ObjectStore
 
 log = logging.getLogger("inqtrix")
+
+
+def db_integrity_response(request: Request, exc: IntegrityError):
+    """Map a DB constraint violation to a typed 4xx, or re-raise it.
+
+    The app-wide Baukasten backstop (registered in :func:`create_app`) so
+    a concurrent-write race in ANY store degrades gracefully and visibly
+    instead of as an opaque 500 with a stack trace — without a
+    flickenteppich of per-route try/except. Deliberately NARROW: only the
+    two client-attributable SQLSTATEs are mapped; every other
+    ``IntegrityError`` (check-constraint 23514, not-null 23502, a
+    serialization failure, or a genuine data bug) is RE-RAISED so it
+    still surfaces as a 500 with its traceback (No Silent Fallbacks —
+    masking those behind a polite 409 would hide real faults). Routes
+    that already catch their own domain conflicts (editor patches,
+    artifact CAS, share) never let the ``IntegrityError`` escape and so
+    never reach here. asyncpg exposes the SQLSTATE on ``exc.orig`` as
+    ``.sqlstate`` (``.pgcode`` on the psycopg checkpointer path).
+    """
+    from inqtrix.services.request_parsing import error_response
+
+    orig = getattr(exc, "orig", None)
+    code = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    log.warning(
+        "DB-Integritaetsverletzung sqlstate=%s auf %s %s",
+        code,
+        request.method,
+        request.url.path,
+    )
+    if code == "23505":  # unique_violation
+        return error_response(
+            409,
+            "Der Datensatz existiert bereits oder verletzt eine "
+            "Eindeutigkeit.",
+            "conflict",
+        )
+    if code == "23503":  # foreign_key_violation
+        return error_response(
+            400,
+            "Ein verknuepfter Datensatz fehlt oder ist ungueltig.",
+            "invalid_request_error",
+        )
+    raise exc
 
 
 _PLACEHOLDER_SECRET_MARKER = "CHANGE_ME"
@@ -234,6 +278,52 @@ def create_app(
             auth_provider.mode,
             "on" if cors_active else "off",
         )
+        if settings.storage.backend == "postgres":
+            # Reviewable connection budget (Sichtbarkeit): count the
+            # pooled engines this process ACTUALLY builds, not a literal,
+            # so the number is trustworthy in every config. Always: the
+            # platform-persistence bundle + the durable run store (2).
+            # Conditionally: the auth-session bundle (cookie-session
+            # modes only) and the indexing store (knowledge enabled).
+            # NullPool stores add one short-lived connection per in-flight
+            # operation on top and are not counted here.
+            pooled_engines = 2
+            if auth_provider.mode in ("local", "ldap", "oidc"):
+                pooled_engines += 1
+            if settings.knowledge.enabled:
+                pooled_engines += 1
+            log.info(
+                "Postgres-Verbindungsbudget | pool_size=%d "
+                "max_overflow=%d | %d gepoolte Engines -> worst case %d "
+                "persistente Verbindungen pro API-Prozess (+ NullPool "
+                "pro Operation).",
+                settings.storage.pool_size,
+                settings.storage.pool_max_overflow,
+                pooled_engines,
+                pooled_engines
+                * (
+                    settings.storage.pool_size
+                    + settings.storage.pool_max_overflow
+                ),
+            )
+        if (
+            settings.server.run_max_concurrent_per_user is not None
+            and settings.server.run_max_concurrent_per_user
+            < settings.agent_platform.max_parallel_children
+        ):
+            # Visible constraint (No Silent Fallbacks): a per-user cap
+            # below one agent wave's width means a single agent tree's
+            # children cannot all be admitted — the wave truncates to
+            # proceed-and-mark holes. Loud at startup, not discovered as
+            # mysteriously incomplete agent runs.
+            log.warning(
+                "RUN_MAX_CONCURRENT_PER_USER=%d ist kleiner als "
+                "INQTRIX_AGENT_MAX_PARALLEL_CHILDREN=%d — eine einzelne "
+                "Agent-Welle passt nicht in das Per-User-Budget und wird "
+                "beschnitten. Cap auf mindestens die Wellenbreite setzen.",
+                settings.server.run_max_concurrent_per_user,
+                settings.agent_platform.max_parallel_children,
+            )
         try:
             yield
         finally:
@@ -277,6 +367,15 @@ def create_app(
             editor_store = getattr(editor_service, "store", None)
             if editor_store is not None and hasattr(editor_store, "aclose"):
                 await editor_store.aclose()
+            # The Postgres editor-patch store owns its own NullPool engine too.
+            editor_patch_service = getattr(
+                container, "editor_patch_service", None
+            )
+            editor_patch_store = getattr(editor_patch_service, "store", None)
+            if editor_patch_store is not None and hasattr(
+                editor_patch_store, "aclose"
+            ):
+                await editor_patch_store.aclose()
             # The Postgres asset-record store owns its own NullPool engine too.
             asset_service = getattr(container, "asset_records_service", None)
             asset_store = getattr(asset_service, "store", None)
@@ -321,7 +420,18 @@ def create_app(
     )
     if cors_kwargs is not None:
         app.add_middleware(CORSMiddleware, **cors_kwargs)
+
+    @app.exception_handler(IntegrityError)
+    async def _db_integrity_handler(
+        request: Request, exc: IntegrityError
+    ):
+        return db_integrity_response(request, exc)
+
     app.include_router(app_router)
     app.state.container = container
+
+    from inqtrix.server.metrics import setup_metrics
+
+    setup_metrics(app, container=container, settings=settings)
 
     return app

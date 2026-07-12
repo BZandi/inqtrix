@@ -3,6 +3,10 @@ import type {
   KnowledgeAnswerRecord,
   KnowledgeReferenceRecord,
 } from '@/features/project/types'
+import {
+  citationLabelFromHref as citationLabelFromHrefGeneric,
+  linkifyCitationLabels as linkifyCitationLabelsGeneric,
+} from '@/components/markdown/citationLinks'
 
 /**
  * Parse the document target out of a knowledge citation URL. The
@@ -96,7 +100,7 @@ export function knowledgeAnswerFromRunResult(result: ResearchRunResult): Knowled
   }
 }
 
-const CITATION_HREF_PREFIX = '#kref-'
+const isKnowledgeCitationLabel = (label: string): boolean => /^K\d+$/.test(label)
 
 /**
  * Make citation tokens clickable WITHOUT touching the off-limits Markdown
@@ -117,63 +121,14 @@ export function linkifyCitationLabels(
   markdown: string,
   knownLabels?: ReadonlySet<string>,
 ): string {
-  let out = markdown.replace(/\[(K\d+)\](?!\()/g, (_match, label: string) => (
-    `[${label}](${CITATION_HREF_PREFIX}${label})`
-  ))
-  if (knownLabels && knownLabels.size > 0) {
-    out = out.replace(
-      /(^|[^\w[\]()/#-])((?:K\d+){2,})\b/g,
-      (match, pre: string, run: string) => {
-        const labels = splitKnownCitationRun(run, knownLabels)
-        return labels ? `${pre}${labels.map((label) => citationLink(label)).join('')}` : match
-      },
-    )
-    out = out.replace(
-      /(^|[^\w[\]()/#-])(K\d+)\b/g,
-      (match, pre: string, label: string) => (
-        knownLabels.has(label) ? `${pre}${citationLink(label)}` : match
-      ),
-    )
-  }
-  return out
-}
-
-function citationLink(label: string): string {
-  return `[${label}](${CITATION_HREF_PREFIX}${label})`
-}
-
-function splitKnownCitationRun(
-  run: string,
-  knownLabels: ReadonlySet<string>,
-): string[] | null {
-  const memo = new Map<number, string[] | null>()
-  const splitFrom = (offset: number): string[] | null => {
-    if (offset === run.length) return []
-    const cached = memo.get(offset)
-    if (cached !== undefined) return cached
-    const candidates = [...knownLabels]
-      .filter((label) => run.startsWith(label, offset))
-      .sort((a, b) => b.length - a.length)
-    for (const label of candidates) {
-      const rest = splitFrom(offset + label.length)
-      if (rest) {
-        const result = [label, ...rest]
-        memo.set(offset, result)
-        return result
-      }
-    }
-    memo.set(offset, null)
-    return null
-  }
-  const labels = splitFrom(0)
-  return labels && labels.length > 1 ? labels : null
+  return linkifyCitationLabelsGeneric(
+    markdown,
+    isKnowledgeCitationLabel,
+    knownLabels,
+  )
 }
 
 /** Extract the citation label from an intercepted `#kref-*` href. */
 export function citationLabelFromHref(href: string | null | undefined): string | null {
-  if (!href) return null
-  const index = href.indexOf(CITATION_HREF_PREFIX)
-  if (index === -1) return null
-  const label = href.slice(index + CITATION_HREF_PREFIX.length)
-  return /^K\d+$/.test(label) ? label : null
+  return citationLabelFromHrefGeneric(href, isKnowledgeCitationLabel)
 }

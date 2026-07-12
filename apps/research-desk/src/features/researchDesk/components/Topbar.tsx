@@ -4,6 +4,7 @@ import {
   FolderOpen,
   Github,
   LoaderCircle,
+  Menu,
   Monitor,
   Moon,
   Save,
@@ -14,8 +15,18 @@ import {
   type LucideIcon,
 } from '@/components/icons'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
+import type { ReactNode } from 'react'
 import { BrandMark } from '@/components/BrandMark'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { ProjectConnection } from '@/features/project/types'
 import type { AppView } from '@/features/researchDesk/types'
@@ -70,12 +81,24 @@ export function Topbar({
   const reduceMotion = useReducedMotion()
   const status = projectStatus(projectConnection, dirty, t)
   const activeModeLabel = viewLabel(activeView, t)
+  const projectActionsProps = {
+    canPersistProject,
+    dirty,
+    importPending,
+    isProjectActionPending,
+    onExportProject,
+    onImportProjectToServer,
+    onLoadProject,
+    onSaveProject,
+    projectConnection,
+    serverSyncEnabled,
+  }
 
   return (
     <header className="sticky top-0 z-30 border-b border-border bg-background/95 backdrop-blur">
-      <div className="flex min-h-[var(--header-h)] w-full flex-wrap items-center gap-2 pr-3 md:pr-4 xl:pr-6">
+      <div className="flex h-[var(--header-h)] min-h-[var(--header-h)] w-full items-center gap-2 overflow-hidden pr-2 md:pr-4 xl:pr-6">
         <div className="flex min-w-0 items-center">
-          <div className="flex w-12 shrink-0 items-center justify-center md:w-14">
+          <div className="flex w-[var(--header-h)] shrink-0 items-center justify-center">
             <BrandMark className="size-7 shrink-0" />
           </div>
           <span className="text-base font-semibold tracking-normal text-brand">
@@ -85,10 +108,8 @@ export function Topbar({
           <motion.span
             aria-live="polite"
             className="hidden min-w-0 items-center overflow-hidden text-sm font-medium text-muted-foreground sm:inline-grid"
-            layout={!reduceMotion}
-            transition={appMotion.list}
           >
-            <AnimatePresence initial={false} mode="sync">
+            <AnimatePresence initial={false} mode="popLayout">
               <motion.span
                 animate={reduceMotion
                   ? { opacity: 1 }
@@ -110,74 +131,43 @@ export function Topbar({
               </motion.span>
             </AnimatePresence>
           </motion.span>
+          {activeView === 'agent' && (
+            <Badge
+              className="t-hint ml-2 hidden h-5 shrink-0 rounded-full border-border/70 bg-background px-1.5 sm:inline-flex"
+              variant="outline"
+            >
+              {t.navigation.agentBeta}
+            </Badge>
+          )}
         </div>
 
-        <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1.5">
+        <div className="ml-auto flex min-w-0 shrink-0 items-center justify-end gap-1.5">
           {!serverSyncEnabled ? (
             <ProjectStatusBadge projectName={projectName} status={status} />
           ) : null}
-          <div
-            aria-label={t.topbar.projectActions}
-            className="inline-flex h-8 items-center rounded-md border border-border bg-card p-0.5 shadow-[0_1px_2px_var(--shadow-hairline)]"
-            role="group"
-          >
-            {serverSyncEnabled ? (
-              // Server-synced: the server is the live source, so the local file
-              // is only for import/export. Loading a file imports it UP (merges
-              // additively), and one "export backup" download replaces the
-              // redundant Export+Save pair (Save = write-to-local, meaningless
-              // when the server auto-saves).
-              <>
-                <ProjectActionButton
-                  disabled={isProjectActionPending}
-                  icon={FolderOpen}
-                  label={t.topbar.importFile}
-                  onClick={onLoadProject}
-                />
-                <ProjectActionButton
-                  disabled={isProjectActionPending}
-                  icon={Download}
-                  label={t.topbar.exportBackup}
-                  onClick={onExportProject}
-                />
-              </>
-            ) : (
-              <>
-                <ProjectActionButton
-                  disabled={isProjectActionPending}
-                  icon={FolderOpen}
-                  label={t.topbar.loadProject}
-                  onClick={onLoadProject}
-                />
-                <ProjectActionButton
-                  disabled={isProjectActionPending}
-                  icon={Download}
-                  label={t.topbar.exportProject}
-                  onClick={onExportProject}
-                />
-                <ProjectActionButton
-                  disabled={isProjectActionPending || (!dirty && projectConnection.kind !== 'directory')}
-                  icon={isProjectActionPending ? LoaderCircle : Save}
-                  label={t.topbar.saveProject}
-                  onClick={onSaveProject}
-                  spin={isProjectActionPending}
-                />
-                {canPersistProject ? (
-                  <ProjectActionButton
-                    disabled={isProjectActionPending || importPending}
-                    icon={importPending ? LoaderCircle : Upload}
-                    label={t.topbar.importToServer}
-                    onClick={onImportProjectToServer}
-                    spin={importPending}
-                  />
-                ) : null}
-              </>
-            )}
+          <div className="hidden md:block">
+            <ProjectActionsGroup {...projectActionsProps} />
           </div>
-          {serverSyncEnabled ? <ServerSyncBadge error={serverSyncError} projectName={projectName} t={t} /> : null}
-          <ThemeToggle />
-          <LanguageToggle />
-          <RepoLink />
+          {serverSyncEnabled ? (
+            <div className="hidden md:block">
+              <ServerSyncBadge error={serverSyncError} projectName={projectName} t={t} />
+            </div>
+          ) : null}
+          <div className="hidden lg:block">
+            <ThemeToggle />
+          </div>
+          <div className="hidden md:block">
+            <LanguageToggle />
+          </div>
+          <div className="hidden lg:block">
+            <RepoLink />
+          </div>
+          <TopbarOverflowMenu
+            projectActions={projectActionsProps}
+            serverSyncBadge={serverSyncEnabled
+              ? <ServerSyncBadge error={serverSyncError} projectName={projectName} t={t} />
+              : null}
+          />
         </div>
       </div>
       {projectActionError ? (
@@ -241,6 +231,90 @@ function ProjectStatusBadge({
   )
 }
 
+type ProjectActionsGroupProps = {
+  canPersistProject: boolean
+  dirty: boolean
+  importPending: boolean
+  isProjectActionPending: boolean
+  onExportProject: () => void
+  onImportProjectToServer: () => void
+  onLoadProject: () => void
+  onSaveProject: () => void
+  projectConnection: ProjectConnection
+  serverSyncEnabled: boolean
+}
+
+function ProjectActionsGroup({
+  canPersistProject,
+  dirty,
+  importPending,
+  isProjectActionPending,
+  onExportProject,
+  onImportProjectToServer,
+  onLoadProject,
+  onSaveProject,
+  projectConnection,
+  serverSyncEnabled,
+}: ProjectActionsGroupProps) {
+  const { t } = useLocale()
+
+  return (
+    <div
+      aria-label={t.topbar.projectActions}
+      className="inline-flex h-8 items-center rounded-md border border-border bg-card p-0.5 shadow-[0_1px_2px_var(--shadow-hairline)]"
+      role="group"
+    >
+      {serverSyncEnabled ? (
+        <>
+          <ProjectActionButton
+            disabled={isProjectActionPending}
+            icon={FolderOpen}
+            label={t.topbar.importFile}
+            onClick={onLoadProject}
+          />
+          <ProjectActionButton
+            disabled={isProjectActionPending}
+            icon={Download}
+            label={t.topbar.exportBackup}
+            onClick={onExportProject}
+          />
+        </>
+      ) : (
+        <>
+          <ProjectActionButton
+            disabled={isProjectActionPending}
+            icon={FolderOpen}
+            label={t.topbar.loadProject}
+            onClick={onLoadProject}
+          />
+          <ProjectActionButton
+            disabled={isProjectActionPending}
+            icon={Download}
+            label={t.topbar.exportProject}
+            onClick={onExportProject}
+          />
+          <ProjectActionButton
+            disabled={isProjectActionPending || (!dirty && projectConnection.kind !== 'directory')}
+            icon={isProjectActionPending ? LoaderCircle : Save}
+            label={t.topbar.saveProject}
+            onClick={onSaveProject}
+            spin={isProjectActionPending}
+          />
+          {canPersistProject ? (
+            <ProjectActionButton
+              disabled={isProjectActionPending || importPending}
+              icon={importPending ? LoaderCircle : Upload}
+              label={t.topbar.importToServer}
+              onClick={onImportProjectToServer}
+              spin={importPending}
+            />
+          ) : null}
+        </>
+      )}
+    </div>
+  )
+}
+
 function ProjectActionButton({
   disabled = false,
   icon: Icon,
@@ -270,6 +344,181 @@ function ProjectActionButton({
       </TooltipTrigger>
       <TooltipContent>{label}</TooltipContent>
     </Tooltip>
+  )
+}
+
+function TopbarOverflowMenu({
+  projectActions,
+  serverSyncBadge,
+}: {
+  projectActions: ProjectActionsGroupProps
+  serverSyncBadge: ReactNode
+}) {
+  const { locale, setLocale, t } = useLocale()
+  const { setTheme, theme } = useTheme()
+  const themeOptions: Array<{
+    icon: LucideIcon
+    label: string
+    value: ThemeMode
+  }> = [
+    { icon: Sun, label: t.common.light, value: 'light' },
+    { icon: Moon, label: t.common.dark, value: 'dark' },
+    { icon: Monitor, label: t.common.system, value: 'system' },
+  ]
+  const languageOptions: Array<{ label: string; value: Locale }> = [
+    { label: 'DE', value: 'de' },
+    { label: 'EN', value: 'en' },
+  ]
+
+  return (
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          aria-label={t.common.menu}
+          className="size-8 shrink-0 text-muted-foreground hover:bg-accent/70 hover:text-foreground lg:hidden"
+          size="icon"
+          title={t.common.menu}
+          type="button"
+          variant="ghost"
+        >
+          <Menu className="icon-md" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-56 rounded-lg p-1 shadow-lg" sideOffset={8}>
+        <div className="md:hidden">
+          <TopbarMenuLabel>{t.topbar.projectActions}</TopbarMenuLabel>
+          <ProjectActionMenuItem
+            disabled={projectActions.isProjectActionPending}
+            icon={FolderOpen}
+            label={projectActions.serverSyncEnabled ? t.topbar.importFile : t.topbar.loadProject}
+            onSelect={projectActions.onLoadProject}
+          />
+          <ProjectActionMenuItem
+            disabled={projectActions.isProjectActionPending}
+            icon={Download}
+            label={projectActions.serverSyncEnabled ? t.topbar.exportBackup : t.topbar.exportProject}
+            onSelect={projectActions.onExportProject}
+          />
+          {!projectActions.serverSyncEnabled ? (
+            <ProjectActionMenuItem
+              disabled={projectActions.isProjectActionPending || (!projectActions.dirty && projectActions.projectConnection.kind !== 'directory')}
+              icon={projectActions.isProjectActionPending ? LoaderCircle : Save}
+              label={t.topbar.saveProject}
+              onSelect={projectActions.onSaveProject}
+              spin={projectActions.isProjectActionPending}
+            />
+          ) : null}
+          {!projectActions.serverSyncEnabled && projectActions.canPersistProject ? (
+            <ProjectActionMenuItem
+              disabled={projectActions.isProjectActionPending || projectActions.importPending}
+              icon={projectActions.importPending ? LoaderCircle : Upload}
+              label={t.topbar.importToServer}
+              onSelect={projectActions.onImportProjectToServer}
+              spin={projectActions.importPending}
+            />
+          ) : null}
+        </div>
+        {serverSyncBadge ? (
+          <div className="md:hidden">
+            <DropdownMenuSeparator />
+            <div className="px-1 py-1">{serverSyncBadge}</div>
+          </div>
+        ) : null}
+        <div className="lg:hidden">
+          <TopbarMenuSeparator className="md:hidden" />
+          <TopbarMenuLabel>{t.common.theme}</TopbarMenuLabel>
+          {themeOptions.map((option) => {
+            const Icon = option.icon
+            return (
+              <DropdownMenuItem
+                className={cn(
+                  topbarMenuItemClassName,
+                  theme === option.value && 'bg-brand-subtle text-brand focus:bg-brand-subtle focus:text-brand',
+                )}
+                key={option.value}
+                onSelect={() => setTheme(option.value)}
+              >
+                <Icon className="icon-sm" />
+                <span className={topbarMenuTextClassName}>{option.label}</span>
+              </DropdownMenuItem>
+            )
+          })}
+        </div>
+        <div className="md:hidden">
+          <DropdownMenuSeparator />
+          <TopbarMenuLabel>{t.common.language}</TopbarMenuLabel>
+          {languageOptions.map((option) => (
+            <DropdownMenuItem
+              className={cn(
+                topbarMenuItemClassName,
+                locale === option.value && 'bg-brand-subtle text-brand focus:bg-brand-subtle focus:text-brand',
+              )}
+              key={option.value}
+              onSelect={() => setLocale(option.value)}
+            >
+              <span className="w-4 text-xs font-semibold">{option.label}</span>
+              <span className={topbarMenuTextClassName}>{option.value === 'de' ? 'Deutsch' : 'English'}</span>
+            </DropdownMenuItem>
+          ))}
+        </div>
+        <div className="lg:hidden">
+          <TopbarMenuSeparator />
+          <DropdownMenuItem asChild className={topbarMenuItemClassName}>
+            <a href={t.authLock.repositoryUrl} rel="noreferrer" target="_blank">
+              <Github className="icon-sm" />
+              <span className={topbarMenuTextClassName}>{t.authLock.repositoryLabel}</span>
+              <ExternalLink className="ml-auto icon-xs" />
+            </a>
+          </DropdownMenuItem>
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+const topbarMenuItemClassName = 'h-8 gap-2 rounded-md px-2 py-1'
+const topbarMenuTextClassName = 'min-w-0 truncate text-xs font-medium'
+
+function TopbarMenuLabel({ children }: { children: ReactNode }) {
+  return (
+    <DropdownMenuLabel className="px-2 py-1">
+      <span className="t-caption text-muted-foreground">{children}</span>
+    </DropdownMenuLabel>
+  )
+}
+
+function TopbarMenuSeparator({ className }: { className?: string }) {
+  return <DropdownMenuSeparator className={className} />
+}
+
+function ProjectActionMenuItem({
+  disabled = false,
+  icon: Icon,
+  label,
+  onSelect,
+  spin = false,
+}: {
+  disabled?: boolean
+  icon: LucideIcon
+  label: string
+  onSelect: () => void
+  spin?: boolean
+}) {
+  return (
+    <DropdownMenuItem
+      className={topbarMenuItemClassName}
+      disabled={disabled}
+      onSelect={(event) => {
+        if (disabled) {
+          event.preventDefault()
+          return
+        }
+        onSelect()
+      }}
+    >
+      <Icon className={cn('icon-sm', spin && 'animate-spin')} />
+      <span className={topbarMenuTextClassName}>{label}</span>
+    </DropdownMenuItem>
   )
 }
 

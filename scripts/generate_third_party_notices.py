@@ -37,6 +37,18 @@ PYTHON_LICENSE_OVERRIDES: dict[str, tuple[str, str]] = {
     ),
 }
 
+# React packages that ship a LICENSE file but omit the `license` field from
+# package.json, so the pnpm metadata carries no SPDX id and the automatic
+# resolver would fail closed. Keyed by canonical npm name; mirrors
+# PYTHON_LICENSE_OVERRIDES. Verify the bundled LICENSE upstream before adding
+# an entry (khroma@2.1.0 ships an MIT license file, package.json omits it).
+REACT_LICENSE_OVERRIDES: dict[str, tuple[str, str]] = {
+    "khroma": (
+        "MIT",
+        "manual override: bundled LICENSE file; package.json omits the field",
+    ),
+}
+
 
 class NoticeGenerationError(RuntimeError):
     """Raised when the notice inventory cannot be generated safely."""
@@ -341,14 +353,21 @@ def collect_react_entries(repo_root: Path) -> list[NoticeEntry]:
     entries: list[NoticeEntry] = []
     for key in sorted(prod | dev):
         package = packages_by_key[key]
+        name = str(package["name"])
+        override = REACT_LICENSE_OVERRIDES.get(canonical_name(name))
+        if override is not None:
+            license_id, source = override
+        else:
+            license_id = _license_from_react_package(package)
+            source = "pnpm package metadata"
         entries.append(
             NoticeEntry(
                 ecosystem="react",
-                name=str(package["name"]),
+                name=name,
                 version=str(package["version"]),
-                license=_license_from_react_package(package),
+                license=license_id,
                 dependency_surface="react-prod" if key in prod else "react-dev",
-                metadata_source="pnpm package metadata",
+                metadata_source=source,
             )
         )
     return entries

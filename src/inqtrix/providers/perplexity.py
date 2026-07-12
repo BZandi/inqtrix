@@ -19,24 +19,32 @@ import threading
 from typing import Any
 
 from cachetools import TTLCache
-from perplexity import APIError, APIStatusError, Perplexity, RateLimitError
+from perplexity import (
+    APIError,
+    APIStatusError,
+    APITimeoutError,
+    Perplexity,
+    RateLimitError,
+)
 
 from inqtrix.constants import SEARCH_TIMEOUT
 from inqtrix.exceptions import AgentRateLimited
 from inqtrix.providers.base import (
     SearchProvider,
     _NonFatalNoticeMixin,
-    _SDK_MAX_RETRIES,
+    _RetryNoticeMixin,
     _apply_domain_filters,
     _bounded_timeout,
     _build_recency_language_hints,
+    _call_openai_chat_completion_with_retries,
+    _operation_deadline,
 )
 from inqtrix.search_result import GroundedSearchResult, GroundedSource
 
 log = logging.getLogger("inqtrix")
 
 
-class PerplexitySearch(_NonFatalNoticeMixin, SearchProvider):
+class PerplexitySearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
     """Query the Perplexity Agent API and normalize the grounded result.
 
     Use this provider when web search should come from Perplexity's Agent
@@ -70,6 +78,7 @@ class PerplexitySearch(_NonFatalNoticeMixin, SearchProvider):
         cache_maxsize: int = 256,
         cache_ttl: int = 3600,
         request_params: dict[str, Any] | None = None,
+        timeout: float = SEARCH_TIMEOUT,
         # Internal: accept a pre-built client from provider factories/tests.
         _client: Perplexity | None = None,
     ) -> None:
@@ -94,6 +103,8 @@ class PerplexitySearch(_NonFatalNoticeMixin, SearchProvider):
                 ``3600``.
             request_params: Optional extra SDK parameters merged into each
                 ``responses.create`` call after reserved keys are filtered.
+            timeout: Budget in seconds for one complete logical search,
+                including every visible retry and backoff.
             _client: Optional prebuilt SDK client used internally by the
                 provider factory, config bridge, and tests.
 
@@ -108,7 +119,7 @@ class PerplexitySearch(_NonFatalNoticeMixin, SearchProvider):
         else:
             client_kwargs: dict[str, Any] = {
                 "api_key": api_key,
-                "max_retries": _SDK_MAX_RETRIES,
+                "max_retries": 0,
             }
             if base_url:
                 client_kwargs["base_url"] = base_url
@@ -119,6 +130,7 @@ class PerplexitySearch(_NonFatalNoticeMixin, SearchProvider):
         self._cache: TTLCache = TTLCache(maxsize=cache_maxsize, ttl=cache_ttl)
         self._cache_lock = threading.Lock()
         self._request_params = dict(request_params or {})
+        self._timeout = float(timeout)
 
     # -- public interface --------------------------------------------------
 
@@ -160,6 +172,7 @@ class PerplexitySearch(_NonFatalNoticeMixin, SearchProvider):
                 raises ``RateLimitError``.
         """
         self._clear_nonfatal_notice()
+        self._clear_retry_notices()
         cache_parts = [
             query,
             str(recency_filter),
@@ -178,11 +191,11 @@ class PerplexitySearch(_NonFatalNoticeMixin, SearchProvider):
         hint = _build_recency_language_hints(recency_filter, language_filter)
         user_input = f"{hint}\n\n{effective_query}" if hint else effective_query
 
+        operation_deadline = _operation_deadline(self._timeout, deadline)
         create_kwargs: dict[str, Any] = {
             "input": user_input,
             "tools": [{"type": "web_search"}],
             "stream": False,
-            "timeout": _bounded_timeout(SEARCH_TIMEOUT, deadline),
         }
         # An explicit model wins; otherwise the preset (default "fast-search")
         # drives the agent and bundles the inline-citation system prompt.
@@ -198,7 +211,24 @@ class PerplexitySearch(_NonFatalNoticeMixin, SearchProvider):
             create_kwargs[param_key] = param_val
 
         try:
-            response = self._client.responses.create(**create_kwargs)
+            response = _call_openai_chat_completion_with_retries(
+                provider_label=type(self).__name__,
+                model=self.search_model,
+                operation="web_search",
+                deadline=operation_deadline,
+                outer_deadline=deadline,
+                timeout_label="Perplexity-WebSearch",
+                configured_timeout_seconds=self._timeout,
+                create=lambda: self._client.responses.create(
+                    **{
+                        **create_kwargs,
+                        "timeout": _bounded_timeout(
+                            self._timeout, operation_deadline
+                        ),
+                    }
+                ),
+                append_retry_notice=self._append_retry_notice,
+            )
         except RateLimitError as exc:
             log.error("FATAL Rate-Limit (Perplexity '%s'): %s", query, exc)
             raise AgentRateLimited(self._model, exc) from exc
@@ -209,14 +239,35 @@ class PerplexitySearch(_NonFatalNoticeMixin, SearchProvider):
             log.error("Perplexity-Suche fehlgeschlagen fuer '%s': %s", query, exc)
             self._set_nonfatal_notice(
                 f"Perplexity-Suche fehlgeschlagen fuer Query '{query[:80]}'; "
-                "leeres Ergebnis wird weiterverwendet."
+                "leeres Ergebnis wird weiterverwendet.",
+                code=(
+                    "provider_timeout"
+                    if exc.status_code == 408
+                    else (
+                        "upstream_5xx"
+                        if exc.status_code >= 500
+                        else "provider_error"
+                    )
+                ),
+                http_status=exc.status_code,
+            )
+            return GroundedSearchResult()
+        except APITimeoutError as exc:
+            log.error("Perplexity-Suche Timeout fuer '%s': %s", query, exc)
+            self._set_nonfatal_notice(
+                f"Perplexity-Suche Timeout fuer Query '{query[:80]}'; "
+                "leeres Ergebnis wird weiterverwendet.",
+                code="provider_timeout",
+                http_status=504,
             )
             return GroundedSearchResult()
         except APIError as exc:
             log.error("Perplexity-Suche fehlgeschlagen fuer '%s': %s", query, exc)
             self._set_nonfatal_notice(
                 f"Perplexity-Suche fehlgeschlagen fuer Query '{query[:80]}'; "
-                "leeres Ergebnis wird weiterverwendet."
+                "leeres Ergebnis wird weiterverwendet.",
+                code="temporary_transport",
+                http_status=503,
             )
             return GroundedSearchResult()
 

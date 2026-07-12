@@ -16,15 +16,19 @@ import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+from inqtrix.constants import REASONING_TIMEOUT
+from inqtrix.providers.base import (
+    MAX_PROVIDER_ATTEMPTS,
+    _check_provider_operation_deadline,
+    _operation_deadline,
+    _retry_delay_seconds,
+    _sleep_before_retry,
+)
 from inqtrix.urls import sanitize_error
 
 log = logging.getLogger("inqtrix")
 
-_MAX_RATE_LIMIT_RETRIES = 5
-"""Bounded 429 retries per rerank call. Serverless deployments (Azure
-AI Foundry) enforce strict per-minute quotas; five honored
-Retry-After/backoff rounds bridge a quota window without ever looping
-unbounded."""
+_RETRYABLE_RERANK_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504})
 
 
 class RerankerError(RuntimeError):
@@ -116,7 +120,7 @@ class CohereRerank(RerankerProvider):
         base_url: str,
         default_model: str,
         rerank_path: str = "/v2/rerank",
-        timeout: float = 30.0,
+        timeout: float = REASONING_TIMEOUT,
     ) -> None:
         if not (api_key or "").strip():
             raise ValueError("CohereRerank requires a non-empty api_key")
@@ -161,36 +165,60 @@ class CohereRerank(RerankerProvider):
             "documents": documents,
             "top_n": min(top_n, len(documents)),
         }
+        operation_deadline = _operation_deadline(self._timeout, None)
         try:
-            for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
-                response = httpx.post(
-                    self._url,
-                    headers={"Authorization": f"Bearer {self._api_key}"},
-                    json=request_body,
-                    timeout=self._timeout,
+            for attempt in range(1, MAX_PROVIDER_ATTEMPTS + 1):
+                _check_provider_operation_deadline(
+                    operation_deadline,
+                    None,
+                    label="Rerank-Aufruf",
                 )
+                try:
+                    response = httpx.post(
+                        self._url,
+                        headers={"Authorization": f"Bearer {self._api_key}"},
+                        json=request_body,
+                        timeout=max(0.001, operation_deadline - time.monotonic()),
+                    )
+                except httpx.TransportError as exc:
+                    if attempt >= MAX_PROVIDER_ATTEMPTS:
+                        raise
+                    delay = _retry_delay_seconds(attempt - 1)
+                    log.warning(
+                        "Rerank transport error (model=%s, attempt=%d/%d). "
+                        "Retrying in %.1fs: %s",
+                        active_model,
+                        attempt,
+                        MAX_PROVIDER_ATTEMPTS,
+                        delay,
+                        sanitize_error(exc),
+                    )
+                    _sleep_before_retry(delay, operation_deadline)
+                    continue
                 if (
-                    response.status_code == 429
-                    and attempt < _MAX_RATE_LIMIT_RETRIES
+                    response.status_code in _RETRYABLE_RERANK_STATUSES
+                    and attempt < MAX_PROVIDER_ATTEMPTS
                 ):
-                    # Serverless rerank deployments enforce strict
-                    # per-minute limits; honoring Retry-After is the
-                    # contract, backoff the fallback. Visible, bounded,
-                    # never an infinite loop.
                     retry_after = response.headers.get("retry-after", "")
-                    delay = (
+                    retry_after_seconds = (
                         float(retry_after)
                         if retry_after.replace(".", "", 1).isdigit()
-                        else float(2 ** (attempt + 1))
+                        else None
+                    )
+                    delay = _retry_delay_seconds(
+                        attempt - 1,
+                        retry_after_seconds,
                     )
                     log.warning(
-                        "Rerank rate-limited (429), Versuch %d/%d, "
-                        "warte %.1fs",
-                        attempt + 1,
-                        _MAX_RATE_LIMIT_RETRIES,
+                        "Rerank transient response (model=%s, status=%d, "
+                        "attempt=%d/%d). Retrying in %.1fs.",
+                        active_model,
+                        response.status_code,
+                        attempt,
+                        MAX_PROVIDER_ATTEMPTS,
                         delay,
                     )
-                    time.sleep(delay)
+                    _sleep_before_retry(delay, operation_deadline)
                     continue
                 response.raise_for_status()
                 payload = response.json()
@@ -254,7 +282,7 @@ class LLMReranker(RerankerProvider):
         default_model: str = "",
         max_candidates: int = 20,
         max_chars_per_document: int = 800,
-        timeout: float = 60.0,
+        timeout: float = REASONING_TIMEOUT,
     ) -> None:
         self._llm = llm
         self._default_model = default_model

@@ -53,6 +53,17 @@ class _LocalJob:
 
     work: Any = field(repr=False, default=None)
     cancel_event: threading.Event = field(default_factory=threading.Event)
+    parked: bool = False
+    """The job's run sits in a waiting status (agent interrupt): the
+    dispatch worker keeps ``work`` so a resume can re-dispatch it."""
+    park_in_flight: bool = False
+    """Set between ``mark_waiting`` and the parking worker's unwind
+    (its ``finally``). A resume landing in that window must defer its
+    re-dispatch to the unwind (``resume_requested``) — dispatching
+    earlier would run the closure on two threads at once."""
+    resume_requested: bool = False
+    """A resume arrived while ``park_in_flight``; the parking worker's
+    unwind performs the deferred re-dispatch."""
 
 
 class PollingJobSubscription:
@@ -133,6 +144,22 @@ class PollingJobSubscription:
         self._stop.set()
 
 
+def resolve_orphan_sweep(queue: Any, recover_orphans: bool | None) -> bool:
+    """Whether this store instance may run the blanket orphan sweep.
+
+    The sweep unconditionally fails every queued/running row and is only
+    correct for the documented single-process no-queue deployment.
+    ``recover_orphans`` therefore overrides the historical ``queue is
+    None`` inference: the queue-backed worker constructs its store with
+    ``queue=None`` (claim-mode wiring) but must NOT sweep — Valkey
+    stream reclaim is its crash-recovery path. ``None`` keeps the
+    inference for existing constructors (API single-process unchanged).
+    """
+    if recover_orphans is None:
+        return queue is None
+    return bool(recover_orphans)
+
+
 class DurableJobStoreBase:
     """The schema-agnostic half of a durable Postgres job store.
 
@@ -157,6 +184,7 @@ class DurableJobStoreBase:
         worker_id: str,
         queue: Any,
         max_concurrent: int,
+        recover_orphans: bool | None = None,
     ) -> None:
         self._engine = engine
         self._session_factory = build_session_factory(engine)
@@ -177,9 +205,17 @@ class DurableJobStoreBase:
         self._loop_thread.start()
         # In-process execution: queued/running rows from a previous
         # process are unrecoverable orphans (their work closures died
-        # with it). Swept lazily on the first database touch; queue mode
-        # never sweeps — workers own those rows.
-        self._sweep_orphans = queue is None
+        # with it). Swept lazily on the first database touch; queue-mode
+        # API processes never sweep — workers own those rows. The sweep
+        # is decoupled from the queue-mode inference via
+        # ``recover_orphans`` because the inference is WRONG for one
+        # constructor: the queue-backed WORKER also builds its store
+        # with ``queue=None`` (worker-claim wiring, not in-process
+        # ownership) and must pass an explicit ``False`` — its
+        # crash-recovery path is stream reclaim, and the blanket sweep
+        # would fail every queued/running run of the deployment on
+        # worker start.
+        self._sweep_orphans = resolve_orphan_sweep(queue, recover_orphans)
 
     # -- async bridge ----------------------------------------------------- #
 
@@ -235,25 +271,55 @@ class DurableJobStoreBase:
         self, entity_id: str, work: Any, cancel_event: threading.Event
     ) -> None:
         handle = self._make_handle(entity_id, cancel_event)
+        crashed = False
         try:
             work(handle)
             # Auto-complete safety net: the work body normally completes
             # the job itself, so this is usually a no-op (suppressed
             # warning) — the public complete()/fail() path keeps the
-            # genuine fenced-out warning.
-            self._auto_complete(entity_id)
+            # genuine fenced-out warning. An execution that PARKED its
+            # run never auto-completes: between the park and this line a
+            # resume may already have re-queued the run, and completing
+            # it here would destroy the interrupt.
+            if not getattr(handle, "parked", False):
+                self._auto_complete(entity_id)
         except Exception as exc:  # noqa: BLE001 — workers terminate cleanly
+            crashed = True
             log.exception("%s %s failed", self._job_kind, entity_id)
-            self.fail(entity_id, sanitize_error(exc))
+            self._terminate_work_exception(handle, entity_id, exc)
         finally:
+            # The park handoff completes HERE: only after this unwind
+            # may the retained closure be dispatched again (a resume
+            # that arrived earlier parked its request in
+            # ``resume_requested`` and is honored now).
             with self._lock:
-                local = self._local.pop(entity_id, None)
-                if local is not None:
-                    local.work = None
+                local = self._local.get(entity_id)
+                if local is not None and local.parked and not crashed:
+                    local.park_in_flight = False
+                    if local.resume_requested:
+                        local.resume_requested = False
+                        local.parked = False
+                        self._pending.append(entity_id)
+                else:
+                    self._local.pop(entity_id, None)
+                    if local is not None:
+                        local.work = None
                 self._running_count = max(0, self._running_count - 1)
                 self._dispatch_locked()
 
     # -- schema-bearing hooks (subclasses implement) ---------------------- #
+
+    def _terminate_work_exception(
+        self, handle: Any, entity_id: str, exc: BaseException
+    ) -> None:
+        """Persist one in-process work exception.
+
+        Generic durable jobs retain the historical server-error behavior.
+        Run stores override this hook to preserve their typed terminal
+        vocabulary without coupling this shared base to run-domain modules.
+        """
+        del handle
+        self.fail(entity_id, sanitize_error(exc))
 
     def _claim_db(self, entity_id: str, tenant_id: str, *, allow_takeover: bool):
         """Async CAS claim (queued -> running, attempt + 1)."""

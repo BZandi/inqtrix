@@ -5,6 +5,11 @@ import type {
   KnowledgeRunStepRecord,
   KnowledgeStepFacts,
 } from '@/features/project/types'
+import {
+  asFiniteNumber as numberFact,
+  asNonEmptyString as stringFact,
+  asStringArray as stringArrayFact,
+} from '@/lib/coerce'
 
 /**
  * Pure event-to-step mapping for the live knowledge run card.
@@ -259,17 +264,4 @@ function finishAllSteps(progress: KnowledgeRunProgressRecord): KnowledgeRunProgr
       step.status === 'done' ? step : { ...step, status: 'done' }
     )),
   }
-}
-
-function numberFact(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
-}
-
-function stringFact(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value : undefined
-}
-
-function stringArrayFact(value: unknown): string[] {
-  if (!Array.isArray(value)) return []
-  return value.filter((item): item is string => typeof item === 'string')
 }

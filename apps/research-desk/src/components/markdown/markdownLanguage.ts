@@ -96,6 +96,30 @@ export function plainCodeLanguageFromClassName(className: unknown): string | nul
   return null
 }
 
+/** The RAW fence language token (lowercased) WITHOUT the Shiki
+ * whitelist — for renderers that dispatch on languages the highlighter
+ * does not know (the mermaid figure). `plainCodeLanguageFromClassName`
+ * stays the highlighter-facing, whitelist-normalized reading. */
+export function rawCodeLanguageFromClassName(className: unknown): string | null {
+  if (Array.isArray(className)) {
+    for (const item of className) {
+      const language = rawCodeLanguageFromClassName(item)
+      if (language) return language
+    }
+    return null
+  }
+
+  if (typeof className !== 'string') return null
+
+  for (const token of className.split(/\s+/)) {
+    if (!token.startsWith('language-')) continue
+    const raw = token.slice('language-'.length).trim().toLowerCase()
+    if (raw) return raw
+  }
+
+  return null
+}
+
 function normalizeMarkdownCodeLanguage(value: unknown): string | null {
   if (typeof value !== 'string') return null
 

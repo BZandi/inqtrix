@@ -42,7 +42,9 @@ describe('editorSync converters', () => {
     expect(payload.folder_id).toBe('edf_1')
     expect(payload.source).toBe('imported-research-report')
     expect(payload.source_run_id).toBe('run_1')
-    expect(payload.revision).toBe(7)
+    // The record's revision is the last-synced server base (7); the save
+    // creates base+1 (8), which the store CAS accepts only while stored == 7.
+    expect(payload.revision).toBe(8)
     expect(payload.created_at).toBe(server.created_at)
     expect(payload.updated_at).toBe(server.updated_at)
     expect(payload.diff_anchor_updated_at).toBe(server.diff_anchor_updated_at)

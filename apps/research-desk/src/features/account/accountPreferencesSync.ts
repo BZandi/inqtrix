@@ -40,6 +40,12 @@ export function preferencesFromServer(
   fallback: ProjectPreferences,
 ): ProjectPreferences {
   return {
+    // Boolean opt-in: an absent field (legacy row / old server) resolves to
+    // the fallback, which is the privacy default OFF.
+    agentMemoryEnabled:
+      typeof server.agent_memory_enabled === 'boolean'
+        ? server.agent_memory_enabled
+        : fallback.agentMemoryEnabled,
     contrastMode: VALID_CONTRAST.has(server.contrast_mode)
       ? (server.contrast_mode as ContrastMode)
       : fallback.contrastMode,
@@ -66,6 +72,7 @@ export function serverAccountPreferencesPayload(
   theme: string
   theme_preset: string
   user_bubble_tone: string
+  agent_memory_enabled: boolean
   updated_at: number
 } {
   return {
@@ -74,6 +81,9 @@ export function serverAccountPreferencesPayload(
     theme: preferences.theme,
     theme_preset: preferences.themePreset,
     user_bubble_tone: preferences.userBubbleTone,
+    // Whole-row upsert: the opt-in MUST ride every save or the server resets
+    // it to the default OFF.
+    agent_memory_enabled: preferences.agentMemoryEnabled,
     updated_at: updatedAt,
   }
 }
@@ -86,5 +96,6 @@ export function preferencesFingerprint(preferences: ProjectPreferences): string 
     preferences.theme,
     preferences.themePreset,
     preferences.userBubbleTone,
+    preferences.agentMemoryEnabled ? 'mem:on' : 'mem:off',
   ].join('|')
 }

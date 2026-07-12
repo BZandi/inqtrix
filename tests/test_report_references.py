@@ -74,3 +74,24 @@ def test_web_references_still_dedup_by_url() -> None:
 
     assert [reference.label for reference in out] == ["E1"]
     assert out[0].document_id is None
+
+
+def test_internal_reference_without_url_keeps_identity_and_support_fields() -> None:
+    out = _report_references_from_state(
+        [
+            {
+                "label": "K1",
+                "document_id": "doc1",
+                "chunk_index": 4,
+                "source_text": "Exact internal passage",
+            }
+        ],
+        tier_by_url={},
+        tiering=_Tiering(),
+    )
+
+    assert len(out) == 1
+    assert out[0].url == "inqtrix://documents/doc1#chunk-4"
+    assert out[0].document_id == "doc1"
+    assert out[0].chunk_index == 4
+    assert out[0].source_text == "Exact internal passage"

@@ -277,15 +277,20 @@ export function seedSystemCapabilities(): InqtrixCapabilities {
       reranker: false,
       sharing: true,
     },
-    // COMPACT-default-derived waits so the demo System Status panel shows the
-    // same timeouts shape the real /v1/capabilities publishes (editor =
-    // min(330, 120 + 30), chat = 300 + 30, text = 60 + 30). The demo editor/chat
+    // Default-derived waits so the demo System Status panel shows the
+    // same timeouts shape the real /v1/capabilities publishes. The demo editor/chat
     // client-abort path still uses the fixed fallbacks: discovery is disabled in
     // demo mode, so the run paths receive capabilities = null, not this seed.
     timeouts: {
-      editor_wait_seconds: 150,
-      chat_wait_seconds: 330,
-      text_wait_seconds: 90,
+      editor_wait_seconds: 630,
+      chat_wait_seconds: 3630,
+      text_wait_seconds: 630,
+      reasoning_operation_seconds: 600,
+      editor_operation_seconds: 600,
+      search_operation_seconds: 600,
+      claim_extract_operation_seconds: 600,
+      research_run_seconds: 3600,
+      max_attempts: 3,
     },
   }
 }

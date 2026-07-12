@@ -171,6 +171,41 @@ def test_complete_structured_sets_response_format(
     assert response_format["json_schema"]["schema"]["required"] == ["claims"]
 
 
+def test_complete_structured_hardens_defaulted_schema_to_strict(
+    mock_azure_client: tuple[type, MagicMock],
+) -> None:
+    # A model with a defaulted/optional property (as Pydantic emits for the
+    # shared ExecutionPlanModel) must be normalised to the strict contract by
+    # the provider: every property in `required`, no `default` — otherwise
+    # Azure `strict:True` returns HTTP 400 (the agent PLAN-phase failure).
+    AzureOpenAILLM, mock_client = mock_azure_client
+    mock_client.chat.completions.create.return_value = _chat_completion_response(
+        '{"a": 1, "b": 2}', 3, 3
+    )
+    llm = AzureOpenAILLM(
+        azure_endpoint="https://test.openai.azure.com/",
+        api_key="test-key",
+    )
+    llm.complete_structured(
+        "x",
+        schema={
+            "type": "object",
+            "properties": {
+                "a": {"type": "integer"},
+                "b": {"type": "integer", "default": 0},
+            },
+            "required": ["a"],
+            "additionalProperties": False,
+        },
+        schema_name="s",
+    )
+    sent = mock_client.chat.completions.create.call_args.kwargs["response_format"][
+        "json_schema"
+    ]["schema"]
+    assert set(sent["required"]) == {"a", "b"}
+    assert "default" not in sent["properties"]["b"]
+
+
 def test_complete_with_system_prompt(mock_azure_client):
     AzureOpenAILLM, mock_client = mock_azure_client
     mock_client.chat.completions.create.return_value = _chat_completion_response("ok")

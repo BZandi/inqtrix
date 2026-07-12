@@ -175,18 +175,17 @@ def main() -> None:
         max_rounds=4,                       # max research-loop iterations before forced stop
         # confidence threshold (1-10) — stop early when reached
         confidence_stop=8,
-        first_round_queries=6,              # number of parallel search queries in first round
-        answer_prompt_citations_max=60,     # max citation URLs forwarded to the answer-synthesis prompt
+        first_round_queries=8,              # DEEP first-round search width
+        answer_prompt_citations_max=500,    # DEEP citation context budget
         # hard wall-clock deadline for the entire run (seconds).
-        # Opus through a proxy needs more time than Sonnet — 600s is a
-        # safe default.  Reduce to 300 for Sonnet-only setups.
-        max_total_seconds=600,
+        # Active-run deadline shared by all four DEEP rounds.
+        max_total_seconds=3600,
         max_question_length=60_000,         # reject questions longer than this (characters)
 
         # -- Timeouts (per individual LLM/search call, in seconds) --
-        reasoning_timeout=120,              # timeout for reasoning / planning / answer calls
-        search_timeout=60,                  # timeout for each web-search call
-        claim_extract_timeout=60,               # timeout for each claim-extraction call
+        reasoning_timeout=600,              # logical reasoning-operation budget
+        search_timeout=600,                 # logical web-search budget, retries included
+        claim_extract_timeout=600,          # logical claim-extraction budget
 
         # -- Risk scoring ──────────────────────────────────────────────
         #

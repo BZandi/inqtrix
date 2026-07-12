@@ -152,7 +152,7 @@ The prompt + parser live in `prompts.py::EVALUATE_FORMAT_SUFFIX` (~lines
 | `max_rounds` | `settings.py` | Config | Hard upper bound | 2 COMPACT / 4 DEEP |
 | `min_rounds` | `settings.py` | Config | Suppresses stop until reached | 1 COMPACT / 2 DEEP |
 | `confidence_stop` | `settings.py` | Config | Final stop threshold | 8 |
-| `first_round_queries` | `settings.py` | Config | Round-0 query count | 6 COMPACT / 10 DEEP |
+| `first_round_queries` | `settings.py` | Config | Round-0 query count | 6 COMPACT / 8 DEEP |
 | `_LATER_ROUND_QUERY_MIN` | `nodes.py` | Constant | Min queries in later research rounds | 6 |
 
 ### Group 13 -- Materialization caps
@@ -173,10 +173,10 @@ See [report-profiles.md](../configuration/report-profiles.md).
 | Knob | Where | Default | Effect |
 |---|---|---|---|
 | `DEFAULT_LLM_MAX_OUTPUT_TOKENS` | `constants.py` | 64 000 | Default output tokens for provider constructors |
-| `max_total_seconds` | `settings.py` | 300 / 1800 | Run wall-clock deadline |
-| `reasoning_timeout` | `settings.py` | 120 | Per reasoning-model call |
-| `search_timeout` | `settings.py` | 60 | Per search provider call |
-| `claim_extract_timeout` | `settings.py` | 60 | Per parallel claim-extraction batch |
+| `max_total_seconds` | `settings.py` | 3600 | Active research-run wall-clock deadline |
+| `reasoning_timeout` | `settings.py` | 600 | One reasoning operation, including retries |
+| `search_timeout` | `settings.py` | 600 | One search operation, including retries |
+| `claim_extract_timeout` | `settings.py` | 600 | One claim-extraction operation, including retries |
 
 ### Group 15 -- Answer audit
 

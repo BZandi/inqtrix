@@ -23,6 +23,7 @@ from inqtrix.nodes import (
     answer,
     apply_answer_contract_claim_gates,
     apply_confidence_guardrails,
+    classify,
     evaluate,
     search,
 )
@@ -30,7 +31,7 @@ from inqtrix.providers.base import LLMResponse, ProviderContext
 from inqtrix.search_result import GroundedSearchResult, GroundedSource
 from inqtrix.report_profiles import ReportProfile
 from inqtrix.settings import AgentSettings
-from inqtrix.state import initial_state
+from inqtrix.state import initial_state, track_tokens
 from inqtrix.strategies import StrategyContext, create_default_strategies
 
 
@@ -78,6 +79,15 @@ class _DirectLLMStub:
 
     def is_available(self) -> bool:
         return True
+
+
+class _BudgetDirectLLMStub(_DirectLLMStub):
+    def complete_with_metadata(
+        self, prompt: str, **kwargs: Any
+    ) -> LLMResponse:
+        response = super().complete_with_metadata(prompt, **kwargs)
+        track_tokens(kwargs["state"], response)
+        return response
 
 
 class _DoneStopCriteria:
@@ -151,6 +161,61 @@ def test_run_skip_search_uses_direct_llm_without_graph(
     assert result["result_state"]["done"] is True
 
 
+def test_direct_llm_enforces_token_budget_after_its_only_model_call() -> None:
+    settings = AgentSettings(skip_search=True)
+    providers = ProviderContext(
+        llm=_BudgetDirectLLMStub(), search=_SearchStub()
+    )
+
+    result = run(
+        "Hallo",
+        providers=providers,
+        strategies=create_default_strategies(settings),
+        settings=settings,
+        token_budget=1,
+    )
+
+    assert result["answer"] == ""
+    assert result["usage"] == {"prompt_tokens": 2, "completion_tokens": 3}
+    assert result["result_state"]["cancelled"] is True
+    assert result["result_state"]["cancel_reason"] == "token_budget_exceeded"
+
+
+def test_research_terminal_boundary_preserves_final_usage_on_budget_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import inqtrix.graph as graph_module
+
+    class FinalUsageAgent:
+        def invoke(self, state: dict[str, Any]) -> dict[str, Any]:
+            return {
+                **state,
+                "answer": "finished answer",
+                "total_prompt_tokens": 7,
+                "total_completion_tokens": 5,
+            }
+
+    monkeypatch.setattr(
+        graph_module,
+        "get_agent",
+        lambda *_args, **_kwargs: FinalUsageAgent(),
+    )
+    settings = AgentSettings()
+    providers = ProviderContext(llm=_EvalLLMStub(""), search=_SearchStub())
+
+    result = run(
+        "Hallo",
+        providers=providers,
+        strategies=create_default_strategies(settings),
+        settings=settings,
+        token_budget=1,
+    )
+
+    assert result["answer"] == ""
+    assert result["usage"] == {"prompt_tokens": 7, "completion_tokens": 5}
+    assert result["result_state"]["cancel_reason"] == "token_budget_exceeded"
+
+
 def test_default_graph_config_emits_native_node_events(monkeypatch):
     import inqtrix.nodes as nodes_module
 
@@ -178,6 +243,34 @@ def test_default_graph_config_emits_native_node_events(monkeypatch):
         "inqtrix.node.finished",
     ]
     assert events[0][1]["snapshot"]["current_node"] == "classify"
+
+
+def test_explicit_recency_survives_classification_fallback() -> None:
+    """A provider failure cannot replace a delegated freshness contract."""
+
+    class _FailingClassifyLLM(_EvalLLMStub):
+        def complete(self, *args, **kwargs):
+            raise AgentTimeout("classification unavailable")
+
+    settings = AgentSettings(testing_mode=True)
+    providers = ProviderContext(
+        llm=_FailingClassifyLLM(""),
+        search=_SearchStub(),
+    )
+    state = initial_state(
+        "Welche Entwicklungen gab es?",
+        web_recency="year",
+    )
+
+    classify(
+        state,
+        providers=providers,
+        strategies=create_default_strategies(settings),
+        settings=settings,
+    )
+
+    assert state["recency"] == "year"
+    assert state["iteration_logs"][-1]["_classify_fallback"] is True
 
 
 def test_run_test_exports_public_sources_and_claims(monkeypatch):
@@ -815,7 +908,7 @@ def test_run_emits_progress_before_rate_limit_abort(monkeypatch):
     providers = ProviderContext(llm=_EvalLLMStub(""), search=_SearchStub())
     strategies = create_default_strategies(settings)
 
-    run(
+    result = run(
         "Was ist passiert?",
         progress_queue=progress_queue,
         providers=providers,
@@ -828,6 +921,10 @@ def test_run_emits_progress_before_rate_limit_abort(monkeypatch):
         messages.append(progress_queue.get()[1])
 
     assert any(msg.startswith("Recherche abgebrochen:") for msg in messages)
+    assert result["result_state"]["_terminal_failure"] == {
+        "type": "rate_limited",
+        "message": "Rate-Limit erreicht fuer Modell 'demo-model': 429",
+    }
 
 
 def test_answer_catches_anthropic_api_error_and_falls_back():

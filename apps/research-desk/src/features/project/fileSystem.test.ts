@@ -39,6 +39,7 @@ describe('resolvePinnedExplorerFromManifest', () => {
       chatThreadIds: ['ct-1'],
       editorDocumentIds: ['doc-1'],
       knowledgeSessionIds: ['ks-1'],
+      agentSessionIds: [],
     })
   })
 
@@ -56,6 +57,7 @@ describe('resolvePinnedExplorerFromManifest', () => {
       chatThreadIds: [],
       editorDocumentIds: [],
       knowledgeSessionIds: ['ks-server'],
+      agentSessionIds: [],
     })
   })
 })

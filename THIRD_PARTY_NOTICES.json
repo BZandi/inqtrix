@@ -279,7 +279,7 @@
       "license": "MIT License",
       "metadata_source": "python package metadata: classifiers",
       "name": "langchain-core",
-      "version": "1.3.2"
+      "version": "1.4.8"
     },
     {
       "dependency_surface": "python",
@@ -287,7 +287,7 @@
       "license": "MIT License",
       "metadata_source": "python package metadata: classifiers",
       "name": "langchain-protocol",
-      "version": "0.0.11"
+      "version": "0.0.18"
     },
     {
       "dependency_surface": "python",
@@ -295,7 +295,7 @@
       "license": "MIT",
       "metadata_source": "python package metadata: License-Expression",
       "name": "langgraph",
-      "version": "1.1.9"
+      "version": "1.2.7"
     },
     {
       "dependency_surface": "python",
@@ -303,7 +303,7 @@
       "license": "MIT",
       "metadata_source": "python package metadata: License-Expression",
       "name": "langgraph-checkpoint",
-      "version": "3.0.1"
+      "version": "4.1.1"
     },
     {
       "dependency_surface": "python",
@@ -311,7 +311,7 @@
       "license": "MIT",
       "metadata_source": "python package metadata: License-Expression",
       "name": "langgraph-prebuilt",
-      "version": "1.0.10"
+      "version": "1.1.0"
     },
     {
       "dependency_surface": "python",
@@ -319,7 +319,7 @@
       "license": "MIT",
       "metadata_source": "python package metadata: License-Expression",
       "name": "langgraph-sdk",
-      "version": "0.3.13"
+      "version": "0.4.2"
     },
     {
       "dependency_surface": "python",
@@ -327,7 +327,7 @@
       "license": "MIT",
       "metadata_source": "python package metadata: License",
       "name": "langsmith",
-      "version": "0.7.22"
+      "version": "0.9.6"
     },
     {
       "dependency_surface": "python",
@@ -694,6 +694,14 @@
       "ecosystem": "python",
       "license": "BSD License",
       "metadata_source": "python package metadata: classifiers",
+      "name": "websockets",
+      "version": "15.0.1"
+    },
+    {
+      "dependency_surface": "python",
+      "ecosystem": "python",
+      "license": "BSD License",
+      "metadata_source": "python package metadata: classifiers",
       "name": "xxhash",
       "version": "3.6.0"
     },
@@ -708,10 +716,66 @@
     {
       "dependency_surface": "python-dev",
       "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "anthropic",
+      "version": "0.115.1"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "bracex",
+      "version": "3.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "deepagents",
+      "version": "0.6.12"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "docstring-parser",
+      "version": "0.18.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
       "license": "BSD-3-Clause",
       "metadata_source": "python package metadata: License-Expression",
       "name": "fakeredis",
       "version": "2.36.1"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "filetype",
+      "version": "1.2.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache Software License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "google-auth",
+      "version": "2.55.1"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache-2.0",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "google-genai",
+      "version": "2.10.0"
     },
     {
       "dependency_surface": "python-dev",
@@ -734,6 +798,38 @@
       "ecosystem": "python",
       "license": "MIT License",
       "metadata_source": "python package metadata: classifiers",
+      "name": "langchain",
+      "version": "1.3.11"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "langchain-anthropic",
+      "version": "1.4.8"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License",
+      "name": "langchain-google-genai",
+      "version": "4.2.6"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "langgraph-checkpoint-postgres",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "MIT License",
+      "metadata_source": "python package metadata: classifiers",
       "name": "pluggy",
       "version": "1.6.0"
     },
@@ -744,6 +840,38 @@
       "metadata_source": "python package metadata: License-Expression",
       "name": "portalocker",
       "version": "3.2.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "Apache-2.0 AND BSD-2-Clause",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "prometheus-client",
+      "version": "0.25.0"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "LGPL-3.0-only",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "psycopg",
+      "version": "3.3.4"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "LGPL-3.0-only",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "psycopg-pool",
+      "version": "3.3.1"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
+      "license": "BSD License",
+      "metadata_source": "python package metadata: classifiers",
+      "name": "pyasn1-modules",
+      "version": "0.4.2"
     },
     {
       "dependency_surface": "python-dev",
@@ -812,10 +940,42 @@
     {
       "dependency_surface": "python-dev",
       "ecosystem": "python",
+      "license": "MIT",
+      "metadata_source": "python package metadata: License-Expression",
+      "name": "wcmatch",
+      "version": "10.2"
+    },
+    {
+      "dependency_surface": "python-dev",
+      "ecosystem": "python",
       "license": "BSD-2-Clause",
       "metadata_source": "python package metadata: License-Expression",
       "name": "wrapt",
       "version": "2.1.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@antfu/install-pkg",
+      "version": "1.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@braintree/sanitize-url",
+      "version": "7.1.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "Apache-2.0",
+      "metadata_source": "pnpm package metadata",
+      "name": "@chevrotain/types",
+      "version": "11.1.2"
     },
     {
       "dependency_surface": "react-prod",
@@ -950,6 +1110,22 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "@iconify/types",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@iconify/utils",
+      "version": "3.1.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "@lezer/common",
       "version": "1.5.2"
     },
@@ -1008,6 +1184,14 @@
       "metadata_source": "pnpm package metadata",
       "name": "@marijn/find-cluster-break",
       "version": "1.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@mermaid-js/parser",
+      "version": "1.2.0"
     },
     {
       "dependency_surface": "react-prod",
@@ -1726,6 +1910,254 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "@types/d3",
+      "version": "7.4.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-array",
+      "version": "3.2.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-axis",
+      "version": "3.0.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-brush",
+      "version": "3.0.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-chord",
+      "version": "3.0.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-color",
+      "version": "3.1.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-contour",
+      "version": "3.0.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-delaunay",
+      "version": "6.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-dispatch",
+      "version": "3.0.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-drag",
+      "version": "3.0.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-dsv",
+      "version": "3.0.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-ease",
+      "version": "3.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-fetch",
+      "version": "3.0.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-force",
+      "version": "3.0.10"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-format",
+      "version": "3.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-geo",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-hierarchy",
+      "version": "3.1.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-interpolate",
+      "version": "3.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-path",
+      "version": "3.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-polygon",
+      "version": "3.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-quadtree",
+      "version": "3.0.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-random",
+      "version": "3.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-scale",
+      "version": "4.0.9"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-scale-chromatic",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-selection",
+      "version": "3.0.11"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-shape",
+      "version": "3.1.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-time",
+      "version": "3.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-time-format",
+      "version": "4.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-timer",
+      "version": "3.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-transition",
+      "version": "3.0.9"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/d3-zoom",
+      "version": "3.0.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "@types/debug",
       "version": "4.1.13"
     },
@@ -1744,6 +2176,14 @@
       "metadata_source": "pnpm package metadata",
       "name": "@types/estree-jsx",
       "version": "1.0.5"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@types/geojson",
+      "version": "7946.0.16"
     },
     {
       "dependency_surface": "react-prod",
@@ -1798,6 +2238,14 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "@types/trusted-types",
+      "version": "2.0.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "@types/unist",
       "version": "2.0.11"
     },
@@ -1824,6 +2272,14 @@
       "metadata_source": "pnpm package metadata",
       "name": "@ungap/structured-clone",
       "version": "1.3.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "@upsetjs/venn.js",
+      "version": "2.0.0"
     },
     {
       "dependency_surface": "react-prod",
@@ -1951,6 +2407,14 @@
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
       "name": "commander",
+      "version": "7.2.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "commander",
       "version": "8.3.0"
     },
     {
@@ -1966,8 +2430,344 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "cose-base",
+      "version": "1.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "cose-base",
+      "version": "2.2.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "crelt",
       "version": "1.0.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "cytoscape",
+      "version": "3.34.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "cytoscape-cose-bilkent",
+      "version": "4.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "cytoscape-fcose",
+      "version": "2.2.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3",
+      "version": "7.9.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-3-Clause",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-array",
+      "version": "2.12.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-array",
+      "version": "3.2.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-axis",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-brush",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-chord",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-color",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-contour",
+      "version": "4.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-delaunay",
+      "version": "6.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-dispatch",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-drag",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-dsv",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-3-Clause",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-ease",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-fetch",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-force",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-format",
+      "version": "3.1.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-geo",
+      "version": "3.1.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-hierarchy",
+      "version": "3.1.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-interpolate",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-3-Clause",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-path",
+      "version": "1.0.9"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-path",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-polygon",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-quadtree",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-random",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-3-Clause",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-sankey",
+      "version": "0.12.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-scale",
+      "version": "4.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-scale-chromatic",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-selection",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-3-Clause",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-shape",
+      "version": "1.3.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-shape",
+      "version": "3.2.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-time",
+      "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-time-format",
+      "version": "4.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-timer",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-transition",
+      "version": "3.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "d3-zoom",
+      "version": "3.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "dagre-d3-es",
+      "version": "7.0.14"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "dayjs",
+      "version": "1.11.21"
     },
     {
       "dependency_surface": "react-prod",
@@ -1984,6 +2784,14 @@
       "metadata_source": "pnpm package metadata",
       "name": "decode-named-character-reference",
       "version": "1.3.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "delaunator",
+      "version": "5.1.0"
     },
     {
       "dependency_surface": "react-prod",
@@ -2036,6 +2844,14 @@
     {
       "dependency_surface": "react-prod",
       "ecosystem": "react",
+      "license": "(MPL-2.0 OR Apache-2.0)",
+      "metadata_source": "pnpm package metadata",
+      "name": "dompurify",
+      "version": "3.4.11"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
       "license": "BSD",
       "metadata_source": "pnpm package metadata",
       "name": "duck",
@@ -2048,6 +2864,14 @@
       "metadata_source": "pnpm package metadata",
       "name": "entities",
       "version": "6.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "es-toolkit",
+      "version": "1.49.0"
     },
     {
       "dependency_surface": "react-prod",
@@ -2104,6 +2928,14 @@
       "metadata_source": "pnpm package metadata",
       "name": "get-nonce",
       "version": "1.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "hachure-fill",
+      "version": "0.5.2"
     },
     {
       "dependency_surface": "react-prod",
@@ -2230,8 +3062,24 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "iconv-lite",
+      "version": "0.6.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "immediate",
       "version": "3.0.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "import-meta-resolve",
+      "version": "4.2.0"
     },
     {
       "dependency_surface": "react-prod",
@@ -2248,6 +3096,22 @@
       "metadata_source": "pnpm package metadata",
       "name": "inline-style-parser",
       "version": "0.2.7"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "internmap",
+      "version": "1.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "ISC",
+      "metadata_source": "pnpm package metadata",
+      "name": "internmap",
+      "version": "2.0.3"
     },
     {
       "dependency_surface": "react-prod",
@@ -2300,6 +3164,14 @@
     {
       "dependency_surface": "react-prod",
       "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "js-tokens",
+      "version": "4.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
       "license": "(MIT OR GPL-3.0-or-later)",
       "metadata_source": "pnpm package metadata",
       "name": "jszip",
@@ -2312,6 +3184,30 @@
       "metadata_source": "pnpm package metadata",
       "name": "katex",
       "version": "0.16.46"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "manual override: bundled LICENSE file; package.json omits the field",
+      "name": "khroma",
+      "version": "2.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "layout-base",
+      "version": "1.0.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "layout-base",
+      "version": "2.0.1"
     },
     {
       "dependency_surface": "react-prod",
@@ -2334,8 +3230,24 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "lodash-es",
+      "version": "4.18.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "longest-streak",
       "version": "3.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "loose-envify",
+      "version": "1.4.0"
     },
     {
       "dependency_surface": "react-prod",
@@ -2356,6 +3268,22 @@
     {
       "dependency_surface": "react-prod",
       "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "make-cancellable-promise",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "make-event-props",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
       "license": "BSD-2-Clause",
       "metadata_source": "pnpm package metadata",
       "name": "mammoth",
@@ -2368,6 +3296,14 @@
       "metadata_source": "pnpm package metadata",
       "name": "markdown-table",
       "version": "3.0.4"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "marked",
+      "version": "16.4.2"
     },
     {
       "dependency_surface": "react-prod",
@@ -2504,6 +3440,22 @@
       "metadata_source": "pnpm package metadata",
       "name": "mdast-util-to-string",
       "version": "4.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "merge-refs",
+      "version": "2.0.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "mermaid",
+      "version": "11.16.0"
     },
     {
       "dependency_surface": "react-prod",
@@ -2828,6 +3780,14 @@
     {
       "dependency_surface": "react-prod",
       "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "package-manager-detector",
+      "version": "1.7.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
       "license": "(MIT AND Zlib)",
       "metadata_source": "pnpm package metadata",
       "name": "pako",
@@ -2862,6 +3822,14 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "path-data-parser",
+      "version": "0.1.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "path-is-absolute",
       "version": "1.0.1"
     },
@@ -2871,7 +3839,23 @@
       "license": "Apache-2.0",
       "metadata_source": "pnpm package metadata",
       "name": "pdfjs-dist",
-      "version": "5.7.284"
+      "version": "5.4.296"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "points-on-curve",
+      "version": "0.2.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "points-on-path",
+      "version": "0.2.1"
     },
     {
       "dependency_surface": "react-prod",
@@ -3014,6 +3998,14 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "react-pdf",
+      "version": "10.4.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "react-remove-scroll",
       "version": "2.7.2"
     },
@@ -3140,6 +4132,14 @@
     {
       "dependency_surface": "react-prod",
       "ecosystem": "react",
+      "license": "Unlicense",
+      "metadata_source": "pnpm package metadata",
+      "name": "robust-predicates",
+      "version": "3.0.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
       "name": "rope-sequence",
@@ -3150,8 +4150,32 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "roughjs",
+      "version": "4.6.6"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "BSD-3-Clause",
+      "metadata_source": "pnpm package metadata",
+      "name": "rw",
+      "version": "1.3.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "safe-buffer",
       "version": "5.1.2"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "safer-buffer",
+      "version": "2.1.2"
     },
     {
       "dependency_surface": "react-prod",
@@ -3246,8 +4270,32 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "stylis",
+      "version": "4.4.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "tailwind-merge",
       "version": "3.6.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "tiny-invariant",
+      "version": "1.3.3"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "tinyexec",
+      "version": "1.2.3"
     },
     {
       "dependency_surface": "react-prod",
@@ -3272,6 +4320,14 @@
       "metadata_source": "pnpm package metadata",
       "name": "trough",
       "version": "2.2.0"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "ts-dedent",
+      "version": "2.3.0"
     },
     {
       "dependency_surface": "react-prod",
@@ -3414,6 +4470,14 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
+      "name": "uuid",
+      "version": "14.0.1"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
       "name": "vfile",
       "version": "6.0.3"
     },
@@ -3440,6 +4504,14 @@
       "metadata_source": "pnpm package metadata",
       "name": "w3c-keyname",
       "version": "2.2.8"
+    },
+    {
+      "dependency_surface": "react-prod",
+      "ecosystem": "react",
+      "license": "MIT",
+      "metadata_source": "pnpm package metadata",
+      "name": "warning",
+      "version": "4.0.3"
     },
     {
       "dependency_surface": "react-prod",
@@ -3631,7 +4703,7 @@
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
       "name": "@oxc-project/types",
-      "version": "0.129.0"
+      "version": "0.133.0"
     },
     {
       "dependency_surface": "react-dev",
@@ -3639,7 +4711,7 @@
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
       "name": "@rolldown/binding-darwin-arm64",
-      "version": "1.0.0"
+      "version": "1.0.3"
     },
     {
       "dependency_surface": "react-dev",
@@ -4407,7 +5479,7 @@
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
       "name": "postcss",
-      "version": "8.5.14"
+      "version": "8.5.15"
     },
     {
       "dependency_surface": "react-dev",
@@ -4431,7 +5503,7 @@
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
       "name": "rolldown",
-      "version": "1.0.0"
+      "version": "1.0.3"
     },
     {
       "dependency_surface": "react-dev",
@@ -4518,8 +5590,8 @@
       "ecosystem": "react",
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
-      "name": "tinyexec",
-      "version": "1.2.3"
+      "name": "tinyglobby",
+      "version": "0.2.16"
     },
     {
       "dependency_surface": "react-dev",
@@ -4527,7 +5599,7 @@
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
       "name": "tinyglobby",
-      "version": "0.2.16"
+      "version": "0.2.17"
     },
     {
       "dependency_surface": "react-dev",
@@ -4583,7 +5655,7 @@
       "license": "MIT",
       "metadata_source": "pnpm package metadata",
       "name": "vite",
-      "version": "8.0.12"
+      "version": "8.0.16"
     },
     {
       "dependency_surface": "react-dev",

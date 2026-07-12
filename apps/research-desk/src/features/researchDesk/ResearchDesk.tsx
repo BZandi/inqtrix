@@ -34,6 +34,7 @@ import {
   type ChatRetryOptions,
 } from '@/features/chat/retry'
 import { useChatHistoryApi } from '@/features/chat/useChatHistoryApi'
+import { clearScrollMemory } from '@/features/scroll/scrollMemory'
 import { useEditorHistoryApi } from '@/features/editor/useEditorHistoryApi'
 import { useAssetHistoryApi } from '@/features/fileLibrary/useAssetHistoryApi'
 import { useVectorIndexHistoryApi } from '@/features/fileLibrary/useVectorIndexHistoryApi'
@@ -48,7 +49,7 @@ import {
   chatRuleOptionsFromRules,
   chatAttachmentChipsFromRefs,
   chatContextRefKey,
-  completedReportOptions,
+  mentionableReportOptions,
   dedupeChatContextRefs,
   fileGroupMentionOptions,
   fileMentionOptions,
@@ -101,6 +102,9 @@ import SettingsWorkspace from '@/features/settings/SettingsWorkspace'
 import { KnowledgeWorkspace, type KnowledgeAskOptions, type KnowledgeMode } from '@/features/knowledge/KnowledgeWorkspace'
 import { knowledgeAnswerFromRunResult } from '@/features/knowledge/answer'
 import { buildKnowledgeAskMessages } from '@/features/knowledge/conversationContext'
+import { AgentWorkspace } from '@/features/agent/AgentWorkspace'
+import { effectiveAgentDepth } from '@/features/agent/agentStatusOverview'
+import { createAgentDemo } from '@/features/agent/demo'
 import { applyKnowledgeRunEvent } from '@/features/knowledge/runSteps'
 import { useKnowledgeSessionsApi } from '@/features/knowledge/useKnowledgeSessionsApi'
 import {
@@ -133,6 +137,8 @@ import { seedSystemHealth } from '@/features/admin/demo'
 import { useTemplateSync } from '@/features/promptLibrary/useTemplateSync'
 import { FileLibraryWorkspace } from '@/features/fileLibrary/FileLibraryWorkspace'
 import { PromptLibraryWorkspace } from '@/features/promptLibrary/PromptLibraryWorkspace'
+import { modelOverridesFromSelection } from '@/features/researchRuns/modelSelection'
+import { useSkillsApi } from '@/features/skills/useSkillsApi'
 import { ingestFiles, scheduleServerParse, type ServerFileUpload } from '@/features/files/ingest'
 import { chatStateForIncognito, ingestIncognitoFiles } from './incognitoAttachments'
 import { moveItem } from '@/features/composer/reorder'
@@ -204,8 +210,10 @@ export function ResearchDesk({
 }: { authConfig?: AuthConfig | null } = {}) {
   const { locale, setLocale, t } = useLocale()
   const {
+    agentMemoryEnabled,
     contrastMode,
     preset: themePreset,
+    setAgentMemoryEnabled,
     setContrastMode,
     setPreset: setThemePreset,
     setTheme,
@@ -258,8 +266,29 @@ export function ResearchDesk({
   const chatFlushFrameByThreadIdRef = useRef<Map<string, number>>(new Map())
   const chatStreamContentByThreadIdRef = useRef<Map<string, string>>(new Map())
   const scheduledChatContentByThreadIdRef = useRef<Map<string, ScheduledChatContent>>(new Map())
-  const allJobs = projectResearchJobs(state)
-  const visibleJobs = visibleResearchJobs(allJobs, state.ui.activeFilter)
+  const allJobs = useMemo(
+    () => projectResearchJobs(state),
+    [state.researchRunOrder, state.researchRuns],
+  )
+  const visibleJobs = useMemo(
+    () => visibleResearchJobs(allJobs, state.ui.activeFilter),
+    [allJobs, state.ui.activeFilter],
+  )
+  // Stable identity so the memoized ReportPanel isn't re-rendered on every
+  // unrelated desk dispatch (dispatch is stable, so this never changes).
+  const handleReportVisibleChange = useCallback(
+    (isVisible: boolean) => dispatch({ isVisible, type: 'setReportVisible' }),
+    [],
+  )
+  const handleSetReportAutocomplete = useCallback(
+    (runId: string, includeInAutocomplete: boolean) =>
+      dispatch({ includeInAutocomplete, runId, type: 'setResearchRunAutocomplete' }),
+    [],
+  )
+  const handleUseReportInChat = useCallback(
+    (runId: string) => dispatch({ runId, type: 'attachReportToNewChat' }),
+    [],
+  )
   const isDemoMode = state.connection.kind === 'demo'
 
   // Demo-only "live" simulator: while the seed run is running in demo mode, feed
@@ -270,6 +299,14 @@ export function ResearchDesk({
   useEffect(() => {
     researchRunsRef.current = state.researchRuns
   }, [state.researchRuns])
+  // The demo simulator reads the active view through a ref so it can skip its
+  // dispatch while the user is on another view WITHOUT tearing the interval
+  // down (a teardown would reset the local phase/round counters and jump the
+  // card backwards on return). See the interval body below.
+  const activeViewRef = useRef(state.ui.activeView)
+  useEffect(() => {
+    activeViewRef.current = state.ui.activeView
+  }, [state.ui.activeView])
   useEffect(() => {
     if (!isDemoMode) return undefined
     // The seed run id is shared with seedProject so the two never drift.
@@ -290,6 +327,11 @@ export function ResearchDesk({
 
     const intervalId = window.setInterval(() => {
       if (researchRunsRef.current[seedId]?.status !== 'running') return
+      // Off the research view the running card is unmounted, so a dispatch here
+      // would only force a wasted re-render of whatever heavy workspace is
+      // mounted (the "light reload" felt on the Database view in demo mode).
+      // Skip without advancing the counters: the card resumes where it paused.
+      if (activeViewRef.current !== 'research') return
       nodeIndex += 1
       if (nodeIndex >= nodeOrder.length) {
         nodeIndex = 0
@@ -358,7 +400,10 @@ export function ResearchDesk({
     () => chatRuleOptionsFromRules(chatRules, 'chat'),
     [chatRules],
   )
-  const reportOptions = completedReportOptions(state)
+  const reportOptions = useMemo(
+    () => mentionableReportOptions(state),
+    [state.researchRunOrder, state.researchRuns],
+  )
   const [chatPillRefs, setChatPillRefs] = useState<ChatContextReferenceRecord[]>([])
   // Session-scoped composer drafts held in the shell (which never unmounts on a view
   // switch) so unsent text survives navigation. Intentionally NOT in the reducer:
@@ -370,14 +415,40 @@ export function ResearchDesk({
   // pills (chatPillRefs) only ever reference existing library data, so they are
   // unchanged in both modes.
   const pendingChatRefs = isIncognitoChat ? incognitoAttachmentRefs : state.ui.pendingChatAttachmentRefs
-  const combinedChatRefs = dedupeChatContextRefs([...chatPillRefs, ...pendingChatRefs])
+  const combinedChatRefs = useMemo(
+    () => dedupeChatContextRefs([...chatPillRefs, ...pendingChatRefs]),
+    [chatPillRefs, pendingChatRefs],
+  )
   // Resolver view for the chat path: in incognito it also sees the local-only
   // attachments, so chips/budget/the outgoing message can resolve their bodies
   // without those assets ever entering the synced store (see incognitoAttachments).
-  const chatResolveState = isIncognitoChat ? chatStateForIncognito(state, incognitoAssets) : state
-  const pendingChips = chatAttachmentChipsFromRefs(chatResolveState, combinedChatRefs)
-  const fileOptions = fileMentionOptions(state)
-  const fileGroupOptions = fileGroupMentionOptions(state)
+  const chatResolveState = useMemo(
+    () => (isIncognitoChat ? chatStateForIncognito(state, incognitoAssets) : state),
+    [
+      incognitoAssets,
+      isIncognitoChat,
+      state.chatRuleOrder,
+      state.chatRules,
+      state.fileAssetOrder,
+      state.fileAssets,
+      state.fileGroupOrder,
+      state.fileGroups,
+      state.researchRunOrder,
+      state.researchRuns,
+    ],
+  )
+  const pendingChips = useMemo(
+    () => chatAttachmentChipsFromRefs(chatResolveState, combinedChatRefs),
+    [chatResolveState, combinedChatRefs],
+  )
+  const fileOptions = useMemo(
+    () => fileMentionOptions(state),
+    [state.fileAssetOrder, state.fileAssets],
+  )
+  const fileGroupOptions = useMemo(
+    () => fileGroupMentionOptions(state),
+    [state.fileAssetOrder, state.fileAssets, state.fileGroupOrder, state.fileGroups],
+  )
 
   const handleAttachChatFiles = async (files: File[]) => {
     if (isIncognitoChat) {
@@ -441,8 +512,8 @@ export function ResearchDesk({
   // effect then re-arms only on a genuine preference change, matching the
   // stable-reference contract the sibling sync hooks rely on (M6c).
   const currentPreferences = useMemo<ProjectPreferences>(
-    () => ({ contrastMode, locale, theme, themePreset, userBubbleTone }),
-    [contrastMode, locale, theme, themePreset, userBubbleTone],
+    () => ({ agentMemoryEnabled, contrastMode, locale, theme, themePreset, userBubbleTone }),
+    [agentMemoryEnabled, contrastMode, locale, theme, themePreset, userBubbleTone],
   )
   const handleApiSummary = useCallback((summary: ResearchRunSummary, options?: { select?: boolean }) => {
     dispatch({ select: options?.select, summary, type: 'upsertApiRunSummary' })
@@ -537,10 +608,33 @@ export function ResearchDesk({
     && authSession.projectNamespace
       ? authSession.projectNamespace
       : state.workspaceId
+  // Skill library (plan M3): server-first behind features.skills; the
+  // demo serves its in-memory list so the tab stays demo-visible.
+  const skillsEnabled = isDemoMode || capabilities?.features.skills === true
+  // Memoized: an inline literal would give useSkillsApi.refresh a new
+  // identity per render, and its load effect would refetch /v1/skills
+  // in a loop (every completed fetch renders the next one).
+  const skillsClientOptions = useMemo(
+    () =>
+      isDemoMode
+        ? null
+        : {
+          apiKey: apiKey.trim() || undefined,
+          workspaceId: effectiveWorkspaceId,
+        },
+    [apiKey, effectiveWorkspaceId, isDemoMode],
+  )
+  const skillsApi = useSkillsApi({
+    clientOptions: skillsClientOptions,
+    demo: isDemoMode,
+    enabled: skillsEnabled,
+  })
   const {
     cancelRun,
     deleteRun,
     lastError: runError,
+    pollingRunIds,
+    runsHydrated,
     submitRun,
   } = useResearchRunApi({
     apiKey: apiKey.trim() || undefined,
@@ -636,6 +730,7 @@ export function ResearchDesk({
     error: chatSyncError,
     hasMoreThreads: chatHistoryHasMore,
     isLoadingMore: chatHistoryLoadingMore,
+    isSelectedThreadMessagesLoading: chatMessagesLoading,
     loadMoreThreads: loadMoreChatHistory,
   } = useChatHistoryApi({
     apiKey: apiKey.trim() || undefined,
@@ -677,7 +772,10 @@ export function ResearchDesk({
     syncActive: projectSyncActive,
     workspaceId: effectiveWorkspaceId,
   })
-  const { error: knowledgeSessionSyncError } = useKnowledgeSessionsApi({
+  const {
+    error: knowledgeSessionSyncError,
+    isSelectedSessionItemsLoading: knowledgeItemsLoading,
+  } = useKnowledgeSessionsApi({
     apiKey: apiKey.trim() || undefined,
     dispatch,
     itemOrder: state.knowledgeItemOrder,
@@ -758,6 +856,43 @@ export function ResearchDesk({
   // filter in projectResearchJobs (the thread is its surface, not a job
   // card). Demo asks reuse the identical event path with synthetic events.
   const knowledgeWorkspaceVisible = isDemoMode || capabilities?.features.knowledge === true
+  const agentWorkspaceVisible = isDemoMode || capabilities?.features.workspace_agent === true
+  // Agent composer state is lifted so drafts survive view switches
+  // (the KnowledgeComposer draft pattern).
+  const [agentDraftQuestion, setAgentDraftQuestion] = useState('')
+  const [agentAutonomy, setAgentAutonomy] = useState<string | null>(null)
+  // Thoroughness (plan M4): lifted like autonomy, so Deep genuinely
+  // stays on across view switches until the user toggles it off.
+  const [agentDepth, setAgentDepth] = useState<'normal' | 'deep' | null>(null)
+  // Stufe (speed/depth ladder); lifted like depth so it survives view
+  // switches. null = server default from capabilities.
+  const [agentTier, setAgentTier] = useState<
+    import('@/features/researchRuns/types').AgentTierId | null
+  >(null)
+  const [agentCollectionIds, setAgentCollectionIds] = useState<string[]>([])
+  const [agentDocumentId, setAgentDocumentId] = useState<string | null>(null)
+  const effectiveAgentAutonomy = agentAutonomy
+    ?? capabilities?.agent?.default_autonomy
+    ?? 'balanced'
+  const effectiveDepth = effectiveAgentDepth(
+    agentDepth,
+    capabilities?.agent?.default_depth,
+  )
+  const projectStateRef = useRef(state)
+  projectStateRef.current = state
+  const agentDemo = useMemo(
+    () =>
+      isDemoMode
+        ? createAgentDemo(
+          dispatch,
+          (documentId) =>
+            projectStateRef.current.editorDocuments[documentId]
+              ?.contentMarkdown ?? null,
+        )
+        : null,
+    [isDemoMode],
+  )
+  useEffect(() => () => agentDemo?.dispose(), [agentDemo])
   const [knowledgeMode, setKnowledgeMode] = useState<KnowledgeMode>('ask')
   const [knowledgeQuestion, setKnowledgeQuestion] = useState('')
   const [knowledgeCollectionIds, setKnowledgeCollectionIds] = useState<string[]>([])
@@ -782,6 +917,41 @@ export function ResearchDesk({
         title: index.title,
       }))
   }, [isDemoMode, knowledgeWorkspaceVisible, state])
+
+  // Patchable editor documents: in demo every local document works; live
+  // requires the server-persisted tier (the id IS the server id there).
+  const agentDocumentOptions = useMemo(
+    () =>
+      isDemoMode || state.serverSyncEnabled
+        ? state.editorDocumentOrder
+          .map((id) => state.editorDocuments[id])
+          .filter(Boolean)
+          .map((document) => ({ id: document.id, title: document.title }))
+        : [],
+    [
+      isDemoMode,
+      state.editorDocumentOrder,
+      state.editorDocuments,
+      state.serverSyncEnabled,
+    ],
+  )
+  useEffect(() => {
+    setAgentDocumentId((current) => (
+      current !== null
+        && !agentDocumentOptions.some((option) => option.id === current)
+        ? null
+        : current
+    ))
+  }, [agentDocumentOptions])
+  // Agent scope mentions submit SERVER collection ids (knowledge_filters).
+  const agentCollectionOptions = useMemo(
+    () =>
+      knowledgeCollections.map((option) => ({
+        id: option.collectionId,
+        title: option.title,
+      })),
+    [knowledgeCollections],
+  )
   useEffect(() => {
     const available = new Set(knowledgeCollections.map((option) => option.id))
     setKnowledgeCollectionIds((current) => (
@@ -867,6 +1037,12 @@ export function ResearchDesk({
       dispatch({ type: 'setActiveView', view: 'research' })
     }
   }, [knowledgeWorkspaceVisible, state.ui.activeView])
+
+  useEffect(() => {
+    if (state.ui.activeView === 'agent' && !agentWorkspaceVisible) {
+      dispatch({ type: 'setActiveView', view: 'research' })
+    }
+  }, [agentWorkspaceVisible, state.ui.activeView])
 
   useEffect(() => {
     const timeouts = knowledgeDemoTimeoutsRef.current
@@ -998,6 +1174,7 @@ export function ResearchDesk({
     setIncognitoKnowledgeAskError(null)
     setKnowledgeAskError(null)
     setIsIncognitoKnowledge(enabled)
+    clearScrollMemory('knowledge:incognito')
   }
 
   function clearKnowledgeAskSession() {
@@ -1009,9 +1186,11 @@ export function ResearchDesk({
       incognitoKnowledgeRunIdsRef.current.clear()
       setIncognitoKnowledgeItems([])
       setIncognitoKnowledgeAskError(null)
+      clearScrollMemory('knowledge:incognito')
       return
     }
     if (state.selectedKnowledgeSessionId) {
+      clearScrollMemory(`knowledge:${state.selectedKnowledgeSessionId}`)
       retireKnowledgeRunRecords(knowledgeRunIdsFromThreadItems(knowledgeItems), { cancelIfActive: true })
       dispatch({ sessionId: state.selectedKnowledgeSessionId, type: 'clearKnowledgeSession' })
     }
@@ -1037,6 +1216,7 @@ export function ResearchDesk({
   }
 
   function deleteKnowledgeAskSession(sessionId: string) {
+    clearScrollMemory(`knowledge:${sessionId}`)
     const deletedItems = state.knowledgeItemOrder.flatMap((itemId) => {
       const item = state.knowledgeItems[itemId]
       return item?.sessionId === sessionId ? [item] : []
@@ -2356,6 +2536,7 @@ export function ResearchDesk({
       return
     }
     if (!threadId) return
+    clearScrollMemory(`chat:${threadId}`)
     dispatch({ threadId, type: 'clearChatThread' })
     setChatErrorByThreadId((current) => {
       const next = { ...current }
@@ -2376,6 +2557,7 @@ export function ResearchDesk({
     setIncognitoThread(createIncognitoThread(t.chat.incognitoTitle, t.chat.incognitoPreview))
     setIncognitoAssets({})
     setIncognitoAttachmentRefs([])
+    clearScrollMemory('chat:incognito')
   }
 
   function handleIncognitoChange(enabled: boolean) {
@@ -2396,6 +2578,7 @@ export function ResearchDesk({
 
   function handleDeleteChatThread(threadId: string) {
     discardChatRequestRuntime(threadId)
+    clearScrollMemory(`chat:${threadId}`)
     dispatch({ threadId, type: 'deleteChatThread' })
     setChatErrorByThreadId((current) => {
       const next = { ...current }
@@ -2497,6 +2680,7 @@ export function ResearchDesk({
   }
 
   function applyProjectPreferences(preferences: ProjectPreferences) {
+    setAgentMemoryEnabled(preferences.agentMemoryEnabled)
     setContrastMode(preferences.contrastMode)
     setLocale(preferences.locale)
     setTheme(preferences.theme)
@@ -2564,7 +2748,7 @@ export function ResearchDesk({
 
   return (
     <QuotaMeterProvider demo={isDemoMode} enabled={Boolean(quotaMeterEnabled)}>
-    <main className="min-h-svh bg-canvas text-foreground lg:flex lg:h-svh lg:flex-col lg:overflow-hidden">
+    <main className="flex h-svh flex-col overflow-hidden bg-canvas text-foreground">
       <Topbar
         activeView={state.ui.activeView}
         canPersistProject={projectPersistenceAvailable}
@@ -2582,7 +2766,7 @@ export function ResearchDesk({
         serverSyncEnabled={state.serverSyncEnabled}
         serverSyncError={serverSyncError}
       />
-      <div className="flex min-h-0 w-full flex-1">
+      <div className="flex min-h-0 w-full flex-1 overflow-hidden">
         <AppRail
           activeView={state.ui.activeView}
           onViewChange={(view) => {
@@ -2590,6 +2774,7 @@ export function ResearchDesk({
             dispatch({ type: 'setActiveView', view })
           }}
           settingsBadgeCount={sharingInbox.pendingCount}
+          showAgent={agentWorkspaceVisible}
           showKnowledge={knowledgeWorkspaceVisible}
           profileSlot={
             <ProfileAvatar
@@ -2613,7 +2798,6 @@ export function ResearchDesk({
               expandedJobId={state.ui.expandedJobId}
               isComposerVisible={state.ui.isComposerVisible}
               isDesktop={isDesktop}
-              isReportExpanded={state.ui.isReportExpanded}
               isReportVisible={state.ui.isReportVisible}
               jobs={visibleJobs}
               cancelErrorByRunId={cancelErrorByRunId}
@@ -2628,14 +2812,7 @@ export function ResearchDesk({
               })}
               onDeleteJob={(jobId) => void handleDeleteJob(jobId)}
               onCancelJob={(jobId) => void handleCancelJob(jobId)}
-              onReportExpandedChange={(isExpanded) => dispatch({
-                isExpanded,
-                type: 'setReportExpanded',
-              })}
-              onReportVisibleChange={(isVisible) => dispatch({
-                isVisible,
-                type: 'setReportVisible',
-              })}
+              onReportVisibleChange={handleReportVisibleChange}
               onReportPanelSizeChange={(size) => dispatch({
                 key: 'researchReport',
                 size,
@@ -2643,7 +2820,8 @@ export function ResearchDesk({
               })}
               onSelectJob={(jobId) => dispatch({ jobId, type: 'selectJob' })}
               onToggleJob={(jobId) => dispatch({ jobId, type: 'toggleJob' })}
-              onUseReportInChat={(runId) => dispatch({ runId, type: 'attachReportToNewChat' })}
+              onSetReportAutocomplete={handleSetReportAutocomplete}
+              onUseReportInChat={handleUseReportInChat}
               onShareJob={sharingEnabled
                 ? (jobId) => setShareTarget({
                   resourceId: jobId,
@@ -2668,6 +2846,7 @@ export function ResearchDesk({
               chatHistoryHasMore={chatHistoryHasMore}
               chatHistoryLoadingMore={chatHistoryLoadingMore}
               onLoadMoreChatHistory={loadMoreChatHistory}
+              isMessagesLoading={chatMessagesLoading}
               defaultChatModel={defaultChatModel}
               historyPanelSize={state.ui.panelLayout.chatHistory}
               isDesktop={isDesktop}
@@ -2815,6 +2994,46 @@ export function ResearchDesk({
                 workspaceId: effectiveWorkspaceId,
               }}
             />
+          ) : state.ui.activeView === 'agent' ? (
+            <AgentWorkspace
+              apiKey={apiKey.trim() || undefined}
+              cancelRun={cancelRun}
+              deleteRun={deleteRun}
+              pollingRunIds={pollingRunIds}
+              runsHydrated={runsHydrated}
+              canvasPanelSize={state.ui.panelLayout.agentCanvas}
+              capabilities={capabilities}
+              collections={agentCollectionOptions}
+              dispatch={dispatch}
+              documents={agentDocumentOptions}
+              draftQuestion={agentDraftQuestion}
+              memoryEnabled={agentMemoryEnabled}
+              skillsApi={skillsEnabled ? skillsApi : null}
+              onAutonomyChange={setAgentAutonomy}
+              onDepthChange={setAgentDepth}
+              modelCatalog={chatModelCatalog}
+              modelOptions={chatModelOptions}
+              modelOptionsStatus={chatModelOptionsState.status}
+              defaultChatModel={defaultChatModel}
+              onCanvasPanelSizeChange={(size) =>
+                dispatch({ key: 'agentCanvas', size, type: 'setPanelLayoutSize' })}
+              onDraftQuestionChange={setAgentDraftQuestion}
+              onSelectedCollectionIdsChange={setAgentCollectionIds}
+              onSelectedDocumentIdChange={setAgentDocumentId}
+              onSessionsPanelSizeChange={(size) =>
+                dispatch({ key: 'agentSessions', size, type: 'setPanelLayoutSize' })}
+              selectedAutonomy={effectiveAgentAutonomy}
+              selectedDepth={effectiveDepth}
+              selectedTier={agentTier}
+              onTierChange={setAgentTier}
+              selectedCollectionIds={agentCollectionIds}
+              selectedDocumentId={agentDocumentId}
+              serverEnabled={!isDemoMode}
+              demo={agentDemo}
+              state={state}
+              submitRun={(request) => submitRun(request)}
+              workspaceId={effectiveWorkspaceId}
+            />
           ) : state.ui.activeView === 'knowledge' ? (
             <KnowledgeWorkspace
               collections={knowledgeCollections}
@@ -2830,6 +3049,7 @@ export function ResearchDesk({
               isAskRunning={isKnowledgeAskRunning}
               isHistoryVisible={state.ui.isKnowledgeHistoryVisible}
               isIncognito={isIncognitoKnowledge}
+              isItemsLoading={knowledgeItemsLoading}
               items={displayedKnowledgeItems}
               sessionSections={knowledgeSessionSections}
               sessions={knowledgeSessions}
@@ -2844,7 +3064,7 @@ export function ResearchDesk({
               }}
               onCreateSessionGroup={() => dispatch({ title: t.knowledge.newFolder, type: 'createKnowledgeSessionGroup' })}
               onDeleteSessionGroup={(groupId) => dispatch({ groupId, type: 'deleteKnowledgeSessionGroup' })}
-	              onDeleteSession={deleteKnowledgeAskSession}
+              onDeleteSession={deleteKnowledgeAskSession}
               onDeleteItems={deleteKnowledgeAskItems}
               onDemoAsk={isDemoMode ? handleKnowledgeDemoAsk : undefined}
               onHistoryPanelSizeChange={(size) => dispatch({
@@ -2888,6 +3108,7 @@ export function ResearchDesk({
           ) : state.ui.activeView === 'prompt-library' ? (
             <PromptLibraryWorkspace
               dispatch={dispatch}
+              skillsApi={skillsEnabled ? skillsApi : null}
               sharing={sharingEnabled
                 ? {
                   onShareRule: (rule) => {
@@ -3331,17 +3552,10 @@ function resolveDefaultChatModel(
 
 const chatModelTierOrder: ChatModelTier[] = ['high', 'mid', 'fast']
 
-function chatAgentOverrides(
-  modelTier: ChatModelTier | null,
-  model: string | null,
-  effort: string | null,
-) {
-  // An explicitly picked model wins over the tier (mirrors the backend's
-  // explicit_request resolution); empty effort inherits the provider default.
-  if (model) return effort ? { model, effort } : { model }
-  if (modelTier) return { modelTier }
-  return undefined
-}
+// Picker-selection -> overrides slice: the shared
+// modelOverridesFromSelection (features/researchRuns/modelSelection.ts)
+// is the single implementation; this alias keeps the call sites short.
+const chatAgentOverrides = modelOverridesFromSelection
 
 function chatRequestContextForKnowledge(
   knowledgeCollectionIds: readonly string[],

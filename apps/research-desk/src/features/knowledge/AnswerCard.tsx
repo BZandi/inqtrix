@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent, type SyntheticEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, useReducedMotion } from 'motion/react'
-import { BadgeCheck, BookOpenCheck, Check, ChevronDown, Copy, FileSearch, Info, ListChecks, MoreHorizontal, Quote, Type } from '@/components/icons'
+import { BadgeCheck, Check, ChevronDown, Copy, FileSearch, Info, ListChecks, MoreHorizontal, Quote, Type } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
@@ -144,16 +144,13 @@ export function AnswerCard({
     <motion.div
       animate={{ filter: 'blur(0px)', opacity: 1, y: 0 }}
       className={cn(
-        'group/answer grid min-w-0 grid-cols-[32px_minmax(0,1fr)] gap-3',
+        'group/answer grid min-w-0 grid-cols-[minmax(0,1fr)]',
         highlightEntry && 'inqtrix-knowledge-answer-entry',
       )}
       data-knowledge-answer-entry={highlightEntry ? 'true' : undefined}
       initial={highlightEntry && !reduceMotion ? { filter: 'blur(3px)', opacity: 0, y: 14 } : false}
       transition={highlightEntry ? appMotion.panel : undefined}
     >
-      <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md border border-border bg-surface text-muted-foreground">
-        <BookOpenCheck className="size-4" />
-      </span>
       <div className="min-w-0">
         <div className="mb-1 flex min-w-0 items-center gap-1.5">
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 t-meta-sm font-semibold text-muted-foreground">

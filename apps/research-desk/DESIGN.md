@@ -55,9 +55,13 @@ Easing is `cubic-bezier(0.22, 1, 0.36, 1)` (soft settle); UI transitions ≤ ~0.
 | Tooltip / popover | fade + micro-scale (0.97→1) | ~0.13s |
 | Running process (active step) | soft pulse — halo/ring/core | `inqtrix-active-node-*` ~2.75s, `inqtrix-segment-breathe`/`-running-dot` 2s — **no blink** |
 | Reasoning "thinking" mark | gentle sweep | `inqtrix-thinking-sweep` 1.9s |
+| Agent pulse track (working connector) | light packet drifts along the station connector | `inqtrix-agent-flow` 2.4s — loop only while the agent works; static `brand/22` fill is the reduced-motion base |
+| Agent composer signature | source-specific orbit/page-scan + a routing packet across the execution capsule | `inqtrix-source-orbit`, `inqtrix-knowledge-scan`, `inqtrix-execution-route` 0.36–0.52s; one shot on hover/focus only, never ambient |
 | Metric update | one-shot count/flash | `inqtrix-metric-flash` 0.6s |
 | Expand / collapse | soft height | `grid-template-rows 0fr→1fr`, ~0.3s |
 | Side panel collapse / expand | width/flex collapse + directed fade-slide (`x ±10px→0`) | `appMotion.panel` 0.26s; left panels originate left, right panels originate right |
+| Page-in-page push (canvas list → detail) | incoming layer slides in full width (`x 100%→0`), covered list parallaxes to `x −30%` and stays mounted (`inert`, scroll/focus survive), leading-edge `--shadow-soft` | forward `appMotion.push` 0.3s, back `appMotion.pushExit` 0.25s; reduced motion = 120ms fade; %-based transforms only (resize-proof) |
+| Appearance switch | token swap without colour transition | Theme, preset, contrast, and bubble-tone changes suppress transitions for one frame so the shell changes as one state |
 | Skeleton / loading | shimmer | loop **only while loading** |
 
 **Rules:** no endless animation on real content (loops only for "working" signals); everything is
@@ -72,12 +76,76 @@ Easing is `cubic-bezier(0.22, 1, 0.36, 1)` (soft settle); UI transitions ≤ ~0.
   affordance, a check on the active item; a segmented reasoning toggle in the footer.
 - **Segmented control** (modes / filters / reasoning level): 2–4 short options, active = `bg-background`
   + soft shadow on a `bg-surface` track (§4, `h-7`).
+- **Agent source dock + execution capsule:** source availability is a two-button `aria-pressed`
+  group in the composer footer; a one-message forced route adds the brand accent and one-shot marker.
+  Run setup and the unchanged rich model picker are adjacent flat controls: no enclosing border,
+  divided frame, or persistent background. Source labels reveal on hover/focus only when the composer
+  container is at least 704px wide; Plus and the Agent model trigger rely on stable accessible names
+  and do not open redundant hover tooltips. The controls,
+  run overview and send action must never be clipped when the Canvas narrows the timeline. Its icon
+  language stays within Lucide's stroke system but uses distinct semantics: globe/orbit for public
+  web, book-search/page scan for project knowledge, workflow for run setup, brain-circuit for the
+  kernel and brain-cog for model selection. The moving execution rail is a functional routing cue,
+  not ambient decoration, and reduced motion removes every transform and tracer.
 - **Hover-card** (rich tooltip): small card — title + one sentence + optional 2–3 compact figures/tags
   — for definitions, derivations, source previews.
 - **Status / tier badge:** `*-subtle` surface + dot/icon + short label.
 - **Empty state:** centred, neutral icon in a circle, one-sentence title + one-sentence hint.
 - **List:** group header (dot + label + count) → dense rows → 2px active accent; hover-only actions
   (`opacity-0 group-hover:opacity-100`).
+- **Explorer history row** (chat threads, knowledge sessions, editor documents, agent sessions): the
+  ONE `ExplorerHistoryRow` primitive (`components/ui/explorer-list.tsx`) — a two-column grid whose
+  truncating `t-list-regular` title never shifts: the right-aligned relative age (`t-hint` +
+  `tabular-nums`) fades out on hover/focus-within while up to two absolutely positioned `size-6`
+  icon actions (`right-7`/`right-1`, `.icon-sm` glyphs, tooltip + aria-label) fade in. Hidden
+  actions are `pointer-events-none` so an invisible destructive button cannot catch a touch tap
+  aimed at the timestamp. A leading-indicator slot between title and age carries the running
+  spinner / gate dot; rename mode swaps the title for `ExplorerHistoryTitleInput` (commit on
+  Enter/blur, cancel on Escape). Do not rebuild this grammar inline in a feature.
+
+### Responsive shell
+
+The app keeps the same mental model across Research Desk, Knowledge Desk, Chat, Agent Desk, Editor,
+Prompt Library, Database, and Settings.
+
+- **Topbar:** the global topbar is always one row at `var(--header-h)`. Secondary project actions,
+  theme, language, and repository actions collapse progressively into the existing dropdown-menu
+  primitive. The global overflow trigger is a borderless hamburger icon button, not a framed
+  ellipsis. Do not let the topbar wrap or grow vertically.
+- **Side panels:** under `lg`, left/right workspace panels become modal overlays via
+  `ResponsiveSidePanel`. The app rail remains visible; the drawer covers the workspace area from
+  below the topbar. Drawers must use `aria-modal`, `aria-labelledby`, focus trapping, Escape close,
+  backdrop close, and `appMotion.panel`. Right-side advanced drawers use the full workspace width on
+  phone-sized screens and 80% from `sm` up; left navigation drawers keep the compact explorer width.
+- **Canvas reading surface:** every canvas view body (report, plan, evidence, run
+  overview, task detail, diff, patch) centers in the ONE `canvasSurfaceClass`
+  measure (`max-w-4xl`, `src/features/canvas/CanvasSurface.tsx`) so tab switches
+  never jump between widths; change the measure there, never per view. The agent
+  transcript column stays `max-w-5xl` (the chat-mode contract).
+- **Desktop panels:** at `lg` and up, keep the resizable split-panel model. Persisted desktop panel
+  visibility must not force a mobile drawer to open immediately when the viewport becomes narrow.
+  Desktop panel widths keep their per-workspace persisted split sizes and limits; a collapsed panel
+  must release its split width completely so no empty gutter remains.
+- **Panel-header edge contract:** persistent left/right `PanelToggle` controls and responsive-drawer
+  close controls sit exactly `px-3` (12px) from the workspace edge in every desk. Do not widen this
+  to viewport-dependent `md:px-6`; the position must remain stable between Editor, Chat, Knowledge,
+  Agent and Research. Workspace, document, explorer and assistant titles are text-only by default;
+  do not prepend a decorative file, folder, chat or robot icon. Icons remain only when they convey
+  a distinct state or action.
+- **Master/detail workspaces:** Prompt Library and Database show the navigator/list first under `lg`;
+  selecting an item or collection moves into the detail surface, which provides a compact Back
+  button. Do not stack navigator and detail vertically on small viewports.
+- **Settings navigation:** under `lg`, Settings uses a compact section dropdown instead of a
+  horizontally scrolling tab row. At `lg` and up, the left Settings rail is the visible navigation.
+- **Dense mobile headers:** on very narrow screens (`< sm`), prioritize panel toggles, current title,
+  and primary mode controls. Secondary workspace actions move to a local vertical-ellipsis overflow
+  menu, hide, or become reachable from the panel/body; they must never overlap the panel toggle hit
+  target.
+- **Agent composer:** use the named `agent-composer` inline-size container rather than viewport
+  breakpoints. Below 704px, Run Setup and model triggers become icon-only while opening the same full
+  popovers; below 576px, the quota percentage collapses to its gauge icon while the full quota menu
+  remains available.
+  Context, both source buttons, both execution segments, run overview and send/stop remain reachable.
 
 ### Do / Don't
 
@@ -311,7 +379,7 @@ category eyebrow (dot + label + count), do **not** repeat that category as a fil
 | Element | Convention |
 |---|---|
 | Top panel header bar | `.inqtrix-panel-header` (`var(--header-h)` tall), `px-3`/`px-4` horizontal, title `.t-section`; keep these single-row and move secondary context to body content or hover text (a whole-page header is `.t-title`) |
-| `--header-h` | `2.75rem` — the compact sticky app topbar and panel-header height (single source; AppRail offset subtracts it) |
+| `--header-h` | `2.625rem` (42px) — the compact sticky app topbar and panel-header height; the AppRail width and overlay offsets use the same value so the chrome stays geometrically aligned |
 | Workspace sidebars | compact `bg-surface/50` navigation rails with `border-r`, dense list rows, and content descriptions in the main panel, not repeated as large sidebar intro blocks; secondary workspace headers align to the app rail's first icon center, sidebar header icons share the same leading icon column as nav rows, and the main panel header hairline aligns with the sidebar header hairline; group anchors use dark `t-caption` text plus outline icons; grouped Settings-nav items may use a subtle indented rail with item nodes on desktop, with the selected row spanning the full group width and the selected node using the brand accent; runtime/status badges belong in the sidebar footer, not beside the title |
 | Toolbar row | one shared control height `h-8`; gap `gap-2`; **one** brand CTA |
 | Content padding | base `p-4`, wider screens `md:p-6` |
@@ -342,6 +410,20 @@ The `.t-*` roles apply to **non-Markdown UI text only**.
 Performance changes may adjust how this renderer warms up, caches syntax highlighting, or shows an
 intermediate structural fallback. Those changes must preserve the final Markdown typography and
 component styling above; they are not permission to introduce a second Markdown look.
+
+**Mermaid figures** (plan M1 S6): a ```` ```mermaid ```` fence renders as a diagram via
+[`src/components/markdown/MermaidFigure.tsx`](src/components/markdown/MermaidFigure.tsx) — the ONE
+integration point is the fence dispatch inside `PrettyCodePre`, so every renderer consumer (chat,
+knowledge, reports, agent canvas, inline answers) gets it. A successful diagram is **unboxed** and
+uses the full document width; only parser errors retain a warning frame. The diagram itself is
+token-mapped through mermaid's `base` theme with `themeVariables` read from the CSS custom
+properties (`--surface`/`--background`/`--foreground`), so nodes render like Inqtrix surfaces in
+both light and dark, while connectors and arrowheads use `--foreground` (ink in light mode, white in
+dark mode) for publication-grade contrast. It follows the highlighter's warm-up allowance: a stable
+hull with a "Diagramm wird erstellt …" hint fills in asynchronously ONCE per (code, theme) from a
+module cache; render errors show a **warning-tone box** (border-warning, AlertTriangle) with the
+parser message plus the source — content never disappears silently. Security stays
+`securityLevel: 'strict'` + `htmlLabels: false`; do not relax it.
 
 ---
 

@@ -47,6 +47,17 @@ config:
   # s3.enabled bundles MinIO (see configmap.yaml). Set it here explicitly ONLY to point
   # at an external S3 endpoint (an explicit config value still wins over the derived one).
   INQTRIX_OBJECT_STORE_PATH: /var/lib/inqtrix/objects
+  # Pooled-engine connection budget. The pooled-engine count is CONDITIONAL:
+  # the API builds 2 always (platform bundle + run store), +1 for a
+  # cookie-session auth mode (local/ldap/oidc), +1 when knowledge is enabled
+  # (up to 4); the worker builds 1, +1 when knowledge is enabled (up to 2).
+  # Worst case per process = pooled_engines x (POOL_SIZE + MAX_OVERFLOW); each
+  # process logs its actual computed number at startup. Size the sum over ALL
+  # replicas below Postgres max_connections, or front the database with a
+  # transaction pooler (pgbouncer.enabled below). Defaults: 5 / 10 / 30.
+  # INQTRIX_DATABASE_POOL_SIZE: "5"
+  # INQTRIX_DATABASE_POOL_MAX_OVERFLOW: "10"
+  # INQTRIX_DATABASE_POOL_TIMEOUT_SECONDS: "30"
 # -- Free-form extra non-secret env merged into the ConfigMap (provider models,
 # feature flags, OIDC issuer/client-id, LDAP DNs, tuning -- anything non-secret).
 extraConfig: {}
@@ -63,6 +74,18 @@ secret:
   # --set-string secret.data.INQTRIX_DATABASE_URL=... or a values override; do
   # NOT commit real secrets into a values file.
   data: {}
+
+# -- Prometheus /metrics endpoint on the API pods. Off by default. Sets
+# INQTRIX_METRICS_ENABLED and, when podAnnotations is true, the
+# prometheus.io/scrape annotations for an annotation-based Prometheus. The
+# series carry no run-id/subject/session labels. When an API key is set (auth
+# apikey mode), /metrics is Bearer-gated with that key; otherwise keep it
+# cluster-internal (this endpoint is not exposed through the web Ingress).
+metrics:
+  enabled: false
+  # Emit prometheus.io/{scrape,port,path} pod annotations (classic scrape
+  # config). Set false when you use a PodMonitor/ServiceMonitor CR instead.
+  podAnnotations: true
 
 # -- API server (FastAPI, python -m inqtrix). Stateless; scale via replicaCount
 # or autoscaling. Note: more than one replica requires the postgres storage
@@ -271,6 +294,36 @@ postgres:
     limits:
       cpu: "1"
       memory: 1Gi
+
+# Transaction-mode PgBouncer in front of the BUNDLED Postgres (requires
+# postgres.enabled). When enabled, the app's derived INQTRIX_DATABASE_URL
+# points at the pooler (with ?prepared_statement_cache_size=0 appended);
+# the migrate hook keeps the DIRECT Postgres URL (DDL does not multiplex).
+# An explicit secret.data.INQTRIX_DATABASE_URL always wins — external-DB
+# deployments run their own pooler and point that URL wherever they like.
+# IMAGE NOTE (maintainer decision pending): PgBouncer has no Docker Official
+# image; edoburu/pgbouncer is the de-facto community standard (non-root,
+# env-configured). Swap the pin if another provenance is preferred.
+pgbouncer:
+  enabled: false
+  image: docker.io/edoburu/pgbouncer:v1.24.1-p1
+  imagePullPolicy: IfNotPresent
+  poolMode: transaction
+  maxClientConn: 400
+  defaultPoolSize: 20
+  # pgbouncer >= 1.21 tracks named prepared statements under transaction
+  # pooling — required for asyncpg (belt-and-braces with the URL param).
+  maxPreparedStatements: 200
+  # The image runs as its own non-root user; nothing to pin. Omitted
+  # automatically under openshift.enabled like the other bundled services.
+  podSecurityContext: {}
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 128Mi
 
 qdrant:
   enabled: false

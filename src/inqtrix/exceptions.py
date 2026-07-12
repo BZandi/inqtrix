@@ -13,6 +13,16 @@ uniformly, or one of the concrete subclasses to react per backend.
 from __future__ import annotations
 
 
+class RunNotFound(KeyError):
+    """Raised when a run is absent or intentionally indistinguishable.
+
+    Run stores use the same exception for unknown ids and authorization
+    denials. Keeping the type below the server layer lets schedulers and
+    services distinguish true retention/deletion from infrastructure
+    failures without importing FastAPI-facing modules.
+    """
+
+
 class AgentTimeout(Exception):
     """Raised when the run exceeds its wall-clock deadline.
 
@@ -25,11 +35,22 @@ class AgentTimeout(Exception):
     """
 
 
+class AgentProviderTimeout(AgentTimeout):
+    """Raised when one provider request times out before the run deadline.
+
+    Provider-internal attempts already exhausted the one logical-operation
+    budget. Agent orchestration therefore records this distinct failure but
+    never replays the complete task. The subclass preserves existing library
+    callers that catch :class:`AgentTimeout`.
+    """
+
+
 class AgentRateLimited(Exception):
     """Raised on a 429 rate-limit or daily-token-limit response.
 
-    Only raised when the SDK's own retry logic could not absorb the
-    rate limit (i.e. all retries exhausted, or a hard daily cap). The
+    Raised after the Inqtrix-owned three-attempt operation budget is
+    exhausted, or immediately for a recognized hard daily cap. Hidden SDK
+    retries are disabled. The
     failing model id and the original SDK exception are preserved as
     instance attributes for diagnostics.
 
@@ -148,7 +169,41 @@ class AgentCancelled(Exception):
     In-flight provider HTTP calls are not aborted by this exception —
     cancel only takes effect at node boundaries. Latency from the
     disconnect to the actual stop equals the remaining duration of the
-    currently running provider call (typically 5-60 s).
+    currently running provider call, bounded by its configured operation
+    timeout.
+    """
+
+
+class AgentTokenBudgetExceeded(AgentCancelled):
+    """Raised when the server-managed per-run token ceiling is reached.
+
+    This remains an :class:`AgentCancelled` subclass so existing graph
+    unwinding stays graceful, while callers can distinguish a resource
+    failure from an explicit client cancellation without inspecting text.
+    """
+
+    def __init__(
+        self, message: str, *, usage: dict[str, int] | None = None
+    ) -> None:
+        """Create a typed budget stop with the consumed usage snapshot.
+
+        Args:
+            message: User-safe explanation of the operator limit.
+            usage: Cumulative run usage at the boundary that reached the
+                limit. Algorithms use it to preserve quota accounting while
+                unwinding without a normal node return.
+        """
+        super().__init__(message)
+        self.usage = dict(usage or {})
+
+
+class AgentPolicyDenied(PermissionError):
+    """Raised when an admitted agent action violates an effective policy.
+
+    The dedicated type keeps source/skill denials distinct from arbitrary
+    filesystem or implementation ``PermissionError`` instances at the native
+    run boundary. It remains a ``PermissionError`` subclass for compatibility
+    with existing tool adapters and callers.
     """
 
 

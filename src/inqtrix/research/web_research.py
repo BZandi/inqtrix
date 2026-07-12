@@ -1,19 +1,12 @@
 """Algorithm adapters for the existing web-research graph.
 
 ``run_web_graph`` / ``run_web_graph_test`` are the registry-side seam
-between the platform layer and the LangGraph engine: non-streaming
-chat, native ``/v1/runs``, and ``/v1/test/run`` all execute through
-this module. Tests that previously monkeypatched
-``inqtrix.server.routes.agent_run`` patch
-``inqtrix.research.web_research.run_web_graph`` instead — the adapters
-resolve the module global at call time, so late patching keeps
-working exactly as before.
-
-SECOND seam (deliberate, until streaming dispatches through the
-registry): the streamed chat path binds the graph independently as
-``inqtrix.server.streaming.agent_run``. Test fakes for streamed chat
-must patch THAT name — patching only this module leaves the streaming
-path on the real engine.
+between the platform layer and the LangGraph engine: streamed AND
+non-streamed chat, native ``/v1/runs``, and ``/v1/test/run`` all execute
+through this module. Tests patch ``inqtrix.research.web_research.run_web_graph``
+— the ONE seam for every chat path now that streaming dispatches through the
+registry — and the adapters resolve the module global at call time, so late
+patching keeps working exactly as before.
 
 Both adapters wrap the SAME graph entry point: the research/direct-LLM
 split is carried by ``agent_settings.skip_search`` (resolved by the
@@ -48,11 +41,11 @@ def _execute_graph(
     effective even when patched after app construction.
 
     Optional seams (``progress_queue``, ``cancel_event``, ``run_id``,
-    ``run_event_sink``) are only passed when set, preserving the exact
-    historical call shape per protocol path: request/response chat
+    ``run_event_sink``, ``web_recency``) are only passed when set, preserving
+    the exact historical call shape per protocol path: request/response chat
     passes none of them, the native run worker passes the cancel/event
     trio. Omitting a ``None`` is semantically identical for the graph
-    (all four default to ``None``) and keeps strict test fakes that
+    (all optional seams default to ``None``) and keeps strict test fakes that
     pin the per-path signature working.
     """
     optional_kwargs: dict[str, Any] = {}
@@ -66,6 +59,8 @@ def _execute_graph(
         optional_kwargs["run_event_sink"] = context.event_sink
     if context.token_budget > 0:
         optional_kwargs["token_budget"] = context.token_budget
+    if request.web_recency is not None:
+        optional_kwargs["web_recency"] = request.web_recency
     return run_web_graph(
         request.question,
         history=request.history,
@@ -85,16 +80,13 @@ class WebResearchAlgorithm:
     def capabilities(self) -> dict:
         """Manifest entry for the capability endpoint and clients.
 
-        ``streams_via_research_graph`` marks that the streamed chat
-        path may execute this algorithm through the legacy
-        ``guarded_stream`` graph binding; ``terminal_node`` is the
-        snapshot node name a completed native run reports.
+        ``terminal_node`` is the snapshot node name a completed native
+        run reports.
         """
         return {
             "requires": ["llm", "web_search"],
             "streams_events": True,
             "supports_chat_completions": True,
-            "streams_via_research_graph": True,
             "terminal_node": "answer",
             "produces": ["answer", "citations", "claims", "sources"],
         }
@@ -107,6 +99,9 @@ class WebResearchAlgorithm:
         context: "RunContext",
     ) -> AgentResult:
         """Execute the research graph and wrap its raw result."""
+        from inqtrix.agents.source_policy import require_task_allowed
+
+        require_task_allowed("web_research", policy=request.source_policy)
         raw = _execute_graph(request, context)
         return AgentResult(
             answer=str(raw.get("answer", "")),
@@ -127,7 +122,6 @@ class DirectLlmAlgorithm:
             "requires": ["llm"],
             "streams_events": True,
             "supports_chat_completions": True,
-            "streams_via_research_graph": True,
             "terminal_node": "direct_llm",
             "produces": ["answer"],
         }

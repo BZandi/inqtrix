@@ -84,10 +84,11 @@ or `create_app(providers=...)`.
 
 | Field | Default (s) | Purpose |
 |-------|-------------|---------|
-| `max_total_seconds` | `300` | Hard wall-clock deadline for the whole run. See [Timeouts and errors](../observability/timeouts-and-errors.md). |
-| `reasoning_timeout` | `120` | Per-call LLM budget. |
-| `search_timeout` | `60` | Per-call search budget. |
-| `claim_extract_timeout` | `60` | Per-call claim-extraction budget. |
+| `max_total_seconds` | `3600` | Outer active-run budget. See [Timeouts and errors](../observability/timeouts-and-errors.md). |
+| `reasoning_timeout` | `600` | Logical reasoning-operation budget, shared by at most three attempts. |
+| `editor_assistant_timeout` | `600` | Logical editor-operation budget, independent from research reasoning. |
+| `search_timeout` | `600` | Logical search-operation budget, shared by at most three attempts. |
+| `claim_extract_timeout` | `600` | Logical claim-extraction budget, shared by at most three attempts. |
 
 ### Risk scoring
 

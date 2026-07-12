@@ -25,11 +25,13 @@ async def _save(
     contrast="high",
     preset="slate",
     user_bubble_tone="gray",
+    enable_agent_memory=False,
     updated_at=1.0,
 ):
     return await service.save_preferences(
         sub=sub, contrast_mode=contrast, locale=locale, theme=theme,
         theme_preset=preset, user_bubble_tone=user_bubble_tone,
+        enable_agent_memory=enable_agent_memory,
         updated_at=updated_at,
     )
 
@@ -83,6 +85,20 @@ async def test_save_is_whole_row_upsert(service) -> None:
     assert (prefs.theme, prefs.theme_preset, prefs.user_bubble_tone, prefs.updated_at) == (
         "light", "graphite", "orange", 2.0
     )
+
+
+@pytest.mark.asyncio
+async def test_agent_memory_opt_in_defaults_off_and_round_trips(service) -> None:
+    # Privacy default OFF when omitted; opt-in persists and survives the
+    # whole-row upsert of another preference.
+    await _save(service, "u")
+    assert (await service.get_preferences(sub="u")).enable_agent_memory is False
+
+    await _save(service, "u", enable_agent_memory=True, updated_at=2.0)
+    assert (await service.get_preferences(sub="u")).enable_agent_memory is True
+
+    await _save(service, "u", theme="light", updated_at=3.0)
+    assert (await service.get_preferences(sub="u")).enable_agent_memory is False
 
 
 @pytest.mark.asyncio

@@ -79,8 +79,17 @@ def test_complete_success_replay() -> None:
 
 
 @pytest.mark.vcr
-def test_rate_limit_replay() -> None:
-    """A 429 cassette is translated into ``AgentRateLimited``."""
+def test_rate_limit_replay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An EXHAUSTED 429 budget escalates to ``AgentRateLimited``.
+
+    A 429 is now retried with backoff (1.1a); the single-429 cassette
+    covers the escalation path, so the rate-limit retry budget is set to
+    0 here to exhaust it on the first hit. The retry-then-succeed
+    behaviour is covered deterministically in ``tests/test_providers.py``.
+    """
+    monkeypatch.setattr(
+        "inqtrix.providers.base._SDK_RATE_LIMIT_MAX_RETRIES", 0
+    )
     provider = _build_provider(max_retries=0)
 
     with pytest.raises(AgentRateLimited):

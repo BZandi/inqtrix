@@ -9,6 +9,7 @@ import {
 } from './accountPreferencesSync'
 
 const fallback: ProjectPreferences = {
+  agentMemoryEnabled: false,
   contrastMode: 'standard',
   locale: 'en',
   theme: 'system',
@@ -21,10 +22,12 @@ describe('accountPreferencesSync', () => {
     const server: ServerAccountPreferences = {
       contrast_mode: 'high', locale: 'de', theme: 'dark', theme_preset: 'sage',
       user_bubble_tone: 'mint',
+      agent_memory_enabled: true,
       updated_at: 1_700_000_000,
     }
     const prefs = preferencesFromServer(server, fallback)
     expect(prefs).toEqual({
+      agentMemoryEnabled: true,
       contrastMode: 'high',
       locale: 'de',
       theme: 'dark',
@@ -39,6 +42,7 @@ describe('accountPreferencesSync', () => {
       theme: 'dark',
       theme_preset: 'sage',
       user_bubble_tone: 'mint',
+      agent_memory_enabled: true,
       updated_at: 42,
     })
   })
@@ -66,10 +70,21 @@ describe('accountPreferencesSync', () => {
     expect(prefs.userBubbleTone).toBe('sky')
   })
 
+  it('keeps the local opt-in when an old server row omits agent_memory_enabled', () => {
+    // Legacy row / old server: an absent boolean must not silently enable
+    // memory — it resolves to the local (privacy default OFF) value.
+    const prefs = preferencesFromServer(
+      { contrast_mode: 'high', locale: 'de', theme: 'dark', theme_preset: 'sage', updated_at: 1 },
+      { ...fallback, agentMemoryEnabled: false },
+    )
+    expect(prefs.agentMemoryEnabled).toBe(false)
+  })
+
   it('fingerprint changes only when a preference field changes', () => {
     const a = preferencesFingerprint(fallback)
     expect(preferencesFingerprint({ ...fallback })).toBe(a)
     expect(preferencesFingerprint({ ...fallback, theme: 'dark' })).not.toBe(a)
     expect(preferencesFingerprint({ ...fallback, userBubbleTone: 'orange' })).not.toBe(a)
+    expect(preferencesFingerprint({ ...fallback, agentMemoryEnabled: true })).not.toBe(a)
   })
 })

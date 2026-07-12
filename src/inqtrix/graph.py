@@ -26,7 +26,12 @@ from typing import Any, Callable
 
 from langgraph.graph import END, StateGraph
 
-from inqtrix.exceptions import AgentCancelled, AgentRateLimited
+from inqtrix.core.results import WebRecency
+from inqtrix.exceptions import (
+    AgentCancelled,
+    AgentRateLimited,
+    AgentTokenBudgetExceeded,
+)
 from inqtrix.i18n import t
 from inqtrix.providers.base import ProviderContext
 from inqtrix.result import ResearchResult, ResearchResultExportOptions
@@ -35,6 +40,7 @@ from inqtrix.settings import AgentSettings
 from inqtrix.state import (
     AgentState,
     build_run_snapshot,
+    check_cancel_event,
     emit_progress,
     emit_run_event,
     initial_state,
@@ -242,6 +248,7 @@ def _run_direct_chat(
     cancel_event: threading.Event | None,
     run_id: str | None = None,
     run_event_sink: Callable[[str, dict[str, Any]], None] | None = None,
+    token_budget: int = 0,
 ) -> dict[str, Any]:
     """Execute the skip-search short-circuit: LLM-only, no graph.
 
@@ -260,6 +267,7 @@ def _run_direct_chat(
         max_rounds=settings.max_rounds,
         run_id=run_id,
         run_event_sink=run_event_sink,
+        token_budget=token_budget,
     )
     log_run_start(
         question=question,
@@ -286,19 +294,29 @@ def _run_direct_chat(
             system=_DIRECT_CHAT_SYSTEM_PROMPT,
             model=direct_chat_model,
             reasoning_effort=direct_chat_effort,
+            timeout=settings.reasoning_timeout,
             state=state,
             deadline=state.get("deadline"),
         )
+        # The provider records usage on the shared state. Direct mode has no
+        # next graph node, so this explicit terminal boundary is what enforces
+        # both a late client cancel and the server-owned token ceiling.
+        check_cancel_event(state)
     except AgentCancelled as exc:
-        log.info("Chat-only run cancelled by client disconnect: %s", exc)
+        log.info("Chat-only run stopped: %s", exc)
         state["cancelled"] = True
+        state["cancel_reason"] = (
+            "token_budget_exceeded"
+            if isinstance(exc, AgentTokenBudgetExceeded)
+            else "client_requested_cancel"
+        )
         log_run_end(
             run_id=state.get("_run_id"),
             run_mode="run_chat_only",
             status="cancelled",
             elapsed_s=time.monotonic() - t0,
             state=state,
-            reason="client_cancelled",
+            reason=state["cancel_reason"],
         )
         return {
             "answer": "",
@@ -311,6 +329,10 @@ def _run_direct_chat(
     except AgentRateLimited as exc:
         emit_progress(state, t(state, "run_aborted", exc=exc))
         log.error("ABBRUCH (chat-only): %s", exc)
+        state["_terminal_failure"] = {
+            "type": "rate_limited",
+            "message": str(exc),
+        }
         log_run_end(
             run_id=state.get("_run_id"),
             run_mode="run_chat_only",
@@ -384,6 +406,7 @@ def run(
     run_id: str | None = None,
     run_event_sink: Callable[[str, dict[str, Any]], None] | None = None,
     token_budget: int = 0,
+    web_recency: WebRecency | None = None,
 ) -> dict[str, Any]:
     """Execute the research agent and return answer + usage + state.
 
@@ -401,6 +424,9 @@ def run(
         The active strategy implementations.
     settings:
         Agent behaviour settings.
+    web_recency:
+        Optional provider-neutral recency filter supplied by a delegating
+        agent. When set, it overrides classifier inference.
 
     Returns
     -------
@@ -431,6 +457,7 @@ def run(
             cancel_event=cancel_event,
             run_id=run_id,
             run_event_sink=run_event_sink,
+            token_budget=token_budget,
         )
 
     agent = get_agent(providers, strategies, settings)
@@ -445,6 +472,7 @@ def run(
         run_id=run_id,
         run_event_sink=run_event_sink,
         token_budget=token_budget,
+        web_recency=web_recency,
     )
     log_run_start(
         question=question,
@@ -458,20 +486,29 @@ def run(
     t0 = time.monotonic()
     try:
         result = agent.invoke(state)
+        state = result
+        # The answer node is terminal and therefore has no successor whose
+        # entry check could observe usage added by the final model call.
+        check_cancel_event(state)
     except AgentCancelled as exc:
         # Implicit-cancel-on-disconnect path: the SSE client went away,
         # the streaming layer set the event, and the next node-boundary
         # probe raised. Return a marked-cancelled state instead of
         # propagating; the streaming generator already stopped emitting.
-        log.info("Run cancelled by client disconnect: %s", exc)
+        log.info("Run stopped: %s", exc)
         state["cancelled"] = True
+        state["cancel_reason"] = (
+            "token_budget_exceeded"
+            if isinstance(exc, AgentTokenBudgetExceeded)
+            else "client_requested_cancel"
+        )
         log_run_end(
             run_id=state.get("_run_id"),
             run_mode="run",
             status="cancelled",
             elapsed_s=time.monotonic() - t0,
             state=state,
-            reason="client_cancelled",
+            reason=state["cancel_reason"],
         )
         return {
             "answer": "",
@@ -484,6 +521,10 @@ def run(
     except AgentRateLimited as exc:
         emit_progress(state, t(state, "run_aborted", exc=exc))
         log.error("ABBRUCH: %s", exc)
+        state["_terminal_failure"] = {
+            "type": "rate_limited",
+            "message": str(exc),
+        }
         log_run_end(
             run_id=state.get("_run_id"),
             run_mode="run",

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +13,7 @@ import pytest
 from openai import APIStatusError, APITimeoutError, OpenAIError, RateLimitError
 
 from inqtrix.exceptions import (
+    AgentProviderTimeout,
     AgentRateLimited,
     AgentTimeout,
     AzureFoundryWebSearchAPIError,
@@ -72,6 +75,43 @@ def test_is_available_when_configured():
     assert _provider(MagicMock()).is_available()
 
 
+def test_shared_provider_gate_caps_all_callers() -> None:
+    """The instance gate, not each caller's thread pool, owns concurrency."""
+    lock = threading.Lock()
+    release = threading.Event()
+    two_started = threading.Event()
+    active = 0
+    peak = 0
+
+    def _create(**_kwargs):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            if active == 2:
+                two_started.set()
+        release.wait(timeout=2)
+        with lock:
+            active -= 1
+        return _response("ok")
+
+    client = MagicMock()
+    client.responses.create.side_effect = _create
+    provider = _provider(client, max_concurrency=2)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(provider.search, f"q{index}") for index in range(4)]
+        assert two_started.wait(timeout=1)
+        assert peak == 2
+        release.set()
+        assert [future.result(timeout=2).answer for future in futures] == [
+            "ok",
+            "ok",
+            "ok",
+            "ok",
+        ]
+    assert peak == 2
+
+
 def test_construction_entra_uses_project_client_without_agent_name():
     """Entra ID auth builds via AIProjectClient.get_openai_client() (no agent_name).
 
@@ -96,7 +136,7 @@ def test_construction_entra_uses_project_client_without_agent_name():
     assert mock_proj.call_args.kwargs["credential"] is custom_cred
     assert mock_proj.call_args.kwargs["allow_preview"] is True
     project_client.get_openai_client.assert_called_once_with()
-    openai_client.with_options.assert_called_once_with(max_retries=0, timeout=60.0)
+    openai_client.with_options.assert_called_once_with(max_retries=0, timeout=600)
     assert provider._client is configured_openai_client
 
 
@@ -332,6 +372,21 @@ def test_non_429_status_error_degrades_to_empty(monkeypatch):
     assert provider.consume_nonfatal_notice() is not None
 
 
+def test_status_408_keeps_provider_timeout_notice(monkeypatch):
+    monkeypatch.setattr("inqtrix.providers.base._retry_delay_seconds", lambda attempt: 0.0)
+    client = MagicMock()
+    client.responses.create.side_effect = _http_error(APIStatusError, 408)
+    provider = _provider(client)
+
+    result = provider.search("Test")
+    notice = provider.consume_nonfatal_notice_detail()
+
+    assert result.sources == []
+    assert notice is not None
+    assert notice["code"] == "provider_timeout"
+    assert notice["http_status"] == 408
+
+
 def test_transient_timeout_retry_emits_notice(monkeypatch):
     monkeypatch.setattr("inqtrix.providers.base._retry_delay_seconds", lambda attempt: 0.0)
     request = httpx.Request("POST", "https://test.ai.azure.com/responses")
@@ -353,14 +408,15 @@ def test_transient_timeout_retry_emits_notice(monkeypatch):
     assert notices[0]["model"] == "foundry-web:web-search-agent@latest"
     assert notices[0]["operation"] == "web_search"
     assert notices[0]["attempt"] == 1
-    assert notices[0]["max_attempts"] == 5
+    assert notices[0]["max_attempts"] == 3
+    assert notices[0]["configured_timeout_seconds"] == 600
     assert notices[0]["error_code"] == "APITimeoutError"
 
 
 def test_timeout_exception_re_raised():
     client = MagicMock()
     client.responses.create.side_effect = OpenAIError("Request timed out")
-    with pytest.raises(AgentTimeout):
+    with pytest.raises(AgentProviderTimeout):
         _provider(client).search("Test")
 
 

@@ -57,6 +57,7 @@ Selects WHICH provider builds each axis of the auto-created server stack, plus t
 | `INQTRIX_TOKEN_BUDGET_PARAMETER` | *(empty)* | Output-budget request field for `litellm`/`azure`: `max_tokens` or `max_completion_tokens` (the latter for OpenAI o-series). Anthropic/Bedrock ignore it (logged when set). |
 | `INQTRIX_SEARCH_PRESET` | *(empty → `fast-search`)* | Perplexity agent preset: `fast-search`, `pro-search`, or `deep-research`. Ignored by `azure_foundry` (logged when set). Web search has no high/mid/fast tiers — this preset plus `SEARCH_MODEL` are the search knobs. |
 | `INQTRIX_SEARCH_INSTRUCTIONS` | *(empty)* | Optional system instructions for the Perplexity search agent; ignored by `azure_foundry`. |
+| `INQTRIX_AZURE_FOUNDRY_MAX_CONCURRENCY` | `6` | Per-process gate shared by Agent Desk and Research Desk calls using the same Azure Foundry search-provider instance. This is an Inqtrix deployment limit, not an Azure service-wide maximum. |
 
 Further tuning (the chosen provider's credentials): `anthropic` reads `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL`; `azure` reads `AZURE_OPENAI_ENDPOINT` plus `AZURE_OPENAI_API_KEY` or the `AZURE_TENANT_ID`/`AZURE_CLIENT_ID`/`AZURE_CLIENT_SECRET` service-principal trio; `bedrock` reads `AWS_REGION` (default `eu-central-1`) / `AWS_PROFILE`; `azure_foundry` search reads `AZURE_AI_PROJECT_ENDPOINT` plus `WEB_SEARCH_AGENT_NAME` (and the optional `WEB_SEARCH_AGENT_VERSION` pin), authenticating with `AZURE_AI_PROJECT_API_KEY` or the same `AZURE_TENANT_ID`/`AZURE_CLIENT_ID`/`AZURE_CLIENT_SECRET` trio. Per-tier reasoning effort and tier models stay in the Models block (`TIER_*_EFFORT`, `TIER_*_MODEL`); the selector passes them to whichever provider is chosen. Context window and output budget are NOT env vars — the model cards (`src/inqtrix/model_cards.py`) are the authoritative source. Inqtrix passes provider credentials explicitly (constructor-first) and does not rely on the underlying SDKs' own credential env vars (`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `PPLX_API_KEY`); use `LITELLM_API_KEY`/`LITELLM_BASE_URL` and `PERPLEXITY_API_KEY` instead. The one exception is Bedrock, which uses boto3's standard AWS chain (`AWS_ACCESS_KEY_ID` etc.) when `AWS_PROFILE` is not set.
 
@@ -70,33 +71,51 @@ Tunes a single research run: loop bounds, stop thresholds, timeouts, input limit
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `REPORT_PROFILE` | `compact` | `compact` or `deep`. `compact` presets `max_rounds=2`, `min_rounds=1`, `confidence_stop=7`, `first_round_queries=6`; `deep` presets `max_rounds=4`, `min_rounds=2`, `confidence_stop=8`, `first_round_queries=10`, `answer_prompt_citations_max=500`, `reasoning_timeout=900`, `editor_assistant_timeout=900`, `claim_extract_timeout=600`, `search_timeout=300`, `max_total_seconds=1800`. See [Report profiles](report-profiles.md). |
+| `REPORT_PROFILE` | `compact` | `compact` or `deep`. `compact` presets `max_rounds=2`, `min_rounds=1`, `confidence_stop=7`, `first_round_queries=6`; `deep` presets `max_rounds=4`, `min_rounds=2`, `confidence_stop=8`, `first_round_queries=8`, and larger evidence/output context. Every profile uses 600-second AI-operation budgets and a 3600-second active-run budget unless explicitly overridden. See [Report profiles](report-profiles.md). |
+| `DEPTH` | `normal` | Agent-mode thoroughness (plan M4): `normal` or `deep`. `deep` is deterministic budget + verification — high kernel reasoning effort (unless the request or a skill pin sets one), the raised kernel iteration ceiling, DEEP child research profiles, and exactly ONE rubric-checked verification/revision round before the final answer. Per-request override: `agent_overrides.depth`. Distinct from `REPORT_PROFILE` (research answer preset). |
+| `AGENT_TIER` | *(empty)* | Agent Desk speed/depth Stufe: `schnell` (one instant web search, no clarification, no plan gate outside `strict`, chat answer), `gruendlich` (bounded research children, max. one clarification round) or `tief` (full budgets, canvas report, escalating quote verification). Empty keeps the legacy `DEPTH` semantics. Per-request override: `agent_overrides.agent_tier`; sending it together with a contradictory `depth` is a 400. All tier budgets come from the ONE `TIER_POLICIES` table and are validator-enforced, then published under `agent.tiers`. |
 | `MAX_ROUNDS` | `2` | Hard upper bound for the research loop (`4` under DEEP). |
 | `MIN_ROUNDS` | `1` | Suppresses early stops until this round; clamped to `MAX_ROUNDS` at request time. |
 | `CONFIDENCE_STOP` | `7` | Minimum evaluator confidence (1-10) at which the stop cascade may emit `done` (`8` under DEEP). |
-| `MAX_TOTAL_SECONDS` | `300` | Wall-clock deadline for the whole run, checked at node boundaries; also the base for the chat and SSE HTTP wait (this value + `REQUEST_WAIT_MARGIN_SECONDS`). `1800` under DEEP. |
-| `REASONING_TIMEOUT` | `120` | Per-call timeout (seconds) for reasoning LLM calls (classify/plan/evaluate/answer). `900` under DEEP. |
-| `EDITOR_ASSISTANT_TIMEOUT` | `120` | Per-call timeout (seconds) for editor suggest/instruct calls, decoupled from `REASONING_TIMEOUT`. Raise it if long editor instructions with large attachments hit a 504, without lengthening research reasoning calls. `900` under DEEP. |
-| `SEARCH_TIMEOUT` | `60` | Per-call timeout (seconds) for search-provider calls; keep below `MAX_TOTAL_SECONDS / FIRST_ROUND_QUERIES` so one slow query cannot consume the run budget. `300` under DEEP. |
-| `CLAIM_EXTRACT_TIMEOUT` | `60` | Per-call timeout (seconds) for claim-extraction calls (one per search hit) and the `/v1/text` improvement call. `600` under DEEP. |
+| `MAX_TOTAL_SECONDS` | `3600` | Outer active research-run budget, checked at node boundaries and used to clamp each provider-operation deadline. |
+| `REASONING_TIMEOUT` | `600` | Logical reasoning-operation budget (classify/plan/evaluate/answer), including at most three attempts and their backoff. |
+| `EDITOR_ASSISTANT_TIMEOUT` | `600` | Logical editor suggest/instruct budget, independent from research reasoning. |
+| `SEARCH_TIMEOUT` | `600` | Logical search-provider budget, including at most three attempts and their backoff. |
+| `CLAIM_EXTRACT_TIMEOUT` | `600` | Logical claim-extraction budget (and `/v1/text` improvement call), including retries. |
 | `SKIP_SEARCH` | `false` | Bypass plan/search/evaluate and answer directly from the LLM with conversation history. No citations, `round` stays `0`. |
 | `TESTING_MODE` | `false` | Expose `/v1/test/run` (used by `inqtrix-parity run`). Never enable in production: no rate limiting, returns full iteration logs. |
 | `OBSERVABILITY_PROFILE` | `summary` | `summary`, `debug` (reserved), or `forensic` (full source/citation/claim/stop/answer lineage events). See [Logging](../observability/logging.md). |
 
 Further tuning: `FIRST_ROUND_QUERIES` (6), `ANSWER_PROMPT_CITATIONS_MAX` (60), `REQUIRED_CONTEXT_WINDOW_TOKENS` (128000), `MAX_QUESTION_LENGTH` (60000 — generous because the chat composer inlines attached file content), `HIGH_RISK_SCORE_THRESHOLD` (4 — observability signal only), `SEARCH_CACHE_MAXSIZE` (256; `0` disables), `SEARCH_CACHE_TTL` (3600), `MODEL_TIER` / `MODEL_OVERRIDE` / `EFFORT_OVERRIDE` (per-request model routing, normally sent by API clients rather than set globally). The per-call/run timeouts and how the HTTP and client waits derive from them are detailed under "Timeout dependency chain" below.
 
+The full-stack starter intentionally makes the robust operation policy
+explicit. A private deployment may tune these values, but every retry remains
+inside the one logical-operation budget and no result text is shortened to
+meet the optional token limit:
+
+```dotenv
+REASONING_TIMEOUT=600
+EDITOR_ASSISTANT_TIMEOUT=600
+SEARCH_TIMEOUT=600
+CLAIM_EXTRACT_TIMEOUT=600
+MAX_TOTAL_SECONDS=3600
+INQTRIX_AGENT_MAX_PARALLEL_CHILDREN=6
+INQTRIX_AZURE_FOUNDRY_MAX_CONCURRENCY=6
+INQTRIX_QUOTA_MAX_TOKENS_PER_RUN=900000
+```
+
 **Interactions.** `REPORT_PROFILE` rewrites the other loop fields unless they were set explicitly. `MODEL_TIER` replaces the default node-to-tier mapping for every LLM call site of a run; `MODEL_OVERRIDE`/`EFFORT_OVERRIDE` bypass tier routing for the direct-chat call only.
 
 **Timeout dependency chain.** Three layers bound any single operation, and the same outer-wait shape deliberately hangs off different base budgets depending on the endpoint — making that explicit is the point of this section. Every per-call timeout is additionally clamped to the time left in `MAX_TOTAL_SECONDS` (`_bounded_timeout`), so no single call can outlive the run.
 
 ```text
-Base per-call / run budgets (env-configurable)
+Base logical-operation / run budgets (env-configurable)
   MAX_TOTAL_SECONDS ........ whole-run wall clock
-  REASONING_TIMEOUT ........ one reasoning call (classify/plan/evaluate/answer)
-  EDITOR_ASSISTANT_TIMEOUT . one editor suggest/instruct call
+  REASONING_TIMEOUT ........ one reasoning operation, all attempts included
+  EDITOR_ASSISTANT_TIMEOUT . one editor suggest/instruct operation
                              (defaults to the REASONING_TIMEOUT default)
-  SEARCH_TIMEOUT ........... one search-provider call
-  CLAIM_EXTRACT_TIMEOUT .... one claim-extraction call; the /v1/text call
+  SEARCH_TIMEOUT ........... one search-provider operation, all attempts included
+  CLAIM_EXTRACT_TIMEOUT .... one claim-extraction operation; the /v1/text call
 
 Derived HTTP waits  (inner budget + REQUEST_WAIT_MARGIN_SECONDS, 30s; each is
                      also capped at the chat wait, so none outlives the run)
@@ -113,7 +132,10 @@ Client abort timeouts (browser)
   hardcoded, so raising a server budget lengthens the client abort in step.
 ```
 
-`REQUEST_WAIT_MARGIN_SECONDS` (30s, an internal constant in `services/request_parsing.py`, not an env var) is the grace each HTTP wait adds over its inner per-call budget so the inner call raises its specific provider error before the outer `asyncio.wait_for` fires a generic 504.
+`REQUEST_WAIT_MARGIN_SECONDS` (30s, an internal constant in `constants.py`, not
+an env var) is the grace each HTTP wait adds over its inner per-call budget so
+the inner call raises its specific provider error before the outer
+`asyncio.wait_for` fires a generic 504.
 
 **When this block is unset.** There is no off switch — unset means the COMPACT defaults. The one degradation toggle is `SKIP_SEARCH=true`, which turns every run into a direct LLM answer without web research or citations; UI clients normally send it per request instead of setting it globally.
 
@@ -128,8 +150,10 @@ Configures the FastAPI surface started by `python -m inqtrix`: the upstream LLM 
 | `PERPLEXITY_API_KEY` | *(empty)* | Key for the auto-created `PerplexitySearch` provider (its own endpoint, not the gateway). |
 | `MAX_CONCURRENT` | `6` | Concurrent `/v1/chat/completions` requests. Native runs reuse this unless `RUN_MAX_CONCURRENT` is set. Each active run holds one thread (the research graph is synchronous), so this also bounds the in-process thread pool; the real ceiling is the provider rate limit + host CPU/RAM. |
 | `RUN_MAX_CONCURRENT` | *(unset)* | Optional separate active-job cap for native `/v1/runs`. |
-| `RUN_QUEUE_MAX_SIZE` | `50` | Waiting native runs; a full queue returns HTTP 429 on `POST /v1/runs`. |
+| `RUN_MAX_CONCURRENT_PER_USER` | *(unset)* | Optional per-user fairness bound under the global run cap: a single subject's QUEUED+RUNNING native runs. Parked (waiting) agent runs are excluded; agent child runs count against the parent's user (size it above one agent tree). Unset = admission stays purely global (single-tenant unchanged); the monthly quota still bounds each user's spend. A rejected submit answers HTTP 429 with `reason=per_user_limit`. |
+| `RUN_QUEUE_MAX_SIZE` | `50` | Waiting native runs; a full queue returns HTTP 429 on `POST /v1/runs` (with `reason=queue_full`). |
 | `INQTRIX_SERVER_API_KEY` | *(empty)* | Static Bearer gate on chat, text-improvement, test-run, and native run routes (`hmac.compare_digest`). `/health` and `/v1/models` stay public. Also drives auth-mode inference (see Auth). |
+| `INQTRIX_METRICS_ENABLED` | `false` | Mount the Prometheus `/metrics` endpoint (run-queue gauges, admission rejections by reason, per-route request latency; bounded cardinality, no run-id/subject/session labels). Needs the image built with the `metrics` extra (the stack image bakes it in); the flag alone otherwise logs a WARNING and stays off. Bearer-gated with the API key when one is set, else keep it cluster-internal. See [Metrics](../observability/metrics.md). |
 | `INQTRIX_SERVER_CORS_ORIGINS` | *(empty)* | Comma-list of allowed origins; installs `CORSMiddleware` with credentials. `*` is accepted but WARNs (browsers reject wildcard with credentials). |
 | `INQTRIX_ENABLE_OPENAPI` | `false` | Serve `/openapi.json`, `/docs`, `/redoc`. Documentation routes only; never changes API behaviour. |
 | `INQTRIX_PUBLIC_BASE_URL` | *(empty)* | Externally reachable base URL. Set: knowledge citations become clickable `/v1/sources/...` links. Empty: citations keep the internal `inqtrix://` scheme — a visible degradation, never a guessed hostname. |
@@ -199,6 +223,13 @@ Moves native-run execution out of the API process. Two orthogonal upgrades keep 
 | `INQTRIX_QUEUE_BACKEND` | `memory` | `memory` executes runs in-process; `valkey` dispatches to workers and requires `INQTRIX_STORAGE_BACKEND=postgres` plus a non-empty `INQTRIX_VALKEY_URL`. |
 | `INQTRIX_VALKEY_URL` | *(empty)* | Connection URL (`redis://` scheme, e.g. `redis://127.0.0.1:6379/0`). Required for `valkey`; ignored otherwise. |
 | `INQTRIX_WORKER_CONCURRENCY` | `2` | Runs one worker process executes concurrently. Each run blocks one thread for its full duration (the research graph is synchronous). |
+
+Agent Desk instant tasks execute inside their parent run's six-wide local wave,
+so they do not consume six worker slots. Delegated `web_research` tasks are
+separate child runs: to execute six such children physically at once, provision
+at least six worker slots across replicas (for example one worker with
+`INQTRIX_WORKER_CONCURRENCY=6` or three replicas at the default `2`). The
+planner/Agent width never silently rewrites the worker setting.
 | `INQTRIX_WORKER_MAX_ATTEMPTS` | `3` | Delivery attempts before a run is dead-lettered and marked failed. Redelivery of finished runs is a no-op. |
 
 Further tuning: `INQTRIX_WORKER_HEARTBEAT_SECONDS` (15.0 — workers re-claim their in-flight stream entries so long runs are not stolen), `INQTRIX_WORKER_CLAIM_IDLE_SECONDS` (90.0 — idle threshold for reclaiming entries from crashed workers; sized to heartbeat loss, not run duration).
@@ -263,6 +294,45 @@ Resource-sharing policy for the cookie-session multi-user modes (`oidc`/`local`/
 | `INQTRIX_SHARING_RESTRICT_TO_WORKSPACE_MEMBERS` | `false` | When `true`, a user may only share a resource with people they share at least one workspace with, and the share typeahead is scoped the same way. A grant-time (write) restriction only — turning it on never revokes an existing grant. Default `false` keeps sharing tenant-wide, byte-identical to deployments before this setting existed. Only meaningful in the cookie-session modes that mount the sharing surface; the single-operator `none`/`apikey` modes never mount it. |
 
 **When this block is OFF.** Default `false` = tenant-wide sharing, identical to before this setting existed.
+
+## Agent platform (`AgentPlatformSettings`)
+
+Workspace-agent limits (`mode=workspace_agent`), enforced server-side:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `INQTRIX_AGENT_ENABLED` | `true` | Master switch; even when on, the mode registers only with a durable checkpointer (Postgres) or the volatile escape below. |
+| `INQTRIX_AGENT_KERNEL_ENABLED` | `false` | Rollout switch for `mode=agent_kernel` (plan M2). Additionally gated on the checkpointer rule, deepagents availability, and native tool calling on the default LLM; a failed gate logs a WARNING. |
+| `INQTRIX_AGENT_KERNEL_MAX_ITERATIONS` | `24` | LangGraph `recursion_limit` per kernel run — a hard, loud loop ceiling (deepagents lifts the default to 9999). |
+| `INQTRIX_AGENT_KERNEL_MAX_ITERATIONS_DEEP` | `40` | The kernel loop ceiling when `depth=deep` (plan M4) — Deep buys more tool turns, never an unbounded loop. |
+| `INQTRIX_AGENT_KERNEL_MAX_TOOL_CALLS` | `30` | Run-wide normal-depth tool-call ceiling. Counts are derived from checkpointed AI messages across park/resume; an overflowing batch executes no tools. |
+| `INQTRIX_AGENT_KERNEL_MAX_TOOL_CALLS_DEEP` | `60` | Run-wide Deep tool-call ceiling with the same checkpoint-derived, whole-batch rejection contract. |
+| `INQTRIX_AGENT_DEFAULT_MODE` | `agent_kernel` | Which algorithm the Agent Desk submits by default (`workspace_agent` or `agent_kernel`); capabilities publish the EFFECTIVE value and fall back to `workspace_agent` while the independent kernel registration gate fails. |
+| `INQTRIX_AGENT_DEFAULT_AUTONOMY` | `balanced` | Permission mode when a request names none: `strict` / `balanced` / `autonomous`. |
+| `INQTRIX_AGENT_MAX_PARALLEL_CHILDREN` | `6` | Width of one independent Agent Desk task wave and maximum child-research submissions per wave. Provider-specific gates remain the final concurrency ceiling. |
+| `INQTRIX_AGENT_DISCOVERY_MAX_TOOL_CALLS` | `15` | Hard probe budget of the read-only discovery phase. |
+| `INQTRIX_AGENT_MAX_PLAN_TASKS` | `8` | Task ceiling the plan validator enforces (agent plans AND user edits). |
+| `INQTRIX_AGENT_MAX_REPLAN_ROUNDS` | `2` | Additive replan rounds before the run proceeds as-is. |
+| `INQTRIX_AGENT_SYNTHESIS_EVIDENCE_BUDGET` | `60` | Reference count above which the synthesis PROMPT digest is capped to the top-ranked references (deterministic source-tier/corroboration/excerpt rank, no LLM call). The citation ledger is never truncated; `0` disables the cap. |
+| `INQTRIX_AGENT_MAX_CLARIFICATION_ROUNDS` | `2` | User-question rounds before the agent proceeds on its best assumption. |
+| `INQTRIX_AGENT_ALLOW_WEB_DISCOVERY_PREVIEW` | `true` | Permit one instant web search during discovery. Only effective in `autonomous` mode — Standard keeps all web contact behind the plan gate (E16 amendment). |
+| `INQTRIX_AGENT_ADVANCED_AUTONOMY` | `false` | Show the legacy three-way autonomy control (incl. `strict`) in the UI instead of the two-mode Standard/Auto toggle. Wire vocabulary is unchanged either way. |
+| `INQTRIX_AGENT_ALLOW_VOLATILE` | `false` | Dev escape: register without Postgres using an in-memory checkpointer (interrupted runs die with the process; logged loudly, `workspace_agent_durable: false`). |
+| `INQTRIX_AGENT_SKILLS_MAX_ATTACHED` | `3` | How many skills one run may attach (`skill_ids`); the runs router rejects excess with a loud 400. Published as `agent.skills.max_attached`. |
+| `INQTRIX_AGENT_SKILLS_DISCLOSURE_BUDGET_CHARS` | `4000` | Character budget of the model-facing skill disclosure block; overflow is a visible "… and N more" line, never a silent cut. Published as `agent.skills.disclosure_budget_chars`. |
+| `INQTRIX_AGENT_MEMORY_PROVIDER` | `none` | Long-term workspace-agent memory provider: `none` or `mem0`. `none` keeps deployments memory-free by default. |
+| `INQTRIX_AGENT_MEMORY_MODE` | `candidate_only` | Learning mode: `off`, `candidate_only`, or `auto_safe`. `auto_safe` currently degrades visibly to `effective_mode=candidate_only`; no automatic retain happens yet. |
+| `INQTRIX_MEM0_BASE_URL` | empty | Base URL for a self-hosted Mem0 API when `INQTRIX_AGENT_MEMORY_PROVIDER=mem0`. |
+| `INQTRIX_MEM0_API_KEY` | empty | Optional server-side Mem0 API key. This value is never accepted from clients. |
+
+Requires the `agent` dependency extra; deployments should also set
+`LANGGRAPH_STRICT_MSGPACK=true`. See
+[Agent platform](../architecture/agent-platform.md).
+
+Long-term memory requires a real per-user principal (`oidc_session` or
+PAT). It stays disabled for anonymous and legacy static-key principals to
+avoid shared anonymous memory. Memory endpoints derive `(tenant_id, sub)`
+from auth and reject owner fields in the request body or query string.
 
 ## Process-level variables (outside `Settings`)
 

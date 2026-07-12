@@ -27,6 +27,21 @@ def build_router(container: "AppContainer") -> APIRouter:
             return payload
         return JSONResponse(status_code=status_code, content=payload)
 
+    @router.get("/readyz")
+    async def readyz():
+        """Readiness: are the stateful dependencies reachable?
+
+        Liveness (``/health``) stays provider-only; THIS is what a
+        load balancer keys traffic on — a pod with a dead database or
+        queue answers 503 here and drains instead of serving 500s.
+        """
+        from inqtrix.services.system_runtime import readiness_payload
+
+        status_code, payload = await readiness_payload(container)
+        if status_code == 200:
+            return payload
+        return JSONResponse(status_code=status_code, content=payload)
+
     @router.get("/v1/models")
     def list_models():
         return health_service.models_payload()

@@ -17,6 +17,8 @@ HTTP loop — the same rule the chat/knowledge stores document.
 
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import delete, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -27,6 +29,7 @@ from inqtrix.project.base_session_store import (
 )
 from inqtrix.project.editor_ports import (
     DocumentNotFound,
+    DocumentRevisionConflict,
     EditorComment,
     EditorDocument,
     EditorFolder,
@@ -36,6 +39,8 @@ from inqtrix.storage.editor_orm import (
     editor_documents,
     editor_folders,
 )
+
+log = logging.getLogger("inqtrix")
 
 # Document metadata columns (everything EXCEPT the heavy content_markdown
 # body) for the list path — the body is transferred only on get_document.
@@ -111,9 +116,46 @@ class PostgresEditorStore(BaseSessionStore):
                 "diff_anchor_updated_at": stmt.excluded.diff_anchor_updated_at,
                 "updated_at": stmt.excluded.updated_at,
             },
+            # Revision CAS (A2): the update fires only when the stored
+            # revision is EXACTLY the writer's base — i.e. the incoming
+            # revision is base+1. The client now tracks `revision` as the
+            # last-synced SERVER revision (its base) and sends base+1, so
+            # a writer whose base is stale (it never saw a concurrent
+            # agent patch or peer edit) fails the CAS and gets a 409 to
+            # rebase, instead of silently clobbering with a higher counter.
+            # This is the same "stored == expected" contract the agent
+            # patch path already enforces. The brand-new-id INSERT branch
+            # is unaffected (no conflict, no WHERE).
+            where=(
+                editor_documents.c.revision == stmt.excluded.revision - 1
+            ),
         ).returning(editor_documents)
         async with self._session() as session:
-            row = (await session.execute(stmt)).one()
+            row = (await session.execute(stmt)).first()
+            if row is None:
+                # Conflict fired but the WHERE suppressed the update:
+                # the row exists at a different revision than the
+                # writer's base. Read it for the client's rebase.
+                current = (
+                    await session.execute(
+                        select(editor_documents.c.revision).where(
+                            editor_documents.c.id == id,
+                            editor_documents.c.tenant_id == _DEFAULT_TENANT,
+                        )
+                    )
+                ).scalar_one_or_none()
+                log.warning(
+                    "Editor-Dokument %s: Revision-CAS verfehlt "
+                    "(gespeichert=%s, Writer-Basis=%d) — Schreibvorgang "
+                    "verworfen, Client muss rebasen.",
+                    id,
+                    current,
+                    revision - 1,
+                )
+                raise DocumentRevisionConflict(
+                    current_revision=int(current or 0),
+                    expected_revision=revision - 1,
+                )
         return self._document_from_row(row)
 
     async def list_documents_page(

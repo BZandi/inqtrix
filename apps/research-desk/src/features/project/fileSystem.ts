@@ -29,6 +29,7 @@ import {
   isWorkspaceId,
   rememberBrowserWorkspaceId,
 } from './workspaceId'
+import { EMPTY_CANVAS_STATE } from '@/features/canvas/types'
 import { normalizePanelLayout } from './panelLayout'
 import { buildZip } from './zip'
 
@@ -438,6 +439,16 @@ function buildProjectStateFromFiles({
     knowledgeSessionOrder: [defaultKnowledgeSession.id],
     knowledgeSessions: { [defaultKnowledgeSession.id]: defaultKnowledgeSession },
     selectedKnowledgeSessionId: defaultKnowledgeSession.id,
+    // Agent Desk state is session-scoped (references short-lived server
+    // runs) and not part of project files — server hydration rebuilds it.
+    agentRuns: {},
+    agentSessionGroupOrder: [],
+    agentSessionGroups: {},
+    agentSessionOrder: [],
+    agentSessions: {},
+    selectedAgentSessionId: null,
+    agentCanvas: EMPTY_CANVAS_STATE,
+    agentPlanDrafts: {},
     dirty: false,
     editorComments: filteredEditorComments,
     editorDocumentOrder,
@@ -471,6 +482,7 @@ function buildProjectStateFromFiles({
       expandedJobId: researchRunOrder.includes((ui as Record<string, unknown>).expandedJobId as string)
         ? (ui as Record<string, unknown>).expandedJobId as string
         : researchRunOrder[0] ?? null,
+      isAgentSessionsVisible: booleanOrDefault((ui as Record<string, unknown>).isAgentSessionsVisible, true),
       isChatHistoryVisible: booleanOrDefault((ui as Record<string, unknown>).isChatHistoryVisible, true),
       isKnowledgeHistoryVisible: booleanOrDefault((ui as Record<string, unknown>).isKnowledgeHistoryVisible, true),
       isComposerVisible: booleanOrDefault((ui as Record<string, unknown>).isComposerVisible, true),
@@ -497,6 +509,13 @@ function buildProjectStateFromFiles({
       selectedChatModelTier: chatModelTierOrDefault(
         (ui as Record<string, unknown>).selectedChatModelTier,
       ),
+      selectedAgentModelTier: chatModelTierOrDefault(
+        (ui as Record<string, unknown>).selectedAgentModelTier,
+      ),
+      selectedAgentModel:
+        stringOrDefault((ui as Record<string, unknown>).selectedAgentModel, '') || null,
+      selectedAgentEffort:
+        stringOrDefault((ui as Record<string, unknown>).selectedAgentEffort, '') || null,
       selectedChatModel:
         stringOrDefault((ui as Record<string, unknown>).selectedChatModel, '') || null,
       selectedChatEffort:
@@ -504,6 +523,10 @@ function buildProjectStateFromFiles({
       selectedChatThreadId: chatThreadOrder.includes((ui as Record<string, unknown>).selectedChatThreadId as string)
         ? (ui as Record<string, unknown>).selectedChatThreadId as string
         : chatThreadOrder[0] ?? null,
+      // Intent only — agent sessions hydrate from the server later, so
+      // membership cannot be validated here (unlike chat threads above).
+      selectedAgentSessionId:
+        stringOrDefault((ui as Record<string, unknown>).selectedAgentSessionId, '') || null,
       selectedJobId: researchRunOrder.includes((ui as Record<string, unknown>).selectedJobId as string)
         ? (ui as Record<string, unknown>).selectedJobId as string
         : researchRunOrder[0] ?? null,
@@ -522,6 +545,7 @@ export function resolvePinnedExplorerFromManifest(
     chatThreadIds?: readonly string[]
     editorDocumentIds?: readonly string[]
     knowledgeSessionIds?: readonly string[]
+    agentSessionIds?: readonly string[]
   } = {},
 ): PinnedExplorerState {
   const record = value && typeof value === 'object' && !Array.isArray(value)
@@ -531,6 +555,7 @@ export function resolvePinnedExplorerFromManifest(
     chatThreadIds: pinnedIdsFromManifest(record.chatThreadIds, validIds.chatThreadIds),
     editorDocumentIds: pinnedIdsFromManifest(record.editorDocumentIds, validIds.editorDocumentIds),
     knowledgeSessionIds: pinnedIdsFromManifest(record.knowledgeSessionIds, validIds.knowledgeSessionIds),
+    agentSessionIds: pinnedIdsFromManifest(record.agentSessionIds, validIds.agentSessionIds),
   }
 }
 
@@ -1289,6 +1314,9 @@ function preferencesOrDefault(value: unknown): ProjectState['preferences'] {
     ? value as Record<string, unknown>
     : {}
   return {
+    // Privacy default OFF; only an explicit true opts in (the server row is
+    // authoritative and wins on login regardless of this device cache).
+    agentMemoryEnabled: preferences.agentMemoryEnabled === true,
     contrastMode: contrastModeOrDefault(preferences.contrastMode),
     locale: localeOrDefault(preferences.locale),
     theme: themeOrDefault(preferences.theme),

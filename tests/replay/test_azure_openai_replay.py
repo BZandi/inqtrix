@@ -129,8 +129,16 @@ def test_complete_success_credential_replay() -> None:
 
 
 @pytest.mark.vcr
-def test_rate_limit_replay() -> None:
-    """A 429 with structured Azure error body raises ``AgentRateLimited``."""
+def test_rate_limit_replay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An EXHAUSTED 429 budget raises ``AgentRateLimited``.
+
+    A 429 is now retried with backoff (1.1a); the single-429 cassette
+    covers the escalation path, so the rate-limit retry budget is set to
+    0 here to exhaust it on the first hit.
+    """
+    monkeypatch.setattr(
+        "inqtrix.providers.base._SDK_RATE_LIMIT_MAX_RETRIES", 0
+    )
     provider = _build_with_api_key(max_retries=0)
 
     with pytest.raises(AgentRateLimited):

@@ -39,7 +39,9 @@ non-thinking model is enough for `plan` (see the tier rationale below).
 
 > Not part of the research flow: the parity diagnostic tool
 > ([`parity/_analysis.py`](../../src/inqtrix/parity/_analysis.py)) uses
-> `reasoning_model` directly and is out of scope for the tier system.
+> `reasoning_model` directly and is out of scope for the tier system. It still
+> consumes the effective `settings.agent.reasoning_timeout`; it is not a
+> separate timeout authority.
 
 ---
 
@@ -60,6 +62,9 @@ A node is mapped to a tier by the hard-coded
 | **knowledge_decompose** | **fast** | none | Small structured rewrite task; deep-profile only. |
 | **knowledge_gate** | **fast** | none | Repeated structured sufficiency checks; cost-sensitive and prompt-scaffolded. |
 | **knowledge_answer** | **high** | reasoning **on** | Final cited synthesis over retrieved evidence, largest quality lever in Knowledge mode. |
+| **agent_intake** / **agent_sufficiency** / **agent_critic** | **fast** | none | Workspace-agent assembly-line checks: assignment profile, coverage verdict, memo critique against precomputed facts. |
+| **agent_discovery_analyst** / **agent_contradiction** / **agent_file_analysis** | **mid** | none | Compression and comparison work over quarantined material. |
+| **agent_plan** / **agent_synthesis** / **agent_citation_repair** | **high** | none | The workspace agent's leverage points: executable planning, cited memo sections, and the sole bounded repair of an unknown citation label. |
 
 Default tier effort is **unset** for every tier, so out of the box tiers differ
 only by *model* and nothing gains implicit reasoning. Turn reasoning on
@@ -78,7 +83,7 @@ sentinel difference is what keeps the change backward compatible.
 |---|---|---|
 | **Anthropic / Bedrock** | `none` → no thinking. A graded level → `thinking={"type":"adaptive"}` + `output_config.effort=<level>`. | For Opus 4.7 adaptive thinking is the on-switch and `effort` an orthogonal cap. Haiku class: adaptive only (no `effort`), with a visible warning. `minimal` is mapped to the nearest supported level. |
 | **Azure (OpenAI)** | `none`/unknown → omit `reasoning_effort` (force off, 400-safe). A graded level → top-level `reasoning_effort=<level>` and `temperature` is dropped (Azure rejects both together). | A graded level on a non-reasoning deployment surfaces loudly as an Azure HTTP 400. |
-| **LiteLLM** | Accepted but **not mapped** yet (deferred). A real effort logs a one-time warning. | Tier *model* routing still applies. Use Anthropic/Bedrock/Azure for reasoning control. |
+| **LiteLLM** | Normalized graded values are forwarded as the OpenAI-compatible `reasoning_effort` field for completion, structured-output, and chat calls. Unset/empty and `none` omit the field. | A gateway/model that does not support the requested effort fails visibly; Inqtrix does not silently strip it. |
 
 Unsupported levels are downgraded to `none` with a visible warning (no silent
 fallbacks).
@@ -193,6 +198,24 @@ model names remain operator-owned configuration; browser clients can only choose
 among the advertised tiers. Discovery is stack-scoped: on multi-stack servers
 the UI must read the selected stack's `models.chat_model_options` and must not
 silently fall back to `/health`, because `/health` describes the default stack.
+
+### Agent modes: overrides scope to the THINKING nodes (R3)
+
+For `mode=workspace_agent` a per-run override (`model_tier`/`model`/`effort` —
+whether from the request or from a skill pin) applies ONLY to the thinking
+nodes `agent_plan`, `agent_synthesis`, `agent_answer`, and
+`agent_answer_light` (`_OVERRIDE_SCOPED_NODES` in `agents/algorithm.py`).
+Assembly-line nodes (intake, critic, sufficiency, point check, ...) always
+stay on the tier map — an explicit "Opus · high" strengthens the reasoning
+without paying frontier prices for classification calls. The kernel
+(`mode=agent_kernel`) resolves only its own `agent_kernel` node, so the
+override naturally targets the brain there. Child research runs do NOT
+inherit the override. The server fixes an explicitly requested normal-depth
+research child to `compact` and a Deep child to `deep`; ordinary normal Agent
+Desk web tasks are one-call `web_instant` operations and create no child.
+Every node still emits its `model_resolution` event, so the narrowed scope
+is auditable per run (`model_source: explicit_request` appears only on the
+thinking nodes).
 
 ---
 

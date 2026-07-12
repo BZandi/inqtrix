@@ -13,6 +13,11 @@ from enum import StrEnum
 class ReportProfile(StrEnum):
     """Supported report styles for the research agent.
 
+    ``schnell`` runs exactly ONE research round (the broad first-round
+    STORM queries) and composes a short two-section answer — the
+    latency-first profile for quick lookups and for agent child runs
+    that need a fast external sweep rather than a full report.
+
     ``compact`` preserves the current concise answer style with lower latency.
 
     ``deep`` keeps more evidence in the pipeline and targets a denser,
@@ -20,6 +25,7 @@ class ReportProfile(StrEnum):
     uncertainty handling.
     """
 
+    SCHNELL = "schnell"
     COMPACT = "compact"
     DEEP = "deep"
 
@@ -226,6 +232,61 @@ _DEEP_ANSWER_SECTIONS = (
 )
 
 
+_SCHNELL_ANSWER_SECTIONS = (
+    AnswerSectionSpec(
+        heading="Kurzfazit",
+        prompt_instruction=(
+            "Beantworte die Frage direkt in wenigen Saetzen und nenne die "
+            "tragenden Erkenntnisse mit Evidence-Labels. Stuetze dich auf die "
+            "bereits geschriebenen Kernaussagen."
+        ),
+        length_guidance="sehr knapp; keine Bulletpoints",
+        write_last=True,
+    ),
+    AnswerSectionSpec(
+        heading="Kernaussagen",
+        prompt_instruction=(
+            "Formuliere die wichtigsten Fakten und Zahlen als eigenstaendig "
+            "verstaendliche Bulletpoints. Keine Vertiefung, keine Wiederholungen."
+        ),
+        length_guidance="nur die tragfaehigsten Punkte; keine Fuellpunkte",
+    ),
+)
+
+
+_SCHNELL_TUNING = ReportProfileTuning(
+    # One round, first-iteration STORM breadth only: the profile exists
+    # for latency (quick lookups, agent child runs), so every budget is
+    # the smallest value that still yields a citable two-section answer.
+    # Same field set as the other profiles (bidirectional request-time
+    # profile switches, see ``settings_overrides`` docstring).
+    settings_overrides={
+        "max_rounds": 1,
+        "min_rounds": 1,
+        "confidence_stop": 6,
+        "first_round_queries": 6,
+        "answer_prompt_citations_max": 40,
+        "reasoning_timeout": 600,
+        "editor_assistant_timeout": 600,
+        "claim_extract_timeout": 600,
+        "search_timeout": 600,
+        "max_total_seconds": 3600,
+    },
+    answer_sections=_SCHNELL_ANSWER_SECTIONS,
+    answer_claim_prompt_items=12,
+    claim_input_char_limit=16000,
+    claim_citation_cap=6,
+    claim_max_items=6,
+    claim_source_url_cap=3,
+    claim_ledger_cap=200,
+    materialize_max_total=16,
+    materialize_max_unverified=6,
+    prompt_evidence_record_char_limit=1800,
+    prompt_evidence_total_char_budget=20000,
+    min_report_eligible_evidence=2,
+)
+
+
 _COMPACT_TUNING = ReportProfileTuning(
     settings_overrides={
         "max_rounds": 2,
@@ -233,11 +294,11 @@ _COMPACT_TUNING = ReportProfileTuning(
         "confidence_stop": 7,
         "first_round_queries": 6,
         "answer_prompt_citations_max": 60,
-        "reasoning_timeout": 120,
-        "editor_assistant_timeout": 120,
-        "claim_extract_timeout": 60,
-        "search_timeout": 60,
-        "max_total_seconds": 300,
+        "reasoning_timeout": 600,
+        "editor_assistant_timeout": 600,
+        "claim_extract_timeout": 600,
+        "search_timeout": 600,
+        "max_total_seconds": 3600,
     },
     answer_sections=_COMPACT_ANSWER_SECTIONS,
     answer_claim_prompt_items=20,
@@ -254,23 +315,19 @@ _COMPACT_TUNING = ReportProfileTuning(
 )
 
 _DEEP_TUNING = ReportProfileTuning(
-    # ``first_round_queries`` raised from 8 to 10 in Phase 13: when an
-    # over-confident evaluator (e.g. GPT-4.1) stops the loop after Round 0,
-    # the first round is the ONLY chance to broaden the source pool —
-    # 8 queries left the answer with only ~11 unique domains in the
-    # synthesis, 10 lifts that to ~14-15 without exceeding sensible
-    # parallelization (still ``min(len, first_round_queries)`` workers).
+    # Eight broad questions retain the established DEEP source breadth while
+    # bounding the costly first wave before iterative gap filling begins.
     settings_overrides={
         "max_rounds": 4,
         "min_rounds": 2,
         "confidence_stop": 8,
-        "first_round_queries": 10,
+        "first_round_queries": 8,
         "answer_prompt_citations_max": 500,
-        "reasoning_timeout": 900,
-        "editor_assistant_timeout": 900,
+        "reasoning_timeout": 600,
+        "editor_assistant_timeout": 600,
         "claim_extract_timeout": 600,
-        "search_timeout": 300,
-        "max_total_seconds": 1800,
+        "search_timeout": 600,
+        "max_total_seconds": 3600,
     },
     answer_sections=_DEEP_ANSWER_SECTIONS,
     answer_claim_prompt_items=40,
@@ -313,6 +370,8 @@ def tuning_for_report_profile(profile: ReportProfile | str) -> ReportProfileTuni
         normalized = ReportProfile.COMPACT
     if normalized is ReportProfile.DEEP:
         return _DEEP_TUNING
+    if normalized is ReportProfile.SCHNELL:
+        return _SCHNELL_TUNING
     return _COMPACT_TUNING
 
 

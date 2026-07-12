@@ -1,7 +1,6 @@
 import {
   Check,
   FileText,
-  Globe2,
   ListChecks,
   PanelBottomClose,
   Repeat2,
@@ -27,7 +26,6 @@ import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
@@ -36,7 +34,11 @@ import { StatusRow, SummaryGroup } from '@/components/ui/status-summary'
 import { Separator } from '@/components/ui/separator'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import type { CreateResearchRunRequest } from '@/features/researchRuns/types'
+import {
+  DEEP_RESEARCH_FIRST_ROUND_QUERIES,
+  DEEP_RESEARCH_MAX_ROUNDS,
+  type CreateResearchRunRequest,
+} from '@/features/researchRuns/types'
 import { ComposerIconButton, composerIconButtonClassName } from '@/features/composer/ComposerIconButton'
 import { QuotaMeter } from '@/features/quota/QuotaMeter'
 import { useLocale } from '@/i18n/LocaleProvider'
@@ -54,12 +56,11 @@ type ComposerProps = {
 
 export type ComposerFormState = {
   confidenceStop: 7 | 8 | 9
-  firstRoundQueries: 4 | 6 | 8 | 10
-  maxRounds: 2 | 3 | 4 | 5
+  firstRoundQueries: 4 | 6 | 8
+  maxRounds: 1 | 2 | 3 | 4
   minRounds: 1 | 2
   question: string
-  reportProfile: 'compact' | 'deep'
-  webSearch: boolean
+  reportProfile: 'schnell' | 'compact' | 'deep'
 }
 
 type ComposerReportProfilePreset = Pick<
@@ -68,6 +69,13 @@ type ComposerReportProfilePreset = Pick<
 >
 
 export const composerReportProfilePresets: Record<ComposerFormState['reportProfile'], ComposerReportProfilePreset> = {
+  schnell: {
+    confidenceStop: 7,
+    firstRoundQueries: 6,
+    maxRounds: 1,
+    minRounds: 1,
+    reportProfile: 'schnell',
+  },
   compact: {
     confidenceStop: 7,
     firstRoundQueries: 6,
@@ -77,8 +85,8 @@ export const composerReportProfilePresets: Record<ComposerFormState['reportProfi
   },
   deep: {
     confidenceStop: 8,
-    firstRoundQueries: 10,
-    maxRounds: 4,
+    firstRoundQueries: DEEP_RESEARCH_FIRST_ROUND_QUERIES,
+    maxRounds: DEEP_RESEARCH_MAX_ROUNDS,
     minRounds: 2,
     reportProfile: 'deep',
   },
@@ -97,7 +105,6 @@ export function applyComposerReportProfilePreset(
 export const defaultComposerFormState: ComposerFormState = {
   ...composerReportProfilePresets.deep,
   question: '',
-  webSearch: true,
 }
 
 type ComposerMenuKey =
@@ -142,7 +149,7 @@ export function buildComposerRequest(
       minRounds: Math.min(form.minRounds, form.maxRounds) as ComposerFormState['minRounds'],
       reportProfile: form.reportProfile,
     },
-    mode: form.webSearch ? 'research' : 'direct_llm',
+    mode: 'research',
     question: question.trim(),
     stack: selectedStack,
   }
@@ -157,6 +164,11 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
   const [openMenu, setOpenMenu] = useState<ComposerMenuKey | null>(null)
   const canSubmit = form.question.trim().length > 0
   const reportProfileOptions: ComposerOption[] = [
+    {
+      description: t.composer.optionSchnellDescription,
+      label: t.composer.schnell,
+      value: 'schnell',
+    },
     {
       description: t.composer.optionCompactDescription,
       label: t.composer.compact,
@@ -201,13 +213,13 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
       label: '8',
       value: '8',
     },
-    {
-      description: t.composer.optionQueries10Description,
-      label: '10',
-      value: '10',
-    },
   ]
   const maxRoundOptions: ComposerOption[] = [
+    {
+      description: t.composer.optionRounds1Description,
+      label: '1',
+      value: '1',
+    },
     {
       description: t.composer.optionRounds2Description,
       label: '2',
@@ -222,11 +234,6 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
       description: t.composer.optionRounds4Description,
       label: '4',
       value: '4',
-    },
-    {
-      description: t.composer.optionRounds5Description,
-      label: '5',
-      value: '5',
     },
   ]
 
@@ -388,19 +395,8 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
                   <TooltipContent>{t.composer.moreSettings}</TooltipContent>
                 </Tooltip>
                 <DropdownMenuContent align="start" className={optionMenuContentClassName} side="top" sideOffset={8}>
-                  <OptionMenuHeader count={2} title={t.composer.moreSettings} />
+                  <OptionMenuHeader count={1} title={t.composer.moreSettings} />
                   <div className="py-1">
-                    <ComposerMenuToggle
-                      checked={form.webSearch}
-                      description={t.composer.webSearchDescription}
-                      icon={Globe2}
-                      label={t.composer.webSearch}
-                      onCheckedChange={(checked) => setForm((currentForm) => ({
-                        ...currentForm,
-                        webSearch: checked,
-                      }))}
-                    />
-                    <DropdownMenuSeparator className="mx-0 my-1" />
                     <div className="px-2.5 pb-1 pt-1.5">
                       <div className="flex items-center gap-1.5">
                         <Repeat2 className="icon-sm shrink-0 text-muted-foreground/70" />
@@ -454,7 +450,6 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
                 openMenu={openMenu}
                 reportProfile={form.reportProfile}
                 selectedStack={selectedStack}
-                webSearch={form.webSearch}
               />
               <Button
                 aria-label={t.composer.send}
@@ -488,7 +483,6 @@ function ComposerStatusMenu({
   openMenu,
   reportProfile,
   selectedStack,
-  webSearch,
 }: {
   confidenceStop: ComposerFormState['confidenceStop']
   firstRoundQueries: ComposerFormState['firstRoundQueries']
@@ -498,10 +492,14 @@ function ComposerStatusMenu({
   openMenu: ComposerMenuKey | null
   reportProfile: ComposerFormState['reportProfile']
   selectedStack: string
-  webSearch: boolean
 }) {
   const { t } = useLocale()
-  const reportProfileLabel = reportProfile === 'compact' ? t.composer.compact : t.composer.deep
+  const reportProfileLabel =
+    reportProfile === 'schnell'
+      ? t.composer.schnell
+      : reportProfile === 'compact'
+        ? t.composer.compact
+        : t.composer.deep
 
   return (
     <DropdownMenu
@@ -532,15 +530,10 @@ function ComposerStatusMenu({
         <TooltipContent>{t.composer.settingsSummary}</TooltipContent>
       </Tooltip>
       <DropdownMenuContent align="end" className={optionMenuContentClassName} side="top" sideOffset={8}>
-        <OptionMenuHeader count={7} title={t.composer.settingsSummary} />
+        <OptionMenuHeader count={6} title={t.composer.settingsSummary} />
         <div className="py-1">
           <SummaryGroup label={t.composer.summaryStrategy}>
             <StatusRow label={t.common.stack} value={selectedStack} />
-            <StatusRow
-              label={t.composer.webSearch}
-              tone={webSearch ? 'success' : 'muted'}
-              value={webSearch ? t.composer.enabled : t.composer.disabled}
-            />
           </SummaryGroup>
           <DropdownMenuSeparator className="mx-0 my-1" />
           <SummaryGroup label={t.composer.summaryPlanning}>
@@ -556,62 +549,6 @@ function ComposerStatusMenu({
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
-  )
-}
-
-function ComposerMenuToggle({
-  checked,
-  description,
-  icon: Icon,
-  label,
-  onCheckedChange,
-}: {
-  checked: boolean
-  description: string
-  icon: LucideIcon
-  label: string
-  onCheckedChange: (checked: boolean) => void
-}) {
-  const { t } = useLocale()
-
-  return (
-    <DropdownMenuItem
-      className="group relative items-center gap-2.5 rounded-none px-2.5 py-1.5 hover:bg-accent/50 focus:bg-accent/80 data-[highlighted]:bg-accent/80"
-      onSelect={(event) => {
-        event.preventDefault()
-        onCheckedChange(!checked)
-      }}
-    >
-      <span
-        className={cn(
-          'absolute inset-y-1 left-0 w-0.5 rounded-full opacity-0 transition-opacity group-hover:opacity-100 group-focus:opacity-100 group-data-[highlighted]:opacity-100',
-          checked ? 'bg-success' : 'bg-muted-foreground/50',
-        )}
-      />
-      <Icon
-        className={cn(
-          'icon-md shrink-0 transition-colors',
-          checked
-            ? 'text-success'
-            : 'text-muted-foreground/70 group-hover:text-foreground group-focus:text-foreground group-data-[highlighted]:text-foreground',
-        )}
-      />
-      <span className="min-w-0 flex-1 text-left">
-        <span className="block truncate t-list text-foreground">{label}</span>
-        <span className="block truncate t-meta-sm text-muted-foreground">{description}</span>
-      </span>
-      <button
-        aria-label={`${label}: ${checked ? t.composer.enabled : t.composer.disabled}`}
-        className="shrink-0"
-        onClick={(event) => {
-          event.stopPropagation()
-          onCheckedChange(!checked)
-        }}
-        type="button"
-      >
-        <ToggleVisual checked={checked} />
-      </button>
-    </DropdownMenuItem>
   )
 }
 
@@ -692,24 +629,5 @@ function ComposerParameterMenu({
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
-  )
-}
-
-function ToggleVisual({ checked }: { checked: boolean }) {
-  return (
-    <span
-      aria-hidden
-      className={cn(
-        'inline-flex h-5 w-9 shrink-0 items-center rounded-full border-2 border-transparent shadow-sm transition-colors',
-        checked ? 'bg-primary' : 'bg-input',
-      )}
-    >
-      <span
-        className={cn(
-          'block h-4 w-4 rounded-full bg-background shadow-lg ring-0 transition-transform',
-          checked ? 'translate-x-4' : 'translate-x-0',
-        )}
-      />
-    </span>
   )
 }

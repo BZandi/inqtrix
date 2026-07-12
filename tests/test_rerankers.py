@@ -111,6 +111,23 @@ def test_cohere_rerank_retries_on_429_then_succeeds():
     assert results[0].index == 0
 
 
+def test_cohere_rerank_never_exceeds_three_total_attempts():
+    attempts = {"count": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        return httpx.Response(503)
+
+    reranker = make_cohere(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(RerankerError):
+            reranker.rerank("q", ["a"], top_n=1)
+    finally:
+        reranker._restore()
+
+    assert attempts["count"] == 3
+
+
 def test_cohere_rerank_verbatim_url_when_path_already_present():
     reranker = CohereRerank(
         api_key="k",

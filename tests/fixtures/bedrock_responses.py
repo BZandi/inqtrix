@@ -49,7 +49,7 @@ def make_throttling_error(
 
     Mirrors the production retry-loop trigger: the provider catches
     ``ThrottlingException`` and retries with jittered backoff up to
-    ``_MAX_BEDROCK_ATTEMPTS=5`` times.
+    ``MAX_PROVIDER_ATTEMPTS=3`` times.
     """
     return ClientError(
         error_response={

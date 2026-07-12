@@ -6,10 +6,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from inqtrix.constants import (
+    MAX_TOTAL_SECONDS,
+    REASONING_TIMEOUT,
+    REQUEST_WAIT_MARGIN_SECONDS,
+)
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_ENDPOINT = "http://127.0.0.1:5100"
-DEFAULT_TIMEOUT = 330
+DEFAULT_TIMEOUT = MAX_TOTAL_SECONDS + REQUEST_WAIT_MARGIN_SECONDS
 TEST_ENDPOINT = "/v1/test/run"
 HEALTH_ENDPOINT = "/health"
 
@@ -17,7 +23,7 @@ DEFAULT_QUESTIONS_FILE = PROJECT_ROOT / "tests" / "integration" / "questions.jso
 DEFAULT_BASELINES_DIR = PROJECT_ROOT / "tests" / "integration" / "baselines"
 DEFAULT_RUNS_DIR = PROJECT_ROOT / "tests" / "integration" / "runs"
 DEFAULT_REPORTS_DIR = PROJECT_ROOT / "tests" / "integration" / "reports"
-DEFAULT_ANALYSIS_TIMEOUT = 120
+DEFAULT_ANALYSIS_TIMEOUT = REASONING_TIMEOUT
 CLAIM_REPORT_LIMIT = 5
 CLAIM_SNAPSHOT_LIMIT = 3
 

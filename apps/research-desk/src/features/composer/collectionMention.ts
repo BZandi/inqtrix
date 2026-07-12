@@ -4,7 +4,8 @@ export type CollectionMentionState = {
   query: string
 }
 
-/** Detect the active Knowledge Desk collection mention at the textarea caret. */
+/** Detect the active `@`-collection mention at the caret — shared by the
+ * Knowledge composer, the Agent composer and the plan-gate task editor. */
 export function detectCollectionMention(
   value: string,
   caret: number,

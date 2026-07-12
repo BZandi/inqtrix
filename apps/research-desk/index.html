@@ -4,6 +4,54 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (() => {
+        const root = document.documentElement
+
+        const readStoredPreference = (key) => {
+          try {
+            return localStorage.getItem(key)
+          } catch {
+            return null
+          }
+        }
+
+        const storedTheme = readStoredPreference('inqtrix.researchDesk.theme')
+        const prefersDark = typeof window.matchMedia === 'function'
+          && window.matchMedia('(prefers-color-scheme: dark)').matches
+        const resolvedTheme = storedTheme === 'dark'
+          || (storedTheme !== 'light' && prefersDark)
+          ? 'dark'
+          : 'light'
+
+        root.classList.toggle('dark', resolvedTheme === 'dark')
+        root.style.colorScheme = resolvedTheme
+
+        const storedPreset = readStoredPreference('inqtrix.researchDesk.themePreset')
+        root.dataset.themePreset = (
+          storedPreset === 'slate'
+          || storedPreset === 'graphite'
+          || storedPreset === 'sage'
+        )
+          ? storedPreset
+          : 'standard'
+
+        root.dataset.contrastMode = readStoredPreference('inqtrix.researchDesk.contrastMode') === 'high'
+          ? 'high'
+          : 'standard'
+
+        const storedBubbleTone = readStoredPreference('inqtrix.researchDesk.userBubbleTone')
+        root.dataset.userBubbleTone = (
+          storedBubbleTone === 'mint'
+          || storedBubbleTone === 'orange'
+          || storedBubbleTone === 'sky'
+          || storedBubbleTone === 'violet'
+          || storedBubbleTone === 'ink'
+        )
+          ? storedBubbleTone
+          : 'gray'
+      })()
+    </script>
     <title>Inqtrix Research Desk</title>
   </head>
   <body>

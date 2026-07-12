@@ -33,6 +33,11 @@ import {
   serverKnowledgeSessionPayload,
   sessionRecordFromServer,
 } from './knowledgeSessionSync'
+import {
+  decideKnowledgeSessionItemsLoadMerge,
+  shouldSurfaceKnowledgeSessionItemsLoadResult,
+} from './sessionLoadPolicy'
+import { recentKnowledgeSessionsForPrefetch } from './sessionPrefetch'
 
 const AUTOSAVE_DEBOUNCE_MS = 1_500
 
@@ -53,6 +58,10 @@ type UseKnowledgeSessionsApiOptions = {
   sessionOrder: string[]
   syncActive: boolean
   workspaceId: string
+}
+
+type LoadSessionItemsOptions = {
+  surfaceErrors: boolean
 }
 
 function isPristineBootstrapSession(
@@ -77,9 +86,13 @@ export function useKnowledgeSessionsApi({
   sessionOrder,
   syncActive,
   workspaceId,
-}: UseKnowledgeSessionsApiOptions): { error: string | null } {
+}: UseKnowledgeSessionsApiOptions): { error: string | null; isSelectedSessionItemsLoading: boolean } {
   const [error, setError] = useState<string | null>(null)
   const [hydrated, setHydrated] = useState(false)
+  // Sessions whose item load-on-open has completed (or errored). Drives the
+  // "still fetching?" signal so the ask view shows a skeleton instead of the
+  // empty-state hero while a session's items load.
+  const [itemsLoadResolved, setItemsLoadResolved] = useState<ReadonlySet<string>>(() => new Set())
 
   const sessionsRef = useRef(sessions)
   sessionsRef.current = sessions
@@ -104,8 +117,20 @@ export function useKnowledgeSessionsApi({
   const syncedGroupsRef = useRef(new Map<string, string>())
   const serverKnownRef = useRef(new Set<string>())
   const loadedRef = useRef(new Set<string>())
+  const loadingRef = useRef(new Map<string, number>())
+  const surfaceLoadResultRef = useRef(new Set<string>())
+  const nextLoadIdRef = useRef(0)
+  const lifecycleEpochRef = useRef(0)
+  const mountedRef = useRef(true)
   const flushingRef = useRef(false)
   const flushPendingRef = useRef(false)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   const itemsForSession = useCallback((sessionId: string) => {
     return itemOrderRef.current
@@ -115,11 +140,19 @@ export function useKnowledgeSessionsApi({
       ))
   }, [])
 
+  const markItemsLoadResolved = useCallback((sessionId: string) => {
+    setItemsLoadResolved((prev) => (prev.has(sessionId) ? prev : new Set(prev).add(sessionId)))
+  }, [])
+
   const reset = useCallback(() => {
+    lifecycleEpochRef.current += 1
     syncedRef.current.clear()
     syncedGroupsRef.current.clear()
     serverKnownRef.current.clear()
     loadedRef.current.clear()
+    loadingRef.current.clear()
+    surfaceLoadResultRef.current.clear()
+    setItemsLoadResolved(new Set())
     flushingRef.current = false
     flushPendingRef.current = false
     setHydrated(false)
@@ -188,45 +221,105 @@ export function useKnowledgeSessionsApi({
     reset,
   })
 
+  const loadSessionItems = useCallback(async (
+    sessionId: string,
+    { surfaceErrors }: LoadSessionItemsOptions,
+  ) => {
+    if (surfaceErrors) surfaceLoadResultRef.current.add(sessionId)
+    if (!serverKnownRef.current.has(sessionId)) return
+    if (loadedRef.current.has(sessionId)) {
+      if (shouldSurfaceKnowledgeSessionItemsLoadResult({
+        selectedSessionId: selectedSessionIdRef.current,
+        sessionId,
+        surfaceErrors,
+      })) {
+        setError(null)
+      }
+      surfaceLoadResultRef.current.delete(sessionId)
+      return
+    }
+    if (loadingRef.current.has(sessionId)) return
+    const loadId = nextLoadIdRef.current + 1
+    nextLoadIdRef.current = loadId
+    const lifecycleEpoch = lifecycleEpochRef.current
+    loadingRef.current.set(sessionId, loadId)
+    try {
+      const serverSession = await getKnowledgeSession(sessionId, optionsRef.current)
+      const canApplyResult = mountedRef.current
+        && lifecycleEpochRef.current === lifecycleEpoch
+        && serverKnownRef.current.has(sessionId)
+      if (!canApplyResult) return
+      const { groupId, record } = sessionRecordFromServer(serverSession)
+      const local = sessionsRef.current[sessionId]
+      const serverItems = itemsFromServerSession(serverSession)
+      const mergeDecision = decideKnowledgeSessionItemsLoadMerge({
+        localItemCount: itemsForSession(sessionId).length,
+        localSession: local,
+        serverItemCount: serverItems.length,
+        serverSession: record,
+      })
+      if (!mergeDecision.markItemsLoadResolved) return
+      syncedRef.current.set(
+        sessionId,
+        fingerprintKnowledgeSession(record, serverItems, groupId),
+      )
+      if (mergeDecision.applyServerState) {
+        dispatch({
+          memberships: { [record.id]: groupId },
+          sessions: [record],
+          type: 'upsertServerKnowledgeSessions',
+        })
+        dispatch({
+          items: serverItems,
+          sessionId,
+          type: 'setServerKnowledgeSessionItems',
+        })
+      }
+      if (mergeDecision.markItemsPayloadLoaded) loadedRef.current.add(sessionId)
+      markItemsLoadResolved(sessionId)
+      if (shouldSurfaceKnowledgeSessionItemsLoadResult({
+        selectedSessionId: selectedSessionIdRef.current,
+        sessionId,
+        surfaceErrors: surfaceErrors || surfaceLoadResultRef.current.has(sessionId),
+      })) {
+        setError(null)
+      }
+    } catch (caught) {
+      const canApplyError = mountedRef.current
+        && lifecycleEpochRef.current === lifecycleEpoch
+        && serverKnownRef.current.has(sessionId)
+      if (canApplyError) {
+        markItemsLoadResolved(sessionId)
+        if (shouldSurfaceKnowledgeSessionItemsLoadResult({
+          selectedSessionId: selectedSessionIdRef.current,
+          sessionId,
+          surfaceErrors: surfaceErrors || surfaceLoadResultRef.current.has(sessionId),
+        })) {
+          setError(messageFromError(caught))
+        }
+      }
+    } finally {
+      if (loadingRef.current.get(sessionId) === loadId) {
+        loadingRef.current.delete(sessionId)
+        surfaceLoadResultRef.current.delete(sessionId)
+      }
+    }
+  }, [dispatch, itemsForSession, markItemsLoadResolved])
+
   useEffect(() => {
     if (!syncActive || !hydrated || !selectedSessionId) return
-    if (!serverKnownRef.current.has(selectedSessionId)) return
-    if (loadedRef.current.has(selectedSessionId)) return
-    loadedRef.current.add(selectedSessionId)
-    let cancelled = false
-    void (async () => {
-      try {
-        const serverSession = await getKnowledgeSession(selectedSessionId, optionsRef.current)
-        if (cancelled) return
-        const { groupId, record } = sessionRecordFromServer(serverSession)
-        const local = sessionsRef.current[selectedSessionId]
-        const serverItems = itemsFromServerSession(serverSession)
-        syncedRef.current.set(
-          selectedSessionId,
-          fingerprintKnowledgeSession(record, serverItems, groupId),
-        )
-        if (!local || record.updatedAt >= local.updatedAt) {
-          dispatch({
-            memberships: { [record.id]: groupId },
-            sessions: [record],
-            type: 'upsertServerKnowledgeSessions',
-          })
-          dispatch({
-            items: serverItems,
-            sessionId: selectedSessionId,
-            type: 'setServerKnowledgeSessionItems',
-          })
-        }
-        setError(null)
-      } catch (caught) {
-        loadedRef.current.delete(selectedSessionId)
-        if (!cancelled) setError(messageFromError(caught))
-      }
-    })()
-    return () => {
-      cancelled = true
+    void loadSessionItems(selectedSessionId, { surfaceErrors: true })
+  }, [hydrated, loadSessionItems, selectedSessionId, syncActive])
+
+  useEffect(() => {
+    if (!syncActive || !hydrated) return
+    for (const session of recentKnowledgeSessionsForPrefetch(
+      sessionsRef.current,
+      serverKnownRef.current,
+    )) {
+      void loadSessionItems(session.id, { surfaceErrors: false })
     }
-  }, [dispatch, hydrated, selectedSessionId, syncActive])
+  }, [hydrated, loadSessionItems, sessions, syncActive])
 
   const pushGroup = useCallback(async (group: KnowledgeSessionGroupRecord) => {
     await saveKnowledgeSessionGroup(
@@ -248,6 +341,7 @@ export function useKnowledgeSessionsApi({
         sessionId: session.id,
         type: 'setServerKnowledgeSessionItems',
       })
+      markItemsLoadResolved(session.id)
     }
     await saveKnowledgeSession(
       session.id,
@@ -256,11 +350,12 @@ export function useKnowledgeSessionsApi({
     )
     serverKnownRef.current.add(session.id)
     loadedRef.current.add(session.id)
+    markItemsLoadResolved(session.id)
     syncedRef.current.set(
       session.id,
       fingerprintKnowledgeSession(session, itemsForPayload, groupId),
     )
-  }, [dispatch, itemsForSession])
+  }, [dispatch, itemsForSession, markItemsLoadResolved])
 
   const flush = useCallback(async () => {
     if (!syncActiveRef.current || !hydrated) return
@@ -360,5 +455,14 @@ export function useKnowledgeSessionsApi({
     return () => document.removeEventListener('visibilitychange', onVisibilityChange)
   }, [flush, syncActive])
 
-  return { error }
+  const isSelectedSessionItemsLoading = Boolean(
+    syncActive
+    && hydrated
+    && selectedSessionId
+    && serverKnownRef.current.has(selectedSessionId)
+    && itemsForSession(selectedSessionId).length === 0
+    && !itemsLoadResolved.has(selectedSessionId),
+  )
+
+  return { error, isSelectedSessionItemsLoading }
 }

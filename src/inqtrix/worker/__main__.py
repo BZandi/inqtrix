@@ -77,22 +77,48 @@ def main() -> None:
 
     from inqtrix.storage.db import build_engine
 
+    queue = ValkeyRunQueue(
+        url=settings.queue.valkey_url, consumer=worker_id
+    )
     store = PostgresRunStore(
-        engine=build_engine(settings.storage.database_url),
+        engine=build_engine(
+            settings.storage.database_url,
+            **settings.storage.pool_kwargs(),
+        ),
         app_role=settings.storage.app_role,
+        # queue=None here is CLAIM-MODE wiring (the ValkeyRunQueue goes
+        # to the WorkerLoop, not the store), not in-process ownership —
+        # without the explicit recover_orphans=False the store would
+        # infer no-queue mode and blanket-fail every queued/running run
+        # of the deployment on worker start ("Verwaister Run ...").
+        # Crash recovery in queue mode is stream reclaim + the TTL
+        # sweeps, never the orphan sweep.
         queue=None,
+        # Submission and wake dispatch are separate from claim ownership:
+        # children created inside a worker and parents woken by terminal
+        # children must return to the shared stream, while queue=None above
+        # remains the load-bearing claim-mode contract.
+        dispatch_queue=queue,
+        recover_orphans=False,
         max_concurrent=(
             settings.server.run_max_concurrent
             or settings.server.max_concurrent
         ),
         max_queue_size=settings.server.run_queue_max_size,
-        completed_ttl_seconds=settings.server.run_completed_ttl_seconds,
+        # DURABLE retention (default 90d), NEVER the in-memory replay TTL
+        # (run_completed_ttl_seconds, 300s): the worker's lazy cleanup
+        # runs on every store access, and with the short TTL it deleted
+        # every terminal run — reports, answers, child runs — five
+        # minutes after completion (live P0 found in the tier E2E).
+        completed_ttl_seconds=settings.server.run_durable_retention_seconds,
         worker_id=worker_id,
+        # The per-user cap is an ADMISSION bound and fires only in
+        # submit(), which the worker never calls (it claims and executes
+        # already-admitted runs). Passed for construction symmetry with
+        # the API store; held inertly here — re-checking a per-user cap on
+        # an already-admitted run would be the wrong layer.
+        max_concurrent_per_user=settings.server.run_max_concurrent_per_user,
     )
-    queue = ValkeyRunQueue(
-        url=settings.queue.valkey_url, consumer=worker_id
-    )
-
     # The reindex consumer runs in the SAME process when knowledge is
     # enabled: its store claims rows itself (queue=None worker-claim
     # mode, like the run store) over a separate reindex stream. Built
@@ -105,9 +131,14 @@ def main() -> None:
         from inqtrix.runs.indexing_queue import ValkeyIndexingQueue
 
         index_store = PostgresIndexingJobStore(
-            engine=build_engine(settings.storage.database_url),
+            engine=build_engine(
+                settings.storage.database_url,
+                **settings.storage.pool_kwargs(),
+            ),
             app_role=settings.storage.app_role,
+            # Claim-mode wiring like the run store above: never sweep.
             queue=None,
+            recover_orphans=False,
             max_concurrent=settings.knowledge.reindex_max_concurrent,
             max_queue_size=settings.knowledge.reindex_queue_max_size,
             completed_ttl_seconds=(
@@ -139,6 +170,12 @@ def main() -> None:
         ),
         run_store=store,
         indexing_store=index_store,
+        # The workspace agent drives the permission/identity repositories
+        # from sync worker threads via per-call asyncio.run; a pooled
+        # asyncpg connection reused across those short-lived loops crashes
+        # ("Future attached to a different loop"). NullPool makes the
+        # shared platform engine loop-agnostic here (the API stays pooled).
+        platform_persistence_null_pool=True,
     )
 
     # The worker has no auth provider, so the container's quota service
@@ -220,6 +257,19 @@ def main() -> None:
         settings.queue.worker_max_attempts,
         settings.queue.worker_heartbeat_seconds,
         settings.queue.worker_claim_idle_seconds,
+    )
+    # Reviewable connection budget (Sichtbarkeit): run store + optional
+    # reindex store are this process's pooled engines.
+    pooled_engines = 2 if index_store is not None else 1
+    log.info(
+        "Postgres-Verbindungsbudget | pool_size=%d max_overflow=%d | %d "
+        "gepoolte Engines -> worst case %d persistente Verbindungen pro "
+        "Worker-Prozess.",
+        settings.storage.pool_size,
+        settings.storage.pool_max_overflow,
+        pooled_engines,
+        pooled_engines
+        * (settings.storage.pool_size + settings.storage.pool_max_overflow),
     )
     threads = [
         threading.Thread(

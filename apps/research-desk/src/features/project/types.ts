@@ -1,5 +1,6 @@
 import type { JobFilter, JobPhase, JobStatus, AppView } from '@/features/researchDesk/types'
 import type { Locale } from '@/i18n/translations'
+import { asFiniteNumber, asNonEmptyString } from '@/lib/coerce'
 import type {
   ContrastMode,
   ThemeMode,
@@ -38,10 +39,19 @@ export type ProjectMetadata = {
   updatedAt: string
 }
 
+import type {
+  AgentRunRecord,
+  AgentSessionGroupRecord,
+  AgentSessionRecord,
+} from '@/features/agent/model'
+import type { CanvasState } from '@/features/canvas/types'
+import type { AgentPlanDraft } from '@/features/agent/plan/usePlanApproval'
+
 export type PinnedExplorerState = {
   chatThreadIds: string[]
   editorDocumentIds: string[]
   knowledgeSessionIds: string[]
+  agentSessionIds: string[]
 }
 
 export type ProjectPanelLayoutState = {
@@ -49,6 +59,10 @@ export type ProjectPanelLayoutState = {
   knowledgeHistory: number
   knowledgeSource: number
   researchReport: number
+  agentSessions: number
+  agentCanvas: number
+  editorTree: number
+  editorComments: number
 }
 
 export type ProjectUiState = {
@@ -56,6 +70,7 @@ export type ProjectUiState = {
   activeView: AppView
   chatChainingEnabled: boolean
   expandedJobId: string | null
+  isAgentSessionsVisible: boolean
   isChatHistoryVisible: boolean
   isKnowledgeHistoryVisible: boolean
   isComposerVisible: boolean
@@ -68,12 +83,23 @@ export type ProjectUiState = {
   selectedChatModel: string | null
   selectedChatEffort: string | null
   selectedChatModelTier: ChatModelTier | null
+  /** Agent-run model override (R3). Deliberately SEPARATE from the
+   * chat selection: agent runs have a different cost profile, so a
+   * chat pick must never silently raise agent spend. */
+  selectedAgentModel: string | null
+  selectedAgentEffort: string | null
+  selectedAgentModelTier: ChatModelTier | null
   selectedChatThreadId: string | null
+  /** Persisted selection INTENT for the Agent Desk. Sessions are
+   * server-hydrated, so load-time membership validation is impossible —
+   * the workspace restores this id (or the most recent session) once
+   * hydration lands, instead of showing the empty new-session state. */
+  selectedAgentSessionId: string | null
   selectedJobId: string | null
   selectedStack: string
 }
 
-export type EditorDocumentSource = 'blank' | 'imported-research-report' | 'pasted'
+export type EditorDocumentSource = 'blank' | 'imported-research-report' | 'pasted' | 'agent-artifact'
 
 export type EditorFolderRecord = {
   createdAt: string
@@ -201,6 +227,7 @@ export type EditorUiState = {
 }
 
 export type ProjectPreferences = {
+  agentMemoryEnabled: boolean
   contrastMode: ContrastMode
   locale: Locale
   theme: ThemeMode
@@ -255,10 +282,19 @@ export type ResearchRunRecord = {
   access?: ResearchRunAccess
   agentOverrides: Record<string, unknown>
   createdAt: string
+  /** Run-tree role; absent = plain standalone run (historical shape). */
+  kind?: 'standard' | 'agent' | 'agent_child'
+  parentRunId?: string
+  sessionId?: string
   durationSeconds?: number
   error?: string
   events: ResearchRunEventRecord[]
   finishedAt?: string
+  /** Whether this run's report is offered in the `@research` mention
+   * autocomplete. Absent/`true` = available (the historical, default-on shape);
+   * only an explicit `false` hides it. Gated at the mention source only
+   * (`mentionableReportOptions`), never on already-attached report chips. */
+  includeInAutocomplete?: boolean
   metrics: ResearchRunCardMetrics
   mode?: ResearchRunMode
   phaseState: ResearchRunPhaseState
@@ -785,6 +821,21 @@ export type ProjectState = {
   knowledgeSessionOrder: string[]
   knowledgeSessions: Record<string, KnowledgeSessionRecord>
   selectedKnowledgeSessionId: string | null
+  /** Agent Desk records. Session-scoped like the knowledge thread: runs
+   * reference short-lived server rows, so none of this is part of
+   * project files — server hydration rebuilds it. */
+  agentRuns: Record<string, AgentRunRecord>
+  agentSessionGroupOrder: string[]
+  agentSessionGroups: Record<string, AgentSessionGroupRecord>
+  agentSessionOrder: string[]
+  agentSessions: Record<string, AgentSessionRecord>
+  selectedAgentSessionId: string | null
+  /** Polymorphic canvas state (base view + overlay stack). Ephemeral:
+   * never serialized, never marks the project dirty. */
+  agentCanvas: CanvasState
+  /** Per-run plan edit drafts — ONE draft shared by the timeline card and
+   * the canvas plan view (plan §5.4). Ephemeral like the canvas. */
+  agentPlanDrafts: Record<string, AgentPlanDraft>
   localRunCounter: number
   preferences: ProjectPreferences
   project: ProjectMetadata
@@ -829,7 +880,7 @@ export function fromRunSummary(
   const startedAt = toIsoString(summary.started_at)
   const finishedAt = toIsoString(summary.finished_at)
   const snapshot = summary.snapshot
-  const maxRounds = snapshot.max_rounds ?? numberFromUnknown(summary.agent_overrides.max_rounds)
+  const maxRounds = snapshot.max_rounds ?? asFiniteNumber(summary.agent_overrides.max_rounds)
   const currentRounds = snapshot.active_round ?? snapshot.completed_rounds ?? 0
   const title = summary.question.trim() || summary.run_id
 
@@ -837,6 +888,9 @@ export function fromRunSummary(
     access: summary.access,
     agentOverrides: summary.agent_overrides,
     createdAt: submittedAt,
+    kind: summary.kind,
+    parentRunId: summary.parent_run_id,
+    sessionId: summary.session_id,
     durationSeconds: terminalStatus(summary.status)
       ? summary.elapsed_seconds ?? undefined
       : undefined,
@@ -881,12 +935,75 @@ export function mergeRunSummary(
   return {
     ...next,
     events: current.events,
+    // The API run summary carries no mention-availability flag, so preserve the
+    // local choice; otherwise a run-list refresh would silently re-enable a
+    // report the user hid from the @-autocomplete (frozen-rebuild field loss).
+    includeInAutocomplete: current.includeInAutocomplete ?? next.includeInAutocomplete,
     result: current.result ?? next.result,
     summary: {
       ...next.summary,
       score: next.summary.score ?? current.summary.score,
     },
   }
+}
+
+/**
+ * Ring cap on a run's stored event timeline. The whole (filtered) array is
+ * rendered in the report log, so this bounds the DOM for a pathological run;
+ * generous enough that no real run (a 20-round DEEP run is ~400 events) is
+ * ever trimmed, so phase-visit counting and the cancel marker are unaffected.
+ */
+export const RUN_EVENT_LOG_CAP = 500
+
+function clearTailActive(
+  events: ResearchRunEventRecord[],
+): ResearchRunEventRecord[] {
+  const lastIndex = events.length - 1
+  // Invariant (maintained by this module): AT MOST the tail is active, so
+  // clearing the tail clears every active flag. When it is already inactive
+  // the array is returned untouched -- the head event OBJECTS keep their
+  // identity, so memoised timeline rows do not re-render.
+  if (lastIndex < 0 || !events[lastIndex].active) return events
+  const next = events.slice()
+  next[lastIndex] = { ...next[lastIndex], active: false }
+  return next
+}
+
+function capHead(
+  events: ResearchRunEventRecord[],
+  cap: number,
+): ResearchRunEventRecord[] {
+  // Trim the OLDEST when over cap; the active event is always the tail, so
+  // dropping from the head never removes it.
+  return events.length > cap ? events.slice(events.length - cap) : events
+}
+
+/**
+ * Append one event record to a run's timeline, preserving the invariant that
+ * at most the tail event is `active`.
+ *
+ * Replaces the previous O(n) `map(active:false)` + O(n^2) `filter(findIndex)`
+ * dedup that ran on every SSE frame and stuttered late in long DEEP runs.
+ * Here only the previous tail's active flag is cleared (head objects are
+ * shared, so memoised rows stay put); dedup keeps the FIRST occurrence by id
+ * -- matching the old semantics for BOTH reconnect replays (`{run}-{seq}` ids
+ * replayed on SSE resume) and node-stable model-resolution ids
+ * (`{run}-model-{node}` refired each round). A model re-fire can sit far from
+ * the tail, so the membership test is the one unavoidable O(n) scan; the
+ * quadratic dedup -- the actual stutter -- is gone.
+ */
+export function appendRunEventRecord(
+  events: ResearchRunEventRecord[],
+  next: ResearchRunEventRecord,
+  options?: { cap?: number },
+): ResearchRunEventRecord[] {
+  const cap = options?.cap ?? RUN_EVENT_LOG_CAP
+  const base = clearTailActive(events)
+  // Duplicate id -> keep the existing row at its stable position, drop next.
+  // The array is already dedup-free (this helper maintains it), so a single
+  // membership scan suffices.
+  if (base.some((item) => item.id === next.id)) return capHead(base, cap)
+  return capHead([...base, next], cap)
 }
 
 export function applyRunEvent(
@@ -897,23 +1014,26 @@ export function applyRunEvent(
   const nextStatus = statusFromEvent(event) ?? record.status
   const eventRecord = eventRecordFromRunEvent(event)
   const events = eventRecord
-    ? [
-      ...record.events.map((item) => ({ ...item, active: false })),
-      eventRecord,
-    ]
+    ? appendRunEventRecord(record.events, eventRecord)
     : record.events
-  const deduplicatedEvents = events.filter((item, index, allEvents) => (
-    allEvents.findIndex((candidate) => candidate.id === item.id) === index
-  ))
   const updated = applySnapshotToRecord(record, snapshot)
 
   return {
     ...updated,
     error: errorFromEvent(event) ?? updated.error,
-    events: deduplicatedEvents,
+    events,
     finishedAt: terminalStatus(nextStatus) && !updated.finishedAt
       ? toIsoString(event.created_at) ?? new Date().toISOString()
       : updated.finishedAt,
+    // The create summary is `queued` (started_at null); `started_at` is only
+    // set server-side at claim and never re-sent on the event stream. Without
+    // this, `status` flips to `running` from an event while `startedAt` stays
+    // undefined, so the live runtime sticks at 00:00:00. Derive it from the
+    // running-transition event's timestamp (mirrors `finishedAt` above); never
+    // overwrite an authoritative summary `startedAt` a hydrated run already has.
+    startedAt: nextStatus === 'running' && !updated.startedAt
+      ? toIsoString(event.created_at) ?? updated.startedAt
+      : updated.startedAt,
     status: nextStatus,
     summary: {
       ...updated.summary,
@@ -928,7 +1048,7 @@ export function attachRunResult(
   result: ResearchRunResult,
 ): ResearchRunRecord {
   const maxRounds = record.snapshot?.max_rounds
-    ?? numberFromUnknown(record.agentOverrides.max_rounds)
+    ?? asFiniteNumber(record.agentOverrides.max_rounds)
     ?? result.metrics.rounds
 
   return {
@@ -1004,7 +1124,7 @@ function applySnapshotToRecord(
 
   const maxRounds = snapshot.max_rounds
     ?? record.snapshot?.max_rounds
-    ?? numberFromUnknown(record.agentOverrides.max_rounds)
+    ?? asFiniteNumber(record.agentOverrides.max_rounds)
   const currentRounds = snapshot.active_round
     ?? snapshot.completed_rounds
     ?? record.snapshot?.active_round
@@ -1078,7 +1198,7 @@ function eventRecordFromRunEvent(event: ResearchRunEvent): ResearchRunEventRecor
     // stable per node, so give them a node-stable id; the dedup below then
     // keeps one row per node instead of one per round (no timeline spam).
     id: event.type === 'inqtrix.node.model_resolution'
-      ? `${event.run_id}-model-${stringFromUnknown(event.data.node) ?? event.sequence}`
+      ? `${event.run_id}-model-${asNonEmptyString(event.data.node) ?? event.sequence}`
       : `${event.run_id}-${event.sequence}`,
     kind: eventKindFromRunEvent(event),
     ...(phase ? { phase } : {}),
@@ -1094,7 +1214,7 @@ function phaseFromRunEvent(event: ResearchRunEvent): JobPhase | undefined {
   const snapshotPhase = phaseFromNode(snapshotFromEvent(event)?.current_node)
   if (snapshotPhase) return snapshotPhase
 
-  return phaseFromNode(stringFromUnknown(event.data.node))
+  return phaseFromNode(asNonEmptyString(event.data.node))
 }
 
 function phaseFromUnknown(value: unknown): JobPhase | undefined {
@@ -1107,12 +1227,12 @@ function phaseFromUnknown(value: unknown): JobPhase | undefined {
   ) {
     return value
   }
-  return phaseFromNode(stringFromUnknown(value))
+  return phaseFromNode(asNonEmptyString(value))
 }
 
 function isVisibleProtocolEvent(event: ResearchRunEvent) {
   if (event.type === 'inqtrix.progress.message') {
-    const message = stringFromUnknown(event.data.message)
+    const message = asNonEmptyString(event.data.message)
     return Boolean(message && message !== 'done' && !message.startsWith('chat_only.'))
   }
   if (
@@ -1145,19 +1265,19 @@ function eventSeverityFromRunEvent(event: ResearchRunEvent): ResearchRunEventSev
   if (event.type === 'inqtrix.run.failed' || event.type === 'inqtrix.node.failed') return 'error'
   if (event.type === 'inqtrix.run.cancel_requested' || event.type === 'inqtrix.run.cancelled') return 'warning'
 
-  const message = stringFromUnknown(event.data.message) ?? titleFromRunEvent(event)
+  const message = asNonEmptyString(event.data.message) ?? titleFromRunEvent(event)
   return warningLikeMessage(message) ? 'warning' : 'info'
 }
 
 function titleFromRunEvent(event: ResearchRunEvent) {
-  const message = stringFromUnknown(event.data.message)
+  const message = asNonEmptyString(event.data.message)
   if (message) return message
 
-  const node = stringFromUnknown(event.data.node)
+  const node = asNonEmptyString(event.data.node)
   if (event.type === 'inqtrix.node.model_resolution' && node) {
-    const model = stringFromUnknown(event.data.model) || '(default)'
-    const source = stringFromUnknown(event.data.model_source) ?? ''
-    const effort = stringFromUnknown(event.data.effort) ?? ''
+    const model = asNonEmptyString(event.data.model) || '(default)'
+    const source = asNonEmptyString(event.data.model_source) ?? ''
+    const effort = asNonEmptyString(event.data.effort) ?? ''
     const sourceLabel = source.startsWith('tier:')
       ? `${source.slice(5)} tier`
       : source === 'reasoning_model_default'
@@ -1184,7 +1304,7 @@ function warningLikeMessage(message: string) {
 function errorFromEvent(event: ResearchRunEvent) {
   const error = event.data.error
   if (!error || typeof error !== 'object' || Array.isArray(error)) return undefined
-  return stringFromUnknown((error as { message?: unknown }).message)
+  return asNonEmptyString((error as { message?: unknown }).message)
 }
 
 function queueNoteFromSummary(summary: ResearchRunSummary) {
@@ -1197,10 +1317,3 @@ function confidenceScore(confidence: number | undefined) {
   return confidence ? `${confidence.toFixed(1)} / 10` : undefined
 }
 
-function numberFromUnknown(value: unknown) {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
-}
-
-function stringFromUnknown(value: unknown) {
-  return typeof value === 'string' && value.trim() ? value : undefined
-}

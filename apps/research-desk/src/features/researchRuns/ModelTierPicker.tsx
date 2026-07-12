@@ -1,4 +1,4 @@
-import { Bot, Check, ChevronDown, Info, Server } from '@/components/icons'
+import { Bot, BrainCog, Check, ChevronDown, Info, Server } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Chip } from '@/components/ui/chip'
 import {
@@ -52,6 +52,15 @@ type ModelTierPickerProps = {
   selectedEffort?: string | null
   onModelChange?: (model: string | null) => void
   onEffortChange?: (effort: string | null) => void
+  /** Copy overrides for non-chat contexts (agent composer). Defaults
+   * keep the chat/editor instances byte-identical. */
+  serverDefaultLabel?: string
+  serverDefaultDescription?: string
+  triggerPrefix?: string
+  pickerTitle?: string
+  /** Agent Desk keeps the same picker contents but gives the trigger a
+   * responsive capsule segment that becomes icon-only in narrow composers. */
+  triggerVariant?: 'default' | 'agent-capsule'
 }
 
 export function ModelTierPicker({
@@ -66,9 +75,18 @@ export function ModelTierPicker({
   selectedEffort = null,
   onModelChange,
   onEffortChange,
+  serverDefaultLabel,
+  serverDefaultDescription,
+  triggerPrefix = '',
+  pickerTitle,
+  triggerVariant = 'default',
 }: ModelTierPickerProps) {
   const { t } = useLocale()
   const catalogMode = (modelCatalog?.length ?? 0) > 0
+  const defaultLabel = serverDefaultLabel ?? t.chat.modelServerDefault
+  const defaultDescription =
+    serverDefaultDescription ?? t.chat.modelServerDefaultDescription
+  const title = pickerTitle ?? t.chat.modelPicker
 
   if (catalogMode && modelCatalog && onModelChange) {
     return (
@@ -77,8 +95,13 @@ export function ModelTierPicker({
         disabled={disabled}
         onEffortChange={onEffortChange}
         onModelChange={onModelChange}
+        pickerTitle={title}
         selectedEffort={selectedEffort}
         selectedModel={selectedModel}
+        serverDefaultDescription={defaultDescription}
+        serverDefaultLabel={defaultLabel}
+        triggerPrefix={triggerPrefix}
+        triggerVariant={triggerVariant}
       />
     )
   }
@@ -94,21 +117,13 @@ export function ModelTierPicker({
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          aria-label={t.chat.modelPicker}
-          className={cn(
-            'h-7 min-w-0 max-w-[min(48vw,17rem)] shrink rounded-md px-1.5 text-xs font-semibold text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0',
-            'data-[state=open]:bg-accent data-[state=open]:text-foreground',
-          )}
-          disabled={disabled}
-          type="button"
-          variant="ghost"
-        >
-          <span className="min-w-0 truncate">{activeLabel}</span>
-          <ChevronDown className="size-3 shrink-0 opacity-60" />
-        </Button>
-      </DropdownMenuTrigger>
+      <ModelPickerTrigger
+        activeLabel={activeLabel}
+        disabled={disabled}
+        title={title}
+        triggerPrefix={triggerPrefix}
+        variant={triggerVariant}
+      />
       <DropdownMenuContent
         align="start"
         className="w-72 max-w-[calc(100vw-2rem)] overflow-x-hidden rounded-xl p-0 shadow-lg"
@@ -116,7 +131,7 @@ export function ModelTierPicker({
         sideOffset={8}
       >
         <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-1.5">
-          <span className="t-meta-sm font-medium text-muted-foreground">{t.chat.modelPicker}</span>
+          <span className="t-meta-sm font-medium text-muted-foreground">{title}</span>
           <span className="ml-auto t-hint tabular-nums text-muted-foreground/50">
             {optionsStatus === 'available' ? options.length : 0}
           </span>
@@ -125,10 +140,10 @@ export function ModelTierPicker({
         <div className="max-h-80 overflow-x-hidden overflow-y-auto py-1">
           <ModelMenuRow
             active={selectedTier == null}
-            description={t.chat.modelServerDefaultDescription}
+            description={defaultDescription}
             detail={modelDetailLabel(defaultModel, t.chat)}
             icon="server"
-            label={t.chat.modelServerDefault}
+            label={defaultLabel}
             onSelect={() => onChange(null)}
           />
           <DropdownMenuSeparator className="mx-0 my-1" />
@@ -186,6 +201,11 @@ function CatalogPicker({
   onModelChange,
   selectedEffort,
   selectedModel,
+  pickerTitle,
+  serverDefaultDescription,
+  serverDefaultLabel,
+  triggerPrefix,
+  triggerVariant,
 }: {
   catalog: ModelCatalogEntry[]
   disabled: boolean
@@ -193,12 +213,17 @@ function CatalogPicker({
   onModelChange: (model: string | null) => void
   selectedEffort: string | null
   selectedModel: string | null
+  pickerTitle: string
+  serverDefaultDescription: string
+  serverDefaultLabel: string
+  triggerPrefix: string
+  triggerVariant: 'default' | 'agent-capsule'
 }) {
   const { t } = useLocale()
   const selectedEntry = catalog.find((entry) => entry.model_id === selectedModel) ?? null
   const selectedCard = selectedEntry?.card ?? null
   const baseTriggerLabel = selectedModel == null
-    ? t.chat.modelServerDefault
+    ? serverDefaultLabel
     : selectedCard?.display_name ?? selectedModel
   // Surface the picked reasoning level at the composer so it can be verified
   // without re-opening the picker (only when an explicit effort is set).
@@ -210,21 +235,13 @@ function CatalogPicker({
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          aria-label={t.chat.modelPicker}
-          className={cn(
-            'h-7 min-w-0 max-w-[min(48vw,17rem)] shrink rounded-md px-1.5 text-xs font-semibold text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0',
-            'data-[state=open]:bg-accent data-[state=open]:text-foreground',
-          )}
-          disabled={disabled}
-          type="button"
-          variant="ghost"
-        >
-          <span className="min-w-0 truncate">{triggerLabel}</span>
-          <ChevronDown className="size-3 shrink-0 opacity-60" />
-        </Button>
-      </DropdownMenuTrigger>
+      <ModelPickerTrigger
+        activeLabel={triggerLabel}
+        disabled={disabled}
+        title={pickerTitle}
+        triggerPrefix={triggerPrefix}
+        variant={triggerVariant}
+      />
       <DropdownMenuContent
         align="start"
         className="w-80 max-w-[calc(100vw-2rem)] overflow-x-hidden rounded-xl p-0 shadow-lg"
@@ -232,7 +249,7 @@ function CatalogPicker({
         sideOffset={8}
       >
         <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-1.5">
-          <span className="t-meta-sm font-medium text-muted-foreground">{t.chat.modelPicker}</span>
+          <span className="t-meta-sm font-medium text-muted-foreground">{pickerTitle}</span>
           <span className="ml-auto t-hint tabular-nums text-muted-foreground/50">
             {catalog.length}
           </span>
@@ -241,10 +258,10 @@ function CatalogPicker({
         <div className="max-h-80 overflow-x-hidden overflow-y-auto py-1">
           <ModelMenuRow
             active={selectedModel == null}
-            description={t.chat.modelServerDefaultDescription}
-            detail={t.chat.modelServerDefaultDescription}
+            description={serverDefaultDescription}
+            detail={serverDefaultDescription}
             icon="server"
-            label={t.chat.modelServerDefault}
+            label={serverDefaultLabel}
             onSelect={() => onModelChange(null)}
           />
           <DropdownMenuSeparator className="mx-0 my-1" />
@@ -302,6 +319,50 @@ function CatalogPicker({
       </DropdownMenuContent>
     </DropdownMenu>
   )
+}
+
+function ModelPickerTrigger({
+  activeLabel,
+  disabled,
+  title,
+  triggerPrefix,
+  variant,
+}: {
+  activeLabel: string
+  disabled: boolean
+  title: string
+  triggerPrefix: string
+  variant: 'default' | 'agent-capsule'
+}) {
+  const accessibleLabel = `${title}: ${activeLabel}`
+  const trigger = (
+    <Button
+      aria-label={accessibleLabel}
+      className={cn(
+        'h-7 min-w-0 max-w-[min(48vw,17rem)] shrink rounded-md px-1.5 text-xs font-semibold text-muted-foreground hover:bg-accent/70 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-0',
+        'data-[state=open]:bg-accent data-[state=open]:text-foreground',
+        variant === 'agent-capsule'
+          && 'agent-model-trigger max-w-none px-2 [&_svg]:size-3.5',
+      )}
+      disabled={disabled}
+      type="button"
+      variant="ghost"
+    >
+      {variant === 'agent-capsule' ? (
+        <BrainCog aria-hidden="true" className="agent-model-icon icon-sm shrink-0" />
+      ) : null}
+      <span className={cn(
+        'min-w-0 truncate',
+        variant === 'agent-capsule' && 'agent-model-trigger-label',
+      )}>{`${triggerPrefix}${activeLabel}`}</span>
+      <ChevronDown className="size-3 shrink-0 opacity-60" />
+    </Button>
+  )
+
+  if (variant !== 'agent-capsule') {
+    return <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
+  }
+  return <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
 }
 
 function CatalogRow({

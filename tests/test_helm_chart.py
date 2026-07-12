@@ -91,11 +91,17 @@ def test_openshift_omits_uid_and_renders_route_not_ingress():
 
 
 def test_bundled_services_autowire_connections():
+    # s3.enabled is part of the fixture: a worker pod shares the object
+    # store with the API, and the chart refuses per-pod-disk "local"
+    # for more than one sharer (see the I.2 guard test below).
     rendered = _template(
         "postgres.enabled=true",
         "qdrant.enabled=true",
         "valkey.enabled=true",
         "worker.enabled=true",
+        "s3.enabled=true",
+        "secret.data.INQTRIX_S3_ACCESS_KEY=k",
+        "secret.data.INQTRIX_S3_SECRET_KEY=s",
     )
     docs = _docs(rendered)
     names = {f"{d['kind']}/{d['metadata']['name']}" for d in docs}
@@ -327,3 +333,138 @@ def test_explicit_s3_config_overrides_bundled_minio():
     assert secret["INQTRIX_S3_ACCESS_KEY"] == "explicit-access"
     # the key left unset still falls back to the bundled MinIO default
     assert secret["INQTRIX_S3_SECRET_KEY"] == "change-me-minio"
+
+
+def test_local_object_store_refuses_multi_replica_render():
+    """I.2: per-pod-disk blobs must not be shared by >1 pod."""
+    # 2 API replicas on the default local store: refused.
+    with pytest.raises(RuntimeError, match="per-pod disk"):
+        _template(_EXTERNAL, "api.replicaCount=2")
+    # Autoscaling ceiling counts even with replicaCount=1.
+    with pytest.raises(RuntimeError, match="per-pod disk"):
+        _template(
+            _EXTERNAL,
+            "api.autoscaling.enabled=true",
+            "api.autoscaling.maxReplicas=3",
+        )
+    # A worker pod shares the store too.
+    with pytest.raises(RuntimeError, match="per-pod disk"):
+        _template(
+            _EXTERNAL,
+            "worker.enabled=true",
+            "valkey.enabled=true",
+        )
+    # Bundled MinIO (s3.enabled) makes multi-replica renderable again, and
+    # the replica hint reaches the app config for its own startup guard.
+    rendered = _template(
+        _EXTERNAL,
+        "api.replicaCount=2",
+        "s3.enabled=true",
+        "secret.data.INQTRIX_S3_ACCESS_KEY=k",
+        "secret.data.INQTRIX_S3_SECRET_KEY=s",
+    )
+    config = _by_kind(_docs(rendered), "ConfigMap")[0]["data"]
+    assert config["INQTRIX_OBJECT_STORE_BACKEND"] == "s3"
+    assert config["INQTRIX_REPLICA_COUNT"] == "2"
+    # Single replica on local keeps working (zero-infra default).
+    single = _template(_EXTERNAL)
+    config = _by_kind(_docs(single), "ConfigMap")[0]["data"]
+    assert config["INQTRIX_OBJECT_STORE_BACKEND"] == "local"
+    assert config["INQTRIX_REPLICA_COUNT"] == "1"
+
+
+def test_bundled_pgbouncer_pools_app_url_but_not_migrate():
+    """I.1: the app routes through the pooler; Alembic stays direct."""
+    # Requires the bundled Postgres.
+    with pytest.raises(RuntimeError, match="requires postgres.enabled"):
+        _template(_EXTERNAL, "pgbouncer.enabled=true")
+    rendered = _template(
+        "postgres.enabled=true",
+        "pgbouncer.enabled=true",
+    )
+    docs = _docs(rendered)
+    names = {f"{d['kind']}/{d['metadata']['name']}" for d in docs}
+    assert "Deployment/rel-inqtrix-pgbouncer" in names
+    assert "Service/rel-inqtrix-pgbouncer" in names
+
+    secret = _by_kind(docs, "Secret")[0]["stringData"]
+    app_url = secret["INQTRIX_DATABASE_URL"]
+    assert "rel-inqtrix-pgbouncer:6432" in app_url
+    assert "prepared_statement_cache_size=0" in app_url
+
+    migrate = [
+        d for d in _by_kind(docs, "Job")
+        if "migrate" in d["metadata"]["name"]
+    ][0]
+    env = migrate["spec"]["template"]["spec"]["containers"][0]["env"]
+    direct = [e for e in env if e["name"] == "INQTRIX_DATABASE_URL"][0]
+    assert "rel-inqtrix-postgres:5432" in direct["value"]
+    assert "pgbouncer" not in direct["value"]
+
+    pooler = [
+        d for d in _by_kind(docs, "Deployment")
+        if "pgbouncer" in d["metadata"]["name"]
+    ][0]
+    container = pooler["spec"]["template"]["spec"]["containers"][0]
+    env = {e["name"]: e.get("value") for e in container["env"]}
+    assert env["POOL_MODE"] == "transaction"
+    assert env["MAX_PREPARED_STATEMENTS"] == "200"
+    assert env["DB_HOST"] == "rel-inqtrix-postgres"
+
+
+def test_pgbouncer_disabled_keeps_direct_app_url():
+    rendered = _template("postgres.enabled=true")
+    secret = _by_kind(_docs(rendered), "Secret")[0]["stringData"]
+    assert "rel-inqtrix-postgres:5432" in secret["INQTRIX_DATABASE_URL"]
+
+
+def _api_deployment(docs: list[dict]) -> dict:
+    return [
+        d for d in _by_kind(docs, "Deployment")
+        if d["metadata"]["name"] == "rel-inqtrix-api"
+    ][0]
+
+
+def test_metrics_disabled_by_default():
+    """2.5: no INQTRIX_METRICS_ENABLED and no scrape annotations by default."""
+    docs = _docs(_template(_EXTERNAL))
+    config = [
+        d for d in _by_kind(docs, "ConfigMap")
+        if d["metadata"]["name"] == "rel-inqtrix"
+    ][0]["data"]
+    assert "INQTRIX_METRICS_ENABLED" not in config
+    annotations = (
+        _api_deployment(docs)["spec"]["template"]["metadata"].get(
+            "annotations", {}
+        )
+    )
+    assert "prometheus.io/scrape" not in annotations
+
+
+def test_metrics_enabled_sets_flag_and_scrape_annotations():
+    """2.5: the toggle wires the env flag and the classic scrape annotations."""
+    docs = _docs(_template(_EXTERNAL, "metrics.enabled=true"))
+    config = [
+        d for d in _by_kind(docs, "ConfigMap")
+        if d["metadata"]["name"] == "rel-inqtrix"
+    ][0]["data"]
+    assert config["INQTRIX_METRICS_ENABLED"] == "true"
+    annotations = _api_deployment(docs)["spec"]["template"]["metadata"][
+        "annotations"
+    ]
+    assert annotations["prometheus.io/scrape"] == "true"
+    assert annotations["prometheus.io/path"] == "/metrics"
+
+    # podAnnotations=false keeps the flag but drops the scrape annotations
+    # (for a PodMonitor/ServiceMonitor-based Prometheus instead).
+    docs2 = _docs(
+        _template(
+            _EXTERNAL, "metrics.enabled=true", "metrics.podAnnotations=false"
+        )
+    )
+    annotations2 = (
+        _api_deployment(docs2)["spec"]["template"]["metadata"].get(
+            "annotations", {}
+        )
+    )
+    assert "prometheus.io/scrape" not in annotations2

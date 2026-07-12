@@ -13,8 +13,9 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends
 
-from inqtrix.auth.principal import Principal
+from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.knowledge.stores.ports import DocumentNotFound
+from inqtrix.server.routers import build_shared_grants_dependency
 from inqtrix.services.request_parsing import error_response
 
 if TYPE_CHECKING:
@@ -36,6 +37,12 @@ def build_router(container: "AppContainer") -> APIRouter:
             "register the router only when knowledge is enabled."
         )
     principal_dep = container.principal_dependency
+    user_context_dep = container.user_context_dependency
+    shared_collections_dep = build_shared_grants_dependency(
+        container.share_service,
+        principal_dep,
+        resource_type="knowledge_collection",
+    )
 
     router = APIRouter()
 
@@ -43,15 +50,25 @@ def build_router(container: "AppContainer") -> APIRouter:
     async def get_source(
         document_id: str,
         principal: Principal = Depends(principal_dep),
+        visible_to: UserContext | None = Depends(user_context_dep),
+        also_visible=Depends(shared_collections_dep),
     ):
         """Return the citable document view (full text + provenance).
 
         The optional ``chunk`` query parameter in citation URLs is a
         client-side anchor; the server always returns the whole
         document so the UI can highlight the cited passage.
+
+        Visibility is the parent collection's: without ownership or an
+        accepted share grant the document is a 404, indistinguishable
+        from absence.
         """
         try:
-            document = await service.get_document(document_id)
+            document = await service.get_document(
+                document_id,
+                visible_to=visible_to,
+                also_visible=also_visible,
+            )
         except DocumentNotFound:
             return error_response(404, "Quelle nicht gefunden", "not_found")
         return {

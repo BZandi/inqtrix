@@ -54,6 +54,7 @@ class AccountPreferencesService:
         theme_preset,
         user_bubble_tone,
         updated_at,
+        enable_agent_memory=False,
     ) -> AccountPreferences:
         if contrast_mode not in _VALID_CONTRAST:
             raise AccountPreferencesValidationError(f"unknown contrast mode: {contrast_mode!r}")
@@ -70,5 +71,5 @@ class AccountPreferencesService:
         return await self._store.upsert_preferences(
             sub=sub, contrast_mode=contrast_mode, locale=locale, theme=theme,
             theme_preset=theme_preset, user_bubble_tone=user_bubble_tone,
-            updated_at=updated_at,
+            updated_at=updated_at, enable_agent_memory=bool(enable_agent_memory),
         )

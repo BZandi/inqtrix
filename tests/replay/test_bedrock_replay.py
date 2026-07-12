@@ -56,6 +56,14 @@ def stubbed_provider(monkeypatch: pytest.MonkeyPatch):
 
     provider = BedrockLLM(default_model="eu.anthropic.claude-sonnet-4-6")
     stubber = Stubber(provider._client)
+    # The provider caches one transport client per remaining-deadline
+    # bucket (``_client_for_deadline``), so the very first call misses the
+    # constructor's default bucket and would build a fresh UNSTUBBED
+    # client (= a real HTTP call). Route every bucket to the one stubbed
+    # client; the deadline/bucket math itself stays fully exercised.
+    monkeypatch.setattr(
+        provider, "_build_client", lambda read_timeout: provider._client
+    )
     stubber.activate()
     try:
         yield provider, stubber

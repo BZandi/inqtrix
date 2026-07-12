@@ -4,3 +4,10 @@
 # a Windows (core.autocrlf) checkout. Pinning Markdown to LF keeps the committed
 # fixtures byte-stable across platforms (defense-in-depth, not the parser fix).
 *.md text eol=lf
+
+# TypeScript sources: declare text + LF so line endings stay consistent
+# cross-platform and tooling treats them as text. This does not by itself stop a
+# stray NUL byte from flipping a file to git-binary (the source must stay
+# NUL-free); it is defense-in-depth alongside keeping sources clean.
+*.ts text eol=lf
+*.tsx text eol=lf

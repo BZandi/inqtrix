@@ -7,7 +7,6 @@ import {
 import type { PanelImperativeHandle } from 'react-resizable-panels'
 
 const PANEL_MOTION_CLASS_NAME = 'inqtrix-resizable-panel-motion'
-const PANEL_COLLAPSED_CLASS_NAME = 'inqtrix-resizable-panel-collapsed'
 const PANEL_MOTION_DURATION_MS = 260
 const PANEL_MOTION_SETTLE_MS = PANEL_MOTION_DURATION_MS + 80
 const PANEL_PROGRAMMATIC_SETTLE_MS = 80
@@ -21,7 +20,6 @@ type AnimatedResizablePanelCollapseOptions = {
 type AnimatedResizablePanelCollapse = {
   groupRef: RefObject<HTMLDivElement | null>
   isProgrammaticLayoutChange: () => boolean
-  panelElementRef: RefObject<HTMLDivElement | null>
   panelRef: RefObject<PanelImperativeHandle | null>
 }
 
@@ -31,7 +29,6 @@ export function useAnimatedResizablePanelCollapse({
   reduceMotion,
 }: AnimatedResizablePanelCollapseOptions): AnimatedResizablePanelCollapse {
   const groupRef = useRef<HTMLDivElement | null>(null)
-  const panelElementRef = useRef<HTMLDivElement | null>(null)
   const panelRef = useRef<PanelImperativeHandle | null>(null)
   const didSyncInitialStateRef = useRef(false)
   const expandedSizeRef = useRef(expandedSize)
@@ -47,13 +44,18 @@ export function useAnimatedResizablePanelCollapse({
 
   useLayoutEffect(() => {
     const panel = panelRef.current
-    if (!panel) return
+    if (!panel) {
+      // The panel can be unmounted (mobile breakpoint) while `expanded` still
+      // changes; record it so the first toggle after remount animates from the
+      // correct previous state instead of being skipped as a no-op.
+      previousExpandedRef.current = expanded
+      return
+    }
 
     const isInitialSync = !didSyncInitialStateRef.current
     didSyncInitialStateRef.current = true
     const shouldAnimate = !isInitialSync && !reduceMotion && previousExpandedRef.current !== expanded
     const group = groupRef.current
-    const panelElement = panelElementRef.current
 
     if (motionFrameRef.current != null) {
       window.cancelAnimationFrame(motionFrameRef.current)
@@ -73,7 +75,6 @@ export function useAnimatedResizablePanelCollapse({
     }
 
     programmaticLayoutChangeRef.current = true
-    panelElement?.classList.toggle(PANEL_COLLAPSED_CLASS_NAME, !expanded)
 
     const syncPanelState = () => {
       if (expanded) {
@@ -81,6 +82,7 @@ export function useAnimatedResizablePanelCollapse({
         panel.resize(`${expandedSizeRef.current}%`)
         return
       }
+      panel.resize('0%')
       panel.collapse()
     }
 
@@ -123,13 +125,11 @@ export function useAnimatedResizablePanelCollapse({
     }
     programmaticLayoutChangeRef.current = false
     groupRef.current?.classList.remove(PANEL_MOTION_CLASS_NAME)
-    panelElementRef.current?.classList.remove(PANEL_COLLAPSED_CLASS_NAME)
   }, [])
 
   return {
     groupRef,
     isProgrammaticLayoutChange: () => programmaticLayoutChangeRef.current,
-    panelElementRef,
     panelRef,
   }
 }

@@ -6,12 +6,16 @@ The wire mapping lives in small per-call helpers
 ``AzureOpenAILLM._apply_call_reasoning_effort``). Those are tested directly
 (deterministic, no network), plus Anthropic gets wire-payload assertions through
 a faked ``_request_json`` to prove the resolved values actually land in the
-outgoing request body. LiteLLM accepts the parameter but maps nothing yet.
+outgoing request body. LiteLLM forwards normalized values across completion,
+structured-output, and tool-calling chat requests.
 """
 
 from __future__ import annotations
 
 import inspect
+from unittest.mock import MagicMock
+
+import pytest
 
 from inqtrix.providers.anthropic import AnthropicLLM
 from inqtrix.providers.azure import AzureOpenAILLM
@@ -39,6 +43,77 @@ def test_all_providers_accept_reasoning_effort_parameter() -> None:
         for method in ("complete", "complete_with_metadata"):
             params = inspect.signature(getattr(cls, method)).parameters
             assert "reasoning_effort" in params, f"{cls.__name__}.{method}"
+
+
+def _litellm_response(content: str) -> MagicMock:
+    """Build the minimal SDK response shared by LiteLLM wire tests."""
+    message = MagicMock(content=content, tool_calls=None)
+    response = MagicMock(
+        choices=[MagicMock(message=message, finish_reason="stop")],
+        usage=MagicMock(prompt_tokens=1, completion_tokens=1),
+    )
+    response.model_dump.return_value = {
+        "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }
+    return response
+
+
+@pytest.mark.parametrize(
+    ("effort", "expected"),
+    [(" HIGH ", "high"), (None, None), ("none", None)],
+)
+def test_litellm_completion_reasoning_effort_wire_payload(
+    monkeypatch, effort: str | None, expected: str | None
+) -> None:
+    provider = LiteLLM(api_key="k")
+    captured: dict[str, object] = {}
+
+    def fake_request(**kwargs):
+        captured.update(kwargs["create_kwargs"])
+        return _litellm_response("ok")
+
+    monkeypatch.setattr(provider, "_create_chat_completion_with_retry", fake_request)
+    provider.complete_with_metadata("q", reasoning_effort=effort)
+
+    assert captured.get("reasoning_effort") == expected
+
+
+def test_litellm_structured_reasoning_effort_wire_payload(monkeypatch) -> None:
+    provider = LiteLLM(api_key="k")
+    captured: dict[str, object] = {}
+
+    def fake_request(**kwargs):
+        captured.update(kwargs["create_kwargs"])
+        return _litellm_response("{}")
+
+    monkeypatch.setattr(provider, "_create_chat_completion_with_retry", fake_request)
+    provider.complete_structured(
+        "q",
+        schema={"type": "object", "properties": {}},
+        schema_name="result",
+        reasoning_effort="high",
+    )
+
+    assert captured["reasoning_effort"] == "high"
+    assert captured["response_format"]["type"] == "json_schema"
+
+
+def test_litellm_chat_reasoning_effort_wire_payload(monkeypatch) -> None:
+    provider = LiteLLM(api_key="k")
+    captured: dict[str, object] = {}
+
+    def fake_request(**kwargs):
+        captured.update(kwargs["create_kwargs"])
+        return _litellm_response("ok")
+
+    monkeypatch.setattr(provider, "_create_chat_completion_with_retry", fake_request)
+    provider.chat(
+        [{"role": "user", "content": "q"}],
+        reasoning_effort="high",
+    )
+
+    assert captured["reasoning_effort"] == "high"
 
 
 # --------------------------------------------------------------------------- #

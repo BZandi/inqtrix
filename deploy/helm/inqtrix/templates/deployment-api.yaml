@@ -19,6 +19,11 @@ spec:
         # otherwise keep stale env until a manual restart). Constant when an
         # existingSecret is used -- rotate that out-of-band (or via Reloader).
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- if and .Values.metrics.enabled .Values.metrics.podAnnotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.service.apiPort | quote }}
+        prometheus.io/path: /metrics
+        {{- end }}
       labels:
         {{- include "inqtrix.labels" (dict "root" . "component" "api") | nindent 8 }}
     spec:
@@ -45,9 +50,14 @@ spec:
               port: http
             periodSeconds: 5
             failureThreshold: 30
+          # Readiness keys on /readyz (database/queue reachability, probes
+          # internally bounded at 2s): a pod whose Postgres or Valkey is down
+          # leaves the Service rotation instead of serving 500s. Liveness and
+          # startup stay on /health (provider-only) — a database outage must
+          # drain traffic, not restart-loop every pod.
           readinessProbe:
             httpGet:
-              path: /health
+              path: /readyz
               port: http
             periodSeconds: 10
             timeoutSeconds: 5

@@ -484,7 +484,7 @@ def test_anthropic_retries_transient_http_error_before_success(monkeypatch):
 
     def fake_urlopen(request, timeout):
         calls["count"] += 1
-        if calls["count"] < 4:
+        if calls["count"] < 3:
             raise _http_error(
                 529,
                 body='{"type":"error","error":{"type":"overloaded_error","message":"temporary overload"},"request_id":"req_retry"}',
@@ -500,8 +500,8 @@ def test_anthropic_retries_transient_http_error_before_success(monkeypatch):
     with llm.observe_retries(lambda notice: observed.append(notice)):
         assert llm.complete("test") == "ok"
 
-    assert calls["count"] == 4
-    assert len(observed) == 3
+    assert calls["count"] == 3
+    assert len(observed) == 2
     assert observed[0]["provider"] == "Anthropic"
     assert observed[0]["error_code"] == "overloaded_error"
     assert observed[0]["progress_emitted"] is True

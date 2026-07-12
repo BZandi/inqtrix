@@ -349,18 +349,17 @@ def main() -> None:
         max_rounds=4,                       # max research-loop iterations before forced stop
         # confidence threshold (1-10) — stop early when reached
         confidence_stop=8,
-        first_round_queries=6,              # number of parallel search queries in first round
-        answer_prompt_citations_max=60,     # max citation URLs forwarded to the answer-synthesis prompt
+        first_round_queries=8,              # DEEP first-round search width
+        answer_prompt_citations_max=500,    # DEEP citation context budget
         # hard wall-clock deadline for the entire run (seconds).
-        # GPT-4o is typically faster than Opus — 300s is usually enough.
-        # Increase to 600 for very complex questions.
-        max_total_seconds=300,
+        # Active-run deadline shared by all four research rounds.
+        max_total_seconds=3600,
         max_question_length=60_000,         # reject questions longer than this (characters)
 
         # -- Timeouts (per individual LLM/search call, in seconds) --
-        reasoning_timeout=120,              # timeout for reasoning / planning / answer calls
-        search_timeout=60,                  # timeout for each web-search call
-        claim_extract_timeout=60,               # timeout for each claim-extraction call
+        reasoning_timeout=600,              # logical reasoning-operation budget
+        search_timeout=600,                 # logical web-search budget, retries included
+        claim_extract_timeout=600,          # logical claim-extraction budget
 
         # -- Risk scoring ──────────────────────────────────────────────
         #

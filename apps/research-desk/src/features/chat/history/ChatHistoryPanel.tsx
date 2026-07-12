@@ -22,7 +22,8 @@ import {
   EXPLORER_REVEAL_STEP,
   ExplorerFolderRow,
   ExplorerFolderToggle,
-  ExplorerItemRow,
+  ExplorerHistoryRow,
+  ExplorerHistoryTitleInput,
   ExplorerRevealControls,
   ExplorerRunningIndicator,
   ExplorerSearchField,
@@ -421,10 +422,9 @@ export function ChatHistoryPanel({
     : groupSectionIds
 
   return (
-    <aside className="flex min-h-0 flex-col border-b border-border bg-surface/60 lg:h-full lg:border-b-0">
+    <aside className="inqtrix-contained-panel flex min-h-0 flex-col border-b border-border bg-surface/60 lg:h-full lg:border-b-0">
       <div className="flex inqtrix-panel-header items-center justify-between gap-2 border-b border-border px-3">
         <div className="flex min-w-0 items-center gap-2">
-          <MessagesSquare className="size-4 shrink-0 text-foreground/80" />
           <h1 className="truncate t-section text-foreground">
             {t.chat.history}
           </h1>
@@ -964,97 +964,47 @@ function ChatThreadHistoryItem({
       {showAfterIndicator && (
         <span className="pointer-events-none absolute -bottom-1 left-1 right-1 h-0.5 rounded-full bg-brand shadow-[0_0_0_1px_var(--background)]" />
       )}
-      <ExplorerItemRow
+      <ExplorerHistoryRow
+        actions={[
+          {
+            ariaLabel: `${isPinned ? t.chat.unpinThread : t.chat.pinThread}: ${thread.title}`,
+            icon: isPinned ? <PinOff className="icon-sm" /> : <Pin className="icon-sm" />,
+            label: isPinned ? t.chat.unpinThread : t.chat.pinThread,
+            onSelect: () => onTogglePinnedThread(thread.id),
+          },
+          ...(!isIncognito
+            ? [
+                {
+                  ariaLabel: `${t.chat.delete}: ${thread.title}`,
+                  destructive: true,
+                  icon: <Trash2 className="icon-sm" />,
+                  label: t.chat.delete,
+                  onSelect: () => onDeleteThread(thread.id),
+                },
+              ]
+            : []),
+        ]}
         active={isActive}
         dragging={isDragging}
+        indicator={isThreadRunning ? <ExplorerRunningIndicator label={t.chat.generating} /> : undefined}
         nested={isNested}
         onPointerDown={(event) => beginThreadDrag(event, thread.id)}
-      >
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              aria-label={`${isPinned ? t.chat.unpinThread : t.chat.pinThread}: ${thread.title}`}
-              className="absolute right-7 top-1/2 size-6 -translate-y-1/2 text-foreground/55 opacity-0 transition hover:text-foreground focus-visible:opacity-100 group-hover/explorer-item:opacity-100"
-              data-explorer-action
-              onClick={() => onTogglePinnedThread(thread.id)}
-              size="icon"
-              type="button"
-              variant="ghost"
-            >
-              {isPinned ? <PinOff className="icon-sm" /> : <Pin className="icon-sm" />}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>{isPinned ? t.chat.unpinThread : t.chat.pinThread}</TooltipContent>
-        </Tooltip>
-        {isEditingTitle ? (
-          <div
-            className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-left"
-            data-explorer-action
-          >
-            <span className="flex min-w-0 items-center gap-2">
-              <input
-                aria-label={t.chat.renameTitle}
-                className="min-w-0 flex-1 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 t-list-regular text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                onBlur={commitHistoryThreadTitleEdit}
-                onChange={(event) => onHistoryThreadTitleDraftChange(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.preventDefault()
-                    commitHistoryThreadTitleEdit()
-                  }
-                  if (event.key === 'Escape') {
-                    event.preventDefault()
-                    cancelHistoryThreadTitleEdit()
-                  }
-                }}
-                ref={historyThreadTitleInputRef}
-                value={historyThreadTitleDraft}
-              />
-              {isThreadRunning && <ExplorerRunningIndicator label={t.chat.generating} />}
-            </span>
-            <span className="shrink-0 t-hint tabular-nums text-muted-foreground transition-opacity group-hover/explorer-item:opacity-0 group-focus-within/explorer-item:opacity-0">
-              {timeLabel}
-            </span>
-          </div>
-        ) : (
-          <button
-            aria-pressed={isActive}
-            className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            onClick={() => onSelectThread(thread.id)}
-            onDoubleClick={() => startHistoryThreadTitleEdit(thread.id, thread.title)}
-            title={t.chat.renameTitle}
-            type="button"
-          >
-            <span className="flex min-w-0 items-center gap-2">
-              <span className="block min-w-0 flex-1 truncate t-list-regular text-foreground">
-                {thread.title}
-              </span>
-              {isThreadRunning && <ExplorerRunningIndicator label={t.chat.generating} />}
-            </span>
-            <span className="shrink-0 t-hint tabular-nums text-muted-foreground transition-opacity group-hover/explorer-item:opacity-0 group-focus-within/explorer-item:opacity-0">
-              {timeLabel}
-            </span>
-          </button>
-        )}
-        {!isIncognito ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label={`${t.chat.delete}: ${thread.title}`}
-                className="absolute right-1 top-1/2 size-6 -translate-y-1/2 text-foreground/55 opacity-0 transition hover:text-destructive focus-visible:opacity-100 group-hover/explorer-item:opacity-100"
-                data-explorer-action
-                onClick={() => onDeleteThread(thread.id)}
-                size="icon"
-                type="button"
-                variant="ghost"
-              >
-                <Trash2 className="icon-sm" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{t.chat.delete}</TooltipContent>
-          </Tooltip>
-        ) : null}
-      </ExplorerItemRow>
+        onSelect={() => onSelectThread(thread.id)}
+        onStartRename={() => startHistoryThreadTitleEdit(thread.id, thread.title)}
+        renameEditor={isEditingTitle ? (
+          <ExplorerHistoryTitleInput
+            inputRef={historyThreadTitleInputRef}
+            label={t.chat.renameTitle}
+            onCancel={cancelHistoryThreadTitleEdit}
+            onChange={onHistoryThreadTitleDraftChange}
+            onCommit={commitHistoryThreadTitleEdit}
+            value={historyThreadTitleDraft}
+          />
+        ) : undefined}
+        renameLabel={t.chat.renameTitle}
+        timeLabel={timeLabel}
+        title={thread.title}
+      />
     </motion.div>
   )
 }

@@ -667,10 +667,10 @@ def _drain(response) -> None:
 
 
 def test_chat_stream_records_tokens(tmp_path, monkeypatch):
-    # Streaming binds the graph at inqtrix.server.streaming.agent_run —
-    # a DIFFERENT seam than the non-stream/run path.
+    # Streaming now dispatches through the registry and reaches the graph at the
+    # SAME seam as the non-stream/run path (inqtrix.research.web_research.run_web_graph).
     monkeypatch.setattr(
-        "inqtrix.server.streaming.agent_run",
+        "inqtrix.research.web_research.run_web_graph",
         lambda *a, **k: minimal_agent_result(),
     )
     client, container = make_quota_client(
@@ -698,7 +698,7 @@ def test_chat_stream_books_abandoned_run(tmp_path, monkeypatch):
     cancelled["result_state"]["cancelled"] = True
 
     monkeypatch.setattr(
-        "inqtrix.server.streaming.agent_run",
+        "inqtrix.research.web_research.run_web_graph",
         lambda *a, **k: cancelled,
     )
     client, container = make_quota_client(

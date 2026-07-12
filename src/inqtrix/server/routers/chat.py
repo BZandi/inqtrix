@@ -1,9 +1,11 @@
 """OpenAI-compatible ``/v1/chat/completions`` endpoint.
 
-Streaming responses go through :func:`guarded_stream` (module-global
-lookup at call time — the monkeypatch seam tests rely on); the
-non-streaming path delegates to the
-:class:`~inqtrix.services.chat_service.ChatService`.
+Streamed and non-streamed responses both dispatch the resolved mode through
+the :class:`~inqtrix.core.algorithms.AlgorithmRegistry`: streaming via
+:func:`guarded_stream` (which drives ``algorithm.run`` with a per-request
+:class:`~inqtrix.core.context.RunContext`), the non-streaming path via the
+:class:`~inqtrix.services.chat_service.ChatService`. Both share the single
+graph seam ``inqtrix.research.web_research.run_web_graph``.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from inqtrix.auth.principal import Principal, UserContext
+from inqtrix.core.results import RunRequest
 from inqtrix.knowledge.stores.ports import CollectionNotFound
 from inqtrix.quota.models import QuotaDimension, consumed_tokens
 from inqtrix.server.routers import (
@@ -51,32 +54,40 @@ def build_router(container: "AppContainer") -> APIRouter:
         resource_type="knowledge_collection",
     )
 
-    async def _deny_invisible_collections(
+    async def _pin_ask_scope(
         resolved_filters: dict,
+        mode: str,
         visible_to: "UserContext | None",
         collection_grants,
     ) -> JSONResponse | None:
         """Admission gate for asks against knowledge collections.
 
-        Strict: ONE invisible collection denies the whole request —
-        silently answering from fewer collections than the caller
-        picked would change the answer's meaning without a trace. The
-        worker only re-executes admitted requests, so this gate covers
-        all three execution paths.
+        Mirrors the native-runs gate. An explicit collection set is
+        asserted strictly for EVERY mode — ONE invisible id denies the
+        whole request, because silently answering from fewer collections
+        than the caller picked would change the answer's meaning without
+        a trace. An omitted/empty/null filter is PINNED to the
+        caller-visible collections, but ONLY for ``mode=knowledge``: that
+        algorithm consumes the filter without scoping of its own, while
+        every other mode either ignores the filter or (workspace agent)
+        resolves its scope itself at execution time. The pinned ids are
+        written back into ``resolved_filters`` in place and ride into
+        execution. ``visible_to=None`` (auth off) keeps the historical
+        see-everything view untouched.
         """
+        if knowledge_service is None or visible_to is None:
+            return None
         requested = resolved_filters.get("collection_ids")
-        if (
-            knowledge_service is None
-            or visible_to is None
-            or not isinstance(requested, list)
-            or not requested
-        ):
+        explicit_scope = isinstance(requested, list) and bool(requested)
+        if not explicit_scope and mode != "knowledge":
             return None
         try:
-            await knowledge_service.assert_collections_visible(
-                [str(item) for item in requested],
-                visible_to=visible_to,
-                also_visible=collection_grants,
+            resolved_filters["collection_ids"] = (
+                await knowledge_service.resolve_ask_scope(
+                    requested,
+                    visible_to=visible_to,
+                    also_visible=collection_grants,
+                )
             )
         except CollectionNotFound:
             return JSONResponse(
@@ -115,8 +126,11 @@ def build_router(container: "AppContainer") -> APIRouter:
         except StackResolutionError as exc:
             return stack_error_response(exc)
 
-        denied = await _deny_invisible_collections(
-            resolved.knowledge_filters, visible_to, collection_grants
+        denied = await _pin_ask_scope(
+            resolved.knowledge_filters,
+            resolved.mode,
+            visible_to,
+            collection_grants,
         )
         if denied is not None:
             return denied
@@ -174,12 +188,11 @@ def build_router(container: "AppContainer") -> APIRouter:
 
         if stream:
             algorithm = container.registry.get(resolved.mode)
-            if not algorithm.capabilities().get("streams_via_research_graph"):
-                # The streamed path still executes the research graph
-                # directly (server/streaming.py); running a non-graph
-                # algorithm through it would silently execute the wrong
-                # engine. Reject loudly until streaming dispatches
-                # through the registry.
+            if not algorithm.capabilities().get("supports_chat_completions"):
+                # An algorithm that is not a chat-completions peer (e.g.
+                # workspace_agent, which needs run_id + park) cannot serve this
+                # surface. Reject loudly rather than dispatch it into a context
+                # it will fail in.
                 return JSONResponse(
                     status_code=400,
                     content={"error": {
@@ -190,21 +203,29 @@ def build_router(container: "AppContainer") -> APIRouter:
                         "type": "invalid_request_error",
                     }},
                 )
+            run_request = RunRequest(
+                mode=resolved.mode,
+                question=question,
+                history=history,
+                messages=messages,
+                agent_overrides=resolved.agent_overrides,
+                knowledge_filters=resolved.knowledge_filters,
+            )
             cancel_event = threading.Event()
             return StreamingResponse(
                 guarded_stream(
                     question,
                     history,
                     sem,
+                    algorithm=algorithm,
+                    runtime=container.runtime,
+                    run_request=run_request,
                     providers=resolved.providers,
                     strategies=resolved.strategies,
                     settings=chat_agent_settings,
-                    messages=messages,
                     include_progress=include_progress,
                     request=req,
                     cancel_event=cancel_event,
-                    stack_name=resolved.stack_name,
-                    workspace_id=workspace_id or "",
                     quota_service=quota_service,
                     principal=principal,
                 ),

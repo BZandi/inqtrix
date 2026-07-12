@@ -40,6 +40,7 @@ const VALID_SOURCES: ReadonlySet<string> = new Set([
   'blank',
   'imported-research-report',
   'pasted',
+  'agent-artifact',
 ])
 
 function normalizeSource(source: string): EditorDocumentSource {
@@ -123,7 +124,12 @@ export function serverDocumentPayload(record: EditorDocumentRecord): {
       ? unixSecondsFromIso(record.diffAnchorUpdatedAt)
       : null,
     folder_id: record.folderId,
-    revision: record.revision,
+    // `record.revision` is the last-synced SERVER revision (the base this
+    // edit is built on); the save creates base+1. The store CAS accepts it
+    // only when the stored revision is still that base, so a stale writer
+    // (base behind the server) gets a 409 to rebase -- the same
+    // read-current/write-current+1 contract the agent patch path uses.
+    revision: record.revision + 1,
     source: record.source,
     source_run_id: record.sourceRunId ?? null,
     title: record.title,

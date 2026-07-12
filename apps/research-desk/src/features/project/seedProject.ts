@@ -2,6 +2,7 @@ import { createDefaultFileLibrarySections } from '@/features/files/sections'
 import { seedKnowledgeThreadItem } from '@/features/knowledge/demo'
 import { DEMO_SHARED_IN_RUN_ID, resetDemoShares } from '@/features/sharing/demoShares'
 import { parseChatRule, parseChatThread, parseResearchRun } from './markdown'
+import { EMPTY_CANVAS_STATE } from '@/features/canvas/types'
 import { DEFAULT_KNOWLEDGE_SESSION_ID, DEFAULT_KNOWLEDGE_SESSION_TITLE } from './knowledgeSessionDefaults'
 import { DEFAULT_PANEL_LAYOUT } from './panelLayout'
 import type {
@@ -113,6 +114,7 @@ const emptyPinnedExplorer: PinnedExplorerState = {
   chatThreadIds: [],
   editorDocumentIds: [],
   knowledgeSessionIds: [],
+  agentSessionIds: [],
 }
 
 function createKnowledgeSession(
@@ -186,8 +188,17 @@ export function createEmptyProjectState(): ProjectState {
     knowledgeSessionOrder: [defaultKnowledgeSession.id],
     knowledgeSessions: { [defaultKnowledgeSession.id]: defaultKnowledgeSession },
     selectedKnowledgeSessionId: defaultKnowledgeSession.id,
+    agentRuns: {},
+    agentSessionGroupOrder: [],
+    agentSessionGroups: {},
+    agentSessionOrder: [],
+    agentSessions: {},
+    selectedAgentSessionId: null,
+    agentCanvas: EMPTY_CANVAS_STATE,
+    agentPlanDrafts: {},
     localRunCounter: 1,
     preferences: {
+      agentMemoryEnabled: false,
       contrastMode: 'standard',
       locale: 'de',
       theme: 'system',
@@ -212,6 +223,7 @@ export function createEmptyProjectState(): ProjectState {
       activeView: 'research',
       chatChainingEnabled: false,
       expandedJobId: null,
+      isAgentSessionsVisible: true,
       isChatHistoryVisible: true,
       isKnowledgeHistoryVisible: true,
       isComposerVisible: true,
@@ -221,10 +233,14 @@ export function createEmptyProjectState(): ProjectState {
       pendingChatAttachmentRefs: [],
       pendingChatReportRunId: null,
       pinnedExplorer: emptyPinnedExplorer,
+      selectedAgentEffort: null,
+      selectedAgentModel: null,
+      selectedAgentModelTier: null,
       selectedChatModel: null,
       selectedChatEffort: null,
       selectedChatModelTier: null,
       selectedChatThreadId: null,
+      selectedAgentSessionId: null,
       selectedJobId: null,
       selectedStack: 'anthropic_perplexity',
     },
@@ -343,8 +359,17 @@ export function createSeedProjectState(): ProjectState {
     knowledgeSessionOrder: [knowledgeSession.id],
     knowledgeSessions: { [knowledgeSession.id]: knowledgeSession },
     selectedKnowledgeSessionId: knowledgeSession.id,
+    agentRuns: {},
+    agentSessionGroupOrder: [],
+    agentSessionGroups: {},
+    agentSessionOrder: [],
+    agentSessions: {},
+    selectedAgentSessionId: null,
+    agentCanvas: EMPTY_CANVAS_STATE,
+    agentPlanDrafts: {},
     localRunCounter: 248,
     preferences: {
+      agentMemoryEnabled: false,
       contrastMode: 'standard',
       locale: 'de',
       theme: 'dark',
@@ -372,6 +397,7 @@ export function createSeedProjectState(): ProjectState {
       activeView: 'research',
       chatChainingEnabled: false,
       expandedJobId: firstReportRunId,
+      isAgentSessionsVisible: true,
       isChatHistoryVisible: true,
       isKnowledgeHistoryVisible: true,
       isComposerVisible: true,
@@ -384,11 +410,16 @@ export function createSeedProjectState(): ProjectState {
         chatThreadIds: chatThreadOrder.slice(0, 1),
         editorDocumentIds: editorDocumentOrder.slice(0, 1),
         knowledgeSessionIds: [],
+        agentSessionIds: [],
       },
+      selectedAgentEffort: null,
+      selectedAgentModel: null,
+      selectedAgentModelTier: null,
       selectedChatModel: null,
       selectedChatEffort: null,
       selectedChatModelTier: null,
       selectedChatThreadId: chatThreadOrder[0] ?? null,
+      selectedAgentSessionId: null,
       selectedJobId: firstReportRunId,
       selectedStack: 'anthropic_perplexity',
     },

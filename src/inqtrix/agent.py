@@ -239,10 +239,10 @@ class AgentConfig(BaseModel):
             "Number of broad search queries the plan node generates in "
             "Round 0. Subsequent rounds generate ``max(6, "
             "first_round_queries - 2)`` targeted slot queries, and "
-            "search executes the same width. DEEP profile uses ``10``."
+            "search executes the same width. DEEP profile uses ``8``."
         ),
     )
-    """Number of broad search queries the plan node generates in Round 0. Subsequent rounds generate ``max(6, first_round_queries - 2)`` targeted slot queries, and search executes the same width. DEEP profile uses ``10``."""
+    """Number of broad search queries the plan node generates in Round 0. Subsequent rounds generate ``max(6, first_round_queries - 2)`` targeted slot queries, and search executes the same width. DEEP profile uses ``8``."""
     answer_prompt_citations_max: int = Field(
         default=60,
         description=(
@@ -264,18 +264,18 @@ class AgentConfig(BaseModel):
     )
     """Minimum model context-window size (in tokens) required for DEEP / forensic runs. Default ``128_000`` tracks the common 128k model tier. Known smaller windows block normal report synthesis; unknown windows produce a visible capacity warning."""
     max_total_seconds: int = Field(
-        default=300,
+        default=3_600,
         description=(
             "Wall-clock deadline for the entire research run, in "
             "seconds. The graph honours this as a soft deadline checked "
             "at node boundaries; in-flight provider calls may run "
-            "slightly past it before the next check. Default ``300`` "
-            "matches the COMPACT profile; DEEP uses ``1800``. Set to a "
+            "slightly past it before the next check. Default ``3600`` "
+            "is shared by all report profiles. Set to a "
             "higher value for slow models or unreliable upstream "
             "search APIs."
         ),
     )
-    """Wall-clock deadline for the entire research run, in seconds. The graph honours this as a soft deadline checked at node boundaries; in-flight provider calls may run slightly past it before the next check. Default ``300`` matches the COMPACT profile; DEEP uses ``1800``. Set to a higher value for slow models or unreliable upstream search APIs."""
+    """Wall-clock deadline for the active research run, in seconds. The graph checks it at node boundaries and providers clamp every logical operation to the remaining budget. Default ``3600`` for every report profile."""
     max_question_length: int = Field(
         default=60_000,
         description=(
@@ -291,7 +291,7 @@ class AgentConfig(BaseModel):
 
     # -- Timeouts --
     reasoning_timeout: int = Field(
-        default=120,
+        default=600,
         description=(
             "Per-call timeout (seconds) for reasoning LLM calls "
             "(classify, plan, evaluate, answer). The provider raises "
@@ -302,34 +302,33 @@ class AgentConfig(BaseModel):
     )
     """Per-call timeout (seconds) for reasoning LLM calls (classify, plan, evaluate, answer). The provider raises ``AgentTimeout`` if a single call exceeds this. Increase for slow extended-thinking deployments; decrease to fail fast against unhealthy upstreams."""
     editor_assistant_timeout: int = Field(
-        default=120,
+        default=600,
         description=(
             "Per-call timeout (seconds) for editor suggest/instruct calls. "
             "Decoupled from ``reasoning_timeout`` so editor work (a full "
             "generation over large attached context) can be given a longer "
             "budget without lengthening every research reasoning call. "
-            "Defaults to the ``reasoning_timeout`` default; ``900`` under DEEP."
+            "Defaults to the shared 600-second AI-operation budget."
         ),
     )
-    """Per-call timeout (seconds) for editor suggest/instruct calls. Decoupled from ``reasoning_timeout`` so editor work (a full generation over large attached context) can be given a longer budget without lengthening every research reasoning call. Defaults to the ``reasoning_timeout`` default; ``900`` under DEEP."""
+    """Timeout in seconds for one logical editor suggest/instruct operation including retries. Defaults to the shared 600-second AI-operation budget."""
     search_timeout: int = Field(
-        default=60,
+        default=600,
         description=(
-            "Per-call timeout (seconds) for search-provider calls. Set "
-            "below ``max_total_seconds / first_round_queries`` so a "
-            "single slow query cannot consume the entire deadline."
+            "Timeout in seconds for one logical search-provider operation "
+            "including retries, clamped to the active run deadline."
         ),
     )
-    """Per-call timeout (seconds) for search-provider calls. Set below ``max_total_seconds / first_round_queries`` so a single slow query cannot consume the entire deadline."""
+    """Timeout in seconds for one logical search-provider operation including retries, clamped to the active run deadline."""
     claim_extract_timeout: int = Field(
-        default=60,
+        default=600,
         description=(
             "Per-call timeout (seconds) for claim-extraction LLM calls. "
-            "Should be tight (60s default) because one call runs per "
-            "search hit; a stuck single call also blocks the round."
+            "The shared 600-second budget covers the complete logical "
+            "extraction operation including retries."
         ),
     )
-    """Per-call timeout (seconds) for claim-extraction LLM calls. Should be tight (60s default) because one call runs per search hit; a stuck single call also blocks the round."""
+    """Timeout in seconds for one logical claim-extraction operation including retries. Defaults to 600 seconds."""
 
     # -- Risk --
     high_risk_score_threshold: int = Field(

@@ -23,6 +23,7 @@ at the DB boundary.
 from __future__ import annotations
 
 from sqlalchemy import (
+    Boolean,
     Column,
     Float,
     MetaData,
@@ -46,6 +47,15 @@ account_preferences = Table(
     Column("theme", Text, nullable=False, server_default=text("'system'")),
     Column("theme_preset", Text, nullable=False, server_default=text("'standard'")),
     Column("user_bubble_tone", Text, nullable=False, server_default=text("'gray'")),
+    # Long-term agent memory is opt-in per user (privacy default OFF): old rows
+    # and old clients resolve to ``false`` and the agent stays memory-less until
+    # the user enables it in Settings.
+    Column(
+        "enable_agent_memory",
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    ),
     Column("updated_at", Float, nullable=False),
 )
 """One user's account-level UI preferences, following

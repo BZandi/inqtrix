@@ -52,14 +52,18 @@ from inqtrix.exceptions import (
 from inqtrix.providers.base import (
     LLMProvider,
     LLMResponse,
+    MAX_PROVIDER_ATTEMPTS,
     StructuredLLMResponse,
     _NonFatalNoticeMixin,
     _RetryNoticeMixin,
     _THINKING_MIN_MAX_TOKENS,
     normalize_reasoning_effort,
     validate_reasoning_effort,
+    _SDK_RATE_LIMIT_MAX_RETRIES,
     _bounded_timeout,
     _check_deadline,
+    _check_provider_operation_deadline,
+    _operation_deadline,
     is_model_capacity_error,
     _retry_delay_seconds,
     _sleep_before_retry,
@@ -85,12 +89,11 @@ log = logging.getLogger("inqtrix")
 #     an immediate hard failure.  529 is Anthropic-specific; 500/502/503/
 #     504 cover standard transient infrastructure errors.
 #
-# _MAX_ANTHROPIC_ATTEMPTS: total tries (initial + retries).  5 gives
-#     enough room for a sustained 529 burst (~15–20 s total with backoff)
-#     without wasting the global time budget.
+# _MAX_ANTHROPIC_ATTEMPTS: total tries (initial + retries). All failure
+#     classes share this counter and the logical-operation deadline.
 # ---------------------------------------------------------------------------
 _RETRYABLE_HTTP_STATUS = frozenset({500, 502, 503, 504, 529})
-_MAX_ANTHROPIC_ATTEMPTS = 5
+_MAX_ANTHROPIC_ATTEMPTS = MAX_PROVIDER_ATTEMPTS
 _ANTHROPIC_MAX_TOKENS = 64_000
 
 # ---------------------------------------------------------------------------
@@ -504,19 +507,38 @@ class AnthropicLLM(
 
         1. Deadline enforcement — abort early if the agent time budget
            has been exceeded.
-        2. Retry with jittered backoff for transient server errors
-           (500/502/503/504/529).  HTTP 429 (rate-limit) is *not*
-           retried but escalated as ``AgentRateLimited`` so the graph
-           can abort the entire run.
+        2. Retry with jittered backoff for transient server errors and 429.
+           Every failure type shares one total attempt counter and one
+           operation deadline, so mixed failures cannot stack budgets.
         3. Structured error extraction for non-retryable failures,
            surfacing request-id and error details in the exception.
         """
         use_model = str(payload.get("model") or self._default_model)
         self._clear_retry_notices()
 
-        for attempt in range(_MAX_ANTHROPIC_ATTEMPTS):
-            if deadline is not None:
-                _check_deadline(deadline)
+        operation_deadline = _operation_deadline(timeout, deadline)
+        effective_timeout_seconds = max(
+            0.0, operation_deadline - time.monotonic()
+        )
+
+        def _sleep(delay: float) -> None:
+            try:
+                _sleep_before_retry(delay, operation_deadline)
+            except AgentTimeout:
+                _check_provider_operation_deadline(
+                    operation_deadline,
+                    deadline,
+                    label="Anthropic-Aufruf",
+                )
+                raise
+
+        attempt = 1
+        while True:
+            _check_provider_operation_deadline(
+                operation_deadline,
+                deadline,
+                label="Anthropic-Aufruf",
+            )
 
             request = Request(
                 self._base_url,
@@ -531,14 +553,48 @@ class AnthropicLLM(
             )
 
             try:
-                with urlopen(request, timeout=_bounded_timeout(timeout, deadline)) as response:
+                with urlopen(
+                    request,
+                    timeout=_bounded_timeout(timeout, operation_deadline),
+                ) as response:
                     raw = response.read().decode("utf-8")
                 data = json.loads(raw)
                 return data if isinstance(data, dict) else {}
             except HTTPError as exc:
                 details = self._extract_http_error_details(exc)
                 if exc.code == 429:
-                    raise AgentRateLimited(use_model, exc)
+                    max_attempts = _SDK_RATE_LIMIT_MAX_RETRIES + 1
+                    if attempt >= max_attempts:
+                        raise AgentRateLimited(use_model, exc)
+                    delay = _retry_delay_seconds(
+                        attempt - 1, details.get("retry_after")
+                    )
+                    self._append_retry_notice({
+                        "provider": "Anthropic",
+                        "model": use_model,
+                        "operation": "messages",
+                        "error_code": str(details.get("error_type") or "HTTP 429"),
+                        "status_code": 429,
+                        "request_id": str(details.get("request_id") or ""),
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "delay_seconds": round(delay, 3),
+                        "configured_timeout_seconds": round(timeout, 3),
+                        "effective_timeout_seconds": round(
+                            effective_timeout_seconds, 3
+                        ),
+                    })
+                    log.warning(
+                        "Anthropic rate limit (%s, request-id=%s, attempt=%d/%d). Retrying in %.2fs.",
+                        use_model,
+                        details.get("request_id") or "-",
+                        attempt,
+                        max_attempts,
+                        delay,
+                    )
+                    _sleep(delay)
+                    attempt += 1
+                    continue
 
                 api_error = self._build_api_error(
                     model=use_model, details=details, original=exc)
@@ -550,8 +606,13 @@ class AnthropicLLM(
                         str(api_error),
                         original=api_error,
                     ) from exc
-                if self._is_retryable_http_status(exc.code) and attempt < (_MAX_ANTHROPIC_ATTEMPTS - 1):
-                    delay = _retry_delay_seconds(attempt, details.get("retry_after"))
+                if (
+                    self._is_retryable_http_status(exc.code)
+                    and attempt < _MAX_ANTHROPIC_ATTEMPTS
+                ):
+                    delay = _retry_delay_seconds(
+                        attempt - 1, details.get("retry_after")
+                    )
                     self._append_retry_notice({
                         "provider": "Anthropic",
                         "model": use_model,
@@ -559,9 +620,13 @@ class AnthropicLLM(
                         "error_code": str(details.get("error_type") or f"HTTP {exc.code}"),
                         "status_code": exc.code,
                         "request_id": str(details.get("request_id") or ""),
-                        "attempt": attempt + 1,
+                        "attempt": attempt,
                         "max_attempts": _MAX_ANTHROPIC_ATTEMPTS,
                         "delay_seconds": round(delay, 3),
+                        "configured_timeout_seconds": round(timeout, 3),
+                        "effective_timeout_seconds": round(
+                            effective_timeout_seconds, 3
+                        ),
                     })
                     log.warning(
                         "Anthropic transient HTTP error (%s, status=%s, type=%s, request-id=%s, attempt=%d/%d). Retrying in %.2fs.",
@@ -569,47 +634,45 @@ class AnthropicLLM(
                         exc.code,
                         details.get("error_type") or "unknown",
                         details.get("request_id") or "-",
-                        attempt + 1,
+                        attempt,
                         _MAX_ANTHROPIC_ATTEMPTS,
                         delay,
                     )
-                    _sleep_before_retry(delay, deadline)
+                    _sleep(delay)
+                    attempt += 1
                     continue
                 raise api_error from exc
             except (URLError, OSError) as exc:
                 api_error = self._build_api_error(model=use_model, original=exc)
-                if attempt < (_MAX_ANTHROPIC_ATTEMPTS - 1):
-                    delay = _retry_delay_seconds(attempt)
+                if attempt < _MAX_ANTHROPIC_ATTEMPTS:
+                    delay = _retry_delay_seconds(attempt - 1)
                     self._append_retry_notice({
                         "provider": "Anthropic",
                         "model": use_model,
                         "operation": "messages",
                         "error_code": type(exc).__name__,
-                        "attempt": attempt + 1,
+                        "attempt": attempt,
                         "max_attempts": _MAX_ANTHROPIC_ATTEMPTS,
                         "delay_seconds": round(delay, 3),
+                        "configured_timeout_seconds": round(timeout, 3),
+                        "effective_timeout_seconds": round(
+                            effective_timeout_seconds, 3
+                        ),
                     })
                     log.warning(
                         "Anthropic transport error (%s, attempt=%d/%d). Retrying in %.2fs: %s",
                         use_model,
-                        attempt + 1,
+                        attempt,
                         _MAX_ANTHROPIC_ATTEMPTS,
                         delay,
                         exc,
                     )
-                    _sleep_before_retry(delay, deadline)
+                    _sleep(delay)
+                    attempt += 1
                     continue
                 raise api_error from exc
             except ValueError as exc:
                 raise self._build_api_error(model=use_model, original=exc) from exc
-
-        # Unreachable: every iteration ends with return, raise, or continue
-        # (continue only when attempt < MAX - 1). Keep as defensive safeguard.
-        raise self._build_api_error(  # pragma: no cover
-            model=use_model,
-            message="Anthropic request exhausted retries without a final response.",
-            original=RuntimeError("retries exhausted"),
-        )
 
     @staticmethod
     def _extract_text(payload: dict[str, Any]) -> str:

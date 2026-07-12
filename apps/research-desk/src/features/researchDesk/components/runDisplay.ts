@@ -1,6 +1,7 @@
 import {
   CheckCircle2,
   Circle,
+  CirclePause,
   Clock3,
   FileText,
   OctagonAlert,
@@ -20,6 +21,11 @@ export const statusIcon = {
   failed: OctagonAlert,
   queued: Clock3,
   running: LoaderCircle,
+  waiting_for_approval: CirclePause,
+  waiting_for_input: CirclePause,
+  // The children park is system progress, not a human wait: child
+  // research runs are executing, so it reads as "running".
+  waiting_for_children: LoaderCircle,
 } satisfies Record<JobStatus, LucideIcon>
 
 export const statusBadgeClassName = {
@@ -29,6 +35,11 @@ export const statusBadgeClassName = {
   failed: 'border-destructive/25 bg-destructive/10 text-destructive hover:bg-destructive/10',
   queued: 'border-border bg-muted text-muted-foreground hover:bg-muted',
   running: 'border-brand/20 bg-brand-subtle text-brand hover:bg-brand-subtle',
+  waiting_for_approval:
+    'border-warning/25 bg-warning-subtle text-warning hover:bg-warning-subtle',
+  waiting_for_input:
+    'border-warning/25 bg-warning-subtle text-warning hover:bg-warning-subtle',
+  waiting_for_children: 'border-brand/20 bg-brand-subtle text-brand hover:bg-brand-subtle',
 } satisfies Record<JobStatus, string>
 
 export const phaseIcon = {

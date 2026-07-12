@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from inqtrix.runs.shared import expand_run_event
+from inqtrix.runs.shared import access_permits_edit, expand_run_event
 from inqtrix.server.container import build_run_store
 from inqtrix.server.runs import RunStore
 from inqtrix.settings import (
@@ -55,6 +55,41 @@ def test_snapshot_event_itself_gets_no_companion():
         status="running",
     )
     assert [event_type for event_type, _ in events] == ["inqtrix.run.snapshot"]
+
+
+# ------------------------------------------------------------------ #
+# access_permits_edit — the run-mutation gate predicate
+# ------------------------------------------------------------------ #
+
+
+def test_access_permits_edit_none_is_owned_run():
+    """No ``access`` key means an owned run — full access, mutation allowed."""
+    assert access_permits_edit(None) is True
+
+
+@pytest.mark.parametrize(
+    "permission, allowed",
+    [
+        ("view", False),
+        ("comment", False),
+        ("edit", True),
+        ("manage", True),
+    ],
+)
+def test_access_permits_edit_respects_ordered_permission(permission, allowed):
+    """A shared-in grant permits mutation iff it is edit-or-higher.
+
+    The ``manage`` case is the regression guard: a raw ``== "edit"`` compare
+    would wrongly deny a manage grant (the highest permission), a 404 for a
+    caller who may do MORE than edit.
+    """
+    access = {"via": "share", "permission": permission}
+    assert access_permits_edit(access) is allowed
+
+
+def test_access_permits_edit_unknown_permission_denies():
+    """An unrecognized permission string is treated as no access, not a crash."""
+    assert access_permits_edit({"via": "share", "permission": "bogus"}) is False
 
 
 # ------------------------------------------------------------------ #

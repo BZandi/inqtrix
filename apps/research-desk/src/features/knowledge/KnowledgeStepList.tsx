@@ -135,7 +135,7 @@ export function KnowledgeStepList({
                   }
                 }}
                 transition={{
-                  ...appMotion.list,
+                  ...motionTransition,
                   delay: stagger ? isLive ? 0.08 : index * 0.03 : 0,
                 }}
               >

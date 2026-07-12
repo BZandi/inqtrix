@@ -33,6 +33,10 @@ from inqtrix.auth.invitations import (
 from inqtrix.auth.permissions import WorkspaceNotFound, WorkspaceRole
 from inqtrix.server.routers._admin_guard import require_instance_admin
 from inqtrix.services.request_parsing import error_response
+from inqtrix.services.workspace_administration import (
+    WorkspaceNameError,
+    create_workspace_for_admin,
+)
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
@@ -95,18 +99,14 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(
                 400, "Ungueltiger JSON-Body", "invalid_request_error"
             )
-        name = str((body or {}).get("name", "")).strip()
-        if not name or len(name) > 120:
-            return error_response(
-                400,
-                "Feld 'name' muss 1 bis 120 Zeichen lang sein",
-                "invalid_request_error",
+        try:
+            workspace_id, created_name = await create_workspace_for_admin(
+                workspace_admin,
+                principal=principal,
+                name=(body or {}).get("name", ""),
             )
-        workspace_id, created_name = await workspace_admin.create_workspace(
-            tenant_id=principal.tenant_id,
-            name=name,
-            created_by_sub=principal.sub,
-        )
+        except WorkspaceNameError as exc:
+            return error_response(400, str(exc), "invalid_request_error")
         return {
             "workspace_id": workspace_id,
             "name": created_name,

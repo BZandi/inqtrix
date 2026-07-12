@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import traceback
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
@@ -86,6 +87,17 @@ class _RedactSecretsFilter(logging.Filter):
             else:
                 record.args = sanitize_log_message(record.args) if isinstance(
                     record.args, (str, Exception)) else record.args
+        if record.exc_info is not None:
+            # Formatters render exc_info only after filters have run, so a raw
+            # provider exception would otherwise bypass msg/args redaction.
+            # Preserve every frame, but replace the formatter input with one
+            # already-scrubbed traceback shared by all handlers.
+            record.exc_text = sanitize_log_message(
+                "".join(traceback.format_exception(*record.exc_info))
+            )
+            record.exc_info = None
+        elif record.exc_text:
+            record.exc_text = sanitize_log_message(record.exc_text)
         return True
 
 

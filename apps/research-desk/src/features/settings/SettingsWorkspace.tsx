@@ -3,7 +3,9 @@ import {
   AlertTriangle,
   BookOpen,
   Check,
+  ChevronDown,
   CircleUserRound,
+  Database,
   ExternalLink,
   Gauge,
   Github,
@@ -13,20 +15,44 @@ import {
   Moon,
   Palette,
   Scale,
+  Search,
   Server,
   Settings,
   Share2,
   Shield,
   SlidersHorizontal,
+  Save,
   Sun,
+  ThumbsDown,
+  ThumbsUp,
+  Trash2,
   Users,
+  X,
   type LucideIcon,
 } from '@/components/icons'
 import { motion } from 'motion/react'
 import { type FormEvent, useEffect, useState, type ReactNode } from 'react'
-import { changePassword, hasHttpStatus } from '@/api/inqtrixClient'
+import {
+  changePassword,
+  hasHttpStatus,
+  type AgentMemoryWire,
+} from '@/api/inqtrixClient'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { useAgentMemory } from '@/features/agent/useAgentMemory'
+import {
+  agentMemoryModeLabel,
+  pendingAgentMemoryCandidates,
+  visibleAgentFeedback,
+} from '@/features/agent/memoryModel'
 import { isPasswordAcceptable } from '@/features/auth/passwordPolicy'
 import { AccessTokensPanel } from '@/features/admin/AccessTokensPanel'
 import { SystemStatusPanel } from '@/features/admin/SystemStatusPanel'
@@ -111,6 +137,7 @@ type SettingsSectionId =
   | 'admin-system'
   | 'admin-users'
   | 'admin-workspaces'
+  | 'agent-memory'
   | 'appearance'
   | 'connection'
   | 'licensing'
@@ -141,6 +168,8 @@ const ADMIN_DATA_SECTION_IDS = new Set<SettingsSectionId>([
   'admin-workspaces',
   'quotas',
 ])
+
+const SETTINGS_NAV_RAIL_CENTER_CLASS = 'lg:[--settings-rail-x:0.9375rem]'
 
 export default function SettingsWorkspace({
   apiCapabilities,
@@ -286,7 +315,8 @@ export default function SettingsWorkspace({
     },
   ]
 
-  const apiBaseUrl = import.meta.env.VITE_INQTRIX_API_BASE_URL || t.settings.sameOriginApi
+  const apiRequestBaseUrl = import.meta.env.VITE_INQTRIX_API_BASE_URL || undefined
+  const apiBaseUrl = apiRequestBaseUrl || t.settings.sameOriginApi
   const legal = apiHealth?.legal
   const hasMultiStackSelection = stackDiscoveryStatus === 'available' && stackOptions.length > 1
   const projectSourceUrl = legal?.source_url ?? t.authLock.repositoryUrl
@@ -312,6 +342,12 @@ export default function SettingsWorkspace({
           icon: Shield,
           id: 'security',
           label: t.settings.security,
+        },
+        {
+          description: t.agentMemory.navDescription,
+          icon: Database,
+          id: 'agent-memory',
+          label: t.agentMemory.navLabel,
         },
         // Sharing management is per-user (your incoming invitations + what you
         // shared), so it lives in the account group. Only present when the
@@ -443,6 +479,7 @@ export default function SettingsWorkspace({
         adminSystemRuntime={adminSystemRuntime}
         adminWorkspaces={adminWorkspaces}
         apiBaseUrl={apiBaseUrl}
+        apiRequestBaseUrl={apiRequestBaseUrl}
         apiCapabilities={apiCapabilities ?? null}
         apiError={apiError}
         apiHealth={apiHealth}
@@ -518,6 +555,9 @@ function SettingsSidebar({
   onSectionChange: (section: SettingsSectionId) => void
 }) {
   const { t } = useLocale()
+  const allItems = [...groups.flatMap((group) => group.items), ...standaloneItems]
+  const activeItem = allItems.find((item) => item.id === activeSection) ?? allItems[0]
+  const ActiveIcon = activeItem?.icon ?? Settings
 
   return (
     <aside className="flex min-w-0 flex-col border-b border-border bg-surface/50 backdrop-blur lg:border-b-0 lg:border-r">
@@ -527,20 +567,93 @@ function SettingsSidebar({
           <h1 className="truncate t-section text-foreground">{t.settings.title}</h1>
         </div>
       </div>
+      <div className="border-b border-border px-3 py-2 lg:hidden">
+        <DropdownMenu modal={false}>
+          <DropdownMenuTrigger asChild>
+            <Button
+              aria-label={t.settings.sectionsLabel}
+              className="h-8 w-full justify-between gap-2 px-2"
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              <span className="flex min-w-0 items-center gap-2">
+                <ActiveIcon className="icon-sm shrink-0" />
+                <span className="t-list truncate">{activeItem?.label ?? t.settings.sectionsLabel}</span>
+              </span>
+              <ChevronDown className="icon-sm shrink-0 text-muted-foreground" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-72">
+            {groups.map((group) => {
+              const GroupIcon = group.icon
+
+              return (
+                <div key={group.id}>
+                  <DropdownMenuLabel className="flex items-center gap-2 t-caption text-muted-foreground">
+                    <GroupIcon className="icon-sm" />
+                    {group.label}
+                  </DropdownMenuLabel>
+                  {group.items.map((item) => {
+                    const ItemIcon = item.icon
+
+                    return (
+                      <DropdownMenuItem
+                        className={cn(activeSection === item.id && 'bg-brand-subtle text-brand focus:bg-brand-subtle focus:text-brand')}
+                        key={item.id}
+                        onSelect={() => onSectionChange(item.id)}
+                      >
+                        <ItemIcon className="icon-sm" />
+                        {item.label}
+                      </DropdownMenuItem>
+                    )
+                  })}
+                  <DropdownMenuSeparator className="last:hidden" />
+                </div>
+              )
+            })}
+            {standaloneItems.length > 0 ? (
+              <>
+                {groups.length > 0 ? <DropdownMenuSeparator /> : null}
+                {standaloneItems.map((item) => {
+                  const ItemIcon = item.icon
+
+                  return (
+                    <DropdownMenuItem
+                      className={cn(activeSection === item.id && 'bg-brand-subtle text-brand focus:bg-brand-subtle focus:text-brand')}
+                      key={item.id}
+                      onSelect={() => onSectionChange(item.id)}
+                    >
+                      <ItemIcon className="icon-sm" />
+                      {item.label}
+                    </DropdownMenuItem>
+                  )
+                })}
+              </>
+            ) : null}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
       <nav
         aria-label={t.settings.sectionsLabel}
-        className="flex gap-2 overflow-x-auto px-3 py-2 [scrollbar-width:none] lg:block lg:min-h-0 lg:flex-1 lg:space-y-3 lg:overflow-y-auto lg:px-2 lg:pb-3 [&::-webkit-scrollbar]:hidden"
+        className="hidden [scrollbar-width:none] lg:block lg:min-h-0 lg:flex-1 lg:space-y-3 lg:overflow-y-auto lg:px-2 lg:pb-3 [&::-webkit-scrollbar]:hidden"
       >
         {groups.map((group) => {
           const GroupIcon = group.icon
 
           return (
-            <div className="flex shrink-0 items-center gap-1.5 lg:block" key={group.id}>
+            <div
+              className={cn(
+                'flex shrink-0 items-center gap-1.5 lg:block',
+                SETTINGS_NAV_RAIL_CENTER_CLASS,
+              )}
+              key={group.id}
+            >
               <p className="hidden h-6 items-center gap-1.5 px-2 t-caption text-foreground lg:flex">
                 <GroupIcon className="icon-sm text-foreground/70" />
                 {group.label}
               </p>
-              <div className="flex gap-1.5 lg:relative lg:flex-col lg:gap-0.5 lg:pl-6 lg:[--settings-rail-x:0.75rem] lg:before:absolute lg:before:bottom-1 lg:before:left-[var(--settings-rail-x)] lg:before:top-1 lg:before:w-px lg:before:bg-muted-foreground/25 lg:before:content-['']">
+              <div className="flex gap-1.5 lg:relative lg:flex-col lg:gap-0.5 lg:pl-6 lg:before:absolute lg:before:bottom-1 lg:before:left-[var(--settings-rail-x)] lg:before:top-1 lg:before:w-px lg:before:-translate-x-1/2 lg:before:bg-muted-foreground/25 lg:before:content-['']">
                 {group.items.map((item) => (
                   <SettingsNavButton
                     item={item}
@@ -599,9 +712,8 @@ function SettingsNavButton({
       aria-current={isActive ? 'page' : undefined}
       className={cn(
         'relative flex h-8 shrink-0 items-center gap-2 rounded-md border-l-2 border-transparent px-2 text-muted-foreground transition-colors hover:bg-accent/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:h-7 lg:w-full lg:justify-start',
-        nested && 'lg:-ml-6 lg:w-[calc(100%+1.5rem)] lg:pl-8 lg:before:absolute lg:before:left-[calc(var(--settings-rail-x)-0.1875rem)] lg:before:top-1/2 lg:before:size-1.5 lg:before:-translate-y-1/2 lg:before:rounded-full lg:before:bg-muted-foreground/60 lg:before:content-[""] lg:hover:before:bg-muted-foreground/80',
+        nested && 'lg:-ml-6 lg:w-[calc(100%+1.5rem)] lg:pl-8',
         isActive && 'border-brand bg-brand-subtle text-brand hover:bg-brand-subtle hover:text-brand',
-        nested && isActive && 'lg:before:bg-brand',
       )}
       onClick={onClick}
       title={item.description}
@@ -624,6 +736,7 @@ function SettingsPanel({
   adminSystemRuntime,
   adminWorkspaces,
   apiBaseUrl,
+  apiRequestBaseUrl,
   apiCapabilities,
   apiError,
   apiHealth,
@@ -665,6 +778,7 @@ function SettingsPanel({
   adminSystemRuntime: ReturnType<typeof useAdminSystemRuntime>
   adminWorkspaces: ReturnType<typeof useAdminWorkspaces>
   apiBaseUrl: string
+  apiRequestBaseUrl?: string
   apiCapabilities: InqtrixCapabilities | null
   apiError: string | null
   apiHealth: InqtrixHealth | null
@@ -772,6 +886,11 @@ function SettingsPanel({
             stackDiscoveryStatus={stackDiscoveryStatus}
             stackModeLabel={stackModeLabel}
             stackOptions={stackOptions}
+          />
+        ) : activeItem.id === 'agent-memory' ? (
+          <AgentMemoryPanel
+            apiKey={apiKey}
+            apiRequestBaseUrl={apiRequestBaseUrl}
           />
         ) : activeItem.id === 'admin-users' ? (
           <UsersPanel
@@ -884,6 +1003,348 @@ function PreferencesPanel({
         />
       </SettingsRow>
     </SettingsSection>
+  )
+}
+
+function AgentMemoryPanel({
+  apiKey,
+  apiRequestBaseUrl,
+}: {
+  apiKey: string
+  apiRequestBaseUrl?: string
+}) {
+  const { t } = useLocale()
+  const { agentMemoryEnabled, setAgentMemoryEnabled } = useTheme()
+  const memory = useAgentMemory({ apiKey, baseUrl: apiRequestBaseUrl })
+  const [drafts, setDrafts] = useState<Record<string, AgentMemoryWire>>({})
+  const [busyId, setBusyId] = useState<string | null>(null)
+
+  useEffect(() => {
+    setDrafts(
+      Object.fromEntries(
+        memory.memories.map((item) => [item.id, { ...item }]),
+      ),
+    )
+  }, [memory.memories])
+
+  const status = memory.status
+  const unavailable = !status || !status.available
+  const pendingCandidates = pendingAgentMemoryCandidates(memory.candidates)
+  const feedbackRows = visibleAgentFeedback(memory.feedback)
+
+  async function runAction(id: string, action: () => Promise<void>) {
+    setBusyId(id)
+    try {
+      await action()
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-5">
+      <SettingsSection
+        description={t.agentMemory.enableSectionDescription}
+        title={t.agentMemory.enableSectionTitle}
+      >
+        <SettingsRow
+          description={t.agentMemory.enableDescription}
+          descriptionId="agent-memory-enable-description"
+          title={t.agentMemory.enableTitle}
+        >
+          <Switch
+            aria-describedby="agent-memory-enable-description"
+            aria-label={t.agentMemory.enableTitle}
+            checked={agentMemoryEnabled}
+            onCheckedChange={setAgentMemoryEnabled}
+          />
+        </SettingsRow>
+      </SettingsSection>
+      <SettingsSection
+        description={t.agentMemory.statusDescription}
+        title={t.agentMemory.statusTitle}
+      >
+        <SettingsRow
+          description={
+            status?.principal_eligible === false
+              ? t.agentMemory.authRequired
+              : t.agentMemory.statusHelper
+          }
+          title={t.agentMemory.provider}
+        >
+          <div className="flex flex-wrap justify-end gap-2">
+            <StatusBadge
+              label={
+                unavailable
+                  ? t.agentMemory.unavailable
+                  : t.agentMemory.available
+              }
+              tone={unavailable ? 'warning' : 'success'}
+            />
+            <StatusBadge
+              label={agentMemoryModeLabel(status)}
+              tone="neutral"
+            />
+            {status?.degraded_reason ? (
+              <StatusBadge label={t.agentMemory.degraded} tone="warning" />
+            ) : null}
+          </div>
+        </SettingsRow>
+        {memory.error ? (
+          <div className="mx-3 rounded-md border border-warning/25 bg-warning-subtle/35 p-2.5 t-meta text-foreground">
+            {memory.error}
+          </div>
+        ) : null}
+      </SettingsSection>
+
+      <SettingsSection
+        description={t.agentMemory.candidatesDescription}
+        title={t.agentMemory.candidatesTitle}
+      >
+        {pendingCandidates.length === 0 ? (
+          <SettingsRow
+            description={t.agentMemory.noCandidatesDescription}
+            title={t.agentMemory.noCandidates}
+          >
+            <StatusBadge label={t.agentMemory.empty} tone="neutral" />
+          </SettingsRow>
+        ) : (
+          pendingCandidates.map((candidate) => (
+            <div
+              className="grid gap-2 rounded-md px-3 py-2.5 transition-colors hover:bg-surface/45"
+              key={candidate.id}
+            >
+              <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0">
+                  <h4 className="t-list text-foreground">{candidate.content}</h4>
+                  <p className="mt-0.5 t-meta text-muted-foreground">
+                    {candidate.scope} · {candidate.category} · {candidate.reason}
+                  </p>
+                </div>
+                <div className="flex shrink-0 gap-1.5">
+                  <Button
+                    disabled={busyId === candidate.id || unavailable}
+                    onClick={() =>
+                      runAction(candidate.id, () =>
+                        memory.acceptCandidate(candidate.id),
+                      )
+                    }
+                    size="sm"
+                  >
+                    <Check className="icon-sm" />
+                    {t.agentMemory.accept}
+                  </Button>
+                  <Button
+                    disabled={busyId === candidate.id}
+                    onClick={() =>
+                      runAction(candidate.id, () =>
+                        memory.rejectCandidate(candidate.id),
+                      )
+                    }
+                    size="sm"
+                    variant="outline"
+                  >
+                    <X className="icon-sm" />
+                    {t.agentMemory.reject}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ))
+        )}
+      </SettingsSection>
+
+      <SettingsSection
+        description={t.agentMemory.memoriesDescription}
+        title={t.agentMemory.memoriesTitle}
+      >
+        <SettingsRow
+          description={t.agentMemory.searchDescription}
+          title={t.agentMemory.searchTitle}
+        >
+          <div className="flex w-full max-w-sm items-center justify-end gap-1.5">
+            <div className="relative min-w-0 flex-1">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 icon-sm -translate-y-1/2 text-muted-foreground" />
+              <Input
+                aria-label={t.agentMemory.searchTitle}
+                className="pl-8"
+                disabled={unavailable}
+                onChange={(event) => memory.setSearchQuery(event.target.value)}
+                placeholder={t.agentMemory.searchPlaceholder}
+                value={memory.searchQuery}
+              />
+            </div>
+            <Button
+              aria-label={t.agentMemory.clearSearch}
+              disabled={!memory.searchQuery}
+              onClick={() => memory.setSearchQuery('')}
+              size="icon"
+              type="button"
+              variant="outline"
+            >
+              <X className="icon-sm" />
+            </Button>
+          </div>
+        </SettingsRow>
+        {memory.memories.length === 0 ? (
+          <SettingsRow
+            description={t.agentMemory.noMemoriesDescription}
+            title={t.agentMemory.noMemories}
+          >
+            <StatusBadge label={t.agentMemory.empty} tone="neutral" />
+          </SettingsRow>
+        ) : (
+          memory.memories.map((item) => {
+            const draft = drafts[item.id] ?? item
+
+            return (
+              <div
+                className="grid gap-2 rounded-md px-3 py-2.5 transition-colors hover:bg-surface/45"
+                key={item.id}
+              >
+                <div className="flex min-w-0 items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <h4 className="t-list text-foreground">
+                      {draft.scope} · {draft.category}
+                    </h4>
+                    <p className="mt-0.5 truncate t-mono text-muted-foreground">
+                      {item.id}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 gap-1.5">
+                    <Button
+                      aria-label={t.agentMemory.feedbackGivePositive}
+                      disabled={
+                        busyId === item.id ||
+                        unavailable ||
+                        !item.source_run_id
+                      }
+                      onClick={() =>
+                        runAction(item.id, () =>
+                          memory.submitFeedback(item, 'positive'),
+                        )
+                      }
+                      size="sm"
+                      title={t.agentMemory.feedbackGivePositive}
+                      variant="ghost"
+                    >
+                      <ThumbsUp className="icon-sm" />
+                    </Button>
+                    <Button
+                      aria-label={t.agentMemory.feedbackGiveNegative}
+                      disabled={
+                        busyId === item.id ||
+                        unavailable ||
+                        !item.source_run_id
+                      }
+                      onClick={() =>
+                        runAction(item.id, () =>
+                          memory.submitFeedback(item, 'negative'),
+                        )
+                      }
+                      size="sm"
+                      title={t.agentMemory.feedbackGiveNegative}
+                      variant="ghost"
+                    >
+                      <ThumbsDown className="icon-sm" />
+                    </Button>
+                    <Button
+                      disabled={busyId === item.id || unavailable}
+                      onClick={() =>
+                        runAction(item.id, () => memory.updateMemory(draft))
+                      }
+                      size="sm"
+                      variant="outline"
+                    >
+                      <Save className="icon-sm" />
+                      {t.common.save}
+                    </Button>
+                    <Button
+                      disabled={busyId === item.id}
+                      onClick={() =>
+                        runAction(item.id, () => memory.deleteMemory(item.id))
+                      }
+                      size="sm"
+                      variant="outline"
+                    >
+                      <Trash2 className="icon-sm" />
+                      {t.common.delete}
+                    </Button>
+                  </div>
+                </div>
+                <textarea
+                  aria-label={t.agentMemory.memoryContent}
+                  className="min-h-20 resize-y rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring"
+                  onChange={(event) =>
+                    setDrafts((current) => ({
+                      ...current,
+                      [item.id]: { ...draft, content: event.target.value },
+                    }))
+                  }
+                  value={draft.content}
+                />
+              </div>
+            )
+          })
+        )}
+        <SettingsRow
+          description={t.agentMemory.clearDescription}
+          title={t.agentMemory.clearTitle}
+        >
+          <Button
+            disabled={memory.memories.length === 0 || busyId === 'clear'}
+            onClick={() => runAction('clear', memory.clearAll)}
+            size="sm"
+            variant="outline"
+          >
+            <Trash2 className="icon-sm" />
+            {t.agentMemory.clearAll}
+          </Button>
+        </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection
+        description={t.agentMemory.feedbackDescription}
+        title={t.agentMemory.feedbackTitle}
+      >
+        {feedbackRows.length === 0 ? (
+          <SettingsRow
+            description={t.agentMemory.noFeedbackDescription}
+            title={t.agentMemory.noFeedback}
+          >
+            <StatusBadge label={t.agentMemory.empty} tone="neutral" />
+          </SettingsRow>
+        ) : (
+          feedbackRows.map((row) => (
+            <div
+              className="grid gap-1 rounded-md px-3 py-2.5 transition-colors hover:bg-surface/45"
+              key={row.id}
+            >
+              <div className="flex min-w-0 items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h4 className="t-list text-foreground">
+                    {row.feedback === 'positive'
+                      ? t.agentMemory.feedbackPositive
+                      : row.feedback === 'negative'
+                        ? t.agentMemory.feedbackNegative
+                        : t.agentMemory.feedbackNeutral}
+                  </h4>
+                  <p className="mt-0.5 truncate t-mono text-muted-foreground">
+                    {row.run_id}
+                  </p>
+                </div>
+                <p className="shrink-0 t-meta text-muted-foreground">
+                  {new Date(row.created_at * 1000).toLocaleString()}
+                </p>
+              </div>
+              {row.reason ? (
+                <p className="t-meta text-muted-foreground">{row.reason}</p>
+              ) : null}
+            </div>
+          ))
+        )}
+      </SettingsSection>
+    </div>
   )
 }
 

@@ -110,9 +110,11 @@ async def test_document_keyset_walks_with_tiebreaker(service) -> None:
 @pytest.mark.asyncio
 async def test_document_upsert_preserves_owner_and_created_at(service) -> None:
     await _save_doc(service, document_id="ed_1", caller_sub="u-a", created_at=100.0, title="first")
+    # base+1 (stored is 1) — a normal next save; created_at/owner must survive
+    # even though this save passes a different created_at.
     await service.save_document(
         id="ed_1", title="second", content_markdown="new body", folder_id=None,
-        source="pasted", source_run_id=None, revision=5,
+        source="pasted", source_run_id=None, revision=2,
         diff_anchor_markdown=None, diff_anchor_updated_at=None,
         created_at=999.0, updated_at=200.0,
         caller_sub="u-a", workspace_id=None, visible_to=_scoped("u-a"),
@@ -120,7 +122,7 @@ async def test_document_upsert_preserves_owner_and_created_at(service) -> None:
     doc = await service.get_document("ed_1", visible_to=_scoped("u-a"))
     assert doc.title == "second"
     assert doc.content_markdown == "new body"
-    assert doc.revision == 5
+    assert doc.revision == 2
     assert doc.created_at == 100.0  # creation time stable
     assert doc.created_by_sub == "u-a"
 
@@ -222,3 +224,60 @@ async def test_invalid_source_kind_status_rejected(service) -> None:
             comments=[{**_comment("edc_2", created_at=1.0), "status": "weird"}],
             visible_to=_scoped("u"),
         )
+
+
+# -- A2: revision CAS (stored == base) ---------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_revision_cas_accepts_base_plus_one_rejects_stale_base(service) -> None:
+    """A save writes only when the stored revision is EXACTLY its base.
+
+    `revision` is base+1 (the client tracks its last-synced server revision
+    as the base). A stale writer — one whose base is behind the server
+    because it never saw a concurrent agent patch or peer edit — fails the
+    CAS and gets a 409 to rebase, instead of silently clobbering. The
+    forward-jump that a monotonic guard used to wave through (the P1
+    data-loss shape) is exactly what must conflict now.
+    """
+    from inqtrix.project.editor_ports import DocumentRevisionConflict
+
+    await _save_doc(service, document_id="ed_cas", caller_sub="u", created_at=1.0)
+
+    async def save(revision: int, body: str) -> None:
+        await service.save_document(
+            id="ed_cas", title="Doc", content_markdown=body, folder_id=None,
+            source="blank", source_run_id=None, revision=revision,
+            diff_anchor_markdown=None, diff_anchor_updated_at=None,
+            created_at=1.0, updated_at=2.0,
+            caller_sub="u", workspace_id=None, visible_to=_scoped("u"),
+        )
+
+    # Forward jump: stored is 1, this writer's base is 4 (revision 5) — it
+    # never synced the current state. A monotonic guard accepted this; the CAS
+    # rejects it (the P1 fix). Content untouched.
+    with pytest.raises(DocumentRevisionConflict) as excinfo:
+        await save(5, "stale writer with a higher counter")
+    assert excinfo.value.current_revision == 1
+    doc = await service.get_document("ed_cas", visible_to=_scoped("u"))
+    assert doc.content_markdown == "body text"
+    assert doc.revision == 1
+
+    # base+1 (base == stored == 1): accepted.
+    await save(2, "proper next revision")
+    doc = await service.get_document("ed_cas", visible_to=_scoped("u"))
+    assert doc.revision == 2
+    assert doc.content_markdown == "proper next revision"
+
+    # Same-base double write (both based on 1, one already won): rejected.
+    with pytest.raises(DocumentRevisionConflict) as excinfo:
+        await save(2, "same-base clobber")
+    assert excinfo.value.current_revision == 2
+
+    # Rewind (stale writer with a lower base): rejected.
+    with pytest.raises(DocumentRevisionConflict):
+        await save(1, "stale rewind")
+
+    doc = await service.get_document("ed_cas", visible_to=_scoped("u"))
+    assert doc.content_markdown == "proper next revision"
+    assert doc.revision == 2

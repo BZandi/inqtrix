@@ -53,10 +53,16 @@ The marker `_claim_extraction_fallback` with `model=<name>` means the extractor 
 
 ## Symptom: "Cancel does not stop the run"
 
-The cancel mechanisms are best-effort at node boundaries. `/v1/chat/completions` uses disconnect cancellation; `/v1/runs/{run_id}/cancel` sets the same per-run cancel event for native runs. A currently running provider call will complete before the cancel takes effect; typical latency is 5-60 seconds depending on the active call. If you need guaranteed sub-second cancel:
+The cancel mechanisms are enforced at node boundaries. `/v1/chat/completions`
+uses disconnect cancellation; `/v1/runs/{run_id}/cancel` sets the same per-run
+cancel event for native runs, and Agent Desk task cancellation prevents any
+retry or late result commit. A synchronous provider call already in flight may
+run until its effective operation deadline (600 seconds by default). If you
+need guaranteed sub-second cancellation:
 
-- Reduce `REASONING_TIMEOUT` so the in-flight call finishes sooner.
-- Force an explicit cancel through your reverse proxy (client-side).
+- Use a provider transport that exposes cooperative request cancellation.
+- Enforce a shorter upstream deadline at the reverse proxy if that operational
+  trade-off is intentional.
 - In-flight HTTP cancellation through the agent is out of scope today (open follow-up).
 
 ## Symptom: "HTTP 429 from the server with slots free"

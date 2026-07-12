@@ -19,6 +19,7 @@ import logging
 import re
 from abc import ABC, abstractmethod
 
+from inqtrix.constants import REASONING_TIMEOUT
 from inqtrix.urls import sanitize_error
 
 log = logging.getLogger("inqtrix")
@@ -175,12 +176,13 @@ class LiteLLMEmbeddings(_OpenAISDKEmbeddings):
         base_url: str = "http://localhost:4000/v1",
         default_model: str = "text-embedding-3-small",
         selectable_models: list[str] | None = None,
-        timeout: float = 60.0,
+        timeout: float = REASONING_TIMEOUT,
     ) -> None:
         from openai import OpenAI
 
         if not (api_key or "").strip():
             raise ValueError("LiteLLMEmbeddings requires a non-empty api_key")
+        self._timeout = float(timeout)
         super().__init__(
             client=OpenAI(
                 api_key=api_key,
@@ -225,7 +227,7 @@ class AzureOpenAIEmbeddings(_OpenAISDKEmbeddings):
         api_version: str = "2024-10-21",
         default_model: str = "text-embedding-3-large",
         selectable_models: list[str] | None = None,
-        timeout: float = 60.0,
+        timeout: float = REASONING_TIMEOUT,
     ) -> None:
         from openai import AzureOpenAI
 
@@ -240,6 +242,7 @@ class AzureOpenAIEmbeddings(_OpenAISDKEmbeddings):
         resource_root = re.sub(
             r"/api/projects/.*$", "", azure_endpoint.strip().rstrip("/")
         )
+        self._timeout = float(timeout)
         super().__init__(
             client=AzureOpenAI(
                 azure_endpoint=resource_root,

@@ -11,7 +11,7 @@ progress.
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from openai import OpenAI, OpenAIError, RateLimitError, APIStatusError
 
@@ -22,16 +22,22 @@ from inqtrix.constants import (
 from inqtrix.exceptions import AgentModelCapacityError, AgentRateLimited, AgentTimeout
 from inqtrix.providers.base import (
     LLMProvider,
+    ChatTurn,
     LLMResponse,
+    StructuredLLMResponse,
     _NonFatalNoticeMixin,
     _RetryNoticeMixin,
     _bounded_timeout,
     _check_deadline,
     _call_openai_chat_completion_with_retries,
+    _operation_deadline,
+    chat_turn_from_openai_response,
     is_model_capacity_error,
     _normalize_completion_response,
     normalize_reasoning_effort,
+    parse_structured_response_content,
 )
+from inqtrix.providers._schema import strictify_json_schema
 from inqtrix.settings import ModelSettings
 from inqtrix.state import track_tokens
 
@@ -114,10 +120,8 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             tier_high_effort: Per-tier reasoning effort for the high tier.
             tier_mid_effort: Per-tier reasoning effort for the mid tier.
             tier_fast_effort: Per-tier reasoning effort for the fast tier.
-                Stored for the tier router but not mapped to the wire by the
-                generic LiteLLM transport (per-call effort is accepted but
-                ignored); use AnthropicLLM/BedrockLLM/AzureOpenAILLM for
-                reasoning control.
+                Stored for the tier router and forwarded as a normalized
+                OpenAI-compatible ``reasoning_effort`` request field.
             default_max_tokens: Default output-token budget for reasoning
                 calls when no per-call value is supplied.
             context_window_tokens: Known context-window size for the
@@ -194,22 +198,50 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         """Return the configured context window for capacity checks."""
         return self._context_window_tokens
 
+    @staticmethod
+    def _apply_reasoning_effort(
+        create_kwargs: dict[str, object], reasoning_effort: str | None
+    ) -> None:
+        """Add an explicitly enabled effort hint to an outgoing request.
+
+        Empty values inherit gateway defaults and ``none`` deliberately omits
+        the field. A gateway that cannot honor a graded value rejects the
+        request visibly; the provider never silently removes that contract.
+
+        Args:
+            create_kwargs: Mutable OpenAI-compatible request parameters.
+            reasoning_effort: Optional per-call effort override.
+        """
+        normalized = normalize_reasoning_effort(reasoning_effort)
+        if normalized not in {"", "none"}:
+            create_kwargs["reasoning_effort"] = normalized
+
     def _create_chat_completion_with_retry(
         self,
         *,
         create_kwargs: dict[str, object],
         model: str,
         operation: str,
+        timeout: float,
         deadline: float | None,
     ) -> object:
         """Call Chat Completions with visible transient-error retries."""
         self._clear_retry_notices()
+        operation_deadline = _operation_deadline(timeout, deadline)
         return _call_openai_chat_completion_with_retries(
             provider_label="LiteLLM",
             model=model,
             operation=operation,
-            deadline=deadline,
-            create=lambda: self._client.chat.completions.create(**create_kwargs),
+            deadline=operation_deadline,
+            outer_deadline=deadline,
+            timeout_label=f"LiteLLM-Aufruf ({operation})",
+            configured_timeout_seconds=timeout,
+            create=lambda: self._client.chat.completions.create(
+                **{
+                    **create_kwargs,
+                    "timeout": _bounded_timeout(timeout, operation_deadline),
+                }
+            ),
             append_retry_notice=self._append_retry_notice,
         )
 
@@ -314,24 +346,6 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         """
         if deadline is not None:
             _check_deadline(deadline)
-
-        # Per-call reasoning-effort mapping is not yet implemented for the
-        # generic LiteLLM/OpenAI-compatible transport, so a requested effort is
-        # accepted but ignored. Warn once (No Silent Fallbacks) instead of
-        # silently dropping it; ""/"none"/None are no-ops and stay quiet.
-        if (
-            normalize_reasoning_effort(reasoning_effort) not in ("", "none")
-            and not getattr(self, "_reasoning_effort_ignored_warned", False)
-        ):
-            log.warning(
-                "CONFIG: LiteLLM ignores reasoning_effort=%r; per-call effort "
-                "mapping is not implemented for the generic LiteLLM transport. "
-                "Use AnthropicLLM, BedrockLLM, or AzureOpenAILLM for reasoning "
-                "control.",
-                reasoning_effort,
-            )
-            self._reasoning_effort_ignored_warned = True
-
         messages: list[dict[str, str]] = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -349,10 +363,12 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             create_kwargs[self._token_budget_parameter] = (
                 max_output_tokens or self._default_max_tokens
             )
+            self._apply_reasoning_effort(create_kwargs, reasoning_effort)
             r = self._create_chat_completion_with_retry(
                 create_kwargs=create_kwargs,
                 model=use_model,
                 operation="complete",
+                timeout=timeout,
                 deadline=deadline,
             )
             normalized = _normalize_completion_response(r)
@@ -396,6 +412,214 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                     original=e,
                 ) from e
             log.error("LLM-Aufruf fehlgeschlagen (%s): %s", use_model, e)
+            raise
+
+    def supports_tool_calls(self, *, model: str | None = None) -> bool:
+        """Native function calling is part of the OpenAI-compatible
+        chat-completions surface LiteLLM proxies, so the provider opts in
+        unconditionally; a gateway model without tool support surfaces
+        its own backend error on the first :meth:`chat` call (visible,
+        never silently degraded)."""
+        return True
+
+    def supports_structured_output(self, *, model: str | None = None) -> bool:
+        """Advertise the OpenAI-compatible JSON-schema request surface.
+
+        Gateway/model compatibility remains authoritative at request time. A
+        rejected schema therefore fails visibly instead of falling back to an
+        unconstrained completion.
+        """
+        return True
+
+    def complete_structured(
+        self,
+        prompt: str,
+        *,
+        schema: dict[str, Any],
+        schema_name: str,
+        schema_description: str = "",
+        system: str | None = None,
+        model: str | None = None,
+        max_output_tokens: int | None = None,
+        timeout: float = REASONING_TIMEOUT,
+        state: dict | None = None,
+        deadline: float | None = None,
+        reasoning_effort: str | None = None,
+    ) -> StructuredLLMResponse:
+        """Generate a strict JSON-schema response through the gateway.
+
+        Args:
+            prompt: User-facing input text.
+            schema: JSON Schema constrained by the gateway.
+            schema_name: Stable provider-facing schema name.
+            schema_description: Reserved for providers that expose schema
+                descriptions; the Chat Completions format does not.
+            system: Optional system instruction.
+            model: Optional per-call model override.
+            max_output_tokens: Optional output-token budget.
+            timeout: Per-call timeout before deadline clamping.
+            state: Optional mutable token-accounting state.
+            deadline: Optional absolute run deadline.
+            reasoning_effort: Optional normalized effort override.
+
+        Returns:
+            Parsed structured response with token metadata.
+        """
+        del schema_description
+        if deadline is not None:
+            _check_deadline(deadline)
+        use_model = model or self._models.reasoning_model
+        messages: list[dict[str, str]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        create_kwargs: dict[str, object] = {
+            "model": use_model,
+            "messages": messages,
+            "timeout": _bounded_timeout(timeout, deadline),
+            "stream": False,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema_name,
+                    "strict": True,
+                    "schema": strictify_json_schema(schema),
+                },
+            },
+        }
+        create_kwargs[self._token_budget_parameter] = (
+            max_output_tokens or self._default_max_tokens
+        )
+        self._apply_reasoning_effort(create_kwargs, reasoning_effort)
+        try:
+            raw_response = self._create_chat_completion_with_retry(
+                create_kwargs=create_kwargs,
+                model=use_model,
+                operation="structured_response",
+                timeout=timeout,
+                deadline=deadline,
+            )
+            normalized = _normalize_completion_response(raw_response)
+            response = StructuredLLMResponse(
+                parsed=parse_structured_response_content(
+                    normalized.content,
+                    model=use_model,
+                    schema_name=schema_name,
+                ),
+                content=normalized.content,
+                prompt_tokens=normalized.prompt_tokens,
+                completion_tokens=normalized.completion_tokens,
+                model=use_model,
+                finish_reason=normalized.finish_reason,
+                raw=normalized.raw,
+                request_max_tokens=int(
+                    create_kwargs.get(self._token_budget_parameter) or 0
+                ),
+                schema_name=schema_name,
+            )
+            if state is not None:
+                track_tokens(state, response)
+            return response
+        except RateLimitError as exc:
+            log.error("FATAL Rate-Limit (%s): %s", use_model, exc)
+            raise AgentRateLimited(use_model, exc)
+        except APIStatusError as exc:
+            if exc.status_code == 429:
+                log.error("FATAL Rate-Limit (%s): %s", use_model, exc)
+                raise AgentRateLimited(use_model, exc)
+            if is_model_capacity_error(exc):
+                log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, exc)
+                raise AgentModelCapacityError(
+                    use_model,
+                    "llm_structured",
+                    str(exc),
+                    original=exc,
+                ) from exc
+            log.error("LLM-Structured-Aufruf fehlgeschlagen (%s): %s", use_model, exc)
+            raise
+        except OpenAIError as exc:
+            if is_model_capacity_error(exc):
+                log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, exc)
+                raise AgentModelCapacityError(
+                    use_model,
+                    "llm_structured",
+                    str(exc),
+                    original=exc,
+                ) from exc
+            log.error("LLM-Structured-Aufruf fehlgeschlagen (%s): %s", use_model, exc)
+            raise
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_output_tokens: int | None = None,
+        timeout: float = REASONING_TIMEOUT,
+        deadline: float | None = None,
+        reasoning_effort: str | None = None,
+    ) -> ChatTurn:
+        """Run one native tool-calling chat turn (plan M2 step 1).
+
+        Same transport, retry loop, and error mapping as
+        :meth:`complete_with_metadata` — the only differences are the
+        caller-owned message array and the OpenAI ``tools`` parameter.
+        Response parsing goes through the shared
+        :func:`chat_turn_from_openai_response` so tool-call rules cannot
+        drift between OpenAI-compatible providers.
+        """
+        if deadline is not None:
+            _check_deadline(deadline)
+        use_model = model or self._models.reasoning_model
+        try:
+            create_kwargs: dict[str, object] = {
+                "model": use_model,
+                "messages": list(messages),
+                "timeout": _bounded_timeout(timeout, deadline),
+                "stream": False,
+            }
+            create_kwargs[self._token_budget_parameter] = (
+                max_output_tokens or self._default_max_tokens
+            )
+            self._apply_reasoning_effort(create_kwargs, reasoning_effort)
+            if tools:
+                create_kwargs["tools"] = list(tools)
+            response = self._create_chat_completion_with_retry(
+                create_kwargs=create_kwargs,
+                model=use_model,
+                operation="chat",
+                timeout=timeout,
+                deadline=deadline,
+            )
+            return chat_turn_from_openai_response(response, model=use_model)
+        except RateLimitError as e:
+            log.error("FATAL Rate-Limit (%s): %s", use_model, e)
+            raise AgentRateLimited(use_model, e)
+        except APIStatusError as e:
+            if e.status_code == 429:
+                log.error("FATAL Rate-Limit (%s): %s", use_model, e)
+                raise AgentRateLimited(use_model, e)
+            if is_model_capacity_error(e):
+                log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, e)
+                raise AgentModelCapacityError(
+                    use_model,
+                    "llm_chat",
+                    str(e),
+                    original=e,
+                ) from e
+            log.error("LLM-Chat fehlgeschlagen (%s): %s", use_model, e)
+            raise
+        except OpenAIError as e:
+            if is_model_capacity_error(e):
+                log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, e)
+                raise AgentModelCapacityError(
+                    use_model,
+                    "llm_chat",
+                    str(e),
+                    original=e,
+                ) from e
+            log.error("LLM-Chat fehlgeschlagen (%s): %s", use_model, e)
             raise
 
     def is_available(self) -> bool:

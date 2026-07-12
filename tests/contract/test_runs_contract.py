@@ -67,6 +67,38 @@ def test_create_run_returns_202_with_full_summary(monkeypatch):
         wait_for_run_status(client, summary["run_id"], "completed")
 
 
+def test_response_form_is_rejected_outside_agent_modes() -> None:
+    with make_contract_client() as client:
+        response = client.post(
+            "/v1/runs",
+            json={
+                "question": "Was ist neu?",
+                "mode": "research",
+                "response_form": "chat",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert "response_form" in response.json()["error"]["message"]
+
+
+def test_session_id_is_rejected_outside_agent_modes() -> None:
+    with make_contract_client() as client:
+        response = client.post(
+            "/v1/runs",
+            json={
+                "question": "Was ist neu?",
+                "mode": "research",
+                "session_id": "as_agent_only",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert "session_id" in response.json()["error"]["message"]
+
+
 def test_list_runs_wraps_data_in_list_object(monkeypatch):
     monkeypatch.setattr(
         web_research_module, "run_web_graph", lambda *a, **kw: minimal_agent_result()
@@ -191,7 +223,8 @@ def test_completed_result_payload_injects_run_id_status_and_usage(monkeypatch):
         {
             "label": "E1", "url": "https://example.com/source", "tier": "unknown",
             "title": None, "document_id": None, "chunk_index": None,
-            "excerpt": None, "source_text": None, "page_number": None,
+            "excerpt": None, "source_text": None,
+            "grounded_support": None, "page_number": None,
         }
     ]
     assert payload["usage"] == {
@@ -300,3 +333,60 @@ def test_workspace_namespace_scopes_get_and_list(monkeypatch):
     assert other_namespace.status_code == 404
     assert other_namespace.json() == NOT_FOUND_ENVELOPE
     assert unscoped.status_code == 200
+
+
+def test_child_events_and_polling_enforce_inherited_workspace() -> None:
+    """Child direct URLs retain the parent's workspace security boundary."""
+    headers_a = {"X-Inqtrix-Workspace-Id": "workspace-a"}
+    headers_b = {"X-Inqtrix-Workspace-Id": "workspace-b"}
+    with make_contract_client() as client:
+        store = client.app.state.container.run_store
+        parent = store.submit(
+            question="Agent",
+            stack_name="default",
+            workspace_id="workspace-a",
+            kind="agent",
+            work=lambda handle: handle.complete(
+                {"answer": "parent", "metrics": {}}
+            ),
+        )
+        child = store.submit(
+            question="Child",
+            stack_name="default",
+            workspace_id="workspace-a",
+            kind="agent_child",
+            parent_run_id=parent["run_id"],
+            root_run_id=parent["run_id"],
+            request_payload={"body": {"parent_task_id": "task-a"}},
+            work=lambda handle: handle.complete(
+                {"answer": "child", "metrics": {}}
+            ),
+        )
+        wait_for_run_status(client, child["run_id"], "completed")
+
+        polling = client.get(
+            f"/v1/runs/{child['run_id']}/events?format=json",
+            headers=headers_a,
+        )
+        polling_denied = client.get(
+            f"/v1/runs/{child['run_id']}/events?format=json",
+            headers=headers_b,
+        )
+        with client.stream(
+            "GET",
+            f"/v1/runs/{child['run_id']}/events",
+            headers=headers_a,
+        ) as stream:
+            assert stream.status_code == 200
+            assert "inqtrix.run.completed" in stream.read().decode("utf-8")
+        stream_denied = client.get(
+            f"/v1/runs/{child['run_id']}/events",
+            headers=headers_b,
+        )
+
+    assert polling.status_code == 200
+    assert polling.json()["terminal"] is True
+    assert polling_denied.status_code == 404
+    assert polling_denied.json() == NOT_FOUND_ENVELOPE
+    assert stream_denied.status_code == 404
+    assert stream_denied.json() == NOT_FOUND_ENVELOPE

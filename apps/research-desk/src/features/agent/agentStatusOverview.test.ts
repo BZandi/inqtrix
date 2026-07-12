@@ -1,0 +1,196 @@
+import { describe, expect, it } from 'vitest'
+import type { AgentPermissionModeEntry } from '@/features/researchRuns/types'
+import {
+  buildAgentOverview,
+  countAgentToolUse,
+  defaultEngineMode,
+  effectiveAgentDepth,
+  type AgentOverviewSource,
+} from './agentStatusOverview'
+
+describe('effectiveAgentDepth', () => {
+  it('uses the capability default until the user makes an explicit choice', () => {
+    expect(effectiveAgentDepth(null, 'deep')).toBe('deep')
+    expect(effectiveAgentDepth('normal', 'deep')).toBe('normal')
+    expect(effectiveAgentDepth('deep', 'normal')).toBe('deep')
+  })
+
+  it('falls back to normal for older or malformed capability manifests', () => {
+    expect(effectiveAgentDepth(null, undefined)).toBe('normal')
+    expect(effectiveAgentDepth(null, 'ultra')).toBe('normal')
+  })
+})
+
+const BALANCED: AgentPermissionModeEntry = {
+  plan_gate: true,
+  web_replan_regate: true,
+  patch_gate: true,
+  kernel_gated_tools: ['load_skill', 'run_deep_mission', 'run_web_research', 'web_instant'],
+  kernel_conditional_tools: ['search_project_knowledge'],
+  kernel_always_gated: ['propose_editor_patch'],
+}
+
+const AUTONOMOUS: AgentPermissionModeEntry = {
+  plan_gate: false,
+  web_replan_regate: false,
+  patch_gate: true,
+  kernel_gated_tools: [],
+  kernel_conditional_tools: [],
+  kernel_always_gated: ['propose_editor_patch'],
+}
+
+function source(overrides: Partial<AgentOverviewSource> = {}): AgentOverviewSource {
+  return {
+    durable: true,
+    tools: [
+      { id: 'web.search.instant', summary: '', effect: 'read', read_only: true, idempotent: true },
+      { id: 'knowledge.search', summary: '', effect: 'read', read_only: true, idempotent: true },
+      { id: 'editor.patch.propose', summary: '', effect: 'write', read_only: false, idempotent: false },
+    ],
+    permission_modes: { autonomous: AUTONOMOUS, balanced: BALANCED },
+    ...overrides,
+  }
+}
+
+describe('buildAgentOverview', () => {
+  it('describes the phase machine gates per mode', () => {
+    const balanced = buildAgentOverview({
+      agent: source(),
+      autonomy: 'balanced',
+      kernelSelectable: true,
+      mode: 'workspace_agent',
+    })
+    expect(balanced.brain).toBe('workspace_agent')
+    expect(balanced.kernel).toBe('selectable')
+    expect(balanced.approvals).toEqual([
+      { id: 'plan', state: 'asks' },
+      { id: 'web_search', state: 'asks' },
+      { id: 'editor_patch', state: 'always' },
+    ])
+
+    const auto = buildAgentOverview({
+      agent: source(),
+      autonomy: 'autonomous',
+      kernelSelectable: false,
+      mode: 'workspace_agent',
+    })
+    expect(auto.kernel).toBe('unavailable')
+    expect(auto.approvals).toEqual([
+      { id: 'plan', state: 'free' },
+      { id: 'web_search', state: 'free' },
+      { id: 'editor_patch', state: 'always' },
+    ])
+  })
+
+  it('starts on the published default only when the feature flag confirms', () => {
+    const agent = source({ default_mode: 'agent_kernel' })
+    // default_mode alone is not enough — the feature flag must confirm.
+    expect(defaultEngineMode(agent, null)).toBe('workspace_agent')
+    expect(
+      defaultEngineMode(agent, {
+        agent_kernel: true, embedding_provider: true, knowledge: true, openapi: true,
+      }),
+    ).toBe('agent_kernel')
+    expect(
+      defaultEngineMode(source(), {
+        agent_kernel: true, embedding_provider: true, knowledge: true, openapi: true,
+      }),
+    ).toBe('workspace_agent')
+  })
+
+  it('renders kernel approval rows for the selected kernel engine', () => {
+    const kernel = buildAgentOverview({
+      agent: source(),
+      autonomy: 'balanced',
+      kernelSelectable: true,
+      mode: 'agent_kernel',
+    })
+    expect(kernel.brain).toBe('agent_kernel')
+    expect(kernel.kernel).toBe('active')
+    expect(kernel.approvals).toEqual([
+      { id: 'web_search', state: 'asks' },
+      { id: 'knowledge_search', state: 'asks', conditional: true },
+      { id: 'research', state: 'asks' },
+      { id: 'skill_activation', state: 'asks' },
+      { id: 'editor_patch', state: 'always' },
+    ])
+  })
+
+  it('shows explicit free rows in the autonomous kernel mode', () => {
+    const kernel = buildAgentOverview({
+      agent: source(),
+      autonomy: 'autonomous',
+      kernelSelectable: true,
+      mode: 'agent_kernel',
+    })
+    expect(kernel.approvals).toEqual([
+      { id: 'web_search', state: 'free' },
+      { id: 'knowledge_search', state: 'free' },
+      { id: 'research', state: 'free' },
+      { id: 'skill_activation', state: 'free' },
+      { id: 'editor_patch', state: 'always' },
+    ])
+  })
+
+  it('surfaces unknown gated tools under their raw name', () => {
+    const agent = source({
+      permission_modes: {
+        balanced: { ...BALANCED, kernel_gated_tools: [...BALANCED.kernel_gated_tools, 'summon_dragon'] },
+      },
+    })
+    const kernel = buildAgentOverview({
+      agent,
+      autonomy: 'balanced',
+      kernelSelectable: true,
+      mode: 'agent_kernel',
+    })
+    expect(kernel.approvals?.some((row) => row.id === 'summon_dragon' && row.state === 'asks')).toBe(true)
+  })
+
+  it('hides the approvals group when the server does not publish modes', () => {
+    const overview = buildAgentOverview({
+      agent: source({ permission_modes: undefined }),
+      autonomy: 'balanced',
+      kernelSelectable: false,
+      mode: 'workspace_agent',
+    })
+    expect(overview.approvals).toBeNull()
+  })
+
+  it('reports tool availability from the manifest, missing ids as unavailable', () => {
+    const overview = buildAgentOverview({
+      agent: source({
+        tools: [
+          { id: 'knowledge.search', summary: '', effect: 'read', read_only: true, idempotent: true },
+        ],
+      }),
+      autonomy: 'balanced',
+      kernelSelectable: false,
+      mode: 'workspace_agent',
+    })
+    expect(overview.tools).toEqual([
+      { id: 'web_search', available: false },
+      { id: 'knowledge_search', available: true },
+      { id: 'editor_access', available: false },
+    ])
+  })
+})
+
+describe('countAgentToolUse', () => {
+  it('counts only completed web and knowledge tasks', () => {
+    expect(countAgentToolUse({
+      tasks: [
+        { taskId: 'w1', toolKind: 'web_instant' },
+        { taskId: 'w2', toolKind: 'web_research' },
+        { taskId: 'k1', toolKind: 'rag_query' },
+        { taskId: 's1', toolKind: 'synthesis' },
+      ],
+      taskStates: {
+        w1: { status: 'completed' },
+        w2: { status: 'running' },
+        k1: { status: 'completed' },
+        s1: { status: 'completed' },
+      },
+    })).toEqual({ web: 1, knowledge: 1 })
+  })
+})

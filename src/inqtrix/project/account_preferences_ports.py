@@ -26,6 +26,9 @@ class AccountPreferences:
         theme: ``light`` / ``dark`` / ``system``.
         theme_preset: ``standard`` / ``slate`` / ``graphite`` / ``sage``.
         user_bubble_tone: User-message bubble tone selected in the desk UI.
+        enable_agent_memory: Whether the user opted long-term agent memory
+            IN. Default ``False`` — memory is off until the user enables it
+            (privacy default), so an absent/legacy row means memory-less.
         updated_at: Unix timestamp of the last save.
         tenant_id: The tenant scope (RLS).
     """
@@ -37,6 +40,7 @@ class AccountPreferences:
     theme_preset: str
     updated_at: float
     user_bubble_tone: str = "gray"
+    enable_agent_memory: bool = False
     tenant_id: str = "default"
 
 
@@ -58,6 +62,7 @@ class AccountPreferencesStore(Protocol):
         theme_preset: str,
         user_bubble_tone: str,
         updated_at: float,
+        enable_agent_memory: bool = False,
     ) -> AccountPreferences:
         """Insert or replace the user's preferences row (whole-row upsert)."""
         ...

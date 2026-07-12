@@ -23,7 +23,9 @@ below mirror `_COMPACT_TUNING` and `_DEEP_TUNING` in `report_profiles.py`:
 | `max_rounds` | 2 | 4 | Hard cap on research rounds. |
 | `min_rounds` | 1 | 2 | Minimum completed rounds before early-stop is allowed. |
 | `confidence_stop` | 7 | 8 | Evaluator-confidence threshold for the stop cascade. |
-| `first_round_queries` | 6 | 10 | Broad search fan-out in Round 0. |
+| `first_round_queries` | 6 | 8 | Broad search fan-out in Round 0. Eight keeps DEEP breadth while bounding the most expensive initial wave. |
+| `max_total_seconds` | 3600 | 3600 | Active research-run deadline; profile depth no longer changes the timeout contract. |
+| `reasoning_timeout` / `editor_assistant_timeout` / `claim_extract_timeout` / `search_timeout` | 600 | 600 | Logical operation budget; all attempts share this one deadline. |
 | `context_block_max_len` | profile default | profile default | Per-block truncation for ingested source passages. |
 | `answer_prompt_citations_max` | 60 | 500 | Hard cap on citations passed to the answer composer. Can also be set directly via `AgentConfig`. |
 | `claim_max_items` | profile default | profile default | Maximum claims extracted per source by the claim-extraction LLM. |

@@ -214,6 +214,19 @@ class KnowledgeStore(Protocol):
 
     async def get_document(self, document_id: str) -> KnowledgeDocument: ...
 
+    async def get_chunks(self, document_id: str) -> list["DocumentChunk"]:
+        """One document's chunks ordered by ``chunk_index`` (no vectors).
+
+        The read side of chunk identity: the citable-provenance surface
+        (a single chunk plus its neighbours) and the reindex
+        id-stability contract are both verified against this. The
+        ``embedding`` field is NOT hydrated (both backends return it
+        empty) — this is a provenance read, not a vector read. Raises
+        :class:`DocumentNotFound` for an unknown document; an existing
+        document with no chunks yet returns an empty list.
+        """
+        ...
+
     async def delete_document(self, document_id: str) -> None: ...
 
     async def reembed_document(

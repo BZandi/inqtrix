@@ -31,7 +31,7 @@ import { cn } from '@/lib/utils'
 import { runBlockAction, type BlockActionId } from './blockActions'
 
 /** Localized strings for the selection toolbar, assembled from `editorCopy` in
- * `EditorWorkspace` (DE + EN) so all copy stays in one place. Block-type labels
+ * `editorCopy.ts` (DE + EN) so all copy stays in one place. Block-type labels
  * reuse the existing `slash*` keys; `turnInto` reuses `blockTurnInto`. */
 export type SelectionToolbarLabels = {
   comment: string

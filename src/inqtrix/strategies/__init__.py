@@ -12,6 +12,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from inqtrix.constants import CLAIM_EXTRACT_TIMEOUT
 from inqtrix.strategies._source_tiering import DefaultSourceTiering, SourceTieringStrategy
 from inqtrix.strategies._claim_extraction import (
     ClaimExtractionStrategy,
@@ -126,7 +127,7 @@ def create_default_strategies(
     *,
     llm: "LLMProvider | None" = None,
     claim_extract_model: str = "",
-    claim_extract_timeout: int = 60,
+    claim_extract_timeout: int = CLAIM_EXTRACT_TIMEOUT,
 ) -> StrategyContext:
     """Create the default strategy bundle used by :class:`ResearchAgent`.
 

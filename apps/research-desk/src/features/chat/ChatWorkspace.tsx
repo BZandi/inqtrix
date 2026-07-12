@@ -1,12 +1,10 @@
 import {
   AlertTriangle,
   BookOpen,
-  Bot,
   BrainCircuit,
   Check,
   ChevronDown,
   ChevronRight,
-  CircleUserRound,
   Copy,
   Database,
   Eraser,
@@ -35,8 +33,10 @@ import {
 import { AnimatePresence, motion } from 'motion/react'
 import {
   useDeferredValue,
+  useCallback,
   useEffect,
   useLayoutEffect,
+  memo,
   useMemo,
   useRef,
   useState,
@@ -45,18 +45,18 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react'
-import {
-  MarkdownRenderer,
-  preloadMarkdownCodeHighlights,
-} from '@/components/markdown/MarkdownRenderer'
+import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer'
 import { MarkdownSelectionCopyMenu } from '@/components/markdown/MarkdownSelectionCopyMenu'
+import { useMarkdownCodePreload } from '@/components/markdown/useMarkdownCodePreload'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { ConversationSkeleton } from '@/components/ui/conversation-skeleton'
 import { WelcomeState } from '@/components/ui/welcome-state'
 import {
   ResizablePanel,
   ResizablePanelGroup,
 } from '@/components/ui/resizable'
+import { ResponsiveSidePanel } from '@/components/ui/responsive-side-panel'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -74,7 +74,6 @@ import {
   AssistantMenuLabel,
 } from '@/components/ui/assistant-menu'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   chatAttachmentChipsFromAttachments,
@@ -130,21 +129,19 @@ import {
 import { useAnimatedResizablePanelCollapse } from '@/components/ui/animated-panel-motion'
 import { ComposerIconButton, composerIconButtonClassName } from '@/features/composer/ComposerIconButton'
 import { ComposerStopButton } from '@/features/composer/ComposerStopButton'
-import {
-  chatScrollModeForUpdate,
-  isChatNearBottom,
-  type ChatScrollMetrics,
-  type ChatScrollMode,
-} from './chatScroll'
 import { ChatHistoryPanel } from './history/ChatHistoryPanel'
 import type { ChatMessage, ChatThread } from './types'
 import { ContextChipLegend } from '@/features/composer/ContextChipLegend'
 import { MentionComposer, type MentionComposerHandle } from '@/features/composer/MentionComposer'
 import { type LabelResolver } from '@/features/composer/mentionDoc'
 import { resizeTextareaToRows } from '@/features/composer/textareaAutosize'
+import {
+  decideConversationAppend,
+  type ConversationContentSnapshot,
+} from '@/features/scroll/conversationAppend'
+import { useScrollRestoration } from '@/features/scroll/useScrollRestoration'
 import { OptionMenuHeader, OptionMenuItem, optionMenuContentClassName } from '@/components/ui/option-menu'
 import type { ChatRetryMode, ChatRetryOptions } from './retry'
-import { useTheme } from '@/theme/ThemeProvider'
 
 type ChatWorkspaceProps = {
   activeAssistantMessageId: string | null
@@ -164,6 +161,9 @@ type ChatWorkspaceProps = {
   isDesktop: boolean
   isHistoryVisible: boolean
   isIncognito: boolean
+  /** True while the selected server thread's messages are still lazy-loading;
+   * shows a message skeleton instead of the empty-state hero during the gap. */
+  isMessagesLoading: boolean
   isSending: boolean
   onAttachContext: (ref: ChatContextReferenceRecord) => void
   onAttachFiles: (files: File[]) => void
@@ -272,6 +272,7 @@ export default function ChatWorkspace({
   isDesktop,
   isHistoryVisible,
   isIncognito,
+  isMessagesLoading,
   isSending,
   onAttachContext,
   onAnswerLastUserMessage,
@@ -337,13 +338,14 @@ export default function ChatWorkspace({
   threads,
 }: ChatWorkspaceProps) {
   const { locale, t } = useLocale()
-  const { resolvedTheme } = useTheme()
   const [composerNotice, setComposerNotice] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [draftCommitPulseKey, setDraftCommitPulseKey] = useState(0)
   const deferredDraft = useDeferredValue(draft)
   const composerTokens = useMemo(() => estimateTokensFromText(deferredDraft), [deferredDraft])
-  const contextTokenModel = buildContextTokenModel(
+  const contextWindowTokens = chatContextCapacity.contextWindowTokens
+  const reservedOutputTokens = chatContextCapacity.reservedOutputTokens
+  const contextTokenModel = useMemo(() => buildContextTokenModel(
     [
       { key: 'documents', tone: 'file', tokens: chatContextBase.documents },
       { key: 'reports', tone: 'success', tokens: chatContextBase.reports },
@@ -351,8 +353,16 @@ export default function ChatWorkspace({
       { key: 'conversation', tone: 'warning', tokens: chatContextBase.conversation },
       { key: 'composer', tone: 'brand', tokens: composerTokens },
     ] satisfies ContextCategoryInput[],
-    chatContextCapacity,
-  )
+    { contextWindowTokens, reservedOutputTokens },
+  ), [
+    chatContextBase.conversation,
+    chatContextBase.documents,
+    chatContextBase.reports,
+    chatContextBase.rules,
+    composerTokens,
+    contextWindowTokens,
+    reservedOutputTokens,
+  ])
   // Send-guard only fires on a real estimated overflow (capacity already nets out
   // reserved output + safety); the estimate is ~96% accurate so we confirm rather
   // than hard-block.
@@ -362,6 +372,7 @@ export default function ChatWorkspace({
   const [overflowConfirmOpen, setOverflowConfirmOpen] = useState(false)
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
   const [isEditingTitle, setIsEditingTitle] = useState(false)
+  const [isMobileHistoryOpen, setIsMobileHistoryOpen] = useState(false)
   const [isMessageSelectionMode, setIsMessageSelectionMode] = useState(false)
   const [messageEditDraft, setMessageEditDraft] = useState('')
   const [pillRefs, setPillRefs] = useState<ChatContextReferenceRecord[]>([])
@@ -369,37 +380,50 @@ export default function ChatWorkspace({
   const [titleDraft, setTitleDraft] = useState('')
   const composerRef = useRef<MentionComposerHandle | null>(null)
   const didRestoreDraftRef = useRef(false)
-  const chatBottomLockCleanupRef = useRef<(() => void) | null>(null)
-  const lastAutoFollowThreadIdRef = useRef<string | null>(null)
   const messageEditTextareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const messageAppendSnapshotRef = useRef<ConversationContentSnapshot | null>(null)
   const messagesContentRef = useRef<HTMLDivElement | null>(null)
   const messagesScrollAreaRef = useRef<HTMLDivElement | null>(null)
-  const shouldAutoFollowChatRef = useRef(true)
   const titleInputRef = useRef<HTMLInputElement | null>(null)
   const chatFileInputRef = useRef<HTMLInputElement | null>(null)
-  const selectedThread = isIncognito
-    ? temporaryThread
-    : threads.find((thread) => thread.id === selectedThreadId) ?? threads[0] ?? null
-  const chatMarkdownsForHighlight = useMemo(() => {
-    const markdowns = threads.flatMap((thread) =>
-      thread.messages
-        .map((message) => message.contentMarkdown)
-        .filter((markdown) => markdown.trim().length > 0),
-    )
-    if (temporaryThread) {
-      markdowns.push(
-        ...temporaryThread.messages
-          .map((message) => message.contentMarkdown)
-          .filter((markdown) => markdown.trim().length > 0),
-      )
-    }
-    return markdowns
-  }, [temporaryThread, threads])
-  useEffect(() => {
-    if (chatMarkdownsForHighlight.length === 0) return
-    void preloadMarkdownCodeHighlights(chatMarkdownsForHighlight, resolvedTheme)
-  }, [chatMarkdownsForHighlight, resolvedTheme])
+  const selectedThread = useMemo(() => {
+    if (isIncognito) return temporaryThread
+    return threads.find((thread) => thread.id === selectedThreadId) ?? threads[0] ?? null
+  }, [isIncognito, selectedThreadId, temporaryThread, threads])
+  const chatScrollKey = selectedThread
+    ? (isIncognito ? 'chat:incognito' : `chat:${selectedThread.id}`)
+    : null
+  const chatContentReady = !isMessagesLoading
   const lastMessage = selectedThread?.messages[selectedThread.messages.length - 1]
+  const chatContentVersion = selectedThread
+    ? [
+      selectedThread.messages.length,
+      lastMessage?.id ?? '',
+      lastMessage?.contentMarkdown ?? '',
+      activeAssistantMessageId ?? '',
+    ].join('\u0000')
+    : ''
+  const chatScroll = useScrollRestoration({
+    contentReady: chatContentReady,
+    getViewport: () =>
+      messagesScrollAreaRef.current?.querySelector<HTMLElement>('[data-scroll-area-viewport]') ?? null,
+    isStreaming: activeAssistantMessageId !== null,
+    memoryKey: chatScrollKey,
+    reduceMotion,
+  })
+  useEffect(() => {
+    if (isDesktop) setIsMobileHistoryOpen(false)
+  }, [isDesktop])
+  const chatMarkdownsForHighlight = useMemo(
+    () =>
+      selectedThread
+        ? selectedThread.messages
+          .map((message) => message.contentMarkdown)
+          .filter((markdown) => markdown.trim().length > 0)
+        : [],
+    [selectedThread],
+  )
+  useMarkdownCodePreload(chatMarkdownsForHighlight)
   const canAnswerLastUserMessage = Boolean(
     selectedThread
     && lastMessage
@@ -409,14 +433,24 @@ export default function ChatWorkspace({
   const canSend = draft.trim().length > 0 && !isSending
   const selectedMessageCount = selectedMessageIds.size
   const canManageMessages = Boolean(selectedThread && selectedThread.messages.length > 0 && !isSending)
-  const mentionCategoryLabels = {
+  const mentionCategoryLabels = useMemo(() => ({
     files: t.chat.mentionFilesCategory,
     filegroups: t.chat.mentionFilegroupsCategory,
     research: t.chat.mentionResearchCategory,
     rules: t.chat.mentionRulesCategory,
-  }
-  const mentionSources = { fileGroupOptions, fileOptions, reportOptions, ruleOptions }
-  const resolveMentionLabel: LabelResolver = (kind, label) => {
+  }), [
+    t.chat.mentionFilegroupsCategory,
+    t.chat.mentionFilesCategory,
+    t.chat.mentionResearchCategory,
+    t.chat.mentionRulesCategory,
+  ])
+  const mentionSources = useMemo(() => ({
+    fileGroupOptions,
+    fileOptions,
+    reportOptions,
+    ruleOptions,
+  }), [fileGroupOptions, fileOptions, reportOptions, ruleOptions])
+  const resolveMentionLabel = useCallback<LabelResolver>((kind, label) => {
     if (kind === 'file-asset') {
       const option = fileOptions.find((file) => file.label === label)
       return option ? { id: option.fileId, label: option.label } : null
@@ -427,7 +461,7 @@ export default function ChatWorkspace({
     }
     const option = reportOptions.find((report) => report.label === label)
     return option ? { id: option.runId, label: option.label } : null
-  }
+  }, [fileGroupOptions, fileOptions, reportOptions])
   const draftTextImprove = useTextImprovement({
     ...textImprovement,
     locale,
@@ -445,7 +479,6 @@ export default function ChatWorkspace({
     setMessageEditDraft('')
     setIsMessageSelectionMode(false)
     setSelectedMessageIds(new Set())
-    shouldAutoFollowChatRef.current = true
   }, [selectedThread?.id, selectedThread?.title])
 
   // Restore the session draft once on mount so text AND its `[N]` pills survive a
@@ -470,26 +503,6 @@ export default function ChatWorkspace({
     }
   }, [selectedMessageIds, selectedThread])
 
-  useEffect(() => {
-    const viewport = messagesScrollAreaRef.current?.querySelector<HTMLElement>('[data-scroll-area-viewport]')
-    if (!viewport) return undefined
-    const scrollViewport = viewport
-
-    function updateAutoFollow() {
-      if (chatBottomLockCleanupRef.current) return
-      shouldAutoFollowChatRef.current = isChatNearBottom(chatScrollMetrics(scrollViewport))
-    }
-
-    updateAutoFollow()
-    scrollViewport.addEventListener('scroll', updateAutoFollow, { passive: true })
-    return () => scrollViewport.removeEventListener('scroll', updateAutoFollow)
-  }, [selectedThread?.id])
-
-  useEffect(() => () => {
-    chatBottomLockCleanupRef.current?.()
-    chatBottomLockCleanupRef.current = null
-  }, [])
-
   useLayoutEffect(() => {
     if (!isEditingTitle) return
     titleInputRef.current?.focus()
@@ -503,49 +516,32 @@ export default function ChatWorkspace({
     resizeTextareaToRows(messageEditTextareaRef.current, 8)
   }, [editingMessageId])
 
-  useLayoutEffect(() => {
-    const selectedId = selectedThread?.id ?? null
-    const viewport = messagesScrollAreaRef.current?.querySelector<HTMLElement>('[data-scroll-area-viewport]')
-    const didThreadChange = lastAutoFollowThreadIdRef.current !== selectedId
-    if (didThreadChange) {
-      shouldAutoFollowChatRef.current = true
-      lastAutoFollowThreadIdRef.current = selectedId
-      if (viewport) {
-        chatBottomLockCleanupRef.current?.()
-        chatBottomLockCleanupRef.current = startChatBottomLock(viewport, messagesContentRef.current, () => {
-          chatBottomLockCleanupRef.current = null
-        })
-      }
-      return () => {
-        chatBottomLockCleanupRef.current?.()
-        chatBottomLockCleanupRef.current = null
-      }
-    }
-    if (!viewport) return
-
-    const behavior = chatScrollModeForUpdate({
-      hasActiveAssistantMessage: activeAssistantMessageId !== null,
-      nearBottom: shouldAutoFollowChatRef.current,
-      reduceMotion,
-      threadChanged: false,
+  // A thread switch restores position via useScrollRestoration; this effect only
+  // handles same-thread growth: a new message, an appended message, or streaming
+  // tokens extending the last message. The hook decides whether to follow (only
+  // when the user is at the bottom or a message is streaming).
+  useEffect(() => {
+    const decision = decideConversationAppend(messageAppendSnapshotRef.current, {
+      contentReady: chatContentReady,
+      contentVersion: chatContentVersion,
+      key: chatScrollKey,
     })
-    scrollChatViewportToBottom(viewport, behavior)
+    messageAppendSnapshotRef.current = decision.next
+    if (decision.shouldAppend) chatScroll.onContentAppended()
   }, [
-    activeAssistantMessageId,
-    lastMessage?.contentMarkdown,
-    lastMessage?.id,
-    selectedThread?.id,
-    selectedThread?.messages.length,
-    reduceMotion,
+    chatContentReady,
+    chatContentVersion,
+    chatScroll,
+    chatScrollKey,
   ])
 
-  function deleteSelectedThread() {
+  const deleteSelectedThread = useCallback(() => {
     if (!selectedThread || isIncognito) return
 
     onDeleteThread(selectedThread.id)
-  }
+  }, [isIncognito, onDeleteThread, selectedThread])
 
-  function toggleMessageSelectionMode() {
+  const toggleMessageSelectionMode = useCallback(() => {
     setIsMessageSelectionMode((current) => {
       if (current) {
         setSelectedMessageIds(new Set())
@@ -556,9 +552,9 @@ export default function ChatWorkspace({
       setMessageEditDraft('')
       return true
     })
-  }
+  }, [canManageMessages])
 
-  function toggleSelectedMessage(messageId: string) {
+  const toggleSelectedMessage = useCallback((messageId: string) => {
     if (!isMessageSelectionMode) return
     setSelectedMessageIds((current) => {
       const next = new Set(current)
@@ -569,38 +565,38 @@ export default function ChatWorkspace({
       }
       return next
     })
-  }
+  }, [isMessageSelectionMode])
 
-  function deleteSelectedMessages() {
+  const deleteSelectedMessages = useCallback(() => {
     if (!selectedThread || selectedMessageIds.size === 0) return
     onDeleteMessages(selectedThread.id, [...selectedMessageIds])
     setSelectedMessageIds(new Set())
     setIsMessageSelectionMode(false)
-  }
+  }, [onDeleteMessages, selectedMessageIds, selectedThread])
 
-  function startMessageEdit(message: ChatMessage) {
+  const startMessageEdit = useCallback((message: ChatMessage) => {
     if (!selectedThread || message.role !== 'user' || isSending) return
     setIsMessageSelectionMode(false)
     setSelectedMessageIds(new Set())
     setEditingMessageId(message.id)
     setMessageEditDraft(message.contentMarkdown)
-  }
+  }, [isSending, selectedThread])
 
-  function commitMessageEdit() {
+  const commitMessageEdit = useCallback(() => {
     if (!selectedThread || !editingMessageId) return
     const nextContent = messageEditDraft.trim()
     if (!nextContent) return
     onEditMessage(selectedThread.id, editingMessageId, nextContent)
     setEditingMessageId(null)
     setMessageEditDraft('')
-  }
+  }, [editingMessageId, messageEditDraft, onEditMessage, selectedThread])
 
-  function cancelMessageEdit() {
+  const cancelMessageEdit = useCallback(() => {
     setEditingMessageId(null)
     setMessageEditDraft('')
-  }
+  }, [])
 
-  function handleMessageEditKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+  const handleMessageEditKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Escape') {
       event.preventDefault()
       cancelMessageEdit()
@@ -610,26 +606,26 @@ export default function ChatWorkspace({
       event.preventDefault()
       commitMessageEdit()
     }
-  }
+  }, [cancelMessageEdit, commitMessageEdit])
 
-  function branchFromMessage(messageId: string) {
+  const branchFromMessage = useCallback((messageId: string) => {
     if (!selectedThread || isIncognito || isSending) return
     onBranchFromMessage(selectedThread.id, messageId)
-  }
+  }, [isIncognito, isSending, onBranchFromMessage, selectedThread])
 
-  function retryAssistantMessage(
+  const retryAssistantMessage = useCallback((
     messageId: string,
     mode: ChatRetryMode,
     options?: ChatRetryOptions,
-  ) {
+  ) => {
     if (!selectedThread || isSending) return
     onRetryAssistantMessage(selectedThread.id, messageId, mode, options)
-  }
+  }, [isSending, onRetryAssistantMessage, selectedThread])
 
-  function answerLastUserMessage(messageId: string) {
+  const answerLastUserMessage = useCallback((messageId: string) => {
     if (!selectedThread || isSending) return
     onAnswerLastUserMessage(selectedThread.id, messageId)
-  }
+  }, [isSending, onAnswerLastUserMessage, selectedThread])
 
   function commitTitleEdit() {
     if (!selectedThread) return
@@ -682,7 +678,7 @@ export default function ChatWorkspace({
   function sendDraft() {
     const instruction = composerRef.current?.getInstructionText().trim() ?? ''
     if (!instruction || isSending) return
-    shouldAutoFollowChatRef.current = true
+    chatScroll.scrollToBottom()
     const knowledgeCollectionIds = (knowledgeIndexOptions ?? [])
       .filter((option) => selectedKnowledgeIndexIds.includes(option.id))
       .map((option) => option.collectionId)
@@ -729,6 +725,11 @@ export default function ChatWorkspace({
     [CHAT_HISTORY_PANEL_ID]: isHistoryVisible ? historyPanelSize : 0,
   }
 
+  const handleHistorySelectThread = useCallback((threadId: string) => {
+    onSelectThread(threadId)
+    if (!isDesktop) setIsMobileHistoryOpen(false)
+  }, [isDesktop, onSelectThread])
+
   const historyPanel = (
     <ChatHistoryPanel
       chatHistorySections={chatHistorySections}
@@ -745,7 +746,7 @@ export default function ChatWorkspace({
       onMoveThreadToGroup={onMoveThreadToGroup}
       onRenameThread={onRenameThread}
       onRenameThreadGroup={onRenameThreadGroup}
-      onSelectThread={onSelectThread}
+      onSelectThread={handleHistorySelectThread}
       onTogglePinnedThread={onTogglePinnedThread}
       pinnedThreadIds={pinnedThreadIds}
       reduceMotion={reduceMotion}
@@ -756,10 +757,10 @@ export default function ChatWorkspace({
   )
 
   const conversationPanel = (
-        <section className="flex min-h-[620px] min-w-0 flex-col bg-background lg:h-full lg:min-h-0 lg:overflow-hidden">
-	          <div
+        <section className="inqtrix-contained-panel flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-background">
+            <div
             className={cn(
-              'z-10 flex inqtrix-panel-header items-center justify-between gap-2 border-b border-border bg-background px-4 transition-colors md:px-6',
+              'z-10 flex inqtrix-panel-header items-center justify-between gap-2 border-b border-border bg-background px-3 transition-colors',
               // Incognito makes a consequential state (nothing is saved) impossible
               // to miss: the header inverts to the opposite-mode neutral surface.
               // The treatment is token-scoped in globals.css, so title/icons/badge
@@ -768,17 +769,20 @@ export default function ChatWorkspace({
             )}
           >
             <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
-              {isDesktop && (
-                <PanelToggle
-                  collapseLabel={t.chat.hideHistory}
-                  controlsId={CHAT_HISTORY_PANEL_ID}
-                  expandLabel={t.chat.showHistory}
-                  expanded={isHistoryVisible}
-                  onToggle={onHistoryVisibleChange}
-                  side="left"
-                />
-              )}
-              <MessageSquareText className="size-4 shrink-0 text-foreground/80" />
+              <PanelToggle
+                collapseLabel={t.chat.hideHistory}
+                controlsId={CHAT_HISTORY_PANEL_ID}
+                expandLabel={t.chat.showHistory}
+                expanded={isDesktop ? isHistoryVisible : isMobileHistoryOpen}
+                onToggle={(next) => {
+                  if (isDesktop) {
+                    onHistoryVisibleChange(next)
+                    return
+                  }
+                  setIsMobileHistoryOpen(next)
+                }}
+                side="left"
+              />
               <div className="min-w-0 flex-1 overflow-hidden" title={selectedThread ? selectedThread.preview : undefined}>
                 <div className="flex min-w-0 items-center gap-2 overflow-hidden">
                   {isEditingTitle && selectedThread ? (
@@ -822,11 +826,11 @@ export default function ChatWorkspace({
                   )}
                 </div>
               </div>
-	            </div>
-	            <div className="flex shrink-0 items-center gap-2">
-	              <Tooltip>
-	                <TooltipTrigger asChild>
-	                  <Button
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
                     aria-label={t.chat.incognito}
                     aria-pressed={isIncognito}
                     className={cn(
@@ -841,36 +845,36 @@ export default function ChatWorkspace({
                   >
                     <EyeOff className="size-4" />
                   </Button>
-	                </TooltipTrigger>
-	                <TooltipContent>{t.chat.incognito}</TooltipContent>
-	              </Tooltip>
-	              <div className="flex h-7 overflow-hidden rounded-md border border-border bg-card shadow-[0_1px_2px_var(--shadow-hairline)]">
-	                <Tooltip>
-	                  <TooltipTrigger asChild>
-	                    <Button
-	                      aria-label={isMessageSelectionMode ? t.chat.exitMessageEditMode : t.chat.editMessages}
-	                      aria-pressed={isMessageSelectionMode}
-	                      className={cn(
-	                        'h-7 w-7 rounded-none border-r border-border text-foreground/75 hover:text-foreground',
-	                        isMessageSelectionMode && 'bg-brand-subtle text-brand hover:bg-brand-subtle hover:text-brand',
-	                      )}
-	                      disabled={!canManageMessages && !isMessageSelectionMode}
-	                      onClick={toggleMessageSelectionMode}
-	                      size="icon"
-	                      type="button"
-	                      variant="ghost"
-	                    >
-	                      <ListChecks className="size-4" />
-	                    </Button>
-	                  </TooltipTrigger>
-	                  <TooltipContent>
-	                    {isMessageSelectionMode ? t.chat.exitMessageEditMode : t.chat.editMessages}
-	                  </TooltipContent>
-	                </Tooltip>
-	                <Tooltip>
-	                  <TooltipTrigger asChild>
-	                    <Button
-	                      aria-label={t.chat.clearChat}
+                  </TooltipTrigger>
+                  <TooltipContent>{t.chat.incognito}</TooltipContent>
+                </Tooltip>
+                <div className="flex h-7 overflow-hidden rounded-md border border-border bg-card shadow-[0_1px_2px_var(--shadow-hairline)]">
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        aria-label={isMessageSelectionMode ? t.chat.exitMessageEditMode : t.chat.editMessages}
+                        aria-pressed={isMessageSelectionMode}
+                        className={cn(
+                          'h-7 w-7 rounded-none border-r border-border text-foreground/75 hover:text-foreground',
+                          isMessageSelectionMode && 'bg-brand-subtle text-brand hover:bg-brand-subtle hover:text-brand',
+                        )}
+                        disabled={!canManageMessages && !isMessageSelectionMode}
+                        onClick={toggleMessageSelectionMode}
+                        size="icon"
+                        type="button"
+                        variant="ghost"
+                      >
+                        <ListChecks className="size-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {isMessageSelectionMode ? t.chat.exitMessageEditMode : t.chat.editMessages}
+                    </TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        aria-label={t.chat.clearChat}
                       className="h-7 w-7 rounded-none border-r border-border text-foreground/75 hover:text-foreground"
                       disabled={!selectedThread || isSending}
                       onClick={onClearThread}
@@ -899,80 +903,81 @@ export default function ChatWorkspace({
                   </TooltipTrigger>
                   <TooltipContent>{t.chat.delete}</TooltipContent>
                 </Tooltip>
-	              </div>
-	            </div>
-	          </div>
-	          <AnimatePresence initial={false}>
-	            {isMessageSelectionMode && (
-	              <motion.div
-	                animate={{ height: 'auto', opacity: 1 }}
-	                className="z-10 overflow-hidden border-b border-border bg-surface/80 px-4 md:px-6"
-	                exit={{ height: 0, opacity: 0 }}
-	                initial={reduceMotion ? false : { height: 0, opacity: 0 }}
-	                transition={appMotion.panel}
-	              >
-	                <div className="mx-auto flex min-h-11 max-w-5xl items-center justify-between gap-3 py-2">
-	                  <div className="flex min-w-0 items-center gap-2">
-	                    <span className="flex size-7 items-center justify-center rounded-md border border-border bg-background text-foreground/80">
-	                      <ListChecks className="size-3.5" />
-	                    </span>
-	                    <span className="truncate text-xs font-semibold text-foreground">
-	                      {selectedMessageCount} {t.chat.messagesSelected}
-	                    </span>
-	                  </div>
-	                  <div className="flex shrink-0 items-center gap-1">
-	                    <Tooltip>
-	                      <TooltipTrigger asChild>
-	                        <Button
-	                          aria-label={t.chat.deleteSelectedMessages}
-	                          className="h-8 w-8 text-foreground/75 hover:text-destructive"
-	                          disabled={selectedMessageCount === 0 || isSending}
-	                          onClick={deleteSelectedMessages}
-	                          size="icon"
-	                          type="button"
-	                          variant="ghost"
-	                        >
-	                          <Trash2 className="size-4" />
-	                        </Button>
-	                      </TooltipTrigger>
-	                      <TooltipContent>{t.chat.deleteSelectedMessages}</TooltipContent>
-	                    </Tooltip>
-	                    <Tooltip>
-	                      <TooltipTrigger asChild>
-	                        <Button
-	                          aria-label={t.chat.exitMessageEditMode}
-	                          className="h-8 w-8 text-foreground/75 hover:text-foreground"
-	                          onClick={toggleMessageSelectionMode}
-	                          size="icon"
-	                          type="button"
-	                          variant="ghost"
-	                        >
-	                          <X className="size-4" />
-	                        </Button>
-	                      </TooltipTrigger>
-	                      <TooltipContent>{t.chat.exitMessageEditMode}</TooltipContent>
-	                    </Tooltip>
-	                  </div>
-	                </div>
-	              </motion.div>
-	            )}
-	          </AnimatePresence>
+                </div>
+              </div>
+            </div>
+            <AnimatePresence initial={false}>
+              {isMessageSelectionMode && (
+                <motion.div
+                  animate={{ height: 'auto', opacity: 1 }}
+                  className="z-10 overflow-hidden border-b border-border bg-surface/80 px-4 md:px-6"
+                  exit={{ height: 0, opacity: 0 }}
+                  initial={reduceMotion ? false : { height: 0, opacity: 0 }}
+                  transition={appMotion.panel}
+                >
+                  <div className="mx-auto flex min-h-11 max-w-5xl items-center justify-between gap-3 py-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="flex size-7 items-center justify-center rounded-md border border-border bg-background text-foreground/80">
+                        <ListChecks className="size-3.5" />
+                      </span>
+                      <span className="truncate text-xs font-semibold text-foreground">
+                        {selectedMessageCount} {t.chat.messagesSelected}
+                      </span>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1">
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            aria-label={t.chat.deleteSelectedMessages}
+                            className="h-8 w-8 text-foreground/75 hover:text-destructive"
+                            disabled={selectedMessageCount === 0 || isSending}
+                            onClick={deleteSelectedMessages}
+                            size="icon"
+                            type="button"
+                            variant="ghost"
+                          >
+                            <Trash2 className="size-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>{t.chat.deleteSelectedMessages}</TooltipContent>
+                      </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            aria-label={t.chat.exitMessageEditMode}
+                            className="h-8 w-8 text-foreground/75 hover:text-foreground"
+                            onClick={toggleMessageSelectionMode}
+                            size="icon"
+                            type="button"
+                            variant="ghost"
+                          >
+                            <X className="size-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>{t.chat.exitMessageEditMode}</TooltipContent>
+                      </Tooltip>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
-	          <ScrollArea
+            <ScrollArea
             className={cn(
               'min-h-0 flex-1',
-              // When empty, let the Radix viewport wrapper fill its height so the
-              // inner `min-h-full` resolves and the hero can center vertically.
-              // Only in the empty case, so message scrolling stays unaffected.
-              !(selectedThread && selectedThread.messages.length > 0) &&
+              // When the hero is shown, let the Radix viewport wrapper fill its
+              // height so the inner `min-h-full` resolves and the hero centers
+              // vertically. Not while loading (the skeleton fills top-down) nor
+              // with messages, so message scrolling stays unaffected.
+              !(selectedThread && selectedThread.messages.length > 0) && !isMessagesLoading &&
                 '[&_[data-scroll-area-viewport]>div]:h-full',
             )}
             ref={messagesScrollAreaRef}
-	          >
-		            <div
-	              className="mx-auto flex min-h-full w-full max-w-5xl flex-col gap-5 px-4 py-6 [overflow-anchor:none] md:px-8"
-	              ref={messagesContentRef}
-	            >
+            >
+              <div
+                className="mx-auto flex min-h-full w-full max-w-5xl flex-col gap-5 px-4 py-6 [overflow-anchor:none] md:px-8"
+                ref={messagesContentRef}
+              >
               {selectedThread && selectedThread.messages.length > 0 ? (
                 selectedThread.messages.map((message, index) => {
                   const previousMessage = selectedThread.messages[index - 1]
@@ -1012,6 +1017,8 @@ export default function ChatWorkspace({
                   />
                   )
                 })
+              ) : isMessagesLoading ? (
+                <ConversationSkeleton reduceMotion={reduceMotion} />
               ) : selectedThread ? (
                 <EmptyChatState
                   subtitle={pendingChips.length > 0 ? t.chat.emptyWithContext : t.chat.emptyHint}
@@ -1020,8 +1027,8 @@ export default function ChatWorkspace({
               ) : (
                 <EmptyChatState subtitle={t.chat.emptyHint} title={t.chat.emptyTitle} />
               )}
-	            </div>
-	          </ScrollArea>
+              </div>
+            </ScrollArea>
 
           <div className="z-10 shrink-0 px-3 pb-4 pt-2 md:px-6">
             <form
@@ -1435,63 +1442,70 @@ export default function ChatWorkspace({
   )
 
   return (
-    <div className="flex min-h-[calc(100svh-var(--header-h))] w-full lg:h-full lg:min-h-0">
-      {isDesktop ? (
-        <ResizablePanelGroup
-          className="min-h-0 w-full overflow-hidden bg-background"
-          defaultLayout={historyPanelLayout}
-          elementRef={historyPanelMotion.groupRef}
-          onLayoutChanged={(layout) => {
-            const size = layout[CHAT_HISTORY_PANEL_ID]
-            if (
-              isHistoryVisible
-              && !historyPanelMotion.isProgrammaticLayoutChange()
-              && Number.isFinite(size)
-              && size > 0
-            ) {
-              onHistoryPanelSizeChange(size)
-            }
-          }}
-          orientation="horizontal"
+    <div className="flex h-[calc(100svh-var(--header-h))] min-h-0 w-full lg:h-full">
+      <ResizablePanelGroup
+        className="min-h-0 w-full overflow-hidden bg-background"
+        defaultLayout={historyPanelLayout}
+        elementRef={historyPanelMotion.groupRef}
+        onLayoutChanged={(layout) => {
+          const size = layout[CHAT_HISTORY_PANEL_ID]
+          if (
+            isHistoryVisible
+            && !historyPanelMotion.isProgrammaticLayoutChange()
+            && Number.isFinite(size)
+            && size > 0
+          ) {
+            onHistoryPanelSizeChange(size)
+          }
+        }}
+        orientation="horizontal"
+      >
+        {isDesktop && (
+          <>
+            <ResizablePanel
+              className="min-h-0 min-w-0 overflow-hidden bg-surface/60"
+              collapsedSize="0%"
+              collapsible
+              defaultSize={historyPanelLayout[CHAT_HISTORY_PANEL_ID]}
+              id={CHAT_HISTORY_PANEL_ID}
+              maxSize="42%"
+              minSize={isHistoryVisible ? '18%' : '0%'}
+              panelRef={historyPanelMotion.panelRef}
+            >
+              <AnimatedPanelBody expanded={isHistoryVisible} side="left">
+                {historyPanel}
+              </AnimatedPanelBody>
+            </ResizablePanel>
+            <AnimatedResizableHandle
+              aria-label={t.chat.resizeHistory}
+              expanded={isHistoryVisible}
+            />
+          </>
+        )}
+        <ResizablePanel
+          className="min-h-0 min-w-0 overflow-hidden"
+          defaultSize={historyPanelLayout[CHAT_CONVERSATION_PANEL_ID]}
+          id={CHAT_CONVERSATION_PANEL_ID}
+          // Identity anchor — must stay unconditional so the conversation DOM
+          // (markdown, KaTeX, composer state) survives the desktop/mobile flip.
+          key={CHAT_CONVERSATION_PANEL_ID}
+          minSize="58%"
         >
-          <ResizablePanel
-            className="min-h-0 min-w-0 overflow-hidden bg-surface/60"
-            collapsedSize="0%"
-            collapsible
-            defaultSize={historyPanelLayout[CHAT_HISTORY_PANEL_ID]}
-            elementRef={historyPanelMotion.panelElementRef}
-            id={CHAT_HISTORY_PANEL_ID}
-            maxSize="42%"
-            minSize={isHistoryVisible ? '18%' : '0%'}
-            panelRef={historyPanelMotion.panelRef}
-          >
-            <AnimatedPanelBody expanded={isHistoryVisible} side="left">
-              {historyPanel}
-            </AnimatedPanelBody>
-          </ResizablePanel>
-          <AnimatedResizableHandle
-            aria-label={t.chat.resizeHistory}
-            expanded={isHistoryVisible}
-          />
-          <ResizablePanel
-            className="min-h-0 min-w-0 overflow-hidden"
-            defaultSize={historyPanelLayout[CHAT_CONVERSATION_PANEL_ID]}
-            id={CHAT_CONVERSATION_PANEL_ID}
-            minSize="58%"
-          >
-            {conversationPanel}
-          </ResizablePanel>
-        </ResizablePanelGroup>
-      ) : (
-        <motion.section
-          initial={reduceMotion ? false : { opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={appMotion.panel}
-          className="flex min-h-0 w-full flex-col overflow-hidden bg-background"
+          {conversationPanel}
+        </ResizablePanel>
+      </ResizablePanelGroup>
+      {!isDesktop && (
+        <ResponsiveSidePanel
+          closeLabel={t.chat.hideHistory}
+          controlsId={CHAT_HISTORY_PANEL_ID}
+          onOpenChange={setIsMobileHistoryOpen}
+          open={isMobileHistoryOpen}
+          showHeader={false}
+          side="left"
+          title={t.chat.history}
         >
           {historyPanel}
-          {conversationPanel}
-        </motion.section>
+        </ResponsiveSidePanel>
       )}
     </div>
   )
@@ -1623,86 +1637,6 @@ function renderMentionHint(text: string) {
   )
 }
 
-function chatScrollMetrics(viewport: HTMLElement): ChatScrollMetrics {
-  return {
-    clientHeight: viewport.clientHeight,
-    scrollHeight: viewport.scrollHeight,
-    scrollTop: viewport.scrollTop,
-  }
-}
-
-function scrollChatViewportToBottom(viewport: HTMLElement, mode: ChatScrollMode) {
-  if (mode === 'none') return
-
-  const top = viewport.scrollHeight
-  if (mode === 'smooth' && typeof viewport.scrollTo === 'function') {
-    viewport.scrollTo({ behavior: 'smooth', top })
-    return
-  }
-
-  viewport.scrollTop = top
-}
-
-function startChatBottomLock(
-  viewport: HTMLElement,
-  content: HTMLElement | null,
-  onSettled: () => void,
-): () => void {
-  const frameIds: number[] = []
-  const timeoutIds: number[] = []
-  let disposed = false
-  let observer: ResizeObserver | null = null
-
-  function syncToBottom() {
-    if (disposed) return
-    scrollChatViewportToBottom(viewport, 'auto')
-  }
-
-  function release() {
-    if (disposed) return
-    disposed = true
-    observer?.disconnect()
-    for (const frameId of frameIds) {
-      window.cancelAnimationFrame(frameId)
-    }
-    for (const timeoutId of timeoutIds) {
-      window.clearTimeout(timeoutId)
-    }
-    onSettled()
-  }
-
-  syncToBottom()
-
-  let remainingFrames = 8
-  function scheduleFrame() {
-    if (disposed) return
-    if (remainingFrames <= 0) {
-      release()
-      return
-    }
-    remainingFrames -= 1
-    const frameId = window.requestAnimationFrame(() => {
-      syncToBottom()
-      scheduleFrame()
-    })
-    frameIds.push(frameId)
-  }
-
-  scheduleFrame()
-  timeoutIds.push(window.setTimeout(() => {
-    syncToBottom()
-    release()
-  }, 700))
-
-  observer =
-    content && typeof ResizeObserver !== 'undefined'
-      ? new ResizeObserver(syncToBottom)
-      : null
-  if (content && observer) observer.observe(content)
-
-  return release
-}
-
 function EmptyChatState({
   subtitle,
   title,
@@ -1730,35 +1664,7 @@ function EmptyChatState({
   )
 }
 
-function ChatMessageBubble({
-  canAnswerLastUserMessage,
-  canBranch,
-  canRetryAssistantMessage,
-  chatModelCatalog,
-  chatModelOptions,
-  chatModelOptionsStatus,
-  defaultChatModel,
-  editDraft,
-  editTextareaRef,
-  editingMessageId,
-  isSelected,
-  isSelectionMode,
-  isStreaming,
-  message,
-  onAnswerLastUserMessage,
-  onBranch,
-  onCancelEdit,
-  onCommitEdit,
-  onEdit,
-  onEditDraftChange,
-  onEditKeyDown,
-  onRetryAssistantMessage,
-  onToggleSelected,
-  reduceMotion,
-  selectedChatEffort,
-  selectedChatModel,
-  selectedModelTier,
-}: {
+type ChatMessageBubbleProps = {
   canAnswerLastUserMessage: boolean
   canBranch: boolean
   canRetryAssistantMessage: boolean
@@ -1786,12 +1692,41 @@ function ChatMessageBubble({
   selectedChatEffort: string | null
   selectedChatModel: string | null
   selectedModelTier: ChatModelTier | null
-}) {
+}
+
+const ChatMessageBubble = memo(function ChatMessageBubble({
+  canAnswerLastUserMessage,
+  canBranch,
+  canRetryAssistantMessage,
+  chatModelCatalog,
+  chatModelOptions,
+  chatModelOptionsStatus,
+  defaultChatModel,
+  editDraft,
+  editTextareaRef,
+  editingMessageId,
+  isSelected,
+  isSelectionMode,
+  isStreaming,
+  message,
+  onAnswerLastUserMessage,
+  onBranch,
+  onCancelEdit,
+  onCommitEdit,
+  onEdit,
+  onEditDraftChange,
+  onEditKeyDown,
+  onRetryAssistantMessage,
+  onToggleSelected,
+  reduceMotion,
+  selectedChatEffort,
+  selectedChatModel,
+  selectedModelTier,
+}: ChatMessageBubbleProps) {
   const { locale, t } = useLocale()
   const [copied, setCopied] = useState(false)
   const isUser = message.role === 'user'
   const isEditing = editingMessageId === message.id
-  const Icon = isUser ? CircleUserRound : Bot
   const canCopy = message.contentMarkdown.trim().length > 0
   const canContinueFromHere = !isUser && !isSelectionMode && canBranch && canCopy && !isStreaming
   const canGenerateAnswer = isUser && !isSelectionMode && canAnswerLastUserMessage && canCopy && !isStreaming && !isEditing
@@ -1831,13 +1766,10 @@ function ChatMessageBubble({
         <div
           className={cn(
             'grid min-w-0 gap-3',
-            isSelectionMode ? 'grid-cols-[24px_32px_minmax(0,1fr)]' : 'grid-cols-[32px_minmax(0,1fr)]',
+            isSelectionMode ? 'grid-cols-[24px_minmax(0,1fr)]' : 'grid-cols-[minmax(0,1fr)]',
           )}
         >
           {selectionControl}
-          <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md border border-border bg-surface text-muted-foreground">
-            <Icon className="size-4" />
-          </span>
           <div className="min-w-0" aria-live={isStreaming ? 'polite' : undefined}>
             <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 t-meta-sm font-semibold text-muted-foreground">
               <span>{t.chat.assistant}</span>
@@ -1921,7 +1853,9 @@ function ChatMessageBubble({
         {selectionControl}
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 justify-end">
-            <div className="min-w-0 max-w-[min(72%,44rem)]">
+            {/* While editing, fill to the max bubble width so the textarea keeps the
+                bubble's geometry instead of collapsing to its intrinsic width. */}
+            <div className={cn('min-w-0 max-w-[min(72%,44rem)]', isEditing && 'w-full')}>
               <div className="mb-1 flex flex-wrap items-center justify-end gap-x-2 gap-y-0.5 t-meta-sm font-semibold text-muted-foreground">
                 {isSelectionMode && (
                   <MessageSelectionPill isSelected={isSelected} label={selectionLabel} />
@@ -1972,12 +1906,46 @@ function ChatMessageBubble({
             </div>
           </div>
         </div>
-        <span className="inqtrix-user-avatar mt-1 flex size-8 shrink-0 items-center justify-center rounded-md border">
-          <Icon className="size-4" />
-        </span>
       </div>
     </div>
   )
+}, areChatMessageBubblePropsEqual)
+
+function areChatMessageBubblePropsEqual(
+  previous: ChatMessageBubbleProps,
+  next: ChatMessageBubbleProps,
+): boolean {
+  const previousEditing = previous.editingMessageId === previous.message.id
+  const nextEditing = next.editingMessageId === next.message.id
+  const editStateEqual = previousEditing === nextEditing
+    && (!previousEditing || previous.editDraft === next.editDraft)
+
+  return previous.message === next.message
+    && previous.canAnswerLastUserMessage === next.canAnswerLastUserMessage
+    && previous.canBranch === next.canBranch
+    && previous.canRetryAssistantMessage === next.canRetryAssistantMessage
+    && previous.chatModelCatalog === next.chatModelCatalog
+    && previous.chatModelOptions === next.chatModelOptions
+    && previous.chatModelOptionsStatus === next.chatModelOptionsStatus
+    && previous.defaultChatModel === next.defaultChatModel
+    && previous.editTextareaRef === next.editTextareaRef
+    && editStateEqual
+    && previous.isSelected === next.isSelected
+    && previous.isSelectionMode === next.isSelectionMode
+    && previous.isStreaming === next.isStreaming
+    && previous.onAnswerLastUserMessage === next.onAnswerLastUserMessage
+    && previous.onBranch === next.onBranch
+    && previous.onCancelEdit === next.onCancelEdit
+    && previous.onCommitEdit === next.onCommitEdit
+    && previous.onEdit === next.onEdit
+    && previous.onEditDraftChange === next.onEditDraftChange
+    && previous.onEditKeyDown === next.onEditKeyDown
+    && previous.onRetryAssistantMessage === next.onRetryAssistantMessage
+    && previous.onToggleSelected === next.onToggleSelected
+    && previous.reduceMotion === next.reduceMotion
+    && previous.selectedChatEffort === next.selectedChatEffort
+    && previous.selectedChatModel === next.selectedChatModel
+    && previous.selectedModelTier === next.selectedModelTier
 }
 
 function MessageSelectionPill({
@@ -2056,23 +2024,29 @@ function ChatMessageEditForm({
 
   return (
     <form
-      className="rounded-lg border border-brand/30 bg-card p-2 shadow-[0_1px_2px_var(--shadow-hairline)]"
+      className="w-full"
       onClick={(event) => event.stopPropagation()}
       onSubmit={handleSubmit}
     >
-      <Textarea
-        aria-label={t.chat.editMessage}
-        className="min-h-24 resize-none border-0 bg-transparent px-2 py-1.5 text-sm leading-6 text-foreground focus-visible:ring-0"
-        onChange={(event) => {
-          onChange(event.target.value)
-          resizeTextareaToRows(event.target, 8)
-        }}
-        onKeyDown={onKeyDown}
-        ref={textareaRef}
-        rows={3}
-        value={draft}
-      />
-      <div className="mt-2 flex items-center justify-end gap-1.5 border-t border-border/70 pt-2">
+      {/* Reuse the display bubble's geometry (same tone, radius, padding, font)
+          so entering edit mode reads as in-place editing of the same bubble, not
+          a swap to a different card. The textarea is a bare, padding-less child so
+          its text sits exactly where the rendered message text sits. */}
+      <div className="inqtrix-user-bubble rounded-lg px-3 py-2.5 text-sm leading-6 shadow-[0_1px_2px_var(--shadow-hairline)] transition-shadow focus-within:ring-1 focus-within:ring-brand/40">
+        <textarea
+          aria-label={t.chat.editMessage}
+          className="block w-full resize-none border-0 bg-transparent p-0 text-sm leading-6 text-inherit outline-none focus:outline-none focus-visible:outline-none focus-visible:ring-0"
+          onChange={(event) => {
+            onChange(event.target.value)
+            resizeTextareaToRows(event.target, 8)
+          }}
+          onKeyDown={onKeyDown}
+          ref={textareaRef}
+          rows={1}
+          value={draft}
+        />
+      </div>
+      <div className="mt-1.5 flex items-center justify-end gap-1.5">
         <Button
           className="h-8 gap-1.5 px-2 text-xs"
           onClick={onCancel}
@@ -2574,7 +2548,7 @@ function MessageActionButton({
   )
 }
 
-function ChatChainTrace({ steps }: { steps: ChatChainStepRecord[] }) {
+const ChatChainTrace = memo(function ChatChainTrace({ steps }: { steps: ChatChainStepRecord[] }) {
   const { t } = useLocale()
   const [expanded, setExpanded] = useState(false)
   const [openStep, setOpenStep] = useState<number | null>(null)
@@ -2629,7 +2603,7 @@ function ChatChainTrace({ steps }: { steps: ChatChainStepRecord[] }) {
       )}
     </div>
   )
-}
+})
 
 function GeneratingPlaceholder({ reduceMotion }: { reduceMotion: boolean | null }) {
   const { t } = useLocale()
@@ -2654,7 +2628,7 @@ function GeneratingPlaceholder({ reduceMotion }: { reduceMotion: boolean | null 
   )
 }
 
-function ChatMessageAttachments({
+const ChatMessageAttachments = memo(function ChatMessageAttachments({
   align = 'start',
   attachments,
 }: {
@@ -2690,7 +2664,7 @@ function ChatMessageAttachments({
       })}
     </div>
   )
-}
+})
 
 function messageFromUnknown(error: unknown) {
   if (error instanceof Error) return error.message

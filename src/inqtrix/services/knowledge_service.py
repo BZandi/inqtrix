@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from inqtrix.auth.permissions import (
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
     from inqtrix.knowledge.parsing import DocumentParser
 from inqtrix.knowledge.stores.ports import (
     CollectionNotFound,
+    DocumentChunk,
     DocumentNotFound,
     KnowledgeCollection,
     KnowledgeDocument,
@@ -50,8 +52,41 @@ from inqtrix.knowledge.stores.ports import (
 )
 
 
+@dataclass(frozen=True)
+class SearchOutcome:
+    """A scoped search result plus the visibility it silently applied.
+
+    The debug search endpoint filters an explicit ``collection_ids``
+    list to its visible members instead of rejecting the whole request
+    (unlike the strict ask-path gate). That filtering must not be
+    invisible to an agent planning against the results, so the outcome
+    reports which requested ids were dropped — the router renders them
+    as a ``collections_filtered`` warning (No Silent Fallbacks).
+
+    Attributes:
+        candidates: The scored hits over the searched collections.
+        filtered_collection_ids: Requested ids the caller may not see
+            (empty for an unscoped caller or when nothing was dropped).
+    """
+
+    candidates: list[RetrievalCandidate]
+    filtered_collection_ids: list[str] = field(default_factory=list)
+
+
 class KnowledgeValidationError(ValueError):
     """Raised for client-payload problems (maps to HTTP 400)."""
+
+
+class ChunkNotFound(KeyError):
+    """Raised when a visible document has no chunk at the given index.
+
+    Service-level sibling of the store's
+    :class:`~inqtrix.knowledge.stores.ports.DocumentNotFound`: chunk
+    identity is ``(document_id, chunk_index)`` and only the service
+    resolves that pair, so the store port stays untouched. Maps to
+    HTTP 404 with a chunk-specific message — the document itself was
+    found and visible, which is safe to disclose.
+    """
 
 
 def collection_access(
@@ -481,6 +516,61 @@ class KnowledgeService:
         await self._document_parent_access(document, visible_to, also_visible)
         return document
 
+    async def get_chunk(
+        self,
+        document_id: str,
+        chunk_index: int,
+        *,
+        context: int = 0,
+        visible_to: "UserContext | None" = None,
+        also_visible: "Mapping[str, SharePermission] | None" = None,
+    ) -> tuple[DocumentChunk, list[DocumentChunk]]:
+        """One chunk plus its neighbour chunks (the citable evidence view).
+
+        Chunk identity is ``(document_id, chunk_index)`` — stable across
+        reindex, unlike the physical chunk id. *context* widens the read
+        so a cited quote can be shown in its document surroundings.
+        Visibility is the parent collection's, exactly like
+        :meth:`get_document` (view suffices; denial stays the indistinct
+        :class:`DocumentNotFound`).
+
+        Args:
+            document_id: The owning document.
+            chunk_index: Zero-based chunk position within the document.
+            context: Neighbour chunks to include on EACH side of the
+                target (``0`` — the default — returns none). Range
+                policy (0..3) is the router's concern; the service
+                trusts its caller.
+            visible_to: Caller scope for the parent-collection check.
+            also_visible: The caller's share grants (router-resolved).
+
+        Returns:
+            ``(chunk, neighbors)`` — *neighbors* are the up to
+            ``2 * context`` surrounding chunks in ``chunk_index`` order,
+            target excluded.
+
+        Raises:
+            DocumentNotFound: Unknown or invisible document.
+            ChunkNotFound: The document is visible but has no chunk at
+                *chunk_index*.
+        """
+        document = await self._knowledge.store.get_document(document_id)
+        await self._document_parent_access(document, visible_to, also_visible)
+        chunks = await self._knowledge.store.get_chunks(document_id)
+        target = next(
+            (chunk for chunk in chunks if chunk.chunk_index == chunk_index),
+            None,
+        )
+        if target is None:
+            raise ChunkNotFound(f"{document_id}#{chunk_index}")
+        neighbors = [
+            chunk
+            for chunk in chunks
+            if chunk.chunk_index != chunk_index
+            and abs(chunk.chunk_index - chunk_index) <= context
+        ]
+        return target, neighbors
+
     async def delete_document(
         self,
         document_id: str,
@@ -530,6 +620,30 @@ class KnowledgeService:
     ) -> list[RetrievalCandidate]:
         """Embed *query* and return scored chunk candidates.
 
+        Backward-compatible shape (``list[RetrievalCandidate]``);
+        callers that need the applied-visibility report use
+        :meth:`search_reported`.
+        """
+        outcome = await self.search_reported(
+            query=query,
+            collection_ids=collection_ids,
+            top_k=top_k,
+            visible_to=visible_to,
+            also_visible=also_visible,
+        )
+        return outcome.candidates
+
+    async def search_reported(
+        self,
+        *,
+        query: str,
+        collection_ids: list[str] | None = None,
+        top_k: int | None = None,
+        visible_to: "UserContext | None" = None,
+        also_visible: "Mapping[str, SharePermission] | None" = None,
+    ) -> SearchOutcome:
+        """Embed *query* and return scored candidates plus dropped ids.
+
         Kept synchronous and side-effect-free on purpose: this is the
         debugging/evaluation surface for retrieval quality, independent
         of answer synthesis.
@@ -538,12 +652,14 @@ class KnowledgeService:
         ``collection_ids`` list is reduced to its visible members
         (none visible raises :class:`CollectionNotFound` — the 404),
         and an unscoped search ranges over the visible set instead of
-        everything.
+        everything. Dropped-but-requested ids are reported so the
+        filtering never stays silent.
         """
         clean_query = (query or "").strip()
         if not clean_query:
             raise KnowledgeValidationError("Feld 'query' ist erforderlich")
         effective_ids = collection_ids
+        filtered_ids: list[str] = []
         if visible_to is not None:
             visible_ids = {
                 collection.id
@@ -555,19 +671,25 @@ class KnowledgeService:
                 effective_ids = [
                     item for item in collection_ids if item in visible_ids
                 ]
+                filtered_ids = [
+                    item for item in collection_ids if item not in visible_ids
+                ]
                 if not effective_ids:
                     raise CollectionNotFound(
                         collection_ids[0] if collection_ids else ""
                     )
             else:
                 if not visible_ids:
-                    return []
+                    return SearchOutcome(candidates=[])
                 effective_ids = sorted(visible_ids)
-        return await retrieve(
+        candidates = await retrieve(
             self._knowledge,
             query=clean_query,
             collection_ids=effective_ids,
             top_k=top_k or self._knowledge.default_top_k,
+        )
+        return SearchOutcome(
+            candidates=candidates, filtered_collection_ids=filtered_ids
         )
 
     async def assert_collections_visible(
@@ -590,3 +712,99 @@ class KnowledgeService:
         for collection_id in collection_ids:
             collection = await self._knowledge.store.get_collection(collection_id)
             collection_access(collection, visible_to, also_visible)
+
+    async def resolve_ask_scope(
+        self,
+        collection_ids: "list[str] | None",
+        *,
+        visible_to: "UserContext | None" = None,
+        also_visible: "Mapping[str, SharePermission] | None" = None,
+    ) -> list[str] | None:
+        """Pin an ask's retrieval scope to what the caller may see.
+
+        The admission-time counterpart of
+        :meth:`assert_collections_visible`: it resolves the scope ONCE at
+        submit and returns the concrete id list to persist into the run's
+        ``knowledge_filters``, so the worker re-executes an already
+        bounded request. This closes the unscoped-ask gap — an omitted,
+        empty, or ``null`` filter otherwise reaches the ``mode=knowledge``
+        algorithm as ``None``, and the shared retrieval pipeline
+        (:mod:`inqtrix.knowledge.retrieval`) then searches EVERY
+        collection in the tenant (only the agent/capability paths carry
+        ``visible_to`` on their own).
+
+        Rules:
+
+        * an explicit, non-empty list is asserted strictly (one invisible
+          id raises :class:`CollectionNotFound`) and returned unchanged —
+          the caller pinned the scope on purpose;
+        * an omitted / ``null`` / ``[]`` / non-list scope with a resolved
+          ``visible_to`` expands to the caller-visible set (owned +
+          shared-in + legacy), matching :meth:`search_reported`'s
+          unscoped expansion and the agent harness's falsy-scope rule —
+          an ask must answer from the caller's corpus, never 404 on a
+          merely-empty selection. An empty visible set returns ``[]`` —
+          fail-closed, because the stores read ``[]`` as "nothing" while
+          only ``None`` means "everything";
+        * ``visible_to is None`` (``AUTH_MODE`` none / static apikey)
+          keeps the historical see-everything view and returns ``None``.
+
+        The expansion honours the stores' one-model-per-query invariant:
+        an EXPLICIT multi-model scope is a hard ``KnowledgeError`` there,
+        while the pre-pin ``None`` scope silently narrowed to the default
+        embedding model's collections. A visible set spanning several
+        embedding models therefore pins the default model's subset (the
+        exact pre-pin coverage), logged loudly; a single-model visible
+        set pins completely regardless of which model that is.
+
+        Args:
+            collection_ids: The request's raw ``collection_ids`` filter —
+                a list, an empty list, or ``None``. A non-list value is
+                treated as unscoped (fail-closed to the visible set).
+            visible_to: The caller's resolved visibility, or ``None`` for
+                the unauthenticated see-everything modes.
+            also_visible: Share grants (shared-in collections) for the
+                caller, resolved at the router alongside ``visible_to``.
+
+        Returns:
+            The concrete scope to persist: the asserted explicit list, the
+            caller-visible id set (possibly empty), or ``None`` for the
+            see-everything modes.
+
+        Raises:
+            CollectionNotFound: An explicit id the caller cannot see.
+        """
+        explicit = (
+            [str(item) for item in collection_ids]
+            if isinstance(collection_ids, list)
+            else []
+        )
+        if explicit:
+            await self.assert_collections_visible(
+                explicit, visible_to=visible_to, also_visible=also_visible
+            )
+            return explicit
+        if visible_to is None:
+            return None
+        visible = await self.list_collections(
+            visible_to=visible_to, also_visible=also_visible
+        )
+        models = {collection.embedding_model for collection in visible}
+        if len(models) <= 1:
+            return [collection.id for collection in visible]
+        default_model = self._knowledge.embeddings.default_model
+        pinned = [
+            collection.id
+            for collection in visible
+            if collection.embedding_model == default_model
+        ]
+        log.warning(
+            "resolve_ask_scope: visible collections span %d embedding "
+            "models; pinning the %d default-model (%s) collection(s) of "
+            "%d visible — scoped asks reach the others.",
+            len(models),
+            len(pinned),
+            default_model,
+            len(visible),
+        )
+        return pinned

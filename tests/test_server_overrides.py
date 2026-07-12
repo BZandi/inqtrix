@@ -45,7 +45,7 @@ def test_overrides_request_accepts_whitelist_fields():
         confidence_stop=8,
         report_profile=ReportProfile.DEEP,
         max_total_seconds=540,
-        first_round_queries=10,
+        first_round_queries=8,
     )
     assert overrides.max_rounds == 4
     assert overrides.report_profile == ReportProfile.DEEP
@@ -61,6 +61,10 @@ def test_overrides_request_validates_ranges():
     """Range-violating values must raise."""
     with pytest.raises(ValidationError):
         AgentOverridesRequest.model_validate({"max_rounds": 99})
+    with pytest.raises(ValidationError):
+        AgentOverridesRequest.model_validate({"max_rounds": 5})
+    with pytest.raises(ValidationError):
+        AgentOverridesRequest.model_validate({"first_round_queries": 9})
     with pytest.raises(ValidationError):
         AgentOverridesRequest.model_validate({"max_total_seconds": 5})  # ge=30
     with pytest.raises(ValidationError):
@@ -103,6 +107,33 @@ def test_apply_overrides_no_op_when_empty():
     assert apply_overrides(base, overrides) is base
 
 
+def test_env_agent_tier_bridges_depth_without_request_overrides():
+    """An operator-level AGENT_TIER must resolve to a CONSISTENT
+    (tier, depth) pair — the durable replay body re-parses the echoed
+    pair and a contradiction would 400 every run at worker claim time."""
+    base = AgentSettings(AGENT_TIER="tief")
+    resolved = apply_overrides(base, None)
+    assert resolved.agent_tier == "tief"
+    assert resolved.depth == "deep"
+
+
+def test_env_agent_tier_bridge_with_unrelated_request_override():
+    base = AgentSettings(AGENT_TIER="tief")
+    resolved = apply_overrides(base, AgentOverridesRequest(max_rounds=3))
+    assert resolved.agent_tier == "tief"
+    assert resolved.depth == "deep"
+    assert resolved.max_rounds == 3
+
+
+def test_request_depth_wins_over_contradicting_env_tier():
+    """Explicit request depth beats the env default tier (request beats
+    env everywhere); the run keeps legacy depth semantics, visibly."""
+    base = AgentSettings(AGENT_TIER="gruendlich")
+    resolved = apply_overrides(base, AgentOverridesRequest(depth="deep"))
+    assert resolved.agent_tier == ""
+    assert resolved.depth == "deep"
+
+
 def test_apply_overrides_merges_into_agent_settings():
     base = AgentSettings()
     overrides = AgentOverridesRequest(max_rounds=2, confidence_stop=6)
@@ -129,7 +160,7 @@ def test_apply_overrides_preserves_operator_explicit_fields():
     assert patched.max_rounds == 6
     # Non-explicit fields take on DEEP defaults.
     assert patched.confidence_stop == 8
-    assert patched.first_round_queries == 10
+    assert patched.first_round_queries == 8
 
 
 def test_apply_overrides_applies_full_profile_defaults():
@@ -143,7 +174,26 @@ def test_apply_overrides_applies_full_profile_defaults():
     # All DEEP-profile defaults filled in.
     assert patched.max_rounds == 4
     assert patched.confidence_stop == 8
-    assert patched.first_round_queries == 10
+    assert patched.first_round_queries == 8
+
+
+def test_apply_overrides_schnell_runs_exactly_one_round():
+    """SCHNELL keeps one round while sharing robust operation budgets."""
+    base = AgentSettings.model_validate({})
+    overrides = AgentOverridesRequest(report_profile=ReportProfile.SCHNELL)
+    patched = apply_overrides(base, overrides)
+
+    assert patched.report_profile == ReportProfile.SCHNELL
+    assert patched.max_rounds == 1
+    assert patched.min_rounds == 1
+    assert patched.first_round_queries == 6
+    assert patched.max_total_seconds == 3600
+
+    # Bidirectional switch: the same base flips wholesale to DEEP.
+    deepened = apply_overrides(
+        base, AgentOverridesRequest(report_profile=ReportProfile.DEEP)
+    )
+    assert deepened.max_rounds == 4
 
 
 def test_apply_overrides_user_explicit_wins_over_profile_defaults():
@@ -159,7 +209,7 @@ def test_apply_overrides_user_explicit_wins_over_profile_defaults():
     assert patched.max_rounds == 3
     # Other DEEP defaults are still applied.
     assert patched.confidence_stop == 8
-    assert patched.first_round_queries == 10
+    assert patched.first_round_queries == 8
 
 
 def test_apply_overrides_can_switch_deep_base_back_to_compact_defaults():
@@ -174,11 +224,11 @@ def test_apply_overrides_can_switch_deep_base_back_to_compact_defaults():
     assert patched.confidence_stop == 7
     assert patched.first_round_queries == 6
     assert patched.answer_prompt_citations_max == 60
-    assert patched.reasoning_timeout == 120
-    assert patched.editor_assistant_timeout == 120
-    assert patched.claim_extract_timeout == 60
-    assert patched.search_timeout == 60
-    assert patched.max_total_seconds == 300
+    assert patched.reasoning_timeout == 600
+    assert patched.editor_assistant_timeout == 600
+    assert patched.claim_extract_timeout == 600
+    assert patched.search_timeout == 600
+    assert patched.max_total_seconds == 3600
 
 
 # ------------------------------------------------------------------ #
@@ -345,7 +395,7 @@ def test_chat_completions_with_profile_switch_routes_deep_settings(monkeypatch):
     # DEEP profile defaults must have cascaded.
     assert forwarded.max_rounds == 4
     assert forwarded.confidence_stop == 8
-    assert forwarded.first_round_queries == 10
+    assert forwarded.first_round_queries == 8
 
 
 def test_chat_completions_invalid_override_returns_400(monkeypatch):
@@ -594,3 +644,14 @@ def test_native_runs_direct_mode_returns_mode_summary(
     assert response.json()["mode"] == "direct_llm"
     assert observed.wait(timeout=1)
     assert captured["settings"].skip_search is True
+
+
+def test_depth_override_validates_and_merges():
+    """`depth` (plan M4) rides the generic whitelist: 'deep' merges
+    into AgentSettings, anything outside the vocabulary raises."""
+    overrides = AgentOverridesRequest.model_validate({"depth": "deep"})
+    merged = apply_overrides(AgentSettings(), overrides)
+    assert merged.depth == "deep"
+    assert AgentSettings().depth == "normal"
+    with pytest.raises(ValidationError):
+        AgentOverridesRequest.model_validate({"depth": "ultra"})

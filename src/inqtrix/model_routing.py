@@ -48,6 +48,35 @@ NODE_TIER_ASSIGNMENT: dict[str, str] = {
     "knowledge_contextualize": "fast",
     "knowledge_decompose": "fast",
     "knowledge_rerank": "fast",
+    # Workspace-agent phases (M5, §4 tiering table): cheap for the
+    # assembly-line steps, expensive only where the leverage is.
+    "agent_intake": "fast",
+    "agent_discovery_analyst": "mid",
+    "agent_plan": "high",
+    "agent_contradiction": "mid",
+    "agent_sufficiency": "fast",
+    "agent_synthesis": "high",
+    # Chat-form answer (plan M1 S3): the user-facing deliverable stays
+    # on the high tier; the LIGHT variant is the R1 auto-downgrade the
+    # algorithm picks DETERMINISTICALLY when no web evidence is in play
+    # (purely internal conversational answers) — auditable per run via
+    # the model_resolution events.
+    "agent_answer": "high",
+    "agent_answer_light": "mid",
+    "agent_critic": "fast",
+    "agent_file_analysis": "mid",
+    "agent_patch": "mid",
+    # Cognitive kernel (plan M2, R2): ONE node id for the tool loop —
+    # the kernel is the brain, intelligence lives here. Tool/child calls
+    # keep their own node tiers; the kernel never inherits downward.
+    "agent_kernel": "high",
+    # Deep verification pass (plan M4 `4.1.4`): a rubric check, not the
+    # brain — mid keeps it cheap; the ONE revision reuses the kernel
+    # node's own resolution.
+    "agent_deep_review": "mid",
+    # Skill clarification point check (plan M3 `3.4`): a cheap
+    # extraction call per attached skill at intake.
+    "agent_skill_point_check": "fast",
 }
 """Maps each LLM call site to its default tier.
 
@@ -162,8 +191,9 @@ def describe_resolution(
         requested_tier: Optional per-run tier selection.
         requested_model: Optional explicit model id from the UI picker. When
             non-empty it wins over both tier and per-node resolution.
-        requested_effort: Optional explicit reasoning effort from the UI; only
-            consulted on the explicit-model path.
+        requested_effort: Optional explicit reasoning effort (UI picker,
+            skill pin, or Deep mode). A non-empty value wins on every
+            path with ``effort_source="explicit_request"``.
 
     Returns:
         A mapping with string values for ``node``, ``model``, ``tier``,
@@ -195,8 +225,14 @@ def describe_resolution(
     else:
         model = (getattr(models, "reasoning_model", "") or "").strip()
         model_source = "reasoning_model_default"
+    explicit_effort = (requested_effort or "").strip()
     tier_effort = (getattr(models, f"tier_{tier}_effort", "") or "").strip()
-    if tier_effort:
+    if explicit_effort:
+        # An explicit effort beats the tier effort on EVERY path, not
+        # only next to an explicit model — skill pins (R4) and the Deep
+        # mode (M4) request an effort while keeping tier routing.
+        effort, effort_source = explicit_effort, "explicit_request"
+    elif tier_effort:
         effort, effort_source = tier_effort, f"tier:{tier}"
     else:
         effort, effort_source = "", "provider_default"
@@ -336,8 +372,8 @@ def resolve_effort(
     Thin wrapper over :func:`describe_resolution`. Returns an effort token
     (``""``, ``"none"``, ``"minimal"``, ``"low"``, ``"medium"``, ``"high"``,
     or ``"xhigh"``). ``""`` means "inherit provider default"; ``"none"`` means
-    "force reasoning off". An explicit ``requested_effort`` (with
-    ``requested_model``) overrides the tier choice.
+    "force reasoning off". A non-empty ``requested_effort`` (UI picker,
+    skill pin, or Deep mode) overrides the tier choice on every path.
     """
     return describe_resolution(
         node,

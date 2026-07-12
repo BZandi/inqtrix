@@ -21,7 +21,8 @@ import {
   EXPLORER_REVEAL_STEP,
   ExplorerFolderRow,
   ExplorerFolderToggle,
-  ExplorerItemRow,
+  ExplorerHistoryRow,
+  ExplorerHistoryTitleInput,
   ExplorerRevealControls,
   ExplorerRunningIndicator,
   ExplorerSearchField,
@@ -362,10 +363,9 @@ export function KnowledgeHistoryPanel({
   const dropGroupIds = draggedGroupId ? groupIds.filter((groupId) => groupId !== draggedGroupId) : groupIds
 
   return (
-    <aside className="flex h-full min-h-0 w-full flex-col border-r border-border bg-surface/60">
+    <aside className="inqtrix-contained-panel flex h-full min-h-0 w-full flex-col border-r border-border bg-surface/60">
       <div className="flex inqtrix-panel-header items-center justify-between gap-2 border-b border-border px-3">
         <div className="flex min-w-0 items-center gap-2">
-          <BookOpenCheck className="size-4 shrink-0 text-foreground/80" />
           <h2 className="truncate t-section text-foreground">{t.knowledge.sessions}</h2>
         </div>
         <div className="flex items-center gap-1.5">
@@ -842,90 +842,43 @@ function KnowledgeSessionHistoryItem({
       {showAfterIndicator && (
         <span className="pointer-events-none absolute -bottom-1 left-1 right-1 h-0.5 rounded-full bg-brand shadow-[0_0_0_1px_var(--background)]" />
       )}
-      <ExplorerItemRow
+      <ExplorerHistoryRow
+        actions={[
+          {
+            ariaLabel: `${pinned ? t.knowledge.unpinSession : t.knowledge.pinSession}: ${session.title}`,
+            icon: pinned ? <PinOff className="icon-sm" /> : <Pin className="icon-sm" />,
+            label: pinned ? t.knowledge.unpinSession : t.knowledge.pinSession,
+            onSelect: () => onTogglePinnedSession(session.id),
+          },
+          {
+            ariaLabel: `${t.knowledge.deleteSession}: ${session.title}`,
+            destructive: true,
+            icon: <Trash2 className="icon-sm" />,
+            label: t.knowledge.deleteSession,
+            onSelect: () => onDeleteSession(session.id),
+          },
+        ]}
         active={selected}
         dragging={dragged}
+        indicator={running ? <ExplorerRunningIndicator label={t.common.running} /> : undefined}
         nested={nested}
         onPointerDown={(event) => beginSessionDrag(event, session.id)}
-      >
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              aria-label={`${pinned ? t.knowledge.unpinSession : t.knowledge.pinSession}: ${session.title}`}
-              className="absolute right-7 top-1/2 size-6 -translate-y-1/2 text-foreground/55 opacity-0 transition hover:text-foreground focus-visible:opacity-100 group-hover/explorer-item:opacity-100"
-              data-explorer-action
-              onClick={() => onTogglePinnedSession(session.id)}
-              size="icon"
-              type="button"
-              variant="ghost"
-            >
-              {pinned ? <PinOff className="icon-sm" /> : <Pin className="icon-sm" />}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>{pinned ? t.knowledge.unpinSession : t.knowledge.pinSession}</TooltipContent>
-        </Tooltip>
-        {editing ? (
-          <div
-            className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-left"
-            data-explorer-action
-          >
-            <span className="flex min-w-0 items-center gap-2">
-              <input
-                aria-label={t.knowledge.renameSession}
-                className="min-w-0 flex-1 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 t-list-regular text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                onBlur={commitSessionEdit}
-                onChange={(event) => onSessionTitleDraftChange(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.preventDefault()
-                    commitSessionEdit()
-                  }
-                  if (event.key === 'Escape') {
-                    event.preventDefault()
-                    cancelSessionEdit()
-                  }
-                }}
-                ref={sessionTitleInputRef}
-                value={sessionTitleDraft}
-              />
-              {running && <ExplorerRunningIndicator label={t.common.running} />}
-            </span>
-            <span className="shrink-0 t-hint tabular-nums text-muted-foreground transition-opacity group-hover/explorer-item:opacity-0 group-focus-within/explorer-item:opacity-0">
-              {sessionTime}
-            </span>
-          </div>
-        ) : (
-          <button
-            aria-pressed={selected}
-            className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            onClick={() => onSelectSession(session.id)}
-            onDoubleClick={() => startSessionEdit(session)}
-            title={t.knowledge.renameSession}
-            type="button"
-          >
-            <span className="flex min-w-0 items-center gap-2">
-              <span className="block min-w-0 flex-1 truncate t-list-regular text-foreground">
-                {session.title}
-              </span>
-              {running && <ExplorerRunningIndicator label={t.common.running} />}
-            </span>
-            <span className="shrink-0 t-hint tabular-nums text-muted-foreground transition-opacity group-hover/explorer-item:opacity-0 group-focus-within/explorer-item:opacity-0">
-              {sessionTime}
-            </span>
-          </button>
-        )}
-        <Button
-          aria-label={`${t.knowledge.deleteSession}: ${session.title}`}
-          className="absolute right-1 top-1/2 size-6 -translate-y-1/2 text-foreground/55 opacity-0 transition hover:text-destructive focus-visible:opacity-100 group-hover/explorer-item:opacity-100"
-          data-explorer-action
-          onClick={() => onDeleteSession(session.id)}
-          size="icon"
-          type="button"
-          variant="ghost"
-        >
-          <Trash2 className="icon-sm" />
-        </Button>
-      </ExplorerItemRow>
+        onSelect={() => onSelectSession(session.id)}
+        onStartRename={() => startSessionEdit(session)}
+        renameEditor={editing ? (
+          <ExplorerHistoryTitleInput
+            inputRef={sessionTitleInputRef}
+            label={t.knowledge.renameSession}
+            onCancel={cancelSessionEdit}
+            onChange={onSessionTitleDraftChange}
+            onCommit={commitSessionEdit}
+            value={sessionTitleDraft}
+          />
+        ) : undefined}
+        renameLabel={t.knowledge.renameSession}
+        timeLabel={sessionTime}
+        title={session.title}
+      />
     </motion.div>
   )
 }

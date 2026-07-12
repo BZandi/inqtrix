@@ -35,12 +35,18 @@ export function OptionMenuItem({
   icon: Icon,
   label,
   onSelect,
+  keepOpen = false,
+  descriptionLines = 1,
 }: {
   active: boolean
   description?: string
   icon: LucideIcon
   label: string
   onSelect: () => void
+  /** Multi-setting popovers can keep the surface open between choices. */
+  keepOpen?: boolean
+  /** Long decision hints may use two lines; all other menu rows stay dense. */
+  descriptionLines?: 1 | 2
 }) {
   return (
     <DropdownMenuItem
@@ -48,7 +54,10 @@ export function OptionMenuItem({
         'group relative items-center gap-2.5 rounded-none px-2.5 py-1.5 pr-1.5 hover:bg-accent/50 focus:bg-accent/80 data-[highlighted]:bg-accent/80',
         active && 'bg-accent',
       )}
-      onSelect={onSelect}
+      onSelect={(event) => {
+        if (keepOpen) event.preventDefault()
+        onSelect()
+      }}
     >
       <span
         className={cn(
@@ -66,7 +75,16 @@ export function OptionMenuItem({
       />
       <span className="min-w-0 flex-1 text-left">
         <span className="block truncate t-list text-foreground">{label}</span>
-        {description ? <span className="block truncate t-meta-sm text-muted-foreground">{description}</span> : null}
+        {description ? (
+          <span
+            className={cn(
+              'block t-meta-sm text-muted-foreground',
+              descriptionLines === 2 ? 'line-clamp-2' : 'truncate',
+            )}
+          >
+            {description}
+          </span>
+        ) : null}
       </span>
       <span className="flex size-4 shrink-0 items-center justify-center">
         {active ? <Check className="size-3.5 text-brand" /> : null}

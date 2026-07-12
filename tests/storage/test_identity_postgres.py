@@ -18,7 +18,7 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import insert, select, text, update
+from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from inqtrix.auth.identity_memory import MemoryIdentityStore
@@ -946,3 +946,189 @@ async def test_membership_admin_repository_parity(session_factory):
     )
     for store in (MemoryIdentityStore(), backend):
         await _exercise_membership_admin(store)
+
+
+@pytest.mark.asyncio
+async def test_create_share_is_idempotent_under_concurrent_grants(
+    session_factory,
+):
+    """1.6: two concurrent grants of the same tuple collapse to one row.
+
+    Before, the loser hit the active partial-unique index and raised a
+    bare IntegrityError (HTTP 500). Now the ON CONFLICT DO UPDATE
+    re-points the existing active row instead — both callers succeed and
+    exactly ONE active row remains (last-writer-wins on permission), with
+    no exception.
+    """
+    import asyncio
+
+    backend = PostgresIdentityBackend(
+        session_factory=session_factory, app_role=APP_ROLE
+    )
+
+    def grant(permission: SharePermission):
+        return backend.create_share(
+            tenant_id="default",
+            subject_type="user",
+            subject_id="bob",
+            resource_type="report",
+            resource_id="rc",
+            permission=permission,
+            granted_by_sub="owner",
+        )
+
+    # Run the concurrency a few rounds on FRESH tuples to reliably hit
+    # the first-grant INSERT-INSERT race (no prior active row to serialise
+    # the two soft-revokes). Every round must stay exception-free and
+    # leave exactly one active row.
+    for round_index in range(8):
+        resource_id = f"rc-{round_index}"
+
+        async def grant_res(permission: SharePermission):
+            return await backend.create_share(
+                tenant_id="default",
+                subject_type="user",
+                subject_id="bob",
+                resource_type="report",
+                resource_id=resource_id,
+                permission=permission,
+                granted_by_sub="owner",
+            )
+
+        results = await asyncio.gather(
+            grant_res(SharePermission.VIEW),
+            grant_res(SharePermission.EDIT),
+            return_exceptions=True,
+        )
+        for result in results:
+            assert not isinstance(result, Exception), result
+
+        # Each returned id must be a row that was actually PERSISTED, not a
+        # minted phantom. The race resolves two legitimate ways: the two
+        # INSERTs conflict and DO UPDATE the one surviving row (both racers
+        # return that id), or one commits first and the other soft-revokes it
+        # then inserts a fresh active row (the ids differ, last-writer-wins).
+        # Either way both ids come from RETURNING on a real statement. Before
+        # the fix the loser echoed a freshly-minted uuid that never hit a row,
+        # so a later accept_share on it would 404.
+        async with scoped(session_factory) as session:
+            for result in results:
+                exists = (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(resource_shares)
+                        .where(resource_shares.c.id == uuid.UUID(result.id))
+                    )
+                ).scalar_one()
+                assert exists == 1, (
+                    f"round {round_index}: returned id {result.id} was never "
+                    "persisted (phantom minted uuid)"
+                )
+
+        async with scoped(session_factory) as session:
+            active = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(resource_shares)
+                    .where(
+                        resource_shares.c.resource_id == resource_id,
+                        resource_shares.c.revoked_at.is_(None),
+                    )
+                )
+            ).scalar_one()
+        assert active == 1, f"round {round_index}: {active} active rows"
+
+    # Sequential re-grant still works and stays single-active (the
+    # historical soft-revoke path).
+    await grant(SharePermission.MANAGE)
+    async with scoped(session_factory) as session:
+        active = (
+            await session.execute(
+                select(func.count())
+                .select_from(resource_shares)
+                .where(
+                    resource_shares.c.resource_id == "rc",
+                    resource_shares.c.revoked_at.is_(None),
+                )
+            )
+        ).scalar_one()
+    assert active == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_regrant_preserves_acceptance(session_factory):
+    """P2: a concurrent re-grant of an ALREADY-ACCEPTED share keeps access.
+
+    Root cause: the ON CONFLICT DO UPDATE wrote the acceptance captured from
+    THIS transaction's own soft-revoke. Under a concurrent re-grant, one
+    grant's soft-revoke can match zero rows (the racer already revoked the
+    active row) and capture ``None``, then win the conflict on the racer's
+    fresh active row and overwrite its live ``accepted_at`` with ``None`` — a
+    silent access revocation, since the consent gate treats a pending
+    (``accepted_at IS NULL``) share as granting nothing. The COALESCE of the
+    EXISTING row's acceptance makes it survive every interleaving. A few
+    rounds raise the odds of hitting the losing interleaving; the invariant
+    (surviving active row stays accepted) must hold on every one.
+    """
+    import asyncio
+
+    backend = PostgresIdentityBackend(
+        session_factory=session_factory, app_role=APP_ROLE
+    )
+
+    for round_index in range(8):
+        resource_id = f"rc-accepted-{round_index}"
+
+        granted = await backend.create_share(
+            tenant_id="default",
+            subject_type="user",
+            subject_id="bob",
+            resource_type="report",
+            resource_id=resource_id,
+            permission=SharePermission.VIEW,
+            granted_by_sub="owner",
+        )
+        accepted = await backend.accept_share_by_id(
+            tenant_id="default", share_id=granted.id, subject_sub="bob"
+        )
+        assert accepted is not None and accepted.accepted_at is not None
+
+        async def regrant(permission: SharePermission):
+            return await backend.create_share(
+                tenant_id="default",
+                subject_type="user",
+                subject_id="bob",
+                resource_type="report",
+                resource_id=resource_id,
+                permission=permission,
+                granted_by_sub="owner",
+            )
+
+        results = await asyncio.gather(
+            regrant(SharePermission.EDIT),
+            regrant(SharePermission.MANAGE),
+            return_exceptions=True,
+        )
+        for result in results:
+            assert not isinstance(result, Exception), result
+            # The RETURNED record must mirror the persisted acceptance too
+            # (accepted_at now comes from RETURNING, not the captured value),
+            # so a re-grant of an accepted share never reports itself pending.
+            assert result.accepted_at is not None, (
+                f"round {round_index}: returned record dropped accepted_at"
+            )
+
+        async with scoped(session_factory) as session:
+            rows = (
+                await session.execute(
+                    select(resource_shares.c.accepted_at).where(
+                        resource_shares.c.resource_id == resource_id,
+                        resource_shares.c.revoked_at.is_(None),
+                    )
+                )
+            ).all()
+        assert len(rows) == 1, f"round {round_index}: {len(rows)} active rows"
+        assert rows[0].accepted_at is not None, (
+            f"round {round_index}: accepted_at was silently reset to NULL "
+            "under a concurrent re-grant (access revoked)"
+        )

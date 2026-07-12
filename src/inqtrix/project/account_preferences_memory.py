@@ -29,10 +29,12 @@ class MemoryAccountPreferencesStore:
         theme_preset,
         user_bubble_tone,
         updated_at,
+        enable_agent_memory=False,
     ) -> AccountPreferences:
         prefs = AccountPreferences(
             sub=sub, contrast_mode=contrast_mode, locale=locale, theme=theme,
             theme_preset=theme_preset, user_bubble_tone=user_bubble_tone,
+            enable_agent_memory=enable_agent_memory,
             updated_at=updated_at,
         )
         self._rows[sub] = prefs

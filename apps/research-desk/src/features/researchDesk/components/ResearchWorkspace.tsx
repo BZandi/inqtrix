@@ -2,14 +2,17 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from '@/components/ui/resizable'
+import { useCallback, useEffect, useState } from 'react'
 import {
   AnimatedPanelBody,
   AnimatedResizableHandle,
 } from '@/components/ui/animated-panel'
 import { useAnimatedResizablePanelCollapse } from '@/components/ui/animated-panel-motion'
+import { ResponsiveSidePanel } from '@/components/ui/responsive-side-panel'
 import type { CreateResearchRunRequest } from '@/features/researchRuns/types'
 import { ReportPanel } from '@/features/report/ReportPanel'
 import type { ResearchRunRecord } from '@/features/project/types'
+import { useLocale } from '@/i18n/LocaleProvider'
 import type { JobFilter, ResearchJob } from '../types'
 import { ResearchRunColumn } from './ResearchRunColumn'
 
@@ -24,7 +27,6 @@ type ResearchWorkspaceProps = {
   expandedJobId: string | null
   isComposerVisible: boolean
   isDesktop: boolean
-  isReportExpanded: boolean
   isReportVisible: boolean
   jobs: ResearchJob[]
   onActiveFilterChange: (filter: JobFilter) => void
@@ -34,10 +36,10 @@ type ResearchWorkspaceProps = {
   onResearchQuestionChange: (question: string) => void
   researchQuestion: string
   onDeleteJob: (jobId: string) => void
-  onReportExpandedChange: (isExpanded: boolean) => void
   onReportPanelSizeChange: (size: number) => void
   onReportVisibleChange: (isVisible: boolean) => void
   onSelectJob: (jobId: string) => void
+  onSetReportAutocomplete?: (runId: string, includeInAutocomplete: boolean) => void
   onShareJob?: (jobId: string) => void
   onToggleJob: (jobId: string) => void
   onUseReportInChat: (runId: string) => void
@@ -58,7 +60,6 @@ export function ResearchWorkspace({
   expandedJobId,
   isComposerVisible,
   isDesktop,
-  isReportExpanded,
   isReportVisible,
   jobs,
   onActiveFilterChange,
@@ -68,10 +69,10 @@ export function ResearchWorkspace({
   onResearchQuestionChange,
   researchQuestion,
   onDeleteJob,
-  onReportExpandedChange,
   onReportPanelSizeChange,
   onReportVisibleChange,
   onSelectJob,
+  onSetReportAutocomplete,
   onShareJob,
   onToggleJob,
   onUseReportInChat,
@@ -83,6 +84,8 @@ export function ResearchWorkspace({
   shareCountByRunId,
   sharedByLabelByRunId,
 }: ResearchWorkspaceProps) {
+  const { t } = useLocale()
+  const [isMobileReportOpen, setIsMobileReportOpen] = useState(false)
   const reportPanelMotion = useAnimatedResizablePanelCollapse({
     expandedSize: reportPanelSize,
     expanded: isReportVisible,
@@ -92,6 +95,26 @@ export function ResearchWorkspace({
     [RESEARCH_REPORT_PANEL_ID]: isReportVisible ? reportPanelSize : 0,
     [RESEARCH_RUN_PANEL_ID]: isReportVisible ? 100 - reportPanelSize : 100,
   }
+
+  useEffect(() => {
+    if (isDesktop) setIsMobileReportOpen(false)
+  }, [isDesktop])
+
+  const controlReportVisible = isDesktop ? isReportVisible : isMobileReportOpen
+  const handleReportVisibleChange = useCallback((isVisible: boolean) => {
+    if (isDesktop) {
+      onReportVisibleChange(isVisible)
+      return
+    }
+    setIsMobileReportOpen(isVisible)
+  }, [isDesktop, onReportVisibleChange])
+  const handleDesktopReportHide = useCallback(() => {
+    onReportVisibleChange(false)
+  }, [onReportVisibleChange])
+  const handleMobileReportHide = useCallback(() => {
+    setIsMobileReportOpen(false)
+  }, [])
+
   const runColumn = (
     <ResearchRunColumn
       activeFilter={activeFilter}
@@ -100,13 +123,13 @@ export function ResearchWorkspace({
       cancelSubmittingRunIds={cancelSubmittingRunIds}
       expandedJobId={expandedJobId}
       isComposerVisible={isComposerVisible}
-      isReportVisible={isReportVisible}
+      isReportVisible={controlReportVisible}
       jobs={jobs}
       onActiveFilterChange={onActiveFilterChange}
       onCancelJob={onCancelJob}
       onComposerSubmit={onComposerSubmit}
       onComposerVisibleChange={onComposerVisibleChange}
-      onReportVisibleChange={onReportVisibleChange}
+      onReportVisibleChange={handleReportVisibleChange}
       reportPanelId={RESEARCH_REPORT_PANEL_ID}
       onResearchQuestionChange={onResearchQuestionChange}
       researchQuestion={researchQuestion}
@@ -122,10 +145,10 @@ export function ResearchWorkspace({
     />
   )
 
-  if (isDesktop) {
-    return (
+  return (
+    <div className="relative flex h-full min-h-0 w-full flex-1 overflow-hidden">
       <ResizablePanelGroup
-        className="h-full w-full overflow-hidden lg:min-h-0"
+        className="min-h-0 w-full overflow-hidden"
         defaultLayout={reportPanelLayout}
         elementRef={reportPanelMotion.groupRef}
         onLayoutChanged={(layout) => {
@@ -145,52 +168,60 @@ export function ResearchWorkspace({
           className="min-h-0 min-w-0 overflow-hidden"
           defaultSize={reportPanelLayout[RESEARCH_RUN_PANEL_ID]}
           id={RESEARCH_RUN_PANEL_ID}
+          // Identity anchor — must stay unconditional so the run column DOM
+          // survives the desktop/mobile flip and the report toggle.
+          key={RESEARCH_RUN_PANEL_ID}
           maxSize={isReportVisible ? '74%' : '100%'}
           minSize="42%"
         >
           {runColumn}
         </ResizablePanel>
-        <AnimatedResizableHandle
-          aria-label="Resize report panel"
-          expanded={isReportVisible}
-        />
-        <ResizablePanel
-          className="min-h-0 min-w-0 overflow-hidden"
-          collapsedSize="0%"
-          collapsible
-          defaultSize={reportPanelLayout[RESEARCH_REPORT_PANEL_ID]}
-          elementRef={reportPanelMotion.panelElementRef}
-          id={RESEARCH_REPORT_PANEL_ID}
-          maxSize="58%"
-          minSize={isReportVisible ? '26%' : '0%'}
-          panelRef={reportPanelMotion.panelRef}
-        >
-          <AnimatedPanelBody expanded={isReportVisible} side="right">
-            <ReportPanel
-              isExpanded={isReportVisible && isReportExpanded}
-              onExpandedChange={onReportExpandedChange}
-              onHide={() => { onReportExpandedChange(false); onReportVisibleChange(false) }}
-              onUseReportInChat={onUseReportInChat}
-              selectedRun={selectedRun}
+        {isDesktop && (
+          <>
+            <AnimatedResizableHandle
+              aria-label="Resize report panel"
+              expanded={isReportVisible}
             />
-          </AnimatedPanelBody>
-        </ResizablePanel>
+            <ResizablePanel
+              className="min-h-0 min-w-0 overflow-hidden"
+              collapsedSize="0%"
+              collapsible
+              defaultSize={reportPanelLayout[RESEARCH_REPORT_PANEL_ID]}
+              id={RESEARCH_REPORT_PANEL_ID}
+              maxSize="58%"
+              minSize={isReportVisible ? '26%' : '0%'}
+              panelRef={reportPanelMotion.panelRef}
+            >
+              <AnimatedPanelBody expanded={isReportVisible} side="right">
+                <ReportPanel
+                  onHide={handleDesktopReportHide}
+                  onSetReportAutocomplete={onSetReportAutocomplete}
+                  onUseReportInChat={onUseReportInChat}
+                  selectedRun={selectedRun}
+                />
+              </AnimatedPanelBody>
+            </ResizablePanel>
+          </>
+        )}
       </ResizablePanelGroup>
-    )
-  }
-
-  return (
-    <div className="grid w-full grid-cols-1 gap-4 py-4">
-      {runColumn}
-      {isReportVisible ? (
-        <ReportPanel
-          isExpanded={isReportExpanded}
-          onExpandedChange={onReportExpandedChange}
-          onHide={() => { onReportExpandedChange(false); onReportVisibleChange(false) }}
-          onUseReportInChat={onUseReportInChat}
-          selectedRun={selectedRun}
-        />
-      ) : null}
+      {!isDesktop && (
+        <ResponsiveSidePanel
+          closeLabel={t.report.hide}
+          controlsId={RESEARCH_REPORT_PANEL_ID}
+          onOpenChange={setIsMobileReportOpen}
+          open={isMobileReportOpen}
+          showHeader={false}
+          side="right"
+          title={t.report.title}
+        >
+          <ReportPanel
+            onHide={handleMobileReportHide}
+            onSetReportAutocomplete={onSetReportAutocomplete}
+            onUseReportInChat={onUseReportInChat}
+            selectedRun={selectedRun}
+          />
+        </ResponsiveSidePanel>
+      )}
     </div>
   )
 }

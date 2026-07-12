@@ -67,8 +67,17 @@ def test_529_then_success_replay() -> None:
 
 
 @pytest.mark.vcr
-def test_rate_limit_replay() -> None:
-    """A 429 is escalated immediately as ``AgentRateLimited`` (no retry)."""
+def test_rate_limit_replay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An EXHAUSTED 429 budget escalates to ``AgentRateLimited``.
+
+    A 429 is now retried with backoff (1.1a); the single-429 cassette
+    covers the escalation path, so the rate-limit retry budget is set to
+    0 here to exhaust it on the first hit. anthropic.py imported the
+    constant by value, so patch it on the anthropic module.
+    """
+    monkeypatch.setattr(
+        "inqtrix.providers.anthropic._SDK_RATE_LIMIT_MAX_RETRIES", 0
+    )
     provider = _build_provider()
 
     with pytest.raises(AgentRateLimited):

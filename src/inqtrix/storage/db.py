@@ -20,6 +20,17 @@ The policies fail closed on top of this: the
 survives as an empty string for the connection lifetime — the
 documented ``current_setting`` gotcha), so a forgotten
 ``tenant_session`` produces a loud error, never another tenant's rows.
+
+Transaction-pooler contract (PgBouncer ``pool_mode=transaction``): this
+module is deliberately pooler-safe — no session-scoped SET, no
+LISTEN/NOTIFY, no session advisory locks — and MUST stay that way; a
+future session-scoped feature would silently break behind a pooler.
+Two operational requirements remain on the DEPLOYMENT side: (1) asyncpg
+prepared statements need either ``?prepared_statement_cache_size=0`` in
+the URL or PgBouncer >= 1.21 with ``max_prepared_statements`` tracking
+(the bundled compose/helm pgbouncer sets both); (2) Alembic migrations
+(``inqtrix-migrate``) connect DIRECTLY to Postgres, never through the
+pooler — DDL and long transactions do not multiplex.
 """
 
 from __future__ import annotations
@@ -46,7 +57,14 @@ utility statement and cannot take bind parameters, so the identifier is
 validated against this conservative pattern before interpolation."""
 
 
-def build_engine(database_url: str, *, null_pool: bool = False) -> AsyncEngine:
+def build_engine(
+    database_url: str,
+    *,
+    null_pool: bool = False,
+    pool_size: int = 5,
+    max_overflow: int = 10,
+    pool_timeout: float = 30.0,
+) -> AsyncEngine:
     """Create the async engine for the platform persistence layer.
 
     Args:
@@ -60,14 +78,26 @@ def build_engine(database_url: str, *, null_pool: bool = False) -> AsyncEngine:
             a store that is called both from the async request loop AND
             from a sync worker thread via ``asyncio.run`` requires (the
             quota store; the durable run store solves the same problem
-            with its own dedicated loop instead).
+            with its own dedicated loop instead). The pool sizing
+            arguments are ignored on this branch — NullPool holds no
+            connections.
+        pool_size: Persistent connections this engine keeps open.
+            Default 5 (the SQLAlchemy default) keeps existing
+            deployments byte-identical. Operators size it through
+            ``StorageSettings.pool_kwargs()`` so the per-process budget
+            — ``pooled_engines x (pool_size + max_overflow)`` — stays
+            reviewable against Postgres ``max_connections``.
+        max_overflow: Burst connections beyond ``pool_size``, closed
+            again when idle (default 10, the SQLAlchemy default).
+        pool_timeout: Seconds a caller waits for a free pooled
+            connection before failing loudly (default 30, the
+            SQLAlchemy default). Bounds the queueing latency a
+            too-small pool would otherwise convert errors into.
 
     Returns:
         An :class:`AsyncEngine` with pre-ping (survives idle-timeout
         connection kills) and a 30-minute recycle below common
-        infrastructure idle limits. Default pool sizing stays at the
-        SQLAlchemy defaults (5 + 10 overflow), adequate for one API
-        process.
+        infrastructure idle limits.
     """
     if null_pool:
         return create_async_engine(database_url, poolclass=NullPool)
@@ -75,6 +105,9 @@ def build_engine(database_url: str, *, null_pool: bool = False) -> AsyncEngine:
         database_url,
         pool_pre_ping=True,
         pool_recycle=1800,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_timeout=pool_timeout,
     )
 
 

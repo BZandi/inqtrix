@@ -218,6 +218,60 @@ async def test_search_with_unknown_collection_raises():
 
 
 @pytest.mark.asyncio
+async def test_reembed_preserves_chunk_ids_and_citation_key():
+    """Reindex must not orphan citations: chunk ids AND the
+    ``(document_id, chunk_index)`` citation key survive a re-embed."""
+    embeddings = StubEmbeddings()
+    store = MemoryKnowledgeStore()
+    service = make_service(make_knowledge_context(embeddings=embeddings, store=store))
+
+    collection = await service.create_collection(name="Recht")
+    document = await service.add_document(
+        collection_id=collection.id,
+        title="Haftungsvertrag",
+        text="Die Haftung ist begrenzt.\n\nDie Frist betraegt 24 Stunden.",
+    )
+
+    before = await store.get_chunks(document.id)
+    assert before, "fixture must produce at least one chunk"
+    ids_before = [(chunk.chunk_index, chunk.id) for chunk in before]
+
+    await service.reembed_document(
+        document=document,
+        embedding_model=collection.embedding_model,
+    )
+
+    after = await store.get_chunks(document.id)
+    ids_after = [(chunk.chunk_index, chunk.id) for chunk in after]
+    assert ids_after == ids_before
+    # The read surface carries no vectors (lockstep with Postgres).
+    assert all(chunk.embedding == () for chunk in after)
+
+
+@pytest.mark.asyncio
+async def test_get_chunks_orders_by_index_and_404s():
+    """``get_chunks`` returns chunk_index order regardless of physical
+    order, and raises for an unknown document."""
+    store = MemoryKnowledgeStore()
+    service = make_service(make_knowledge_context(store=store))
+    collection = await service.create_collection(name="Recht")
+    document = await service.add_document(
+        collection_id=collection.id,
+        title="D",
+        text="Erster Absatz.\n\nZweiter Absatz.\n\nDritter Absatz.",
+    )
+    # Physically reverse the stored chunk list; get_chunks must still
+    # return chunk_index order (0,1,2), not physical order.
+    store._chunks[document.id] = list(reversed(store._chunks[document.id]))
+    chunks = await store.get_chunks(document.id)
+    assert [chunk.chunk_index for chunk in chunks] == sorted(
+        chunk.chunk_index for chunk in chunks
+    )
+    with pytest.raises(DocumentNotFound):
+        await store.get_chunks("kd_unknown")
+
+
+@pytest.mark.asyncio
 async def test_delete_unknown_document_raises():
     store = MemoryKnowledgeStore()
     with pytest.raises(DocumentNotFound):

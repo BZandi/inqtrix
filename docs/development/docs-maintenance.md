@@ -155,10 +155,11 @@ Whenever a code change alters public behaviour, update the matching `docs/**` pa
 | `deploy/helm/inqtrix/**` (Helm chart, values, templates) | `docs/deployment/kubernetes.md`, `docs/deployment/deployment-modes.md` |
 | `src/inqtrix/agent.py` public API | `docs/architecture/public-api.md`, `docs/architecture/overview.md` |
 | `src/inqtrix/nodes.py` | `docs/architecture/nodes.md` |
+| `src/inqtrix/agents/**`, `src/inqtrix/capabilities/**`, `src/inqtrix/services/agent_control_service.py`, `src/inqtrix/server/routers/agent_runs.py` | `docs/architecture/agent-platform.md`; event-catalog or waiting-status changes additionally `docs/observability/run-events.md`; `INQTRIX_AGENT_*` changes additionally `docs/configuration/settings-and-env.md` |
 | `src/inqtrix/evidence.py` | `docs/architecture/evidence-pipeline.md` |
 | `src/inqtrix/prompts.py` answer behaviour | `docs/architecture/evidence-pipeline.md`, `docs/architecture/nodes.md` |
 | `src/inqtrix/runtime_logging.py` forensic schemas / log tooling | `docs/observability/logging.md`, `docs/observability/forensic-cookbook.md` |
-| `apps/research-desk/**`, `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml` | `docs/deployment/react-ui.md` and, when the run-event contract changes, `docs/observability/run-events.md` |
+| `apps/research-desk/**`, `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml` | `docs/deployment/react-ui.md` and, when the run-event contract changes, `docs/observability/run-events.md`; when a frontend dependency is added or changed, also regenerate `THIRD_PARTY_NOTICES.md`/`.json` per [`release-process.md`](release-process.md) (step 7) |
 
 **Env-var completeness rule.** [`settings-and-env.md`](../configuration/settings-and-env.md) is the single source of truth for environment variables and must list **every** variable the code reads: every `Field(alias=...)` / `validation_alias` in `settings.py` (a new `*Settings` class gets its own block), and every `os.getenv` / `os.environ` read in the server/worker bootstrap, scripts, and tests (the last under the development/test-only section). A variable may appear in a table row or in a "Further tuning" prose line, but it must appear under its exact name so the page stays greppable. The committed `.env.example` / `deploy/.env.stack.example` templates are curated starters, not the reference; keep them free of variables that no longer exist in code. Deep-dive pages (provider recipes, auth modes, logging) may show usage but link here for the definition.
 

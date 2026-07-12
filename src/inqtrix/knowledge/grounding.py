@@ -102,6 +102,34 @@ def _normalize(text: str) -> str:
     return " ".join(folded.split()).casefold()
 
 
+def quote_is_verbatim(text: str, evidence_texts: list[str]) -> bool:
+    """Whether *text* appears verbatim in ANY of the evidence texts.
+
+    The agent-side quote check (``agents/report_quality.verify_quotes``)
+    reuses the ONE normalizer chain through this helper instead of the
+    ``check_grounding`` answer-block contract — that parser is bound to
+    per-label indices and the ``ANTWORT:`` scaffold, neither of which
+    exists for memo quotes checked against the whole evidence ledger.
+
+    Args:
+        text: The quoted passage (without surrounding quote marks).
+        evidence_texts: Stored source texts captured at retrieval time
+            (internal chunks and web excerpts alike).
+
+    Returns:
+        ``True`` when the normalizer-folded quote is a substring of at
+        least one normalizer-folded evidence text.
+    """
+    normalized = _normalize(text)
+    if not normalized:
+        return False
+    return any(
+        normalized in _normalize(evidence)
+        for evidence in evidence_texts
+        if evidence
+    )
+
+
 def check_grounding(
     content: str, evidence_texts: list[str]
 ) -> GroundingReport:

@@ -48,7 +48,7 @@ The provider itself reads no AWS environment variables; it always defers to `bot
 
 ## Retry and rate-limit behaviour
 
-- `ThrottlingException`: up to 5 attempts (`_MAX_BEDROCK_ATTEMPTS`) with exponential backoff + jitter. After the last attempt, the error is translated to `AgentRateLimited` so upstream handlers treat it the same as an Anthropic 429.
+- `ThrottlingException`: up to 3 total attempts (`_MAX_BEDROCK_ATTEMPTS`) inside one logical-operation deadline, with exponential backoff + jitter. After the last attempt, the error is translated to `AgentRateLimited` so upstream handlers treat it the same as an Anthropic 429.
 - Other Bedrock `ClientError` responses: raised as `BedrockAPIError` with the mapped HTTP-ish status code.
 - Retries respect the run deadline so retries cannot push past `MAX_TOTAL_SECONDS`.
 

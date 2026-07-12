@@ -1,6 +1,6 @@
 export function resizeTextareaToRows(
   textarea: HTMLTextAreaElement | null,
-  maxRows: number,
+  maxRows?: number,
 ) {
   if (!textarea) return
 
@@ -17,7 +17,9 @@ export function resizeTextareaToRows(
   const minHeight = Number.isFinite(configuredMinHeight)
     ? configuredMinHeight
     : lineHeight + paddingTop + paddingBottom + borderTop + borderBottom
-  const maxHeight = (lineHeight * maxRows) + paddingTop + paddingBottom + borderTop + borderBottom
+  const maxHeight = maxRows === undefined
+    ? Number.POSITIVE_INFINITY
+    : (lineHeight * maxRows) + paddingTop + paddingBottom + borderTop + borderBottom
   const nextHeight = Math.min(textarea.scrollHeight + borderTop + borderBottom, maxHeight)
   const shouldScroll = textarea.scrollHeight > maxHeight
   const caretIsAtEnd = textarea.selectionEnd >= textarea.value.length

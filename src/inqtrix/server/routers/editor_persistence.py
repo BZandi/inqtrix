@@ -22,6 +22,7 @@ from inqtrix.pagination import (
 )
 from inqtrix.project.editor_ports import (
     DocumentNotFound,
+    DocumentRevisionConflict,
     EditorComment,
     EditorDocument,
     EditorFolder,
@@ -208,6 +209,18 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(400, str(exc), "invalid_request_error")
         except DocumentNotFound:
             return error_response(404, "Dokument nicht gefunden", "not_found")
+        except DocumentRevisionConflict as exc:
+            # A concurrent writer (agent patch apply vs. this autosave)
+            # moved the document past the caller's base. 409 with the
+            # live revision — the client refetches and rebases (same
+            # envelope as the artifact/patch CAS conflicts).
+            return error_response(
+                409,
+                "Das Dokument wurde zwischenzeitlich geaendert — bitte "
+                "neu laden und erneut speichern.",
+                "conflict",
+                current_revision=exc.current_revision,
+            )
         return _document_detail_payload(document)
 
     @router.delete("/v1/editor/documents/{document_id}", status_code=204)

@@ -210,6 +210,11 @@ class AuditEntry:
         resource_id: Identifier of the resource acted on.
         detail: Small free-form context (requested permission, route).
             Must never contain secrets or full request bodies.
+        actor_type: ``user`` (default, every direct principal action) or
+            ``agent`` — actions a workspace-agent run performs on the
+            owner's behalf (``agent.*`` actions from the agent runtime).
+            ``actor_sub`` then still carries the OWNING user's sub: the
+            column distinguishes WHO acted, not on whose authority.
     """
 
     tenant_id: str
@@ -218,6 +223,7 @@ class AuditEntry:
     resource_type: str
     resource_id: str
     detail: dict[str, str] = field(default_factory=dict)
+    actor_type: str = "user"
 
 
 class MembershipRepository(Protocol):

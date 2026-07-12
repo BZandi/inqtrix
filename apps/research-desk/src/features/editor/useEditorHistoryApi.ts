@@ -23,6 +23,7 @@ import {
   deleteEditorDocument,
   deleteEditorFolder,
   getEditorDocument,
+  hasHttpStatus,
   listEditorComments,
   listEditorDocuments,
   listEditorFolders,
@@ -134,11 +135,47 @@ export function useEditorHistoryApi({
       })
       record = { ...document, contentMarkdown }
     }
-    await saveEditorDocument(
-      record.id,
-      serverDocumentPayload(record),
-      optionsRef.current,
-    )
+    try {
+      const saved = await saveEditorDocument(
+        record.id,
+        serverDocumentPayload(record),
+        optionsRef.current,
+      )
+      // Adopt the server's new revision as our base (revision now tracks the
+      // SERVER, not local edits). Revision-only, never touching content/
+      // updatedAt/dirty: the flush fingerprint is updatedAt, so this cannot
+      // wedge a re-flush, and a live keystroke during the save keeps its
+      // newer body. Without this, the next save would re-send the same base+1
+      // and 409 against the just-advanced server on every flush.
+      dispatch({
+        documentId: record.id,
+        revision: saved.revision,
+        type: 'adoptEditorDocumentRevision',
+      })
+    } catch (cause) {
+      if (!hasHttpStatus(cause, 409)) throw cause
+      // The server's revision guard refused this save: a concurrent
+      // writer (typically an agent patch apply) advanced the document
+      // past our base. Refetch and rebase onto the server revision.
+      // pushedContentMarkdown lets the reducer tell whether the user
+      // kept typing during the PUT->GET window: if not, it adopts the
+      // server body; if so, it KEEPS the live keystrokes and re-pushes
+      // them on the fresh base (never silently overwriting a live edit).
+      console.warn(
+        `[inqtrix] Editor-Dokument ${record.id}: Autosave verlor den `
+        + 'Revision-Guard (409) — Server-Stand wird uebernommen.',
+      )
+      const detail = await getEditorDocument(record.id, optionsRef.current)
+      dispatch({
+        contentMarkdown: detail.content_markdown ?? '',
+        documentId: record.id,
+        pushedContentMarkdown: record.contentMarkdown,
+        revision: detail.revision,
+        type: 'rebaseServerEditorDocument',
+      })
+      loadedDocsRef.current.add(record.id)
+      return
+    }
     // We hold this document's body now, so re-opening it must not trigger a
     // redundant body fetch.
     loadedDocsRef.current.add(record.id)

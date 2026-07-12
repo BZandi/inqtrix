@@ -258,7 +258,10 @@ def _build_session_backends(settings: "Settings"):
         from inqtrix.storage.pat_postgres import PostgresPatStore
 
         session_factory = build_session_factory(
-            build_engine(settings.storage.database_url)
+            build_engine(
+                settings.storage.database_url,
+                **settings.storage.pool_kwargs(),
+            )
         )
         app_role = settings.storage.app_role
         return (

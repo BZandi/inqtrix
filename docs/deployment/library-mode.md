@@ -93,7 +93,7 @@ agent = ResearchAgent(AgentConfig(
     report_profile=ReportProfile.DEEP,
     max_rounds=4,
     confidence_stop=8,
-    max_total_seconds=300,
+    max_total_seconds=3600,
 ))
 
 result = agent.research("Was ist der aktuelle Stand der GKV-Reform?")

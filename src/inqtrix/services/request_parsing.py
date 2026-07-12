@@ -16,6 +16,7 @@ from typing import Any
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from inqtrix.constants import REQUEST_WAIT_MARGIN_SECONDS
 from inqtrix.settings import AgentSettings, ServerSettings
 
 WORKSPACE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,80}$")
@@ -196,17 +197,6 @@ def question_and_messages(
         )
     enforce_payload_caps(question, messages, server)
     return question, messages
-
-
-REQUEST_WAIT_MARGIN_SECONDS = 30
-"""Grace the outer HTTP wait adds over the inner per-call budget (seconds).
-
-Every HTTP-level ``asyncio.wait_for`` deliberately outlives the inner per-call
-timeout by this margin so the inner call raises its specific, localized error
-(a provider timeout with a clear message) before the outer wait fires a generic
-504. Defined once and reused by every derived wait below so the relationship
-lives in a single place rather than four inlined ``+ 30`` literals.
-"""
 
 
 def request_timeout_seconds(agent_settings: AgentSettings) -> int:

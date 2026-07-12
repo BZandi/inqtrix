@@ -11,7 +11,6 @@ import json
 import logging
 import re
 import uuid
-from dataclasses import dataclass
 from hashlib import sha1
 from typing import Any
 
@@ -87,6 +86,16 @@ _COMMON_EVENT_KEYS = frozenset({
 # :func:`_sanitize_value` (hybrid policy: strict allowlist for the
 # forensic-lineage events, drop-list for ``iteration_summary`` headers).
 _EVENT_SCHEMAS: dict[str, frozenset[str]] = {
+    # Agent-Desk narration (plan B2): a strict allowlist so the prose
+    # channel can never grow surprise fields — the transcript renders
+    # the payload verbatim.
+    "inqtrix.agent.narration": frozenset({
+        "narration_id",
+        "kind",
+        "text",
+        "phase",
+        "final",
+    }),
     "run_start": frozenset({
         "run_id",
         "run_mode",
@@ -416,56 +425,6 @@ _EVENT_SCHEMAS: dict[str, frozenset[str]] = {
         "binding_status",
     }),
 }
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderCitationRecord:
-    """Normalized provider-side citation provenance.
-
-    These records capture the provider-neutral link between a query and a
-    source URL without retaining raw SDK payloads, request headers, or
-    credentials. Providers supply :class:`GroundedSource` rows on the
-    typed :class:`GroundedSearchResult`; those rows are normalized into
-    this stable event shape by :func:`normalize_source_provenance`.
-    """
-
-    citation_id: str
-    query_id: str
-    source_id: str
-    url: str
-    canonical_url: str
-    rank: int
-    origin: str
-    provider: str
-    title: str = ""
-    snippet: str = ""
-    source_date: str = ""
-    last_updated: str = ""
-    source: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class SourceRecord:
-    """Run-local source registry record.
-
-    The registry de-duplicates URLs by canonical URL and stores only
-    allowlisted forensic metadata: domain, tier, tier reason, provider,
-    and first-seen query. It intentionally does not include provider
-    request bodies, SDK response objects, headers, or credential-bearing
-    configuration.
-    """
-
-    source_id: str
-    url: str
-    canonical_url: str
-    domain: str
-    provider: str
-    first_seen_query_id: str
-    first_seen_rank: int
-    origin: str
-    tier: str = "unknown"
-    tier_reason: str = ""
-    access_status: str = "answer"
 
 
 def _serialize_payload(payload: dict[str, Any]) -> str:

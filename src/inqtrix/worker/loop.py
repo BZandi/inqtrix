@@ -41,11 +41,16 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
+from inqtrix.auth.principal import (
+    ANONYMOUS_PRINCIPAL,
+    STATIC_PRINCIPAL,
+    Principal,
+)
 from inqtrix.core.results import RunRequest
+from inqtrix.execution_failures import terminate_native_run
 from inqtrix.quota.models import QuotaSubject
 from inqtrix.server.runs import RunHandle
 from inqtrix.services.run_service import execute_run_request
-from inqtrix.urls import sanitize_error
 
 if TYPE_CHECKING:
     from inqtrix.core.algorithms import AlgorithmRegistry
@@ -75,6 +80,10 @@ class _ActiveJob:
     job: Any
     cancel_event: threading.Event
     future: Future | None = None
+    successor: Any | None = None
+    """One queued follow-up dispatch held while a parked segment unwinds."""
+    handoff_in_progress: bool = False
+    """The successor occupies this slot while its row claim is landing."""
 
 
 class BaseWorkerLoop(Generic[TJob, TClaimed]):
@@ -149,6 +158,17 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
     def _enqueue_dispatch(self, entity_id: str, tenant_id: str) -> None:
         """Re-enqueue one dispatch message (reconciler)."""
         raise NotImplementedError
+
+    def _is_successor_dispatch(self, job: TJob) -> bool:
+        """Whether *job* is a real queued successor of an active segment.
+
+        Durable reindex jobs never park and therefore keep the historical
+        duplicate-ACK behaviour. The run worker overrides this hook and reads
+        the authoritative row status so a resume/wake message is not mistaken
+        for a reconciler duplicate while the previous segment is unwinding.
+        """
+        del job
+        return False
 
     # -- lifecycle -------------------------------------------------------- #
 
@@ -291,16 +311,28 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
 
     def _start(self, job: TJob, *, takeover: bool) -> None:
         entity_id = self._entity_id(job)
-        with self._lock:
-            active = self._active.get(entity_id)
-            active_message_id = active.job.message_id if active else None
-        if active is not None:
-            if active_message_id == job.message_id:
+        while True:
+            with self._lock:
+                active = self._active.get(entity_id)
+                active_message_id = active.job.message_id if active else None
+                successor_message_id = (
+                    active.successor.message_id
+                    if active is not None and active.successor is not None
+                    else None
+                )
+                handoff_in_progress = bool(
+                    active is not None and active.handoff_in_progress
+                )
+            if active is None:
+                break
+            if job.message_id in {
+                active_message_id,
+                successor_message_id,
+            }:
                 # Self-reclaim: XAUTOCLAIM does not exclude the calling
-                # consumer, so after a heartbeat gap a worker can
-                # reclaim its OWN in-flight entry. Acking it would
-                # destroy the job's only crash-recovery entry — keep
-                # holding it (the reclaim already reset its idle time).
+                # consumer, so after a heartbeat gap a worker can reclaim its
+                # OWN active or held-successor entry. Acking either would
+                # destroy the job's crash-recovery entry.
                 log.warning(
                     "Worker %s: Self-Reclaim fuer aktiven Job %s nach "
                     "Heartbeat-Stille — Eintrag bleibt gehalten.",
@@ -308,16 +340,51 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                     entity_id,
                 )
                 return
-            # A genuinely SECOND dispatch message (reconciler under
-            # backlog): ack it; silently dropping would leave an
-            # un-heartbeated PEL entry that matures into a takeover of
-            # the healthy execution. The original message stays held.
-            log.info(
-                "Worker %s: Duplikat-Dispatch fuer aktiven Job %s "
-                "bestaetigt.",
-                self._store.worker_id,
-                entity_id,
-            )
+            if handoff_in_progress or successor_message_id is not None:
+                # One held successor is sufficient. Extra messages are true
+                # duplicates and must not idle in the PEL until they can steal
+                # the queued/running successor.
+                log.info(
+                    "Worker %s: zusaetzlicher Duplikat-Dispatch fuer Job %s "
+                    "bestaetigt.",
+                    self._store.worker_id,
+                    entity_id,
+                )
+                self._queue.ack(job.message_id)
+                return
+            # A queued row while the previous segment is still active is not
+            # a reconciler duplicate: it is the durable resume/child-wake
+            # successor. The status read deliberately happens outside the
+            # worker lock. If it fails, the exception propagates and the
+            # message remains unacked for redelivery — never degrade an
+            # uncertain successor into an ACK.
+            if not self._is_successor_dispatch(job):
+                log.info(
+                    "Worker %s: Duplikat-Dispatch fuer aktiven Job %s "
+                    "bestaetigt.",
+                    self._store.worker_id,
+                    entity_id,
+                )
+                self._queue.ack(job.message_id)
+                return
+            with self._lock:
+                current = self._active.get(entity_id)
+                if current is not active:
+                    # The old execution completed during the row-status read;
+                    # re-evaluate and claim normally instead of losing the
+                    # successor in that handoff window.
+                    continue
+                if current.successor is None and not current.handoff_in_progress:
+                    current.successor = job
+                    log.info(
+                        "Worker %s: Folge-Dispatch fuer geparkten Job %s "
+                        "bis zum Segment-Abschluss gehalten.",
+                        self._store.worker_id,
+                        entity_id,
+                    )
+                    return
+            # A successor won the lock between the two reads. Keep the first
+            # one and acknowledge this redundant message.
             self._queue.ack(job.message_id)
             return
         if job.delivery_count > self._max_attempts:
@@ -356,15 +423,118 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                 self._active.pop(entity_id, None)
             raise
 
+    def _finish_active(self, job: TJob, *, allow_successor: bool) -> None:
+        """Release one execution slot and hand off its held successor.
+
+        A successor is activated only after the old stream entry was ACKed.
+        Otherwise the old entry could later be redelivered with takeover
+        permission and fence out the newly started segment. The successor is
+        kept as an active placeholder during its claim so capacity and drain
+        never observe a false empty slot.
+        """
+        entity_id = self._entity_id(job)
+        placeholder: _ActiveJob | None = None
+        with self._lock:
+            active = self._active.get(entity_id)
+            if active is None or active.job.message_id != job.message_id:
+                return
+            successor = active.successor
+            if successor is None or not allow_successor:
+                self._active.pop(entity_id, None)
+                if successor is not None:
+                    log.warning(
+                        "Worker %s: Folge-Dispatch fuer Job %s bleibt "
+                        "unbestaetigt, weil der alte Stream-Eintrag nicht "
+                        "sicher freigegeben wurde — Redelivery uebernimmt.",
+                        self._store.worker_id,
+                        entity_id,
+                    )
+                return
+            placeholder = _ActiveJob(
+                job=successor,
+                cancel_event=threading.Event(),
+                handoff_in_progress=True,
+            )
+            self._active[entity_id] = placeholder
+        self._activate_successor(entity_id, placeholder)
+
+    def _activate_successor(
+        self, entity_id: str, placeholder: _ActiveJob
+    ) -> None:
+        """Claim and submit a pre-registered successor placeholder."""
+        job = placeholder.job
+        try:
+            if job.delivery_count > self._max_attempts:
+                self._store.fail(
+                    entity_id,
+                    "Maximale Anzahl Ausfuehrungsversuche erreicht.",
+                    error_type="max_retries_exceeded",
+                )
+                self._queue.dead_letter(
+                    job, reason="max_attempts_exceeded"
+                )
+                with self._lock:
+                    if self._active.get(entity_id) is placeholder:
+                        self._active.pop(entity_id, None)
+                return
+            claimed = self._store.claim_for_execution(
+                entity_id,
+                job.tenant_id,
+                # A successor is a fresh queued segment. A crash during this
+                # handoff leaves the message for normal reclaim, whose regular
+                # _start call supplies takeover=True later.
+                allow_takeover=False,
+            )
+            if claimed is None:
+                self._queue.ack(job.message_id)
+                with self._lock:
+                    if self._active.get(entity_id) is placeholder:
+                        self._active.pop(entity_id, None)
+                return
+            # The row is RUNNING now. Open the placeholder for the NEXT
+            # generation before submitting: ThreadPoolExecutor may start a
+            # very fast segment before submit() returns, and that segment can
+            # park/enqueue its own successor immediately. Leaving the handoff
+            # flag set through submit would misclassify that legitimate next
+            # successor as an extra duplicate.
+            with self._lock:
+                if self._active.get(entity_id) is placeholder:
+                    placeholder.handoff_in_progress = False
+            future = self._executor.submit(
+                self._execute, job, claimed, placeholder.cancel_event
+            )
+            with self._lock:
+                if self._active.get(entity_id) is placeholder:
+                    placeholder.future = future
+        except BaseException:
+            with self._lock:
+                if self._active.get(entity_id) is placeholder:
+                    self._active.pop(entity_id, None)
+            # The successor entry remains unacked. Surface the failure, but do
+            # not let an unobserved executor-finally exception disappear.
+            log.exception(
+                "Worker %s: Folge-Dispatch fuer Job %s konnte nicht "
+                "aktiviert werden — Redelivery uebernimmt.",
+                self._store.worker_id,
+                entity_id,
+            )
+
+    def _heartbeat_message_ids(self) -> list[str]:
+        """Snapshot active and held-successor stream ids under one lock."""
+        with self._lock:
+            message_ids: list[str] = []
+            for active in self._active.values():
+                message_ids.append(active.job.message_id)
+                if active.successor is not None:
+                    message_ids.append(active.successor.message_id)
+            return message_ids
+
     def _heartbeat_loop(self) -> None:
         # Gated on _terminated, NOT _stop: heartbeats must continue
         # through the drain window or every draining job would be
         # reclaimed and double-executed by another worker.
         while not self._terminated.wait(self._heartbeat_seconds):
-            with self._lock:
-                message_ids = [
-                    active.job.message_id for active in self._active.values()
-                ]
+            message_ids = self._heartbeat_message_ids()
             if not message_ids:
                 continue
             try:
@@ -468,6 +638,20 @@ class FencedRunHandle(RunHandle):
             self.run_id, reason=reason, fence_attempt=self._fence_attempt
         )
 
+    def wait(self, status: Any) -> None:
+        """Park the run, fenced to this claim attempt (M5 segments).
+
+        The fence keeps a reclaimed zombie from parking a run the live
+        attempt owns. After a successful park the worker loop ACKS the
+        dispatch message like a terminal state — the resume re-enqueues
+        a FRESH message and any worker continues from the persisted
+        payload + checkpoint.
+        """
+        self._store.mark_waiting(
+            self.run_id, status=status, fence_attempt=self._fence_attempt
+        )
+        self.parked = True
+
 
 class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
     """Claim-and-execute loop for research runs.
@@ -532,6 +716,13 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
     def _enqueue_dispatch(self, entity_id: str, tenant_id: str) -> None:
         self._queue.enqueue(run_id=entity_id, tenant_id=tenant_id)
 
+    def _is_successor_dispatch(self, job: "QueuedJob") -> bool:
+        """Recognize a queued resume/wake behind an unwinding segment."""
+        return (
+            self._store.dispatch_status(job.run_id, job.tenant_id)
+            == "queued"
+        )
+
     def _execute(
         self,
         job: "QueuedJob",
@@ -541,6 +732,7 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
         handle = FencedRunHandle(
             self._store, job.run_id, cancel_event, claimed.attempt
         )
+        old_message_acked = False
         try:
             try:
                 payload = claimed.request_payload
@@ -562,6 +754,7 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                         "dieselbe Stack-Konfiguration teilen."
                     )
                 algorithm = self._registry.get(resolved.mode)
+                body = payload.get("body", {}) or {}
                 run_request = RunRequest(
                     mode=resolved.mode,
                     question=payload["question"],
@@ -569,6 +762,28 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                     messages=payload.get("messages", []),
                     agent_overrides=resolved.agent_overrides,
                     knowledge_filters=resolved.knowledge_filters,
+                    autonomy=str(body.get("autonomy", "") or ""),
+                    session_id=str(body.get("session_id", "") or ""),
+                    document_id=str(body.get("document_id", "") or ""),
+                    response_form=str(body.get("response_form", "") or ""),
+                    skill_ids=tuple(
+                        str(item) for item in (body.get("skill_ids") or [])
+                    ),
+                    skill_revisions={
+                        str(key): float(value)
+                        for key, value in (
+                            body.get("skill_revisions") or {}
+                        ).items()
+                    },
+                    tool_directives=tuple(
+                        str(item)
+                        for item in (body.get("tool_directives") or [])
+                    ),
+                    source_policy=body.get("source_policy") or {},
+                    web_recency=body.get("web_recency") or None,
+                    execution_directive=str(
+                        body.get("execution_directive", "") or ""
+                    ),
                 )
                 # Reconstruct the metered subject from the persisted run
                 # attribution — the worker has no live principal, but the
@@ -585,23 +800,81 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                         tenant_id=claimed.created_by_tenant_id,
                         sub=claimed.created_by_sub,
                     )
+                # Reconstruct the OWNER principal from the persisted run
+                # attribution: the workspace agent scopes its tool calls
+                # and attributes child runs through it (the quota subject
+                # alone cannot carry visibility). None only for legacy
+                # rows without a recorded creator.
+                principal = None
+                if (
+                    claimed.created_by_sub
+                    and claimed.created_by_tenant_id
+                    and claimed.created_by_sub
+                    not in (ANONYMOUS_PRINCIPAL.sub, STATIC_PRINCIPAL.sub)
+                ):
+                    # The sentinel subs of the none/apikey modes stay
+                    # principal-less: their historical unscoped view must
+                    # not turn into a membership-scoped one queue-side.
+                    principal = Principal(
+                        sub=claimed.created_by_sub,
+                        kind="oidc_session",
+                        tenant_id=claimed.created_by_tenant_id,
+                        role="member",
+                    )
+                requested_token_budget = int(
+                    body.get("token_budget", 0) or 0
+                ) or None
+                if claimed.kind == "agent_child" and requested_token_budget:
+                    # Pre-0043 mission planners embedded their own tiny caps in
+                    # child replay payloads. Children now inherit only the
+                    # operator's global run cap; trusted root overrides remain
+                    # available for non-child runs.
+                    log.warning(
+                        "Legacy-Tokenbudget im Agent-Child %s ignoriert; "
+                        "Operatorgrenzen bleiben autoritativ.",
+                        job.run_id,
+                    )
+                    handle.emit(
+                        "inqtrix.agent.activity",
+                        {
+                            "activity_id": (
+                                f"legacy-child-budget:{job.run_id}"
+                            ),
+                            "scope": "task",
+                            "phase": "execution",
+                            "operation": "task.legacy_budget_ignored",
+                            "detail": (
+                                "Veraltetes Task-Budget wird ignoriert"
+                            ),
+                            "status": "completed",
+                            "task_id": str(
+                                body.get("parent_task_id") or ""
+                            ),
+                            "fallback": True,
+                        },
+                    )
+                    requested_token_budget = None
                 execute_run_request(
                     handle,
                     algorithm=algorithm,
                     run_request=run_request,
                     resolved=resolved,
                     runtime=self._runtime,
-                    principal=None,
+                    principal=principal,
                     quota_service=self._quota_service,
                     quota_subject=quota_subject,
+                    token_budget=requested_token_budget,
+                    workspace_id=claimed.workspace_id,
                 )
             except Exception as exc:  # noqa: BLE001 — terminal-write then ack
                 log.exception("Worker-Run %s fehlgeschlagen", job.run_id)
-                handle.fail(sanitize_error(exc))
-            if handle.terminal_landed:
-                # Terminal state is committed; only now may the stream
-                # forget the job.
+                terminate_native_run(handle, exc)
+            if handle.terminal_landed or handle.parked:
+                # Terminal state is committed (or the run is PARKED in a
+                # waiting status — its resume re-enqueues a fresh
+                # message); only now may the stream forget the job.
                 self._queue.ack(job.message_id)
+                old_message_acked = True
             else:
                 # Fenced out: a superseding attempt owns the run AND
                 # this very message id — acking here would strip the
@@ -625,5 +898,6 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                 job.run_id,
             )
         finally:
-            with self._lock:
-                self._active.pop(job.run_id, None)
+            self._finish_active(
+                job, allow_successor=old_message_acked
+            )

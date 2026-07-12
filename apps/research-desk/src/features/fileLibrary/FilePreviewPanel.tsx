@@ -1,33 +1,25 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { FileText, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer'
 import { useLocale } from '@/i18n/LocaleProvider'
-import { cn } from '@/lib/utils'
-import { fetchServerFileContent, getAsset, type ClientOptions } from '@/api/inqtrixClient'
+import type { ClientOptions } from '@/api/inqtrixClient'
 import type { FileAssetRecord } from '@/features/project/types'
-import { OriginalFileTab } from '@/features/files/OriginalFileTab'
-
-type Tab = 'markdown' | 'original'
-
-type BodyState =
-  | { kind: 'loading' }
-  | { kind: 'error'; message: string }
-  | { kind: 'ready'; text: string }
+import {
+  FilePreviewBody,
+  FilePreviewTabSwitch,
+  useFilePreviewTabs,
+} from '@/features/files/FilePreviewBody'
 
 /**
  * Right-hand overlay that previews one library file: the transformed Markdown
  * (rendered with the app's report renderer, the same styling as chat/reports)
  * and — when the original is server-managed — the original PDF via react-pdf.
  *
- * Same overlay idiom as the knowledge `DocumentViewer`. The Markdown body comes
- * from the local record when present (client-parsed or already loaded) and is
- * otherwise fetched on open (`getAsset`, the load-on-use pattern). The Original
- * tab needs a connected server (`serverFileId` + options); it is disabled for
- * local-only assets.
+ * Same overlay idiom as the knowledge `DocumentViewer`. The body/tab
+ * mechanics live in the shared `FilePreviewBody` (also hosted by the agent
+ * canvas file view); this panel owns only the overlay chrome.
  */
 export function FilePreviewPanel({
   asset,
@@ -40,42 +32,7 @@ export function FilePreviewPanel({
   options: ClientOptions | null
 }) {
   const { t } = useLocale()
-  const [tab, setTab] = useState<Tab>('markdown')
-  const [originalOpened, setOriginalOpened] = useState(false)
-
-  const localText = asset.extractedText
-  const [body, setBody] = useState<BodyState>(
-    localText.trim() ? { kind: 'ready', text: localText } : { kind: 'loading' },
-  )
-
-  useEffect(() => {
-    if (localText.trim()) {
-      setBody({ kind: 'ready', text: localText })
-      return undefined
-    }
-    if (!options) {
-      // Local-only asset with no server to fetch from: nothing more to show.
-      setBody({ kind: 'ready', text: '' })
-      return undefined
-    }
-    let cancelled = false
-    setBody({ kind: 'loading' })
-    getAsset(asset.id, options)
-      .then((detail) => {
-        if (!cancelled) setBody({ kind: 'ready', text: detail.extracted_text ?? '' })
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setBody({
-            kind: 'error',
-            message: error instanceof Error ? error.message : t.filePreview.markdownError,
-          })
-        }
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [asset.id, localText, options, t])
+  const { originalOpened, switchTab, tab } = useFilePreviewTabs()
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -86,19 +43,6 @@ export function FilePreviewPanel({
   }, [onClose])
 
   const canShowOriginal = Boolean(asset.serverFileId && options)
-  const serverFileId = asset.serverFileId
-  const loadOriginal = useCallback((): Promise<{ blob: Blob; contentType: string }> => {
-    if (!serverFileId || !options) {
-      return Promise.reject(new Error(t.filePreview.originalUnavailable))
-    }
-    return fetchServerFileContent(serverFileId, options)
-  }, [options, serverFileId, t])
-
-  function switchTab(next: Tab) {
-    setTab(next)
-    if (next === 'original') setOriginalOpened(true)
-  }
-
   const title = asset.label || asset.fileName || t.filePreview.title
 
   return (
@@ -127,30 +71,11 @@ export function FilePreviewPanel({
             <p className="truncate t-meta text-muted-foreground">{asset.fileName}</p>
           </div>
 
-          <div className="grid h-7 shrink-0 grid-cols-2 rounded-md bg-surface p-0.5">
-            {(['markdown', 'original'] as const).map((tabKey) => {
-              const isActive = tab === tabKey
-              const isDisabled = tabKey === 'original' && !canShowOriginal
-              return (
-                <button
-                  aria-pressed={isActive}
-                  className={cn(
-                    'inline-flex items-center justify-center rounded px-2 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40',
-                    isActive
-                      ? 'bg-background text-foreground shadow-[0_1px_2px_var(--shadow-hairline)]'
-                      : 'text-muted-foreground hover:text-foreground',
-                  )}
-                  disabled={isDisabled}
-                  key={tabKey}
-                  onClick={() => switchTab(tabKey)}
-                  title={isDisabled ? t.filePreview.originalUnavailable : undefined}
-                  type="button"
-                >
-                  {tabKey === 'markdown' ? t.filePreview.tabMarkdown : t.filePreview.tabOriginal}
-                </button>
-              )
-            })}
-          </div>
+          <FilePreviewTabSwitch
+            canShowOriginal={canShowOriginal}
+            onSwitch={switchTab}
+            tab={tab}
+          />
 
           <Tooltip>
             <TooltipTrigger asChild>
@@ -169,36 +94,12 @@ export function FilePreviewPanel({
           </Tooltip>
         </header>
 
-            <ScrollArea className={cn('min-h-0 flex-1', tab !== 'markdown' && 'hidden')}>
-              <div className="w-full px-6 py-6">
-                {body.kind === 'loading' && (
-                  <p className="t-hint text-muted-foreground">{t.filePreview.markdownLoading}</p>
-                )}
-                {body.kind === 'error' && (
-                  <p className="t-meta text-destructive">{body.message}</p>
-                )}
-                {body.kind === 'ready' && (
-                  body.text.trim() ? (
-                    <div className="report-markdown w-full min-w-0 max-w-full [overflow-wrap:anywhere]">
-                      <MarkdownRenderer markdown={body.text} variant="report" />
-                    </div>
-                  ) : (
-                    <div className="space-y-1">
-                      <p className="t-hint text-muted-foreground">{t.filePreview.markdownEmpty}</p>
-                      {asset.parseWarning ? (
-                        <p className="t-meta text-warning">{asset.parseWarning}</p>
-                      ) : null}
-                    </div>
-                  )
-                )}
-              </div>
-            </ScrollArea>
-
-            {originalOpened && canShowOriginal && (
-              <div className={cn('flex min-h-0 flex-1 flex-col', tab !== 'original' && 'hidden')}>
-                <OriginalFileTab fileName={asset.fileName} load={loadOriginal} />
-              </div>
-            )}
+            <FilePreviewBody
+              asset={asset}
+              options={options}
+              originalOpened={originalOpened}
+              tab={tab}
+            />
           </aside>
         </ResizablePanel>
       </ResizablePanelGroup>

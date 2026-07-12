@@ -240,13 +240,13 @@ def main() -> None:
         # hard wall-clock deadline for the entire run (seconds).
         # Opus with thinking plus full DEEP synthesis needs generous
         # end-to-end time; small values turn into visible timeout fallback.
-        max_total_seconds=1800,
+        max_total_seconds=3600,
         max_question_length=60_000,         # reject questions longer than this (characters)
 
         # -- Timeouts (per individual LLM/search call, in seconds) --
-        reasoning_timeout=900,              # timeout for reasoning / planning / answer calls
-        search_timeout=900,                  # timeout for each web-search call
-        claim_extract_timeout=900,               # timeout for each claim-extraction call
+        reasoning_timeout=600,              # logical reasoning budget, retries included
+        search_timeout=600,                 # logical search budget, retries included
+        claim_extract_timeout=600,          # logical extraction budget, retries included
 
         # -- Risk scoring ──────────────────────────────────────────────
         #

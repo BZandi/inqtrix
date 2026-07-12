@@ -93,6 +93,28 @@ def _comment(comment_id, document_id, *, created_at=1.0, body="c"):
 
 
 @pytest.mark.asyncio
+async def test_agent_artifact_source_passes_the_check_constraint(store) -> None:
+    """Migration 0032: the export source is accepted at the DB level."""
+    saved = await store.upsert_document(
+        id="ed_agent",
+        title="Agent-Memo",
+        content_markdown="# Memo",
+        folder_id=None,
+        source="agent-artifact",
+        source_run_id="run_x",
+        revision=1,
+        diff_anchor_markdown=None,
+        diff_anchor_updated_at=None,
+        created_at=1.0,
+        updated_at=1.0,
+        created_by_sub="u",
+        workspace_id=None,
+    )
+    assert saved.source == "agent-artifact"
+    assert saved.source_run_id == "run_x"
+
+
+@pytest.mark.asyncio
 async def test_document_list_excludes_body_get_includes_it(store) -> None:
     await _save_doc(store, "ed_1", owner="u", created_at=1.0, body="HEAVY BODY")
     page, _ = await store.list_documents_page(
@@ -126,16 +148,17 @@ async def test_document_keyset_walks_with_tiebreaker_and_scopes(store) -> None:
 @pytest.mark.asyncio
 async def test_upsert_preserves_created_at_and_owner(store) -> None:
     await _save_doc(store, "ed_1", owner="u1", created_at=100.0, body="v1")
+    # base+1 (stored is 1) — a normal next save; created_at/owner survive.
     await store.upsert_document(
         id="ed_1", title="second", content_markdown="v2", folder_id=None,
-        source="pasted", source_run_id=None, revision=9,
+        source="pasted", source_run_id=None, revision=2,
         diff_anchor_markdown=None, diff_anchor_updated_at=None,
         created_at=999.0, updated_at=200.0,
         created_by_sub="someone-else", workspace_id=None,
     )
     doc = await store.get_document("ed_1")
     assert doc.content_markdown == "v2"
-    assert doc.revision == 9
+    assert doc.revision == 2
     assert doc.created_at == 100.0
     assert doc.created_by_sub == "u1"
 
@@ -166,3 +189,50 @@ async def test_folder_delete_orphans_documents(store) -> None:
     await store.delete_folder("edf_1")
     doc = await store.get_document("ed_1")
     assert doc.folder_id is None
+
+
+@pytest.mark.asyncio
+async def test_revision_cas_on_conflict_where(store) -> None:
+    """A2: the ON CONFLICT WHERE is an exact CAS (stored == base).
+
+    A forward jump — a stale writer whose base is behind the server — is the
+    P1 data-loss shape and must 409, not pass. Only base+1 (stored == base)
+    writes.
+    """
+    from inqtrix.project.editor_ports import DocumentRevisionConflict
+
+    await _save_doc(store, "ed_cas", body="first")  # stored revision 1
+
+    async def save(revision: int, body: str):
+        return await store.upsert_document(
+            id="ed_cas", title="D", content_markdown=body, folder_id=None,
+            source="blank", source_run_id=None, revision=revision,
+            diff_anchor_markdown=None, diff_anchor_updated_at=None,
+            created_at=1.0, updated_at=2.0,
+            created_by_sub="u", workspace_id=None,
+        )
+
+    # Forward jump (base 4 over stored 1): the monotonic guard passed this;
+    # the CAS suppresses it via the ON CONFLICT WHERE. Content untouched.
+    with pytest.raises(DocumentRevisionConflict) as excinfo:
+        await save(5, "stale higher counter")
+    assert excinfo.value.current_revision == 1
+    unchanged = await store.get_document("ed_cas")
+    assert unchanged.content_markdown == "first"
+    assert unchanged.revision == 1
+    # base+1 (stored == 1): accepted.
+    doc = await save(2, "next revision")
+    assert doc.revision == 2
+    # Same-base double write: suppressed.
+    with pytest.raises(DocumentRevisionConflict) as excinfo:
+        await save(2, "clobber")
+    assert excinfo.value.current_revision == 2
+    # Rewind: suppressed too.
+    with pytest.raises(DocumentRevisionConflict):
+        await save(1, "rewind")
+    fresh = await store.get_document("ed_cas")
+    assert fresh.content_markdown == "next revision"
+    assert fresh.revision == 2
+    # The brand-new-id INSERT branch stays unaffected by the guard.
+    created = await _save_doc(store, "ed_cas_new", body="fresh")
+    assert created.revision == 1

@@ -6,9 +6,14 @@ That model name is the default on `ModelSettings()`; it is a LiteLLM alias, not 
 
 See [Debugging runs](../observability/debugging-runs.md) for the log-marker walkthrough.
 
-## I pressed Cancel in my UI but the run kept going for another minute
+## I pressed Cancel in my UI but the run kept going
 
-Cancel is enforced at node boundaries, not mid-provider-call. A running Anthropic Opus call with a 60-second reasoning budget will complete before the cancel takes effect. The SSE stream closes immediately; the agent continues in the background until the next boundary. Reduce `REASONING_TIMEOUT` to shorten the worst case.
+Cancel is enforced at node boundaries. A synchronous in-flight provider call
+cannot be interrupted by task cancellation and may finish within its effective
+operation budget (600 seconds by default); the UI therefore says “cancellation
+requested” instead of claiming an immediate network abort. No retry or result
+commit follows that request. Whole-run cancellation and research children use
+the existing run-cancel path.
 
 See [Web server mode](../deployment/webserver-mode.md) and [Progress events](../observability/progress-events.md).
 
@@ -69,7 +74,11 @@ Yes, for the built-in LLM providers:
 - `BedrockLLM` retries transient Converse errors and selected transport errors with exponential backoff.
 - `AzureOpenAILLM` and `LiteLLM` disable hidden OpenAI SDK retries and run an Inqtrix-owned retry loop for transient 408/409/5xx and SDK timeout/connection errors.
 
-Every LLM retry consults the run deadline, logs a warning, and emits live progress so long waits are visible in the UI. HTTP 429 remains fatal (`AgentRateLimited`) instead of being silently retried. See [Timeouts and errors](../observability/timeouts-and-errors.md).
+Every retry consults the same operation/run deadline, logs a warning, and
+emits live progress so long waits are visible in the UI. HTTP 429 is retried
+within the same maximum of three total attempts; if it remains (or represents
+a hard provider quota), it becomes `AgentRateLimited`. See
+[Timeouts and errors](../observability/timeouts-and-errors.md).
 
 ## How can I validate my setup without running a full research question?
 

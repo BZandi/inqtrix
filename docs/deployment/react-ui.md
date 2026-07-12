@@ -27,6 +27,14 @@ The main screen should stay as a small orchestrator:
 - `features/researchRuns/` owns native run API types and run-specific helpers.
 - `features/chat/`, `features/editor/`, `features/settings/`, and
   `features/report/` own their respective feature surfaces.
+- `features/agent/` owns the Agent Desk: the automatic cognitive-kernel
+  front door (`mode=agent_kernel`), explicit Mission runs
+  (`mode=workspace_agent`), the session rail, assignment timeline with the
+  plan/clarification gates, and the six canvas views. `features/canvas/` is
+  the agent-agnostic polymorphic
+  canvas host (registry + follow hook) other workspaces can mount later.
+  The entry is capability-gated on `features.workspace_agent` (visible in
+  demo mode).
 
 The rail workspaces are directly reachable shell surfaces and should render
 without a Suspense-only loading state. Import Research, Chat, Editor, Settings,
@@ -220,12 +228,17 @@ development while preserving the production boundary between frontend and API.
 ```bash
 pnpm run ui:typecheck
 pnpm run ui:lint
+pnpm run ui:test
 pnpm run ui:build
 # or:
 npm run ui:typecheck
 npm run ui:lint
+npm run ui:test
 npm run ui:build
 ```
+
+`ui:test` runs the Vitest unit suite (`vitest run`); it is a separate check and
+is not part of `ui:build`.
 
 The Vite build output is `apps/research-desk/dist/`. The directory is ignored by
 git because it is a generated artifact. Deployment should build it in CI and
@@ -281,7 +294,7 @@ as chat messages:
 | `POST /v1/runs` | Create a queued research run. |
 | `GET /v1/runs/{run_id}/events` | Stream structured run events. |
 | `POST /v1/runs/{run_id}/cancel` | Cancel a queued run or request cancellation. |
-| `GET /v1/runs/{run_id}/result` | Fetch the final report payload (`answer`, `metrics`, `top_sources`, `references`, `top_claims`, `usage`). |
+| `GET /v1/runs/{run_id}/result` | Fetch the final report payload (`answer`, `metrics`, `top_sources`, `references`, `top_claims`, `usage`, plus `execution` for Agent Desk runs). |
 
 When `INQTRIX_SERVER_API_KEY` is enabled, event streaming must use a
 fetch-based SSE reader because browser `EventSource` cannot attach an
@@ -297,6 +310,98 @@ field for the native chat/research choice: send `mode="direct_llm"` for LLM
 chat without web research, and send `mode="research"` or omit the field for the
 normal graph. Keep `agent_overrides.skip_search` only for compatibility with
 older clients rather than introducing parallel mock-only fields.
+
+### Agent Desk composer and routing
+
+The Agent Desk composer separates four concepts that must not collapse into
+one chip row:
+
+1. **Context and edit targets.** The plus control opens one flat picker for
+   knowledge collections and editor targets. The chip row contains only
+   selected collections, an edit target, and attached skills; web/knowledge
+   availability and slash routes never appear as context chips.
+2. **Source Dock.** Web and project knowledge are adjacent two-state buttons.
+   `available` means the agent MAY choose that source, not that every message
+   invokes it. Server absence is disabled and explained; a one-shot route uses
+   a distinct forced state without changing the stored session preference.
+   The pair is one `role="group"`; each button keeps a stable accessible name,
+   reports selection through `aria-pressed`, and exposes the same explanation
+   on keyboard focus as on hover.
+3. **Execution Capsule.** Run Setup and the existing `ModelTierPicker` are two
+   adjacent segments. Run Setup owns permission mode, Automatic/Mission,
+   response form, and Normal/Deep; the model segment keeps the complete Auto,
+   model-category, concrete-model, model-information, and reasoning-effort
+   picker. Narrow layouts change only the trigger to an icon with an accessible
+   selected-model label; they open the same full picker. The capsule trigger
+   variant is additive, so every non-Agent `ModelTierPicker` use keeps its
+   existing trigger and behaviour.
+4. **Transparency and submit.** Quota, the independent run-overview trigger,
+   and Send remain reachable at every width. The run overview is read-only and
+   reports the effective route, source policy, permission gates, model/effort,
+   depth, consent reason, and separately the tools actually used.
+
+Before admission the overview shows the prospective composer/capability state.
+Once a run exists, `snapshot.execution` is authoritative: its
+`effective_mode`, effective `source_policy`, model/effort, `consent_reason`,
+and `tool_use_counts` replace client inference. In particular, “Web available”
+and “Web used: 1 search” are distinct rows. The overview trigger remains an
+independent control; it is not moved into Run Setup on narrow layouts.
+
+The footer is a query container. At 704px and above its execution controls may
+show labels and the short focus/hover reveal; from 576px through 703px they use
+compact icon triggers with tooltips; below 576px only essential controls stay
+inline and secondary quota detail moves into the run overview. Controls must
+wrap/reduce their trigger presentation rather than disappear behind clipping.
+Touch devices keep icon triggers stable. Reduced-motion mode removes reveal
+and transform motion while preserving every state change. Source and capsule
+transitions use the shared `appMotion.composer` timing (160ms,
+`cubic-bezier(0.22, 1, 0.36, 1)`); available sources never pulse in a loop.
+
+Run Setup reads the server's permission and depth manifests. The ordinary
+permission choices are Standard (`balanced`) and Auto (`autonomous`); Strict
+is shown only when the server publishes advanced autonomy. Automatic maps to
+the kernel, while Mission explicitly selects the phase machine. If the kernel
+is not registered, the composer states that only Mission is available instead
+of silently relabelling Mission as Automatic.
+
+Agent-session `items_json` stores the small UI-owned object
+`{"source_policy":{"web":"available","knowledge":"disabled"}}`; each source
+property independently accepts `available` or `disabled`.
+New sessions default both sources to `available`. The selected source policy
+is sent on every Agent Desk run, while the selected model/tier/effort remains
+in the existing Agent UI settings and is serialized in `agent_overrides`.
+The effective depth is likewise always serialized, including an explicit
+`normal` selection when the server capability default is `deep`; display and
+submission therefore consume the same value.
+
+The slash menu has separate Commands and Skills groups. Selecting `/web` or
+`/wissen` sets a visible one-shot route; an exact trailing command is also
+recognized during submit and removed from the user question. The request maps
+as follows:
+
+| Composer choice | Native-run request |
+|---|---|
+| Automatic | `mode="agent_kernel"` |
+| Mission | `mode="workspace_agent"` |
+| Web/project-knowledge availability | `source_policy.web` / `.knowledge` = `available` or `disabled` |
+| `/web` | `execution_directive="quick_web"` |
+| `/wissen` | `execution_directive="knowledge_only"` |
+| Chat/Canvas/Auto | `response_form="chat"` / `"canvas"` / `"auto"` |
+| Normal/Deep | `agent_overrides.depth="normal"` / `"deep"` |
+| Model and reasoning | existing `agent_overrides.model_tier`, `.model`, and `.effort` fields |
+
+An execution directive is one-message state. The UI clears it only after
+`POST /v1/runs` is admitted and a run summary is returned; validation, quota,
+or transport failure leaves it visible for retry. The persistent session
+source policy is never mutated by that reset. `/web` is the deterministic
+one-search path, while Automatic remains the ordinary front door that may
+choose instant web itself for a simple current-facts question.
+
+The Source Dock and command availability are feature-detected from
+`capabilities.agent.source_controls` and
+`capabilities.agent.execution_directives`. The demo manifest publishes the
+same blocks so source states, slash routes, responsive model trigger, and run
+overview can be reviewed without a live agent backend.
 
 The Magic Stick text-improvement control is an explicit review flow, not an
 auto-rewrite. The browser sends only the active field text plus its context
@@ -317,6 +422,45 @@ the current selection only if it remains visible, otherwise select the first
 visible run or clear the selection when the filter is empty. The trigger uses a
 local neutral focus/open style; do not change the global shadcn button focus
 ring for this compact control.
+
+### Agent Desk execution control centre
+
+The Agent Desk run canvas is the execution overview, not a raw tool log. It
+keeps the root phase rail and groups plan work units into active,
+attention-required, and completed sections. Each work unit reports its honest
+execution type, current user-facing activity, last update, retry attempt only
+after a retry, and available query/source/claim counts. Instant search uses an
+indeterminate one-call state, knowledge work may show a known `n/N`, and a real
+research child uses its graph phases; the UI never fabricates a percentage or
+ETA.
+
+Selecting a work unit changes the existing run canvas descriptor to
+`{view: "run", runId, taskId}` while retaining the same `run:{runId}` tab. The
+detail view provides a visible Back action and restores focus to the source
+card; it does not create a second task tab. Errors, fallbacks, insufficient
+evidence, partial result summaries, and SSE-to-polling degradation stay visible
+in the overview and expand into sanitized technical details. Terminal run
+hydration first reads the durable plan/task rows and then replays the existing
+event page through the live reducer, so cancellation or reload does not erase
+the execution story.
+
+Plan rows label their actual semantics: `Instant search - 1 request`,
+`Research agent - Compact/Deep - N guidance questions`, or `Project knowledge
+- n/N queries`. Independent tasks expose their shared execution wave. Editable
+titles and questions use the existing auto-growing textarea behaviour; the
+full plan never truncates approved text, while the compact approval tray may
+use a two-line disclosure. Motion reuses the established pulse/flow primitives
+and becomes static under reduced motion.
+
+Agent memo citations use the artifact/result reference contract directly.
+Internal `K#` entries open the exact knowledge chunk; web `W#` entries show an
+exact source excerpt when one exists, otherwise clearly label
+`grounded_support` as provider-grounded context rather than a quote from the
+page. The report body does not duplicate citation chips above the document.
+New agent output is currency-safe at the backend boundary. A small Agent-only
+display adapter repairs legacy saved artifacts while preserving URLs, code,
+block math, and genuine inline formulas; the shared Markdown renderer remains
+unchanged.
 
 Reports should render the backend `answer` markdown rather than a second run
 summary card. The mock workspace includes a long GFM report fixture to exercise

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -76,11 +75,11 @@ def make_files_client(
         semaphore_factory=lambda: asyncio.Semaphore(1),
         auth_provider=HeaderSubAuthProvider(),
         permissions=permissions,
+        # The default offline container wires no parser; inject one so it
+        # reaches the FileService (the route and the file.text.read
+        # capability both parse through the service).
+        document_parser=document_parser,
     )
-    # The default offline container wires no parser; inject one to exercise the
-    # server-side text extraction route (the frozen container is replaced).
-    if document_parser is not None:
-        container = replace(container, document_parser=document_parser)
     app = FastAPI()
     app.include_router(files_router.build_router(container))
     app.include_router(capabilities_router.build_router(container))

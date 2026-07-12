@@ -50,7 +50,7 @@ export type ResearchJob = {
 
 export type JobFilter = Extract<JobStatus, 'cancelled' | 'completed' | 'queued' | 'running'> | 'all'
 
-export type AppView = 'research' | 'chat' | 'editor' | 'knowledge' | 'prompt-library' | 'database' | 'settings'
+export type AppView = 'research' | 'chat' | 'agent' | 'editor' | 'knowledge' | 'prompt-library' | 'database' | 'settings'
 
 export function localizedText(value: LocalizedText, locale: Locale) {
   return value[locale]

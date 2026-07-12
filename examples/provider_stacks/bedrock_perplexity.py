@@ -239,20 +239,20 @@ def main() -> None:
 
         # -- Behaviour --
         # max research-loop iterations before forced stop
-        max_rounds=2,
+        max_rounds=4,
         # confidence threshold (1-10) — stop early when reached
         confidence_stop=8,
-        # max context blocks retained across rounds (older ones pruned)
+        first_round_queries=8,
+        answer_prompt_citations_max=500,
         # hard wall-clock deadline for the entire run (seconds).
-        # Opus with thinking needs more time than Sonnet — 600s is a
-        # safe default.  Reduce to 300 for Sonnet-only setups.
-        max_total_seconds=1000,
+        # DEEP synthesis and all search rounds share this active-run budget.
+        max_total_seconds=3600,
         max_question_length=60_000,         # reject questions longer than this (characters)
 
         # -- Timeouts (per individual LLM/search call, in seconds) --
-        reasoning_timeout=900,              # timeout for reasoning / planning / answer calls
-        search_timeout=900,                  # timeout for each web-search call
-        claim_extract_timeout=900,               # timeout for each claim-extraction call
+        reasoning_timeout=600,              # logical reasoning budget, retries included
+        search_timeout=600,                 # logical search budget, retries included
+        claim_extract_timeout=600,          # logical extraction budget, retries included
 
         # -- Risk scoring ──────────────────────────────────────────────
         #

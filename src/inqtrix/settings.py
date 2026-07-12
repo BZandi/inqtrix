@@ -16,7 +16,7 @@ Precedence (highest wins):
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode
@@ -262,20 +262,72 @@ class AgentSettings(BaseSettings):
         ReportProfile.COMPACT,
         alias="REPORT_PROFILE",
         description=(
-            "Selects the answer style and depth preset (``compact`` or "
-            "``deep``). The active profile triggers a bundle of profile-"
-            "specific overrides. ``compact`` sets ``max_rounds=2``, "
+            "Selects the answer style and depth preset (``schnell``, "
+            "``compact`` or ``deep``). The active profile triggers a bundle "
+            "of profile-specific overrides. ``schnell`` runs exactly one "
+            "round (``max_rounds=1``, ``min_rounds=1``, "
+            "``first_round_queries=6``, ``max_total_seconds=3600``) with a "
+            "short two-section answer; ``compact`` sets ``max_rounds=2``, "
             "``min_rounds=1``, ``confidence_stop=7`` and "
             "``first_round_queries=6``; ``deep`` sets ``max_rounds=4``, "
             "``min_rounds=2``, ``confidence_stop=8``, "
-            "``first_round_queries=10``, ``answer_prompt_citations_max=500``, "
-            "``reasoning_timeout=900``, ``editor_assistant_timeout=900``, "
-            "``claim_extract_timeout=600``, "
-            "``search_timeout=300``, ``max_total_seconds=1800``) for any field the user has not "
+            "``first_round_queries=8``, ``answer_prompt_citations_max=500``, "
+            "uniform 600-second AI-operation budgets and a 3600-second "
+            "active run budget) for any field the user has not "
             "set explicitly."
         ),
     )
-    """Selects the answer style and depth preset (``compact`` or ``deep``). The active profile triggers profile-specific overrides for any field the user has not set explicitly: ``compact`` uses ``max_rounds=2``, ``min_rounds=1``, ``confidence_stop=7`` and ``first_round_queries=6``; ``deep`` uses ``max_rounds=4``, ``min_rounds=2``, ``confidence_stop=8``, ``first_round_queries=10`` and the larger answer/timeout budgets."""
+    """Selects the answer style and depth preset (``schnell``, ``compact`` or ``deep``). The active profile triggers profile-specific overrides for any field the user has not set explicitly: ``schnell`` runs exactly one round with the broad first-round queries and a short two-section answer (the latency-first profile); ``compact`` uses ``max_rounds=2``, ``min_rounds=1``, ``confidence_stop=7`` and ``first_round_queries=6``; ``deep`` uses ``max_rounds=4``, ``min_rounds=2``, ``confidence_stop=8``, ``first_round_queries=8`` and the larger answer/timeout budgets."""
+    depth: Literal["normal", "deep"] = Field(
+        "normal",
+        alias="DEPTH",
+        description=(
+            "Agent-mode thoroughness (plan M4): ``normal`` or ``deep``. "
+            "``deep`` is deterministic budget-plus-verification, never an "
+            "unbounded loop: the kernel runs with high reasoning effort "
+            "(unless the request or a skill pin sets one), a raised "
+            "iteration ceiling, child research runs on the DEEP report "
+            "profile, and one rubric-checked verification pass before "
+            "the final answer. Orthogonal to the permission mode."
+        ),
+    )
+    """Agent-mode thoroughness (plan M4): ``normal`` (default) or ``deep``. Deep = deterministic budget + verification: high reasoning effort on the kernel node (precedence: explicit request effort > skill pin > deep), ``kernel_max_iterations_deep`` as the loop ceiling, child research runs forced onto the DEEP report profile, and exactly ONE rubric-checked verification/revision round before finalization. Distinct from ``report_profile`` (research-mode answer preset) and orthogonal to autonomy."""
+
+    agent_tier: Literal["", "schnell", "gruendlich", "tief"] = Field(
+        "",
+        alias="AGENT_TIER",
+        description=(
+            "User-facing speed/depth tier of the Agent Desk (Stufen): "
+            "``schnell`` (one instant search, no clarification, no plan "
+            "gate outside strict, chat answer), ``gruendlich`` (default "
+            "behavior with bounded research children) or ``tief`` (full "
+            "budgets, canvas report, escalating verification). The "
+            "empty string means 'not selected' and keeps the legacy "
+            "``depth`` semantics untouched. The operational meaning per "
+            "tier lives in ONE table, "
+            ":data:`inqtrix.agents.tier_policy.TIER_POLICIES`."
+        ),
+    )
+    """User-facing Agent-Desk speed/depth tier (``schnell``/``gruendlich``/``tief``); empty string = not selected (legacy ``depth`` semantics apply unchanged). A selected tier bridges into ``depth`` (``tief`` -> ``deep``, else ``normal``) at the override seam so every existing depth consumer keeps working; the per-tier budgets/gates come from :data:`inqtrix.agents.tier_policy.TIER_POLICIES` (published == enforced). Never entangled with model selection."""
+
+    @field_validator("depth", mode="before")
+    @classmethod
+    def _normalize_depth(cls, value: object) -> str:
+        """Normalize the sole agent-depth contract and reject unknown values.
+
+        Args:
+            value: Constructor or environment value supplied for ``depth``.
+
+        Returns:
+            The lower-case ``normal`` or ``deep`` token.
+
+        Raises:
+            ValueError: If the value is not one of the two public depths.
+        """
+        normalized = str(value).strip().lower()
+        if normalized not in {"normal", "deep"}:
+            raise ValueError("depth must be 'normal' or 'deep'")
+        return normalized
     max_rounds: int = Field(
         2,
         alias="MAX_ROUNDS",
@@ -321,12 +373,12 @@ class AgentSettings(BaseSettings):
         alias="FIRST_ROUND_QUERIES",
         description=(
             "Number of broad queries generated in Round 0 by the plan "
-            "node. Default ``6`` for COMPACT, ``10`` for DEEP. Setting "
+            "node. Default ``6`` for COMPACT, ``8`` for DEEP. Setting "
             "below ``4`` typically starves later rounds of source "
             "diversity."
         ),
     )
-    """Number of broad queries generated in Round 0 by the plan node. Default ``6`` for COMPACT, ``10`` for DEEP. Setting below ``4`` typically starves later rounds of source diversity."""
+    """Number of broad queries generated in Round 0 by the plan node. Default ``6`` for COMPACT, ``8`` for DEEP. Setting below ``4`` typically starves later rounds of source diversity."""
     answer_prompt_citations_max: int = Field(
         60,
         alias="ANSWER_PROMPT_CITATIONS_MAX",
@@ -351,7 +403,7 @@ class AgentSettings(BaseSettings):
     """Minimum model context-window size expected for DEEP / forensic runs. Default ``128_000`` tracks the common 128k model tier. Unknown provider capacity emits a visible warning; known capacity below the requirement blocks normal report synthesis."""
 
     reasoning_timeout: int = Field(
-        120,
+        600,
         alias="REASONING_TIMEOUT",
         description=(
             "Per-call timeout (seconds) for reasoning LLM calls. "
@@ -361,47 +413,47 @@ class AgentSettings(BaseSettings):
     )
     """Per-call timeout (seconds) for reasoning LLM calls. Increase for slow extended-thinking deployments; decrease to fail fast against unhealthy upstreams."""
     editor_assistant_timeout: int = Field(
-        120,
+        600,
         alias="EDITOR_ASSISTANT_TIMEOUT",
         description=(
             "Per-call timeout (seconds) for editor suggest/instruct calls. "
             "Decoupled from ``reasoning_timeout`` so editor work (a full "
             "generation over large attached context) can get a longer budget "
             "without lengthening every research reasoning call. Defaults to "
-            "the reasoning-timeout default; ``900`` under DEEP."
+            "the reasoning-timeout default."
         ),
     )
-    """Per-call timeout (seconds) for editor suggest/instruct calls. Decoupled from ``reasoning_timeout`` so editor work (a full generation over large attached context) can get a longer budget without lengthening every research reasoning call. Defaults to the reasoning-timeout default (``120``); ``900`` under DEEP."""
+    """Per-call timeout (seconds) for editor suggest/instruct calls. Decoupled from ``reasoning_timeout`` so deployments may tune editor work independently while the shared default remains ``600``."""
     search_timeout: int = Field(
-        60,
+        600,
         alias="SEARCH_TIMEOUT",
         description=(
             "Per-call timeout (seconds) for search-provider calls. "
-            "Should sit below "
-            "``max_total_seconds / first_round_queries``."
+            "The budget covers one logical operation including retries and "
+            "is clamped to the active run deadline."
         ),
     )
-    """Per-call timeout (seconds) for search-provider calls. Should sit below ``max_total_seconds / first_round_queries``."""
+    """Timeout in seconds for one logical search operation including retries, clamped to the active run deadline."""
     claim_extract_timeout: int = Field(
-        60,
+        600,
         alias="CLAIM_EXTRACT_TIMEOUT",
         description=(
             "Per-call timeout (seconds) for claim-extraction LLM calls. "
-            "Tight by design because one call runs per search hit."
+            "The budget covers one logical extraction operation including retries."
         ),
     )
-    """Per-call timeout (seconds) for claim-extraction LLM calls. Tight by design because one call runs per search hit."""
+    """Timeout in seconds for one logical claim-extraction operation including retries. Defaults to the shared 600-second AI-operation budget."""
     max_total_seconds: int = Field(
-        300,
+        3_600,
         alias="MAX_TOTAL_SECONDS",
         description=(
             "Wall-clock deadline (seconds) for the entire research run. "
-            "Default ``300`` for COMPACT, ``1800`` for DEEP. Checked at "
+            "Default ``3600`` for every report profile. Checked at "
             "node boundaries; in-flight provider calls may run slightly "
             "past this before the next check."
         ),
     )
-    """Wall-clock deadline (seconds) for the entire research run. Default ``300`` for COMPACT, ``1800`` for DEEP. Checked at node boundaries; in-flight provider calls may run slightly past this before the next check."""
+    """Wall-clock deadline (seconds) for the active research run. Default ``3600`` for every report profile. Checked at node boundaries and used to clamp provider-operation deadlines."""
     max_question_length: int = Field(
         60_000,
         alias="MAX_QUESTION_LENGTH",
@@ -722,6 +774,27 @@ class ServerSettings(BaseSettings):
         ),
     )
     """Optional active-worker cap for native ``/v1/runs`` jobs. When unset, native runs reuse ``max_concurrent``; when set, chat completions and native runs have explicit per-surface caps. This does not create a global cross-endpoint cap."""
+    run_max_concurrent_per_user: int | None = Field(
+        None,
+        alias="RUN_MAX_CONCURRENT_PER_USER",
+        ge=1,
+        description=(
+            "Optional per-principal fairness bound UNDER the global run "
+            "cap: at most this many slot-occupying native runs per "
+            "verified subject (QUEUED+RUNNING standard runs and agent "
+            "CHILDREN). Parked/waiting runs hold no slot and are "
+            "excluded; agent PARENTS are excluded too (they park "
+            "immediately and must not contend against their own "
+            "children). Size it at or above "
+            "INQTRIX_AGENT_MAX_PARALLEL_CHILDREN so one agent wave fits "
+            "(startup warns otherwise). Approximate on Postgres under "
+            "READ COMMITTED (may transiently exceed by a few); exact "
+            "in-memory. Unset (default) keeps admission purely global — "
+            "single-operator deployments stay byte-identical. Anonymous "
+            "submissions (no subject) are never capped."
+        ),
+    )
+    """Optional per-principal fairness bound under the global run cap (default ``None`` = off). Counts a subject's slot-occupying native runs at admission — QUEUED+RUNNING standard runs and agent CHILDREN. Excluded: parked/waiting runs (slot-free) and agent PARENTS (they park immediately and must not contend against their own children). Size it at or above ``INQTRIX_AGENT_MAX_PARALLEL_CHILDREN`` so a single agent wave fits (the composition root warns at startup otherwise). APPROXIMATE on the Postgres backend: under READ COMMITTED, concurrent submits by one subject can transiently exceed the cap by a few — acceptable for a fairness bound (the in-memory backend is exact). It protects OTHER users from a noisy neighbour; the monthly quota bounds the neighbour's own spend."""
     run_queue_max_size: int = Field(
         50,
         alias="RUN_QUEUE_MAX_SIZE",
@@ -836,6 +909,23 @@ class ServerSettings(BaseSettings):
         ),
     )
     """Static Bearer API key. When set, the server installs a FastAPI dependency on chat, text-improvement, test-run, and native run routes that requires ``Authorization: Bearer <api_key>`` and compares with ``hmac.compare_digest`` for constant-time safety. ``/health`` and ``/v1/models`` deliberately stay unauthenticated so Kubernetes liveness probes and model discovery clients keep working without credentials. Empty string (default) disables the gate, matching the historical behaviour. Rotation requires a server restart in this iteration; multi-key support is a follow-up task."""
+    metrics_enabled: bool = Field(
+        False,
+        alias="INQTRIX_METRICS_ENABLED",
+        description=(
+            "Mount a Prometheus ``/metrics`` endpoint. Off by default: "
+            "the endpoint requires the optional ``metrics`` extra "
+            "(``prometheus-client``); when the flag is on but the extra "
+            "is not installed, the server logs a WARNING and leaves "
+            "``/metrics`` unmounted rather than failing to start. When "
+            "``api_key`` is set, ``/metrics`` is gated behind the same "
+            "Bearer token; otherwise it is unauthenticated and must be "
+            "protected at the network layer (NetworkPolicy / ingress "
+            "allowlist). Metrics carry no run-id/subject/session labels "
+            "(bounded cardinality)."
+        ),
+    )
+    """Mount a Prometheus ``/metrics`` endpoint. Off by default: the endpoint requires the optional ``metrics`` extra (``prometheus-client``); when the flag is on but the extra is not installed, the server logs a WARNING and leaves ``/metrics`` unmounted rather than failing to start. When ``api_key`` is set, ``/metrics`` is gated behind the same Bearer token; otherwise it is unauthenticated and must be protected at the network layer (NetworkPolicy / ingress allowlist). Metrics carry no run-id/subject/session labels (bounded cardinality)."""
     cors_origins: str = Field(
         "",
         alias="INQTRIX_SERVER_CORS_ORIGINS",
@@ -968,6 +1058,72 @@ class StorageSettings(BaseSettings):
         ),
     )
     """Postgres role every application transaction switches to via ``SET LOCAL ROLE`` before touching tenant tables. The role is created NOLOGIN/NOSUPERUSER/NOBYPASSRLS by the migrations so row-level security applies even when the connection user is the table owner or a superuser (dev-compose convenience). Empty disables the switch — only sensible when the connection user itself is a restricted role."""
+    pool_size: int = Field(
+        5,
+        alias="INQTRIX_DATABASE_POOL_SIZE",
+        ge=1,
+        description=(
+            "Persistent connections per POOLED engine (the platform "
+            "bundle, run store, indexing store, and auth bundle each "
+            "own one; NullPool stores are unaffected). The worst-case "
+            "budget of one process is pooled_engines x (pool_size + "
+            "max_overflow) plus the in-flight NullPool connections — "
+            "size the sum of all replicas below Postgres "
+            "max_connections (or front it with a transaction pooler)."
+        ),
+    )
+    """Persistent connections per POOLED engine (default 5, the SQLAlchemy default — existing deployments see zero change). Four engines per API process are pooled (platform bundle, run store, indexing store, auth bundle) and the worker adds two more; NullPool stores open per-operation connections and ignore this. Budget arithmetic: pooled_engines x (pool_size + max_overflow) per process, summed over replicas, must stay below Postgres ``max_connections`` unless a transaction pooler fronts the database."""
+    pool_max_overflow: int = Field(
+        10,
+        alias="INQTRIX_DATABASE_POOL_MAX_OVERFLOW",
+        ge=0,
+        description=(
+            "Burst connections a pooled engine may open beyond "
+            "pool_size (closed again when idle). Part of the same "
+            "budget arithmetic as pool_size."
+        ),
+    )
+    """Burst connections a pooled engine may open beyond ``pool_size`` (default 10, the SQLAlchemy default). Counted in the same worst-case budget as ``pool_size``."""
+    pool_timeout_seconds: float = Field(
+        30.0,
+        alias="INQTRIX_DATABASE_POOL_TIMEOUT_SECONDS",
+        gt=0,
+        description=(
+            "Seconds a request waits for a free pooled connection "
+            "before failing loudly. Bounds the queueing latency a "
+            "too-small pool converts errors into."
+        ),
+    )
+    """Seconds a request waits for a free pooled connection before failing loudly (default 30, the SQLAlchemy default). A too-small pool trades 'too many connections' errors for waits — this bounds that wait visibly."""
+
+    def pool_kwargs(self) -> dict[str, Any]:
+        """The pooled-engine sizing bundle for :func:`build_engine`.
+
+        Defined ONCE so every pooled call site (container, auth bundle,
+        worker) splats the same policy and the per-process budget stays
+        reviewable as ``engines x (pool_size + max_overflow)``.
+        NullPool engines must NOT receive these (they ignore sizing).
+        """
+        return {
+            "pool_size": self.pool_size,
+            "max_overflow": self.pool_max_overflow,
+            "pool_timeout": self.pool_timeout_seconds,
+        }
+
+    replica_count: int = Field(
+        1,
+        alias="INQTRIX_REPLICA_COUNT",
+        ge=1,
+        description=(
+            "How many replicas of this process the deployment runs — "
+            "an operator-injected hint (Helm sets it from "
+            "api.replicaCount), not something a single process can "
+            "detect itself. Guards refuse per-replica-disk state above "
+            "1: the local object-store backend would 404 every blob on "
+            "the replica that did not write it."
+        ),
+    )
+    """Deployment-injected replica count of this process (default 1). A single process cannot detect its siblings, so multi-replica safety guards (e.g. rejecting the per-replica-disk ``local`` object store) key on this hint; Helm derives it from ``api.replicaCount``."""
     object_store_backend: Literal["local", "s3"] = Field(
         "local",
         alias="INQTRIX_OBJECT_STORE_BACKEND",
@@ -2354,6 +2510,17 @@ class ProviderSettings(BaseSettings):
         description="Optional pinned version label for the Azure Foundry Web Search agent.",
     )
     """Optional pinned version label for the Azure Foundry Web Search agent."""
+    azure_foundry_max_concurrency: int = Field(
+        6,
+        ge=1,
+        alias="INQTRIX_AZURE_FOUNDRY_MAX_CONCURRENCY",
+        description=(
+            "Maximum simultaneous Azure Foundry web-search operations in "
+            "one process. The provider enforces this on its shared instance, "
+            "so Research and Agent Desk waves cannot independently exceed it."
+        ),
+    )
+    """Per-process Azure Foundry web-search concurrency ceiling shared by every caller of the provider instance (default ``6``)."""
 
     selectable_chat_models: Annotated[list[str], NoDecode] = Field(
         default_factory=list,
@@ -2488,6 +2655,269 @@ class SharingSettings(BaseSettings):
     workspace co-members. Default false = tenant-wide, byte-identical."""
 
 
+class AgentPlatformSettings(BaseSettings):
+    """Workspace-agent platform knobs (``INQTRIX_AGENT_*``).
+
+    Server-side limits for the ``mode=workspace_agent`` runtime (plan
+    decisions E8/E16 and the §4 algorithm): everything here is enforced
+    in code, never prompted — the agent cannot talk itself past a limit.
+    """
+
+    model_config = _SETTINGS_MODEL_CONFIG
+
+    enabled: bool = Field(
+        True,
+        alias="INQTRIX_AGENT_ENABLED",
+        description=(
+            "Master switch for the workspace-agent mode. Even when True "
+            "the algorithm only registers with a durable checkpointer "
+            "(Postgres) or the explicit volatile escape below."
+        ),
+    )
+    """Master switch for the workspace-agent mode. Even when True the algorithm only registers with a durable checkpointer (Postgres backend) or the explicit volatile escape below — degrading VISIBLY instead of silently (decision E8)."""
+    kernel_enabled: bool = Field(
+        False,
+        alias="INQTRIX_AGENT_KERNEL_ENABLED",
+        description=(
+            "Rollout switch for the cognitive-kernel mode (plan M2). "
+            "Even when True the kernel only registers with a "
+            "checkpointer AND an LLM provider that supports native "
+            "tool calling; a failed gate logs a WARNING."
+        ),
+    )
+    """Rollout switch for the ``mode=agent_kernel`` algorithm (plan M2, default False while the kernel matures). Even when True the kernel only registers when the checkpointer gate passes (same rule as ``enabled``) AND the default LLM provider reports ``supports_tool_calls()`` — an enabled-but-ungated deployment logs a WARNING instead of silently missing the mode."""
+    default_agent_mode: str = Field(
+        "agent_kernel",
+        alias="INQTRIX_AGENT_DEFAULT_MODE",
+        description=(
+            "Which algorithm the Agent Desk submits by default: "
+            "workspace_agent (phase machine) or agent_kernel. Published "
+            "via capabilities agent.default_mode; the kernel value only "
+            "takes effect when the kernel registration gate passed."
+        ),
+    )
+    """The Agent Desk's configured default ``mode`` (default ``agent_kernel``). Capabilities publish that value only after the kernel registration gate passes; otherwise they visibly fall back to ``workspace_agent``, so the frontend never submits an unregistered mode. Setting ``INQTRIX_AGENT_DEFAULT_MODE=workspace_agent`` retains the phase machine as an explicit deployment override."""
+    skills_max_attached: int = Field(
+        3,
+        alias="INQTRIX_AGENT_SKILLS_MAX_ATTACHED",
+        description=(
+            "How many skills one run may attach explicitly (composer "
+            "chips). Enforced at run admission, published via "
+            "capabilities agent.skills."
+        ),
+    )
+    """Per-run cap on explicitly attached skills (default 3, plan M3). Enforced server-side at run admission; the composer reads the published value instead of hardcoding it."""
+    skills_disclosure_budget_chars: int = Field(
+        4000,
+        alias="INQTRIX_AGENT_SKILLS_DISCLOSURE_BUDGET_CHARS",
+        description=(
+            "Character budget of the model-facing skill disclosure "
+            "block; overflow is cut with a VISIBLE '... und N weitere' "
+            "line, never silently."
+        ),
+    )
+    """Character budget of the model-facing skill disclosure block (default 4000, plan M3 `3.3`). Deterministic cut with a visible overflow line — a silent truncation would hide activatable skills from the model."""
+    kernel_max_iterations: int = Field(
+        24,
+        alias="INQTRIX_AGENT_KERNEL_MAX_ITERATIONS",
+        description=(
+            "LangGraph recursion_limit for one kernel run. deepagents "
+            "lifts the default bound to 9999; this restores a hard, "
+            "loud ceiling (GraphRecursionError fails the run)."
+        ),
+    )
+    """LangGraph ``recursion_limit`` per kernel run (default 24, plan M2 `2.7`). One model turn spans several graph super-steps (middleware nodes included), so 24 bounds the loop at roughly 6-8 model turns; the Deep mode raises it (M4). Exceeding it raises ``GraphRecursionError`` — a loudly failed run, never a silent truncation."""
+    kernel_max_iterations_deep: int = Field(
+        40,
+        alias="INQTRIX_AGENT_KERNEL_MAX_ITERATIONS_DEEP",
+        description=(
+            "LangGraph recursion_limit for one kernel run in Deep mode "
+            "(plan M4). Higher than the normal ceiling because Deep "
+            "biases toward more tool work and delegation, but still a "
+            "hard, loud bound."
+        ),
+    )
+    """LangGraph ``recursion_limit`` per kernel run when ``depth=deep`` (default 40, plan M4). Deep buys more tool turns, not an unbounded loop — exceeding the ceiling still fails the run loudly."""
+    kernel_max_tool_calls: int = Field(
+        30,
+        ge=1,
+        alias="INQTRIX_AGENT_KERNEL_MAX_TOOL_CALLS",
+        description=(
+            "Run-wide tool-call ceiling for normal kernel runs. Every call "
+            "in a model batch counts; an overflowing batch is rejected "
+            "before any tool executes."
+        ),
+    )
+    """Run-wide tool-call ceiling for normal kernel runs (default 30). The count is derived from checkpointed AI messages, making the limit cumulative and idempotent across park/resume; an overflowing multi-call batch is rejected in full before dispatch."""
+    kernel_max_tool_calls_deep: int = Field(
+        60,
+        ge=1,
+        alias="INQTRIX_AGENT_KERNEL_MAX_TOOL_CALLS_DEEP",
+        description=(
+            "Run-wide tool-call ceiling for deep kernel runs. It has the "
+            "same pre-dispatch and resume-safe semantics as the normal "
+            "ceiling."
+        ),
+    )
+    """Run-wide tool-call ceiling for Deep kernel runs (default 60). Deep permits more evidence work while retaining the same fail-loud, whole-batch rejection contract."""
+    max_parallel_children: int = Field(
+        6,
+        alias="INQTRIX_AGENT_MAX_PARALLEL_CHILDREN",
+        description=(
+            "Child research runs submitted per park round (and the "
+            "in-process tool-wave width). The parent parks slot-free "
+            "while children run, so undersized workers serialise a "
+            "wave but can no longer deadlock the pool."
+        ),
+    )
+    """Child research runs submitted per park round, and the width of the in-process tool wave (default 6). The parent holds NO execution slot while its children run (``waiting_for_children`` park) — sizing worker capacity below one wave serialises the wave's children (visible via the worker's startup sizing hint), it cannot starve or deadlock the pool."""
+    discovery_max_tool_calls: int = Field(
+        15,
+        alias="INQTRIX_AGENT_DISCOVERY_MAX_TOOL_CALLS",
+        description=(
+            "Hard probe budget for the read-only discovery phase; the "
+            "probe plan is truncated server-side, never prompted."
+        ),
+    )
+    """Hard probe budget for the read-only discovery phase (default 15). The probe plan is truncated server-side; the LLM never negotiates it."""
+    max_plan_tasks: int = Field(
+        8,
+        alias="INQTRIX_AGENT_MAX_PLAN_TASKS",
+        description=(
+            "Task-count ceiling the plan validator enforces for agent "
+            "AND user-edited plans."
+        ),
+    )
+    """Task-count ceiling the deterministic plan validator enforces (default 8) — for planner output and user edits alike (same validator, Designprinzip 4)."""
+    max_replan_rounds: int = Field(
+        2,
+        alias="INQTRIX_AGENT_MAX_REPLAN_ROUNDS",
+        description="Replan iterations before the run proceeds as-is.",
+    )
+    """Replan iterations before the run proceeds with what it has (default 2); each replan is an ADDITIVE task delta, results are never discarded."""
+    synthesis_evidence_budget: int = Field(
+        60,
+        alias="INQTRIX_AGENT_SYNTHESIS_EVIDENCE_BUDGET",
+        description=(
+            "Reference count above which the outline/answer prompt "
+            "digest is capped to the top-ranked references "
+            "(deterministic rank_evidence; 0 disables the cap)."
+        ),
+    )
+    """Reference count above which the synthesis PROMPT digest is capped by the deterministic ``rank_evidence`` selection (default 60 — typical runs stay below it, so behavior only changes for evidence-heavy deep runs). The citation ledger itself is never truncated; 0 disables the cap entirely."""
+    max_clarification_rounds: int = Field(
+        2,
+        alias="INQTRIX_AGENT_MAX_CLARIFICATION_ROUNDS",
+        description=(
+            "User-question rounds per run before the agent proceeds on "
+            "its best assumption (visibly noted in the memo)."
+        ),
+    )
+    """User-question rounds per run (default 2) before the agent proceeds on its best assumption — noted visibly in the memo, never silently."""
+    default_autonomy: str = Field(
+        "balanced",
+        alias="INQTRIX_AGENT_DEFAULT_AUTONOMY",
+        description=(
+            "Permission mode when the request names none: strict "
+            "(discovery + every plan delta approved), balanced (initial "
+            "plan approved, small read-only replans auto), autonomous "
+            "(no plan interrupt; write actions ALWAYS gated)."
+        ),
+    )
+    """Permission mode when the request names none (decision E16). ``strict`` approves discovery and every plan delta; ``balanced`` (default) approves the initial plan and auto-applies small read-only replans; ``autonomous`` skips plan interrupts entirely. Write-effect actions are gated in EVERY mode."""
+    allow_web_discovery_preview: bool = Field(
+        True,
+        alias="INQTRIX_AGENT_ALLOW_WEB_DISCOVERY_PREVIEW",
+        description=(
+            "Permit ONE instant web search during discovery so the "
+            "planner sees the external source situation. Applies only "
+            "in autonomous mode — Standard keeps all web contact "
+            "behind the plan gate (E16 amendment)."
+        ),
+    )
+    """Permit ONE ``web.search.instant`` call during discovery (default on) so the planner sees the external source situation before committing to web tasks; off = discovery stays fully internal. Since the E16 amendment (plan M1 S7) the preview additionally requires ``autonomous`` mode — in Standard the approved plan (whose tasks carry their verbatim queries) is the ONLY web-search consent surface."""
+    advanced_autonomy: bool = Field(
+        False,
+        alias="INQTRIX_AGENT_ADVANCED_AUTONOMY",
+        description=(
+            "Show the legacy three-way autonomy control (incl. strict) "
+            "in the UI instead of the two-mode Standard/Auto toggle."
+        ),
+    )
+    """Republish the legacy three-way autonomy control in the UI (default off). The wire vocabulary (strict/balanced/autonomous) is unchanged either way — this only decides whether the composer shows the simplified two-mode Standard/Auto toggle (plan M1 S7, the Cowork pattern) or all three modes; ``strict`` stays fully functional for API callers and enterprise deployments regardless."""
+    allow_volatile: bool = Field(
+        False,
+        alias="INQTRIX_AGENT_ALLOW_VOLATILE",
+        description=(
+            "Dev escape (E8): register the agent WITHOUT Postgres using "
+            "an in-memory checkpointer. Interrupted runs then die with "
+            "the process — logged loudly, surfaced as "
+            "workspace_agent_durable=false."
+        ),
+    )
+    """Dev escape (decision E8): register the workspace agent WITHOUT the Postgres backend, checkpointing in memory. Interrupted runs then cannot survive a restart — the container logs a WARNING and ``/v1/capabilities`` reports ``workspace_agent_durable: false`` so the degradation is visible, never silent."""
+    memory_provider: str = Field(
+        "none",
+        alias="INQTRIX_AGENT_MEMORY_PROVIDER",
+        description=(
+            "Long-term memory provider for workspace-agent runs: none or "
+            "mem0. The provider is optional and never replaces run/session "
+            "artifacts; it only backs user-approved long-term memories."
+        ),
+    )
+    """Long-term workspace-agent memory provider (``none`` or ``mem0``). Default ``none`` keeps existing deployments byte-identical and prevents accidental shared memory in no-auth modes."""
+    memory_mode: str = Field(
+        "candidate_only",
+        alias="INQTRIX_AGENT_MEMORY_MODE",
+        description=(
+            "Long-term memory learning mode: off, candidate_only, or "
+            "auto_safe. candidate_only stages memories for user approval; "
+            "auto_safe is reserved for harmless preferences only."
+        ),
+    )
+    """Long-term memory learning mode. ``candidate_only`` is the safe default; ``auto_safe`` remains constrained to harmless preferences."""
+    mem0_base_url: str = Field(
+        "",
+        alias="INQTRIX_MEM0_BASE_URL",
+        description=(
+            "Base URL of the self-hosted Mem0 API. Empty disables the "
+            "Mem0 adapter even when memory_provider is mem0."
+        ),
+    )
+    """Self-hosted Mem0 API base URL. Empty means the Mem0 adapter is unavailable."""
+    mem0_api_key: str = Field(
+        "",
+        alias="INQTRIX_MEM0_API_KEY",
+        description=(
+            "Optional server-side Mem0 API token. It is never exposed to "
+            "clients and is only sent as an Authorization header by the "
+            "server-side adapter."
+        ),
+    )
+    """Optional server-side Mem0 API token. Sensitive: never log or expose this value."""
+
+    @field_validator("memory_provider")
+    @classmethod
+    def _validate_memory_provider(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"none", "mem0"}:
+            raise ValueError(
+                "INQTRIX_AGENT_MEMORY_PROVIDER must be one of: none, mem0"
+            )
+        return normalized
+
+    @field_validator("memory_mode")
+    @classmethod
+    def _validate_memory_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"off", "candidate_only", "auto_safe"}:
+            raise ValueError(
+                "INQTRIX_AGENT_MEMORY_MODE must be one of: off, "
+                "candidate_only, auto_safe"
+            )
+        return normalized
+
+
 class Settings(BaseSettings):
     """Root container that aggregates the Settings groups.
 
@@ -2581,3 +3011,11 @@ class Settings(BaseSettings):
         ),
     )
     """Resource-sharing policy (tenant-wide by default)."""
+    agent_platform: AgentPlatformSettings = Field(
+        default_factory=AgentPlatformSettings,
+        description=(
+            "Workspace-agent platform limits (INQTRIX_AGENT_*): autonomy "
+            "default, wave/probe/replan ceilings, the volatile dev escape."
+        ),
+    )
+    """Workspace-agent platform limits (``INQTRIX_AGENT_*``)."""

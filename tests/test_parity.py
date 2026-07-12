@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
+from inqtrix.constants import (
+    MAX_TOTAL_SECONDS,
+    REASONING_TIMEOUT,
+    REQUEST_WAIT_MARGIN_SECONDS,
+)
 from inqtrix.parity import (
+    DEFAULT_ANALYSIS_TIMEOUT,
     DEFAULT_QUESTIONS_FILE,
+    DEFAULT_TIMEOUT,
     ParityTolerance,
     QuestionSpec,
     build_contract_report,
@@ -270,6 +278,12 @@ class TestCompareRuns:
 
 class TestLlmCompareAnalysis:
 
+    def test_timeout_defaults_follow_the_shared_agent_contract(self):
+        assert DEFAULT_TIMEOUT == (
+            MAX_TOTAL_SECONDS + REQUEST_WAIT_MARGIN_SECONDS
+        )
+        assert DEFAULT_ANALYSIS_TIMEOUT == REASONING_TIMEOUT
+
     def test_resolve_analysis_model_name_prefers_override(self):
         assert resolve_analysis_model_name(
             "configured-model", "reasoning-model", "override") == "override"
@@ -320,3 +334,32 @@ class TestLlmCompareAnalysis:
         assert llm.calls[0]["model"] == "analysis-model"
         assert llm.calls[0]["timeout"] == 42.0
         assert "Question" in llm.calls[0]["prompt"]
+
+    def test_auto_created_analysis_uses_effective_agent_timeout(self, monkeypatch):
+        import inqtrix.providers as providers_module
+        import inqtrix.settings as settings_module
+
+        llm = _StubAnalysisLLM()
+        settings = SimpleNamespace(
+            agent=SimpleNamespace(reasoning_timeout=777),
+            models=SimpleNamespace(reasoning_model="configured-model"),
+        )
+        monkeypatch.setattr(settings_module, "Settings", lambda: settings)
+        monkeypatch.setattr(
+            providers_module,
+            "create_providers",
+            lambda _settings: SimpleNamespace(llm=llm),
+        )
+        question = QuestionSpec(
+            id="q001",
+            question="Question",
+            category="news",
+        )
+
+        generate_llm_analysis_report(
+            {"meta": {}, "results": [_result("q001", confidence=7)]},
+            {"meta": {}, "results": [_result("q001", confidence=8)]},
+            [question],
+        )
+
+        assert llm.calls[0]["timeout"] == 777.0

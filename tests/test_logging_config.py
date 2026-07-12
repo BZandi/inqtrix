@@ -68,6 +68,27 @@ def test_mapping_style_logging_is_preserved_and_redacted(tmp_path, capsys):
     assert "[KEY]" in content
 
 
+def test_log_filter_redacts_exception_traceback_without_losing_frames(
+    tmp_path,
+) -> None:
+    log_path = configure_logging(enabled=True, log_dir=str(tmp_path / "logs"))
+    logger = logging.getLogger("inqtrix")
+
+    try:
+        raise RuntimeError("provider failed sk-fakeSecretToken1234567890abcdef")
+    except RuntimeError:
+        logger.exception("Native run failed")
+    for handler in logger.handlers:
+        if hasattr(handler, "flush"):
+            handler.flush()
+
+    content = Path(log_path).read_text(encoding="utf-8")
+    assert "sk-fakeSecretToken1234567890abcdef" not in content
+    assert "[KEY]" in content
+    assert "Traceback (most recent call last)" in content
+    assert "RuntimeError" in content
+
+
 def test_log_filter_preserves_benign_urls(tmp_path):
     """The log filter must not erase harmless URLs (regression for [URL] redaction)."""
     log_path = configure_logging(enabled=True, log_dir=str(tmp_path / "logs"))

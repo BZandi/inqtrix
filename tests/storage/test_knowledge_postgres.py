@@ -189,6 +189,60 @@ async def test_reembed_replaces_chunks_in_place(store) -> None:
 
 
 @pytest.mark.asyncio
+async def test_reembed_preserves_chunk_ids_by_position(store) -> None:
+    """Reindex keeps chunk ids stable by position so citations survive:
+    the first chunk keeps its id, growth appends a fresh id, and a shrink
+    drops the tail — verified through the public ``get_chunks`` read."""
+    collection = await store.create_collection(
+        name="C", embedding_model="m", embedding_dim=2
+    )
+    document = await store.add_document(
+        collection_id=collection.id, title="D", text="t",
+        metadata={}, chunks=["one", "two"],
+        embeddings=[[1.0, 0.0], [0.0, 1.0]],
+        source_chunks=["one", "two"],
+    )
+    before = await store.get_chunks(document.id)
+    assert [c.chunk_index for c in before] == [0, 1]
+    id0, id1 = before[0].id, before[1].id
+
+    # Grow to three chunks: positions 0/1 keep their ids, 2 is fresh.
+    await store.reembed_document(
+        document_id=document.id,
+        chunks=["one", "two", "three"],
+        embeddings=[[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+        source_chunks=["one", "two", "three"],
+    )
+    grown = await store.get_chunks(document.id)
+    assert [c.id for c in grown[:2]] == [id0, id1]
+    assert grown[2].id not in {id0, id1}
+
+    # Shrink back to one chunk: position 0 keeps its original id.
+    await store.reembed_document(
+        document_id=document.id,
+        chunks=["one"], embeddings=[[1.0, 0.0]], source_chunks=["one"],
+    )
+    shrunk = await store.get_chunks(document.id)
+    assert [c.id for c in shrunk] == [id0]
+
+
+@pytest.mark.asyncio
+async def test_get_chunks_orders_and_404s(store) -> None:
+    collection = await store.create_collection(
+        name="C", embedding_model="m", embedding_dim=2
+    )
+    document = await store.add_document(
+        collection_id=collection.id, title="D", text="t",
+        metadata={}, chunks=["a", "b", "c"],
+        embeddings=[[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+    )
+    chunks = await store.get_chunks(document.id)
+    assert [c.chunk_index for c in chunks] == [0, 1, 2]
+    with pytest.raises(DocumentNotFound):
+        await store.get_chunks("kd_unknown")
+
+
+@pytest.mark.asyncio
 async def test_delete_document_and_collection_cascade(store) -> None:
     collection = await store.create_collection(
         name="C", embedding_model="m", embedding_dim=2

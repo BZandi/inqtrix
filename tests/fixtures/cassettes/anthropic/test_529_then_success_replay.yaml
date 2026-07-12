@@ -1,6 +1,6 @@
 # Hand-crafted Anthropic-specific 529 Overloaded burst followed by a
 # successful response. Tests the provider's exponential-backoff retry
-# loop (_MAX_ANTHROPIC_ATTEMPTS=5). The disable_backoff_sleep fixture
+# loop (MAX_PROVIDER_ATTEMPTS=3). The disable_backoff_sleep fixture
 # in tests/replay/conftest.py prevents the test from actually waiting
 # the backoff intervals.
 interactions:

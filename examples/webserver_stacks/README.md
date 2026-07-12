@@ -341,7 +341,7 @@ The JSON body of `/v1/chat/completions` accepts an optional
 | `min_rounds` | 1–10 | Minimum number of research rounds |
 | `confidence_stop` | 1–10 | Confidence threshold for early stop |
 | `report_profile` | `compact` / `deep` | Switch between compact and deep answers. Profile defaults are mirrored onto non-explicit fields; explicit operator/user values win. |
-| `max_total_seconds` | 30–1800 | Wall-clock deadline per run |
+| `max_total_seconds` | 30–3600 | Wall-clock deadline per run |
 | `first_round_queries` | 1–20 | Round-0 query breadth |
 | `skip_search` | boolean | Direct-chat mode: bypass plan/search/evaluate, return an uncited LLM answer with `round=0`. |
 
@@ -565,14 +565,14 @@ What this means in practice:
   when they need explicit cancellation without closing an event stream.
 - **Token budget is bounded** by the in-flight provider call when
   the disconnect happens. Latency from the disconnect to the actual
-  agent stop equals the remaining duration of that call (typically
-  5-60 s); in-flight LLM/search HTTP calls are not interrupted.
+  agent stop equals the remaining duration of that call; in-flight
+  LLM/search HTTP calls are not interrupted and remain bounded by the
+  configured operation timeout.
 - **Server log** emits `INFO  Run cancelled by client disconnect` so
   operators can correlate dropped UI connections with backend cost.
 
-If you need true sub-second cancellation (interrupt provider calls
-mid-flight, expose an explicit `/v1/runs/<id>/cancel` endpoint),
-that is a separate follow-up task.
+True sub-second cancellation would require provider-specific support to
+interrupt calls mid-flight; that remains a separate follow-up task.
 
 ## Search engine identifier in /health and /v1/stacks
 

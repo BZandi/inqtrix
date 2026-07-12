@@ -56,6 +56,8 @@ When a client POSTs to `/v1/chat/completions` with `"stream": true`, the server 
 
 Include the flag `"include_progress": false` in the body to get only answer chunks; the separator and progress prefixes are then omitted. This flag affects the OpenAI-compatible chat stream only. Native `/v1/runs/{run_id}/events` still emits structured progress events because UI state depends on them. See [Web server mode](../deployment/webserver-mode.md) for the full API contract.
 
+Progress blockquotes appear for the graph modes (`research`, `direct_llm`), which push coarse messages onto the progress queue. `knowledge` emits its detailed gate and grounding steps as structured native-run events and therefore streams the **answer only** on the chat-completions surface. This is intentional: streaming dispatches every mode through the `AlgorithmRegistry`, while the chat surface renders coarse progress only from the queue used by graph modes.
+
 ## Cancel interaction
 
 The streaming generator on the server side races `progress_queue.get(timeout=0.3)` against a watcher task that calls `await request.receive()`. When the client disconnects, the watcher sets `cancel_event`, the generator exits cleanly, and the next node boundary raises `AgentCancelled`. Result: progress messages stop arriving within roughly one second of disconnect; the active provider call continues until its natural completion (see [Web server mode](../deployment/webserver-mode.md)).

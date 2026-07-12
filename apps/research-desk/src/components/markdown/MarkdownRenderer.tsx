@@ -21,12 +21,14 @@ import type { PluggableList } from 'unified'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
+import { MermaidFigure } from '@/components/markdown/MermaidFigure'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import { useTheme } from '@/theme/ThemeProvider'
 import {
   extractMarkdownCodeBlocks,
   plainCodeLanguageFromClassName,
+  rawCodeLanguageFromClassName,
 } from './markdownLanguage'
 
 export type MarkdownRendererVariant = 'chat' | 'report'
@@ -203,7 +205,7 @@ const MARKDOWN_COMPONENTS_BY_VARIANT: Record<MarkdownRendererVariant, Components
       <strong className={cn('font-semibold text-foreground', className)} {...props} />
     ),
     table: ({ className, ...props }) => (
-      <div className="my-3 max-w-full overflow-x-auto rounded-md border border-border bg-background [scrollbar-width:thin]">
+      <div className="my-3 max-w-full overflow-x-auto rounded-md border border-border bg-background [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <table className={cn('w-full min-w-[32rem] border-collapse text-left text-xs leading-[1.4]', className)} {...props} />
       </div>
     ),
@@ -297,7 +299,7 @@ const MARKDOWN_COMPONENTS_BY_VARIANT: Record<MarkdownRendererVariant, Components
       <strong className={cn('font-semibold text-foreground', className)} {...props} />
     ),
     table: ({ className, ...props }) => (
-      <div className="my-5 max-w-full overflow-x-auto rounded-lg border border-border [scrollbar-width:thin]">
+      <div className="my-5 max-w-full overflow-x-auto rounded-lg border border-border [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <table className={cn('w-full min-w-[560px] border-collapse text-left text-sm', className)} {...props} />
       </div>
     ),
@@ -477,6 +479,21 @@ function PrettyCodePre({
     ?? 'text'
   const codeText = textFromReactNode(children)
 
+  // ```mermaid fences render as diagrams app-wide (plan M1 S6): this is
+  // the ONE integration point every MarkdownRenderer consumer flows
+  // through (chat, knowledge, reports, agent canvas, answer blocks).
+  // The check reads the RAW fence token — the normalized `language`
+  // above is whitelist-filtered for the highlighter and erases unknown
+  // languages to 'text'.
+  const rawLanguage = propToString(
+    dataProps['data-language']
+      ?? node?.properties?.dataLanguage
+      ?? node?.properties?.['data-language'],
+  )?.toLowerCase() ?? rawCodeLanguageFromReactNode(children)
+  if (rawLanguage === 'mermaid') {
+    return <MermaidFigure code={codeText.trim()} />
+  }
+
   async function copyCode() {
     try {
       await navigator.clipboard.writeText(readRenderedCodeText(preRef.current, codeText))
@@ -519,7 +536,7 @@ function PrettyCodePre({
       </div>
       <pre
         className={cn(
-          'max-w-full overflow-x-auto bg-transparent font-mono text-foreground [scrollbar-width:thin]',
+          'max-w-full overflow-x-auto bg-transparent font-mono text-foreground [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
           variant === 'report' ? 'p-4 leading-6' : 'p-3 leading-[1.45]',
           className,
         )}
@@ -622,7 +639,7 @@ function StreamingMarkdownTail({
             {pendingCode.language}
           </span>
         </div>
-        <pre className="max-w-full overflow-x-auto whitespace-pre-wrap bg-transparent p-3 font-mono leading-[1.45] text-foreground [overflow-wrap:anywhere] [scrollbar-width:thin]">
+        <pre className="max-w-full overflow-x-auto whitespace-pre-wrap bg-transparent p-3 font-mono leading-[1.45] text-foreground [overflow-wrap:anywhere] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {pendingCode.body}
         </pre>
       </div>
@@ -869,6 +886,23 @@ function codeLanguageFromReactNode(node: ReactNode): string | null {
   if (isValidElement<{ children?: ReactNode; className?: unknown }>(node)) {
     return plainCodeLanguageFromClassName(node.props.className)
       ?? codeLanguageFromReactNode(node.props.children)
+  }
+
+  return null
+}
+
+function rawCodeLanguageFromReactNode(node: ReactNode): string | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const language = rawCodeLanguageFromReactNode(child)
+      if (language) return language
+    }
+    return null
+  }
+
+  if (isValidElement<{ children?: ReactNode; className?: unknown }>(node)) {
+    return rawCodeLanguageFromClassName(node.props.className)
+      ?? rawCodeLanguageFromReactNode(node.props.children)
   }
 
   return null

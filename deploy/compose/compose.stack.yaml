@@ -59,6 +59,41 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  pgbouncer:
+    # Optional transaction-mode connection pooler in front of Postgres
+    # (--profile pgbouncer). Opt in by ALSO pointing INQTRIX_DATABASE_URL at
+    # pgbouncer:6432 (see deploy/.env.stack.example); migrate below stays
+    # wired directly to postgres:5432 (DDL does not multiplex).
+    # IMAGE-POLICY EXCEPTION (maintainer decision pending): PgBouncer has no
+    # Docker Official or Docker-Sponsored image. edoburu/pgbouncer is the
+    # de-facto community standard (non-root, env-configured); swap the pin
+    # here if the maintainer prefers another provenance.
+    # MAX_PREPARED_STATEMENTS (pgbouncer >= 1.21) makes asyncpg's named
+    # prepared statements safe under transaction pooling; the URL-side
+    # ?prepared_statement_cache_size=0 in the example env is belt-and-braces.
+    profiles: ["pgbouncer"]
+    image: docker.io/edoburu/pgbouncer:v1.24.1-p1
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${INQTRIX_PG_USER:-inqtrix}
+      DB_PASSWORD: ${INQTRIX_PG_PASSWORD:?set INQTRIX_PG_PASSWORD in deploy/.env.stack}
+      DB_NAME: ${INQTRIX_PG_DB:-inqtrix}
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: "400"
+      DEFAULT_POOL_SIZE: "20"
+      MAX_PREPARED_STATEMENTS: "200"
+      AUTH_TYPE: scram-sha-256
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 6432 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
   migrate:
     # One-shot schema migration. Runs the packaged Alembic migrations to head
     # (the same inqtrix-migrate console script operators use) and exits 0.
@@ -71,6 +106,11 @@ services:
     command: ["inqtrix-migrate"]
     env_file:
       - ../../${INQTRIX_ENV_FILE:-deploy/.env.stack}
+    environment:
+      # Always DIRECT to Postgres, independent of the app URL: with the
+      # pgbouncer profile the operator points INQTRIX_DATABASE_URL at the
+      # pooler, but Alembic DDL must not run through transaction pooling.
+      INQTRIX_DATABASE_URL: postgresql+asyncpg://${INQTRIX_PG_USER:-inqtrix}:${INQTRIX_PG_PASSWORD:?set INQTRIX_PG_PASSWORD in deploy/.env.stack}@postgres:5432/${INQTRIX_PG_DB:-inqtrix}
     depends_on:
       postgres:
         condition: service_healthy

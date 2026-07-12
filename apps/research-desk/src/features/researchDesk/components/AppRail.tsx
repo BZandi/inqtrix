@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 
-import { BookOpenCheck, Database, FileText, Globe2, Library, MessagesSquare, Settings, type LucideIcon } from '@/components/icons'
+import { BookOpenCheck, Database, FileText, Globe2, Library, MessagesSquare, Settings, Waypoints, type LucideIcon } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useLocale } from '@/i18n/LocaleProvider'
@@ -13,6 +13,9 @@ type AppRailProps = {
   /** Capability gate for the knowledge workspace entry (true when the
    * backend advertises `features.knowledge`, or in demo mode). */
   showKnowledge?: boolean
+  /** Capability gate for the Agent Desk entry (true when the backend
+   * advertises `features.workspace_agent`, or in demo mode). */
+  showAgent?: boolean
   /** Pending share invitations awaiting consent — a count chip on the
    * settings entry so the inbox is discoverable from anywhere. 0 hides it. */
   settingsBadgeCount?: number
@@ -28,7 +31,7 @@ type RailItem = {
   value: AppView
 }
 
-export function AppRail({ activeView, onViewChange, settingsBadgeCount = 0, showKnowledge = false, profileSlot }: AppRailProps) {
+export function AppRail({ activeView, onViewChange, settingsBadgeCount = 0, showAgent = false, showKnowledge = false, profileSlot }: AppRailProps) {
   const { t } = useLocale()
   const deskItems: RailItem[] = [
     { icon: Globe2, label: t.navigation.research, value: 'research' },
@@ -40,6 +43,11 @@ export function AppRail({ activeView, onViewChange, settingsBadgeCount = 0, show
     { icon: MessagesSquare, label: t.navigation.chat, value: 'chat' },
     { icon: FileText, label: t.navigation.editor, value: 'editor' },
   ]
+  // The Agent Desk sits in its OWN group below the editor, set off by a
+  // divider — it is the acting-agent surface, distinct from the read tools.
+  const agentItems: RailItem[] = showAgent
+    ? [{ icon: Waypoints, label: t.navigation.agent, value: 'agent' }]
+    : []
   const settingsItem = {
     badge: settingsBadgeCount,
     icon: Settings,
@@ -58,9 +66,14 @@ export function AppRail({ activeView, onViewChange, settingsBadgeCount = 0, show
   } satisfies RailItem
 
   return (
+    // The shell row is fully capped (`overflow-hidden`, never scrolls), so the
+    // rail must NOT be sticky: a sticky rail reacts to the row's transient
+    // scroll extent and gets dragged when a sibling workspace mounts with a
+    // vertical entry transform (e.g. Settings' `y: 8`), producing a visible
+    // up/down jitter. `relative` keeps the same box position and honours z-20.
     <nav
       aria-label={t.navigation.label}
-      className="sticky top-[var(--header-h)] z-20 flex h-[calc(100svh-var(--header-h))] w-12 shrink-0 flex-col items-center border-r border-border bg-background/90 px-1.5 pb-3 pt-1 backdrop-blur md:w-14 md:px-2"
+      className="relative z-20 flex h-full min-h-0 w-[var(--header-h)] shrink-0 flex-col items-center border-r border-border bg-background/90 px-0 pb-3 pt-1 backdrop-blur"
     >
       <div className="flex flex-col items-center gap-1">
         {deskItems.map((item) => (
@@ -68,6 +81,12 @@ export function AppRail({ activeView, onViewChange, settingsBadgeCount = 0, show
         ))}
         <span aria-hidden className="my-0.5 h-px w-5 rounded-full bg-border/70" />
         {toolItems.map((item) => (
+          <RailButton activeView={activeView} item={item} key={item.value} onViewChange={onViewChange} />
+        ))}
+        {agentItems.length > 0 && (
+          <span aria-hidden className="my-0.5 h-px w-5 rounded-full bg-border/70" />
+        )}
+        {agentItems.map((item) => (
           <RailButton activeView={activeView} item={item} key={item.value} onViewChange={onViewChange} />
         ))}
       </div>

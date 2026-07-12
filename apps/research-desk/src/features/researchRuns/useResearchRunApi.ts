@@ -8,17 +8,23 @@ import {
   cancelResearchRun,
   createResearchRun,
   deleteResearchRun,
+  fetchRunEventsPage,
   fetchResearchRunResult,
   hasHttpStatus,
   listResearchRuns,
-  streamResearchRunEvents,
 } from '@/api/inqtrixClient'
+import { subscribeRunEvents } from './runEventChannel'
 import type {
   CreateResearchRunRequest,
   ResearchRunEvent,
   ResearchRunResult,
   ResearchRunSummary,
 } from './types'
+
+/** Runs per keyset page during history hydration; the loop follows
+ * `next_cursor` so the full working set still hydrates while each server
+ * query stays bounded (matches the chat/asset/editor hydration idiom). */
+const RUN_PAGE_LIMIT = 100
 
 type LiveRunCallbacks = {
   onEvent: (event: ResearchRunEvent) => void
@@ -65,7 +71,15 @@ export function useResearchRunApi({
   workspaceId,
 }: UseResearchRunApiOptions) {
   const [lastError, setLastError] = useState<string | null>(null)
+  // Initial run-list hydration has SETTLED (success or error): workspaces
+  // render a loading skeleton instead of an empty state until this flips,
+  // so a reload does not flash "no runs" while pages stream in.
+  const [runsHydrated, setRunsHydrated] = useState(false)
+  // Runs currently on the polling fallback (plan M1 T1) — the timeline
+  // shows a visible degradation hint for these.
+  const [pollingRunIds, setPollingRunIds] = useState<string[]>([])
   const streamsRef = useRef(new Map<string, AbortController>())
+  const replayedTerminalRunIdsRef = useRef(new Set<string>())
   const perRunCallbacksRef = useRef(new Map<string, PerRunCallbacks>())
   const callbacksRef = useRef<LiveRunCallbacks>({
     onEvent,
@@ -96,10 +110,46 @@ export function useResearchRunApi({
     }
   }, [apiKey, workspaceId])
 
+  const replayTerminalAgentEvents = useCallback(async (
+    summary: ResearchRunSummary,
+  ) => {
+    if (replayedTerminalRunIdsRef.current.has(summary.run_id)) return
+    replayedTerminalRunIdsRef.current.add(summary.run_id)
+    try {
+      await replayTerminalEventPages({
+        fetchPage: (afterSequence) => fetchRunEventsPage(
+          summary.events_url,
+          afterSequence,
+          { apiKey, workspaceId },
+        ),
+        onEvent: (event) => {
+          const callbacks = perRunCallbacksRef.current.get(summary.run_id)
+            ?? callbacksRef.current
+          callbacks.onEvent?.(event)
+        },
+      })
+    } catch (error) {
+      const callbacks = perRunCallbacksRef.current.get(summary.run_id)
+        ?? callbacksRef.current
+      callbacks.onRunError?.(summary.run_id, messageFromError(error))
+    } finally {
+      if (summary.status === 'completed') {
+        void loadResult(summary.run_id)
+      } else {
+        perRunCallbacksRef.current.delete(summary.run_id)
+      }
+    }
+  }, [apiKey, loadResult, workspaceId])
+
   const startStream = useCallback((summary: ResearchRunSummary) => {
+    // Child runs are projected through their parent stream. A child channel is
+    // opened only when its work unit is explicitly inspected.
+    if (summary.kind === 'agent_child') return
     if (streamsRef.current.has(summary.run_id)) return
     if (terminalStatus(summary.status)) {
-      if (summary.status === 'completed') {
+      if (shouldReplayTerminalAgentEvents(summary)) {
+        void replayTerminalAgentEvents(summary)
+      } else if (summary.status === 'completed') {
         void loadResult(summary.run_id)
       } else {
         perRunCallbacksRef.current.delete(summary.run_id)
@@ -109,10 +159,21 @@ export function useResearchRunApi({
 
     const controller = new AbortController()
     streamsRef.current.set(summary.run_id, controller)
-    void streamResearchRunEvents(summary.events_url, {
-      apiKey,
+    void subscribeRunEvents({
+      eventsUrl: summary.events_url,
+      options: { apiKey, workspaceId },
       signal: controller.signal,
-      workspaceId,
+      // Visible degradation (plan M1 T1): the timeline shows a hint
+      // while the run is on the polling fallback; recovery clears it.
+      onTransportChange: (transport) => {
+        setPollingRunIds((current) => {
+          const isPolling = transport === 'polling'
+          if (current.includes(summary.run_id) === isPolling) return current
+          return isPolling
+            ? [...current, summary.run_id]
+            : current.filter((id) => id !== summary.run_id)
+        })
+      },
       onEvent: (event) => {
         const callbacks = perRunCallbacksRef.current.get(event.run_id) ?? callbacksRef.current
         callbacks.onEvent?.(event)
@@ -129,8 +190,12 @@ export function useResearchRunApi({
       perRunCallbacksRef.current.delete(summary.run_id)
     }).finally(() => {
       streamsRef.current.delete(summary.run_id)
+      setPollingRunIds((current) =>
+        current.includes(summary.run_id)
+          ? current.filter((id) => id !== summary.run_id)
+          : current)
     })
-  }, [apiKey, loadResult, workspaceId])
+  }, [apiKey, loadResult, replayTerminalAgentEvents, workspaceId])
 
   const submitRun = useCallback(async (
     request: CreateResearchRunRequest,
@@ -234,6 +299,8 @@ export function useResearchRunApi({
       }
       streamsRef.current.clear()
       perRunCallbacksRef.current.clear()
+      replayedTerminalRunIdsRef.current.clear()
+      setRunsHydrated(false)
       return undefined
     }
 
@@ -243,17 +310,32 @@ export function useResearchRunApi({
     }
     streamsRef.current.clear()
     perRunCallbacksRef.current.clear()
+    replayedTerminalRunIdsRef.current.clear()
+    setRunsHydrated(false)
 
     async function hydrate() {
       try {
-        const summaries = await listResearchRuns({ apiKey, workspaceId })
-        if (ignore) return
-        for (const summary of summaries) {
-          callbacksRef.current.onSummary(summary)
-          startStream(summary)
-        }
+        let cursor: string | undefined
+        do {
+          const page = await listResearchRuns({
+            apiKey,
+            cursor,
+            limit: RUN_PAGE_LIMIT,
+            workspaceId,
+          })
+          if (ignore) return
+          for (const summary of page.data) {
+            callbacksRef.current.onSummary(summary)
+            startStream(summary)
+          }
+          cursor = page.next_cursor ?? undefined
+        } while (cursor)
       } catch (error) {
         if (!ignore) setLastError(messageFromError(error))
+      } finally {
+        // "Settled", not "succeeded": a failed listing surfaces via
+        // lastError — the loading state must still end either way.
+        if (!ignore) setRunsHydrated(true)
       }
     }
 
@@ -271,6 +353,7 @@ export function useResearchRunApi({
       }
       streamsRef.current.clear()
       perRunCallbacksRef.current.clear()
+      replayedTerminalRunIdsRef.current.clear()
     }
   }, [])
 
@@ -278,6 +361,8 @@ export function useResearchRunApi({
     cancelRun,
     deleteRun,
     lastError,
+    pollingRunIds,
+    runsHydrated,
     submitRun,
   }
 }
@@ -287,6 +372,40 @@ function terminalStatus(status: ResearchRunSummary['status']) {
     || status === 'failed'
     || status === 'cancelled'
     || status === 'expired'
+}
+
+/** Terminal root-agent summaries need their durable event story replayed after
+ * hydration. Child runs stay parent-projected; standard runs need only their
+ * result payload. */
+export function shouldReplayTerminalAgentEvents(
+  summary: Pick<ResearchRunSummary, 'kind' | 'mode' | 'status'>,
+): boolean {
+  return summary.kind !== 'agent_child'
+    && (summary.mode === 'workspace_agent' || summary.mode === 'agent_kernel')
+    && terminalStatus(summary.status)
+}
+
+export async function replayTerminalEventPages({
+  fetchPage,
+  onEvent,
+}: {
+  fetchPage: (afterSequence: number | null) => Promise<{
+    data: ResearchRunEvent[]
+    terminal: boolean
+  }>
+  onEvent: (event: ResearchRunEvent) => void
+}): Promise<void> {
+  let afterSequence: number | null = null
+  for (;;) {
+    const page = await fetchPage(afterSequence)
+    for (const event of page.data) onEvent(event)
+    if (page.terminal) return
+    const latest = page.data.at(-1)?.sequence
+    if (latest === undefined || latest === afterSequence) {
+      throw new Error('Terminal agent event replay ended before a terminal page.')
+    }
+    afterSequence = latest
+  }
 }
 
 function messageFromError(error: unknown) {

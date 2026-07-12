@@ -16,6 +16,7 @@ from fastapi import Depends
 from fastapi.responses import JSONResponse
 
 from inqtrix.quota.models import QuotaDimension, QuotaExceeded
+from inqtrix.server.metrics import record_admission_rejected
 from inqtrix.services.agent_context import StackResolutionError
 
 if TYPE_CHECKING:
@@ -86,8 +87,11 @@ def quota_error_response(exc) -> JSONResponse:
 
     The envelope names the dimension, the limit, the current usage, and
     the reset timestamp so the UI can render a precise, actionable
-    message (never a silent block).
+    message (never a silent block). Also the single quota-rejection
+    chokepoint, so every surface's quota 429 is counted once for
+    ``/metrics`` here (no-op when metrics are off).
     """
+    record_admission_rejected("quota")
     return JSONResponse(
         status_code=429,
         content={"error": {

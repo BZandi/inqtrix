@@ -30,7 +30,9 @@ Start here when you know what you want to do but not which page owns it. The roo
 | Configure env vars or report profiles | [Configuration cookbook](configuration/configuration-cookbook.md), [Settings and env](configuration/settings-and-env.md), [Report profiles](configuration/report-profiles.md) |
 | Understand the LangGraph loop and evidence flow | [Architecture overview](architecture/overview.md), [Graph topology](architecture/graph-topology.md), [Nodes](architecture/nodes.md), [Evidence pipeline](architecture/evidence-pipeline.md) |
 | Understand the knowledge/RAG retrieval pipeline (hybrid, RRF, gate loop) | [Knowledge retrieval](architecture/knowledge-retrieval.md) |
+| Understand the workspace agent (plans, approvals, child runs, memo canvas) | [Agent platform](architecture/agent-platform.md) |
 | Debug a bad or expensive run | [Debugging runs](observability/debugging-runs.md), [Logging](observability/logging.md), [Forensic cookbook](observability/forensic-cookbook.md), [Troubleshooting](reference/troubleshooting.md) |
+| Scrape metrics / wire readiness probes | [Metrics](observability/metrics.md) |
 | Learn why a run stopped | [Stop criteria](scoring-and-stopping/stop-criteria.md), [Score ledger](scoring-and-stopping/score-ledger.md), [Confidence](scoring-and-stopping/confidence.md), [Aspect coverage](scoring-and-stopping/aspect-coverage.md) |
 | Add a custom provider or strategy | [Writing a custom provider](providers/writing-a-custom-provider.md), [Strategies](architecture/strategies.md) |
 | Plug in a custom auth provider or storage backend | [Custom auth provider](how-to/writing-a-custom-auth-provider.md), [Custom storage backend](how-to/writing-a-custom-storage.md) |
@@ -71,4 +73,5 @@ Start here when you know what you want to do but not which page owns it. The roo
 - [Architecture overview](architecture/overview.md)
 - [Evidence pipeline](architecture/evidence-pipeline.md)
 - [Knowledge retrieval](architecture/knowledge-retrieval.md)
+- [Agent platform](architecture/agent-platform.md)
 - [Troubleshooting](reference/troubleshooting.md)

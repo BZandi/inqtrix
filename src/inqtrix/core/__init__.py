@@ -15,11 +15,12 @@ task modes) speaks:
 
 The architectural line for agent executions: ``HTTP router ->
 application service -> AlgorithmRegistry -> AgentAlgorithm ->
-providers/stores -> run events/result``. Known exceptions, kept
-deliberately and to be migrated with their own phases: the editor and
-text routers orchestrate single LLM calls inline (no agent run
-involved), and the streamed chat path still executes the research
-graph through ``inqtrix.server.streaming``.
+providers/stores -> run events/result``. Streamed chat now follows this
+same line — ``inqtrix.server.streaming`` dispatches ``algorithm.run``
+with a per-request ``RunContext`` rather than binding the graph itself.
+Known exceptions, kept deliberately and to be migrated with their own
+phases: the editor and text routers orchestrate single LLM calls inline
+(no agent run involved).
 """
 
 from inqtrix.core.algorithms import (

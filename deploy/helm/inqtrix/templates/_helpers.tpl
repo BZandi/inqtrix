@@ -118,6 +118,26 @@ derived. Used by both the chart Secret and the migrate hook so they agree.
 {{- end -}}
 
 {{/*
+Effective database URL for the APP (api/worker): an explicit
+secret.data.INQTRIX_DATABASE_URL wins; with the bundled PgBouncer enabled the
+derived URL points at the pooler (transaction mode) and disables asyncpg's
+prepared-statement cache; otherwise it is the direct bundled-Postgres URL.
+The migrate hook deliberately keeps "inqtrix.databaseUrl" (DIRECT) -- Alembic
+DDL must never run through transaction pooling.
+*/}}
+{{- define "inqtrix.appDatabaseUrl" -}}
+{{- if hasKey .Values.secret.data "INQTRIX_DATABASE_URL" -}}
+{{- .Values.secret.data.INQTRIX_DATABASE_URL -}}
+{{- else if and .Values.pgbouncer.enabled .Values.postgres.enabled -}}
+{{- /* Trigger the shared password-charset guard (single source). */ -}}
+{{- $_ := include "inqtrix.databaseUrl" . -}}
+{{- printf "postgresql+asyncpg://%s:%s@%s-pgbouncer:6432/%s?prepared_statement_cache_size=0" .Values.postgres.auth.username .Values.postgres.auth.password (include "inqtrix.fullname" .) .Values.postgres.auth.database -}}
+{{- else -}}
+{{- include "inqtrix.databaseUrl" . -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Effective Valkey URL: explicit secret.data.INQTRIX_VALKEY_URL wins; otherwise
 derived from the bundled Valkey (password embedded in the URL).
 */}}

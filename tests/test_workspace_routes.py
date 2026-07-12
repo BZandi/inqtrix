@@ -164,6 +164,41 @@ class TestWorkspaceSurface:
         listed = client.get("/v1/workspaces").json()["data"]
         assert [entry["name"] for entry in listed] == ["Mein Team"]
 
+    def test_non_string_names_are_rejected_uniformly(self, logged_in):
+        """Names are strings, strictly: the historical ``str(...)``
+        coercion stored repr leaks like a workspace named "None".
+        Pinned as a deliberate hardening across every name-taking
+        surface (create here, rename in the admin router tests)."""
+        client, csrf, _identity = logged_in
+        for bad_name in (None, 0, False, ["Team"]):
+            response = client.post(
+                "/v1/workspaces",
+                json={"name": bad_name},
+                headers={"X-CSRF-Token": csrf},
+            )
+            assert response.status_code == 400, bad_name
+            assert response.json()["error"]["type"] == "invalid_request_error"
+
+    def test_self_serve_creation_is_audited(self, logged_in):
+        """Both creation surfaces share one command: the self-serve
+        route records the same ``workspace.created`` trail the admin
+        route always had (the pre-consolidation gap)."""
+        client, csrf, identity = logged_in
+        created = client.post(
+            "/v1/workspaces",
+            json={"name": "Auditiertes Team"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert created.status_code == 201
+        workspace_id = created.json()["workspace_id"]
+        entries = [
+            entry
+            for entry in identity.audit_entries
+            if entry.action == "workspace.created"
+        ]
+        assert [entry.resource_id for entry in entries] == [workspace_id]
+        assert entries[0].detail == {"name": "Auditiertes Team"}
+
     def test_invitation_management_requires_owner(self, logged_in):
         client, csrf, identity = logged_in
         workspace_id = client.post(

@@ -16,7 +16,12 @@ from pydantic import ValidationError
 
 from inqtrix.model_routing import resolve_model
 from inqtrix.providers import create_providers
-from inqtrix.settings import ModelSettings, ProviderSettings, Settings
+from inqtrix.settings import (
+    AgentSettings,
+    ModelSettings,
+    ProviderSettings,
+    Settings,
+)
 
 
 def _settings(providers: ProviderSettings, *, reasoning_model: str = "R", **model_kwargs) -> Settings:
@@ -114,6 +119,29 @@ def test_mix_and_match_axes_are_independent() -> None:
     ctx = create_providers(_settings(providers))
     assert type(ctx.llm).__name__ == "AnthropicLLM"
     assert type(ctx.search).__name__ == "AzureFoundryWebSearch"
+
+
+def test_search_timeout_and_foundry_concurrency_reach_provider() -> None:
+    """The env/settings bridge must not fall back to provider literals."""
+    providers = ProviderSettings(
+        search_provider="azure_foundry",
+        azure_ai_project_endpoint=(
+            "https://p.services.ai.azure.com/api/projects/p"
+        ),
+        web_search_agent_name="web-search",
+        azure_ai_project_api_key="k",
+        azure_foundry_max_concurrency=7,
+    )
+    settings = Settings(
+        providers=providers,
+        models=ModelSettings(reasoning_model="R"),
+        agent=AgentSettings(search_timeout=777),
+    )
+
+    ctx = create_providers(settings)
+
+    assert ctx.search._timeout == 777
+    assert ctx.search.max_search_concurrency == 7
 
 
 def test_missing_anthropic_key_fails_loud(caplog: pytest.LogCaptureFixture) -> None:

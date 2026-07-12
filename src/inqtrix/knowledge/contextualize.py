@@ -26,6 +26,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
+from inqtrix.constants import REASONING_TIMEOUT
 from inqtrix.model_routing import resolve_model
 from inqtrix.prompts import (
     build_chunk_context_prompt,
@@ -112,7 +113,7 @@ class LLMChunkContextualizer(ChunkContextualizer):
         llm: Any,
         *,
         model: str | None = None,
-        timeout: float = 120.0,
+        timeout: float = REASONING_TIMEOUT,
     ) -> None:
         self._llm = llm
         self._model = model
@@ -201,7 +202,7 @@ def contextualize_followup_question(
     question: str,
     history: str,
     model: str | None = None,
-    timeout: float = 120.0,
+    timeout: float = REASONING_TIMEOUT,
 ) -> tuple[ContextualizedQuestion, dict[str, int]]:
     """Rewrite a follow-up into a standalone retrieval query.
 

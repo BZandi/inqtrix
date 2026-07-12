@@ -1,5 +1,7 @@
 import * as React from 'react'
 import { ChevronDown, ChevronRight, LoaderCircle, Search, X } from '@/components/icons'
+import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
 export const EXPLORER_REVEAL_STEP = 5
@@ -251,5 +253,169 @@ export function ExplorerItemRow({
     >
       {children}
     </div>
+  )
+}
+
+export type ExplorerHistoryAction = {
+  /** Overrides `label` as the accessible name, e.g. `"Löschen: <title>"`. */
+  ariaLabel?: string
+  destructive?: boolean
+  icon: React.ReactNode
+  /** Tooltip text and default accessible name. */
+  label: string
+  onSelect: () => void
+}
+
+/** Last action sits at `right-1`, the one before it at `right-7` (max 2). */
+const EXPLORER_HISTORY_ACTION_OFFSETS = ['right-1', 'right-7']
+
+/**
+ * History/session explorer row: two-column grid whose right-aligned relative
+ * age yields to the hover actions. The actions are absolutely positioned so
+ * the title never shifts when they reveal.
+ */
+export function ExplorerHistoryRow({
+  actions = [],
+  active = false,
+  dragging = false,
+  indicator,
+  nested = false,
+  onPointerDown,
+  onSelect,
+  onStartRename,
+  renameEditor,
+  renameLabel,
+  timeLabel,
+  title,
+}: {
+  actions?: readonly ExplorerHistoryAction[]
+  active?: boolean
+  dragging?: boolean
+  /** Status slot between title and age — running spinner / gate dot. */
+  indicator?: React.ReactNode
+  nested?: boolean
+  onPointerDown?: React.PointerEventHandler<HTMLDivElement>
+  onSelect: () => void
+  onStartRename?: () => void
+  /** When set, the row is in rename mode and renders this in place of the title. */
+  renameEditor?: React.ReactNode
+  renameLabel?: string
+  timeLabel: string
+  title: React.ReactNode
+}) {
+  const cells = (
+    <>
+      <span className="flex min-w-0 items-center gap-2">
+        {renameEditor ?? (
+          <span className="block min-w-0 flex-1 truncate t-list-regular text-foreground">
+            {title}
+          </span>
+        )}
+        {indicator}
+      </span>
+      <span className="shrink-0 t-hint tabular-nums text-muted-foreground transition-opacity group-hover/explorer-item:opacity-0 group-focus-within/explorer-item:opacity-0">
+        {timeLabel}
+      </span>
+    </>
+  )
+
+  return (
+    <ExplorerItemRow
+      active={active}
+      dragging={dragging}
+      nested={nested}
+      onPointerDown={onPointerDown}
+    >
+      {renameEditor ? (
+        <div
+          className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-left"
+          data-explorer-action
+        >
+          {cells}
+        </div>
+      ) : (
+        <button
+          aria-pressed={active}
+          className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          onClick={onSelect}
+          onDoubleClick={onStartRename}
+          title={renameLabel}
+          type="button"
+        >
+          {cells}
+        </button>
+      )}
+      {actions.map((action, index) => (
+        <Tooltip key={index}>
+          <TooltipTrigger asChild>
+            {/* pointer-events follow the visibility: while hidden, the
+                actions sit UNDER the time label, and an invisible destructive
+                button must not catch a touch tap aimed at the timestamp. */}
+            <Button
+              aria-label={action.ariaLabel ?? action.label}
+              className={cn(
+                'pointer-events-none absolute top-1/2 size-6 -translate-y-1/2 text-foreground/55 opacity-0 transition',
+                'focus-visible:pointer-events-auto focus-visible:opacity-100',
+                'group-hover/explorer-item:pointer-events-auto group-hover/explorer-item:opacity-100',
+                EXPLORER_HISTORY_ACTION_OFFSETS[actions.length - 1 - index],
+                action.destructive ? 'hover:text-destructive' : 'hover:text-foreground',
+              )}
+              data-explorer-action
+              onClick={(event) => {
+                event.stopPropagation()
+                action.onSelect()
+              }}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              {action.icon}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{action.label}</TooltipContent>
+        </Tooltip>
+      ))}
+    </ExplorerItemRow>
+  )
+}
+
+/** Inline rename control for `ExplorerHistoryRow`: commit on Enter/blur, cancel on Escape. */
+export function ExplorerHistoryTitleInput({
+  autoFocus = false,
+  inputRef,
+  label,
+  onCancel,
+  onChange,
+  onCommit,
+  value,
+}: {
+  autoFocus?: boolean
+  inputRef?: React.Ref<HTMLInputElement>
+  label: string
+  onCancel: () => void
+  onChange: (value: string) => void
+  onCommit: () => void
+  value: string
+}) {
+  return (
+    <input
+      aria-label={label}
+      autoFocus={autoFocus}
+      className="min-w-0 flex-1 rounded-sm border-0 bg-background/85 px-1.5 py-0.5 t-list-regular text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      onBlur={onCommit}
+      onChange={(event) => onChange(event.target.value)}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault()
+          onCommit()
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          onCancel()
+        }
+      }}
+      ref={inputRef}
+      value={value}
+    />
   )
 }

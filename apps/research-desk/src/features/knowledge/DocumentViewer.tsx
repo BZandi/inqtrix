@@ -5,7 +5,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import { ChevronDown, ChevronUp, FileText, X } from '@/components/icons'
+import { ChevronDown, ChevronUp, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -136,7 +136,6 @@ export function DocumentViewer({
         >
           <aside className="flex h-full w-full flex-col border-l border-border bg-background shadow-[0_8px_28px_-12px_var(--shadow-soft)]">
             <header className="flex inqtrix-panel-header items-center gap-2 border-b border-border px-3">
-          <FileText className="icon-md shrink-0 text-foreground/80" />
           <div className="min-w-0 flex-1" title={target.collectionLabel ?? undefined}>
             <h2 className="truncate t-section text-foreground">{title}</h2>
           </div>

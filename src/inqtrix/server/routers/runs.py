@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from queue import Empty
 from typing import TYPE_CHECKING, Mapping
 
@@ -17,19 +18,39 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from inqtrix.auth.principal import Principal, UserContext
+from inqtrix.core.constants import (
+    AGENT_EXECUTION_DIRECTIVES,
+    AGENT_MODE_IDS,
+    AGENT_SOURCE_ACCESS,
+    AGENT_SOURCE_IDS,
+    AGENT_TOOL_DIRECTIVES,
+)
+from inqtrix.core.results import SourcePolicy
+from inqtrix.content.skills import SkillNotFound
 from inqtrix.knowledge.stores.ports import CollectionNotFound
+from inqtrix.project.agent_sessions_ports import AgentSessionNotFound
 from inqtrix.quota.models import QuotaDimension
+from inqtrix.server.metrics import record_admission_rejected
 from inqtrix.server.routers import (
     build_shared_grants_dependency,
     quota_admission,
     quota_record,
     stack_error_response,
 )
+from inqtrix.runs.shared import replay_after
 from inqtrix.server.runs import (
     RunActive,
     RunNotFound,
+    RunPerUserLimit,
     RunQueueFull,
+    RunSessionActive,
     format_sse_event,
+)
+from inqtrix.pagination import (
+    InvalidCursor,
+    clamp_limit,
+    decode_cursor,
+    list_envelope,
 )
 from inqtrix.services.agent_context import StackResolutionError
 from inqtrix.services.request_parsing import (
@@ -51,6 +72,59 @@ TERMINAL_EVENTS = {
 }
 
 
+def _parse_agent_execution_contract(
+    body: Mapping[str, object],
+) -> tuple[SourcePolicy, str]:
+    """Validate the additive Agent Desk source/directive wire contract.
+
+    The router parses this before mode resolution because a one-shot
+    directive itself forces ``agent_kernel``.  Durable replay receives the
+    already-normalized values and validates them again through
+    :class:`~inqtrix.core.results.RunRequest`.
+
+    Raises:
+        ValueError: With a user-facing validation message.
+    """
+    raw_policy = body.get("source_policy")
+    if raw_policy is None:
+        source_policy = SourcePolicy()
+    elif not isinstance(raw_policy, dict):
+        raise ValueError("source_policy muss ein Objekt sein.")
+    else:
+        unknown = sorted(set(raw_policy) - set(AGENT_SOURCE_IDS))
+        if unknown:
+            raise ValueError(
+                "source_policy erlaubt nur: " + ", ".join(AGENT_SOURCE_IDS)
+            )
+        invalid = [
+            key
+            for key, value in raw_policy.items()
+            if value not in AGENT_SOURCE_ACCESS
+        ]
+        if invalid:
+            raise ValueError(
+                "source_policy-Werte muessen available oder disabled sein."
+            )
+        source_policy = SourcePolicy.model_validate(raw_policy)
+
+    raw_directive = body.get("execution_directive")
+    if raw_directive is None:
+        execution_directive = ""
+    elif raw_directive not in AGENT_EXECUTION_DIRECTIVES:
+        raise ValueError(
+            "execution_directive erlaubt nur: "
+            + ", ".join(AGENT_EXECUTION_DIRECTIVES)
+        )
+    else:
+        execution_directive = str(raw_directive)
+    if execution_directive and "tool_directives" in body:
+        raise ValueError(
+            "execution_directive und tool_directives duerfen nicht "
+            "gleichzeitig gesetzt sein."
+        )
+    return source_policy, execution_directive
+
+
 def build_router(container: "AppContainer") -> APIRouter:
     """Bind the native run routes against the container."""
     router = APIRouter()
@@ -67,8 +141,12 @@ def build_router(container: "AppContainer") -> APIRouter:
         share_service, principal_dep, resource_type="run"
     )
     knowledge_service = container.knowledge_service
+    skill_service = container.skill_service
     shared_collections_dep = build_shared_grants_dependency(
         share_service, principal_dep, resource_type="knowledge_collection"
+    )
+    shared_skills_dep = build_shared_grants_dependency(
+        share_service, principal_dep, resource_type="skill_template"
     )
 
     @router.post("/v1/runs")
@@ -77,41 +155,91 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
         collection_grants=Depends(shared_collections_dep),
+        skill_grants=Depends(shared_skills_dep),
     ):
         """Create a queued native research run for browser UI clients."""
         try:
             body = await req.json()
         except Exception:
             return error_response(400, "Ungueltiger JSON-Body", "invalid_request_error")
+        if not isinstance(body, dict):
+            return error_response(
+                400, "Ungueltiger JSON-Body", "invalid_request_error"
+            )
+
+        try:
+            source_policy, execution_directive = (
+                _parse_agent_execution_contract(body)
+            )
+        except ValueError as exc:
+            return error_response(
+                400, str(exc), "invalid_request_error"
+            )
+
+        resolution_body = dict(body)
+        if execution_directive:
+            # One-shot directives are execution routes, not suggestions.
+            # Force the cognitive kernel before the registry-backed resolver
+            # validates availability; never silently fall back to a mission.
+            resolution_body["mode"] = "agent_kernel"
 
         try:
             workspace_id = workspace_id_from_request(req, body)
             question, messages = question_and_messages(body, settings.server)
-            resolved = resolver.resolve(body)
+            resolved = resolver.resolve(resolution_body)
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
         except StackResolutionError as exc:
             return stack_error_response(exc)
 
-        # Admission gate for knowledge asks: strict like the chat
-        # path — ONE invisible collection denies the whole submission
-        # (an ask that silently searched fewer collections than picked
-        # would change the answer's meaning without a trace), and the
-        # worker only re-executes admitted requests.
+        if execution_directive:
+            # Both enforced routes are conversational and intentionally
+            # normal-depth. Explicit model/tier/effort overrides remain on
+            # the copied settings and are honored by the kernel.
+            resolved = replace(
+                resolved,
+                agent_settings=resolved.agent_settings.model_copy(
+                    update={"depth": "normal"}
+                ),
+                agent_overrides={
+                    **resolved.agent_overrides,
+                    "depth": "normal",
+                },
+            )
+
+        # Admission gate for knowledge asks. An explicit collection set is
+        # asserted strictly for EVERY mode (one invisible id denies the
+        # whole submission — a silent narrowing would change the answer's
+        # meaning without a trace). An omitted/empty/null filter is PINNED
+        # to the caller-visible collections, but ONLY for mode=knowledge:
+        # that algorithm consumes the filter without scoping of its own,
+        # so an unscoped ask would otherwise reach every tenant
+        # collection. Agent runs resolve their scope themselves at
+        # execution time (fresh visibility, unscoped-by-design filters) —
+        # pinning them would freeze a submit-time snapshot AND fail the
+        # harness's grant-less re-assert on shared-in ids. The pinned ids
+        # ride the run's knowledge_filters into the (possibly
+        # out-of-process) worker. visible_to=None (auth off) keeps the
+        # historical see-everything view untouched.
         requested_collections = resolved.knowledge_filters.get(
             "collection_ids"
+        )
+        explicit_scope = (
+            isinstance(requested_collections, list)
+            and bool(requested_collections)
         )
         if (
             knowledge_service is not None
             and visible_to is not None
-            and isinstance(requested_collections, list)
-            and requested_collections
+            and (explicit_scope or resolved.mode == "knowledge")
         ):
             try:
-                await knowledge_service.assert_collections_visible(
-                    [str(item) for item in requested_collections],
-                    visible_to=visible_to,
-                    also_visible=collection_grants,
+                resolved.knowledge_filters["collection_ids"] = (
+                    await knowledge_service.resolve_ask_scope(
+                        requested_collections,
+                        visible_to=visible_to,
+                        also_visible=collection_grants,
+                    )
                 )
             except CollectionNotFound:
                 return error_response(
@@ -131,6 +259,194 @@ def build_router(container: "AppContainer") -> APIRouter:
         history = format_history(
             messages, max_messages=settings.server.max_messages_history
         )
+
+        # Workspace-agent submission extras (E15/E16): validated here,
+        # inert for every other mode. The agent kind drives the additive
+        # summary keys and the cancel cascade (M3).
+        autonomy = body.get("autonomy")
+        if autonomy is not None and autonomy not in (
+            "strict",
+            "balanced",
+            "autonomous",
+        ):
+            return error_response(
+                400,
+                "autonomy muss strict, balanced oder autonomous sein.",
+                "invalid_request_error",
+            )
+        session_id = body.get("session_id")
+        if session_id is not None and (
+            not isinstance(session_id, str) or not session_id.strip()
+        ):
+            return error_response(
+                400,
+                "session_id muss ein nicht-leerer String sein.",
+                "invalid_request_error",
+            )
+        document_id = body.get("document_id")
+        if document_id is not None and (
+            not isinstance(document_id, str) or not document_id.strip()
+        ):
+            return error_response(
+                400,
+                "document_id muss ein nicht-leerer String sein.",
+                "invalid_request_error",
+            )
+        response_form = body.get("response_form")
+        if response_form is not None and response_form not in (
+            "auto",
+            "chat",
+            "canvas",
+        ):
+            return error_response(
+                400,
+                "response_form muss auto, chat oder canvas sein.",
+                "invalid_request_error",
+            )
+        is_agent = resolved.mode in AGENT_MODE_IDS
+        if session_id is not None and not is_agent:
+            return error_response(
+                400,
+                "session_id gilt nur fuer Agent-Modi.",
+                "invalid_request_error",
+            )
+        if response_form is not None and not is_agent:
+            return error_response(
+                400,
+                "response_form gilt nur fuer Agent-Modi.",
+                "invalid_request_error",
+            )
+        if "source_policy" in body and not is_agent:
+            return error_response(
+                400,
+                "source_policy gilt nur fuer Agent-Modi.",
+                "invalid_request_error",
+            )
+        if execution_directive and document_id is not None:
+            return error_response(
+                400,
+                "execution_directive kann nicht mit document_id "
+                "kombiniert werden.",
+                "invalid_request_error",
+            )
+        capability_ids = (
+            set(container.capability_registry.ids())
+            if container.capability_registry is not None
+            else set()
+        )
+        if (
+            execution_directive == "quick_web"
+            and "web.search.instant" not in capability_ids
+        ):
+            return error_response(
+                400,
+                "Schnell-Web ist auf diesem Server nicht verfuegbar.",
+                "invalid_request_error",
+            )
+        if (
+            execution_directive == "knowledge_only"
+            and "knowledge.search" not in capability_ids
+        ):
+            return error_response(
+                400,
+                "Projektwissen ist auf diesem Server nicht verfuegbar.",
+                "invalid_request_error",
+            )
+        if is_agent and autonomy is None:
+            autonomy = settings.agent_platform.default_autonomy
+
+        # Skill admission (plan M3): strict like collections — ONE
+        # invisible skill denies the whole submission (a run that
+        # silently ran with fewer skills than attached would change
+        # behavior without a trace), and the count cap is enforced
+        # here, never prompted.
+        raw_skill_ids = body.get("skill_ids")
+        skill_ids: list[str] = []
+        skill_revisions: dict[str, float] = {}
+        if raw_skill_ids is not None:
+            if not is_agent:
+                return error_response(
+                    400,
+                    "skill_ids gilt nur fuer Agent-Modi.",
+                    "invalid_request_error",
+                )
+            if not isinstance(raw_skill_ids, list) or any(
+                not isinstance(item, str) or not item.strip()
+                for item in raw_skill_ids
+            ):
+                return error_response(
+                    400,
+                    "skill_ids muss eine Liste nicht-leerer Strings sein.",
+                    "invalid_request_error",
+                )
+            skill_ids = list(
+                dict.fromkeys(item.strip() for item in raw_skill_ids)
+            )
+            max_attached = settings.agent_platform.skills_max_attached
+            if len(skill_ids) > max_attached:
+                return error_response(
+                    400,
+                    f"Hoechstens {max_attached} Skills pro Lauf.",
+                    "invalid_request_error",
+                )
+            if skill_ids and skill_service is None:
+                return error_response(
+                    400,
+                    "Skills sind auf diesem Server nicht eingerichtet.",
+                    "invalid_request_error",
+                )
+            for skill_id in skill_ids:
+                try:
+                    record, _shared = await skill_service.get_visible(
+                        skill_id,
+                        tenant_id=principal.tenant_id,
+                        visible_to=visible_to,
+                        also_visible=skill_grants,
+                    )
+                    skill_revisions[skill_id] = record.updated_at
+                except SkillNotFound:
+                    return error_response(
+                        404,
+                        f"Skill nicht gefunden: {skill_id}",
+                        "not_found",
+                    )
+        raw_directives = body.get("tool_directives")
+        tool_directives: list[str] = []
+        if raw_directives is not None:
+            if not is_agent:
+                return error_response(
+                    400,
+                    "tool_directives gilt nur fuer Agent-Modi.",
+                    "invalid_request_error",
+                )
+            if not isinstance(raw_directives, list) or any(
+                item not in AGENT_TOOL_DIRECTIVES for item in raw_directives
+            ):
+                return error_response(
+                    400,
+                    "tool_directives erlaubt nur: "
+                    + ", ".join(AGENT_TOOL_DIRECTIVES),
+                    "invalid_request_error",
+                )
+            tool_directives = list(dict.fromkeys(raw_directives))
+
+        if is_agent and session_id is not None:
+            try:
+                await container.agent_sessions_service.claim_session(
+                    session_id,
+                    title=question[:120],
+                    caller_sub=(
+                        principal.sub
+                        if principal.kind in ("oidc_session", "pat")
+                        else None
+                    ),
+                    workspace_id=workspace_id,
+                    visible_to=visible_to,
+                )
+            except AgentSessionNotFound:
+                return error_response(
+                    404, "Sitzung nicht gefunden", "not_found"
+                )
 
         # Quota admission: one run counts as one run-unit, AND the run is
         # the highest LLM-token consumer — so a caller already over their
@@ -155,12 +471,50 @@ def build_router(container: "AppContainer") -> APIRouter:
                 resolved=resolved,
                 workspace_id=workspace_id,
                 principal=principal,
+                kind="agent" if is_agent else "standard",
+                session_id=session_id,
+                autonomy=(autonomy or "") if is_agent else "",
+                document_id=(document_id or "") if is_agent else "",
+                # "auto" is the wire default — stored as "" (no override,
+                # the intake profile decides the deliverable form).
+                response_form=(
+                    "chat"
+                    if execution_directive
+                    else ""
+                    if not is_agent or response_form in (None, "auto")
+                    else str(response_form)
+                ),
+                skill_ids=skill_ids,
+                skill_revisions=skill_revisions,
+                tool_directives=tool_directives,
+                source_policy=source_policy if is_agent else None,
+                execution_directive=execution_directive,
+            )
+        except RunPerUserLimit:
+            # THEIR cap, not the shared queue: the caller can free
+            # capacity by finishing/cancelling their own runs.
+            record_admission_rejected("per_user_limit")
+            return error_response(
+                429,
+                "Ihr persoenliches Limit gleichzeitiger Recherchen ist "
+                "erreicht. Bitte warten, bis eigene Auftraege abgeschlossen "
+                "sind.",
+                "rate_limit_error",
+                reason="per_user_limit",
             )
         except RunQueueFull:
+            record_admission_rejected("queue_full")
             return error_response(
                 429,
                 "Zu viele wartende Recherche-Auftraege. Bitte warten.",
                 "rate_limit_error",
+                reason="queue_full",
+            )
+        except RunSessionActive:
+            return error_response(
+                409,
+                "In dieser Sitzung ist bereits ein Agentenlauf aktiv.",
+                "session_run_active",
             )
         # Booked only once the run is accepted into the queue: the
         # run's LLM-token spend is booked separately at completion.
@@ -234,19 +588,31 @@ def build_router(container: "AppContainer") -> APIRouter:
         visible_to: UserContext | None = Depends(user_context_dep),
         also_visible=Depends(shared_runs_dep),
     ):
-        """List all queued, running, and short-lived terminal native runs."""
+        """List native runs, newest first, keyset-paginated.
+
+        ``?limit`` (default 50, max 200) and ``?cursor`` page a long run
+        history instead of materialising it whole on every poll. The
+        envelope gains an additive ``next_cursor`` (``null`` on the last
+        page); a client that ignores it and reads only ``data`` sees the
+        newest page — the full working set for typical active-run counts.
+        """
         try:
             workspace_id = workspace_id_from_request(req)
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
-        return {
-            "object": "list",
-            "data": run_store.list(
-                workspace_id=workspace_id,
-                visible_to=visible_to,
-                also_visible=also_visible,
-            ),
-        }
+        try:
+            after = decode_cursor(req.query_params.get("cursor"))
+        except InvalidCursor:
+            return error_response(400, "Ungueltiger Cursor", "invalid_cursor")
+        limit = clamp_limit(req.query_params.get("limit"))
+        summaries, next_cursor = run_store.list_page(
+            limit=limit,
+            after=after,
+            workspace_id=workspace_id,
+            visible_to=visible_to,
+            also_visible=also_visible,
+        )
+        return list_envelope(summaries, next_cursor)
 
     @router.get("/v1/runs/{run_id}")
     def get_run(
@@ -309,7 +675,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(404, "Run-Ergebnis nicht gefunden", "not_found")
 
     @router.post("/v1/runs/{run_id}/cancel")
-    def cancel_run(
+    async def cancel_run(
         run_id: str,
         req: Request,
         principal: Principal = Depends(principal_dep),
@@ -319,12 +685,23 @@ def build_router(container: "AppContainer") -> APIRouter:
         """Request cancellation for a queued or running native run."""
         try:
             workspace_id = workspace_id_from_request(req)
-            return run_store.cancel(
+            summary, affected_run_ids = await asyncio.to_thread(
+                run_store.cancel_tree,
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
                 also_visible=also_visible,
             )
+            # Waiting/queued runs become terminal synchronously and will not
+            # re-enter the algorithm to close their plan rows. Running runs
+            # retain their worker; its cancellation boundary performs the
+            # same domain transition without racing this request.
+            control_service = container.agent_control_service
+            if control_service is not None:
+                await control_service.reconcile_terminal_run_tree(
+                    affected_run_ids
+                )
+            return summary
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
         except RunNotFound:
@@ -376,6 +753,38 @@ def build_router(container: "AppContainer") -> APIRouter:
                     "Run %s geloescht; %d Freigaben entzogen", run_id, revoked
                 )
 
+    @router.get("/v1/runs/{run_id}/children")
+    async def run_children(
+        run_id: str,
+        req: Request,
+        principal: Principal = Depends(principal_dep),
+        visible_to: UserContext | None = Depends(user_context_dep),
+        also_visible=Depends(shared_runs_dep),
+    ):
+        """List an agent run's direct child runs, newest first.
+
+        Access is decided on the PARENT (view-share suffices for
+        reading); children inherit that visibility through this route
+        only — their direct URLs stay owner-scoped (plan rule R7).
+        """
+        try:
+            workspace_id = workspace_id_from_request(req)
+            # to_thread like every durable-store touch in async routes:
+            # the store call blocks on database round-trips.
+            await asyncio.to_thread(
+                run_store.get,
+                run_id,
+                workspace_id=workspace_id,
+                visible_to=visible_to,
+                also_visible=also_visible,
+            )
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content=exc.detail)
+        except RunNotFound:
+            return error_response(404, "Run nicht gefunden", "not_found")
+        children = await asyncio.to_thread(run_store.children, run_id)
+        return {"object": "list", "data": children}
+
     @router.get("/v1/runs/{run_id}/events")
     async def run_events(
         run_id: str,
@@ -384,7 +793,23 @@ def build_router(container: "AppContainer") -> APIRouter:
         visible_to: UserContext | None = Depends(user_context_dep),
         also_visible=Depends(shared_runs_dep),
     ):
-        """Stream buffered and live native run events as SSE."""
+        """Stream buffered and live native run events as SSE.
+
+        ``?after=<sequence>`` filters the REPLAY to events newer than
+        the given sequence (reconnect semantics, rule R8); the live
+        tail is unaffected.
+        """
+        after_raw = req.query_params.get("after")
+        after: int | None = None
+        if after_raw is not None:
+            try:
+                after = int(after_raw)
+            except ValueError:
+                return error_response(
+                    400,
+                    "after muss eine Event-Sequenznummer (Ganzzahl) sein",
+                    "invalid_request_error",
+                )
         try:
             workspace_id = workspace_id_from_request(req)
             subscription = await asyncio.to_thread(
@@ -399,14 +824,36 @@ def build_router(container: "AppContainer") -> APIRouter:
         except RunNotFound:
             return error_response(404, "Run nicht gefunden", "not_found")
 
+        # Polling fallback (plan M1 T2): ``?format=json`` returns the
+        # SAME replay buffer as an immediate JSON page instead of a
+        # stream — for clients behind SSE-buffering proxies. One event
+        # pipeline, one auth path; ``terminal`` tells the poller to stop.
+        if req.query_params.get("format") == "json":
+            try:
+                events = list(replay_after(subscription.replay, after))
+                terminal = bool(
+                    subscription.replay
+                    and subscription.replay[-1].get("type")
+                    in TERMINAL_EVENTS
+                )
+            finally:
+                subscription.close()
+            return {"object": "list", "data": events, "terminal": terminal}
+
         async def _event_generator():
             try:
-                terminal_replayed = False
-                for event in subscription.replay:
+                for event in replay_after(subscription.replay, after):
                     yield format_sse_event(event)
-                    terminal_replayed = event.get("type") in TERMINAL_EVENTS
-                if terminal_replayed:
+                # Terminal detection must use the UNFILTERED replay: a
+                # reconnect with ``after`` at/past the terminal event
+                # would otherwise wait forever on a stream that emits
+                # nothing more.
+                if subscription.replay and (
+                    subscription.replay[-1].get("type") in TERMINAL_EVENTS
+                ):
                     return
+                loop = asyncio.get_running_loop()
+                next_heartbeat = loop.time() + 5.0
                 while True:
                     if await req.is_disconnected():
                         return
@@ -417,8 +864,15 @@ def build_router(container: "AppContainer") -> APIRouter:
                             0.5,
                         )
                     except Empty:
+                        if loop.time() >= next_heartbeat:
+                            # SSE comments keep proxy/client readers active
+                            # without creating a second event vocabulary or
+                            # consuming sequence numbers.
+                            yield ": keepalive\n\n"
+                            next_heartbeat = loop.time() + 5.0
                         continue
                     yield format_sse_event(event)
+                    next_heartbeat = loop.time() + 5.0
                     if event.get("type") in TERMINAL_EVENTS:
                         return
             finally:

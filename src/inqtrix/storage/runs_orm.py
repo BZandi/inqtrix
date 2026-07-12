@@ -60,6 +60,16 @@ runs = Table(
         server_default=text("'queued'"),
     ),
     Column("mode", Text, nullable=False, server_default=text("'research'")),
+    # Agent-tree columns (migration 0029): role of the run in an agent
+    # tree plus its parent/root links and desk-session grouping. All
+    # additive with defaults so historical rows and callers are
+    # untouched; summaries omit the defaults entirely.
+    Column("kind", Text, nullable=False, server_default=text("'standard'")),
+    Column("parent_run_id", Text, nullable=True),
+    Column("root_run_id", Text, nullable=True),
+    Column("session_id", Text, nullable=True),
+    # TTL anchor while a run sits in a waiting status (0029).
+    Column("waiting_since", Float, nullable=True),
     Column("question", Text, nullable=False),
     Column("stack_name", Text, nullable=False, server_default=text("'default'")),
     Column("workspace_id", Text, nullable=True),
@@ -88,6 +98,30 @@ runs = Table(
     # skipping or repeating rows. Supersedes the old (tenant_id, created_at).
     Index("ix_runs_tenant_created_id", "tenant_id", "created_at", "run_id"),
     Index("ix_runs_tenant_status", "tenant_id", "status"),
+    # Child listing + session grouping for agent trees (0029).
+    Index("ix_runs_tenant_parent", "tenant_id", "parent_run_id"),
+    Index("ix_runs_tenant_session", "tenant_id", "session_id"),
+    # Per-user in-flight cap COUNT (created_by_sub + active status) on every
+    # submit; the tenant-leading indexes don't narrow by subject on a
+    # single-tenant deployment. Partial over the two active statuses so it
+    # indexes only the tiny live set (0037).
+    Index(
+        "ix_runs_sub_active",
+        "created_by_sub",
+        "status",
+        postgresql_where=text("status IN ('queued', 'running')"),
+    ),
+    Index(
+        "uq_runs_active_agent_session",
+        "session_id",
+        unique=True,
+        postgresql_where=text(
+            "session_id IS NOT NULL AND kind = 'agent' "
+            "AND parent_run_id IS NULL AND status IN "
+            "('queued', 'running', 'waiting_for_approval', "
+            "'waiting_for_input', 'waiting_for_children')"
+        ),
+    ),
 )
 """Durable run records — the source of truth once
 ``INQTRIX_STORAGE_BACKEND=postgres`` is active; the Valkey stream only

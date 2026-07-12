@@ -432,7 +432,7 @@ def test_throttling_retries_then_raises_rate_limited(mock_boto3):
         with pytest.raises(AgentRateLimited):
             llm.complete("test")
 
-    assert mock_client.converse.call_count == 5
+    assert mock_client.converse.call_count == 3
 
 
 def test_non_retryable_error_raises_bedrock_api_error(mock_boto3):
@@ -476,7 +476,7 @@ def test_connection_closed_retries_once_then_succeeds(mock_boto3):
     assert observed[0]["progress_emitted"] is True
     assert len(notices) == 1
     assert notices[0]["error_code"] == "ConnectionClosedError"
-    assert notices[0]["max_attempts"] == 2
+    assert notices[0]["max_attempts"] == 3
 
 
 def test_connection_closed_exhausts_limited_transport_attempts(mock_boto3):
@@ -492,7 +492,7 @@ def test_connection_closed_exhausts_limited_transport_attempts(mock_boto3):
         with pytest.raises(BedrockAPIError) as exc_info:
             llm.complete("test")
 
-    assert mock_client.converse.call_count == 2
+    assert mock_client.converse.call_count == 3
     assert exc_info.value.error_code == "ConnectionClosedError"
 
 
@@ -510,6 +510,93 @@ def test_deadline_raises_agent_timeout(mock_boto3):
 
     with pytest.raises(AgentTimeout):
         llm.complete("test", deadline=past_deadline)
+
+
+def test_transport_read_timeout_is_bounded_by_outer_deadline():
+    """A short outer budget must reach botocore, not just Python checks."""
+    mock_client = MagicMock()
+    mock_client.converse.return_value = _converse_response("ok")
+    mock_session = MagicMock()
+    mock_session.client.return_value = mock_client
+
+    with patch("inqtrix.providers.bedrock.boto3") as mock_boto3_mod, patch(
+        "inqtrix.providers.bedrock.BotoConfig",
+        side_effect=lambda **kwargs: kwargs,
+    ):
+        mock_boto3_mod.Session.return_value = mock_session
+        from inqtrix.providers.bedrock import BedrockLLM
+
+        llm = BedrockLLM(timeout=600)
+        outer_deadline = time.monotonic() + 5
+        llm.complete("test", timeout=600, deadline=outer_deadline)
+
+    read_timeouts = [
+        call.kwargs["config"]["read_timeout"]
+        for call in mock_session.client.call_args_list
+    ]
+    connect_timeouts = [
+        call.kwargs["config"]["connect_timeout"]
+        for call in mock_session.client.call_args_list
+    ]
+    assert read_timeouts[0] == 600
+    assert 0 < read_timeouts[-1] <= 5
+    assert connect_timeouts == read_timeouts
+
+
+def _make_transport_mocked_provider():
+    """Build a BedrockLLM whose session yields a fresh mock client per build."""
+    mock_session = MagicMock()
+    mock_session.client.side_effect = lambda *args, **kwargs: MagicMock()
+
+    with patch("inqtrix.providers.bedrock.boto3") as mock_boto3_mod, patch(
+        "inqtrix.providers.bedrock.BotoConfig",
+        side_effect=lambda **kwargs: kwargs,
+    ):
+        mock_boto3_mod.Session.return_value = mock_session
+        from inqtrix.providers.bedrock import BedrockLLM
+
+        return BedrockLLM(timeout=600), mock_session
+
+
+def test_client_for_deadline_reuses_rung_clients_under_shrinking_budget():
+    """A second-by-second shrinking budget maps to rungs, not one client each."""
+    from inqtrix.providers.bedrock import _TRANSPORT_TIMEOUT_RUNGS
+
+    llm, mock_session = _make_transport_mocked_provider()
+
+    seen_timeouts = set()
+    for remaining in range(120, 1, -1):
+        _, read_timeout = llm._client_for_deadline(time.monotonic() + remaining)
+        assert read_timeout <= remaining
+        assert read_timeout in _TRANSPORT_TIMEOUT_RUNGS
+        seen_timeouts.add(read_timeout)
+
+    assert len(seen_timeouts) <= 12
+    assert mock_session.client.call_count == 1 + len(seen_timeouts)
+
+
+def test_client_for_deadline_caps_cached_clients():
+    """The client cache stays within the LRU bound across every rung."""
+    from inqtrix.providers.bedrock import (
+        _MAX_TRANSPORT_CLIENTS,
+        _TRANSPORT_TIMEOUT_RUNGS,
+    )
+
+    llm, _ = _make_transport_mocked_provider()
+
+    for rung in _TRANSPORT_TIMEOUT_RUNGS:
+        llm._client_for_deadline(time.monotonic() + rung + 0.5)
+        assert len(llm._clients_by_read_timeout) <= _MAX_TRANSPORT_CLIENTS
+
+    top_rung = _TRANSPORT_TIMEOUT_RUNGS[-1]
+    client, read_timeout = llm._client_for_deadline(
+        time.monotonic() + top_rung + 5
+    )
+    cached_client, cached_timeout = llm._client_for_deadline(
+        time.monotonic() + top_rung + 5
+    )
+    assert cached_client is client
+    assert cached_timeout == read_timeout == top_rung
 
 
 # ---------------------------------------------------------------------------

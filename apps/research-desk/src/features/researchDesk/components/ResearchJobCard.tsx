@@ -21,6 +21,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { SharedBadge } from '@/features/sharing/SharedBadge'
 import { canCancelWithAccess } from '@/features/sharing/shareModel'
 import { useLocale } from '@/i18n/LocaleProvider'
+import { PhaseSegments as SharedPhaseSegments } from '@/components/ui/phase-segments'
 import { cn } from '@/lib/utils'
 import { useRunningDuration } from '@/features/researchRuns/useRunningDuration'
 import { appMotion } from '@/motion/transitions'
@@ -271,12 +272,7 @@ function runCardAction(
   action()
 }
 
-/**
- * Five-segment phase bar shared by the minimized and expanded running views.
- * Done segments are solid brand, the active one shows a calmly breathing fill
- * (CSS `inqtrix-segment-breathe`), upcoming ones stay neutral. Decorative — the
- * phase is conveyed textually next to it. `withLabels` adds the phase captions.
- */
+/** Research binding of the shared five-segment phase bar. */
 function PhaseSegments({
   activePhase,
   completedPhases,
@@ -289,50 +285,15 @@ function PhaseSegments({
   withLabels?: boolean
 }) {
   const { t } = useLocale()
-  const activeIndex = phaseOrder.indexOf(activePhase)
-
   return (
-    <div aria-hidden="true" className="min-w-0 flex-1">
-      <div className="flex items-center gap-1">
-        {phaseOrder.map((phase, index) => {
-          const isDone = index < activeIndex || completedPhases.includes(phase)
-          const isActive = phase === activePhase
-          return (
-            <span
-              className={cn(
-                'relative flex-1 overflow-hidden rounded-full',
-                thin ? 'h-1' : 'h-1.5',
-                isDone ? 'bg-brand' : isActive ? 'bg-brand/15' : 'bg-muted',
-              )}
-              key={phase}
-            >
-              {isActive && (
-                <span className="inqtrix-segment-breathe absolute inset-0 rounded-full bg-brand" />
-              )}
-            </span>
-          )
-        })}
-      </div>
-      {withLabels && (
-        <div className="mt-1.5 flex items-center gap-1">
-          {phaseOrder.map((phase, index) => (
-            <span
-              className={cn(
-                'min-w-0 flex-1 truncate text-center t-caption font-semibold',
-                index === activeIndex
-                  ? 'text-brand'
-                  : index < activeIndex
-                    ? 'text-muted-foreground'
-                    : 'text-muted-foreground/45',
-              )}
-              key={phase}
-            >
-              {phaseLabel(phase, t)}
-            </span>
-          ))}
-        </div>
-      )}
-    </div>
+    <SharedPhaseSegments
+      activePhase={activePhase}
+      completedPhases={completedPhases}
+      labelFor={(phase) => phaseLabel(phase, t)}
+      phases={phaseOrder}
+      thin={thin}
+      withLabels={withLabels}
+    />
   )
 }
 
@@ -585,4 +546,3 @@ function MetricRow({
     </div>
   )
 }
-

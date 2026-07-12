@@ -43,7 +43,9 @@ class TestAgentConfig:
         assert cfg.max_rounds == 2
         assert cfg.confidence_stop == 7
         assert cfg.answer_prompt_citations_max == 60
-        assert cfg.max_total_seconds == 300
+        assert cfg.max_total_seconds == 3600
+        assert cfg.reasoning_timeout == 600
+        assert cfg.search_timeout == 600
         assert cfg.llm is None
         assert cfg.search is None
 
@@ -203,6 +205,35 @@ class TestResearchResult:
         payload = result.to_export_payload()
         assert payload["references"][0]["title"] == "AI ACT Regulation (EU) 2024:1689.pdf"
         assert payload["references"][1]["title"] is None
+
+    def test_from_raw_accepts_agent_reference_alias_and_grounded_support(self):
+        raw = {
+            "answer": "Antwort [W1]",
+            "usage": {},
+            "result_state": {
+                "references": [
+                    {
+                        "label": "W1",
+                        "url": "https://example.com/report",
+                        "title": "Market report",
+                        "grounded_support": "Provider-grounded context",
+                    }
+                ]
+            },
+        }
+
+        result = ResearchResult.from_raw(raw)
+        payload = result.to_export_payload()
+
+        assert len(result.references) == 1
+        assert (
+            result.references[0].grounded_support
+            == "Provider-grounded context"
+        )
+        assert (
+            payload["references"][0]["grounded_support"]
+            == "Provider-grounded context"
+        )
 
     def test_from_raw_empty_state(self):
         raw = {"answer": "Keine Ergebnisse", "usage": {}, "result_state": {}}
@@ -365,7 +396,7 @@ class TestResearchAgentConstruction:
         assert settings.max_rounds == 4
         assert settings.min_rounds == 2
         assert settings.confidence_stop == 8
-        assert settings.first_round_queries == 10
+        assert settings.first_round_queries == 8
         assert settings.answer_prompt_citations_max == 500
 
     def test_build_settings_keeps_explicit_overrides_over_report_profile_defaults(self):

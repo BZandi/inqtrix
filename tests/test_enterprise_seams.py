@@ -16,10 +16,18 @@ context, custom permissions via ``permissions=``.)
 
 from __future__ import annotations
 
+import asyncio
+
+from sqlalchemy.pool import NullPool
+
 from inqtrix.auth.api_key import build_auth_provider
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server import create_app
 from inqtrix.server.app import _placeholder_secret_fields
+from inqtrix.server.container import (
+    build_container,
+    build_platform_persistence_bundle,
+)
 from inqtrix.settings import (
     AuthSettings,
     ServerSettings,
@@ -69,6 +77,71 @@ def test_create_app_object_store_impl_is_wired_into_file_service():
     file_service = app.state.container.file_service
     assert file_service is not None
     assert file_service._object_store is sentinel
+
+
+def _pg_settings() -> Settings:
+    # A dummy asyncpg URL: create_async_engine is lazy, so no connection is
+    # ever opened — only the pool CLASS is exercised.
+    return Settings(
+        server=ServerSettings(public_base_url=""),
+        storage=StorageSettings(
+            backend="postgres",
+            database_url="postgresql+asyncpg://u:p@localhost:5432/db",
+        ),
+        auth=AuthSettings(mode="none"),
+    )
+
+
+def _bundle_engine(bundle):
+    return bundle.session_factory.kw["bind"]
+
+
+def _permission_engine(container):
+    # The permission service's identity backend is the store that crashed on
+    # agent resume; assert the pool class on ITS engine, not just the bundle.
+    return container.permission_service._members._session_factory.kw["bind"]
+
+
+def test_platform_persistence_bundle_null_pool_is_loop_agnostic():
+    # The workspace agent drives these repositories from a sync worker thread
+    # via per-call asyncio.run; a pooled asyncpg connection reused across those
+    # short-lived loops crashes ("Future attached to a different loop"). The
+    # worker asks for a NullPool engine so the shared platform engine is
+    # loop-agnostic.
+    bundle = build_platform_persistence_bundle(_pg_settings(), null_pool=True)
+    assert isinstance(_bundle_engine(bundle).pool, NullPool)
+
+
+def test_platform_persistence_bundle_defaults_to_pooled_engine():
+    # The API keeps the pooled engine (one persistent request loop): the flag
+    # is OFF by default so existing deployments stay byte-identical.
+    bundle = build_platform_persistence_bundle(_pg_settings())
+    assert not isinstance(_bundle_engine(bundle).pool, NullPool)
+
+
+def test_build_container_forwards_platform_persistence_null_pool():
+    # The worker passes platform_persistence_null_pool=True; it must reach the
+    # permission service's identity engine end-to-end, not just the bundle.
+    container = build_container(
+        providers=_providers(),
+        strategies=None,
+        settings=_pg_settings(),
+        semaphore_factory=lambda: asyncio.Semaphore(1),
+        platform_persistence_null_pool=True,
+    )
+    assert isinstance(_permission_engine(container).pool, NullPool)
+
+
+def test_build_container_defaults_platform_persistence_to_pooled():
+    # Without the flag (the API path) the permission engine stays pooled — the
+    # distinct-value assertion that keeps the flag load-bearing.
+    container = build_container(
+        providers=_providers(),
+        strategies=None,
+        settings=_pg_settings(),
+        semaphore_factory=lambda: asyncio.Semaphore(1),
+    )
+    assert not isinstance(_permission_engine(container).pool, NullPool)
 
 
 def test_placeholder_secret_scan_flags_change_me_values():

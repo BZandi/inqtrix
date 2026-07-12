@@ -254,6 +254,22 @@ class MemoryKnowledgeStore:
                 raise DocumentNotFound(document_id)
             return document
 
+    async def get_chunks(self, document_id: str) -> list[DocumentChunk]:
+        """One document's chunks ordered by ``chunk_index`` (no vectors).
+
+        The embedding is stripped so this read surface is byte-identical
+        to the Postgres store, which never hydrates vectors here — the
+        two backends must not diverge on an observable field.
+        """
+        with self._lock:
+            if document_id not in self._documents:
+                raise DocumentNotFound(document_id)
+            ordered = sorted(
+                self._chunks.get(document_id, []),
+                key=lambda chunk: chunk.chunk_index,
+            )
+            return [replace(chunk, embedding=()) for chunk in ordered]
+
     async def delete_document(self, document_id: str) -> None:
         """Delete one document and its chunks."""
         with self._lock:
@@ -306,9 +322,19 @@ class MemoryKnowledgeStore:
                     )
             sources = source_chunks or []
             pages = page_numbers or []
+            # Reuse chunk ids by position so a re-embed does not orphan
+            # existing citations: (document_id, chunk_index) is the
+            # citation key, but a stable chunk_id lets exact provenance
+            # links survive reindex too. Positions beyond the previous
+            # chunk count get fresh ids; a shrunk document drops the tail.
+            previous_ids = [chunk.id for chunk in self._chunks.get(document_id, [])]
             self._chunks[document_id] = [
                 DocumentChunk(
-                    id=_new_id("kch"),
+                    id=(
+                        previous_ids[index]
+                        if index < len(previous_ids)
+                        else _new_id("kch")
+                    ),
                     document_id=document_id,
                     collection_id=document.collection_id,
                     chunk_index=index,

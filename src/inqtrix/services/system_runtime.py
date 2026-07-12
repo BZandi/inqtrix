@@ -279,6 +279,83 @@ async def _probe_vector_store(container: "AppContainer") -> bool:
     return await _bounded_probe("vector_store", probe)
 
 
+async def readiness_payload(
+    container: "AppContainer",
+) -> tuple[int, dict[str, Any]]:
+    """Build the ``/readyz`` payload and its HTTP status code.
+
+    Readiness differs from ``/health`` (liveness, provider-only): a pod
+    whose DATABASE or QUEUE is unreachable cannot serve requests and
+    must leave the load-balancer rotation (503). A down VECTOR store
+    only degrades the knowledge feature — research/chat/files still
+    work and knowledge routes fail loudly per-request — so it reports
+    ``degraded`` but stays ready (200). Every probe is read-only and
+    bounded (:data:`_RUNTIME_PROBE_TIMEOUT_SECONDS`), well below usual
+    kubelet probe timeouts; the memory backends are trivially ready so
+    the zero-infrastructure default stays green.
+    """
+    database_ok, queue_ok, vector_ok = await asyncio.gather(
+        _probe_database(container),
+        _probe_queue(container),
+        _probe_vector_store_ready(container),
+    )
+    ready = database_ok and queue_ok
+    status = "ready" if ready and vector_ok else (
+        "degraded" if ready else "not_ready"
+    )
+    checks = {
+        "database": _check_label(
+            database_ok, skipped=container.settings.storage.backend != "postgres"
+        ),
+        "queue": _check_label(
+            queue_ok, skipped=container.settings.queue.backend != "valkey"
+        ),
+        "vector_store": _check_label(
+            vector_ok, skipped=container.knowledge_service is None
+        ),
+    }
+    return (200 if ready else 503), {"status": status, "checks": checks}
+
+
+def _check_label(ok: bool, *, skipped: bool) -> str:
+    if skipped:
+        return "skipped"
+    return "ok" if ok else "unavailable"
+
+
+async def _probe_database(container: "AppContainer") -> bool:
+    settings = container.settings
+    if settings.storage.backend != "postgres":
+        return True
+    session_factory = container.session_factory
+    if session_factory is None:
+        # postgres declared but no factory wired — a composition bug
+        # that must read as not-ready, never as silently green.
+        log.warning(
+            "Readiness: Storage-Backend postgres ohne Session-Factory — "
+            "Datenbank-Probe meldet unavailable."
+        )
+        return False
+
+    async def probe() -> bool:
+        from sqlalchemy import text
+
+        async with session_factory() as session:
+            await session.execute(text("SELECT 1"))
+        return True
+
+    return await _bounded_probe("database", probe)
+
+
+async def _probe_vector_store_ready(container: "AppContainer") -> bool:
+    # Readiness variant: NO knowledge service means the feature is off —
+    # trivially ready (the admin runtime view reports False there
+    # because it describes feature availability, not pod readiness).
+    if container.knowledge_service is None:
+        return True
+    return await _probe_vector_store(container)
+
+
 async def _bounded_probe(
     name: str,
     probe: Callable[[], Awaitable[bool]],

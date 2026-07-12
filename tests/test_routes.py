@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from types import SimpleNamespace
@@ -220,8 +221,9 @@ def test_native_runs_endpoint_returns_events_and_result(monkeypatch):
         {
             "label": "E1", "url": "https://example.com/source", "tier": "unknown",
             "title": None, "document_id": None, "chunk_index": None,
-            "excerpt": None, "source_text": None, "page_number": None,
-        }
+                "excerpt": None, "source_text": None, "page_number": None,
+                "grounded_support": None,
+            }
     ]
     assert payload["usage"]["total_tokens"] == 18
     summary = client.get(f"/v1/runs/{run_id}").json()
@@ -816,3 +818,182 @@ def test_chat_completions_accepts_typical_payload(monkeypatch):
     )
 
     assert response.status_code == 200
+
+
+def _fake_quick_run(question, **kwargs):
+    return {
+        "answer": "Fertig.",
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        "result_state": {"answer": "Fertig.", "round": 1},
+    }
+
+
+def _submit_completed_run(client) -> str:
+    response = client.post("/v1/runs", json={"question": "Was ist neu?"})
+    assert response.status_code == 202
+    run_id = response.json()["run_id"]
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        if client.get(f"/v1/runs/{run_id}").json()["status"] == "completed":
+            return run_id
+        time.sleep(0.01)
+    raise AssertionError("native run did not complete")
+
+
+def test_run_children_route_returns_list_envelope_and_404(monkeypatch):
+    client = _make_app()
+    monkeypatch.setattr(web_research_module, "run_web_graph", _fake_quick_run)
+    run_id = _submit_completed_run(client)
+
+    response = client.get(f"/v1/runs/{run_id}/children")
+    assert response.status_code == 200
+    assert response.json() == {"object": "list", "data": []}
+
+    missing = client.get("/v1/runs/run_unbekannt/children")
+    assert missing.status_code == 404
+
+
+def test_run_events_after_filters_replay_and_still_terminates(monkeypatch):
+    client = _make_app()
+    monkeypatch.setattr(web_research_module, "run_web_graph", _fake_quick_run)
+    run_id = _submit_completed_run(client)
+
+    with client.stream("GET", f"/v1/runs/{run_id}/events") as stream:
+        full_body = stream.read().decode("utf-8")
+    sequences = [
+        json.loads(line[len("data: "):])["sequence"]
+        for line in full_body.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert sequences == sorted(sequences)
+    cutoff = sequences[len(sequences) // 2]
+
+    with client.stream(
+        "GET", f"/v1/runs/{run_id}/events?after={cutoff}"
+    ) as stream:
+        filtered_body = stream.read().decode("utf-8")
+    filtered = [
+        json.loads(line[len("data: "):])["sequence"]
+        for line in filtered_body.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert filtered == [seq for seq in sequences if seq > cutoff]
+
+    # after at/past the terminal event: the stream must still END
+    # (empty replay, no live tail on a terminal run) instead of hanging.
+    with client.stream(
+        "GET", f"/v1/runs/{run_id}/events?after={max(sequences)}"
+    ) as stream:
+        empty_body = stream.read().decode("utf-8")
+    assert empty_body == ""
+
+
+def test_run_events_json_format_pages_the_same_replay(monkeypatch):
+    """T2 polling fallback: ``?format=json`` returns the replay buffer
+    as an immediate JSON page (same events, same ``after`` keyset) with
+    a terminal flag so a poller knows when to stop."""
+    client = _make_app()
+    monkeypatch.setattr(web_research_module, "run_web_graph", _fake_quick_run)
+    run_id = _submit_completed_run(client)
+
+    with client.stream("GET", f"/v1/runs/{run_id}/events") as stream:
+        sse_body = stream.read().decode("utf-8")
+    sse_events = [
+        json.loads(line[len("data: "):])
+        for line in sse_body.splitlines()
+        if line.startswith("data: ")
+    ]
+
+    page = client.get(f"/v1/runs/{run_id}/events?format=json").json()
+    assert page["object"] == "list"
+    assert page["terminal"] is True
+    assert page["data"] == sse_events
+
+    cutoff = sse_events[len(sse_events) // 2]["sequence"]
+    filtered = client.get(
+        f"/v1/runs/{run_id}/events?format=json&after={cutoff}"
+    ).json()
+    assert [event["sequence"] for event in filtered["data"]] == [
+        event["sequence"]
+        for event in sse_events
+        if event["sequence"] > cutoff
+    ]
+    assert filtered["terminal"] is True
+
+
+def test_run_events_after_rejects_non_integer(monkeypatch):
+    client = _make_app()
+    monkeypatch.setattr(web_research_module, "run_web_graph", _fake_quick_run)
+    run_id = _submit_completed_run(client)
+
+    response = client.get(f"/v1/runs/{run_id}/events?after=abc")
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_readyz_is_ready_on_memory_backends():
+    """2.3: the zero-infrastructure default answers ready (route-level)."""
+    client = _make_app()
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["checks"]["database"] == "skipped"
+    assert payload["checks"]["queue"] == "skipped"
+
+
+def _startup_warnings(settings) -> list[str]:
+    """WARNING messages emitted on the inqtrix logger during lifespan.
+
+    The inqtrix logger does not always propagate to root, so caplog must
+    attach its handler directly (repo gotcha #2).
+    """
+    import logging
+
+    providers = ProviderContext(llm=_DummyLLM(), search=_DummySearch())
+    app = create_app(settings=settings, providers=providers)
+    logger = logging.getLogger("inqtrix")
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if record.levelno >= logging.WARNING:
+                records.append(record)
+
+    handler = _Capture()
+    logger.addHandler(handler)
+    try:
+        with TestClient(app):
+            pass
+    finally:
+        logger.removeHandler(handler)
+    return [record.getMessage() for record in records]
+
+
+def test_startup_warns_when_per_user_cap_below_one_agent_wave():
+    """1.3 review fix: a per-user cap below the agent wave width is loud.
+
+    A cap that cannot fit one agent wave silently truncates agent trees;
+    the composition root must warn at startup (No Silent Fallbacks).
+    """
+    settings = Settings()
+    settings.server.run_max_concurrent_per_user = 2
+    settings.agent_platform.max_parallel_children = 3
+    messages = _startup_warnings(settings)
+    assert any(
+        "RUN_MAX_CONCURRENT_PER_USER=2" in message
+        and "INQTRIX_AGENT_MAX_PARALLEL_CHILDREN=3" in message
+        for message in messages
+    )
+
+
+def test_startup_silent_when_per_user_cap_fits_a_wave():
+    settings = Settings()
+    settings.server.run_max_concurrent_per_user = 4
+    settings.agent_platform.max_parallel_children = 3
+    messages = _startup_warnings(settings)
+    assert not any(
+        "RUN_MAX_CONCURRENT_PER_USER" in message for message in messages
+    )

@@ -87,7 +87,12 @@ export type KnowledgeSessionHistorySection =
  * editor/chat lists can never drift apart again.
  */
 export function isResearchDeskRun(run: ResearchRunRecord): boolean {
-  return (run.mode ?? 'research') !== 'knowledge'
+  if ((run.mode ?? 'research') === 'knowledge') return false
+  // Workspace-agent runs (and their child runs) live on the Agent Desk;
+  // showing them here would duplicate every agent assignment as a
+  // research card.
+  if (run.mode === 'workspace_agent') return false
+  return (run.kind ?? 'standard') === 'standard'
 }
 
 export function projectResearchJobs(state: ProjectState): ResearchJob[] {
@@ -273,6 +278,19 @@ export function completedReportOptions(state: ProjectState): CompletedReportOpti
       title: run.summary.title,
     }))
   return withUniqueLabels(reports)
+}
+
+/**
+ * The subset of {@link completedReportOptions} the user has left available for
+ * the `@research` mention autocomplete. Gate ONLY the mention source with this;
+ * `completedReportOptions` still resolves already-attached report chips, so
+ * hiding a report from new mentions never strips it from a chat that already
+ * references it.
+ */
+export function mentionableReportOptions(state: ProjectState): CompletedReportOption[] {
+  return completedReportOptions(state).filter(
+    (option) => state.researchRuns[option.runId]?.includeInAutocomplete !== false,
+  )
 }
 
 function commentStatusRank(status: EditorCommentThreadRecord['status']) {

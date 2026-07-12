@@ -5,6 +5,7 @@ import {
   BookOpen,
   Bot,
   Check,
+  ChevronLeft,
   EyeOff,
   FileText,
   FolderOpen,
@@ -58,6 +59,8 @@ import type {
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
 import { TemplateConflictError, canDeleteRule, canEditRule } from './templateSync'
 import type { TemplateSyncHandle } from './useTemplateSync'
+import { SkillLibraryPanel } from '@/features/skills/SkillLibraryPanel'
+import type { SkillsApiHandle } from '@/features/skills/useSkillsApi'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import {
@@ -112,12 +115,16 @@ const emptyDraft: PromptDraft = {
 export function PromptLibraryWorkspace({
   dispatch,
   sharing = null,
+  skillsApi = null,
   state,
   templateSync = null,
   textImprovement,
 }: {
   dispatch: Dispatch<ResearchDeskAction>
   sharing?: { onShareRule: (rule: ChatRuleRecord) => void } | null
+  /** Skill library handle (plan M3); null hides the Skills tab
+   * (feature off or server absent). */
+  skillsApi?: SkillsApiHandle | null
   state: ProjectState
   templateSync?: TemplateSyncHandle | null
   textImprovement: Omit<TextImprovementApiOptions, 'locale'>
@@ -137,6 +144,8 @@ export function PromptLibraryWorkspace({
   const [draft, setDraft] = useState<PromptDraft>(() => draftFromRule(rules[0] ?? null))
   const [pendingNav, setPendingNav] = useState<(() => void) | null>(null)
   const [isSaving, setIsSaving] = useState(false)
+  const [isMobileDetailOpen, setIsMobileDetailOpen] = useState(false)
+  const [libraryTab, setLibraryTab] = useState<'rules' | 'skills'>('rules')
   const promptTextImprove = useTextImprovement({
     ...textImprovement,
     locale,
@@ -211,6 +220,7 @@ export function PromptLibraryWorkspace({
     setPromptImproveError(null)
     promptTextImprove.clearProposal()
     setPreviewOpen(false)
+    setIsMobileDetailOpen(true)
   }
 
   function guardedLoad(rule: ChatRuleRecord | null) {
@@ -371,9 +381,52 @@ export function PromptLibraryWorkspace({
     setPromptImproveError(null)
   }
 
+  const tabBar = skillsApi ? (
+    <div className="flex items-center gap-1 border-b border-border bg-surface/50 px-4 py-2">
+      {(['rules', 'skills'] as const).map((tab) => (
+        <button
+          className={cn(
+            'rounded-md px-2.5 py-1 t-meta font-medium transition-colors',
+            libraryTab === tab
+              ? 'bg-background text-foreground shadow-[0_1px_2px_var(--shadow-hairline)]'
+              : 'text-muted-foreground hover:text-foreground',
+          )}
+          key={tab}
+          onClick={() => setLibraryTab(tab)}
+          type="button"
+        >
+          {tab === 'rules' ? t.promptLibrary.rulesTab : t.skills.title}
+          {tab === 'skills' && (
+            <Badge className="ml-1.5" variant="outline">Beta</Badge>
+          )}
+        </button>
+      ))}
+    </div>
+  ) : null
+
+  if (skillsApi && libraryTab === 'skills') {
+    return (
+      <div className="flex h-[calc(100svh-var(--header-h))] min-h-0 flex-col bg-background">
+        {tabBar}
+        <SkillLibraryPanel
+          api={skillsApi}
+          reduceMotion={Boolean(reduceMotion)}
+          textImprovement={textImprovement}
+        />
+      </div>
+    )
+  }
+
   return (
-    <div className="grid h-[calc(100svh-var(--header-h))] min-h-0 bg-background lg:grid-cols-[320px_minmax(0,1fr)]">
-      <aside className="flex min-h-0 min-w-0 flex-col border-b border-border bg-surface/50 lg:border-b-0 lg:border-r">
+    <div className="flex h-[calc(100svh-var(--header-h))] min-h-0 flex-col bg-background">
+      {tabBar}
+      <div className="grid min-h-0 flex-1 lg:grid-cols-[320px_minmax(0,1fr)]">
+      <aside
+        className={cn(
+          'min-h-0 min-w-0 flex-col border-b border-border bg-surface/50 lg:flex lg:border-b-0 lg:border-r',
+          isMobileDetailOpen ? 'hidden' : 'flex',
+        )}
+      >
         <div className="border-b border-border p-4">
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 items-center gap-2.5">
@@ -483,11 +536,22 @@ export function PromptLibraryWorkspace({
         </ScrollArea>
       </aside>
 
-      <ScrollArea className="min-h-0">
+      <ScrollArea className={cn('min-h-0 lg:block', isMobileDetailOpen ? 'block' : 'hidden')}>
         <div className="mx-auto flex max-w-6xl flex-col gap-4 p-4 md:p-6">
           <section className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
-              <div className="min-w-0">
+              <div className="flex min-w-0 items-center gap-2">
+                <Button
+                  aria-label={t.common.back}
+                  className="size-8 lg:hidden"
+                  onClick={() => setIsMobileDetailOpen(false)}
+                  size="icon"
+                  type="button"
+                  variant="ghost"
+                >
+                  <ChevronLeft className="size-4" />
+                </Button>
+                <div className="min-w-0">
                 <h2 className="t-section truncate text-foreground">
                   {selectedRule ? selectedRule.title : t.promptLibrary.newPrompt}
                 </h2>
@@ -498,9 +562,10 @@ export function PromptLibraryWorkspace({
                   <p className="t-meta text-muted-foreground">
                     {selectedRule.access.permission === 'edit'
                       ? t.sharing.sharedCanEdit
-                      : t.sharing.sharedViewOnly}
+                    : t.sharing.sharedViewOnly}
                   </p>
                 ) : null}
+                </div>
               </div>
               <div className="flex shrink-0 items-center gap-2">
                 {sharing && selectedRule?.serverTemplateId && !selectedRule.access ? (
@@ -699,6 +764,7 @@ export function PromptLibraryWorkspace({
           }}
         />
       ) : null}
+      </div>
     </div>
   )
 }

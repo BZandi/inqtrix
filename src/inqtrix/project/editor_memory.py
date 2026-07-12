@@ -16,6 +16,7 @@ from dataclasses import replace
 from inqtrix.pagination import keyset_page
 from inqtrix.project.editor_ports import (
     DocumentNotFound,
+    DocumentRevisionConflict,
     EditorComment,
     EditorDocument,
     EditorFolder,
@@ -52,6 +53,16 @@ class MemoryEditorStore:
     ) -> EditorDocument:
         existing = self._documents.get(id)
         if existing is not None:
+            if existing.revision != revision - 1:
+                # Revision CAS, wire-identical to the Postgres store (A2):
+                # the stored revision must be EXACTLY the writer's base
+                # (incoming is base+1). A stale base — a writer that never
+                # saw a concurrent agent patch or peer edit — conflicts and
+                # rebases instead of clobbering with a higher counter.
+                raise DocumentRevisionConflict(
+                    current_revision=existing.revision,
+                    expected_revision=revision - 1,
+                )
             document = replace(
                 existing,
                 title=title,

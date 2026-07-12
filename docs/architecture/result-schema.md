@@ -26,6 +26,7 @@ result.metrics.evidence_contract_status  # "clean" | "needs_review" | "unknown"
 result.top_sources                    # list[Source]
 result.references                     # list[ReportReference]
 result.top_claims                     # list[Claim]
+result.execution                      # AgentExecution | None
 ```
 
 `ResearchResult.from_raw()` bridges the internal state dict (TypedDict) to the typed Pydantic model. You normally do not call it directly — `ResearchAgent.research()` returns the typed object. The native HTTP endpoint `GET /v1/runs/{run_id}/result` returns the same public projection via `ResearchResult.to_export_payload()`.
@@ -48,6 +49,7 @@ applications and HTTP clients, but it is not a full evidence ledger export.
 | `top_sources` | `answer`, `EvidenceOverview.allowed_urls`, `evidence_ledger`, `all_citations`, `source_records` | Capped source URLs ordered by actual answer use first, then visible EvidenceOverview URLs, then remaining report-eligible/discovered citations. Tiers prefer normalized `source_records` and fall back to default tiering. |
 | `references` | `AgentState.report_references` | Exact structured counterpart of the rendered `## Referenzen` appendix. It is not capped by `from_raw()` and should be used when a UI must match the report reference list. |
 | `top_claims` | `AgentState.consolidated_claims` | First capped claims converted through `Claim.from_consolidated()`. |
+| `execution` | `result_state.execution` | Canonical effective Agent Desk route, model/effort, source policy, consent reason, and successful tool-use counters. Present for current agent runs; `None` for non-agent and legacy results. |
 
 For debugging weak answers, inspect the internal `result_state` returned by
 `graph.run()` or the observability logs. For application code, prefer the typed
@@ -92,6 +94,25 @@ public result.
 Use `references` for exact report/evidence views. `top_sources` remains a ranked
 overview capped at 60 sources and may intentionally differ from the complete
 report appendix.
+
+### `AgentExecution`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `execution_directive` | `str` | `quick_web`, `knowledge_only`, or an empty string for ordinary routing. |
+| `effective_mode` | `str` | Algorithm that actually executed, currently `agent_kernel` or `workspace_agent`. |
+| `response_form` | `str` | Effective `auto`, `chat`, or `canvas` delivery form. |
+| `depth` | `str` | Effective `normal` or `deep` depth. |
+| `model` | `str` | Resolved model id; empty when the provider default remains unresolved. |
+| `reasoning_effort` | `str` | Resolved effort token; empty when the provider default applies. |
+| `source_policy` | `dict[str, str]` | Effective `web` and `knowledge` availability after a one-shot directive. |
+| `consent_reason` | `str` | Stable machine reason for permission/approval state. |
+| `tool_use_counts` | `dict[str, int]` | Successful source operations keyed by `web` and `knowledge`; zero is explicit. |
+
+Availability and use are intentionally separate: a source can be
+`available` while its count remains zero. The complete block is also copied
+into state-bearing native-run snapshots for live transparency; see [Run
+events](../observability/run-events.md#run-summary).
 
 ### `Claim`
 
@@ -140,6 +161,10 @@ payload = result.to_export_payload(ResearchResultExportOptions(
 - `max_claims: int | None` — cap the number of claims in the export.
 - `max_references: int | None` — cap the number of report references in this export only. `None` keeps every report reference.
 - `max_sources: int | None` — cap the number of sources in the export.
+
+When `execution` is present it is always exported as a complete block; the
+source/tool transparency contract is not controlled by the evidence-list
+include/cap options.
 
 The native run API stores this export payload only for `RUN_COMPLETED_TTL_SECONDS` in process memory. A durable application UI should persist the payload in an application database after reading `/v1/runs/{run_id}/result`.
 

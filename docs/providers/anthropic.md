@@ -10,7 +10,7 @@
 
 - You already have an Anthropic API key and want the shortest path to Claude.
 - You want to enable extended thinking (`thinking={"type": "adaptive"}`) on reasoning-heavy roles.
-- You want the adapter's own retry loop (5 attempts, exponential backoff with jitter on 5xx / 529) rather than the OpenAI SDK retry semantics.
+- You want the adapter's own visible retry loop (at most 3 total attempts within one operation deadline) rather than hidden SDK retry semantics.
 
 ## Constructor
 
@@ -50,7 +50,7 @@ Claude Haiku 4.5 rejects the `effort` parameter with HTTP 400 and expects a diff
 
 ## Retry behaviour
 
-- HTTP 5xx or 529 (overloaded): up to 5 attempts with exponential backoff and jitter.
+- HTTP 5xx, 529 (overloaded), transient transport failures, and 429 share at most 3 total attempts with exponential backoff and jitter.
 - HTTP 429 / daily token limit: raise `AgentRateLimited` immediately without retry.
 - Other errors: raise `AnthropicAPIError` with status code and body.
 

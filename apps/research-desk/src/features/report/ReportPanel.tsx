@@ -7,13 +7,13 @@ import {
   FileText,
   Info,
   LoaderCircle,
-  Maximize2,
   MessageSquarePlus,
-  Minimize2,
   PanelRightClose,
 } from '@/components/icons'
 import {
+  memo,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type UIEvent,
@@ -22,6 +22,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { ResearchRunRecord } from '@/features/project/types'
@@ -36,9 +37,8 @@ import {
 import { MarkdownReport } from './MarkdownReport'
 
 type ReportPanelProps = {
-  isExpanded: boolean
-  onExpandedChange: (isExpanded: boolean) => void
   onHide: () => void
+  onSetReportAutocomplete?: (runId: string, includeInAutocomplete: boolean) => void
   onUseReportInChat?: (runId: string) => void
   selectedRun: ResearchRunRecord | null
 }
@@ -56,22 +56,22 @@ type ReportPanelState = {
   mode: ReportPanelMode
 }
 
-export function ReportPanel({
-  isExpanded,
-  onExpandedChange,
+export const ReportPanel = memo(function ReportPanel({
   onHide,
+  onSetReportAutocomplete,
   onUseReportInChat,
   selectedRun,
 }: ReportPanelProps) {
   const { t } = useLocale()
   const reduceMotion = useReducedMotion()
-  const panelState = resolveReportPanelState(selectedRun)
+  const panelState = useMemo(() => resolveReportPanelState(selectedRun), [selectedRun])
   const isRunningRun = panelState.mode === 'running'
   const isCompletedRun = panelState.mode === 'completed-with-report'
     || panelState.mode === 'completed-without-report'
-  const visibleEventCount = selectedRun
-    ? selectedRun.events.filter(isDisplayableAgentEvent).length
-    : 0
+  const visibleEventCount = useMemo(
+    () => (selectedRun ? selectedRun.events.filter(isDisplayableAgentEvent).length : 0),
+    [selectedRun],
+  )
   const panelTitle = isRunningRun
     ? t.report.agentStepsTitle
     : panelState.mode === 'queued'
@@ -86,14 +86,9 @@ export function ReportPanel({
       initial={reduceMotion ? false : { opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={appMotion.panel}
-      className={cn(
-        'min-h-0 w-full min-w-0 max-w-full overflow-hidden bg-background',
-        isExpanded
-          ? 'fixed bottom-4 left-4 right-4 top-20 z-40 w-auto max-w-none rounded-lg border border-border shadow-[0_24px_80px_var(--shadow-soft)] md:bottom-5 md:left-[76px] md:right-5 xl:left-[88px] xl:right-8'
-          : 'border-t border-border lg:h-full lg:border-t-0',
-      )}
+      className="h-full min-h-0 w-full min-w-0 max-w-full overflow-hidden border-t border-border bg-background lg:border-t-0"
     >
-      <Tabs defaultValue="preview" className="flex h-full min-h-[420px] flex-col lg:min-h-0">
+      <Tabs defaultValue="preview" className="flex h-full min-h-0 flex-col">
         <div>
           <div className="flex inqtrix-panel-header items-center justify-between gap-3 border-b border-border px-3">
             <div className="min-w-0">
@@ -135,27 +130,6 @@ export function ReportPanel({
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>{t.report.hide}</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    aria-label={isExpanded ? t.report.collapse : t.report.expand}
-                    className="size-7"
-                    onClick={() => onExpandedChange(!isExpanded)}
-                    size="icon"
-                    type="button"
-                    variant="ghost"
-                  >
-                    {isExpanded ? (
-                      <Minimize2 className="size-4" />
-                    ) : (
-                      <Maximize2 className="size-4" />
-                    )}
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>
-                  {isExpanded ? t.report.collapse : t.report.expand}
-                </TooltipContent>
               </Tooltip>
             </div>
           </div>
@@ -240,7 +214,7 @@ export function ReportPanel({
                   <ReportAgentSteps run={selectedRun} />
                 </TabsContent>
                 <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="export">
-                  <ReportExport markdown={panelState.markdown} run={selectedRun} />
+                  <ReportExport markdown={panelState.markdown} onSetAutocomplete={onSetReportAutocomplete} run={selectedRun} />
                 </TabsContent>
               </ScrollArea>
             </motion.div>
@@ -277,7 +251,7 @@ export function ReportPanel({
       </Tabs>
     </motion.aside>
   )
-}
+})
 
 function resolveReportPanelState(selectedRun: ResearchRunRecord | null): ReportPanelState {
   if (!selectedRun) {
@@ -929,13 +903,18 @@ function formatTime(iso: string) {
 
 function ReportExport({
   markdown,
+  onSetAutocomplete,
   run,
 }: {
   markdown: string | null
+  onSetAutocomplete?: (runId: string, includeInAutocomplete: boolean) => void
   run: ResearchRunRecord
 }) {
   const { t } = useLocale()
   const hasReport = Boolean(markdown)
+  const [isExportingWord, setIsExportingWord] = useState(false)
+  const [wordFailed, setWordFailed] = useState(false)
+  const mentionAvailable = run.includeInAutocomplete !== false
 
   function handleExportMarkdown() {
     if (!markdown) return
@@ -946,22 +925,76 @@ function ReportExport({
     )
   }
 
+  async function handleExportWord() {
+    if (!markdown || isExportingWord) return
+    setWordFailed(false)
+    setIsExportingWord(true)
+    try {
+      // Reuse the editor's markdown->docx export (code-split, browser-only).
+      const { exportMarkdownToDocx } = await import('@/features/editor/export/docxExport')
+      await exportMarkdownToDocx(markdown.trimEnd(), run.summary.title)
+    } catch (error) {
+      setWordFailed(true)
+      console.error('Inqtrix report Word export failed.', error)
+    } finally {
+      setIsExportingWord(false)
+    }
+  }
+
   return (
-    <div className="rounded-lg border border-border bg-surface p-4">
-      <h3 className="t-section text-foreground">{t.report.exportTitle}</h3>
-      <p className="mt-2 text-sm leading-6 text-muted-foreground">
-        {hasReport ? t.report.exportReadyDescription : t.report.exportDescription}
-      </p>
-      <Button
-        className="mt-4 gap-2"
-        disabled={!hasReport}
-        onClick={handleExportMarkdown}
-        type="button"
-        variant="outline"
-      >
-        <Download className="size-4" />
-        <span>{t.report.exportMarkdown}</span>
-      </Button>
+    <div className="flex flex-col gap-4">
+      <div className="rounded-lg border border-border bg-surface p-4">
+        <h3 className="t-section text-foreground">{t.report.exportTitle}</h3>
+        <p className="mt-2 text-sm leading-6 text-muted-foreground">
+          {hasReport ? t.report.exportReadyDescription : t.report.exportDescription}
+        </p>
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <Button
+            className="gap-2"
+            disabled={!hasReport}
+            onClick={handleExportMarkdown}
+            type="button"
+            variant="outline"
+          >
+            <Download className="size-4" />
+            <span>{t.report.exportMarkdown}</span>
+          </Button>
+          <Button
+            className="gap-2"
+            disabled={!hasReport || isExportingWord}
+            onClick={() => void handleExportWord()}
+            type="button"
+            variant="outline"
+          >
+            {isExportingWord ? (
+              <LoaderCircle className="size-4 motion-safe:animate-spin" />
+            ) : (
+              <FileText className="size-4" />
+            )}
+            <span>{t.report.exportWord}</span>
+          </Button>
+        </div>
+        {wordFailed ? (
+          <p className="mt-2 text-sm text-destructive">{t.report.exportWordFailed}</p>
+        ) : null}
+      </div>
+
+      {onSetAutocomplete ? (
+        <div className="rounded-lg border border-border bg-surface p-4">
+          <h3 className="t-section text-foreground">{t.report.mentionAvailableTitle}</h3>
+          <div className="mt-3 flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <p className="t-list text-foreground">{t.report.mentionAvailable}</p>
+              <p className="mt-1 t-meta text-muted-foreground">{t.report.mentionAvailableHint}</p>
+            </div>
+            <Switch
+              aria-label={t.report.mentionAvailable}
+              checked={mentionAvailable}
+              onCheckedChange={(checked) => onSetAutocomplete(run.runId, checked)}
+            />
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

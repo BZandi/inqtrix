@@ -291,7 +291,18 @@ def make_sharing_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     app = FastAPI()
     app.include_router(runs_router.build_router(container))
     app.include_router(build_shares_router(container))
-    return TestClient(app)
+    from inqtrix.server.routers import agent_runs as agent_runs_router
+    from inqtrix.server.routers import agent_sessions as agent_sessions_router
+
+    app.include_router(agent_runs_router.build_router(container))
+    app.include_router(agent_sessions_router.build_router(container))
+    client = TestClient(app)
+    # Store handles for tests that need agent trees / control fixtures
+    # (the HTTP API only creates standard runs; agent runs, approvals and
+    # artifacts are store-level primitives until the M5 runtime).
+    client.run_store = container.run_store  # type: ignore[attr-defined]
+    client.agent_control = container.agent_control_service  # type: ignore[attr-defined]
+    return client
 
 
 def create_completed_run(client: TestClient, *, sub: str = OWNER) -> str:
@@ -561,3 +572,64 @@ def test_http_cancel_needs_edit_grant(monkeypatch):
             f"/v1/runs/{run_id}/cancel", headers={SUB_HEADER: RECIPIENT}
         )
         assert allowed.status_code == 200
+
+
+def test_http_children_follow_parent_view_share(monkeypatch):
+    """R7: a view share on the PARENT grants the children listing."""
+    client = make_sharing_client(monkeypatch)
+    with client:
+        store = client.run_store  # type: ignore[attr-defined]
+        parent = store.submit(
+            question="Agentenauftrag",
+            stack_name="default",
+            work=lambda handle: handle.complete({"answer": "fertig"}),
+            kind="agent",
+            created_by_sub=OWNER,
+            created_by_tenant_id="default",
+        )
+        child = store.submit(
+            question="Teilaufgabe",
+            stack_name="default",
+            work=lambda handle: handle.complete({"answer": "teil"}),
+            kind="agent_child",
+            parent_run_id=parent["run_id"],
+            root_run_id=parent["run_id"],
+            created_by_sub=OWNER,
+            created_by_tenant_id="default",
+        )
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if (
+                store.get(parent["run_id"])["status"] == "completed"
+                and store.get(child["run_id"])["status"] == "completed"
+            ):
+                break
+            time.sleep(0.01)
+
+        # Stranger and not-yet-invited recipient: indistinct 404.
+        for sub in (RECIPIENT, STRANGER):
+            denied = client.get(
+                f"/v1/runs/{parent['run_id']}/children",
+                headers={SUB_HEADER: sub},
+            )
+            assert denied.status_code == 404
+
+        accept_via_http(
+            client, grant_via_http(client, parent["run_id"])["id"]
+        )
+
+        listing = client.get(
+            f"/v1/runs/{parent['run_id']}/children",
+            headers={SUB_HEADER: RECIPIENT},
+        )
+        assert listing.status_code == 200
+        payload = listing.json()
+        assert payload["object"] == "list"
+        assert [row["run_id"] for row in payload["data"]] == [child["run_id"]]
+        assert payload["data"][0]["parent_run_id"] == parent["run_id"]
+
+        # The child's DIRECT url stays owner-scoped (no grant on it).
+        direct = client.get(
+            f"/v1/runs/{child['run_id']}", headers={SUB_HEADER: RECIPIENT}
+        )
+        assert direct.status_code == 404

@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import * as React from 'react'
 
 import { X } from '@/components/icons'
+import { useModalFocusTrap } from '@/components/ui/use-modal-focus-trap'
 import { cn } from '@/lib/utils'
 
 type DialogProps = {
@@ -17,9 +18,6 @@ type DialogProps = {
   open: boolean
   title: ReactNode
 }
-
-const FOCUSABLE =
-  'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])'
 
 /**
  * Hand-built modal dialog (overlay tier §6: `rounded-xl` + `shadow-lg`),
@@ -42,52 +40,7 @@ export function Dialog({
 }: DialogProps) {
   const panelRef = React.useRef<HTMLDivElement>(null)
   const titleId = React.useId()
-  // onClose/dismissable live in refs so the focus effect can depend on `open`
-  // ALONE — otherwise an inline onClose (new identity each render) re-runs the
-  // effect on every parent re-render and yanks focus back to the panel
-  // mid-interaction (e.g. clicking "Copy" on the one-time-reveal dialog).
-  const onCloseRef = React.useRef(onClose)
-  const dismissableRef = React.useRef(dismissable)
-  onCloseRef.current = onClose
-  dismissableRef.current = dismissable
-
-  React.useEffect(() => {
-    if (!open) return undefined
-    const previouslyFocused = document.activeElement as HTMLElement | null
-    const visibleFocusables = () => {
-      const panel = panelRef.current
-      if (!panel) return [] as HTMLElement[]
-      return Array.from(
-        panel.querySelectorAll<HTMLElement>(FOCUSABLE),
-      ).filter((element) => element.offsetParent !== null)
-    }
-    ;(visibleFocusables()[0] ?? panelRef.current)?.focus()
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && dismissableRef.current) {
-        event.preventDefault()
-        onCloseRef.current()
-        return
-      }
-      if (event.key !== 'Tab') return
-      const items = visibleFocusables()
-      if (items.length === 0) return
-      const first = items[0]
-      const last = items[items.length - 1]
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault()
-        last.focus()
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault()
-        first.focus()
-      }
-    }
-    document.addEventListener('keydown', onKeyDown)
-    return () => {
-      document.removeEventListener('keydown', onKeyDown)
-      previouslyFocused?.focus?.()
-    }
-  }, [open])
+  useModalFocusTrap({ dismissable, onClose, open, panelRef })
 
   if (!open) return null
   return (

@@ -10,24 +10,23 @@ shared :func:`require_instance_admin` guard, never on workspace ownership.
 Mounted only for a cookie-session provider that carries a user mirror AND a
 workspace-admin (membership) store; in every other configuration the routes
 are plain 404s. Denials hide behind 404 (the permission layer's not-403
-convention); every mutation is audited.
+convention); repositories commit every mutation together with its audit and
+user invalidations.
 
 One UX invariant: a workspace must not be left without an OWNER by demoting
-or removing its last one (409 ``last_owner``) — a recoverable orphan an admin
-could otherwise create by accident. The guard is read-then-write at the
-router (not atomic): an orphaned workspace stays fully manageable by instance
-admins, so the mild race is acceptable, unlike the deployment-locking
-last-instance-admin guard which is atomic in the store.
+or removing its last one (409 ``last_owner``). The repository locks the
+workspace before checking and mutating membership, so concurrent admin calls
+cannot violate the invariant.
 """
 
 from __future__ import annotations
 
-import logging
+import uuid
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Request
 
-from inqtrix.auth.permissions import AuditEntry, WorkspaceRole
+from inqtrix.auth.permissions import LastWorkspaceOwnerError, WorkspaceRole
 from inqtrix.server.routers._admin_guard import require_instance_admin
 from inqtrix.services.request_parsing import error_response
 from inqtrix.services.workspace_administration import (
@@ -38,9 +37,6 @@ from inqtrix.services.workspace_administration import (
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
-
-log = logging.getLogger("inqtrix")
-
 
 def _parse_role(value: object) -> WorkspaceRole | None:
     """Parse a workspace-role string, or ``None`` when it is not valid."""
@@ -66,27 +62,18 @@ def build_router(container: "AppContainer") -> APIRouter:
         )
     router = APIRouter()
     provider = container.auth_provider
+    principal_dep = container.principal_dependency
     users = getattr(provider, "users", None)
 
     async def _admin(request: Request):
         """Resolve the caller as an instance admin, or yield the error."""
-        resolved, error = await require_instance_admin(provider, request)
+        resolved, error = await require_instance_admin(
+            provider, request, principal_dep
+        )
         if error is not None:
             return None, error
         principal, _session, _mirror = resolved
         return principal, None
-
-    async def _audit(principal, action: str, resource_id: str, detail: dict) -> None:
-        await workspace_admin.record(
-            AuditEntry(
-                tenant_id=principal.tenant_id,
-                actor_sub=principal.sub,
-                action=action,
-                resource_type="workspace",
-                resource_id=resource_id,
-                detail=detail,
-            )
-        )
 
     async def _members_or_404(tenant_id: str, workspace_id: str):
         """``list_members`` with the absent-workspace case mapped to a 404."""
@@ -98,22 +85,6 @@ def build_router(container: "AppContainer") -> APIRouter:
                 404, "Workspace nicht gefunden", "not_found"
             )
         return members, None
-
-    def _last_owner_blocked(
-        members: tuple[tuple[str, WorkspaceRole], ...],
-        *,
-        target_sub: str,
-        keeps_owner: bool,
-    ) -> bool:
-        """Whether the op would strip a workspace's only OWNER.
-
-        *keeps_owner* is ``True`` when the op leaves *target_sub* an owner
-        (a no-op for the guard); ``False`` for a removal or a demotion.
-        """
-        if keeps_owner:
-            return False
-        owners = [sub for sub, role in members if role is WorkspaceRole.OWNER]
-        return target_sub in owners and len(owners) == 1
 
     # ----------------------------------------------------------------- #
     # Workspaces
@@ -134,10 +105,10 @@ def build_router(container: "AppContainer") -> APIRouter:
                 {
                     "workspace_id": workspace_id,
                     "name": name,
-                    "created_by_sub": created_by_sub,
+                    "created_by_user_id": str(created_by_user_id),
                     "member_count": member_count,
                 }
-                for workspace_id, name, created_by_sub, member_count in rows
+                for workspace_id, name, created_by_user_id, member_count in rows
             ],
         }
 
@@ -180,15 +151,15 @@ def build_router(container: "AppContainer") -> APIRouter:
         except WorkspaceNameError as exc:
             return error_response(400, str(exc), "invalid_request_error")
         renamed = await workspace_admin.rename_workspace(
-            tenant_id=principal.tenant_id, workspace_id=workspace_id, name=name
+            tenant_id=principal.tenant_id,
+            workspace_id=workspace_id,
+            name=name,
+            actor_user_id=principal.user_id,
         )
         if not renamed:
             return error_response(
                 404, "Workspace nicht gefunden", "not_found"
             )
-        await _audit(
-            principal, "workspace.renamed", workspace_id, {"name": name}
-        )
         return {"workspace_id": workspace_id, "name": name}
 
     @router.delete("/v1/admin/workspaces/{workspace_id}", status_code=204)
@@ -198,13 +169,14 @@ def build_router(container: "AppContainer") -> APIRouter:
         if error is not None:
             return error
         deleted = await workspace_admin.delete_workspace(
-            tenant_id=principal.tenant_id, workspace_id=workspace_id
+            tenant_id=principal.tenant_id,
+            workspace_id=workspace_id,
+            actor_user_id=principal.user_id,
         )
         if not deleted:
             return error_response(
                 404, "Workspace nicht gefunden", "not_found"
             )
-        await _audit(principal, "workspace.deleted", workspace_id, {})
 
     # ----------------------------------------------------------------- #
     # Members
@@ -221,16 +193,16 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error
         profiles = {}
         if users is not None and members:
-            profiles = await users.profiles_for_subjects(
+            profiles = await users.profiles_for_user_ids(
                 tenant_id=principal.tenant_id,
-                subs=tuple(sub for sub, _role in members),
+                user_ids=tuple(user_id for user_id, _role in members),
             )
         data = []
-        for sub, role in members:
-            profile = profiles.get(sub)
+        for user_id, role in members:
+            profile = profiles.get(user_id)
             data.append(
                 {
-                    "sub": sub,
+                    "user_id": str(user_id),
                     "role": role.value,
                     "display_name": (
                         profile.display_name if profile is not None else None
@@ -254,10 +226,12 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(
                 400, "Ungueltiger JSON-Body", "invalid_request_error"
             )
-        sub = str((body or {}).get("sub", "")).strip()
-        if not sub:
+        raw_user_id = str((body or {}).get("user_id", "")).strip()
+        try:
+            user_id = uuid.UUID(raw_user_id)
+        except ValueError:
             return error_response(
-                400, "Feld 'sub' ist erforderlich", "invalid_request_error"
+                400, "Feld 'user_id' muss eine UUID sein", "invalid_request_error"
             )
         role = _parse_role((body or {}).get("role"))
         if role is None:
@@ -268,37 +242,32 @@ def build_router(container: "AppContainer") -> APIRouter:
                 "invalid_request_error",
             )
         # The target must be a known user (no phantom memberships).
-        if users is not None and not await users.has_subject(
-            tenant_id=principal.tenant_id, sub=sub
+        if users is not None and not await users.has_user_id(
+            tenant_id=principal.tenant_id, user_id=user_id
         ):
             return error_response(404, "Benutzer nicht gefunden", "not_found")
-        members, error = await _members_or_404(principal.tenant_id, workspace_id)
-        if error is not None:
-            return error
-        if _last_owner_blocked(
-            members, target_sub=sub, keeps_owner=role is WorkspaceRole.OWNER
-        ):
+        try:
+            assigned = await workspace_admin.assign_member(
+                tenant_id=principal.tenant_id,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                role=role,
+                actor_user_id=principal.user_id,
+            )
+        except LastWorkspaceOwnerError:
             return error_response(
                 409,
                 "Der letzte OWNER kann nicht herabgestuft werden",
                 "last_owner",
             )
-        await workspace_admin.assign_member(
-            tenant_id=principal.tenant_id,
-            workspace_id=workspace_id,
-            sub=sub,
-            role=role,
-        )
-        await _audit(
-            principal,
-            "workspace.member_added",
-            f"{workspace_id}:{sub}",
-            {"role": role.value},
-        )
-        return {"sub": sub, "role": role.value}
+        if not assigned:
+            return error_response(404, "Workspace nicht gefunden", "not_found")
+        return {"user_id": str(user_id), "role": role.value}
 
-    @router.patch("/v1/admin/workspaces/{workspace_id}/members/{sub}")
-    async def set_member_role(workspace_id: str, sub: str, request: Request):
+    @router.patch("/v1/admin/workspaces/{workspace_id}/members/{user_id}")
+    async def set_member_role(
+        workspace_id: str, user_id: uuid.UUID, request: Request
+    ):
         """Change an existing member's role."""
         principal, error = await _admin(request)
         if error is not None:
@@ -317,39 +286,30 @@ def build_router(container: "AppContainer") -> APIRouter:
                 f"Feld 'role' muss eines von {valid} sein",
                 "invalid_request_error",
             )
-        members, error = await _members_or_404(principal.tenant_id, workspace_id)
-        if error is not None:
-            return error
-        if sub not in {member_sub for member_sub, _role in members}:
-            return error_response(
-                404, "Mitglied nicht gefunden", "not_found"
+        try:
+            updated = await workspace_admin.set_existing_member_role(
+                tenant_id=principal.tenant_id,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                role=role,
+                actor_user_id=principal.user_id,
             )
-        if _last_owner_blocked(
-            members, target_sub=sub, keeps_owner=role is WorkspaceRole.OWNER
-        ):
+        except LastWorkspaceOwnerError:
             return error_response(
                 409,
                 "Der letzte OWNER kann nicht herabgestuft werden",
                 "last_owner",
             )
-        await workspace_admin.assign_member(
-            tenant_id=principal.tenant_id,
-            workspace_id=workspace_id,
-            sub=sub,
-            role=role,
-        )
-        await _audit(
-            principal,
-            "workspace.member_role_set",
-            f"{workspace_id}:{sub}",
-            {"role": role.value},
-        )
-        return {"sub": sub, "role": role.value}
+        if not updated:
+            return error_response(404, "Mitglied nicht gefunden", "not_found")
+        return {"user_id": str(user_id), "role": role.value}
 
     @router.delete(
-        "/v1/admin/workspaces/{workspace_id}/members/{sub}", status_code=204
+        "/v1/admin/workspaces/{workspace_id}/members/{user_id}", status_code=204
     )
-    async def remove_member(workspace_id: str, sub: str, request: Request):
+    async def remove_member(
+        workspace_id: str, user_id: uuid.UUID, request: Request
+    ):
         """Remove a member from the workspace."""
         principal, error = await _admin(request)
         if error is not None:
@@ -357,21 +317,23 @@ def build_router(container: "AppContainer") -> APIRouter:
         members, error = await _members_or_404(principal.tenant_id, workspace_id)
         if error is not None:
             return error
-        if sub not in {member_sub for member_sub, _role in members}:
+        if user_id not in {member_user_id for member_user_id, _role in members}:
             return error_response(
                 404, "Mitglied nicht gefunden", "not_found"
             )
-        if _last_owner_blocked(members, target_sub=sub, keeps_owner=False):
+        try:
+            removed = await workspace_admin.remove_member(
+                tenant_id=principal.tenant_id,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                actor_user_id=principal.user_id,
+            )
+        except LastWorkspaceOwnerError:
             return error_response(
                 409,
                 "Der letzte OWNER kann nicht entfernt werden",
                 "last_owner",
             )
-        await workspace_admin.remove_member(
-            tenant_id=principal.tenant_id, workspace_id=workspace_id, sub=sub
-        )
-        await _audit(
-            principal, "workspace.member_removed", f"{workspace_id}:{sub}", {}
-        )
-
+        if not removed:
+            return error_response(404, "Mitglied nicht gefunden", "not_found")
     return router

@@ -32,6 +32,7 @@ export type EditorSuggestionBlockCardProps = {
   onRefine?: (suggestionId: string, instruction: string) => void
   onReject?: (suggestionId: string) => void
   onSelect?: (suggestionId: string) => void
+  providerActionsDisabled?: boolean
   proposedText: string
   reviewSurface: 'editor' | 'panel'
   revision: number
@@ -128,6 +129,7 @@ export function EditorSuggestionBlockCard({
   onRefine,
   onReject,
   onSelect,
+  providerActionsDisabled = false,
   proposedText,
   reviewSurface,
   revision,
@@ -148,7 +150,7 @@ export function EditorSuggestionBlockCard({
 
   function submitRefinement() {
     const instruction = refinementDraft.trim()
-    if (!instruction || isRunning) return
+    if (!instruction || isRunning || providerActionsDisabled) return
     onRefine?.(id, instruction)
     setRefinementDraft('')
     setMode('preview')
@@ -175,7 +177,7 @@ export function EditorSuggestionBlockCard({
           {revision > 1 ? <span className="suggestion-block-revision">{labels.revision} {revision}</span> : null}
         </div>
         <div className="suggestion-block-actions">
-          <IconButton disabled={isRunning} label={labels.refine} onClick={() => setMode(mode === 'refine' ? 'preview' : 'refine')}>
+          <IconButton disabled={isRunning || providerActionsDisabled} label={labels.refine} onClick={() => setMode(mode === 'refine' ? 'preview' : 'refine')}>
             <MessageSquareText aria-hidden="true" className="suggestion-block-icon" />
           </IconButton>
           <IconButton disabled={isRunning} label={labels.edit} onClick={() => setMode(mode === 'edit' ? 'preview' : 'edit')}>
@@ -183,10 +185,10 @@ export function EditorSuggestionBlockCard({
           </IconButton>
           {reviewSurface === 'editor' ? (
             <>
-              <IconButton disabled={isRunning} label={labels.reject} onClick={() => onReject?.(id)}>
+              <IconButton disabled={isRunning || providerActionsDisabled} label={labels.reject} onClick={() => onReject?.(id)}>
                 <X aria-hidden="true" className="suggestion-block-icon" />
               </IconButton>
-              <IconButton accent disabled={isRunning} label={labels.accept} onClick={() => onAccept?.(id)}>
+              <IconButton accent disabled={isRunning || providerActionsDisabled} label={labels.accept} onClick={() => onAccept?.(id)}>
                 <Check aria-hidden="true" className="suggestion-block-icon" />
               </IconButton>
             </>
@@ -222,12 +224,12 @@ export function EditorSuggestionBlockCard({
           <input
             aria-label={labels.refine}
             className="suggestion-block-input"
-            disabled={isRunning}
+            disabled={isRunning || providerActionsDisabled}
             onChange={(event) => setRefinementDraft(event.target.value)}
             placeholder={labels.refinementPlaceholder}
             value={refinementDraft}
           />
-          <IconButton accent disabled={isRunning || !refinementDraft.trim()} label={labels.send} type="submit">
+          <IconButton accent disabled={isRunning || providerActionsDisabled || !refinementDraft.trim()} label={labels.send} type="submit">
             <SendHorizontal aria-hidden="true" className="suggestion-block-icon" />
           </IconButton>
         </form>

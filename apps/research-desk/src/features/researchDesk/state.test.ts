@@ -11,9 +11,11 @@ import type {
   KnowledgeSessionGroupRecord,
   KnowledgeSessionRecord,
   KnowledgeThreadItemRecord,
+  ProjectState,
   ResearchRunRecord,
 } from '@/features/project/types'
 import { applyRunEvent, fromRunSummary, mergeRunSummary } from '@/features/project/types'
+import { persistableAgentSessionsInOrder } from '@/features/agent/agentSessionSync'
 import { researchDeskReducer } from './state'
 
 function makeRunEvent(overrides: Partial<ResearchRunEvent> = {}): ResearchRunEvent {
@@ -150,6 +152,7 @@ function makeKnowledgeItem(
 
 function makeRunSummary(overrides: Partial<ResearchRunSummary> = {}): ResearchRunSummary {
   return {
+    access: { mode: 'owner' },
     agent_overrides: {},
     created_at: Date.parse('2026-01-01T00:00:00.000Z') / 1000,
     elapsed_seconds: null,
@@ -168,6 +171,224 @@ function makeRunSummary(overrides: Partial<ResearchRunSummary> = {}): ResearchRu
     ...overrides,
   }
 }
+
+describe('authoritative run replacement', () => {
+  it('adopts the server-generated id for an imported run and its selection', () => {
+    const imported = {
+      ...fromRunSummary(makeRunSummary({ run_id: 'external-run' }), 'test-stack'),
+      source: 'imported' as const,
+    }
+    const state = {
+      ...createEmptyProjectState(),
+      researchRunOrder: [imported.runId],
+      researchRuns: { [imported.runId]: imported },
+      ui: {
+        ...createEmptyProjectState().ui,
+        expandedJobId: imported.runId,
+        pendingChatReportRunId: imported.runId,
+        selectedJobId: imported.runId,
+      },
+    }
+
+    const adopted = researchDeskReducer(state, {
+      sourceRunId: imported.runId,
+      summary: makeRunSummary({ run_id: 'run_server_allocated' }),
+      type: 'adoptImportedApiRun',
+    })
+
+    expect(adopted.researchRuns['external-run']).toBeUndefined()
+    expect(adopted.researchRuns.run_server_allocated).toMatchObject({
+      runId: 'run_server_allocated',
+      source: 'api',
+    })
+    expect(adopted.researchRunOrder).toEqual(['run_server_allocated'])
+    expect(adopted.ui).toMatchObject({
+      expandedJobId: 'run_server_allocated',
+      pendingChatReportRunId: 'run_server_allocated',
+      selectedJobId: 'run_server_allocated',
+    })
+  })
+
+  it('prunes missing API runs while preserving imported rows and server order', () => {
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      summary: makeRunSummary({ run_id: 'run-revoked' }),
+      type: 'upsertApiRunSummary',
+    })
+    const imported: ResearchRunRecord = {
+      ...fromRunSummary(makeRunSummary({ run_id: 'run-imported' }), 'test-stack'),
+      source: 'imported',
+    }
+    state = {
+      ...state,
+      researchRunOrder: ['run-revoked', imported.runId],
+      researchRuns: { ...state.researchRuns, [imported.runId]: imported },
+    }
+
+    const replaced = researchDeskReducer(state, {
+      summaries: [
+        makeRunSummary({ run_id: 'run-newest' }),
+        makeRunSummary({ run_id: 'run-older' }),
+      ],
+      type: 'replaceApiRunSummaries',
+    })
+
+    expect(replaced.researchRuns['run-revoked']).toBeUndefined()
+    expect(replaced.researchRuns['run-imported']).toBe(imported)
+    expect(replaced.researchRunOrder).toEqual([
+      'run-newest',
+      'run-older',
+      'run-imported',
+    ])
+    expect(replaced.ui.selectedJobId).toBe('run-newest')
+  })
+
+  it('keeps live event state for present runs and removes vanished agent shells', () => {
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      summary: makeRunSummary({ run_id: 'run-live' }),
+      type: 'upsertApiRunSummary',
+    })
+    state = {
+      ...state,
+      researchRuns: {
+        ...state.researchRuns,
+        'run-live': {
+          ...state.researchRuns['run-live'],
+          events: [{
+            createdAt: '2026-01-01T00:00:05.000Z',
+            id: 'event-live',
+            kind: 'system',
+            severity: 'info',
+            title: 'Live detail',
+          }],
+        },
+      },
+    }
+    state = researchDeskReducer(state, {
+      summary: makeRunSummary({
+        kind: 'agent',
+        mode: 'workspace_agent',
+        run_id: 'run-agent-revoked',
+      }),
+      type: 'upsertApiRunSummary',
+    })
+
+    const replaced = researchDeskReducer(state, {
+      summaries: [makeRunSummary({ run_id: 'run-live', status: 'running' })],
+      type: 'replaceApiRunSummaries',
+    })
+
+    expect(replaced.researchRuns['run-live'].events).toHaveLength(1)
+    expect(replaced.agentRuns['run-agent-revoked']).toBeUndefined()
+    expect(replaced.agentSessions['run-agent-revoked']).toBeUndefined()
+  })
+
+  it('retains loaded agent children for a visible root and prunes the full removed tree', () => {
+    const root = makeRunSummary({
+      kind: 'agent',
+      mode: 'workspace_agent',
+      run_id: 'run-agent-root',
+      session_id: 'session-agent',
+    })
+    const child = makeRunSummary({
+      kind: 'agent_child',
+      mode: 'workspace_agent',
+      parent_run_id: root.run_id,
+      root_run_id: root.run_id,
+      run_id: 'run-agent-child',
+      session_id: 'session-agent',
+    })
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      summary: root,
+      type: 'upsertAgentRunSummary',
+    })
+    state = researchDeskReducer(state, {
+      summary: child,
+      type: 'upsertAgentRunSummary',
+    })
+
+    const retained = researchDeskReducer(state, {
+      summaries: [root],
+      type: 'replaceApiRunSummaries',
+    })
+    expect(retained.agentRuns[root.run_id]).toBeDefined()
+    expect(retained.agentRuns[child.run_id]).toMatchObject({
+      parentRunId: root.run_id,
+      rootRunId: root.run_id,
+    })
+
+    const pruned = researchDeskReducer(retained, {
+      summaries: [],
+      type: 'replaceApiRunSummaries',
+    })
+    expect(pruned.agentRuns[root.run_id]).toBeUndefined()
+    expect(pruned.agentRuns[child.run_id]).toBeUndefined()
+  })
+
+  it('keeps shared agent runs in a non-persistable view session and prunes it on revoke', () => {
+    const shared = makeRunSummary({
+      access: { mode: 'shared', permission: 'view' },
+      kind: 'agent',
+      mode: 'workspace_agent',
+      run_id: 'run-agent-shared',
+      session_id: 'owner-session-secret',
+    })
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      summary: shared,
+      type: 'upsertApiRunSummary',
+    })
+    const derivedId = state.agentRuns[shared.run_id].sessionId as string
+
+    expect(derivedId).toBe('shared-agent-view:run-agent-shared')
+    expect(derivedId).not.toContain(shared.session_id as string)
+    expect(state.agentSessions[derivedId]).toMatchObject({
+      persistable: false,
+      runIds: [shared.run_id],
+    })
+    expect(persistableAgentSessionsInOrder(
+      state.agentSessions,
+      state.agentSessionOrder,
+    )).toEqual([])
+
+    state = researchDeskReducer(state, {
+      summaries: [shared],
+      type: 'replaceApiRunSummaries',
+    })
+    expect(state.agentSessionOrder.filter((id) => id === derivedId)).toEqual([
+      derivedId,
+    ])
+    expect(persistableAgentSessionsInOrder(
+      state.agentSessions,
+      state.agentSessionOrder,
+    )).toEqual([])
+
+    state = researchDeskReducer(state, {
+      summaries: [],
+      type: 'replaceApiRunSummaries',
+    })
+    expect(state.agentRuns[shared.run_id]).toBeUndefined()
+    expect(state.agentSessions[derivedId]).toBeUndefined()
+    expect(state.agentSessionOrder).not.toContain(derivedId)
+  })
+
+  it('keeps owned agent runs on their existing persistable session path', () => {
+    const owned = makeRunSummary({
+      kind: 'agent',
+      mode: 'workspace_agent',
+      run_id: 'run-agent-owned',
+      session_id: 'session-owned',
+    })
+    const state = researchDeskReducer(createEmptyProjectState(), {
+      summary: owned,
+      type: 'upsertApiRunSummary',
+    })
+
+    expect(state.agentRuns[owned.run_id].sessionId).toBe('session-owned')
+    expect(persistableAgentSessionsInOrder(
+      state.agentSessions,
+      state.agentSessionOrder,
+    ).map((session) => session.id)).toEqual(['session-owned'])
+  })
+})
 
 function makeChatThread(id: string, title: string, overrides: Partial<ChatThreadRecord> = {}): ChatThreadRecord {
   return {
@@ -1024,38 +1245,52 @@ describe('file-asset reducer actions', () => {
   })
 
   it('moves an asset into an existing section group', () => {
-    const created = researchDeskReducer(createEmptyProjectState(), {
-      sectionId: 'file-section-library',
+    const base = createEmptyProjectState()
+    const librarySectionId = base.fileLibrarySectionOrder.find(
+      (id) => base.fileLibrarySections[id]?.kind === 'custom',
+    )!
+    const temporarySectionId = base.fileLibrarySectionOrder.find(
+      (id) => base.fileLibrarySections[id]?.kind === 'temporary',
+    )!
+    const created = researchDeskReducer(base, {
+      sectionId: librarySectionId,
       title: 'Group',
       type: 'createFileGroup',
     })
     const groupId = created.fileGroupOrder[0]
     const seeded = researchDeskReducer(created, {
-      assets: [makeAsset('f1', 'alpha')],
+      assets: [makeAsset('f1', 'alpha', { sectionId: temporarySectionId })],
       type: 'ingestFileAssets',
     })
     const next = researchDeskReducer(seeded, {
       fileId: 'f1',
       groupId,
-      sectionId: 'file-section-library',
+      sectionId: librarySectionId,
       type: 'moveFileAsset',
     })
-    expect(next.fileAssets.f1.sectionId).toBe('file-section-library')
+    expect(next.fileAssets.f1.sectionId).toBe(librarySectionId)
     expect(next.fileAssets.f1.groupId).toBe(groupId)
   })
 
   it('drops a move into a group that does not belong to the target section', () => {
-    const seeded = researchDeskReducer(createEmptyProjectState(), {
-      assets: [makeAsset('f1', 'alpha')],
+    const base = createEmptyProjectState()
+    const librarySectionId = base.fileLibrarySectionOrder.find(
+      (id) => base.fileLibrarySections[id]?.kind === 'custom',
+    )!
+    const temporarySectionId = base.fileLibrarySectionOrder.find(
+      (id) => base.fileLibrarySections[id]?.kind === 'temporary',
+    )!
+    const seeded = researchDeskReducer(base, {
+      assets: [makeAsset('f1', 'alpha', { sectionId: temporarySectionId })],
       type: 'ingestFileAssets',
     })
     const next = researchDeskReducer(seeded, {
       fileId: 'f1',
       groupId: 'does-not-exist',
-      sectionId: 'file-section-library',
+      sectionId: librarySectionId,
       type: 'moveFileAsset',
     })
-    expect(next.fileAssets.f1.sectionId).toBe('file-section-library')
+    expect(next.fileAssets.f1.sectionId).toBe(librarySectionId)
     expect(next.fileAssets.f1.groupId).toBeNull()
   })
 
@@ -1077,30 +1312,122 @@ describe('file-asset reducer actions', () => {
 
 describe('file-group reducer actions', () => {
   it('creates a group under a section', () => {
-    const next = researchDeskReducer(createEmptyProjectState(), {
-      sectionId: 'file-section-library',
+    const base = createEmptyProjectState()
+    const librarySectionId = base.fileLibrarySectionOrder.find(
+      (id) => base.fileLibrarySections[id]?.kind === 'custom',
+    )!
+    const next = researchDeskReducer(base, {
+      sectionId: librarySectionId,
       title: 'New Group',
       type: 'createFileGroup',
     })
     expect(next.fileGroupOrder).toHaveLength(1)
     const groupId = next.fileGroupOrder[0]
-    expect(next.fileGroups[groupId]).toMatchObject({ sectionId: 'file-section-library', title: 'New Group' })
+    expect(next.fileGroups[groupId]).toMatchObject({ sectionId: librarySectionId, title: 'New Group' })
   })
 
   it('reassigns members to no group when their group is deleted', () => {
-    const created = researchDeskReducer(createEmptyProjectState(), {
-      sectionId: 'file-section-library',
+    const base = createEmptyProjectState()
+    const librarySectionId = base.fileLibrarySectionOrder.find(
+      (id) => base.fileLibrarySections[id]?.kind === 'custom',
+    )!
+    const created = researchDeskReducer(base, {
+      sectionId: librarySectionId,
       title: 'Group',
       type: 'createFileGroup',
     })
     const groupId = created.fileGroupOrder[0]
     const withAsset = researchDeskReducer(created, {
-      assets: [makeAsset('f1', 'alpha', { groupId, sectionId: 'file-section-library' })],
+      assets: [makeAsset('f1', 'alpha', { groupId, sectionId: librarySectionId })],
       type: 'ingestFileAssets',
     })
     const next = researchDeskReducer(withAsset, { groupId, type: 'deleteFileGroup' })
     expect(next.fileGroups[groupId]).toBeUndefined()
     expect(next.fileAssets.f1.groupId).toBeNull()
+  })
+})
+
+describe('legacy resource identity migration', () => {
+  it('rekeys a file section and all local parent references atomically', () => {
+    const base = createEmptyProjectState()
+    const originalId = base.fileLibrarySectionOrder.find(
+      (id) => base.fileLibrarySections[id]?.kind === 'temporary',
+    )!
+    const legacyId = 'file-section-temp'
+    const section = base.fileLibrarySections[originalId]
+    const fileLibrarySections: ProjectState['fileLibrarySections'] = {
+      ...base.fileLibrarySections,
+      [legacyId]: { ...section, id: legacyId },
+    }
+    delete fileLibrarySections[originalId]
+    const state = {
+      ...base,
+      fileAssetOrder: ['fa-1'],
+      fileAssets: {
+        'fa-1': makeAsset('fa-1', 'source', { sectionId: legacyId }),
+      },
+      fileGroupOrder: ['fg-1'],
+      fileGroups: {
+        'fg-1': {
+          createdAt: section.createdAt,
+          id: 'fg-1',
+          sectionId: legacyId,
+          title: 'Sources',
+          updatedAt: section.updatedAt,
+        },
+      },
+      fileLibrarySectionOrder: base.fileLibrarySectionOrder.map(
+        (id) => id === originalId ? legacyId : id,
+      ),
+      fileLibrarySections,
+    }
+
+    const migrated = researchDeskReducer(state, {
+      replacements: { [legacyId]: 'file-section-new' },
+      type: 'rekeyFileLibrarySectionIds',
+    })
+
+    expect(migrated.fileLibrarySections[legacyId]).toBeUndefined()
+    expect(migrated.fileLibrarySections['file-section-new']?.id).toBe('file-section-new')
+    expect(migrated.fileGroups['fg-1'].sectionId).toBe('file-section-new')
+    expect(migrated.fileAssets['fa-1'].sectionId).toBe('file-section-new')
+    expect(migrated.fileLibrarySectionOrder).toContain('file-section-new')
+  })
+
+  it('rekeys a knowledge session and every item, membership, selection, and pin', () => {
+    const base = createEmptyProjectState()
+    const originalId = base.selectedKnowledgeSessionId!
+    const legacyId = 'knowledge-session-default'
+    const session = base.knowledgeSessions[originalId]
+    const state = {
+      ...base,
+      knowledgeItemOrder: ['ki-1'],
+      knowledgeItems: { 'ki-1': makeKnowledgeItem('ki-1', legacyId) },
+      knowledgeSessionGroupMemberships: { [legacyId]: 'kg-1' },
+      knowledgeSessionOrder: [legacyId],
+      knowledgeSessions: { [legacyId]: { ...session, id: legacyId } },
+      selectedKnowledgeSessionId: legacyId,
+      ui: {
+        ...base.ui,
+        pinnedExplorer: {
+          ...base.ui.pinnedExplorer,
+          knowledgeSessionIds: [legacyId],
+        },
+      },
+    }
+
+    const migrated = researchDeskReducer(state, {
+      replacements: { [legacyId]: 'ks-new' },
+      type: 'rekeyKnowledgeSessionIds',
+    })
+
+    expect(migrated.knowledgeSessions[legacyId]).toBeUndefined()
+    expect(migrated.knowledgeSessions['ks-new']?.id).toBe('ks-new')
+    expect(migrated.knowledgeItems['ki-1'].sessionId).toBe('ks-new')
+    expect(migrated.knowledgeSessionGroupMemberships).toEqual({ 'ks-new': 'kg-1' })
+    expect(migrated.selectedKnowledgeSessionId).toBe('ks-new')
+    expect(migrated.ui.pinnedExplorer.knowledgeSessionIds).toEqual(['ks-new'])
+    expect(migrated.dirty).toBe(true)
   })
 })
 
@@ -1462,7 +1789,14 @@ describe('vector index reducer actions', () => {
 
   it('refuses to delete the temporary section', () => {
     const state = createEmptyProjectState()
-    expect(researchDeskReducer(state, { sectionId: 'file-section-temp', type: 'deleteFileLibrarySection' })).toBe(state)
+    const temporarySectionId = state.fileLibrarySectionOrder.find(
+      (id) => state.fileLibrarySections[id]?.kind === 'temporary',
+    )
+    expect(temporarySectionId).toBeDefined()
+    expect(researchDeskReducer(state, {
+      sectionId: temporarySectionId!,
+      type: 'deleteFileLibrarySection',
+    })).toBe(state)
   })
 })
 
@@ -1828,6 +2162,7 @@ describe('agent canvas is reconciled on session switch', () => {
       type: 'openAgentCanvasView',
     })
     const summary: ResearchRunSummary = {
+      access: { mode: 'owner' },
       run_id: 'r-new',
       status: 'running',
       queue_position: null,
@@ -1858,6 +2193,7 @@ describe('agent canvas is reconciled on session switch', () => {
 
 describe('agent plan stale re-flag (plan tab on-open fetch)', () => {
   const summary: ResearchRunSummary = {
+    access: { mode: 'owner' },
     run_id: 'r-plan',
     status: 'waiting_for_approval',
     queue_position: null,
@@ -1916,6 +2252,7 @@ describe('gate-tray root fixes (P6): approvals reconcile + exclusive membership'
   const agentSummary = (
     overrides: Partial<ResearchRunSummary> = {},
   ): ResearchRunSummary => ({
+    access: { mode: 'owner' },
     run_id: 'r-gate',
     status: 'waiting_for_approval',
     queue_position: null,
@@ -1945,7 +2282,7 @@ describe('gate-tray root fixes (P6): approvals reconcile + exclusive membership'
     payload: {},
     decision: status === 'approved' ? 'approve' : '',
     note: '',
-    decided_by_sub: '',
+    decided_by_user_id: null,
     created_at: 1_700_000_000,
     decided_at: status === 'approved' ? 1_700_000_100 : null,
   })
@@ -1981,7 +2318,7 @@ describe('gate-tray root fixes (P6): approvals reconcile + exclusive membership'
       status,
       answer: status === 'answered' ? 'DACH' : '',
       option_id: '',
-      answered_by_sub: '',
+      answered_by_user_id: null,
       created_at: 1_700_000_000,
       answered_at: status === 'answered' ? 1_700_000_050 : null,
     })

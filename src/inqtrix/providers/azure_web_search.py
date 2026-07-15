@@ -31,6 +31,7 @@ from typing import Any
 from openai import APIStatusError, OpenAI, OpenAIError, RateLimitError
 
 from inqtrix.exceptions import (
+    AgentCancelled,
     AgentRateLimited,
     AgentProviderTimeout,
     AgentTimeout,
@@ -350,6 +351,11 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
                 http_status=503,
             )
             return GroundedSearchResult()
+        except AgentCancelled:
+            # Run cancellation is not a provider failure: it must unwind
+            # into the run's cancelled terminal state, never degrade into
+            # a fake empty result with a provider_error notice.
+            raise
         except Exception as exc:  # noqa: BLE001 -- non-fatal degrade (see gotcha #11)
             log.error(
                 "Azure-Foundry-WebSearch fehlgeschlagen fuer '%s': %s", query[:80], exc

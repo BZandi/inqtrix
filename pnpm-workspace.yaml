@@ -1,8 +1,68 @@
 packages:
   - "apps/*"
+  - "packages/*"
+
+linkWorkspacePackages: true
+
+overrides:
+  "@tiptap/core": "3.27.1"
+  "@tiptap/extension-blockquote": "3.27.1"
+  "@tiptap/extension-bold": "3.27.1"
+  "@tiptap/extension-bubble-menu": "3.27.1"
+  "@tiptap/extension-bullet-list": "3.27.1"
+  "@tiptap/extension-code": "3.27.1"
+  "@tiptap/extension-code-block": "3.27.1"
+  "@tiptap/extension-collaboration": "3.27.1"
+  "@tiptap/extension-collaboration-caret": "3.27.1"
+  "@tiptap/extension-document": "3.27.1"
+  "@tiptap/extension-drag-handle": "3.27.1"
+  "@tiptap/extension-drag-handle-react": "3.27.1"
+  "@tiptap/extension-dropcursor": "3.27.1"
+  "@tiptap/extension-floating-menu": "3.27.1"
+  "@tiptap/extension-gapcursor": "3.27.1"
+  "@tiptap/extension-hard-break": "3.27.1"
+  "@tiptap/extension-heading": "3.27.1"
+  "@tiptap/extension-highlight": "3.27.1"
+  "@tiptap/extension-horizontal-rule": "3.27.1"
+  "@tiptap/extension-italic": "3.27.1"
+  "@tiptap/extension-link": "3.27.1"
+  "@tiptap/extension-list": "3.27.1"
+  "@tiptap/extension-list-item": "3.27.1"
+  "@tiptap/extension-list-keymap": "3.27.1"
+  "@tiptap/extension-mathematics": "3.27.1"
+  "@tiptap/extension-node-range": "3.27.1"
+  "@tiptap/extension-ordered-list": "3.27.1"
+  "@tiptap/extension-paragraph": "3.27.1"
+  "@tiptap/extension-strike": "3.27.1"
+  "@tiptap/extension-table": "3.27.1"
+  "@tiptap/extension-table-cell": "3.27.1"
+  "@tiptap/extension-table-header": "3.27.1"
+  "@tiptap/extension-table-row": "3.27.1"
+  "@tiptap/extension-task-item": "3.27.1"
+  "@tiptap/extension-task-list": "3.27.1"
+  "@tiptap/extension-text": "3.27.1"
+  "@tiptap/extension-text-align": "3.27.1"
+  "@tiptap/extension-underline": "3.27.1"
+  "@tiptap/extensions": "3.27.1"
+  "@tiptap/markdown": "3.27.1"
+  "@tiptap/pm": "3.27.1"
+  "@tiptap/react": "3.27.1"
+  "@tiptap/starter-kit": "3.27.1"
+  "@tiptap/suggestion": "3.27.1"
+  "@tiptap/y-tiptap": "3.0.6"
+  "prosemirror-model": "1.25.11"
+  "prosemirror-state": "1.4.4"
+  "prosemirror-transform": "1.12.0"
+  "prosemirror-view": "1.42.1"
+  "yjs": "13.6.31"
+
+onlyBuiltDependencies:
+  - esbuild
 
 packageConfigs:
   "@inqtrix/research-desk":
+    saveExact: true
+  "@inqtrix/editor-schema":
     saveExact: true
 
 minimumReleaseAge: 1440
@@ -10,3 +70,7 @@ minimumReleaseAgeStrict: true
 minimumReleaseAgeIgnoreMissingTime: false
 blockExoticSubdeps: true
 trustPolicy: no-downgrade
+patchedDependencies:
+  '@handlewithcare/prosemirror-suggest-changes@0.1.8': patches/@handlewithcare__prosemirror-suggest-changes@0.1.8.patch
+allowBuilds:
+  esbuild: true

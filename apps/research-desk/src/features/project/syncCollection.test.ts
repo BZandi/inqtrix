@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { syncCollection } from './syncCollection'
+import { deleteTolerant404, syncCollection } from './syncCollection'
 
 type Item = { id: string; v: string }
 
@@ -70,5 +70,23 @@ describe('syncCollection', () => {
     ).rejects.toThrow('network')
     expect(attempts).toBe(1)
     expect(synced.has('a')).toBe(false) // not advanced -> retried next pass
+  })
+})
+
+describe('deleteTolerant404', () => {
+  it('treats an already-absent entity as the successful delete state', async () => {
+    const notFound = Object.assign(new Error('not found'), { status: 404 })
+
+    await expect(
+      deleteTolerant404(async () => { throw notFound }),
+    ).resolves.toBeUndefined()
+  })
+
+  it('keeps non-404 failures visible to the synchronization badge', async () => {
+    const unavailable = Object.assign(new Error('unavailable'), { status: 503 })
+
+    await expect(
+      deleteTolerant404(async () => { throw unavailable }),
+    ).rejects.toBe(unavailable)
   })
 })

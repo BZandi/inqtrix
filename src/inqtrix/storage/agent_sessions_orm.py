@@ -19,6 +19,7 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.dialects.postgresql import UUID
 
 agent_sessions_metadata = MetaData()
 
@@ -27,7 +28,7 @@ agent_session_groups = Table(
     agent_sessions_metadata,
     Column("id", Text, primary_key=True),
     Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
-    Column("created_by_sub", Text, nullable=True),
+    Column("created_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("workspace_id", Text, nullable=True),
     Column("title", Text, nullable=False, server_default=text("''")),
     Column("created_at", Float, nullable=False),
@@ -35,7 +36,7 @@ agent_session_groups = Table(
     Index(
         "ix_agent_session_groups_owner_created",
         "tenant_id",
-        "created_by_sub",
+        "created_by_user_id",
         "workspace_id",
         "created_at",
         "id",
@@ -48,7 +49,7 @@ agent_sessions = Table(
     agent_sessions_metadata,
     Column("id", Text, primary_key=True),
     Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
-    Column("created_by_sub", Text, nullable=True),
+    Column("created_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("workspace_id", Text, nullable=True),
     Column("title", Text, nullable=False, server_default=text("''")),
     Column(
@@ -67,7 +68,7 @@ agent_sessions = Table(
     Index(
         "ix_agent_sessions_owner_updated",
         "tenant_id",
-        "created_by_sub",
+        "created_by_user_id",
         "workspace_id",
         "updated_at",
         "id",

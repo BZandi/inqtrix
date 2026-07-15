@@ -13,22 +13,22 @@ import {
   sortUsers,
 } from './adminModel'
 
-function user(partial: Partial<AdminUser> & { subject: string }): AdminUser {
+function user(partial: Partial<AdminUser> & { id: string }): AdminUser {
   return {
     disabled: false,
-    display_name: partial.subject,
-    email: `${partial.subject}@example.com`,
+    display_name: partial.id,
+    email: `${partial.id}@example.com`,
     instance_role: 'user',
     last_login_at: null,
     ...partial,
   }
 }
 
-const owner = user({ subject: 'owner', instance_role: 'admin' })
-const admin2 = user({ subject: 'admin2', instance_role: 'admin' })
-const bob = user({ subject: 'bob' })
+const owner = user({ id: 'owner', instance_role: 'admin' })
+const admin2 = user({ id: 'admin2', instance_role: 'admin' })
+const bob = user({ id: 'bob' })
 const disabledAdmin = user({
-  subject: 'old',
+  id: 'old',
   instance_role: 'admin',
   disabled: true,
 })
@@ -88,7 +88,7 @@ describe('canDisable', () => {
 
 describe('sortUsers', () => {
   it('puts admins first, then orders by email', () => {
-    expect(sortUsers([bob, admin2, owner]).map((u) => u.subject)).toEqual([
+    expect(sortUsers([bob, admin2, owner]).map((u) => u.id)).toEqual([
       'admin2',
       'owner',
       'bob',

@@ -12,13 +12,11 @@ apart. The byte-level wire behaviour behind these methods is pinned by
 from __future__ import annotations
 
 from dataclasses import dataclass
+import uuid
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    from inqtrix.auth.permissions import SharePermission
-    from inqtrix.auth.principal import UserContext
+    from inqtrix.auth.principal import Principal, UserContext
     from inqtrix.server.runs import RunWork
 
 
@@ -63,8 +61,9 @@ class RunStorePort(Protocol):
         agent_overrides: dict[str, Any] | None = None,
         mode: str = "research",
         workspace_id: str | None = None,
-        created_by_sub: str | None = None,
+        created_by_user_id: uuid.UUID | None = None,
         created_by_tenant_id: str | None = None,
+        execution_scopes: frozenset[str] = frozenset(),
         request_payload: dict[str, Any] | None = None,
         kind: str = "standard",
         parent_run_id: str | None = None,
@@ -95,7 +94,6 @@ class RunStorePort(Protocol):
         *,
         workspace_id: str | None = None,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ) -> list[dict[str, Any]]:
         """Visible summaries, newest first (unbounded, internal reads)."""
         ...
@@ -117,8 +115,8 @@ class RunStorePort(Protocol):
 
     def session_owners(
         self, session_id: str
-    ) -> set[tuple[str | None, str | None]]:
-        """Recorded ``(tenant_id, subject)`` owners for a session id.
+    ) -> set[tuple[str | None, uuid.UUID | None]]:
+        """Recorded ``(tenant_id, user_id)`` owners for a session id.
 
         This raw ownership probe is intentionally not visibility-filtered.
         It is used only to prevent a deleted session registry row from being
@@ -133,7 +131,6 @@ class RunStorePort(Protocol):
         after: tuple[float, str] | None = None,
         workspace_id: str | None = None,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """One keyset page of visible summaries + next cursor.
 
@@ -170,7 +167,6 @@ class RunStorePort(Protocol):
         *,
         workspace_id: str | None = None,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ) -> dict[str, Any]:
         """Cancel queued immediately / request cancel of running."""
         ...
@@ -181,7 +177,6 @@ class RunStorePort(Protocol):
         *,
         workspace_id: str | None = None,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ) -> tuple[dict[str, Any], tuple[str, ...]]:
         """Cancel one run tree and return its exact affected run ids.
 
@@ -191,12 +186,36 @@ class RunStorePort(Protocol):
         """
         ...
 
+    def authorized_control_write(
+        self,
+        run_id: str,
+        *,
+        workspace_id: str | None = None,
+        visible_to: "UserContext | None" = None,
+        control_write: Any,
+    ) -> Any:
+        """Run one agent-control mutation under live ``edit`` authority.
+
+        ``control_write(transaction, cancel_child)`` is invoked only after
+        the canonical run root, active caller, and accepted direct share have
+        been locked. Durable backends pass their database transaction;
+        in-memory backends pass ``None`` while holding the corresponding
+        run/identity locks. ``cancel_child`` cancels one direct child subtree
+        inside that same boundary and returns the child's resulting status.
+
+        This is the control-table counterpart of ``resume_run``'s
+        ``control_write`` seam: a revoke either commits before the callback
+        and the write is denied, or waits until the complete control mutation
+        (including an optional child cancellation) has committed.
+        """
+        ...
+
     def delete(
         self,
         run_id: str,
         *,
         workspace_id: str | None = None,
-        requester_sub: str | None = None,
+        requester_user_id: uuid.UUID | None = None,
     ) -> None:
         """Permanently remove one terminal run; owner-only.
 
@@ -218,8 +237,8 @@ class RunStorePort(Protocol):
         """Event subscription with stored replay plus live tail."""
         ...
 
-    def owner_sub(self, run_id: str) -> str | None:
-        """The run's ``created_by_sub`` regardless of visibility.
+    def owner_user_id(self, run_id: str) -> uuid.UUID | None:
+        """The run's ``created_by_user_id`` regardless of visibility.
 
         The share layer's owner resolver: authorization happens in the
         ShareService against this fact, so the lookup itself must not
@@ -227,6 +246,24 @@ class RunStorePort(Protocol):
         pre-scoping rows (no recorded creator) alike — both are
         unshareable.
         """
+        ...
+
+    def execution_request_body(self, run_id: str) -> dict[str, Any]:
+        """Return the persisted execution body for internal validation.
+
+        The body is detached from storage and is never part of the public run
+        summary. Control and worker paths use it to restore the one immutable
+        dependency boundary admitted with the run.
+        """
+        ...
+
+    def execution_principal(
+        self,
+        run_id: str,
+        *,
+        fallback: "Principal | None" = None,
+    ) -> "Principal | None":
+        """Reconstruct the effective actor persisted for the run segment."""
         ...
 
     def emit(
@@ -308,7 +345,14 @@ class RunStorePort(Protocol):
         """
         ...
 
-    def resume_run(self, run_id: str) -> dict[str, Any]:
+    def resume_run(
+        self,
+        run_id: str,
+        *,
+        actor_user_id: uuid.UUID | None = None,
+        execution_scopes: frozenset[str] = frozenset(),
+        control_write: Any = None,
+    ) -> dict[str, Any]:
         """Move a waiting run back to ``queued`` and re-dispatch it.
 
         Raises ``RunNotFound`` for unknown ids and ``RunActive`` when
@@ -329,7 +373,7 @@ class RunStorePort(Protocol):
     def import_completed_run(
         self,
         *,
-        run_id: str,
+        source_run_id: str,
         question: str,
         stack_name: str,
         result: dict[str, Any],
@@ -340,18 +384,16 @@ class RunStorePort(Protocol):
         error: dict[str, Any] | None = None,
         created_at: float | None = None,
         workspace_id: str | None = None,
-        created_by_sub: str | None = None,
+        created_by_user_id: uuid.UUID | None = None,
         created_by_tenant_id: str | None = None,
     ) -> dict[str, Any]:
         """Persist an already-terminal run imported from a project file.
 
         Stores a completed report snapshot directly (no execution), scoped to
         the caller, so a loaded project's reports survive a reload and follow
-        the user. The client ``run_id`` is kept when free (idempotent re-import
-        of the caller's own run); a foreign-owned id collision allocates a fresh
-        id instead of overwriting. ``created_at`` keeps the report's original
-        date; the durable-retention clock starts at import time (so an old
-        report is not pruned immediately), hence no ``finished_at`` parameter.
-        Returns the public run summary.
+        the user. ``source_run_id`` is an owner-scoped idempotency key; a new
+        row always gets a server-generated ``run_id``. ``created_at`` keeps the
+        report's original date; the durable-retention clock starts at import
+        time, hence no ``finished_at`` parameter. Returns the public summary.
         """
         ...

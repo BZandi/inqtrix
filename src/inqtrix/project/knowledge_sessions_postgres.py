@@ -1,6 +1,6 @@
 """Postgres-backed knowledge-session store (durable Wissensmodus tier).
 
-Sessions persist relationally, scoped per ``(tenant_id, created_by_sub,
+Sessions persist relationally, scoped per ``(tenant_id, created_by_user_id,
 workspace_id)`` with the inherited tenant-session lifecycle
 (:class:`BaseSessionStore`). ``list_sessions`` SELECTs metadata columns only
 (NOT the heavy ``items_json``); ``get_session`` SELECTs the full row.
@@ -8,7 +8,9 @@ workspace_id)`` with the inherited tenant-session lifecycle
 
 from __future__ import annotations
 
-from sqlalchemy import delete, select
+import uuid
+
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from inqtrix.project.base_session_store import (
@@ -18,7 +20,14 @@ from inqtrix.project.base_session_store import (
 from inqtrix.project.knowledge_sessions_ports import (
     KnowledgeSession,
     KnowledgeSessionGroup,
+    KnowledgeSessionGroupNotFound,
     KnowledgeSessionNotFound,
+)
+from inqtrix.project.scoped_upsert import (
+    ResourceScope,
+    delete_scoped_postgres,
+    require_scoped_parent,
+    scoped_postgres_upsert,
 )
 from inqtrix.storage.knowledge_sessions_orm import (
     knowledge_session_groups,
@@ -29,7 +38,7 @@ from inqtrix.storage.knowledge_sessions_orm import (
 _META_COLUMNS = (
     knowledge_sessions.c.id,
     knowledge_sessions.c.tenant_id,
-    knowledge_sessions.c.created_by_sub,
+    knowledge_sessions.c.created_by_user_id,
     knowledge_sessions.c.workspace_id,
     knowledge_sessions.c.title,
     knowledge_sessions.c.group_id,
@@ -44,28 +53,42 @@ class PostgresKnowledgeSessionStore(BaseSessionStore):
 
     async def upsert_session(
         self, *, id: str, title: str, items_json: str, group_id: str | None,
-        created_at: float, updated_at: float, created_by_sub: str | None,
+        created_at: float,
+        updated_at: float,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> KnowledgeSession:
         values = dict(
-            id=id, tenant_id=_DEFAULT_TENANT, created_by_sub=created_by_sub,
+            id=id, tenant_id=_DEFAULT_TENANT, created_by_user_id=created_by_user_id,
             workspace_id=workspace_id, title=title, group_id=group_id,
             items_json=items_json,
             created_at=created_at, updated_at=updated_at,
         )
         mutable = ["title", "group_id", "items_json", "updated_at"]
-        stmt = _with_set(
+        stmt = scoped_postgres_upsert(
             pg_insert(knowledge_sessions), knowledge_sessions, values, mutable
         ).returning(knowledge_sessions)
         async with self._session() as session:
-            row = (await session.execute(stmt)).one()
+            if group_id is not None:
+                await require_scoped_parent(
+                    session,
+                    table=knowledge_session_groups,
+                    parent_id=group_id,
+                    tenant_id=_DEFAULT_TENANT,
+                    created_by_user_id=created_by_user_id,
+                    workspace_id=workspace_id,
+                    not_found=KnowledgeSessionGroupNotFound,
+                )
+            row = (await session.execute(stmt)).first()
+            if row is None:
+                raise KnowledgeSessionNotFound(id)
         return _from_row(row)
 
     async def list_sessions(
-        self, *, created_by_sub: str | None, workspace_id: str | None
+        self, *, created_by_user_id: uuid.UUID | None, workspace_id: str | None
     ) -> list[KnowledgeSession]:
         query = _scoped_query(
-            select(*_META_COLUMNS), knowledge_sessions, created_by_sub, workspace_id
+            select(*_META_COLUMNS), knowledge_sessions, created_by_user_id, workspace_id
         )
         query = query.order_by(
             knowledge_sessions.c.updated_at.desc(), knowledge_sessions.c.id.desc()
@@ -85,36 +108,41 @@ class PostgresKnowledgeSessionStore(BaseSessionStore):
             raise KnowledgeSessionNotFound(session_id)
         return _from_row(row)
 
-    async def delete_session(self, session_id: str) -> None:
+    async def delete_session(
+        self, session_id: str, *, scope: ResourceScope
+    ) -> None:
         async with self._session() as session:
-            await session.execute(delete(knowledge_sessions).where(
-                knowledge_sessions.c.tenant_id == _DEFAULT_TENANT,
-                knowledge_sessions.c.id == session_id,
-            ))
+            await delete_scoped_postgres(
+                session, table=knowledge_sessions, resource_id=session_id,
+                tenant_id=_DEFAULT_TENANT, scope=scope,
+                not_found=KnowledgeSessionNotFound,
+            )
 
     async def upsert_group(
         self, *, id: str, title: str, created_at: float, updated_at: float,
-        created_by_sub: str | None, workspace_id: str | None,
+        created_by_user_id: uuid.UUID | None, workspace_id: str | None,
     ) -> KnowledgeSessionGroup:
         values = dict(
-            id=id, tenant_id=_DEFAULT_TENANT, created_by_sub=created_by_sub,
+            id=id, tenant_id=_DEFAULT_TENANT, created_by_user_id=created_by_user_id,
             workspace_id=workspace_id, title=title, created_at=created_at,
             updated_at=updated_at,
         )
-        stmt = _with_set(
+        stmt = scoped_postgres_upsert(
             pg_insert(knowledge_session_groups), knowledge_session_groups,
             values, ["title", "updated_at"],
         ).returning(knowledge_session_groups)
         async with self._session() as session:
-            row = (await session.execute(stmt)).one()
+            row = (await session.execute(stmt)).first()
+            if row is None:
+                raise KnowledgeSessionGroupNotFound(id)
         return _group_from_row(row)
 
     async def list_groups(
-        self, *, created_by_sub: str | None, workspace_id: str | None
+        self, *, created_by_user_id: uuid.UUID | None, workspace_id: str | None
     ) -> list[KnowledgeSessionGroup]:
         query = _scoped_query(
             select(knowledge_session_groups), knowledge_session_groups,
-            created_by_sub, workspace_id,
+            created_by_user_id, workspace_id,
         )
         query = query.order_by(
             knowledge_session_groups.c.created_at.desc(),
@@ -124,12 +152,15 @@ class PostgresKnowledgeSessionStore(BaseSessionStore):
             rows = (await session.execute(query)).all()
         return [_group_from_row(row) for row in rows]
 
-    async def delete_group(self, group_id: str) -> None:
+    async def delete_group(
+        self, group_id: str, *, scope: ResourceScope
+    ) -> None:
         async with self._session() as session:
-            await session.execute(delete(knowledge_session_groups).where(
-                knowledge_session_groups.c.tenant_id == _DEFAULT_TENANT,
-                knowledge_session_groups.c.id == group_id,
-            ))
+            await delete_scoped_postgres(
+                session, table=knowledge_session_groups, resource_id=group_id,
+                tenant_id=_DEFAULT_TENANT, scope=scope,
+                not_found=KnowledgeSessionGroupNotFound,
+            )
 
 
 def _from_row(row) -> KnowledgeSession:
@@ -141,7 +172,7 @@ def _from_row(row) -> KnowledgeSession:
         created_at=row.created_at,
         updated_at=row.updated_at,
         tenant_id=row.tenant_id,
-        created_by_sub=row.created_by_sub,
+        created_by_user_id=row.created_by_user_id,
         workspace_id=row.workspace_id,
     )
 
@@ -153,25 +184,17 @@ def _group_from_row(row) -> KnowledgeSessionGroup:
         created_at=row.created_at,
         updated_at=row.updated_at,
         tenant_id=row.tenant_id,
-        created_by_sub=row.created_by_sub,
+        created_by_user_id=row.created_by_user_id,
         workspace_id=row.workspace_id,
     )
 
 
-def _scoped_query(query, table, created_by_sub, workspace_id):
+def _scoped_query(
+    query, table, created_by_user_id: uuid.UUID | None, workspace_id
+):
     query = query.where(table.c.tenant_id == _DEFAULT_TENANT)
-    if created_by_sub is not None:
-        query = query.where(table.c.created_by_sub == created_by_sub)
+    if created_by_user_id is not None:
+        query = query.where(table.c.created_by_user_id == created_by_user_id)
     if workspace_id is not None:
         query = query.where(table.c.workspace_id == workspace_id)
     return query
-
-
-def _with_set(stmt, table, values, mutable_columns):
-    """values()+on_conflict_do_update keyed on the PK, never reassigning
-    created_at / ownership."""
-    stmt = stmt.values(**values)
-    return stmt.on_conflict_do_update(
-        index_elements=[table.c.id],
-        set_={col: getattr(stmt.excluded, col) for col in mutable_columns},
-    )

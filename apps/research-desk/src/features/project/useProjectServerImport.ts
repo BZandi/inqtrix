@@ -16,9 +16,12 @@
  * After the push + opt-in, the per-entity sync hooks hydrate the just-pushed
  * data (server == local → no re-push) and take over autosave.
  *
- * Non-destructive: the local project is untouched. Errors propagate to the
- * caller (the ResearchDesk handler surfaces them via the project-action
- * banner — No Silent Fallbacks), while ``importPending`` always clears.
+ * Before the first push, the local graph is detached onto globally unique ids
+ * and becomes the active project. That mapping remains stable across retries
+ * in the current project epoch, so a partial push converges instead of writing
+ * a second graph. Errors propagate to the caller (the ResearchDesk handler
+ * surfaces them via the project-action banner — No Silent Fallbacks), while
+ * ``importPending`` always clears.
  */
 
 import { useCallback, useRef, useState } from 'react'
@@ -29,6 +32,7 @@ import { pushAllChatEntities } from '@/features/chat/chatHistorySync'
 import { pushAllEditorEntities } from '@/features/editor/editorSync'
 import { pushAllAssetEntities } from '@/features/fileLibrary/assetSync'
 import { pushAllVectorIndexEntities } from '@/features/fileLibrary/vectorIndexSync'
+import { detachProjectResourceGraph } from '@/features/project/detachedImport'
 import type { ProjectState } from '@/features/project/types'
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
 
@@ -58,13 +62,26 @@ export function useProjectServerImport({
   stateRef.current = state
   const optionsRef = useRef<ClientOptions>({ apiKey, workspaceId })
   optionsRef.current = { apiKey, workspaceId }
+  const preparedRef = useRef<{ projectEpoch: number; workspaceId: string } | null>(null)
 
   const importToServer = useCallback(async () => {
     if (!canPersist || importPending) return
     setImportPending(true)
     try {
-      const project = stateRef.current
+      const current = stateRef.current
       const options = optionsRef.current
+      const prepared = preparedRef.current
+      const project = prepared?.projectEpoch === current.projectEpoch
+        && prepared.workspaceId === workspaceId
+        ? current
+        : detachProjectResourceGraph(current, workspaceId)
+      if (project !== current) {
+        preparedRef.current = {
+          projectEpoch: current.projectEpoch + 1,
+          workspaceId,
+        }
+        dispatch({ state: project, type: 'hydrateProject' })
+      }
       // The four pushes run in sequence and serverSyncEnabled is flipped only
       // AFTER all of them succeed, so a mid-flight rejection never enables sync
       // over partial data. A failed push leaves the entities it already wrote
@@ -98,10 +115,11 @@ export function useProjectServerImport({
       )
       await pushAllVectorIndexEntities(project.vectorIndexes, options)
       dispatch({ enabled: true, type: 'setServerSyncEnabled' })
+      preparedRef.current = null
     } finally {
       setImportPending(false)
     }
-  }, [canPersist, importPending, dispatch])
+  }, [canPersist, dispatch, importPending, workspaceId])
 
   return { importPending, importToServer }
 }

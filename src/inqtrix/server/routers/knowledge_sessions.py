@@ -9,6 +9,7 @@ metadata only; the single-session GET returns the items body (load-on-open).
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Request
@@ -29,8 +30,8 @@ if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
 
-def _caller_sub(principal: Principal) -> str | None:
-    return principal.sub if principal.kind in ("oidc_session", "pat") else None
+def _caller_user_id(principal: Principal) -> uuid.UUID | None:
+    return principal.user_id if principal.kind in ("oidc_session", "pat") else None
 
 
 def _meta_payload(s: KnowledgeSession) -> dict[str, Any]:
@@ -80,7 +81,7 @@ def build_router(container: "AppContainer") -> APIRouter:
     @router.get("/v1/knowledge-sessions")
     async def list_sessions(req: Request, principal: Principal = Depends(principal_dep)):
         sessions = await service.list_sessions(
-            caller_sub=_caller_sub(principal),
+            caller_user_id=_caller_user_id(principal),
             workspace_id=workspace_id_from_request(req),
         )
         return {"object": "list", "data": [_meta_payload(s) for s in sessions]}
@@ -88,7 +89,7 @@ def build_router(container: "AppContainer") -> APIRouter:
     @router.get("/v1/knowledge-session-groups")
     async def list_groups(req: Request, principal: Principal = Depends(principal_dep)):
         groups = await service.list_groups(
-            caller_sub=_caller_sub(principal),
+            caller_user_id=_caller_user_id(principal),
             workspace_id=workspace_id_from_request(req),
         )
         return {"object": "list", "data": [_group_payload(group) for group in groups]}
@@ -108,7 +109,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 id=group_id, title=str(body.get("title", "")),
                 created_at=float(body["created_at"]),
                 updated_at=float(body["updated_at"]),
-                caller_sub=_caller_sub(principal),
+                caller_user_id=_caller_user_id(principal),
                 workspace_id=workspace_id_from_request(req),
                 visible_to=visible_to,
             )
@@ -163,7 +164,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 id=session_id, title=str(body.get("title", "")), items_json=items_json,
                 group_id=group_id,
                 created_at=float(body["created_at"]), updated_at=float(body["updated_at"]),
-                caller_sub=_caller_sub(principal),
+                caller_user_id=_caller_user_id(principal),
                 workspace_id=workspace_id_from_request(req), visible_to=visible_to,
             )
         except KnowledgeSessionGroupNotFound:

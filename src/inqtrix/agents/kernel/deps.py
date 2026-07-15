@@ -177,6 +177,11 @@ class KernelDeps:
                 blocks the tool — surfaced as a loud tool error the
                 model must acknowledge.
         """
+        authority_check = getattr(
+            self.capability_context, "authority_check", None
+        )
+        if authority_check is not None:
+            authority_check()
         if (
             self.tier == "schnell"
             and tool_name == "web_instant"

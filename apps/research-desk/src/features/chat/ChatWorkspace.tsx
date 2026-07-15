@@ -47,7 +47,6 @@ import {
 } from 'react'
 import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer'
 import { MarkdownSelectionCopyMenu } from '@/components/markdown/MarkdownSelectionCopyMenu'
-import { useMarkdownCodePreload } from '@/components/markdown/useMarkdownCodePreload'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ConversationSkeleton } from '@/components/ui/conversation-skeleton'
@@ -414,16 +413,6 @@ export default function ChatWorkspace({
   useEffect(() => {
     if (isDesktop) setIsMobileHistoryOpen(false)
   }, [isDesktop])
-  const chatMarkdownsForHighlight = useMemo(
-    () =>
-      selectedThread
-        ? selectedThread.messages
-          .map((message) => message.contentMarkdown)
-          .filter((markdown) => markdown.trim().length > 0)
-        : [],
-    [selectedThread],
-  )
-  useMarkdownCodePreload(chatMarkdownsForHighlight)
   const canAnswerLastUserMessage = Boolean(
     selectedThread
     && lastMessage

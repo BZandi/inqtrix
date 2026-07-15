@@ -16,7 +16,8 @@ on cancel or failure — the collection stays consistent throughout.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+import uuid
+from typing import TYPE_CHECKING, Any, Callable
 
 from inqtrix.knowledge.stores.ports import (
     CollectionNotFound,
@@ -32,6 +33,9 @@ if TYPE_CHECKING:
     from inqtrix.server.indexing import IndexingJobHandle, IndexingJobStore
     from inqtrix.services.knowledge_service import KnowledgeService
     from inqtrix.services.quota_service import QuotaService
+    from inqtrix.services.execution_dependency_authority import (
+        CollectionEditAuthorizer,
+    )
 
 log = logging.getLogger("inqtrix")
 
@@ -48,9 +52,11 @@ class ReindexUnsupported(RuntimeError):
 
 
 def store_supports_reembed(knowledge_service: "KnowledgeService") -> bool:
-    """Whether the wired vector store implements in-place re-embedding."""
+    """Whether the store can re-embed behind a mutation boundary."""
     store = knowledge_service.knowledge.store
-    return callable(getattr(store, "reembed_document", None))
+    return callable(getattr(store, "reembed_document", None)) and bool(
+        getattr(store, "supports_safe_reindex", True)
+    )
 
 
 def execute_reindex_job(
@@ -61,6 +67,8 @@ def execute_reindex_job(
     embedding_model: str,
     quota_service: "QuotaService | None" = None,
     quota_subject: "QuotaSubject | None" = None,
+    authority_check: Callable[[], None] | None = None,
+    actor_user_id: uuid.UUID | None = None,
 ) -> None:
     """Re-embed every document in one collection, emitting progress.
 
@@ -79,27 +87,41 @@ def execute_reindex_job(
             as it completes (incremental, so a cancelled run only counts
             what it actually embedded). ``None`` for unmetered
             deployments.
-        quota_subject: Explicit metered subject, reconstructed from the
-            job's (sub, tenant) — token accounting fires regardless of
-            which thread executes the job.
+        quota_subject: Explicit quota account, reconstructed from the job's
+            canonical user UUID and tenant — token accounting fires
+            regardless of which thread executes the job.
     """
     store = knowledge_service.knowledge.store
+    if authority_check is not None:
+        authority_check()
     # The reindex worker is synchronous; the knowledge store/service are
     # async. Bridge each call to completion on this worker thread.
     documents = run_coro_sync(store.list_documents(collection_id))
     handle.begin(len(documents))
-    for index, document in enumerate(documents):
+    for index, listed_document in enumerate(documents):
+        if authority_check is not None:
+            authority_check()
         if handle.cancelled:
             handle.cancel("client_requested_cancel")
             return
-        handle.progress(
-            completed_documents=index,
-            current_document_title=document.title,
-        )
         try:
+            # Enumeration fixes only the work list. The canonical document is
+            # reloaded immediately before embedding so a preceding mutation
+            # that committed before the maintenance boundary cannot feed stale
+            # title/text/metadata into this pass.
+            document = run_coro_sync(store.get_document(listed_document.id))
+            if authority_check is not None:
+                authority_check()
+            handle.progress(
+                completed_documents=index,
+                current_document_title=document.title,
+            )
             run_coro_sync(
                 knowledge_service.reembed_document(
-                    document=document, embedding_model=embedding_model
+                    document=document,
+                    embedding_model=embedding_model,
+                    authority_check=authority_check,
+                    actor_user_id=actor_user_id,
                 )
             )
         except DocumentNotFound:
@@ -108,7 +130,7 @@ def execute_reindex_job(
             log.warning(
                 "Reindex %s: document %s vanished mid-run; skipping",
                 collection_id,
-                document.id,
+                listed_document.id,
             )
             continue
         # This document is now re-embedded — emit a per-document event so the
@@ -123,6 +145,8 @@ def execute_reindex_job(
     if handle.cancelled:
         handle.cancel("client_requested_cancel")
         return
+    if authority_check is not None:
+        authority_check()
     handle.progress(
         completed_documents=len(documents), current_document_title=""
     )
@@ -147,15 +171,26 @@ class IndexingService:
         knowledge_service: "KnowledgeService",
         job_store: "IndexingJobStore",
         quota_service: "QuotaService | None" = None,
+        authority: "CollectionEditAuthorizer | None" = None,
     ) -> None:
         self._knowledge_service = knowledge_service
         self._job_store = job_store
         self._quota_service = quota_service
+        self._authority = authority
+        knowledge_service.bind_collection_maintenance(
+            active_check=job_store.has_active_job,
+            mutation_runner=getattr(job_store, "run_collection_mutation", None),
+        )
 
     @property
     def job_store(self) -> "IndexingJobStore":
         """The underlying job store (read-side surface for the router)."""
         return self._job_store
+
+    @property
+    def authority(self) -> "CollectionEditAuthorizer | None":
+        """Live collection-edit checker shared with queue workers."""
+        return self._authority
 
     def submit(
         self,
@@ -169,7 +204,7 @@ class IndexingService:
 
         Access to the collection is the router's concern (checked before
         this call); this method only wires the work closure and the
-        metered subject.
+        canonical quota attribution.
 
         Raises:
             ReindexUnsupported: The active vector store cannot re-embed
@@ -181,7 +216,7 @@ class IndexingService:
         """
         if not store_supports_reembed(self._knowledge_service):
             raise ReindexUnsupported(
-                "the active vector store does not support reindexing"
+                "the active knowledge store cannot safely serialize reindexing"
             )
         quota_subject = (
             self._quota_service.subject_for(principal)
@@ -191,6 +226,10 @@ class IndexingService:
         collection_id = collection.id
         embedding_model = collection.embedding_model
 
+        def _check_authority() -> None:
+            if self._authority is not None:
+                self._authority.check(collection_id, principal)
+
         def _work(handle: "IndexingJobHandle") -> None:
             execute_reindex_job(
                 handle,
@@ -199,6 +238,10 @@ class IndexingService:
                 embedding_model=embedding_model,
                 quota_service=self._quota_service,
                 quota_subject=quota_subject,
+                authority_check=_check_authority,
+                actor_user_id=(
+                    principal.user_id if principal is not None else None
+                ),
             )
 
         return self._job_store.submit(
@@ -208,7 +251,7 @@ class IndexingService:
             work=_work,
             index_id=index_id,
             workspace_id=workspace_id,
-            created_by_sub=principal.sub if principal is not None else None,
+            created_by_user_id=principal.user_id if principal is not None else None,
             created_by_tenant_id=(
                 principal.tenant_id if principal is not None else None
             ),

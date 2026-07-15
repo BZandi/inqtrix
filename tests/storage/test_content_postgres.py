@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 
 import pytest
 import pytest_asyncio
@@ -20,6 +21,10 @@ from inqtrix.storage.content_orm import files
 from inqtrix.storage.content_postgres import PostgresFileRegistry
 from inqtrix.storage.db import build_engine, build_session_factory, tenant_session
 from inqtrix.storage.migrate import run_migrations
+from tests.storage._canonical_users import (
+    canonical_user_id,
+    ensure_canonical_users,
+)
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
@@ -29,6 +34,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 APP_ROLE = "inqtrix_app"
+ALICE_USER_ID = canonical_user_id("content-alice")
+BOB_USER_ID = canonical_user_id("content-bob")
+MALLORY_USER_ID = canonical_user_id("content-mallory")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -71,6 +79,10 @@ async def registry(engine):
                     "superuser/BYPASSRLS user (cross-tenant cleanup)."
                 )
             await session.execute(files.delete())
+            await ensure_canonical_users(
+                session,
+                (ALICE_USER_ID, BOB_USER_ID, MALLORY_USER_ID),
+            )
     return PostgresFileRegistry(session_factory=factory, app_role=APP_ROLE)
 
 
@@ -78,14 +90,14 @@ def make_record(
     file_id: str = "fl_test1",
     *,
     tenant_id: str = "default",
-    owner_sub: str = "alice",
+    owner_user_id: uuid.UUID = ALICE_USER_ID,
     workspace_id: str | None = None,
     created_at: float | None = None,
 ) -> FileRecord:
     return FileRecord(
         id=file_id,
         tenant_id=tenant_id,
-        owner_sub=owner_sub,
+        owner_user_id=owner_user_id,
         workspace_id=workspace_id,
         file_name="vertrag.pdf",
         content_type="application/pdf",
@@ -104,7 +116,7 @@ async def test_create_get_list_delete_roundtrip(registry):
     assert await registry.get("fl_test1", tenant_id="default") == record
 
     listed = await registry.list(
-        tenant_id="default", owner_sub="alice", workspace_id=None
+        tenant_id="default", owner_user_id=ALICE_USER_ID, workspace_id=None
     )
     assert listed == [record]
 
@@ -118,7 +130,9 @@ async def test_create_get_list_delete_roundtrip(registry):
 async def test_listing_facets_and_ordering(registry):
     older = make_record("fl_old", created_at=100.0)
     newer = make_record("fl_new", created_at=200.0)
-    foreign_owner = make_record("fl_bob", owner_sub="bob", created_at=300.0)
+    foreign_owner = make_record(
+        "fl_bob", owner_user_id=BOB_USER_ID, created_at=300.0
+    )
     tagged = make_record(
         "fl_ws", workspace_id="ws-ui-0001", created_at=400.0
     )
@@ -126,12 +140,12 @@ async def test_listing_facets_and_ordering(registry):
         await registry.create(record)
 
     by_owner = await registry.list(
-        tenant_id="default", owner_sub="alice", workspace_id=None
+        tenant_id="default", owner_user_id=ALICE_USER_ID, workspace_id=None
     )
     assert [item.id for item in by_owner] == ["fl_ws", "fl_new", "fl_old"]
 
     unscoped = await registry.list(
-        tenant_id="default", owner_sub=None, workspace_id=None
+        tenant_id="default", owner_user_id=None, workspace_id=None
     )
     assert [item.id for item in unscoped] == [
         "fl_ws",
@@ -141,7 +155,7 @@ async def test_listing_facets_and_ordering(registry):
     ]
 
     by_namespace = await registry.list(
-        tenant_id="default", owner_sub=None, workspace_id="ws-ui-0001"
+        tenant_id="default", owner_user_id=None, workspace_id="ws-ui-0001"
     )
     assert [item.id for item in by_namespace] == ["fl_ws"]
 
@@ -154,7 +168,7 @@ async def test_cross_tenant_files_are_invisible(registry, engine):
         await registry.get("fl_a", tenant_id="tenant-b")
     assert (
         await registry.list(
-            tenant_id="tenant-b", owner_sub=None, workspace_id=None
+            tenant_id="tenant-b", owner_user_id=None, workspace_id=None
         )
         == []
     )
@@ -189,7 +203,9 @@ async def test_memory_and_postgres_registry_agree(registry):
         with pytest.raises(FileNotFound):
             await backend.get(record.id, tenant_id="tenant-x")
         assert await backend.list(
-            tenant_id="default", owner_sub="mallory", workspace_id=None
+            tenant_id="default",
+            owner_user_id=MALLORY_USER_ID,
+            workspace_id=None,
         ) == []
         await backend.delete(record.id, tenant_id="default")
         with pytest.raises(FileNotFound):
@@ -212,7 +228,7 @@ async def test_files_cross_tenant_insert_violates_with_check(engine):
                 insert(files).values(
                     id=record.id,
                     tenant_id=record.tenant_id,
-                    owner_sub=record.owner_sub,
+                    owner_user_id=record.owner_user_id,
                     workspace_id=record.workspace_id,
                     file_name=record.file_name,
                     content_type=record.content_type,

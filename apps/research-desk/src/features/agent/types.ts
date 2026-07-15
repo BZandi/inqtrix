@@ -89,7 +89,7 @@ export type AgentApprovalWire = {
   payload: Record<string, unknown>
   decision: string
   note: string
-  decided_by_sub: string
+  decided_by_user_id: string | null
   created_at: number
   decided_at: number | null
 }
@@ -150,7 +150,7 @@ export type AgentClarificationWire = {
   status: 'pending' | 'answered'
   answer: string
   option_id: string
-  answered_by_sub: string
+  answered_by_user_id: string | null
   created_at: number
   answered_at: number | null
 }

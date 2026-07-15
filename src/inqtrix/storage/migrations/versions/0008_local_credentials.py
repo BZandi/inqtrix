@@ -14,7 +14,39 @@ from __future__ import annotations
 
 from alembic import op
 
-from inqtrix.storage.credentials_orm import credentials_metadata
+# Frozen schema snapshot from the deployed revision. Historical migrations
+# must never import the live ORM because later authority changes would alter
+# the schema produced by a fresh traversal.
+from sqlalchemy import Column, Float, Index, MetaData, Table, Text, func, text
+
+credentials_metadata = MetaData()
+
+local_credentials = Table(
+    "local_credentials",
+    credentials_metadata,
+    Column("subject", Text, primary_key=True),
+    Column(
+        "tenant_id", Text, nullable=False, server_default=text("'default'")
+    ),
+    Column("email", Text, nullable=False),
+    Column("password_hash", Text, nullable=False),
+    Column("display_name", Text, nullable=True),
+    Column("created_at", Float, nullable=False),
+    Column("disabled_at", Float, nullable=True),
+)
+"""Local email/password accounts. Primary key ``subject`` serves login
+re-lookup and admin actions; the functional unique index below enforces
+one account per case-insensitive email within a tenant."""
+
+# One account per (tenant, email) — case-insensitive so Foo@x and foo@x
+# cannot both register. Defined after the table so it can reference the
+# real column; create_all emits CREATE UNIQUE INDEX ... (tenant_id, lower(email)).
+Index(
+    "uq_local_credentials_email",
+    local_credentials.c.tenant_id,
+    func.lower(local_credentials.c.email),
+    unique=True,
+)
 
 revision = "0008_local_credentials"
 down_revision = "0007_quota"

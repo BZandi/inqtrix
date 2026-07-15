@@ -1,7 +1,7 @@
 """Contracts of the account-preferences store (M6c).
 
 The simplest project-persistence port: a single preferences row per user
-(``sub``), no workspace dimension, no list, no children. ``get_preferences``
+(``user_id``), no workspace dimension, no list, no children. ``get_preferences``
 returns ``None`` when the user has never saved — the caller (router) maps that
 to 404 so the frontend keeps its own default theme/locale (the defaults are a
 frontend SSOT, never fabricated server-side). Two implementations behind one
@@ -11,6 +11,7 @@ and :class:`~inqtrix.project.account_preferences_postgres.PostgresAccountPrefere
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -20,7 +21,7 @@ class AccountPreferences:
     """One user's account-level UI preferences.
 
     Attributes:
-        sub: The owning principal subject (the row key).
+        user_id: The owning principal's canonical UUID (the row key).
         contrast_mode: ``standard`` or ``high``.
         locale: ``de`` or ``en``.
         theme: ``light`` / ``dark`` / ``system``.
@@ -33,7 +34,7 @@ class AccountPreferences:
         tenant_id: The tenant scope (RLS).
     """
 
-    sub: str
+    user_id: uuid.UUID
     contrast_mode: str
     locale: str
     theme: str
@@ -48,14 +49,16 @@ class AccountPreferences:
 class AccountPreferencesStore(Protocol):
     """Persistence port for the per-user preferences singleton."""
 
-    async def get_preferences(self, *, sub: str) -> AccountPreferences | None:
+    async def get_preferences(
+        self, *, user_id: uuid.UUID
+    ) -> AccountPreferences | None:
         """The user's stored preferences, or ``None`` when never saved."""
         ...
 
     async def upsert_preferences(
         self,
         *,
-        sub: str,
+        user_id: uuid.UUID,
         contrast_mode: str,
         locale: str,
         theme: str,

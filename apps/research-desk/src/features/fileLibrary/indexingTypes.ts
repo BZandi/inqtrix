@@ -11,6 +11,7 @@
 export type IndexingJobStatus =
   | 'queued'
   | 'running'
+  | 'cancelling'
   | 'completed'
   | 'failed'
   | 'cancelled'
@@ -35,7 +36,8 @@ export type IndexingJobSummary = {
   error: { message: string; type: string } | null
   events_url: string
   finished_at: number | null
-  /** Client vector-index id echoed back so a job maps onto its index. */
+  /** Optional caller correlation only. Authorization and UI ownership are
+   * always derived from `collection_id`. */
   index_id: string | null
   job_id: string
   percent: number

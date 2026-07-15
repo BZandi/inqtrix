@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+import uuid
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import func, select, text
 
 from inqtrix.pagination import decode_cursor
+from inqtrix.project.scoped_upsert import ResourceScope
 from inqtrix.project.vector_index_postgres import PostgresVectorIndexStore
 from inqtrix.project.vector_index_ports import (
     VectorIndexHistoryEntry,
@@ -21,6 +23,10 @@ from inqtrix.storage.vector_index_orm import (
     vector_index_members,
     vector_index_records,
 )
+from tests.storage._canonical_users import (
+    canonical_user_id,
+    ensure_canonical_users,
+)
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
@@ -30,6 +36,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 APP_ROLE = "inqtrix_app"
+USER_ID = canonical_user_id("vector-index-user")
+USER_1_ID = canonical_user_id("vector-index-user-1")
+USER_2_ID = canonical_user_id("vector-index-user-2")
+OTHER_USER_ID = canonical_user_id("vector-index-other-user")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -55,18 +65,30 @@ async def store():
             await session.execute(vector_index_history.delete())
             await session.execute(vector_index_members.delete())
             await session.execute(vector_index_records.delete())
+            await ensure_canonical_users(
+                session,
+                (USER_ID, USER_1_ID, USER_2_ID, OTHER_USER_ID),
+            )
     vector_store = PostgresVectorIndexStore(engine=engine, app_role=APP_ROLE)
     yield vector_store
     await vector_store.aclose()
 
 
-async def _save(store, iid, *, owner="u", created_at=1.0, members=(), history=()):
+async def _save(
+    store,
+    iid,
+    *,
+    owner: uuid.UUID = USER_ID,
+    created_at=1.0,
+    members=(),
+    history=(),
+):
     return await store.upsert_index(
         id=iid, title="Idx", handle="idx", model="text-embedding-3-large",
         dims=3072, status="ready", server_collection_id=None,
         server_collection_model=None, last_error=None,
         members=members, history=history, created_at=created_at, updated_at=created_at,
-        created_by_sub=owner, workspace_id=None,
+        created_by_user_id=owner, workspace_id=None,
     )
 
 
@@ -83,7 +105,12 @@ async def test_list_returns_full_records_with_children(store) -> None:
         history=(VectorIndexHistoryEntry("ok", 2, 1500, None, 1.0, 2.5),
                  VectorIndexHistoryEntry("error", 0, 9, "boom", 0.0, 0.4)),
     )
-    page, _ = await store.list_indexes_page(created_by_sub="u", workspace_id=None, limit=50, after=None)
+    page, _ = await store.list_indexes_page(
+        created_by_user_id=USER_ID,
+        workspace_id=None,
+        limit=50,
+        after=None,
+    )
     record = page[0]
     assert [(m.file_id, m.state) for m in record.members] == [("fa_2", "embedded"), ("fa_1", "pending")]
     # The backend doc id persists (lets a post-reload "remove" delete the exact
@@ -97,11 +124,16 @@ async def test_list_returns_full_records_with_children(store) -> None:
 @pytest.mark.asyncio
 async def test_keyset_walk_and_owner_scope(store) -> None:
     for n, ts in enumerate([10.0, 10.0, 20.0, 30.0, 30.0]):
-        await _save(store, f"vix_{n}", owner="u1", created_at=ts)
-    await _save(store, "vix_other", owner="u2", created_at=5.0)
+        await _save(store, f"vix_{n}", owner=USER_1_ID, created_at=ts)
+    await _save(store, "vix_other", owner=USER_2_ID, created_at=5.0)
     seen, cursor = [], None
     for _ in range(10):
-        pg, nxt = await store.list_indexes_page(created_by_sub="u1", workspace_id=None, limit=2, after=cursor)
+        pg, nxt = await store.list_indexes_page(
+            created_by_user_id=USER_1_ID,
+            workspace_id=None,
+            limit=2,
+            after=cursor,
+        )
         seen.extend(r.id for r in pg)
         if nxt is None:
             break
@@ -113,7 +145,7 @@ async def test_keyset_walk_and_owner_scope(store) -> None:
 @pytest.mark.asyncio
 async def test_upsert_preserves_created_at_and_replaces_children(store) -> None:
     await _save(
-        store, "vix_1", owner="u1", created_at=100.0,
+        store, "vix_1", owner=USER_1_ID, created_at=100.0,
         members=(VectorIndexMember("fa_1", "embedded"), VectorIndexMember("fa_2", "embedded")),
         history=(VectorIndexHistoryEntry("ok", 2, 10, None, 1.0, 2.0),),
     )
@@ -124,24 +156,38 @@ async def test_upsert_preserves_created_at_and_replaces_children(store) -> None:
         members=(VectorIndexMember("fa_3", "pending"),),
         history=(VectorIndexHistoryEntry("cancelled", 1, 7, None, 3.0, 3.5),
                  VectorIndexHistoryEntry("ok", 2, 10, None, 1.0, 2.0)),
-        created_at=999.0, updated_at=200.0, created_by_sub="someone-else", workspace_id=None,
+        created_at=999.0, updated_at=200.0,
+        created_by_user_id=USER_1_ID, workspace_id=None,
     )
     record = await store.get_index("vix_1")
     assert record.title == "renamed"
     assert record.created_at == 100.0
-    assert record.created_by_sub == "u1"
+    assert record.created_by_user_id == USER_1_ID
     assert [m.file_id for m in record.members] == ["fa_3"]
     assert [h.result for h in record.history] == ["cancelled", "ok"]
 
 
 @pytest.mark.asyncio
+async def test_cross_owner_index_id_collision_is_not_found(store) -> None:
+    await _save(store, "vix_1", owner=USER_1_ID)
+
+    with pytest.raises(VectorIndexNotFound):
+        await _save(store, "vix_1", owner=OTHER_USER_ID)
+
+    assert (await store.get_index("vix_1")).created_by_user_id == USER_1_ID
+
+
+@pytest.mark.asyncio
 async def test_delete_cascades_children(store) -> None:
     await _save(
-        store, "vix_1", owner="u",
+        store, "vix_1", owner=USER_ID,
         members=(VectorIndexMember("fa_1", "embedded"),),
         history=(VectorIndexHistoryEntry("ok", 1, 10, None, 1.0, 2.0),),
     )
-    await store.delete_index("vix_1")
+    await store.delete_index(
+        "vix_1",
+        scope=ResourceScope.from_record(await store.get_index("vix_1")),
+    )
     async with store._session() as session:
         members = (await session.execute(
             select(func.count()).select_from(vector_index_members)

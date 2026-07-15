@@ -1,11 +1,12 @@
 # Testing Strategy
 
-This document explains the four-layer test pyramid that protects Inqtrix
-provider code, when each layer applies, and how to add a new test for a
-provider you are introducing or refactoring. It is the canonical
-reference for the **Aufgabe 3 — Mock-/Replay-Test-Suite** introduced in
-2026-04 and supersedes any in-line documentation that may exist in
-individual test modules.
+## Scope
+
+This document explains the test layers that protect Inqtrix provider code and
+cross-process product features, when each layer applies, and which release
+gates remain manual. It covers offline unit/replay tests, PostgreSQL integration
+tests, the editor collaboration matrix, and live qualification. It does not
+replace the command-focused [Running tests](running-tests.md) page.
 
 ## Table of contents
 
@@ -16,6 +17,7 @@ individual test modules.
 - [Markers and CI](#markers-and-ci)
 - [Recording new cassettes](#recording-new-cassettes)
 - [Cookbook: adding a test for provider X](#cookbook-adding-a-test-for-provider-x)
+- [Collaboration test matrix](#collaboration-test-matrix)
 - [Known limitations](#known-limitations)
 
 ## The four layers
@@ -269,6 +271,81 @@ the answer-side faithfulness judge that lands together with the
 sufficiency check (the judge model must be pinned — swapping it
 silently re-baselines every threshold).
 
+## Collaboration test matrix
+
+Editor collaboration crosses a shared schema package, two runtimes, a binary
+gateway, PostgreSQL, three browser-serving paths, and role-aware UI. No single
+mocked test proves the feature. Changes must select the layers whose public
+contract they can break:
+
+| Layer | Current location | Contract protected |
+|---|---|---|
+| Shared schema | `packages/editor-schema/tests/` | Markdown/Yjs round trips, schema fingerprint, package exports, nested suggestions, decision bypass, and final/original projections. |
+| Node coordinator | `apps/collaboration-server/tests/` | Config validation, internal API parsing, leases, state loading, serialized persistence, durable acknowledgements, suggestion policy, AI suggestion publication, decisions, and failure close codes. |
+| FastAPI service | `tests/test_editor_collaboration.py`, `tests/test_editor_patch_collaboration.py` | Activation/session contracts, cookie-only leases, error mapping, AI publication, expected-sequence decisions, idempotency, and legacy Markdown isolation. |
+| PostgreSQL | `tests/storage/test_editor_collaboration_postgres.py`, `tests/storage/test_editor_collaboration_migration.py` | RLS, sequence allocation, hash/command idempotency, instance fencing, snapshots, retention, tombstones, migration/backfill, and tenant isolation. |
+| Binary transport | `tests/test_collaboration_gateway.py` | Origin policy, binary-only relay, bidirectional frame limits, upstream failure, and close-code propagation. |
+| Deployment paths | `tests/test_collaboration_deployment.py`, `tests/test_run_research_desk.py`, `tests/test_helm_chart.py` | Private Node topology, Compose profile, nginx/launcher WebSocket forwarding, and one-replica disabled-by-default Helm rendering. |
+| Research Desk | `apps/research-desk/src/**/*.test.ts(x)` | Collaboration lifecycle, lease rotation, durable-ack state, no Markdown body autosave, role locking, review presentation, inspector filtering/navigation, and detached export/import rules. |
+
+Run the offline gates after every collaboration milestone:
+
+```bash
+uv run pytest tests/ -v
+corepack pnpm --filter @inqtrix/editor-schema typecheck
+corepack pnpm --filter @inqtrix/editor-schema test
+corepack pnpm --filter @inqtrix/collaboration-server typecheck
+corepack pnpm --filter @inqtrix/collaboration-server test
+corepack pnpm run ui:lint
+corepack pnpm run ui:typecheck
+corepack pnpm run ui:test
+corepack pnpm run ui:build
+corepack pnpm why yjs
+helm lint deploy/helm/inqtrix
+helm template inqtrix deploy/helm/inqtrix
+```
+
+`corepack pnpm why yjs` must resolve one Yjs copy. Browser, shared schema, and
+Node package versions must stay exact and coordinated; a duplicated Yjs or
+mixed Tiptap schema is a release blocker, not a warning.
+
+Set `INQTRIX_TEST_DATABASE_URL` to a disposable migrated PostgreSQL database to
+exercise the real store and RLS tests. The default offline run may skip those
+tests, so an all-green offline run alone does not prove sequence races, fencing,
+or tenant isolation.
+
+Production qualification additionally requires a real two-user browser test
+through each supported serving path (Vite, bundled nginx/Compose, and the dist
+launcher), at desktop and mobile widths. Exercise direct concurrent edits,
+carets, Suggest/Accept/Reject, reconnect, revoke/downgrade, schema mismatch,
+sidecar failure, a distinct public FastAPI/gateway failure, source read-only,
+private AI anchors, and detached export. The browser gate must assert document
+content, visible durability clearance, suggest-lease identity plus rejection of
+an unmarked direct Yjs update, same-socket protocol rejection after downgrade,
+hidden-document 404 after revoke, and full editor/Inspector bounds with a
+populated expanded Changes row, not only that controls are present. Run its
+local semantic and compile gates with `pnpm e2e:tooling:test` and
+`pnpm e2e:typecheck`; `pnpm e2e:release` additionally requires the external
+fixture, treats every required skip as a failure, and accepts no CLI arguments
+that could alter or bypass the fixed Playwright release matrix.
+
+A load qualification must use 1,000 connected sockets and 100 active writers,
+20 non-writer observers, at least 30 seconds of sustained writes, and at least
+10 acknowledged rounds per writer. Visible remote update p95 must stay below
+250 ms and durable acknowledgement p95 below 500 ms. Twenty validated FastAPI
+`/health` samples must span the full loaded interval and degrade by no more than
+20 percent. Qualification also requires abnormal `1006` loss for every live
+socket during the ungraceful restart, independently observed production
+instance/epoch advancement at `/collaboration/instance`, and exact marker
+reconstruction on a fresh observer cohort. Run the semantic harness checks with
+`pnpm load:collaboration:test`. Release qualification also requires fixture-v2
+authenticated reissue of 60-second leases for all connected sockets, live
+socket reauthentication, refresh-at scheduling, and newly issued post-restart
+observer sessions; a longer initial lease is not a substitute. The repository's
+unit/integration suites do not simulate production load by themselves. Record
+the external release command, environment, and measurements with the release
+evidence.
+
 ## Known limitations
 
 - **Bedrock-runtime mocking** uses `botocore.stub.Stubber` because
@@ -288,3 +365,10 @@ silently re-baselines every threshold).
   replay tests can still call
   `provider._client.with_options(max_retries=0)` when they need to pin
   endpoint-specific search-provider behavior.
+
+## Related docs
+
+- [Running tests](running-tests.md)
+- [Editor collaboration architecture](../architecture/editor-collaboration.md)
+- [Deploy editor collaboration](../deployment/editor-collaboration.md)
+- [Local infrastructure](local-infrastructure.md)

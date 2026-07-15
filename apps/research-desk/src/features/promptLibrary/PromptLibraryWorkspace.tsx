@@ -1,4 +1,4 @@
-import { useMemo, useState, type Dispatch, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type Dispatch, type ReactNode } from 'react'
 import { useReducedMotion } from 'motion/react'
 import {
   AlertTriangle,
@@ -57,9 +57,16 @@ import type {
   ProjectState,
 } from '@/features/project/types'
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
-import { TemplateConflictError, canDeleteRule, canEditRule } from './templateSync'
+import {
+  TemplateConflictError,
+  canDeleteRule,
+  canEditRule,
+  canSavePromptDraft,
+  hasPromptDraftConflict,
+} from './templateSync'
 import type { TemplateSyncHandle } from './useTemplateSync'
 import { SkillLibraryPanel } from '@/features/skills/SkillLibraryPanel'
+import type { SkillInfo } from '@/features/skills/skillLibrary'
 import type { SkillsApiHandle } from '@/features/skills/useSkillsApi'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
@@ -76,6 +83,7 @@ type CategoryFilter = ChatRuleCategory | 'all'
 type VisibilityFilter = 'all' | 'chat' | 'editor' | 'hidden'
 
 type PromptDraft = {
+  baseRevision: number | null
   category: ChatRuleCategory
   contentMarkdown: string
   error: string | null
@@ -84,6 +92,8 @@ type PromptDraft = {
   label: string
   linkedContextRefs: ChatContextReferenceRecord[]
   selectedRuleId: string | null
+  /** Immutable server destination of the draft loaded from a synced rule. */
+  sourceTemplateId: string | null
   title: string
   visibility: ChatRuleVisibility
 }
@@ -100,6 +110,7 @@ type ContextPickerOption = {
 const contextPickerLimit = 8
 
 const emptyDraft: PromptDraft = {
+  baseRevision: null,
   category: 'instruction',
   contentMarkdown: '',
   error: null,
@@ -108,12 +119,15 @@ const emptyDraft: PromptDraft = {
   label: '',
   linkedContextRefs: [],
   selectedRuleId: null,
+  sourceTemplateId: null,
   title: '',
   visibility: { chat: true, editor: true },
 }
 
 export function PromptLibraryWorkspace({
   dispatch,
+  onRequestedResourceHandled,
+  requestedResource = null,
   sharing = null,
   skillsApi = null,
   state,
@@ -121,7 +135,15 @@ export function PromptLibraryWorkspace({
   textImprovement,
 }: {
   dispatch: Dispatch<ResearchDeskAction>
-  sharing?: { onShareRule: (rule: ChatRuleRecord) => void } | null
+  onRequestedResourceHandled?: () => void
+  requestedResource?: {
+    resourceId: string
+    resourceType: 'prompt_template' | 'skill_template'
+  } | null
+  sharing?: {
+    onShareRule: (rule: ChatRuleRecord) => void
+    onShareSkill: (skill: SkillInfo) => void
+  } | null
   /** Skill library handle (plan M3); null hides the Skills tab
    * (feature off or server absent). */
   skillsApi?: SkillsApiHandle | null
@@ -156,8 +178,26 @@ export function PromptLibraryWorkspace({
     },
   })
   const selectedRule = draft.selectedRuleId
-    ? rules.find((rule) => rule.id === draft.selectedRuleId) ?? null
+    ? rules.find((rule) => rule.id === draft.selectedRuleId)
+      ?? (draft.sourceTemplateId
+        ? rules.find((rule) => rule.serverTemplateId === draft.sourceTemplateId)
+        : null)
+      ?? null
     : null
+  const sourceUnavailable = draft.sourceTemplateId !== null && selectedRule === null
+  const remoteConflict = draft.isDirty && hasPromptDraftConflict(
+    draft.sourceTemplateId,
+    selectedRule,
+    draft.baseRevision,
+  )
+  const permissionDowngraded = Boolean(
+    draft.isDirty && selectedRule && !canEditRule(selectedRule),
+  )
+  const canSaveDraft = canSavePromptDraft(
+    draft.sourceTemplateId,
+    selectedRule,
+    draft.baseRevision,
+  )
   const fileOptions = fileMentionOptions(state)
   const fileGroupOptions = fileGroupMentionOptions(state)
   const contextOptions = useMemo(
@@ -231,6 +271,43 @@ export function PromptLibraryWorkspace({
     loadRule(rule)
   }
 
+  // Keep an untouched open draft synchronized with an authoritative refresh.
+  // A dirty draft stays in place so optimistic concurrency can surface the
+  // conflict instead of silently discarding the user's text.
+  useEffect(() => {
+    if (!draft.selectedRuleId || draft.isDirty) return
+    if (!selectedRule) {
+      setDraft(draftFromRule(rules[0] ?? null))
+      return
+    }
+    setDraft(draftFromRule(selectedRule))
+  }, [
+    draft.isDirty,
+    draft.selectedRuleId,
+    rules,
+    selectedRule?.access?.permission,
+    selectedRule?.serverRevision,
+    selectedRule?.updatedAt,
+  ])
+
+  useEffect(() => {
+    if (!requestedResource || requestedResource.resourceType !== 'prompt_template') return
+    const rule = rules.find(
+      (candidate) => candidate.serverTemplateId === requestedResource.resourceId
+        || candidate.id === requestedResource.resourceId,
+    )
+    if (!rule) return
+    setLibraryTab('rules')
+    guardedLoad(rule)
+    onRequestedResourceHandled?.()
+  }, [requestedResource, rules])
+
+  useEffect(() => {
+    if (requestedResource?.resourceType === 'skill_template' && skillsApi) {
+      setLibraryTab('skills')
+    }
+  }, [requestedResource, skillsApi])
+
   function updateDraft(patch: Partial<PromptDraft>) {
     setDraft((current) => ({
       ...current,
@@ -265,7 +342,31 @@ export function PromptLibraryWorkspace({
     })
   }
 
+  function keepPromptAsCopy() {
+    setDraft((current) => ({
+      ...current,
+      baseRevision: null,
+      error: null,
+      isDirty: true,
+      label: normalizeRuleLabel(`${current.label.replace(/-copy$/, '')}-copy`),
+      selectedRuleId: createRuleId(),
+      sourceTemplateId: null,
+    }))
+  }
+
+  function discardUnavailableDraft() {
+    loadRule(selectedRule)
+  }
+
   async function savePrompt(): Promise<boolean> {
+    if (sourceUnavailable) {
+      updateDraft({
+        error: t.promptLibrary.sourceUnavailable,
+        isDirty: draft.isDirty,
+      })
+      return false
+    }
+    if (!canEditRule(selectedRule)) return false
     const label = normalizeRuleLabel(draft.label)
     const title = draft.title.trim() || label
     const contentMarkdown = draft.contentMarkdown.trim()
@@ -293,10 +394,14 @@ export function PromptLibraryWorkspace({
       linkedContextRefs: draft.category === 'context'
         ? normalizeLinkedContextRefs(draft.linkedContextRefs)
         : [],
-      serverTemplateId: selectedRule?.serverTemplateId,
-      // The exact server timestamp of the loaded version travels as the
-      // optimistic-concurrency precondition for this save.
-      serverUpdatedAt: selectedRule?.serverUpdatedAt,
+      // Retain the original server destination independently of the live
+      // list record. If that destination vanished, the guard above blocks
+      // the save instead of silently creating an owned template.
+      serverTemplateId: draft.sourceTemplateId ?? selectedRule?.serverTemplateId,
+      // The draft keeps the revision it was actually based on. A background
+      // resource refresh may update selectedRule while the user is editing;
+      // borrowing that newer revision here would silently bypass OCC.
+      serverRevision: draft.baseRevision ?? undefined,
       title,
       updatedAt: now,
       visibility: draft.visibility,
@@ -311,14 +416,13 @@ export function PromptLibraryWorkspace({
       try {
         rule = await templateSync.saveRule(rule)
       } catch (error) {
-        // A conflict re-hydrated the latest version into state; keep
-        // the user's draft and tell them to re-save against it. If the
-        // refresh fetch failed, the latest is NOT in hand — soften the
-        // message so it does not falsely claim a reload happened.
+        // A refreshed conflict updates the authoritative list but never
+        // lends its revision to this dirty draft. The conflict panel offers
+        // only the two safe outcomes: create a copy or discard the draft.
         updateDraft({
           error: error instanceof TemplateConflictError
             ? error.refreshed
-              ? t.promptLibrary.syncConflict
+              ? null
               : t.promptLibrary.syncConflictStale
             : `${t.promptLibrary.syncFailed}: ${messageFromUnknown(error)}`,
           isDirty: draft.isDirty,
@@ -410,7 +514,12 @@ export function PromptLibraryWorkspace({
         {tabBar}
         <SkillLibraryPanel
           api={skillsApi}
+          onShare={sharing?.onShareSkill}
+          onRequestedSkillHandled={onRequestedResourceHandled}
           reduceMotion={Boolean(reduceMotion)}
+          requestedSkillId={requestedResource?.resourceType === 'skill_template'
+            ? requestedResource.resourceId
+            : null}
           textImprovement={textImprovement}
         />
       </div>
@@ -553,12 +662,13 @@ export function PromptLibraryWorkspace({
                 </Button>
                 <div className="min-w-0">
                 <h2 className="t-section truncate text-foreground">
-                  {selectedRule ? selectedRule.title : t.promptLibrary.newPrompt}
+                  {selectedRule?.title
+                    ?? (sourceUnavailable ? draft.title : t.promptLibrary.newPrompt)}
                 </h2>
                 {draft.isDirty ? (
                   <p className="t-meta text-warning">{t.promptLibrary.unsaved}</p>
                 ) : null}
-                {selectedRule?.access ? (
+                {selectedRule?.access?.mode === 'shared' ? (
                   <p className="t-meta text-muted-foreground">
                     {selectedRule.access.permission === 'edit'
                       ? t.sharing.sharedCanEdit
@@ -568,7 +678,9 @@ export function PromptLibraryWorkspace({
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                {sharing && selectedRule?.serverTemplateId && !selectedRule.access ? (
+                {sharing
+                  && selectedRule?.serverTemplateId
+                  && selectedRule.access?.mode !== 'shared' ? (
                   <Button
                     className="gap-1.5"
                     onClick={() => sharing.onShareRule(selectedRule)}
@@ -593,7 +705,7 @@ export function PromptLibraryWorkspace({
                 </Button>
                 <Button
                   className="gap-1.5 bg-brand text-brand-foreground hover:bg-brand/90"
-                  disabled={!canEditRule(selectedRule) || isSaving}
+                  disabled={!canSaveDraft || isSaving}
                   onClick={() => void savePrompt()}
                   size="sm"
                   type="button"
@@ -605,6 +717,33 @@ export function PromptLibraryWorkspace({
             </div>
 
             <PromptUsageHint draft={draft} />
+
+            {(sourceUnavailable || remoteConflict || permissionDowngraded) ? (
+              <div className="rounded-md border border-warning/25 bg-warning-subtle px-3 py-2.5">
+                <p className="t-label text-warning">
+                  {sourceUnavailable
+                    ? t.promptLibrary.sourceUnavailableTitle
+                    : permissionDowngraded
+                      ? t.promptLibrary.permissionDowngraded
+                      : t.promptLibrary.remoteConflict}
+                </p>
+                <p className="mt-1 t-meta text-muted-foreground">
+                  {sourceUnavailable
+                    ? t.promptLibrary.sourceUnavailable
+                    : permissionDowngraded
+                      ? t.promptLibrary.permissionDowngradedHint
+                      : t.promptLibrary.syncConflict}
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <Button onClick={keepPromptAsCopy} size="sm" type="button" variant="outline">
+                    {t.promptLibrary.keepAsCopy}
+                  </Button>
+                  <Button onClick={discardUnavailableDraft} size="sm" type="button" variant="ghost">
+                    {t.promptLibrary.discardDraft}
+                  </Button>
+                </div>
+              </div>
+            ) : null}
 
             <div className="space-y-4">
               <div className="grid gap-3 sm:grid-cols-2">
@@ -748,6 +887,7 @@ export function PromptLibraryWorkspace({
       ) : null}
       {pendingNav ? (
         <UnsavedGuardModal
+          saveDisabled={!canSaveDraft}
           onCancel={() => setPendingNav(null)}
           onDiscard={() => {
             const run = pendingNav
@@ -1152,10 +1292,12 @@ function UnsavedGuardModal({
   onCancel,
   onDiscard,
   onSave,
+  saveDisabled,
 }: {
   onCancel: () => void
   onDiscard: () => void
   onSave: () => void
+  saveDisabled: boolean
 }) {
   const { t } = useLocale()
   return (
@@ -1193,6 +1335,7 @@ function UnsavedGuardModal({
           </Button>
           <Button
             className="gap-1.5 bg-brand text-brand-foreground hover:bg-brand/90"
+            disabled={saveDisabled}
             onClick={onSave}
             size="sm"
             type="button"
@@ -1210,6 +1353,7 @@ function draftFromRule(rule: ChatRuleRecord | null): PromptDraft {
   if (!rule) return emptyDraft
   const normalized = normalizeChatRule(rule)
   return {
+    baseRevision: normalized.serverRevision ?? null,
     category: normalized.category ?? 'instruction',
     contentMarkdown: normalized.contentMarkdown,
     error: null,
@@ -1218,6 +1362,7 @@ function draftFromRule(rule: ChatRuleRecord | null): PromptDraft {
     label: normalized.label,
     linkedContextRefs: normalized.linkedContextRefs ?? [],
     selectedRuleId: normalized.id,
+    sourceTemplateId: normalized.serverTemplateId ?? null,
     title: normalized.title,
     visibility: normalized.visibility ?? { chat: true, editor: true },
   }

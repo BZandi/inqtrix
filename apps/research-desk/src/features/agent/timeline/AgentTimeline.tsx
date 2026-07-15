@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { motion, useReducedMotion } from 'motion/react'
 import {
   AlertTriangle,
@@ -27,6 +27,7 @@ import type { CanvasViewDescriptor } from '@/features/canvas/types'
 import type { TranslationDictionary } from '@/i18n/translations'
 import { AgentActivityLine } from '../AgentPulseTrack'
 import {
+  canEditAgentRun,
   isActiveAgentRun,
   isGateAgentRun,
   type AgentArtifactRecord,
@@ -49,10 +50,7 @@ import {
   agentTaskResultPreview,
   effectiveAgentTaskStatus,
 } from '../plan/taskPresentation'
-import {
-  agentRunCompletionRecap,
-  answerClampDecision,
-} from '../runPresentation'
+import { agentRunCompletionRecap } from '../runPresentation'
 
 export type AgentTimelineActions = {
   answerClarification: (
@@ -288,16 +286,18 @@ export function AgentRunTurn({
             gate={isGateAgentRun(run.status)}
             text={activityText(run, t)}
           />
-          <Button
-            aria-label={t.agent.composer.stop}
-            className="size-5 shrink-0 text-muted-foreground hover:text-destructive"
-            onClick={() => actions.onCancelRun(run.runId)}
-            size="icon"
-            type="button"
-            variant="ghost"
-          >
-            <X className="icon-xs" />
-          </Button>
+          {canEditAgentRun(run) && (
+            <Button
+              aria-label={t.agent.composer.stop}
+              className="size-5 shrink-0 text-muted-foreground hover:text-destructive"
+              onClick={() => actions.onCancelRun(run.runId)}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              <X className="icon-xs" />
+            </Button>
+          )}
         </div>
       )}
     </motion.div>
@@ -405,41 +405,6 @@ function AgentAnswerBlock({
   const [copied, setCopied] = useState(false)
   const body = answer.contentMarkdown
   const writing = answer.status === 'writing'
-  // Settled long answers collapse to a preview: the full result lives
-  // one click away in the canvas, and the transcript stays scannable.
-  // Layout effect = measured and decided BEFORE paint (no height flash);
-  // scrollHeight reports the full content height even under max-h.
-  const bodyRef = useRef<HTMLDivElement>(null)
-  const [clamp, setClamp] = useState<'clamped' | 'full'>('full')
-  useLayoutEffect(() => {
-    setClamp(
-      answerClampDecision(bodyRef.current?.scrollHeight ?? null, writing),
-    )
-  }, [body, writing])
-  // Async content (mermaid, highlighted code, images) grows the body
-  // AFTER the pre-paint decision — re-evaluate on real size changes so a
-  // tall settled answer cannot dodge the clamp. Never loops: clamping
-  // fixes the observed height, and equal decisions bail before setState.
-  const bodyMounted = body !== undefined
-  useLayoutEffect(() => {
-    const element = bodyRef.current
-    if (!element || typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(() => {
-      setClamp((current) => {
-        const next = answerClampDecision(
-          element.scrollHeight ?? null,
-          writing,
-        )
-        return next === current ? current : next
-      })
-    })
-    observer.observe(element)
-    return () => observer.disconnect()
-    // bodyMounted: the observed div renders conditionally on the body —
-    // on the reload path it appears AFTER mount and the observer must
-    // attach then (the ref is null on the first pass).
-  }, [writing, bodyMounted])
-  const clamped = clamp === 'clamped'
   const copy = () => {
     if (body === undefined) return
     void navigator.clipboard.writeText(body).then(() => {
@@ -470,36 +435,25 @@ function AgentAnswerBlock({
         )}
       </div>
       {body !== undefined ? (
-        <div
-          className={cn('relative', clamped && 'max-h-72 overflow-hidden')}
-          ref={bodyRef}
+        <MarkdownSelectionCopyMenu
+          className="chat-markdown max-w-4xl text-sm leading-snug text-foreground"
+          markdown={body}
         >
-          <MarkdownSelectionCopyMenu
-            className="chat-markdown max-w-4xl text-sm leading-snug text-foreground"
+          <MarkdownRenderer
+            isStreaming={writing}
             markdown={body}
-          >
-            <MarkdownRenderer
-              isStreaming={writing}
-              markdown={body}
-              variant="chat"
-            />
-            {writing && (
-              <span
-                aria-hidden="true"
-                className={cn(
-                  'ml-1 inline-block size-2 rounded-full bg-brand align-middle',
-                  !reduceMotion && 'animate-pulse',
-                )}
-              />
-            )}
-          </MarkdownSelectionCopyMenu>
-          {clamped && (
-            <div
+            variant="chat"
+          />
+          {writing && (
+            <span
               aria-hidden="true"
-              className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-background"
+              className={cn(
+                'ml-1 inline-block size-2 rounded-full bg-brand align-middle',
+                !reduceMotion && 'animate-pulse',
+              )}
             />
           )}
-        </div>
+        </MarkdownSelectionCopyMenu>
       ) : (
         <span
           aria-hidden="true"
@@ -508,21 +462,6 @@ function AgentAnswerBlock({
             !reduceMotion && 'animate-pulse',
           )}
         />
-      )}
-      {clamped && (
-        <button
-          className="mt-1 flex items-center gap-1 t-hint font-medium text-muted-foreground transition-colors hover:text-foreground"
-          onClick={() =>
-            actions.onOpenCanvas({
-              artifactId: answer.artifactId,
-              runId: run.runId,
-              view: 'document',
-            })}
-          type="button"
-        >
-          <ExternalLink className="icon-xs" />
-          {t.agent.timeline.answerMoreInCanvas}
-        </button>
       )}
       {body !== undefined && !writing && (
         <div className="mt-1 flex items-center gap-1">

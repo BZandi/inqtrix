@@ -8,7 +8,7 @@ Two tables: ``quota_usage_counters`` holds one row per
 ``(tenant, subject, dimension, period_start)`` window (a new window =
 a new row, so old months stay as harmless history), and
 ``quota_limits`` holds the admin-set overrides plus the tenant default
-(the sentinel ``__quota_default__`` subject). Neither ``subject_sub``
+(the sentinel ``__quota_default__`` subject). Neither ``subject_user_id``
 is a foreign key into the users mirror — quota state outlives mirror
 rows, same rule as PATs and templates.
 """
@@ -26,6 +26,7 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.dialects.postgresql import UUID
 
 quota_metadata = MetaData()
 
@@ -35,36 +36,51 @@ quota_usage_counters = Table(
     Column(
         "tenant_id", Text, nullable=False, server_default=text("'default'")
     ),
-    Column("subject_sub", Text, nullable=False),
+    Column("subject_user_id", UUID(as_uuid=True), nullable=False),
     Column("dimension", Text, nullable=False),
     Column("period_start", Float, nullable=False),
     Column("used", BigInteger, nullable=False, server_default=text("0")),
     Column("updated_at", Float, nullable=False),
     PrimaryKeyConstraint(
         "tenant_id",
-        "subject_sub",
+        "subject_user_id",
         "dimension",
         "period_start",
         name="pk_quota_usage_counters",
     ),
-    Index("ix_quota_usage_subject", "tenant_id", "subject_sub"),
+    Index("ix_quota_usage_subject", "tenant_id", "subject_user_id"),
 )
 
 quota_limits = Table(
     "quota_limits",
     quota_metadata,
     Column(
+        "id",
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    ),
+    Column(
         "tenant_id", Text, nullable=False, server_default=text("'default'")
     ),
-    Column("subject_sub", Text, nullable=False),
+    Column("subject_user_id", UUID(as_uuid=True), nullable=True),
     Column("dimension", Text, nullable=False),
     Column("limit_value", BigInteger, nullable=False),
-    Column("set_by_sub", Text, nullable=False),
+    Column("set_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("set_at", Float, nullable=False),
-    PrimaryKeyConstraint(
+    Index(
+        "uq_quota_limits_user",
         "tenant_id",
-        "subject_sub",
+        "subject_user_id",
         "dimension",
-        name="pk_quota_limits",
+        unique=True,
+        postgresql_where=text("subject_user_id IS NOT NULL"),
+    ),
+    Index(
+        "uq_quota_limits_default",
+        "tenant_id",
+        "dimension",
+        unique=True,
+        postgresql_where=text("subject_user_id IS NULL"),
     ),
 )

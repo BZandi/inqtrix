@@ -20,7 +20,9 @@ path without network IO.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI, Request
@@ -34,7 +36,7 @@ from inqtrix.auth.principal import (
     Principal,
 )
 from inqtrix.auth.identity_memory import MemoryIdentityStore
-from inqtrix.auth.permissions import PermissionService
+from inqtrix.auth.permissions import AuthorizationService
 from inqtrix.exceptions import AgentCancelled
 from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
 from inqtrix.knowledge.stores.ports import KnowledgeProviderContext
@@ -77,6 +79,11 @@ from tests.test_knowledge_engine import StubEmbeddings
 SUB_HEADER = "X-Test-Sub"
 USER_A = "user-a"
 USER_B = "user-b"
+
+
+def _user_id(label: str) -> uuid.UUID:
+    """Map test labels to stable canonical user UUIDs."""
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"inqtrix-test:{label}")
 
 
 #: Real usage the stub reports per ``complete`` call (prompt + completion).
@@ -138,12 +145,26 @@ class OidcProvider(AuthProvider):
     def mode(self) -> AuthMode:
         return "oidc"
 
+    @property
+    def users(self):
+        class _Users:
+            async def find_by_user_id(self, *, tenant_id, user_id):
+                return SimpleNamespace(disabled_at=None)
+
+            async def has_user_id(self, *, tenant_id, user_id):
+                return True
+
+        return _Users()
+
     def resolve_principal(self, request: Request) -> Principal:
         sub = request.headers.get(SUB_HEADER, "")
         if not sub:
             return ANONYMOUS_PRINCIPAL
         return Principal(
-            sub=sub, kind="oidc_session", tenant_id="default", role="member"
+            user_id=_user_id(sub),
+            kind="oidc_session",
+            tenant_id="default",
+            role="member",
         )
 
     def build_principal_dependency(self):
@@ -184,8 +205,8 @@ def make_quota_client(
         ),
         semaphore_factory=lambda: asyncio.Semaphore(4),
         auth_provider=OidcProvider(),
-        permissions=PermissionService(
-            members=identity, groups=identity, shares=identity, audit=identity
+        permissions=AuthorizationService(
+            members=identity, shares=identity, audit=identity
         ),
         workspace_admin=identity,
         knowledge=KnowledgeProviderContext(
@@ -210,7 +231,9 @@ def make_quota_client(
 def used(container, sub: str, dimension: QuotaDimension) -> int:
     """Read one subject's booked usage for *dimension* (memory store)."""
     rows = asyncio.run(
-        container.quota_service.usage_for(QuotaSubject("default", sub))
+        container.quota_service.usage_for(
+            QuotaSubject("default", _user_id(sub))
+        )
     )
     return next(r.used for r in rows if r.dimension == dimension)
 
@@ -231,7 +254,10 @@ def test_guards_noop_without_service():
         # No raise / no effect:
         await quota_record(None, ANONYMOUS_PRINCIPAL, QuotaDimension.RUNS, 5)
         await quota_record_for_subject(
-            None, QuotaSubject("t", "s"), QuotaDimension.STORED_BYTES, 5
+            None,
+            QuotaSubject("t", _user_id("s")),
+            QuotaDimension.STORED_BYTES,
+            5,
         )
 
     asyncio.run(_run())
@@ -479,7 +505,7 @@ def test_editor_admission_blocks_over_quota(tmp_path):
         asyncio.run(
             container.quota_service.record(
                 Principal(
-                    sub=USER_A,
+                    user_id=_user_id(USER_A),
                     kind="oidc_session",
                     tenant_id="default",
                     role="member",
@@ -605,7 +631,7 @@ def _preload_over(container, sub: str, dimension: QuotaDimension, amount: int):
     asyncio.run(
         container.quota_service.record(
             Principal(
-                sub=sub,
+                user_id=_user_id(sub),
                 kind="oidc_session",
                 tenant_id="default",
                 role="member",
@@ -805,7 +831,10 @@ def test_month_rollover_readmits_blocked_subject():
         clock=lambda: clock["now"],
     )
     principal = Principal(
-        sub=USER_A, kind="oidc_session", tenant_id="default", role="member"
+        user_id=_user_id(USER_A),
+        kind="oidc_session",
+        tenant_id="default",
+        role="member",
     )
 
     async def scenario():
@@ -867,5 +896,3 @@ def test_self_usage_empty_for_unscoped(tmp_path):
         resp = client.get("/v1/quota/usage")
         assert resp.status_code == 200
         assert resp.json() == {"object": "list", "data": []}
-
-

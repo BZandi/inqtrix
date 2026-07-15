@@ -1,20 +1,28 @@
+import {
+  createEditorSchemaExtensions,
+  isRemoteYjsTransaction,
+  normalizeEditorMarkdown,
+  sanitizeSerializedEditorMarkdown,
+  serializeEditorJson,
+  SUGGESTION_MARK_NAMES,
+  transformToInqtrixSuggestionTransaction,
+  type SuggestionKind,
+  type SuggestionMetadata,
+} from '@inqtrix/editor-schema'
 import { Extension, getMarkRange, type Editor, type Extensions } from '@tiptap/core'
-import Highlight from '@tiptap/extension-highlight'
-import Link from '@tiptap/extension-link'
-import { BlockMath, InlineMath } from '@tiptap/extension-mathematics'
-import { Table, TableCell, TableHeader, TableRow } from '@tiptap/extension-table'
 import { Placeholder } from '@tiptap/extensions'
-import TaskItem from '@tiptap/extension-task-item'
-import TaskList from '@tiptap/extension-task-list'
-import TextAlign from '@tiptap/extension-text-align'
-import { Markdown } from '@tiptap/markdown'
-import StarterKit from '@tiptap/starter-kit'
-import { type Node as ProseMirrorNode } from '@tiptap/pm/model'
-import { type EditorState, Plugin, PluginKey, TextSelection } from '@tiptap/pm/state'
-import { Decoration, DecorationSet } from '@tiptap/pm/view'
+import { type Mark, type Node as ProseMirrorNode } from '@tiptap/pm/model'
+import { type EditorState, Plugin, PluginKey, TextSelection, type Transaction } from '@tiptap/pm/state'
+import { Decoration, DecorationSet, type DecorationAttrs, type EditorView } from '@tiptap/pm/view'
 import { ReactRenderer } from '@tiptap/react'
 import { EditorSuggestionBlockCard, type EditorSuggestionBlockCardProps } from './EditorSuggestionBlockCard'
 import { SlashCommandExtension, type SlashCommandConfig } from './slashCommand'
+
+export type CollaborationPresenceUser = {
+  color: string
+  id: string
+  name: string
+}
 
 type CommentDecorationOptions = {
   onClick?: (commentId: string) => void
@@ -33,6 +41,27 @@ type CommentDecorationOptions = {
   placeholderHeading?: string
   /** Localized config for the `/` slash command menu. Omit to disable the menu. */
   slash?: SlashCommandConfig
+}
+
+export type CollaborationReviewDisplay = 'all' | 'final' | 'original' | 'simple'
+
+export type CollaborationReviewOverlayUpdate = {
+  collaboration?: boolean
+  display: CollaborationReviewDisplay
+  documentId?: string | null
+  enabled: boolean
+  selectedSuggestionIds?: readonly string[]
+  visibleSuggestionIds?: readonly string[]
+  writeAuthorId?: string | null
+  writeMode?: 'edit' | 'suggest' | 'view'
+}
+
+type CollaborationReviewExtensionOptions = {
+  initialPolicy?: CollaborationReviewOverlayUpdate
+}
+
+type CollaborationReviewExtensionStorage = {
+  grouping: CollaborationSuggestionGroupingCoordinator
 }
 
 export type CommentDecorationItem = {
@@ -138,6 +167,7 @@ export type SuggestionDecorationItem = {
   isRunning: boolean
   proposedLabel: string
   proposedText: string
+  providerActionsDisabled: boolean
   refineLabel: string
   refinementPlaceholder: string
   rejectLabel: string
@@ -210,6 +240,7 @@ function buildBlockSuggestionWidget(
     onRefine: callbacks.onRefine,
     onReject: callbacks.onReject,
     onSelect: callbacks.onSelect,
+    providerActionsDisabled: item.providerActionsDisabled,
     proposedText: item.proposedText,
     reviewSurface: item.reviewSurface,
     revision: item.revision,
@@ -254,7 +285,7 @@ function buildSuggestionDecorations(
       }
       decorations.push(Decoration.widget(item.widgetAt ?? to, () => buildBlockSuggestionWidget(editor, item, callbacks), {
         destroy: destroySuggestionWidget,
-        key: `suggestion-block-${item.id}-${item.revision}-${item.proposedText.length}-${item.isRunning ? 'running' : 'idle'}-${item.error ?? ''}`,
+        key: `suggestion-block-${item.id}-${item.revision}-${item.proposedText.length}-${item.isRunning ? 'running' : 'idle'}-${item.providerActionsDisabled ? 'restricted' : 'enabled'}-${item.error ?? ''}`,
         side: 1,
         stopEvent: (event) => event.type !== 'click',
       }))
@@ -334,6 +365,547 @@ export const SuggestionDecorationExtension = Extension.create<CommentDecorationO
     ]
   },
 })
+
+type CollaborationReviewMarkKind = 'deletion' | 'insertion' | 'modification'
+
+export type CollaborationReviewMarkPresentation = {
+  className: string
+  display: CollaborationReviewDisplay
+  style: string
+}
+
+type CollaborationReviewOverlayState = {
+  collaboration: boolean
+  decorations: DecorationSet
+  display: CollaborationReviewDisplay
+  documentId: string | null
+  enabled: boolean
+  selectedSuggestionIds: ReadonlySet<string>
+  visibleSuggestionIds: ReadonlySet<string> | null
+  writeAuthorId: string | null
+  writeMode: 'edit' | 'suggest' | 'view'
+}
+
+const DEFAULT_COLLABORATION_REVIEW_STATE: CollaborationReviewOverlayState = {
+  collaboration: false,
+  decorations: DecorationSet.empty,
+  display: 'final',
+  documentId: null,
+  enabled: false,
+  selectedSuggestionIds: new Set(),
+  visibleSuggestionIds: null,
+  writeAuthorId: null,
+  writeMode: 'edit',
+}
+
+export const collaborationReviewPluginKey = new PluginKey<CollaborationReviewOverlayState>(
+  'inqtrixCollaborationReview',
+)
+
+export const collaborationSuggestionErrorEvent = 'inqtrix:collaboration-suggestion-error'
+export const collaborationSuggestionCollisionEvent = 'inqtrix:collaboration-suggestion-collision'
+
+export type CollaborationSuggestionCollision = {
+  patchId: string
+  suggestionId: string
+}
+
+export const COLLABORATION_SUGGESTION_GROUP_IDLE_MS = 5_000
+
+type SuggestionGroupingContext = {
+  authorId: string | null
+  documentId: string | null
+  writeMode: 'edit' | 'suggest' | 'view'
+}
+
+type SuggestionGroupingCoordinatorOptions = {
+  createPatchId?: () => string
+  now?: () => number
+}
+
+/** The sole owner of local suggest-mode patch identity. Natural caret movement
+ * caused by typing stays grouped; explicit selection transactions and remote
+ * boundaries reset it before the next edit. */
+export class CollaborationSuggestionGroupingCoordinator {
+  private readonly createPatchId: () => string
+  private readonly now: () => number
+  private context: SuggestionGroupingContext = {
+    authorId: null,
+    documentId: null,
+    writeMode: 'view',
+  }
+  private group: (SuggestionMetadata & { lastActivityAt: number }) | null = null
+
+  constructor(options: SuggestionGroupingCoordinatorOptions = {}) {
+    this.createPatchId = options.createPatchId ?? (() => crypto.randomUUID())
+    this.now = options.now ?? (() => Date.now())
+  }
+
+  observeContext(context: SuggestionGroupingContext): void {
+    if (
+      context.authorId !== this.context.authorId
+      || context.documentId !== this.context.documentId
+      || context.writeMode !== this.context.writeMode
+    ) {
+      this.reset()
+    }
+    this.context = context
+  }
+
+  metadata(): SuggestionMetadata {
+    const { authorId, documentId, writeMode } = this.context
+    if (!authorId || !documentId || writeMode !== 'suggest') {
+      throw new Error('Suggestion grouping requires an active document and author.')
+    }
+    const now = this.now()
+    if (!this.group || now - this.group.lastActivityAt >= COLLABORATION_SUGGESTION_GROUP_IDLE_MS) {
+      this.group = {
+        authorId,
+        createdAt: now,
+        lastActivityAt: now,
+        patchId: this.createPatchId(),
+      }
+    } else {
+      this.group.lastActivityAt = now
+    }
+    return {
+      authorId: this.group.authorId,
+      createdAt: this.group.createdAt,
+      patchId: this.group.patchId,
+    }
+  }
+
+  reset(): void {
+    this.group = null
+  }
+}
+
+/**
+ * Return the complete visual contract for one tracked-change mark. Filtered
+ * marks deliberately use the clean final projection so a filter never exposes
+ * unrelated review overlays.
+ */
+export function collaborationReviewMarkPresentation(
+  kind: CollaborationReviewMarkKind,
+  display: CollaborationReviewDisplay,
+  active: boolean,
+  visible = true,
+): CollaborationReviewMarkPresentation {
+  const effectiveDisplay = visible ? display : 'final'
+  const activeStyle = active
+    ? 'box-shadow: 0 0 0 2px color-mix(in oklab, var(--brand) 45%, transparent);'
+    : ''
+  const common = `border-radius: 0.2rem; -webkit-box-decoration-break: clone; box-decoration-break: clone; ${activeStyle}`
+  let style: string
+  if (kind === 'insertion') {
+    if (effectiveDisplay === 'original') {
+      style = 'display: none;'
+    } else if (effectiveDisplay === 'all') {
+      style = `${common} background: color-mix(in oklab, var(--success-subtle) 78%, transparent); color: var(--success); text-decoration: none;`
+    } else if (effectiveDisplay === 'simple') {
+      style = `${common} background: color-mix(in oklab, var(--success-subtle) 52%, transparent); color: inherit; text-decoration: none;`
+    } else {
+      style = `${common} background: transparent; color: inherit; text-decoration: none;`
+    }
+  } else if (kind === 'deletion') {
+    if (effectiveDisplay === 'all' || (effectiveDisplay === 'simple' && active)) {
+      style = `${common} background: color-mix(in oklab, var(--destructive-subtle) 70%, transparent); color: var(--destructive); text-decoration: line-through;`
+    } else if (effectiveDisplay === 'original') {
+      style = `${common} background: transparent; color: inherit; text-decoration: none;`
+    } else {
+      style = 'display: none;'
+    }
+  } else if (effectiveDisplay === 'all' || effectiveDisplay === 'simple') {
+    style = `${common} background: color-mix(in oklab, var(--warning-subtle) 58%, transparent); color: inherit; text-decoration: none;`
+  } else {
+    style = `${common} background: transparent; color: inherit; text-decoration: none;`
+  }
+  return {
+    className: [
+      'inqtrix-review-overlay',
+      `inqtrix-review-overlay-${kind}`,
+      ...(active ? ['inqtrix-review-overlay-active'] : []),
+    ].join(' '),
+    display: effectiveDisplay,
+    style,
+  }
+}
+
+function collaborationReviewDecorations(
+  doc: ProseMirrorNode,
+  state: CollaborationReviewOverlayState,
+): DecorationSet {
+  if (!state.enabled) return DecorationSet.empty
+  const decorations: Decoration[] = []
+  doc.descendants((node, position) => {
+    if (!node.isText || node.nodeSize === 0) return true
+    for (const mark of node.marks) {
+      if (!SUGGESTION_MARK_NAMES.has(mark.type.name as SuggestionKind)) continue
+      const suggestionId = mark.attrs.suggestionId
+      if (typeof suggestionId !== 'string' || !suggestionId) continue
+      const kind = mark.type.name as CollaborationReviewMarkKind
+      const active = state.selectedSuggestionIds.has(suggestionId)
+      const visible = state.visibleSuggestionIds?.has(suggestionId) ?? true
+      const presentation = collaborationReviewMarkPresentation(
+        kind,
+        state.display,
+        active,
+        visible,
+      )
+      decorations.push(Decoration.inline(position, position + node.nodeSize, {
+        class: presentation.className,
+        'data-review-active': active ? 'true' : 'false',
+        'data-review-display': presentation.display,
+        'data-review-overlay': 'change',
+        'data-review-suggestion-id': suggestionId,
+        style: presentation.style,
+      }))
+    }
+    return true
+  })
+  return DecorationSet.create(doc, decorations)
+}
+
+function withCollaborationReviewDecorations(
+  doc: ProseMirrorNode,
+  state: CollaborationReviewOverlayState,
+): CollaborationReviewOverlayState {
+  return {
+    ...state,
+    decorations: collaborationReviewDecorations(doc, state),
+  }
+}
+
+function enforceCaretOnlyPresence(root: HTMLElement): void {
+  for (const caret of root.querySelectorAll<HTMLElement>('.collaboration-carets__caret')) {
+    if (caret.dataset.collaborationCaret === 'text') continue
+    const label = caret.querySelector<HTMLElement>('.collaboration-carets__label')
+    const color = caret.style.borderColor || label?.style.backgroundColor || 'var(--brand)'
+    caret.dataset.collaborationCaret = 'text'
+    caret.classList.add('inqtrix-collaboration-caret')
+    caret.style.setProperty('border-left', `2px solid ${color}`)
+    caret.style.setProperty('border-right', '0')
+    caret.style.setProperty('height', '1.2em')
+    caret.style.setProperty('margin-left', '-1px')
+    caret.style.setProperty('margin-right', '-1px')
+    caret.style.setProperty('pointer-events', 'none')
+    caret.style.setProperty('position', 'relative')
+    if (label) {
+      label.classList.add(
+        'inqtrix-collaboration-caret-label',
+        't-meta-sm',
+        'whitespace-nowrap',
+      )
+      label.style.setProperty('background-color', color)
+      label.style.setProperty('color', collaborationCaretLabelColor(color))
+      label.style.setProperty('left', '-1px')
+      label.style.setProperty('padding', '0.125rem 0.25rem')
+      label.style.setProperty('position', 'absolute')
+      label.style.setProperty('top', '-1.55rem')
+      label.style.setProperty('user-select', 'none')
+    }
+  }
+  for (const selection of root.querySelectorAll<HTMLElement>('.collaboration-carets__selection')) {
+    if (
+      selection.dataset.collaborationSelection === 'transparent'
+      && selection.style.getPropertyValue('background-color') === 'transparent'
+    ) continue
+    selection.dataset.collaborationSelection = 'transparent'
+    selection.classList.add('inqtrix-collaboration-selection')
+    selection.style.setProperty('background-color', 'transparent', 'important')
+    selection.style.setProperty('box-shadow', 'none', 'important')
+  }
+}
+
+function emitSuggestionTransformError(view: EditorView, error: unknown): void {
+  const detail = error instanceof Error
+    ? error.message
+    : 'This edit cannot be represented as a suggestion.'
+  view.dom.dispatchEvent(new CustomEvent<string>(collaborationSuggestionErrorEvent, { detail }))
+}
+
+function emitSuggestionTransformSuccess(view: EditorView): void {
+  view.dom.dispatchEvent(new CustomEvent<null>(collaborationSuggestionErrorEvent, { detail: null }))
+  view.dom.dispatchEvent(new CustomEvent<null>(collaborationSuggestionCollisionEvent, { detail: null }))
+}
+
+function emitSuggestionCollision(
+  view: EditorView,
+  collision: CollaborationSuggestionCollision,
+): void {
+  view.dom.dispatchEvent(new CustomEvent<CollaborationSuggestionCollision>(
+    collaborationSuggestionCollisionEvent,
+    { detail: collision },
+  ))
+}
+
+function clearSuggestionCollision(view: EditorView): void {
+  view.dom.dispatchEvent(new CustomEvent<null>(collaborationSuggestionCollisionEvent, { detail: null }))
+}
+
+/** Find an existing suggestion by another author in every pre-step range the
+ * transaction will mutate. Insertions inspect active boundary marks as well as
+ * replaced ranges, so the detector runs before the Yjs dispatch. */
+export function detectForeignSuggestionCollision(
+  transaction: Transaction,
+  authorId: string,
+): CollaborationSuggestionCollision | null {
+  for (let index = 0; index < transaction.steps.length; index += 1) {
+    const document = transaction.docs[index]
+    const step = transaction.steps[index]
+    if (!document || !step) continue
+    let collision: CollaborationSuggestionCollision | null = null
+    step.getMap().forEach((oldStart, oldEnd) => {
+      if (collision) return
+      collision = foreignSuggestionInRange(document, oldStart, oldEnd, authorId)
+    })
+    if (collision) return collision
+  }
+  return null
+}
+
+function foreignSuggestionInRange(
+  document: ProseMirrorNode,
+  from: number,
+  to: number,
+  authorId: string,
+): CollaborationSuggestionCollision | null {
+  const marks: Mark[] = []
+  const maxPosition = document.content.size
+  const safeFrom = Math.max(0, Math.min(from, maxPosition))
+  const safeTo = Math.max(safeFrom, Math.min(to, maxPosition))
+  if (safeFrom < safeTo) {
+    document.nodesBetween(safeFrom, safeTo, (node) => {
+      marks.push(...node.marks)
+      return true
+    })
+  } else {
+    const position = document.resolve(safeFrom)
+    marks.push(...position.marks())
+    for (let depth = 0; depth <= position.depth; depth += 1) {
+      marks.push(...position.node(depth).marks)
+    }
+  }
+  for (const mark of marks) {
+    if (!SUGGESTION_MARK_NAMES.has(mark.type.name as SuggestionKind)) continue
+    const markAuthorId = mark.attrs.authorId
+    const patchId = mark.attrs.patchId
+    const suggestionId = mark.attrs.suggestionId
+    if (
+      typeof markAuthorId === 'string'
+      && markAuthorId !== authorId
+      && typeof patchId === 'string'
+      && patchId
+      && typeof suggestionId === 'string'
+      && suggestionId
+    ) {
+      return { patchId, suggestionId }
+    }
+  }
+  return null
+}
+
+function collaborationDispatchTransaction(
+  view: EditorView,
+  baseDispatch: (transaction: Transaction) => void,
+  transaction: Transaction,
+  grouping: CollaborationSuggestionGroupingCoordinator,
+): void {
+  const state = collaborationReviewPluginKey.getState(view.state)
+    ?? DEFAULT_COLLABORATION_REVIEW_STATE
+  grouping.observeContext({
+    authorId: state.writeAuthorId,
+    documentId: state.documentId,
+    writeMode: state.writeMode,
+  })
+  if (!state.collaboration) {
+    baseDispatch(transaction)
+    return
+  }
+  if (isRemoteYjsTransaction(transaction)) {
+    grouping.reset()
+    baseDispatch(transaction)
+    return
+  }
+  if (!transaction.docChanged) {
+    if (transaction.selectionSet) grouping.reset()
+    baseDispatch(transaction)
+    return
+  }
+  if (state.writeMode === 'view') return
+  if (!state.writeAuthorId) {
+    clearSuggestionCollision(view)
+    emitSuggestionTransformError(view, new Error('Suggestion mode requires a verified collaborator.'))
+    return
+  }
+  const collision = detectForeignSuggestionCollision(transaction, state.writeAuthorId)
+  if (collision) {
+    grouping.reset()
+    emitSuggestionCollision(view, collision)
+    emitSuggestionTransformError(
+      view,
+      new Error('This edit overlaps a change from another collaborator. Review that change before editing it.'),
+    )
+    return
+  }
+  clearSuggestionCollision(view)
+  if (state.writeMode === 'edit') {
+    grouping.reset()
+    baseDispatch(transaction)
+    emitSuggestionTransformSuccess(view)
+    return
+  }
+  try {
+    const transformed = transformToInqtrixSuggestionTransaction(
+      transaction,
+      view.state,
+      grouping.metadata(),
+    )
+    baseDispatch(transformed)
+    emitSuggestionTransformSuccess(view)
+  } catch (error) {
+    grouping.reset()
+    emitSuggestionTransformError(view, error)
+  }
+}
+
+function collaborationReviewStateFromUpdate(
+  value: CollaborationReviewOverlayState,
+  update: CollaborationReviewOverlayUpdate,
+): CollaborationReviewOverlayState {
+  return {
+    collaboration: update.collaboration ?? value.collaboration,
+    decorations: value.decorations,
+    display: update.display,
+    documentId: update.documentId === undefined ? value.documentId : update.documentId,
+    enabled: update.enabled,
+    selectedSuggestionIds: new Set(update.selectedSuggestionIds ?? []),
+    visibleSuggestionIds: update.visibleSuggestionIds === undefined
+      ? null
+      : new Set(update.visibleSuggestionIds),
+    writeAuthorId: update.writeAuthorId === undefined
+      ? value.writeAuthorId
+      : update.writeAuthorId,
+    writeMode: update.writeMode ?? value.writeMode,
+  }
+}
+
+export const CollaborationReviewExtension = Extension.create<
+  CollaborationReviewExtensionOptions,
+  CollaborationReviewExtensionStorage
+>({
+  name: 'collaborationReview',
+
+  addOptions() {
+    return { initialPolicy: undefined }
+  },
+
+  addStorage() {
+    return { grouping: new CollaborationSuggestionGroupingCoordinator() }
+  },
+
+  dispatchTransaction({ transaction, next }) {
+    collaborationDispatchTransaction(this.editor.view, next, transaction, this.storage.grouping)
+  },
+
+  addProseMirrorPlugins() {
+    const initialState = this.options.initialPolicy
+      ? collaborationReviewStateFromUpdate(
+          DEFAULT_COLLABORATION_REVIEW_STATE,
+          this.options.initialPolicy,
+        )
+      : DEFAULT_COLLABORATION_REVIEW_STATE
+    return [
+      new Plugin<CollaborationReviewOverlayState>({
+        key: collaborationReviewPluginKey,
+        state: {
+          init: (_config, state) => withCollaborationReviewDecorations(state.doc, initialState),
+          apply(transaction, value) {
+            const update = transaction.getMeta(collaborationReviewPluginKey) as (
+              CollaborationReviewOverlayUpdate | undefined
+            )
+            if (!update && !transaction.docChanged) return value
+            const nextState = update
+              ? collaborationReviewStateFromUpdate(value, update)
+              : value
+            return withCollaborationReviewDecorations(transaction.doc, nextState)
+          },
+        },
+        props: {
+          decorations(state) {
+            return collaborationReviewPluginKey.getState(state)?.decorations
+              ?? DecorationSet.empty
+          },
+        },
+        view(view) {
+          enforceCaretOnlyPresence(view.dom)
+          const presenceObserver = new MutationObserver(() => {
+            enforceCaretOnlyPresence(view.dom)
+          })
+          presenceObserver.observe(view.dom, {
+            attributeFilter: ['style'],
+            attributes: true,
+            childList: true,
+            subtree: true,
+          })
+          return {
+            destroy() {
+              presenceObserver.disconnect()
+            },
+            update(nextView) {
+              enforceCaretOnlyPresence(nextView.dom)
+            },
+          }
+        },
+      }),
+    ]
+  },
+})
+
+export function caretOnlySelectionRender(user: Record<string, unknown>): DecorationAttrs {
+  void user
+  return {
+    nodeName: 'span',
+    class: 'inqtrix-collaboration-selection',
+    style: 'background-color: transparent; box-shadow: none;',
+    'data-collaboration-selection': 'transparent',
+  }
+}
+
+export function renderCollaborationCaret(user: Record<string, unknown>): HTMLElement {
+  const name = typeof user.name === 'string' && user.name.trim()
+    ? user.name.trim().slice(0, 80)
+    : 'Collaborator'
+  const color = typeof user.color === 'string' && /^#[0-9a-f]{6}$/i.test(user.color)
+    ? user.color
+    : 'var(--brand)'
+  const caret = document.createElement('span')
+  caret.className = 'inqtrix-collaboration-caret pointer-events-none relative inline-block align-text-bottom'
+  caret.setAttribute('aria-hidden', 'true')
+  caret.style.cssText = `border-left: 2px solid ${color}; height: 1.2em; margin-left: -1px; margin-right: -1px;`
+
+  const label = document.createElement('span')
+  label.className = 'inqtrix-collaboration-caret-label t-meta-sm absolute bottom-full left-0 z-20 whitespace-nowrap rounded-sm px-1 py-0.5 shadow-sm'
+  label.style.backgroundColor = color
+  label.style.color = collaborationCaretLabelColor(color)
+  label.textContent = name
+  caret.append(label)
+  return caret
+}
+
+export function collaborationCaretLabelColor(color: string): '#111827' | '#ffffff' {
+  if (!/^#[0-9a-f]{6}$/i.test(color)) return '#ffffff'
+  const red = Number.parseInt(color.slice(1, 3), 16)
+  const green = Number.parseInt(color.slice(3, 5), 16)
+  const blue = Number.parseInt(color.slice(5, 7), 16)
+  const luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255
+  return luminance > 0.58 ? '#111827' : '#ffffff'
+}
+
+export const collaborationCaretOptions = {
+  render: renderCollaborationCaret,
+  selectionRender: caretOnlySelectionRender,
+}
 
 // ----- Syntax marker reveal (Obsidian Live Preview style) -----
 // Tiptap's document has no literal markdown markers (bold is a mark, not `**`).
@@ -640,37 +1212,14 @@ export const SyntaxMarkerRevealExtension = Extension.create<SyntaxMarkerRevealOp
   },
 })
 
-export function createEditorExtensions(options: CommentDecorationOptions = {}): Extensions {
+export function createEditorExtensions(
+  options: CommentDecorationOptions & {
+    collaborationReview?: CollaborationReviewOverlayUpdate
+  } = {},
+): Extensions {
   return [
-    StarterKit.configure({
-      link: false,
-    }),
-    Markdown.configure({
-      markedOptions: {
-        gfm: true,
-      },
-    }),
-    BlockMath.configure({
-      katexOptions: {
-        displayMode: true,
-        throwOnError: false,
-      },
-    }),
-    InlineMath.configure({
-      katexOptions: {
-        displayMode: false,
-        throwOnError: false,
-      },
-    }),
-    Link.configure(safeLinkOptions()),
-    Highlight.configure({ multicolor: false }),
-    TaskList,
-    TaskItem.configure({ nested: true }),
-    Table.configure({ resizable: true }),
-    TableRow,
-    TableHeader,
-    TableCell,
-    TextAlign.configure({ types: ['heading', 'paragraph'] }),
+    ...createEditorSchemaExtensions({ resizableTables: true }),
+    CollaborationReviewExtension.configure({ initialPolicy: options.collaborationReview }),
     Placeholder.configure({
       showOnlyCurrent: true,
       placeholder: ({ node }) =>
@@ -683,35 +1232,6 @@ export function createEditorExtensions(options: CommentDecorationOptions = {}): 
   ]
 }
 
-function safeLinkOptions() {
-  return {
-    HTMLAttributes: {
-      rel: 'noopener noreferrer nofollow',
-      target: '_blank',
-    },
-    autolink: true,
-    defaultProtocol: 'https',
-    isAllowedUri: (url: string, context: { defaultValidate: (url: string) => boolean }) => {
-      return isSafeEditorUrl(url) && context.defaultValidate(url)
-    },
-    linkOnPaste: true,
-    openOnClick: false,
-    protocols: ['http', 'https', 'mailto'],
-    shouldAutoLink: isSafeEditorUrl,
-  }
-}
-
-function isSafeEditorUrl(value: string) {
-  const trimmed = value.trim()
-  if (!trimmed) return false
-  try {
-    const url = new URL(trimmed.includes(':') ? trimmed : `https://${trimmed}`)
-    return url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'mailto:'
-  } catch {
-    return false
-  }
-}
-
 /**
  * Unit Separator (U+001F) that `@tiptap/markdown` emits inside populated table
  * cells while serializing (e.g. `| Hello |`). It is invisible, is never
@@ -719,26 +1239,22 @@ function isSafeEditorUrl(value: string) {
  * round-trip through it collapses the table. Stripped on every serialize and
  * defensively on load so legacy documents saved before this fix self-heal.
  */
-const TIPTAP_TABLE_CELL_ARTIFACT = String.fromCharCode(0x1f)
-
 /**
  * Serialize the editor document to markdown for persistence, removing the
- * `@tiptap/markdown` table-cell artifact (`TIPTAP_TABLE_CELL_ARTIFACT`). This is
+ * `@tiptap/markdown` table-cell artifact. This is
  * the single save-path entry point: the live/source sync comparison must use it
  * too, otherwise a populated table always looks "changed" (raw `getMarkdown()`
  * still carries the separator) and triggers a needless reparse.
  */
 export function serializeEditorMarkdown(editor: Editor): string {
-  return editor.getMarkdown().split(TIPTAP_TABLE_CELL_ARTIFACT).join('')
+  return sanitizeSerializedEditorMarkdown(editor.getMarkdown())
+}
+
+/** Serialize the canonical accepted view of a marked collaboration document. */
+export function serializeEditorFinalProjectionMarkdown(editor: Editor): string {
+  return serializeEditorJson(editor.getJSON(), 'final')
 }
 
 export function normalizeEditorMarkdownForTiptap(markdown: string) {
-  return markdown
-    .split(TIPTAP_TABLE_CELL_ARTIFACT).join('')
-    .replace(/\\\[([\s\S]*?)\\\]/g, (_match, expression: string) => (
-      `\n\n$$\n${expression.trim()}\n$$\n\n`
-    ))
-    .replace(/\\\(([\s\S]*?)\\\)/g, (_match, expression: string) => (
-      `$${expression.trim()}$`
-    ))
+  return normalizeEditorMarkdown(markdown)
 }

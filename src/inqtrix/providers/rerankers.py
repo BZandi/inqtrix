@@ -14,11 +14,16 @@ import json
 import logging
 import re
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Any, Iterator
 
 from inqtrix.constants import REASONING_TIMEOUT
+from inqtrix.exceptions import AgentCancelled
 from inqtrix.providers.base import (
     MAX_PROVIDER_ATTEMPTS,
+    ProviderRetryCallback,
+    _RetryNoticeMixin,
     _check_provider_operation_deadline,
     _operation_deadline,
     _retry_delay_seconds,
@@ -89,7 +94,7 @@ class RerankerProvider(ABC):
         """
 
 
-class CohereRerank(RerankerProvider):
+class CohereRerank(_RetryNoticeMixin, RerankerProvider):
     """Cohere rerank API adapter (native endpoint or Azure AI Foundry).
 
     Speaks the Cohere ``/v2/rerank`` request schema with a Bearer key —
@@ -158,6 +163,7 @@ class CohereRerank(RerankerProvider):
 
         import httpx
 
+        self._clear_retry_notices()
         active_model = (model or "").strip() or self._default_model
         request_body = {
             "model": active_model,
@@ -184,6 +190,18 @@ class CohereRerank(RerankerProvider):
                     if attempt >= MAX_PROVIDER_ATTEMPTS:
                         raise
                     delay = _retry_delay_seconds(attempt - 1)
+                    self._append_retry_notice({
+                        "provider": "CohereRerank",
+                        "model": active_model,
+                        "operation": "rerank",
+                        "error_code": type(exc).__name__,
+                        "attempt": attempt,
+                        "max_attempts": MAX_PROVIDER_ATTEMPTS,
+                        "delay_seconds": round(delay, 3),
+                        "configured_timeout_seconds": round(
+                            float(self._timeout), 3
+                        ),
+                    })
                     log.warning(
                         "Rerank transport error (model=%s, attempt=%d/%d). "
                         "Retrying in %.1fs: %s",
@@ -209,6 +227,19 @@ class CohereRerank(RerankerProvider):
                         attempt - 1,
                         retry_after_seconds,
                     )
+                    self._append_retry_notice({
+                        "provider": "CohereRerank",
+                        "model": active_model,
+                        "operation": "rerank",
+                        "error_code": f"HTTP {response.status_code}",
+                        "status_code": response.status_code,
+                        "attempt": attempt,
+                        "max_attempts": MAX_PROVIDER_ATTEMPTS,
+                        "delay_seconds": round(delay, 3),
+                        "configured_timeout_seconds": round(
+                            float(self._timeout), 3
+                        ),
+                    })
                     log.warning(
                         "Rerank transient response (model=%s, status=%d, "
                         "attempt=%d/%d). Retrying in %.1fs.",
@@ -223,6 +254,11 @@ class CohereRerank(RerankerProvider):
                 response.raise_for_status()
                 payload = response.json()
                 break
+        except AgentCancelled:
+            # Run cancellation (a probe bound via provider_cancel_scope)
+            # must unwind as-is, never be misclassified as a broken
+            # rerank endpoint.
+            raise
         except Exception as exc:  # noqa: BLE001 — normalized below, visibly
             log.warning(
                 "Rerank-Aufruf fehlgeschlagen (model=%s, candidates=%d): %s",
@@ -293,6 +329,35 @@ class LLMReranker(RerankerProvider):
     @property
     def default_model(self) -> str:
         return self._default_model
+
+    @contextmanager
+    def observe_retries(
+        self, callback: ProviderRetryCallback
+    ) -> Iterator[object]:
+        """Forward retry observation to the wrapped LLM when available.
+
+        The listwise reranker performs no retries itself — the single
+        completion call retries inside the injected LLM provider, so this
+        adapter only exposes that provider's seam (mirrors
+        ``ConfiguredLLMProvider``). Both reranker types thereby offer the
+        same observation surface to the retrieval pipeline.
+        """
+        observer = getattr(self._llm, "observe_retries", None)
+        if callable(observer):
+            with observer(callback):
+                yield self
+        else:
+            yield self
+
+    def consume_retry_notices(self) -> list[dict[str, Any]]:
+        """Forward retry diagnostics from the wrapped LLM when available."""
+        consumer = getattr(self._llm, "consume_retry_notices", None)
+        if not callable(consumer):
+            return []
+        notices = consumer()
+        if not isinstance(notices, list):
+            return []
+        return [dict(item) for item in notices if isinstance(item, dict)]
 
     def rerank(
         self,

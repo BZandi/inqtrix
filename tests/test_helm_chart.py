@@ -11,6 +11,7 @@ chart logic is only verifiable against the real templating engine.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,6 +20,7 @@ import pytest
 import yaml
 
 _CHART = Path(__file__).resolve().parent.parent / "deploy" / "helm" / "inqtrix"
+_ROOT = _CHART.parents[2]
 
 pytestmark = pytest.mark.skipif(
     shutil.which("helm") is None, reason="helm binary not available"
@@ -46,6 +48,19 @@ def _by_kind(docs: list[dict], kind: str) -> list[dict]:
     return [d for d in docs if d.get("kind") == kind]
 
 
+def _node_collaboration_env_names() -> set[str]:
+    """Return environment names consumed by the Node settings parser."""
+    source = (
+        _ROOT / "apps" / "collaboration-server" / "src" / "config.ts"
+    ).read_text(encoding="utf-8")
+    return set(
+        re.findall(
+            r"INQTRIX_(?:API_INTERNAL_URL|COLLABORATION_[A-Z0-9_]+)",
+            source,
+        )
+    )
+
+
 # A database source is mandatory for the default (postgres) storage backend, so
 # every positive-path render supplies one.
 _EXTERNAL = "secret.existingSecret=app-secret"
@@ -65,6 +80,172 @@ def test_memory_backend_needs_no_database():
     assert _by_kind(_docs(rendered), "Deployment")
 
 
+def test_collaboration_is_absent_by_default() -> None:
+    """The default release keeps every legacy resource and config path off."""
+    docs = _docs(_template(_EXTERNAL))
+    names = {d.get("metadata", {}).get("name", "") for d in docs}
+    assert not any(name.endswith("-collaboration") for name in names)
+
+    config = _by_kind(docs, "ConfigMap")[0]["data"]
+    assert "INQTRIX_COLLABORATION_ENABLED" not in config
+    assert "INQTRIX_COLLABORATION_HTTP_URL" not in config
+    assert "INQTRIX_COLLABORATION_WS_URL" not in config
+
+    api = next(
+        d
+        for d in _by_kind(docs, "Deployment")
+        if d["metadata"]["name"].endswith("-api")
+    )
+    api_env = api["spec"]["template"]["spec"]["containers"][0].get(
+        "env", []
+    )
+    assert api["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
+    assert not any(
+        item["name"] == "INQTRIX_COLLABORATION_SECRET" for item in api_env
+    )
+
+
+def test_collaboration_renders_one_private_recreate_replica() -> None:
+    """Enabled collaboration is private, secret-scoped, and never scalable."""
+    docs = _docs(
+        _template(
+            _EXTERNAL,
+            "collaboration.enabled=true",
+            "collaboration.replicaCount=4",
+            "collaboration.secret.existingSecret=collaboration-secret",
+            "config.INQTRIX_COLLABORATION_SNAPSHOT_IDLE_SECONDS=7",
+            "config.INQTRIX_COLLABORATION_UPDATE_RATE_WINDOW_SECONDS=9",
+            "config.INQTRIX_COLLABORATION_MAX_FRAME_BYTES=3145728",
+            "config.INQTRIX_COLLABORATION_MAX_QUEUED_BYTES=524288",
+            "config.INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES=11",
+            "config.INQTRIX_COLLABORATION_MAINTENANCE_INTERVAL_SECONDS=17",
+            "config.INQTRIX_COLLABORATION_RECONCILE_MAX_HASHES=77",
+            "config.INQTRIX_COLLABORATION_RECONCILE_RATE_COUNT=19",
+            "config.INQTRIX_COLLABORATION_RECONCILE_RATE_WINDOW_SECONDS=23",
+            "config.INQTRIX_COLLABORATION_SNAPSHOT_RETRY_BASE_MS=300",
+            "config.INQTRIX_COLLABORATION_SNAPSHOT_RETRY_MAX_MS=9000",
+            "config.INQTRIX_COLLABORATION_SOCKET_BACKPRESSURE_BYTES=262144",
+            "config.INQTRIX_COLLABORATION_TENANT_ID=tenant-primary",
+        )
+    )
+    deployment = next(
+        d
+        for d in _by_kind(docs, "Deployment")
+        if d["metadata"]["name"].endswith("-collaboration")
+    )
+    service = next(
+        d
+        for d in _by_kind(docs, "Service")
+        if d["metadata"]["name"].endswith("-collaboration")
+    )
+
+    assert deployment["spec"]["replicas"] == 1
+    assert deployment["spec"]["strategy"] == {"type": "Recreate"}
+    assert service["spec"]["type"] == "ClusterIP"
+    assert service["spec"]["ports"] == [
+        {
+            "name": "http",
+            "port": 1234,
+            "targetPort": "http",
+            "protocol": "TCP",
+        }
+    ]
+
+    pod = deployment["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+    assert container["image"] == "inqtrix-collaboration:0.2.0"
+    assert "volumes" not in pod
+    assert "volumeMounts" not in container
+    assert "envFrom" not in container
+    assert container["securityContext"]["runAsNonRoot"] is True
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True
+
+    env = {item["name"]: item for item in container["env"]}
+    assert env["INQTRIX_API_INTERNAL_URL"]["value"] == (
+        "http://rel-inqtrix-api:5100"
+    )
+    assert env["INQTRIX_COLLABORATION_SECRET"]["valueFrom"][
+        "secretKeyRef"
+    ] == {
+        "name": "collaboration-secret",
+        "key": "INQTRIX_COLLABORATION_SECRET",
+    }
+    assert env["INQTRIX_COLLABORATION_SNAPSHOT_IDLE_SECONDS"]["value"] == "7"
+    assert env["INQTRIX_COLLABORATION_UPDATE_RATE_WINDOW_SECONDS"]["value"] == (
+        "9"
+    )
+    assert env["INQTRIX_COLLABORATION_MAX_FRAME_BYTES"]["value"] == (
+        "3145728"
+    )
+    assert env["INQTRIX_COLLABORATION_TENANT_ID"]["value"] == "tenant-primary"
+    assert env["INQTRIX_COLLABORATION_MAINTENANCE_INTERVAL_SECONDS"][
+        "value"
+    ] == "17"
+    assert env["INQTRIX_COLLABORATION_RECONCILE_MAX_HASHES"]["value"] == "77"
+    assert env["INQTRIX_COLLABORATION_RECONCILE_RATE_COUNT"]["value"] == "19"
+    assert env["INQTRIX_COLLABORATION_RECONCILE_RATE_WINDOW_SECONDS"][
+        "value"
+    ] == "23"
+    assert env["INQTRIX_COLLABORATION_MAX_QUEUED_BYTES"]["value"] == "524288"
+    assert env["INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES"]["value"] == "11"
+    assert env["INQTRIX_COLLABORATION_SNAPSHOT_RETRY_BASE_MS"]["value"] == "300"
+    assert env["INQTRIX_COLLABORATION_SNAPSHOT_RETRY_MAX_MS"]["value"] == "9000"
+    assert env["INQTRIX_COLLABORATION_SOCKET_BACKPRESSURE_BYTES"]["value"] == "262144"
+    assert set(env) == _node_collaboration_env_names()
+    assert not any("DATABASE" in name for name in env)
+
+    config = _by_kind(docs, "ConfigMap")[0]["data"]
+    assert config["INQTRIX_COLLABORATION_ENABLED"] == "true"
+    assert config["INQTRIX_COLLABORATION_HTTP_URL"] == (
+        "http://rel-inqtrix-collaboration:1234"
+    )
+    assert config["INQTRIX_COLLABORATION_WS_URL"] == (
+        "ws://rel-inqtrix-collaboration:1234/collaboration"
+    )
+
+    forbidden_kinds = {"HorizontalPodAutoscaler", "PodDisruptionBudget"}
+    assert not any(
+        d.get("kind") in forbidden_kinds
+        and d.get("metadata", {}).get("name", "").endswith("-collaboration")
+        for d in docs
+    )
+    assert not any(
+        d.get("kind") == "PersistentVolumeClaim"
+        and d.get("metadata", {}).get("name", "").endswith("-collaboration")
+        for d in docs
+    )
+
+    api = next(
+        d
+        for d in _by_kind(docs, "Deployment")
+        if d["metadata"]["name"].endswith("-api")
+    )
+    api_env = {
+        item["name"]: item
+        for item in api["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert api_env["INQTRIX_COLLABORATION_SECRET"]["valueFrom"][
+        "secretKeyRef"
+    ]["name"] == "collaboration-secret"
+
+
+@pytest.mark.parametrize(
+    "secret, message",
+    [
+        (None, "requires secret.data.INQTRIX_COLLABORATION_SECRET"),
+        ("too-short", "must contain at least 32 characters"),
+    ],
+)
+def test_collaboration_managed_secret_fails_loudly(
+    secret: str | None, message: str
+) -> None:
+    args = ["postgres.enabled=true", "collaboration.enabled=true"]
+    if secret is not None:
+        args.append(f"secret.data.INQTRIX_COLLABORATION_SECRET={secret}")
+    with pytest.raises(RuntimeError, match=message):
+        _template(*args)
+
+
 def test_vanilla_sets_nonroot_uid_and_no_route():
     rendered = _template(_EXTERNAL)
     docs = _docs(rendered)
@@ -73,6 +254,56 @@ def test_vanilla_sets_nonroot_uid_and_no_route():
     pod_sc = api["spec"]["template"]["spec"]["securityContext"]
     assert pod_sc["runAsUser"] == 1001
     assert pod_sc["fsGroup"] == 1001
+
+
+def test_tls_ingress_wires_the_public_origin_through_nginx() -> None:
+    """TLS termination produces one trusted HTTPS origin at web and API."""
+    docs = _docs(
+        _template(
+            _EXTERNAL,
+            "ingress.enabled=true",
+            "ingress.host=desk.example",
+            "ingress.tls.enabled=true",
+            "ingress.tls.secretName=desk-tls",
+        )
+    )
+    ingress = _by_kind(docs, "Ingress")[0]
+    assert ingress["spec"]["tls"] == [
+        {"hosts": ["desk.example"], "secretName": "desk-tls"}
+    ]
+    ingress_path = ingress["spec"]["rules"][0]["http"]["paths"][0]
+    assert ingress_path["path"] == "/"
+    assert ingress_path["pathType"] == "Prefix"
+    assert ingress_path["backend"]["service"]["name"] == "rel-inqtrix-web"
+
+    config = _by_kind(docs, "ConfigMap")[0]["data"]
+    assert config["INQTRIX_PUBLIC_BASE_URL"] == "https://desk.example"
+
+    web = next(
+        document
+        for document in _by_kind(docs, "Deployment")
+        if document["metadata"]["name"].endswith("-web")
+    )
+    env = {
+        item["name"]: item["value"]
+        for item in web["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert env["INQTRIX_EXTERNAL_SCHEME"] == "https"
+
+
+def test_explicit_public_origin_overrides_ingress_derivation() -> None:
+    """Operators retain the documented explicit public URL precedence."""
+    docs = _docs(
+        _template(
+            _EXTERNAL,
+            "ingress.enabled=true",
+            "ingress.host=internal.example",
+            "ingress.tls.enabled=true",
+            "config.INQTRIX_PUBLIC_BASE_URL=https://public.example",
+        )
+    )
+    config = _by_kind(docs, "ConfigMap")[0]["data"]
+    assert config["INQTRIX_PUBLIC_BASE_URL"] == "https://public.example"
 
 
 def test_openshift_omits_uid_and_renders_route_not_ingress():
@@ -88,6 +319,48 @@ def test_openshift_omits_uid_and_renders_route_not_ingress():
         sc = dep["spec"]["template"]["spec"].get("securityContext", {})
         assert "runAsUser" not in sc, "OpenShift SCC assigns the UID; chart must not pin it"
         assert "fsGroup" not in sc
+
+
+def test_openshift_auto_host_collaboration_requires_public_origin() -> None:
+    """A post-render Route hostname cannot silently break TLS WebSockets."""
+    with pytest.raises(
+        RuntimeError,
+        match="automatically assigned OpenShift Route host requires",
+    ):
+        _template(
+            _EXTERNAL,
+            "openshift.enabled=true",
+            "collaboration.enabled=true",
+            "collaboration.secret.existingSecret=collaboration-secret",
+        )
+
+
+def test_openshift_auto_host_collaboration_accepts_explicit_public_origin() -> None:
+    """The final platform-assigned hostname may be supplied as a trust anchor."""
+    docs = _docs(
+        _template(
+            _EXTERNAL,
+            "openshift.enabled=true",
+            "collaboration.enabled=true",
+            "collaboration.secret.existingSecret=collaboration-secret",
+            "config.INQTRIX_PUBLIC_BASE_URL=https://desk.apps.example",
+        )
+    )
+
+    route = _by_kind(docs, "Route")[0]
+    assert "host" not in route["spec"]
+    config = _by_kind(docs, "ConfigMap")[0]["data"]
+    assert config["INQTRIX_PUBLIC_BASE_URL"] == "https://desk.apps.example"
+    web = next(
+        document
+        for document in _by_kind(docs, "Deployment")
+        if document["metadata"]["name"].endswith("-web")
+    )
+    env = {
+        item["name"]: item["value"]
+        for item in web["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert env["INQTRIX_EXTERNAL_SCHEME"] == "https"
 
 
 def test_bundled_services_autowire_connections():
@@ -240,6 +513,297 @@ def test_migrate_hook_phase_tracks_database_origin():
     assert migrate_bun["metadata"]["annotations"]["helm.sh/hook"] == "post-install,pre-upgrade"
 
 
+def test_migration_secret_is_scoped_to_job_and_owner_upgrade_is_confirmed():
+    rendered = _template(
+        _EXTERNAL,
+        "migrations.databaseSecret.name=migration-database",
+        "migrations.databaseSecret.key=direct-url",
+        "migrations.rlsMode=bypass",
+    )
+    docs = _docs(rendered)
+    migrate = next(
+        document
+        for document in _by_kind(docs, "Job")
+        if document["metadata"]["name"].endswith("-migrate")
+    )
+    pod_spec = migrate["spec"]["template"]["spec"]
+    assert pod_spec["serviceAccountName"] == "rel-inqtrix-migrate"
+    assert pod_spec["automountServiceAccountToken"] is False
+    env = {
+        item["name"]: item
+        for item in pod_spec["containers"][0]["env"]
+    }
+    assert env["INQTRIX_MIGRATION_DATABASE_URL"]["valueFrom"]["secretKeyRef"] == {
+        "name": "migration-database",
+        "key": "direct-url",
+    }
+    assert env["INQTRIX_MIGRATION_RLS_MODE"]["value"] == "bypass"
+    assert "INQTRIX_DATABASE_URL" not in env
+
+    for deployment in _by_kind(docs, "Deployment"):
+        container = deployment["spec"]["template"]["spec"]["containers"][0]
+        assert "migration-database" not in str(container.get("envFrom", []))
+        component = deployment["metadata"]["name"].removeprefix("rel-inqtrix-")
+        env = {item["name"]: item for item in container.get("env", [])}
+        if component in {"api", "worker"}:
+            assert env["INQTRIX_MIGRATION_DATABASE_URL"] == {
+                "name": "INQTRIX_MIGRATION_DATABASE_URL",
+                "value": "",
+            }
+        else:
+            assert "INQTRIX_MIGRATION_DATABASE_URL" not in env
+
+    with pytest.raises(RuntimeError, match="must differ from the runtime"):
+        _template(
+            _EXTERNAL,
+            "migrations.databaseSecret.name=app-secret",
+            "migrations.rlsMode=bypass",
+        )
+    with pytest.raises(RuntimeError, match="forbidden in the runtime"):
+        _template(
+            _EXTERNAL,
+            "secret.data.INQTRIX_MIGRATION_DATABASE_URL=privileged",
+        )
+
+    with pytest.raises(RuntimeError, match="ownerMaintenanceConfirmed"):
+        _template(
+            _EXTERNAL,
+            "migrations.rlsMode=owner",
+            extra=["--is-upgrade"],
+        )
+    confirmed = _template(
+        _EXTERNAL,
+        "migrations.rlsMode=owner",
+        "migrations.ownerMaintenanceConfirmed=true",
+        extra=["--is-upgrade"],
+    )
+    confirmed_docs = _docs(confirmed)
+    assert "INQTRIX_MIGRATION_SERVICES_QUIESCED" in confirmed
+    maintenance = next(
+        document
+        for document in _by_kind(confirmed_docs, "Job")
+        if document["metadata"]["name"].endswith("-owner-maintenance")
+    )
+    assert maintenance["metadata"]["annotations"]["helm.sh/hook-weight"] == "-20"
+    assert maintenance["spec"]["template"]["spec"]["serviceAccountName"] == (
+        "rel-inqtrix-owner-maintenance"
+    )
+    assert maintenance["spec"]["template"]["spec"][
+        "automountServiceAccountToken"
+    ] is True
+    command = maintenance["spec"]["template"]["spec"]["containers"][0][
+        "command"
+    ]
+    assert command == [
+        "python",
+        "-m",
+        "inqtrix.deployment.kubernetes_maintenance",
+    ]
+    role = next(
+        document
+        for document in _by_kind(confirmed_docs, "Role")
+        if document["metadata"]["name"].endswith("-owner-maintenance")
+    )
+    assert {rule["resources"][0] for rule in role["rules"]} == {
+        "deployments/scale",
+        "horizontalpodautoscalers",
+        "pods",
+        "rolebindings",
+    }
+    self_revoke = next(
+        rule for rule in role["rules"] if rule["resources"] == ["rolebindings"]
+    )
+    assert self_revoke["verbs"] == ["delete"]
+    maintenance_env = {
+        item["name"]: item["value"]
+        for item in maintenance["spec"]["template"]["spec"]["containers"][0]["env"]
+        if "value" in item
+    }
+    assert maintenance_env["INQTRIX_K8S_MAINTENANCE_ROLE_BINDING"] == (
+        "rel-inqtrix-owner-maintenance"
+    )
+
+
+def test_owner_upgrade_reactivates_api_hpa_only_after_migration() -> None:
+    owner = _docs(_template(
+        _EXTERNAL,
+        "api.autoscaling.enabled=true",
+        "api.autoscaling.minReplicas=2",
+        "config.INQTRIX_OBJECT_STORE_BACKEND=s3",
+        "config.INQTRIX_S3_AUTH_MODE=default",
+        "config.INQTRIX_S3_BUCKET=managed-bucket",
+        "migrations.rlsMode=owner",
+        "migrations.ownerMaintenanceConfirmed=true",
+        extra=["--is-upgrade"],
+    ))
+    owner_api = next(
+        document for document in _by_kind(owner, "Deployment")
+        if document["metadata"]["name"].endswith("-api")
+    )
+    assert owner_api["spec"]["replicas"] == 2
+
+    bypass = _docs(_template(
+        _EXTERNAL,
+        "api.autoscaling.enabled=true",
+        "config.INQTRIX_OBJECT_STORE_BACKEND=s3",
+        "config.INQTRIX_S3_AUTH_MODE=default",
+        "config.INQTRIX_S3_BUCKET=managed-bucket",
+        "migrations.rlsMode=bypass",
+        extra=["--is-upgrade"],
+    ))
+    bypass_api = next(
+        document for document in _by_kind(bypass, "Deployment")
+        if document["metadata"]["name"].endswith("-api")
+    )
+    assert "replicas" not in bypass_api["spec"]
+
+
+def test_byo_service_account_creates_none_and_requires_explicit_name() -> None:
+    with pytest.raises(RuntimeError, match="requires an explicit"):
+        _template(_EXTERNAL, "serviceAccount.create=false")
+
+    rendered = _template(
+        _EXTERNAL,
+        "serviceAccount.create=false",
+        "serviceAccount.name=inqtrix-runtime",
+        "worker.enabled=true",
+        "collaboration.enabled=true",
+        "config.INQTRIX_OBJECT_STORE_BACKEND=s3",
+        "config.INQTRIX_S3_AUTH_MODE=default",
+        "config.INQTRIX_S3_BUCKET=managed-bucket",
+    )
+    docs = _docs(rendered)
+    assert _by_kind(docs, "ServiceAccount") == []
+    for document in docs:
+        if document.get("kind") not in {"Deployment", "Job", "Pod"}:
+            continue
+        pod_spec = (
+            document["spec"]["template"]["spec"]
+            if document["kind"] in {"Deployment", "Job"}
+            else document["spec"]
+        )
+        assert pod_spec["serviceAccountName"] == "inqtrix-runtime"
+
+    with pytest.raises(RuntimeError, match="annotations requires"):
+        _template(
+            _EXTERNAL,
+            extra=[
+                "--set-string",
+                r"serviceAccount.api.annotations.eks\.amazonaws\.com/role-arn=ignored",
+            ],
+        )
+
+
+def test_chart_version_tracks_chart_contract_changes() -> None:
+    chart = yaml.safe_load((_CHART / "Chart.yaml").read_text(encoding="utf-8"))
+    assert chart["version"] == "0.1.6"
+
+
+def test_workload_identity_and_ca_are_scoped_to_api_and_worker():
+    rendered = _template(
+        _EXTERNAL,
+        "worker.enabled=true",
+        "config.INQTRIX_OBJECT_STORE_BACKEND=s3",
+        "config.INQTRIX_S3_AUTH_MODE=default",
+        "config.INQTRIX_S3_BUCKET=managed-bucket",
+        "serviceAccount.api.create=true",
+        "serviceAccount.api.automountServiceAccountToken=true",
+        "serviceAccount.worker.create=true",
+        "serviceAccount.worker.automountServiceAccountToken=true",
+        "s3.caBundle.existingConfigMap=managed-s3-ca",
+        extra=[
+            "--set-string",
+            r"serviceAccount.api.annotations.eks\.amazonaws\.com/role-arn=api-role",
+            "--set-string",
+            r"serviceAccount.worker.annotations.eks\.amazonaws\.com/role-arn=worker-role",
+        ],
+    )
+    docs = _docs(rendered)
+    accounts = {
+        account["metadata"]["name"]: account
+        for account in _by_kind(docs, "ServiceAccount")
+    }
+    assert accounts["rel-inqtrix-api"]["metadata"]["annotations"] == {
+        "eks.amazonaws.com/role-arn": "api-role"
+    }
+    assert accounts["rel-inqtrix-worker"]["metadata"]["annotations"] == {
+        "eks.amazonaws.com/role-arn": "worker-role"
+    }
+
+    deployments = {
+        deployment["metadata"]["name"].removeprefix("rel-inqtrix-"): deployment
+        for deployment in _by_kind(docs, "Deployment")
+    }
+    for component in ("api", "worker"):
+        pod_spec = deployments[component]["spec"]["template"]["spec"]
+        assert pod_spec["serviceAccountName"] == f"rel-inqtrix-{component}"
+        assert pod_spec["automountServiceAccountToken"] is True
+        mounts = pod_spec["containers"][0]["volumeMounts"]
+        assert any(mount["name"] == "object-store-ca" for mount in mounts)
+        ca_volume = next(
+            volume for volume in pod_spec["volumes"]
+            if volume["name"] == "object-store-ca"
+        )
+        assert ca_volume["configMap"]["name"] == "managed-s3-ca"
+
+    web_spec = deployments["web"]["spec"]["template"]["spec"]
+    assert web_spec["serviceAccountName"] == "rel-inqtrix-web"
+    assert web_spec["automountServiceAccountToken"] is False
+    assert "object-store-ca" not in str(web_spec)
+    migrate = next(
+        document for document in _by_kind(docs, "Job")
+        if document["metadata"]["name"].endswith("-migrate")
+    )
+    assert "object-store-ca" not in str(migrate)
+    assert "rel-inqtrix-api" not in str(migrate["spec"]["template"]["spec"])
+    assert migrate["spec"]["template"]["spec"]["serviceAccountName"] == (
+        "rel-inqtrix-migrate"
+    )
+
+    config = _by_kind(docs, "ConfigMap")[0]["data"]
+    assert config["INQTRIX_S3_CA_BUNDLE"] == "/etc/inqtrix/object-store/ca.crt"
+
+
+def test_helm_smoke_uses_readiness_and_requires_configured_s3():
+    rendered = _template(
+        _EXTERNAL,
+        "config.INQTRIX_OBJECT_STORE_BACKEND=s3",
+        "config.INQTRIX_S3_AUTH_MODE=default",
+        "config.INQTRIX_S3_BUCKET=managed-bucket",
+    )
+    test_pod = next(
+        document
+        for document in _by_kind(_docs(rendered), "Pod")
+        if document["metadata"]["name"].endswith("-test-health")
+    )
+    script = test_pod["spec"]["containers"][0]["command"][-1]
+    assert "/readyz" in script
+    assert 'get("object_store") != "ok"' in script
+    assert test_pod["spec"]["automountServiceAccountToken"] is False
+    assert test_pod["spec"]["serviceAccountName"] == "rel-inqtrix-test"
+
+
+def test_database_runtime_login_policy_tracks_database_origin() -> None:
+    external = _by_kind(_docs(_template(_EXTERNAL)), "ConfigMap")[0]["data"]
+    bundled = _by_kind(
+        _docs(_template("postgres.enabled=true")), "ConfigMap"
+    )[0]["data"]
+
+    assert external["INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY"] == "restricted"
+    assert bundled["INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY"] == "bundled_legacy"
+
+    explicit = _by_kind(
+        _docs(
+            _template(
+                _EXTERNAL,
+                "config.INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY=bundled_legacy",
+            )
+        ),
+        "ConfigMap",
+    )[0]["data"]
+    assert explicit["INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY"] == "bundled_legacy"
+
+
 def test_secret_change_triggers_pod_rollout():
     """The api/worker pod template must carry a secret checksum so a changed
     secret value rolls the pods (envFrom alone would keep stale env)."""
@@ -265,6 +829,9 @@ def test_bundled_minio_renders_and_autowires_s3():
     assert config["INQTRIX_OBJECT_STORE_BACKEND"] == "s3"
     assert config["INQTRIX_S3_ENDPOINT_URL"] == "http://rel-inqtrix-minio:9000"
     assert config["INQTRIX_S3_BUCKET"] == "inqtrix-files"
+    assert config["INQTRIX_S3_AUTH_MODE"] == "static"
+    assert config["INQTRIX_S3_ADDRESSING_STYLE"] == "path"
+    assert config["INQTRIX_S3_BUCKET_PROVISIONING"] == "create_if_missing"
 
     secret = _by_kind(docs, "Secret")[0]["stringData"]
     assert secret["INQTRIX_S3_ACCESS_KEY"] == "inqtrix"

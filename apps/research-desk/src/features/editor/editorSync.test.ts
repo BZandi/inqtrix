@@ -9,6 +9,7 @@ import {
   commentRecordFromServer,
   documentRecordFromServer,
   folderRecordFromServer,
+  isCollaborationDocument,
   serverCommentPayload,
   serverDocumentPayload,
   serverFolderPayload,
@@ -64,9 +65,48 @@ describe('editorSync converters', () => {
       updated_at: 1,
     })
     expect(record.contentMarkdown).toBe('')
+    expect(record.contentMode).toBe('markdown')
+    expect(record.metadataRevision).toBe(1)
+    expect(record.access).toEqual({ mode: 'owner', permission: 'edit' })
     expect('sourceRunId' in record).toBe(false)
     expect('diffAnchorMarkdown' in record).toBe(false)
     expect(serverDocumentPayload(record).source_run_id).toBe(null)
+  })
+
+  it('maps collaboration access and durable projection metadata', () => {
+    const record = documentRecordFromServer({
+      access: { mode: 'shared', permission: 'suggest' },
+      collaboration: {
+        generation: 2,
+        persisted_sequence: 19,
+        projection_sequence: 17,
+        projection_updated_at: 1_700_000_000,
+        schema_version: 1,
+      },
+      content_mode: 'collaboration',
+      created_at: 1,
+      diff_anchor_markdown: null,
+      diff_anchor_updated_at: null,
+      folder_id: null,
+      id: 'ed_shared',
+      metadata_revision: 4,
+      revision: 8,
+      source: 'blank',
+      source_run_id: null,
+      title: 'Shared draft',
+      updated_at: 2,
+    })
+
+    expect(isCollaborationDocument(record)).toBe(true)
+    expect(record.access).toEqual({ mode: 'shared', permission: 'suggest' })
+    expect(record.metadataRevision).toBe(4)
+    expect(record.collaboration).toEqual({
+      generation: 2,
+      persistedSequence: 19,
+      projectionSequence: 17,
+      projectionUpdatedAt: '2023-11-14T22:13:20.000Z',
+      schemaVersion: 1,
+    })
   })
 
   it('normalizes an unknown document source', () => {

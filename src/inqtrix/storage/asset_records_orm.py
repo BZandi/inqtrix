@@ -2,7 +2,7 @@
 
 The asset-record layer of the project-persistence tier: the local file
 library's METADATA (sections, groups, asset records + their extracted
-text), scoped per ``(tenant_id, created_by_sub, workspace_id)`` like the
+text), scoped per ``(tenant_id, created_by_user_id, workspace_id)`` like the
 chat/editor entities. The original binaries already live in the object
 store via the files registry (``content_orm.files``); an asset record
 references that blob by ``server_file_id`` and adds the library
@@ -37,6 +37,7 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.dialects.postgresql import UUID
 
 asset_metadata = MetaData()
 
@@ -45,7 +46,7 @@ asset_sections = Table(
     asset_metadata,
     Column("id", Text, primary_key=True),
     Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
-    Column("created_by_sub", Text, nullable=True),
+    Column("created_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("workspace_id", Text, nullable=True),
     Column("kind", Text, nullable=False, server_default=text("'custom'")),
     Column("title", Text, nullable=False),
@@ -54,7 +55,7 @@ asset_sections = Table(
     Index(
         "ix_asset_sections_owner_created",
         "tenant_id",
-        "created_by_sub",
+        "created_by_user_id",
         "created_at",
         "id",
     ),
@@ -66,7 +67,7 @@ asset_groups = Table(
     asset_metadata,
     Column("id", Text, primary_key=True),
     Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
-    Column("created_by_sub", Text, nullable=True),
+    Column("created_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("workspace_id", Text, nullable=True),
     Column(
         "section_id",
@@ -80,7 +81,7 @@ asset_groups = Table(
     Index(
         "ix_asset_groups_owner_created",
         "tenant_id",
-        "created_by_sub",
+        "created_by_user_id",
         "created_at",
         "id",
     ),
@@ -92,7 +93,7 @@ asset_records = Table(
     asset_metadata,
     Column("id", Text, primary_key=True),
     Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
-    Column("created_by_sub", Text, nullable=True),
+    Column("created_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("workspace_id", Text, nullable=True),
     Column(
         "section_id",
@@ -129,7 +130,7 @@ asset_records = Table(
     Index(
         "ix_asset_records_owner_created",
         "tenant_id",
-        "created_by_sub",
+        "created_by_user_id",
         "created_at",
         "id",
     ),

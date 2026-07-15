@@ -150,6 +150,20 @@ def register_routes(
         )
 
         _router.include_router(build_editor_patches_router(container))
+    if container.editor_collaboration_service is not None:
+        from inqtrix.server.collaboration_gateway import (
+            build_router as build_collaboration_gateway_router,
+        )
+        from inqtrix.server.routers.editor_collaboration import (
+            build_router as build_editor_collaboration_router,
+        )
+        from inqtrix.server.routers.internal_collaboration import (
+            build_router as build_internal_collaboration_router,
+        )
+
+        _router.include_router(build_collaboration_gateway_router(container))
+        _router.include_router(build_editor_collaboration_router(container))
+        _router.include_router(build_internal_collaboration_router(container))
     if container.asset_records_service is not None:
         from inqtrix.server.routers.asset_records import (
             build_router as build_asset_records_router,
@@ -205,13 +219,19 @@ def register_routes(
         from inqtrix.server.routers.auth import build_auth_router
 
         _router.include_router(
-            build_auth_router(container.auth_provider)
+            build_auth_router(
+                container.auth_provider,
+                container.principal_dependency,
+            )
         )
         if getattr(container.auth_provider, "users", None) is not None:
             from inqtrix.server.routers.admin import build_admin_router
 
             _router.include_router(
-                build_admin_router(container.auth_provider)
+                build_admin_router(
+                    container.auth_provider,
+                    container.principal_dependency,
+                )
             )
             from inqtrix.server.routers.admin_system import (
                 build_router as build_admin_system_router,
@@ -251,6 +271,12 @@ def register_routes(
 
             _router.include_router(build_shares_router(container))
             _router.include_router(build_users_router(container))
+        if container.user_event_store is not None:
+            from inqtrix.server.routers.user_events import (
+                build_router as build_user_events_router,
+            )
+
+            _router.include_router(build_user_events_router(container))
         if container.quota_service is not None:
             from inqtrix.server.routers.quota import (
                 build_router as build_quota_router,

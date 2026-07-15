@@ -3,22 +3,26 @@
 Registered alongside the knowledge surface (only when the knowledge
 engine is enabled). Submission resolves and edit-checks the target
 collection, gates the embedding-token quota, and queues a job on the
-:class:`~inqtrix.server.indexing.IndexingJobStore`; the read side
-(list/get/cancel/events) consumes the store directly, mirroring the
-native-run router.
+:class:`~inqtrix.server.indexing.IndexingJobStore`. Job authorization follows
+the parent collection: viewers may inspect its jobs and editors may cancel
+them, independent of which authorized user originally submitted the job.
 """
 
 from __future__ import annotations
 
 import asyncio
 from queue import Empty
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from inqtrix.auth.permissions import SharePermission
-from inqtrix.auth.principal import Principal, UserContext
+from inqtrix.auth.principal import (
+    Principal,
+    UserContext,
+    resolve_live_principal,
+)
 from inqtrix.knowledge.stores.ports import CollectionNotFound
 from inqtrix.quota.models import QuotaDimension
 from inqtrix.server.indexing import (
@@ -28,12 +32,8 @@ from inqtrix.server.indexing import (
     IndexingQueueFull,
     format_sse_event,
 )
-from inqtrix.server.routers import (
-    build_shared_grants_dependency,
-    quota_admission,
-)
+from inqtrix.server.routers import quota_admission
 from inqtrix.services.indexing_service import ReindexUnsupported
-from inqtrix.services.knowledge_service import collection_access
 from inqtrix.services.request_parsing import (
     error_response,
     workspace_id_from_request,
@@ -63,10 +63,31 @@ def build_router(container: "AppContainer") -> APIRouter:
     principal_dep = container.principal_dependency
     user_context_dep = container.user_context_dependency
     quota_service = container.quota_service
-    share_service = container.share_service
-    shared_collections_dep = build_shared_grants_dependency(
-        share_service, principal_dep, resource_type="knowledge_collection"
-    )
+
+    async def _authorized_job(
+        job_id: str,
+        *,
+        visible_to: UserContext | None,
+        require_edit: bool = False,
+    ) -> dict[str, Any]:
+        """Resolve one job through its parent collection authority."""
+        try:
+            summary = await asyncio.to_thread(job_store.get, job_id)
+            collection = await knowledge_service.knowledge.store.get_collection(
+                str(summary["collection_id"])
+            )
+            await knowledge_service.collection_access(
+                collection,
+                visible_to,
+                minimum=(
+                    SharePermission.EDIT
+                    if require_edit
+                    else SharePermission.VIEW
+                ),
+            )
+        except (CollectionNotFound, IndexingJobNotFound, KeyError) as exc:
+            raise IndexingJobNotFound(job_id) from exc
+        return summary
 
     @router.post("/v1/knowledge/collections/{collection_id}/reindex")
     async def start_reindex(
@@ -74,7 +95,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_collections_dep),
     ):
         """Queue a background re-embed of one collection's documents."""
         try:
@@ -103,11 +123,11 @@ def build_router(container: "AppContainer") -> APIRouter:
             collection = await knowledge_service.knowledge.store.get_collection(
                 collection_id
             )
-            shared = collection_access(collection, visible_to, also_visible)
-            # Writes through a share need at least the edit grant; a
-            # view-only invitee earns the indistinct 404, never a reindex.
-            if shared is not None and not shared.at_least(SharePermission.EDIT):
-                raise CollectionNotFound(collection_id)
+            await knowledge_service.collection_access(
+                collection,
+                visible_to,
+                minimum=SharePermission.EDIT,
+            )
             summary = indexing_service.submit(
                 collection=collection,
                 index_id=index_id,
@@ -133,7 +153,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         return JSONResponse(status_code=202, content=summary)
 
     @router.get("/v1/knowledge/indexing-jobs")
-    def list_jobs(
+    async def list_jobs(
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
@@ -145,21 +165,31 @@ def build_router(container: "AppContainer") -> APIRouter:
         jobs for the workspace.
         """
         try:
-            workspace_id = workspace_id_from_request(req)
+            workspace_id_from_request(req)
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
         collection_id = req.query_params.get("collection_id") or None
+        visible_collections = await knowledge_service.list_collections(
+            visible_to=visible_to,
+        )
+        visible_collection_ids = {
+            collection.id for collection in visible_collections
+        }
+        jobs = await asyncio.to_thread(
+            job_store.list,
+            collection_id=collection_id,
+        )
         return {
             "object": "list",
-            "data": job_store.list(
-                collection_id=collection_id,
-                workspace_id=workspace_id,
-                visible_to=visible_to,
-            ),
+            "data": [
+                job
+                for job in jobs
+                if job.get("collection_id") in visible_collection_ids
+            ],
         }
 
     @router.get("/v1/knowledge/indexing-jobs/{job_id}")
-    def get_job(
+    async def get_job(
         job_id: str,
         req: Request,
         principal: Principal = Depends(principal_dep),
@@ -167,9 +197,10 @@ def build_router(container: "AppContainer") -> APIRouter:
     ):
         """Return the current public summary for one reindex job."""
         try:
-            workspace_id = workspace_id_from_request(req)
-            return job_store.get(
-                job_id, workspace_id=workspace_id, visible_to=visible_to
+            workspace_id_from_request(req)
+            return await _authorized_job(
+                job_id,
+                visible_to=visible_to,
             )
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
@@ -177,7 +208,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(404, "Indizierung nicht gefunden", "not_found")
 
     @router.post("/v1/knowledge/indexing-jobs/{job_id}/cancel")
-    def cancel_job(
+    async def cancel_job(
         job_id: str,
         req: Request,
         principal: Principal = Depends(principal_dep),
@@ -185,9 +216,16 @@ def build_router(container: "AppContainer") -> APIRouter:
     ):
         """Request cancellation for a queued or running reindex job."""
         try:
-            workspace_id = workspace_id_from_request(req)
-            return job_store.cancel(
-                job_id, workspace_id=workspace_id, visible_to=visible_to
+            workspace_id_from_request(req)
+            await _authorized_job(
+                job_id,
+                visible_to=visible_to,
+                require_edit=True,
+            )
+            return await asyncio.to_thread(
+                job_store.cancel,
+                job_id,
+                actor_user_id=principal.user_id,
             )
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
@@ -203,12 +241,14 @@ def build_router(container: "AppContainer") -> APIRouter:
     ):
         """Stream buffered and live reindex-job events as SSE."""
         try:
-            workspace_id = workspace_id_from_request(req)
+            workspace_id_from_request(req)
+            await _authorized_job(
+                job_id,
+                visible_to=visible_to,
+            )
             subscription = await asyncio.to_thread(
                 job_store.subscribe,
                 job_id,
-                workspace_id=workspace_id,
-                visible_to=visible_to,
             )
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
@@ -216,9 +256,36 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(404, "Indizierung nicht gefunden", "not_found")
 
         async def _event_generator():
+            async def _authorized_frame() -> bool:
+                try:
+                    current = await resolve_live_principal(principal_dep, req)
+                    if (
+                        current.user_id != principal.user_id
+                        or current.kind != principal.kind
+                        or current.tenant_id != principal.tenant_id
+                        or current.session_id != principal.session_id
+                        or current.pat_id != principal.pat_id
+                        or current.scopes != principal.scopes
+                    ):
+                        return False
+                    live_visible_to = (
+                        await container.permission_service.resolve_user_context(
+                            current
+                        )
+                    )
+                    await _authorized_job(
+                        job_id,
+                        visible_to=live_visible_to,
+                    )
+                except (HTTPException, IndexingJobNotFound):
+                    return False
+                return True
+
             try:
                 terminal_replayed = False
                 for event in subscription.replay:
+                    if not await _authorized_frame():
+                        return
                     yield format_sse_event(event)
                     terminal_replayed = event.get("type") in TERMINAL_INDEXING_EVENTS
                 if terminal_replayed:
@@ -232,6 +299,8 @@ def build_router(container: "AppContainer") -> APIRouter:
                         )
                     except Empty:
                         continue
+                    if not await _authorized_frame():
+                        return
                     yield format_sse_event(event)
                     if event.get("type") in TERMINAL_INDEXING_EVENTS:
                         return

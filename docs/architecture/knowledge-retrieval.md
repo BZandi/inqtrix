@@ -99,7 +99,36 @@ Key transitions:
 - **Postgres holds the truth**: collections, documents (full canonical `text`), and chunk metadata (`text` plus `source_text`). The canonical text is the citable source view (the document viewer renders it; quote highlighting is text search within it) and the input reindex re-embeds from.
 - **Qdrant holds only vectors plus a lean payload** — the chunk id and the filter keys (`collection_id` / `document_id` / `chunk_id`). No document text is duplicated into Qdrant. Retrieval returns chunk ids from Qdrant and hydrates text/title back from Postgres.
 - **`vector_synced`** is the durable reconcile flag, not an outbox table: the canonical text commits to Postgres first, then vectors upsert to Qdrant and the flag flips `true`; a failed vector sync leaves it `false` — a queryable, operator-visible "vectors out of sync" signal. Reindex re-embeds from the canonical text and clears it.
-- **One physical Qdrant collection per embedding-model configuration**, with the logical collection as an indexed payload field (`is_tenant` partitioning). `embedding_model`/`embedding_dim` are immutable per collection because vectors from different models are geometrically incomparable. The payload filter is a performance boundary, **not** the authorization boundary — access control stays with the PermissionService.
+- **One physical Qdrant collection per embedding-model configuration**, with the logical collection as an indexed payload field (`is_tenant` partitioning). `embedding_model`/`embedding_dim` are immutable per collection because vectors from different models are geometrically incomparable. The payload filter is a performance boundary, **not** the authorization boundary — live owner-or-accepted-direct-share checks stay with the `AuthorizationService` and the transactional collection store.
+
+### Shared collections and maintenance
+
+A collection list is a single authoritative owned-plus-accepted-shared view.
+`view` permits metadata, document text, retrieval, and cited answers. `edit`
+also permits ingest, document deletion, and reindex; collection deletion and
+share management remain owner-only. Workspace membership does not grant
+collection access by itself. When the optional common-workspace restriction is
+enabled, every access verifies that the owner and recipient still share at
+least one workspace.
+
+Collection sharing covers extracted/indexed text and metadata, not the
+uploader's original file binary. An editor can ingest a file they own into a
+shared collection; its extracted text then belongs to the collection and
+remains there after that editor leaves, while the binary remains accessible
+only to the uploader. Client code must therefore hide binary download actions
+for shared documents rather than constructing an endpoint the recipient cannot
+use.
+
+Reindex is a serialized maintenance state on the collection. While one job is
+queued, running, or `cancelling`, document writes and collection deletion return
+HTTP 409 `collection_maintenance`; reads remain available. The worker reloads
+each canonical document before embedding and checks the requester's active
+account plus current `edit` access before and after the external vector write.
+Losing that authority ends the job as `authorization_revoked`. A current
+viewer can list/read the job and its events; a current editor can cancel it.
+Backends without transactional collection metadata return 501 for reindex and
+collection sharing rather than treating Qdrant or process-local state as an
+authorization boundary.
 
 ## Retrieval pipeline: question to cited answer
 
@@ -144,7 +173,7 @@ Key transitions:
 - **Follow-up contextualization** (`contextualize_followup_question`) runs only when the request carries prior `messages`/`history`. It rewrites the current follow-up into a standalone retrieval query before profile selection, decomposition, retrieval, and gate evaluation. The final answer still receives the original user question and the history, but the prompt states that history is context only, not evidence. Provider/parse failures fall back to the original question with `_knowledge_query_context_fallback` and `inqtrix.knowledge.contextualized`.
 - **Decompose** (`decompose_question`, tief profile only) splits the retrieval query into 2-4 sub-queries on the fast tier. Each sub-query and the standalone retrieval query are retrieved independently.
 - **Interleave** (`interleave_candidates`) merges the per-query result lists round-robin — one candidate per list in rotation, the original question's list first, duplicates collapsed on `chunk.id`. This guarantees every aspect contributes to the top-k instead of the first list crowding the others out (the aggregation-failure class a plain first-wins union reproduces).
-- **Collection scope** (`knowledge_filters.collection_ids`) is resolved at admission (`KnowledgeService.resolve_ask_scope`, called by the chat and native-runs routers for `mode=knowledge`): an explicit, non-empty list is asserted strictly — one invisible collection denies the whole submission with a 404 — and an omitted/`null`/empty filter from an authenticated caller is pinned to the caller-visible collections (owned + accepted shares + legacy) before the run is stored, so a worker only ever re-executes a bounded request. When the visible set spans several embedding models, the pin narrows to the default embedding model's collections (the stores enforce one model per query); scoped asks reach the others. Deployments without user auth (`AUTH_MODE` none/apikey) keep the historical view: an unscoped ask searches every collection.
+- **Collection scope** (`knowledge_filters.collection_ids`) is resolved at admission (`KnowledgeService.resolve_ask_scope`, called by the chat and native-runs routers for `mode=knowledge`): an explicit, non-empty list is asserted strictly — one invisible collection denies the whole submission with a 404 — and an omitted/`null`/empty filter from an authenticated caller is pinned to the caller-visible collections (owned + accepted direct shares) before the run is stored, so a worker only ever re-executes a bounded request. The execution actor's access to every pinned id is rechecked at run safepoints; losing one aborts with `authorization_revoked` instead of silently narrowing the evidence. When the visible set spans several embedding models, the pin narrows to the default embedding model's collections (the stores enforce one model per query); scoped asks reach the others. Deployments without user auth (`AUTH_MODE` none/apikey) keep the historical ownerless view.
 - **Retrieval widths**: `top_k` (per-(sub-)query width, `knowledge_filters.top_k`, 1-50) bounds each `retrieve()` call; `final_k` bounds the candidate pool actually surfaced to the answer. By default `final_k = min(top_k × profile.final_k_factor, EVIDENCE_K_MAX)` — only `tief` raises the factor above `1.0`, so its decompose/gate fan-out widens evidence instead of collapsing back to `top_k`; a profile without decomposition retrieves `final_k` directly. An explicit `knowledge_filters.final_k` pins it, overriding the factor. `EVIDENCE_K_MAX` and each profile's `final_k_factor` are published in `/v1/capabilities` (`knowledge.evidence_k_max`, `knowledge.profiles[].final_k_factor`); full request contract in [knowledge-profiles.md](../configuration/knowledge-profiles.md).
 - **Evidence budget** renders the candidates as `[K1] Title (Abschnitt N)` entries up to a context-window-derived character budget. Truncation happens once, here, and emits `inqtrix.knowledge.evidence.truncated` — the reference list and the prompt always describe the same set.
 - **Sufficiency gate** (`evaluate_evidence`, `gate.py`) is one fast-tier call returning a three-way coverage verdict. `full` answers normally; `partial` answers with the gaps named explicitly (a binary verdict was observed refusing answerable multi-aspect questions wholesale); `none` yields the honest no-evidence answer instead of a fabrication. An unparseable gate response fails *open* to sufficient with the loud `_knowledge_gate_fallback` marker.

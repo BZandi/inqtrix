@@ -1,7 +1,7 @@
 """UI-namespace consistency guard for destructive project-entity operations.
 
 This is deliberately NOT an authorization check. Authorization is ownership
-plus shares (``auth.permissions.resolve_owned_access``); the workspace is a
+plus shares (``auth.permissions.require_owned_access``); the workspace is a
 client-supplied UI namespace filter (see ``auth.principal.UserContext``), never
 an auth input. This guard mirrors that namespace filter onto the DELETE path so
 a delete issued from one project's UI namespace cannot reach a different

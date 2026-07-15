@@ -25,7 +25,6 @@ from inqtrix.services.knowledge_service import KnowledgeValidationError
 if TYPE_CHECKING:
     from inqtrix.services.knowledge_service import KnowledgeService
 
-_KNOWLEDGE_GRANT = "knowledge_collection"
 _TOP_K_MAX = 50
 
 # No standalone knowledge.chunk.read capability in wave 1: a search hit
@@ -99,8 +98,13 @@ def build_knowledge_capabilities(
     ) -> CollectionsListOutput:
         collections = await service.list_collections(
             visible_to=context.visible_to,
-            also_visible=context.grants_for(_KNOWLEDGE_GRANT),
         )
+        if context.knowledge_collection_ids is not None:
+            collections = [
+                collection
+                for collection in collections
+                if collection.id in context.knowledge_collection_ids
+            ]
         return CollectionsListOutput(
             collections=[
                 CollectionSummary(
@@ -116,15 +120,27 @@ def build_knowledge_capabilities(
     async def _search(
         payload: KnowledgeSearchInput, context: CapabilityContext
     ) -> KnowledgeSearchOutput:
-        also_visible = context.grants_for(_KNOWLEDGE_GRANT)
+        collection_ids = list(payload.collection_ids)
+        pinned_ids = context.knowledge_collection_ids
+        if pinned_ids is not None:
+            if collection_ids and not set(collection_ids).issubset(pinned_ids):
+                raise CapabilityError(
+                    "knowledge.collection_not_found",
+                    "Mindestens eine angefragte Sammlung ist nicht sichtbar.",
+                    http_status=404,
+                )
+            if not collection_ids:
+                collection_ids = sorted(pinned_ids)
+            if not collection_ids:
+                return KnowledgeSearchOutput(query=payload.query, hits=[])
+
         # Strict: an explicit collection set the agent cannot fully see is
         # a denial, not a quiet narrowing of the search (E5).
-        if payload.collection_ids:
+        if collection_ids:
             try:
                 await service.assert_collections_visible(
-                    payload.collection_ids,
+                    collection_ids,
                     visible_to=context.visible_to,
-                    also_visible=also_visible,
                 )
             except CollectionNotFound as exc:
                 raise CapabilityError(
@@ -135,10 +151,9 @@ def build_knowledge_capabilities(
         try:
             candidates = await service.search(
                 query=payload.query,
-                collection_ids=payload.collection_ids or None,
+                collection_ids=collection_ids or None,
                 top_k=payload.top_k,
                 visible_to=context.visible_to,
-                also_visible=also_visible,
             )
         except KnowledgeValidationError as exc:
             raise CapabilityError("invalid_input", str(exc), http_status=400) from exc
@@ -174,7 +189,6 @@ def build_knowledge_capabilities(
             document = await service.get_document(
                 payload.document_id,
                 visible_to=context.visible_to,
-                also_visible=context.grants_for(_KNOWLEDGE_GRANT),
             )
         except DocumentNotFound as exc:
             raise CapabilityError(
@@ -182,6 +196,15 @@ def build_knowledge_capabilities(
                 "Dokument nicht gefunden.",
                 http_status=404,
             ) from exc
+        if (
+            context.knowledge_collection_ids is not None
+            and document.collection_id not in context.knowledge_collection_ids
+        ):
+            raise CapabilityError(
+                "knowledge.document_not_found",
+                "Dokument nicht gefunden.",
+                http_status=404,
+            )
         return DocumentReadOutput(
             id=document.id,
             collection_id=document.collection_id,

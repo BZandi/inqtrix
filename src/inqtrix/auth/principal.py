@@ -18,7 +18,9 @@ Design decisions (mirroring the platform rebuild plan):
 
 from __future__ import annotations
 
+import inspect
 import logging
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Literal
@@ -45,10 +47,9 @@ class Principal:
     """Resolved identity of one HTTP request.
 
     Attributes:
-        sub: Stable subject identifier. ``"__anonymous__"`` in the
-            open-server mode, ``"__static__"`` in the static-key mode,
-            and the IdP-issued subject for OIDC sessions and personal
-            access tokens.
+        user_id: Canonical local ``users.id`` UUID for a scoped user. It is
+            ``None`` for anonymous and static-key requests, which therefore
+            cannot participate in user-scoped sharing or persistence.
         kind: How the principal authenticated. Drives audit labelling
             and (later) per-kind policy; never used for silent
             behavioural branches.
@@ -67,14 +68,14 @@ class Principal:
         display_name: Optional human-readable name for UI/audit
             surfaces.
         email: Optional e-mail claim from the IdP; identity anchoring
-            always uses ``sub``, never e-mail.
+            always uses ``user_id``, never e-mail or an IdP subject.
         session_id: Server-side session row id for ``oidc_session``
             principals, enabling targeted revocation.
         pat_id: Token row id for ``pat`` principals, enabling targeted
             revocation and last-used bookkeeping.
     """
 
-    sub: str
+    user_id: uuid.UUID | None
     kind: PrincipalKind
     tenant_id: str = "default"
     role: str = "owner"
@@ -98,19 +99,16 @@ class UserContext:
         principal: The verified request identity.
         workspace_ids: Workspaces the principal is a member of,
             resolved server-side.
-        groups: Group ids the principal belongs to, resolved
-            server-side (local groups or IdP-claim mirrors).
     """
 
     principal: Principal
     workspace_ids: tuple[str, ...] = ()
-    groups: tuple[str, ...] = ()
 
 
-ANONYMOUS_PRINCIPAL = Principal(sub="__anonymous__", kind="anonymous")
+ANONYMOUS_PRINCIPAL = Principal(user_id=None, kind="anonymous")
 """Singleton principal for the open-server (no-auth) deployment mode."""
 
-STATIC_PRINCIPAL = Principal(sub="__static__", kind="static")
+STATIC_PRINCIPAL = Principal(user_id=None, kind="static")
 """Singleton principal for the legacy static-Bearer-key deployment mode."""
 
 
@@ -195,6 +193,36 @@ def make_principal_dependency(
         return provider.resolve_principal(request)
 
     return get_principal
+
+
+async def resolve_live_principal(
+    dependency: Callable[..., object],
+    request: Request,
+) -> Principal:
+    """Re-run the active credential resolver for a long-lived request.
+
+    SSE handlers call this immediately before data frames so session/PAT
+    revocation and user disablement take effect without reconnecting. The
+    helper accepts both synchronous and asynchronous provider dependencies.
+
+    Args:
+        dependency: Principal dependency built by the active auth provider.
+        request: Original request carrying the cookie or bearer credential.
+
+    Returns:
+        The currently valid principal.
+
+    Raises:
+        TypeError: The configured dependency returned an invalid object.
+        fastapi.HTTPException: The credential is no longer valid.
+    """
+    live_resolver = getattr(dependency, "__inqtrix_live_resolver__", dependency)
+    resolved = live_resolver(request)
+    if inspect.isawaitable(resolved):
+        resolved = await resolved
+    if not isinstance(resolved, Principal):
+        raise TypeError("principal dependency returned an invalid value")
+    return resolved
 
 
 def resolve_auth_mode(

@@ -108,4 +108,9 @@ class CapabilityRegistry:
                     + (f": {loc}" if loc else ""),
                     http_status=400,
                 ) from exc
-        return await definition.handler(model, context)
+        if context.authority_check is not None:
+            context.authority_check()
+        result = await definition.handler(model, context)
+        if context.authority_check is not None:
+            context.authority_check()
+        return result

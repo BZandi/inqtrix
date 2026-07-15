@@ -21,6 +21,7 @@ from inqtrix.exceptions import (
     AgentTimeout,
     AzureOpenAIAPIError,
 )
+from inqtrix.execution_authority import AuthorizationRevoked
 from inqtrix.execution_failures import classify_execution_failure
 from inqtrix.server.runs import RunStore
 from inqtrix.services.run_service import RunService
@@ -69,6 +70,10 @@ def test_explicit_failure_codes_beat_ambiguous_http_and_builtin_types() -> None:
     assert (
         classify_execution_failure(AgentPolicyDenied("blocked"))
         == "policy_denied"
+    )
+    assert (
+        classify_execution_failure(AuthorizationRevoked("share revoked"))
+        == "authorization_revoked"
     )
     assert issubclass(AgentProviderTimeout, AgentTimeout)
     assert (

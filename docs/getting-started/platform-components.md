@@ -4,7 +4,7 @@
 
 ## Scope
 
-Inqtrix runs with **zero infrastructure** by default (in-memory storage, in-memory queue, knowledge engine off). Each platform component — Postgres, an object store, Qdrant, Valkey + workers, an OIDC IdP — is opt-in and unlocks specific features. This page answers *which components you actually need*, maps every user-facing feature to its requirements, and shows the manual (Framework-Mode) setup. For the one-command Stack-mode path see [Stack quickstart](stack-quickstart.md).
+Inqtrix runs with **zero infrastructure** by default (in-memory storage, in-memory queue, knowledge engine off). Each platform component - Postgres, an object store, Qdrant, Valkey + workers, a collaboration sidecar, or an identity provider - is opt-in and unlocks specific features. This page answers *which components you actually need*, maps every user-facing feature to its requirements, and shows the manual (Framework-Mode) setup. For the one-command Stack-mode path see [Stack quickstart](stack-quickstart.md).
 
 ## Do you need this?
 
@@ -13,8 +13,9 @@ Inqtrix runs with **zero infrastructure** by default (in-memory storage, in-memo
 | Trying it out / single user, no persistence | Nothing extra — zero-infra default ([First research run](first-research-run.md)) |
 | Single-user setup, data survives restart | Stack mode default: **Postgres** (+ API + web) |
 | Cited answers over your own documents | + **Qdrant** (`--profile knowledge`) for persistent/hybrid retrieval |
-| File uploads | + an **object store** (local volume by default; **S3** via `--profile s3`) |
+| File uploads | + an **object store** (local volume by default; bundled or managed **S3**) |
 | Many concurrent runs / runs that survive an API restart | + **Valkey** and worker processes (`--profile workers`) |
+| Multiple people editing one editor document | + **Postgres**, cookie auth, and the private **collaboration** service (`--profile collaboration`) |
 | Enterprise SSO | + an **OIDC IdP** (`--profile oidc`; Dex is the reference) |
 | Bind logins to an existing directory | + **LDAP** (`--profile ldap`; LLDAP is the dev reference) |
 
@@ -33,6 +34,7 @@ Which feature needs which component and which auth mode. The capability endpoint
 | Prompt templates (durable) | any | **postgres** | – | – | – | `features.prompt_templates` |
 | Multi-user / invitations | oidc / local / ldap | **postgres** | – | – | – | (implicit) |
 | Sharing (runs/collections/templates) | oidc / local / ldap | **postgres** | – | – | – | `features.sharing` |
+| Live editor collaboration | oidc / local / ldap | **postgres** | – | – | not used | `features.collaboration` plus root `collaboration.service_available` |
 
 Note: multi-user, invitations, and sharing require a cookie-session auth mode — `local` (email/password), `ldap`, or `oidc` — plus the Postgres backend. The single-operator `none`/`apikey` modes have no scoped identity and therefore no sharing; for single-user-with-sharing run `local` with one owner.
 
@@ -48,10 +50,11 @@ dispatch mode and queue reachability, not live worker replica count.
 
 Each component states what it enables, the env switch, and what you lose without it.
 
-- **Postgres** (`INQTRIX_STORAGE_BACKEND=postgres`, `INQTRIX_DATABASE_URL=...`) — durable run rows, identity, knowledge metadata, durable prompt templates. Without it: everything is in-memory and lost on restart. The Stack-mode compose defaults to Postgres. Migrations are applied by `inqtrix-migrate` (the compose `migrate` service runs it once before the API starts) and also create the restricted `inqtrix_app` role used for row-level security.
-- **Object store** (`INQTRIX_OBJECT_STORE_BACKEND=local|s3`) — storage for uploaded file blobs. `local` (default) writes to a volume; `s3` (`--profile s3` → SeaweedFS, or any S3 endpoint) for shared/scalable storage. If `s3` is configured but unreachable, file uploads are not advertised (`features.files=false`) and the System page shows the object store as not reachable.
+- **Postgres** (`INQTRIX_STORAGE_BACKEND=postgres`, `INQTRIX_DATABASE_URL=...`) — PostgreSQL 15+ stores durable run rows, identity, knowledge metadata and durable prompt templates; used relationally only (vector search lives in Qdrant or in-memory, no pgvector or other extension needed). Without it: everything is in-memory and lost on restart. The Stack-mode compose defaults to Postgres. Its automatic one-shot migration dependency creates the restricted `inqtrix_app` role; managed services use a separate direct migration credential and explicit RLS authority. API readiness and workers verify Alembic head plus the restricted role before serving/claiming. See [Database migrations](../deployment/database-migrations.md).
+- **Object store** (`INQTRIX_OBJECT_STORE_BACKEND=local|s3`) — storage for uploaded file blobs. `local` (default) writes to a volume; `s3` can be bundled SeaweedFS/MinIO, static-key compatible storage, or AWS-native workload identity through boto3's default chain. If S3 is unreachable, file uploads are not advertised (`features.files=false`), file requests return a stable 503, and `/readyz` is degraded without removing unrelated API traffic. See [Object storage](../deployment/object-storage.md).
 - **Qdrant** (`--profile knowledge`, `INQTRIX_VECTOR_BACKEND=qdrant`, `INQTRIX_QDRANT_URL=...`) — persistent vector/document store with hybrid dense + BM25 retrieval. The knowledge engine otherwise uses an in-memory store (lost on restart, dense-only). If Qdrant is configured but unreachable, knowledge and hybrid retrieval are not advertised. Self-hosted Qdrant is unauthenticated by default — set `INQTRIX_QDRANT_API_KEY`.
-- **Valkey + worker** (`--profile workers`, `INQTRIX_QUEUE_BACKEND=valkey`, `INQTRIX_VALKEY_URL=...`) — dispatches native runs to separate worker processes for horizontal scaling and restart survival. The API/run store and worker use the same queue path for initial runs, child completion wakes, and resumed parents; the reconciler is a safety net, not normal dispatch. The default `memory` queue runs in-process. The worker refuses to start without Postgres + Valkey (nothing durable to process).
+- **Valkey + worker** (`--profile workers`, `INQTRIX_QUEUE_BACKEND=valkey`, `INQTRIX_VALKEY_URL=...`) — dispatches native runs to separate worker processes for horizontal scaling and restart survival. The API/run store and worker use the same queue path for initial runs, child completion wakes, and resumed parents; the reconciler is a safety net, not normal dispatch. The default `memory` queue runs in-process. The worker refuses to start without Postgres + Valkey and validates the schema/role contract before claiming its first message.
+- **Editor collaboration service** (`--profile collaboration`, `INQTRIX_COLLABORATION_ENABLED=true`) - a private, single-replica Node/Hocuspocus coordinator for Yjs updates, suggestions, carets, and durable acknowledgements. FastAPI remains the policy and persistence authority; the service has no database credentials, host port, or data volume. See [Deploy editor collaboration](../deployment/editor-collaboration.md).
 - **OIDC IdP** (`--profile oidc`, `INQTRIX_AUTH_MODE=oidc`) — browser SSO. Dex is the dev reference; any OIDC provider works. See [Auth modes](../deployment/auth-modes.md).
 - **LDAP directory** (`--profile ldap`, `INQTRIX_AUTH_MODE=ldap`) — bind logins against a directory. A throwaway LLDAP is the dev reference; any LDAP/AD works. See [Connect to an existing LDAP](../how-to/connect-to-existing-ldap.md) and the [LDAP stack walkthrough](../../examples/webserver_stacks/ldap_stack.md).
 
@@ -76,11 +79,20 @@ INQTRIX_VALKEY_URL=redis://:...@valkey:6379/0
 INQTRIX_VALKEY_PASSWORD=...
 ```
 
-Misconfiguration fails loudly at startup (e.g. `INQTRIX_QUEUE_BACKEND=valkey` without a URL, or `valkey` without `postgres`).
+Add the `collaboration` profile separately when the full experience includes
+shared editor documents. It requires the feature flag, an independent secret,
+and cookie auth; it does not reuse the workers' Valkey service. Misconfiguration
+fails loudly at startup (for example `INQTRIX_QUEUE_BACKEND=valkey` without a
+URL, or collaboration without Postgres and cookie auth).
 
 ## Manual / host platform (Framework Mode)
 
 If you run the API on the host instead of in the Stack-mode container (library mode, custom providers, integration tests), start only the infrastructure with the dev compose and wire the API yourself:
+
+This local Framework-mode example has no orchestrator, so the explicit
+`inqtrix-migrate` call is intentional. Production Compose and Helm deployments
+run the packaged command automatically in their one-shot migration service/job;
+operators should not execute it manually during a normal rollout.
 
 ```bash
 # Infrastructure only (no api/web container):

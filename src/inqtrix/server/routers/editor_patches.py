@@ -10,12 +10,14 @@ a foreign document answers exactly like an absent one.
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Request
 
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.pagination import list_envelope
+from inqtrix.project.editor_collaboration_ports import CollaborationConflict
 from inqtrix.project.editor_patch_ports import (
     EditorPatchRecord,
     PatchAlreadyDecided,
@@ -23,6 +25,10 @@ from inqtrix.project.editor_patch_ports import (
     PatchRevisionConflict,
 )
 from inqtrix.project.editor_ports import DocumentNotFound
+from inqtrix.services.collaboration_client import (
+    CollaborationNodeConflict,
+    CollaborationServiceUnavailable,
+)
 from inqtrix.services.editor_patch_service import EditorPatchValidationError
 from inqtrix.services.request_parsing import error_response
 
@@ -42,15 +48,6 @@ def build_router(container: "AppContainer") -> APIRouter:
     router = APIRouter()
     principal_dep = container.principal_dependency
     user_context_dep = container.user_context_dependency
-    # No shared-grants dependency here ON PURPOSE: editor documents have
-    # no sharing surface today (the ShareService resolves only run /
-    # knowledge_collection / prompt_template owners, and
-    # editor_persistence.py wires no grants either), so also_visible
-    # stays None end to end. When document sharing lands, wire
-    # build_shared_grants_dependency for the editor-document resource
-    # type here AND in editor_persistence.py together — the service
-    # already threads also_visible through.
-
     @router.get("/v1/editor/documents/{document_id}/patches")
     async def list_document_patches(
         document_id: str,
@@ -112,18 +109,37 @@ def build_router(container: "AppContainer") -> APIRouter:
                 400, "Ungueltiger JSON-Body", "invalid_request_error"
             )
         expected = body.get("expected_revision")
-        # bool subclasses int — reject it explicitly (the artifact-PUT
-        # precedent for numeric preconditions).
-        if isinstance(expected, bool) or not isinstance(expected, int):
+        expected_sequence = body.get("expected_sequence")
+        try:
+            decision_id = _optional_uuid(body.get("decision_id"))
+        except ValueError:
+            return error_response(
+                400, "decision_id muss eine UUID sein.", "invalid_request_error"
+            )
+        if expected is not None and (
+            isinstance(expected, bool) or not isinstance(expected, int)
+        ):
             return error_response(
                 400,
-                "expected_revision ist erforderlich (Ganzzahl).",
+                "expected_revision muss eine Ganzzahl sein.",
+                "invalid_request_error",
+            )
+        if expected_sequence is not None and (
+            isinstance(expected_sequence, bool)
+            or not isinstance(expected_sequence, int)
+            or expected_sequence < 0
+        ):
+            return error_response(
+                400,
+                "expected_sequence muss eine nichtnegative Ganzzahl sein.",
                 "invalid_request_error",
             )
         try:
             patch = await service.apply(
                 patch_id,
                 expected_revision=expected,
+                expected_sequence=expected_sequence,
+                decision_id=decision_id,
                 visible_to=visible_to,
                 principal=principal,
             )
@@ -144,6 +160,32 @@ def build_router(container: "AppContainer") -> APIRouter:
                 "conflict",
                 status=exc.patch.status,
             )
+        except EditorPatchValidationError as exc:
+            return error_response(400, str(exc), "invalid_request_error")
+        except (CollaborationConflict, CollaborationNodeConflict) as exc:
+            return error_response(
+                409,
+                "Der Kollaborationsstand wurde zwischenzeitlich geaendert.",
+                "conflict",
+                reason=getattr(exc, "reason", str(exc)),
+            )
+        except CollaborationServiceUnavailable:
+            return error_response(
+                503,
+                "Live-Kollaboration ist derzeit nicht verfuegbar.",
+                "service_unavailable",
+                reason="collaboration_unavailable",
+            )
+        if patch.collaboration_generation is not None:
+            return {
+                "document_id": patch.document_id,
+                "status": patch.status,
+                "sequence": patch.decision_sequence,
+                "suggestion_ids": list(patch.suggestion_ids),
+                "command_id": (
+                    str(patch.command_id) if patch.command_id is not None else None
+                ),
+            }
         return {
             "document_id": patch.document_id,
             "revision": patch.applied_revision,
@@ -162,14 +204,33 @@ def build_router(container: "AppContainer") -> APIRouter:
         if body is None:
             body = {}
         note = body.get("note")
+        expected_sequence = body.get("expected_sequence")
+        try:
+            decision_id = _optional_uuid(body.get("decision_id"))
+        except ValueError:
+            return error_response(
+                400, "decision_id muss eine UUID sein.", "invalid_request_error"
+            )
         if note is not None and not isinstance(note, str):
             return error_response(
                 400, "note muss ein String sein.", "invalid_request_error"
+            )
+        if expected_sequence is not None and (
+            isinstance(expected_sequence, bool)
+            or not isinstance(expected_sequence, int)
+            or expected_sequence < 0
+        ):
+            return error_response(
+                400,
+                "expected_sequence muss eine nichtnegative Ganzzahl sein.",
+                "invalid_request_error",
             )
         try:
             patch = await service.reject(
                 patch_id,
                 note=note or "",
+                expected_sequence=expected_sequence,
+                decision_id=decision_id,
                 visible_to=visible_to,
                 principal=principal,
             )
@@ -181,6 +242,22 @@ def build_router(container: "AppContainer") -> APIRouter:
                 "Der Patch wurde bereits anders entschieden.",
                 "conflict",
                 status=exc.patch.status,
+            )
+        except EditorPatchValidationError as exc:
+            return error_response(400, str(exc), "invalid_request_error")
+        except (CollaborationConflict, CollaborationNodeConflict) as exc:
+            return error_response(
+                409,
+                "Der Kollaborationsstand wurde zwischenzeitlich geaendert.",
+                "conflict",
+                reason=getattr(exc, "reason", str(exc)),
+            )
+        except CollaborationServiceUnavailable:
+            return error_response(
+                503,
+                "Live-Kollaboration ist derzeit nicht verfuegbar.",
+                "service_unavailable",
+                reason="collaboration_unavailable",
             )
         return _patch_detail_payload(patch)
 
@@ -210,7 +287,22 @@ def _patch_meta_payload(patch: EditorPatchRecord) -> dict[str, Any]:
         "edit_count": len(patch.edits),
         "summary": patch.summary,
         "revision_before": patch.revision_before,
+        "collaboration_generation": patch.collaboration_generation,
+        "base_sequence": patch.base_sequence,
+        "decision_sequence": patch.decision_sequence,
+        "suggestion_ids": list(patch.suggestion_ids),
         "applied_revision": patch.applied_revision,
+        "created_by_user_id": (
+            str(patch.created_by_user_id)
+            if patch.created_by_user_id is not None
+            else None
+        ),
+        "decided_by_user_id": (
+            str(patch.decided_by_user_id)
+            if patch.decided_by_user_id is not None
+            else None
+        ),
+        "command_id": str(patch.command_id) if patch.command_id is not None else None,
         "created_at": patch.created_at,
         "decided_at": patch.decided_at,
     }
@@ -232,6 +324,14 @@ def _patch_detail_payload(patch: EditorPatchRecord) -> dict[str, Any]:
 
 
 def _edit_payload(edit: dict[str, Any]) -> dict[str, Any]:
+    if edit.get("suggestion_id"):
+        return {
+            "suggestion_id": edit.get("suggestion_id"),
+            "patch_id": edit.get("patch_id"),
+            "author_id": edit.get("author_id"),
+            "created_at": edit.get("created_at"),
+            "kind": edit.get("kind"),
+        }
     return {
         "id": edit.get("id", ""),
         "find": edit.get("find", ""),
@@ -241,3 +341,11 @@ def _edit_payload(edit: dict[str, Any]) -> dict[str, Any]:
         "text": edit.get("text", ""),
         "note": edit.get("note", ""),
     }
+
+
+def _optional_uuid(value: Any) -> uuid.UUID | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("invalid UUID")
+    return uuid.UUID(value)

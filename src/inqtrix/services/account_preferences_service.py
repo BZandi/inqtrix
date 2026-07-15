@@ -2,12 +2,14 @@
 
 The thinnest of the persistence services: payload validation and a pass to
 the store. There is no owner/share access rule because a caller can only ever
-address their own ``sub`` (the row key is the authenticated principal subject,
-never a URL/body value) — per-user isolation is structural, not enforced here.
+address their own ``user_id`` (the row key is the authenticated principal's
+canonical UUID, never a URL/body value) — per-user isolation is structural,
+not enforced here.
 """
 
 from __future__ import annotations
 
+import uuid
 from inqtrix.project.account_preferences_ports import (
     AccountPreferences,
     AccountPreferencesStore,
@@ -41,13 +43,15 @@ class AccountPreferencesService:
     def durable(self) -> bool:
         return self._durable
 
-    async def get_preferences(self, *, sub: str) -> AccountPreferences | None:
-        return await self._store.get_preferences(sub=sub)
+    async def get_preferences(
+        self, *, user_id: uuid.UUID
+    ) -> AccountPreferences | None:
+        return await self._store.get_preferences(user_id=user_id)
 
     async def save_preferences(
         self,
         *,
-        sub,
+        user_id: uuid.UUID,
         contrast_mode,
         locale,
         theme,
@@ -69,7 +73,7 @@ class AccountPreferencesService:
                 f"unknown user bubble tone: {user_bubble_tone!r}"
             )
         return await self._store.upsert_preferences(
-            sub=sub, contrast_mode=contrast_mode, locale=locale, theme=theme,
+            user_id=user_id, contrast_mode=contrast_mode, locale=locale, theme=theme,
             theme_preset=theme_preset, user_bubble_tone=user_bubble_tone,
             updated_at=updated_at, enable_agent_memory=bool(enable_agent_memory),
         )

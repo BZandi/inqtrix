@@ -8,9 +8,8 @@ The session foreign key uses ``ON DELETE SET NULL`` so deleting a folder orphans
 its sessions to the ungrouped section, matching the frontend reducer and the
 chat-history persistence model.
 
-Idempotent: fresh databases may already have these objects because migration
-0021 creates the current ORM metadata. Already-migrated databases need this
-forward patch.
+Revision 0021 owns only the historical session table. This revision therefore
+creates the folder table and relationship exactly once.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ APP_ROLE = "inqtrix_app"
 def upgrade() -> None:
     op.execute(
         """
-        CREATE TABLE IF NOT EXISTS knowledge_session_groups (
+        CREATE TABLE knowledge_session_groups (
             id text PRIMARY KEY,
             tenant_id text NOT NULL DEFAULT 'default',
             created_by_sub text NULL,
@@ -41,7 +40,7 @@ def upgrade() -> None:
     )
     op.execute(
         """
-        CREATE INDEX IF NOT EXISTS ix_knowledge_session_groups_owner_created
+        CREATE INDEX ix_knowledge_session_groups_owner_created
             ON knowledge_session_groups (
                 tenant_id, created_by_sub, workspace_id, created_at, id
             )
@@ -49,7 +48,7 @@ def upgrade() -> None:
     )
     op.execute(
         "ALTER TABLE knowledge_sessions "
-        "ADD COLUMN IF NOT EXISTS group_id text "
+        "ADD COLUMN group_id text "
         "REFERENCES knowledge_session_groups(id) ON DELETE SET NULL"
     )
     op.execute(
@@ -60,22 +59,10 @@ def upgrade() -> None:
     op.execute("ALTER TABLE knowledge_session_groups FORCE ROW LEVEL SECURITY")
     op.execute(
         """
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1
-                FROM pg_policies
-                WHERE schemaname = current_schema()
-                  AND tablename = 'knowledge_session_groups'
-                  AND policyname = 'tenant_isolation'
-            ) THEN
-                CREATE POLICY tenant_isolation ON knowledge_session_groups
-                    FOR ALL
-                    USING (tenant_id = (SELECT inqtrix_current_tenant_id()))
-                    WITH CHECK (tenant_id = (SELECT inqtrix_current_tenant_id()));
-            END IF;
-        END
-        $$;
+        CREATE POLICY tenant_isolation ON knowledge_session_groups
+            FOR ALL
+            USING (tenant_id = (SELECT inqtrix_current_tenant_id()))
+            WITH CHECK (tenant_id = (SELECT inqtrix_current_tenant_id()))
         """
     )
 

@@ -737,7 +737,8 @@ export function researchRunToJob(run: ResearchRunRecord): ResearchJob {
   return {
     access: run.access,
     activePhase: run.phaseState.activePhase,
-    cancelRequested: run.events.some((event) => event.title === 'Cancellation requested'),
+    cancelRequested: run.cancelRequested === true
+      || run.events.some((event) => event.title === 'Cancellation requested'),
     confidence: run.snapshot?.confidence ? `${run.snapshot.confidence} / 10` : undefined,
     completedPhases: run.phaseState.completedPhases,
     duration: run.durationSeconds === undefined ? undefined : formatDuration(run.durationSeconds),

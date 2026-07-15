@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { FileAssetRecord, VectorIndexRecord } from '@/features/project/types'
-import { ingestNewVectorIndexMembers, reindexVectorIndexOnServer } from './knowledgeSync'
+import { ingestNewVectorIndexMembers, createVectorIndexCollectionOnServer } from './knowledgeSync'
 
 const mocks = vi.hoisted(() => ({
   addKnowledgeDocument: vi.fn(),
@@ -70,9 +70,9 @@ beforeEach(() => {
   mocks.deleteKnowledgeCollection.mockResolvedValue(undefined)
 })
 
-describe('reindexVectorIndexOnServer', () => {
+describe('createVectorIndexCollectionOnServer', () => {
   it('creates a collection with the index model and uploads member texts', async () => {
-    const result = await reindexVectorIndexOnServer(
+    const result = await createVectorIndexCollectionOnServer(
       makeIndex(),
       [makeAsset()],
       { apiKey: 'key', workspaceId: 'ws_test_123' },
@@ -103,29 +103,19 @@ describe('reindexVectorIndexOnServer', () => {
     })
   })
 
-  it('deletes the previous server collection before rebuilding', async () => {
-    await reindexVectorIndexOnServer(
-      makeIndex({ serverCollectionId: 'kc_old' }),
+  it('refuses to replace an existing collection', async () => {
+    await expect(createVectorIndexCollectionOnServer(
+      makeIndex({ serverCollectionId: 'kc_existing' }),
       [makeAsset()],
       {},
-    )
-    expect(mocks.deleteKnowledgeCollection).toHaveBeenCalledWith('kc_old', {})
-  })
+    )).rejects.toThrow('requires an index without a server collection')
 
-  it('tolerates a 404 on the stale previous collection', async () => {
-    const gone = Object.assign(new Error('not found'), { status: 404 })
-    mocks.deleteKnowledgeCollection.mockRejectedValueOnce(gone)
-
-    const result = await reindexVectorIndexOnServer(
-      makeIndex({ serverCollectionId: 'kc_old' }),
-      [makeAsset()],
-      {},
-    )
-    expect(result.collectionId).toBe('kc_fresh')
+    expect(mocks.deleteKnowledgeCollection).not.toHaveBeenCalled()
+    expect(mocks.createKnowledgeCollection).not.toHaveBeenCalled()
   })
 
   it('reports members without extracted text instead of dropping them silently', async () => {
-    const result = await reindexVectorIndexOnServer(
+    const result = await createVectorIndexCollectionOnServer(
       makeIndex(),
       [makeAsset(), makeAsset({ extractedText: '  ', id: 'file-2', label: 'Scan ohne Text' })],
       {},
@@ -134,14 +124,14 @@ describe('reindexVectorIndexOnServer', () => {
     expect(result.uploadedDocuments).toBe(1)
   })
 
-  it('rebuilds to an empty collection and reports all-textless members as skipped', async () => {
-    const result = await reindexVectorIndexOnServer(
-      makeIndex({ serverCollectionId: 'kc_old' }),
+  it('creates an empty collection and reports all-textless members as skipped', async () => {
+    const result = await createVectorIndexCollectionOnServer(
+      makeIndex(),
       [makeAsset({ extractedText: '', label: 'Scan ohne Text' })],
       {},
     )
 
-    expect(mocks.deleteKnowledgeCollection).toHaveBeenCalledWith('kc_old', {})
+    expect(mocks.deleteKnowledgeCollection).not.toHaveBeenCalled()
     expect(mocks.createKnowledgeCollection).toHaveBeenCalledWith(
       { embeddingModel: 'text-embedding-3-small', name: 'Verträge' },
       {},
@@ -161,7 +151,7 @@ describe('reindexVectorIndexOnServer', () => {
   })
 
   it('ingests via file_id when enabled and the asset has a server file', async () => {
-    const result = await reindexVectorIndexOnServer(
+    const result = await createVectorIndexCollectionOnServer(
       makeIndex(),
       [makeAsset({ serverFileId: 'srv-file-9' })],
       { useFileIngestion: true, workspaceId: 'ws_test_123' },
@@ -181,7 +171,7 @@ describe('reindexVectorIndexOnServer', () => {
   })
 
   it('embeds the stored text (skips the redundant re-parse) when it is already MarkItDown-grade', async () => {
-    const result = await reindexVectorIndexOnServer(
+    const result = await createVectorIndexCollectionOnServer(
       makeIndex(),
       [makeAsset({ serverFileId: 'srv-file-9', parserId: 'markitdown' })],
       { useFileIngestion: true, workspaceId: 'ws_test_123' },
@@ -205,7 +195,7 @@ describe('reindexVectorIndexOnServer', () => {
   })
 
   it('re-ingests the original file and returns its server text for back-fill when client-parsed', async () => {
-    const result = await reindexVectorIndexOnServer(
+    const result = await createVectorIndexCollectionOnServer(
       makeIndex(),
       [makeAsset({ serverFileId: 'srv-file-9', parserId: 'client' })],
       { useFileIngestion: true },
@@ -222,7 +212,7 @@ describe('reindexVectorIndexOnServer', () => {
 
   it('keeps the build succeeding (no back-fill) when reading the server text fails', async () => {
     mocks.fetchKnowledgeDocumentText.mockRejectedValueOnce(new Error('text read failed'))
-    const result = await reindexVectorIndexOnServer(
+    const result = await createVectorIndexCollectionOnServer(
       makeIndex(),
       [makeAsset({ serverFileId: 'srv-file-9', parserId: 'client' })],
       { useFileIngestion: true },
@@ -233,7 +223,7 @@ describe('reindexVectorIndexOnServer', () => {
   })
 
   it('counts a text-less asset as uploadable when file ingestion covers it', async () => {
-    const result = await reindexVectorIndexOnServer(
+    const result = await createVectorIndexCollectionOnServer(
       makeIndex(),
       [makeAsset({ extractedText: '', serverFileId: 'srv-file-9' })],
       { useFileIngestion: true },
@@ -243,7 +233,7 @@ describe('reindexVectorIndexOnServer', () => {
   })
 
   it('falls back to the text path without the file ingestion capability', async () => {
-    await reindexVectorIndexOnServer(
+    await createVectorIndexCollectionOnServer(
       makeIndex(),
       [makeAsset({ serverFileId: 'srv-file-9' })],
       {},
@@ -253,7 +243,7 @@ describe('reindexVectorIndexOnServer', () => {
   })
 
   it('falls back to the text path when the asset never reached the server', async () => {
-    await reindexVectorIndexOnServer(
+    await createVectorIndexCollectionOnServer(
       makeIndex(),
       [makeAsset({ serverFileId: null })],
       { useFileIngestion: true },
@@ -266,7 +256,7 @@ describe('reindexVectorIndexOnServer', () => {
     mocks.addKnowledgeDocument.mockRejectedValueOnce(new Error('embedding backend down'))
 
     await expect(
-      reindexVectorIndexOnServer(makeIndex(), [makeAsset()], {}),
+      createVectorIndexCollectionOnServer(makeIndex(), [makeAsset()], {}),
     ).rejects.toThrow('embedding backend down')
     expect(mocks.deleteKnowledgeCollection).toHaveBeenCalledWith('kc_fresh', {})
   })

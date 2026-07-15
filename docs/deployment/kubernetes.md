@@ -97,21 +97,25 @@ Decide before you start (each maps to a value below):
   `s3.enabled=true`, or an external S3-compatible endpoint?
 - **Auth mode**: `none`, `apikey`, `local`, `ldap`, or `oidc`? (See [Auth modes](auth-modes.md).)
 - **Knowledge engine / worker**: needed? (Qdrant for knowledge; Valkey + worker for durable runs.)
+- **Live editor collaboration**: needed? It requires Postgres, cookie auth, and one private collaboration pod.
 
 ## Step 1: build and publish the images, prepare the chart
 
-The chart deploys two images. There is no CI publishing them yet, so build and
-push them yourself. Run these from the repository root and replace `<REGISTRY>`
+The chart always deploys API and web images and can deploy the optional
+collaboration image. There is no CI publishing them yet, so build and push them
+yourself. Run these from the repository root and replace `<REGISTRY>`
 (your registry prefix, e.g. `ghcr.io/your-org`) and `<TAG>` (e.g. `0.2.0`):
 
 ```bash
 # Build (build context is the repo root)
 docker build -f deploy/docker/Dockerfile.api -t <REGISTRY>/inqtrix-api:<TAG> .
 docker build -f deploy/docker/Dockerfile.web -t <REGISTRY>/inqtrix-web:<TAG> .
+docker build -f deploy/docker/Dockerfile.collaboration -t <REGISTRY>/inqtrix-collaboration:<TAG> .
 
 # Push (the cluster pulls from here)
 docker push <REGISTRY>/inqtrix-api:<TAG>
 docker push <REGISTRY>/inqtrix-web:<TAG>
+docker push <REGISTRY>/inqtrix-collaboration:<TAG> # only when enabled
 ```
 
 For a multi-architecture image (amd64 + arm64) use buildx:
@@ -162,9 +166,11 @@ or an externally managed Kubernetes Secret.
 | `INQTRIX_ENV_FILE=deploy/.env.azure.stack` | Compose-only loader. For Helm, copy the relevant keys into a private values file, `config.*`, `secret.data.*`, or `secret.existingSecret`. |
 | `INQTRIX_WEB_PORT=8080` | `service.webPort` controls the Service port; expose it with port-forward, Ingress, or Route. |
 | `INQTRIX_PG_PASSWORD` | For bundled demo Postgres use `postgres.auth.password`; for external Postgres put the full `INQTRIX_DATABASE_URL` in the Secret. |
+| `INQTRIX_MIGRATION_DATABASE_URL`, `INQTRIX_MIGRATION_RLS_MODE` | Put the direct privileged URL in a dedicated Secret selected by `migrations.databaseSecret.name/key`; its name must differ from the runtime application Secret. `secret.data.INQTRIX_MIGRATION_DATABASE_URL` is rejected. Select authority with `migrations.rlsMode`. The URL is injected only into the one-shot hook Job and explicitly blanked in API/worker. |
 | `INQTRIX_QDRANT_URL`, `INQTRIX_VECTOR_BACKEND`, `INQTRIX_KNOWLEDGE_ENABLED` | Auto-wired when `qdrant.enabled=true`; for external Qdrant set them in `config` and put `INQTRIX_QDRANT_API_KEY` in the Secret when needed. |
 | `INQTRIX_QUEUE_BACKEND=valkey`, `INQTRIX_VALKEY_URL`, `INQTRIX_VALKEY_PASSWORD` | Auto-wired when `valkey.enabled=true` and `worker.enabled=true`; for external Valkey set `INQTRIX_QUEUE_BACKEND=valkey` in `config` and `INQTRIX_VALKEY_URL` in the Secret. |
-| `--profile s3` (SeaweedFS), `INQTRIX_OBJECT_STORE_BACKEND=s3`, `INQTRIX_S3_*` | Bundle the in-cluster object store with `s3.enabled=true` (MinIO; auto-wires backend, endpoint, bucket and keys), or point at external S3: set backend/endpoint/bucket in `config` and the access/secret keys in the Secret. |
+| `--profile collaboration`, `INQTRIX_COLLABORATION_ENABLED=true` | `collaboration.enabled=true`; set `image.collaboration.*` and provide `collaboration.secret.existingSecret` (or the main Secret) with `collaboration.secret.key`. The chart derives the private HTTP/WS URLs. |
+| `--profile s3` (SeaweedFS), `INQTRIX_OBJECT_STORE_BACKEND=s3`, `INQTRIX_S3_*` | Bundle MinIO with `s3.enabled=true`, use static credentials in the app Secret, or set `AUTH_MODE=default` plus API/worker ServiceAccount overrides for managed workload identity. See [Object storage](object-storage.md). |
 | Dex/OIDC and LLDAP profiles | Helm has no bundled Dex or LLDAP service. Use `config.INQTRIX_AUTH_MODE=oidc`/`ldap` and point at an external IdP/directory. |
 
 ## Step 2, scenario A: turnkey demo on vanilla Kubernetes
@@ -308,10 +314,13 @@ an Ingress with TLS. Provide secrets through a Kubernetes Secret you own.
        --from-literal=INQTRIX_SESSION_SECRET='<openssl rand -hex 32>' \
        --from-literal=INQTRIX_PAT_PEPPER='<openssl rand -hex 32>' \
        --from-literal=AZURE_OPENAI_API_KEY='<AZURE-OPENAI-KEY>'
+   kubectl -n inqtrix create secret generic inqtrix-migration-database \
+       --from-literal=INQTRIX_MIGRATION_DATABASE_URL='postgresql+asyncpg://<MIGRATION-USER>:<PASS>@<DB-HOST>:5432/<DB-NAME>'
    ```
 
-   The existing Secret must hold every secret key the app needs (the migrate Job
-   reads `INQTRIX_DATABASE_URL` from it directly). See the secret reference below.
+   The runtime Secret holds only application/provider secrets. The second
+   Secret is available only to the migration Job and must use a direct database
+   connection with the authority described in [Database migrations](database-migrations.md).
 
 2. Install, pointing at the Secret and your Ingress host:
 
@@ -321,6 +330,8 @@ an Ingress with TLS. Provide secrets through a Kubernetes Secret you own.
        --set image.registry=<REGISTRY> \
        --set image.api.tag=<TAG> --set image.web.tag=<TAG> \
        --set secret.existingSecret=inqtrix-secrets \
+       --set migrations.databaseSecret.name=inqtrix-migration-database \
+       --set migrations.rlsMode=bypass \
        --set config.INQTRIX_AUTH_MODE=local \
        --set config.INQTRIX_LLM_PROVIDER=azure \
        --set config.AZURE_OPENAI_ENDPOINT=https://<AZURE-OPENAI-RESOURCE>.openai.azure.com/ \
@@ -336,6 +347,12 @@ an Ingress with TLS. Provide secrets through a Kubernetes Secret you own.
        --set ingress.tls.secretName=<YOUR-TLS-SECRET>
    ```
 
+   For an enabled Ingress, the chart derives `INQTRIX_PUBLIC_BASE_URL` from
+   `ingress.host` and `ingress.tls.enabled`, and configures nginx to overwrite
+   forwarded proto with that trusted boundary. The explicit value above is
+   therefore optional when it is identical, and keeps precedence when the
+   externally published origin intentionally differs from the Ingress host.
+
 3. To scale or survive restarts, enable the worker and a queue, and use the S3
    object store (see [Scaling](#scaling)).
 
@@ -349,14 +366,23 @@ Same as scenario C, with three differences:
   needed: the images run non-root, bind only ports above 1024, drop all
   capabilities and use a read-only root filesystem.
 - Use `oc` and an OpenShift Route host (or leave `route.host` empty to let
-  OpenShift generate one).
+  OpenShift generate one). Collaboration needs a public trust anchor at render
+  time: set `route.host` explicitly, or deploy with collaboration disabled,
+  read the generated host, then upgrade with
+  `config.INQTRIX_PUBLIC_BASE_URL=https://<GENERATED-HOST>` and
+  `collaboration.enabled=true`. The chart fails loudly if collaboration is
+  enabled while both values are unknown.
 - On OpenShift you **can** bundle Qdrant, Valkey and the S3 store
   (`qdrant.enabled`, `valkey.enabled`, `s3.enabled`) — they run under the
   `restricted-v2` arbitrary UID. The bundled **Postgres** is the exception: the
   official image's `initdb` needs a fixed UID and will not start under
   `restricted-v2`, so use an external or managed database there
   (`INQTRIX_DATABASE_URL`, e.g. Azure Database for PostgreSQL). The example below
-  uses `values-openshift.yaml`, which keeps Postgres external.
+  uses `values-openshift.yaml`, which keeps Postgres external. The external
+  service must run PostgreSQL 15 or newer; the migration preflight checks this
+  before taking schema locks. No PostgreSQL extensions are required —
+  pgvector-enabled images work, the extension stays unused (see
+  [Database migrations](database-migrations.md)).
 
 ```bash
 oc new-project inqtrix
@@ -368,12 +394,17 @@ oc -n inqtrix create secret generic inqtrix-secrets \
     --from-literal=INQTRIX_OIDC_CLIENT_SECRET='<OIDC-CLIENT-SECRET>' \
     --from-literal=AZURE_OPENAI_API_KEY='<AZURE-OPENAI-KEY>'
 
+oc -n inqtrix create secret generic inqtrix-migration-database \
+    --from-literal=INQTRIX_MIGRATION_DATABASE_URL='postgresql+asyncpg://<MIGRATION-USER>:<PASS>@<DB-HOST>:5432/<DB-NAME>'
+
 helm install inqtrix deploy/helm/inqtrix \
     --namespace inqtrix \
     -f deploy/helm/inqtrix/values-openshift.yaml \
     --set image.registry=<REGISTRY> \
     --set image.api.tag=<TAG> --set image.web.tag=<TAG> \
     --set secret.existingSecret=inqtrix-secrets \
+    --set migrations.databaseSecret.name=inqtrix-migration-database \
+    --set migrations.rlsMode=bypass \
     --set config.INQTRIX_AUTH_MODE=oidc \
     --set config.INQTRIX_LLM_PROVIDER=azure \
     --set config.AZURE_OPENAI_ENDPOINT=https://<AZURE-OPENAI-RESOURCE>.openai.azure.com/ \
@@ -411,11 +442,12 @@ intentionally own every secret key.
 | Secret key | When needed | What it is |
 |---|---|---|
 | `INQTRIX_DATABASE_URL` | storage backend `postgres` | `postgresql+asyncpg://user:pass@host:5432/db`. Auto-wired when `postgres.enabled=true`. |
+| `INQTRIX_MIGRATION_DATABASE_URL` | managed PostgreSQL migration job | Direct migration-only URL stored in `migrations.databaseSecret`; never put it in the app Secret. |
 | `INQTRIX_SESSION_SECRET` | auth `local`/`ldap`/`oidc` | >=32 chars; CSRF-token HMAC key. `openssl rand -hex 32`. |
 | `INQTRIX_PAT_PEPPER` | auth `local`/`ldap`/`oidc` | >=32 chars; pepper for personal access tokens. Rotating it invalidates all tokens. |
 | `INQTRIX_OIDC_CLIENT_SECRET` | auth `oidc` | Confidential OIDC client secret from your IdP. |
 | `INQTRIX_LDAP_BIND_PASSWORD` | auth `ldap` | Service-account bind password. |
-| `INQTRIX_S3_ACCESS_KEY`, `INQTRIX_S3_SECRET_KEY` | object store `s3` | S3 credentials. Auto-wired from `s3.accessKey`/`s3.secretKey` when `s3.enabled=true` (bundled MinIO). |
+| `INQTRIX_S3_ACCESS_KEY`, `INQTRIX_S3_SECRET_KEY`, optional `INQTRIX_S3_SESSION_TOKEN` | object store `s3`, static auth | S3 credentials. Auto-wired from `s3.accessKey`/`s3.secretKey` only for bundled MinIO. Omit all three with `INQTRIX_S3_AUTH_MODE=default`. |
 | `INQTRIX_QDRANT_API_KEY` | external Qdrant with auth | Qdrant API key. Auto-wired when `qdrant.apiKey` is set on a bundled Qdrant. |
 | `LITELLM_API_KEY` | LLM provider `litellm` (default) | Key for the LiteLLM gateway / OpenAI-compatible endpoint. |
 | `ANTHROPIC_API_KEY` | LLM provider `anthropic` | Direct Anthropic API key. |
@@ -495,15 +527,20 @@ reference. The knobs you will reach for most:
 
 | Value | Default | Effect |
 |---|---|---|
-| `image.registry`, `image.api.tag`, `image.web.tag` | `""`, appVersion | Where to pull images and which tag. |
+| `image.registry`, `image.api.tag`, `image.web.tag`, `image.collaboration.tag` | `""`, appVersion | Where to pull images and which tag. The collaboration image is used only when enabled. |
 | `imagePullSecrets` | `[]` | Pull-secret names for a private registry, e.g. `--set imagePullSecrets[0].name=regcred`. |
 | `openshift.enabled` | `false` | `true` renders a Route and omits the fixed UID/fsGroup for the SCC. |
 | `config.<ENV_VAR>` / `extraConfig.<ENV_VAR>` | see file | Non-secret env (ConfigMap). Provider, auth mode, endpoints, object store, tuning. |
 | `secret.existingSecret` | `""` | Name of a Secret you created (production). |
 | `secret.data.<ENV_VAR>` | `{}` | Chart-managed secret values (dev only). |
+| `migrations.databaseSecret.name/key` | `""`, `INQTRIX_MIGRATION_DATABASE_URL` | Dedicated direct migration DSN, injected only into the hook Job. |
+| `migrations.rlsMode`, `migrations.ownerMaintenanceConfirmed` | `auto`, `false` | Migration authority and explicit owner-upgrade maintenance assertion. |
+| `serviceAccount.api`, `serviceAccount.worker` | shared account | Optional independent names/annotations/token policy for workload identity. Web, Collaboration and migrations retain tokenless identities. |
+| `s3.caBundle.existingConfigMap/key/mountPath` | empty | Optional private CA mounted only into API/worker and exposed as `INQTRIX_S3_CA_BUNDLE`. |
 | `ingress.enabled`, `ingress.host`, `ingress.tls.*` | `false` | Vanilla-k8s Ingress. |
 | `route.enabled`, `route.tls.termination` | `true`, `edge` | OpenShift Route (only when `openshift.enabled`). `edge` is the only termination that works with the stock plain-HTTP web pod; `reencrypt`/`passthrough` need a TLS-serving backend (and `reencrypt` a `route.tls.destinationCACertificate`). |
 | `worker.enabled` | `false` | Durable worker Deployment (needs postgres + valkey). |
+| `collaboration.enabled` | `false` | Private one-replica `Recreate` Deployment and ClusterIP Service. Requires Postgres, cookie auth, and an independent secret; it has no HPA/PDB/PVC. |
 | `api.replicaCount`, `api.autoscaling.*` | `1`, off | Scale the API (see scaling note). |
 | `persistence.enabled`, `persistence.size` | `false`, `5Gi` | PVC for the local object store. |
 | `postgres.enabled`, `qdrant.enabled`, `valkey.enabled`, `s3.enabled` | `false` | Bundle a demo backing service in-cluster (`s3.enabled` = MinIO object store). qdrant/valkey/s3 are OpenShift-capable; postgres is vanilla-k8s only. |
@@ -522,17 +559,15 @@ The chart offers three object-store options:
   beyond a local trial (secret key >= 8 characters).
 - **External S3** (AWS S3, MinIO, R2, SeaweedFS, ...):
 
-  ```bash
-  --set config.INQTRIX_OBJECT_STORE_BACKEND=s3 \
-  --set config.INQTRIX_S3_ENDPOINT_URL=https://<S3-ENDPOINT> \
-  --set config.INQTRIX_S3_BUCKET=<BUCKET> \
-  --set-string secret.data.INQTRIX_S3_ACCESS_KEY=<ACCESS-KEY> \
-  --set-string secret.data.INQTRIX_S3_SECRET_KEY=<SECRET-KEY>
-  ```
+  Set `INQTRIX_S3_AUTH_MODE=static` with keys for an S3-compatible
+  provider, or `default` with API/worker ServiceAccount annotations for AWS/
+  ROSA workload identity. Native AWS leaves `INQTRIX_S3_ENDPOINT_URL` empty;
+  managed buckets should set `INQTRIX_S3_BUCKET_PROVISIONING=existing`.
 
 Use shared S3 (bundled or external) for anything with a worker or more than one API
-pod. For production, prefer external/managed S3 and put the keys in
-`secret.existingSecret` instead of `secret.data`.
+pod. For production, prefer external/managed S3; put static keys in
+`secret.existingSecret`, or grant only API/worker a workload identity. The
+complete IAM, CA and SSE-KMS contract is [Object storage](object-storage.md).
 
 ## Scaling
 
@@ -552,6 +587,11 @@ the durable backends — all of which Inqtrix already supports:
 
 Then raise `api.replicaCount` (or enable `api.autoscaling`) and `worker.replicaCount`.
 
+Editor collaboration is an exception to that horizontal-scaling advice.
+Version 1 always renders exactly one collaboration replica with `Recreate` and
+database fencing. Do not add an HPA, PDB, or second replica; Redis/Valkey is not
+a persistence or multi-writer substitute for this service.
+
 ## Upgrades and migrations
 
 Schema migrations run automatically as a Helm hook Job (`inqtrix-migrate`): a
@@ -564,9 +604,17 @@ helm upgrade inqtrix deploy/helm/inqtrix -n inqtrix --reuse-values \
     --set image.api.tag=<NEW-TAG> --set image.web.tag=<NEW-TAG>
 ```
 
+For collaboration-enabled releases, update
+`image.collaboration.tag=<NEW-TAG>` in the same maintenance window so the API,
+browser schema, Node schema, and migration stay compatible.
+
 Back up the database (and the object store) before upgrades — see [Runbooks](runbooks.md).
-To run migrations out-of-band instead, set `migrations.enabled=false` and run
-`inqtrix-migrate` yourself.
+For managed PostgreSQL, give only the Job a direct migration Secret and select
+`bypass` or `owner`. For owner upgrades,
+`migrations.ownerMaintenanceConfirmed=true` authorizes the chart's bounded
+quiesce hook; custom charts must preserve that stop -> one-shot job ->
+readiness -> start ordering. Manual
+`inqtrix-migrate` is break-glass only. See [Database migrations](database-migrations.md).
 
 ## Troubleshooting
 
@@ -575,12 +623,15 @@ To run migrations out-of-band instead, set `migrations.enabled=false` and run
 | Pods `CrashLoopBackOff`, logs show a DB/connection error | `INQTRIX_DATABASE_URL` missing or wrong, or storage backend is `postgres` with no DB | Provide the Secret (scenario C) or bundle Postgres (scenario A/B); verify the URL. |
 | Pod `CrashLoopBackOff` with `Read-only file system: 'logs'` | `INQTRIX_LOG_ENABLED=true` under the read-only root filesystem | Logs already go to container stdout (captured by the cluster). Leave file logging off; the chart mounts an ephemeral `/app/logs` so the flag does not crash, but stdout is the durable sink. |
 | `helm install` hangs on the migrate hook | The database is unreachable from the cluster | Check `kubectl -n inqtrix logs job/inqtrix-migrate`; fix connectivity/credentials. |
+| Migration fails with SQLSTATE `28000` / `inqtrix.tenant_id is not set` | A normal managed-PostgreSQL role touched a forced-RLS table, or the custom chart reused the runtime credential | Configure the migration-only Secret and explicit `bypass`/`owner` mode; do not set a tenant env variable. See [Database migrations](database-migrations.md). |
+| `/readyz` says database unavailable and product routes return `database_not_ready` | New runtime image is running against an old schema, cannot `SET ROLE`, or the effective role is privileged | Inspect the failed migration Job and role grants. Do not bypass readiness or start workers until the contract passes. |
 | Turnkey install with bundled Postgres hangs when `--wait` is added | Helm can wait for normal resources before the post-install migration hook has run | Install scenario A without `--wait`, then run `kubectl wait` as shown above. |
 | Bundled services are enabled but `INQTRIX_DATABASE_URL`, `INQTRIX_VALKEY_URL`, `INQTRIX_S3_ACCESS_KEY`/`INQTRIX_S3_SECRET_KEY` or `INQTRIX_QDRANT_API_KEY` is missing | `secret.existingSecret` was set, so the chart cannot render derived secret values into the app Secret | Put the derived secret values into the existing Secret yourself, or use chart-managed `secret.data` for bundled demo installs. |
 | S3 uploads fail against `http://seaweedfs:8333` | That hostname is the Compose stack's SeaweedFS; the chart's bundled store is MinIO under a different Service name | Bundle the store with `s3.enabled=true` (auto-wires `INQTRIX_S3_ENDPOINT_URL`), or set `INQTRIX_S3_ENDPOINT_URL` to your external endpoint. |
 | Pods rejected on OpenShift (`runAsNonRoot`/SCC error) | `openshift.enabled` not set, or a bundled service image needs a fixed UID | Set `openshift.enabled=true`; use an external database instead of the bundled ones on OpenShift. |
 | `ImagePullBackOff` | Registry not reachable or private without a pull secret | Push to a reachable registry; add `imagePullSecrets`. |
 | Worker pod stuck `Pending` (Multi-Attach) | `worker.enabled` + `persistence.enabled` share one `ReadWriteOnce` PVC across nodes | Use the S3 object-store backend for the worker (see [Scaling](#scaling)). |
+| Collaboration pod is ready but `service_available=false` | API/Node secrets differ, private API is unreachable, or the instance fencing lease was not acquired | Compare Secret references, inspect API and collaboration logs, and verify one collaboration replica only. |
 
 Inspect a deployment:
 
@@ -588,12 +639,12 @@ Inspect a deployment:
 kubectl -n inqtrix get pods
 kubectl -n inqtrix logs deploy/inqtrix-api
 kubectl -n inqtrix logs job/inqtrix-migrate
-helm test inqtrix -n inqtrix          # hits the API /health endpoint
+helm test inqtrix -n inqtrix          # /readyz; also requires S3 when configured
 ```
 
 ## Related docs
 
-- [Deployment modes](deployment-modes.md) — pick the right way to run Inqtrix.
-- [Auth modes](auth-modes.md) — full `none`/`apikey`/`local`/`ldap`/`oidc` reference.
-- [Settings and env](../configuration/settings-and-env.md) — every environment variable.
-- [Runbooks](runbooks.md) — backup, restore, and operational procedures.
+- [Deploy editor collaboration](editor-collaboration.md) - secret, readiness, backup, and kill-switch details.
+- [Auth modes](auth-modes.md) - full `none`/`apikey`/`local`/`ldap`/`oidc` reference.
+- [Settings and env](../configuration/settings-and-env.md) - every environment variable.
+- [Runbooks](runbooks.md) - backup, restore, and operational procedures.

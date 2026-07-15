@@ -4,15 +4,15 @@ Separate ``MetaData`` on purpose (immutable-snapshot rule): the table
 arrives with revision 0041. Timestamps are unix-seconds doubles,
 mirroring the in-memory records exactly.
 
-``owner_sub`` follows the prompt-template rule: nullable text, not a
-foreign key — ``NULL`` marks open skills created by the
-anonymous/static principals, and skill validity never depends on the
-user-mirror row's lifecycle.
+``owner_user_id`` follows the prompt-template UUID rule. Migration 0045 adds
+the physical cross-metadata foreign key with ``ON DELETE RESTRICT``; ``NULL``
+remains reserved for ownerless records in unscoped deployments.
 """
 
 from __future__ import annotations
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Column,
@@ -23,7 +23,7 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 skill_metadata = MetaData()
 
@@ -34,7 +34,7 @@ skill_templates = Table(
     Column(
         "tenant_id", Text, nullable=False, server_default=text("'default'")
     ),
-    Column("owner_sub", Text, nullable=True),
+    Column("owner_user_id", UUID(as_uuid=True), nullable=True),
     Column("label", Text, nullable=False),
     Column("title", Text, nullable=False),
     Column("description", Text, nullable=False, server_default=text("''")),
@@ -70,6 +70,9 @@ skill_templates = Table(
     ),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
+    Column(
+        "revision", BigInteger, nullable=False, server_default=text("1")
+    ),
     CheckConstraint(
         "deliverable IN ('', 'chat', 'canvas', 'email', 'talking_points')",
         name="ck_skill_templates_deliverable",
@@ -82,5 +85,5 @@ skill_templates = Table(
         "invocation IN ('user_only', 'model_allowed')",
         name="ck_skill_templates_invocation",
     ),
-    Index("ix_skill_templates_owner", "tenant_id", "owner_sub"),
+    Index("ix_skill_templates_owner", "tenant_id", "owner_user_id"),
 )

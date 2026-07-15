@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -41,7 +41,6 @@ from inqtrix.agents.control_ports import (
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.pagination import InvalidCursor, clamp_limit, decode_cursor, list_envelope
 from inqtrix.runs.shared import access_permits_edit
-from inqtrix.server.routers import build_shared_grants_dependency
 from inqtrix.server.runs import RunActive, RunNotFound
 from inqtrix.services.agent_control_service import (
     AgentControlUnavailable,
@@ -71,15 +70,11 @@ def build_router(container: "AppContainer") -> APIRouter:
     run_store = container.run_store
     principal_dep = container.principal_dependency
     user_context_dep = container.user_context_dependency
-    shared_runs_dep = build_shared_grants_dependency(
-        container.share_service, principal_dep, resource_type="run"
-    )
 
     async def _resolve_run(
         req: Request,
         run_id: str,
         visible_to: "UserContext | None",
-        also_visible: "Mapping[str, Any] | None",
         *,
         mutation: bool,
     ) -> dict[str, Any] | JSONResponse:
@@ -98,7 +93,6 @@ def build_router(container: "AppContainer") -> APIRouter:
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
@@ -123,12 +117,11 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_runs_dep),
     ):
         """Return one plan version (latest by default) with its tasks and
         the version history (``?version=`` selects an older one)."""
         resolved = await _resolve_run(
-            req, run_id, visible_to, also_visible, mutation=False
+            req, run_id, visible_to, mutation=False
         )
         if isinstance(resolved, JSONResponse):
             return resolved
@@ -164,7 +157,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_runs_dep),
     ):
         """Return complete Markdown and evidence for one plan task.
 
@@ -173,7 +165,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         provider answer eagerly.
         """
         resolved = await _resolve_run(
-            req, run_id, visible_to, also_visible, mutation=False
+            req, run_id, visible_to, mutation=False
         )
         if isinstance(resolved, JSONResponse):
             return resolved
@@ -249,11 +241,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_runs_dep),
     ):
         """Request cancellation of one source task, preserving siblings."""
         resolved = await _resolve_run(
-            req, run_id, visible_to, also_visible, mutation=True
+            req, run_id, visible_to, mutation=True
         )
         if isinstance(resolved, JSONResponse):
             return resolved
@@ -262,8 +253,10 @@ def build_router(container: "AppContainer") -> APIRouter:
                 run_id,
                 task_id,
                 workspace_id=resolved.get("workspace_id"),
+                principal=principal,
+                visible_to=visible_to,
             )
-        except (PlanNotFound, PlanTaskNotFound):
+        except (PlanNotFound, PlanTaskNotFound, RunNotFound):
             return error_response(404, "Aufgabe nicht gefunden", "not_found")
         except PlanTaskCancellationConflict as exc:
             return error_response(
@@ -286,11 +279,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_runs_dep),
     ):
         """List the run's approval requests, newest first."""
         resolved = await _resolve_run(
-            req, run_id, visible_to, also_visible, mutation=False
+            req, run_id, visible_to, mutation=False
         )
         if isinstance(resolved, JSONResponse):
             return resolved
@@ -307,7 +299,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_runs_dep),
     ):
         """Decide one approval (approve / reject / edit).
 
@@ -317,7 +308,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         different decision on an already-decided approval answers 409.
         """
         resolved = await _resolve_run(
-            req, run_id, visible_to, also_visible, mutation=True
+            req, run_id, visible_to, mutation=True
         )
         if isinstance(resolved, JSONResponse):
             return resolved
@@ -403,11 +394,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_runs_dep),
     ):
         """List the run's clarification questions, newest first."""
         resolved = await _resolve_run(
-            req, run_id, visible_to, also_visible, mutation=False
+            req, run_id, visible_to, mutation=False
         )
         if isinstance(resolved, JSONResponse):
             return resolved
@@ -424,11 +414,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_runs_dep),
     ):
         """Answer one clarification (free text OR an option id)."""
         resolved = await _resolve_run(
-            req, run_id, visible_to, also_visible, mutation=True
+            req, run_id, visible_to, mutation=True
         )
         if isinstance(resolved, JSONResponse):
             return resolved
@@ -500,11 +489,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_runs_dep),
     ):
         """Artifact METADATA page (no bodies), ``?kind&limit&cursor``."""
         resolved = await _resolve_run(
-            req, run_id, visible_to, also_visible, mutation=False
+            req, run_id, visible_to, mutation=False
         )
         if isinstance(resolved, JSONResponse):
             return resolved
@@ -530,12 +518,11 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_runs_dep),
     ):
         """One artifact with body, refs, and revision history
         (``?revision=`` serves an older body)."""
         resolved = await _resolve_run(
-            req, run_id, visible_to, also_visible, mutation=False
+            req, run_id, visible_to, mutation=False
         )
         if isinstance(resolved, JSONResponse):
             return resolved
@@ -573,11 +560,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_runs_dep),
     ):
         """Optimistic user edit of an artifact body (E13 409 matrix)."""
         resolved = await _resolve_run(
-            req, run_id, visible_to, also_visible, mutation=True
+            req, run_id, visible_to, mutation=True
         )
         if isinstance(resolved, JSONResponse):
             return resolved
@@ -609,7 +595,11 @@ def build_router(container: "AppContainer") -> APIRouter:
                 content_markdown=content,
                 expected_revision=expected,
                 principal=principal,
+                visible_to=visible_to,
+                workspace_id=resolved.get("workspace_id"),
             )
+        except RunNotFound:
+            return error_response(404, *_RUN_NOT_FOUND)
         except ArtifactNotFound:
             return error_response(404, "Artefakt nicht gefunden", "not_found")
         except ArtifactLocked:
@@ -641,7 +631,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_runs_dep),
     ):
         """Copy the artifact into a NEW editor document (copy-out).
 
@@ -650,7 +639,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         run and writes only into the caller's own namespace.
         """
         resolved = await _resolve_run(
-            req, run_id, visible_to, also_visible, mutation=False
+            req, run_id, visible_to, mutation=False
         )
         if isinstance(resolved, JSONResponse):
             return resolved
@@ -678,8 +667,8 @@ def build_router(container: "AppContainer") -> APIRouter:
             workspace_id = workspace_id_from_request(req, body)
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
-        caller_sub = (
-            principal.sub
+        caller_user_id = (
+            principal.user_id
             if principal.kind in ("oidc_session", "pat")
             else None
         )
@@ -690,7 +679,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 title=title,
                 folder_id=folder_id,
                 principal=principal,
-                caller_sub=caller_sub,
+                caller_user_id=caller_user_id,
                 workspace_id=workspace_id,
             )
         except ArtifactNotFound:
@@ -766,7 +755,7 @@ def _approval_payload(approval: ApprovalRecord) -> dict[str, Any]:
         "payload": dict(approval.payload),
         "decision": approval.decision,
         "note": approval.note,
-        "decided_by_sub": approval.decided_by_sub,
+        "decided_by_user_id": approval.decided_by_user_id,
         "created_at": approval.created_at,
         "decided_at": approval.decided_at,
     }
@@ -786,7 +775,7 @@ def _clarification_payload(clarification: ClarificationRecord) -> dict[str, Any]
         "status": clarification.status,
         "answer": clarification.answer,
         "option_id": clarification.option_id,
-        "answered_by_sub": clarification.answered_by_sub,
+        "answered_by_user_id": clarification.answered_by_user_id,
         "created_at": clarification.created_at,
         "answered_at": clarification.answered_at,
     }

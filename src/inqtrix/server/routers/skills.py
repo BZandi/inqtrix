@@ -1,7 +1,8 @@
 """Skill CRUD (``/v1/skills*``, plan M3 `3.1`).
 
 The server half of the skill library: list returns the caller's
-visible set (owned plus shared-in plus ownerless) with the additive
+visible set (owned plus accepted shared-in; ownerless only in unscoped
+deployments) with the additive
 ``access`` annotation, writes follow the shared owned-resource rule
 (edit grant for updates, owner-only deletion), and a deleted skill's
 shares are revoked in the same breath — the prompt-template router
@@ -10,11 +11,15 @@ shape verbatim, over the skill service.
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Request, Response
 
+from inqtrix.auth.permissions import (
+    AccessMode,
+    ResourceAccess,
+    SharePermission,
+)
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.content.skill_markdown import (
     SkillMarkdownError,
@@ -26,15 +31,11 @@ from inqtrix.content.skills import (
     SkillNotFound,
     SkillRecord,
 )
-from inqtrix.runs.shared import access_annotation
-from inqtrix.server.routers import build_shared_grants_dependency
 from inqtrix.services.request_parsing import error_response
 from inqtrix.services.skill_service import SkillValidationError
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
-
-log = logging.getLogger("inqtrix")
 
 _SCOPED_KINDS = frozenset({"oidc_session", "pat"})
 
@@ -67,6 +68,7 @@ def skill_payload(
         "model_tier": record.model_tier,
         "effort": record.effort,
         "include_in_autocomplete": record.include_in_autocomplete,
+        "revision": record.revision,
         "created_at": record.created_at,
         "updated_at": record.updated_at,
         **({"access": access} if access is not None else {}),
@@ -89,11 +91,6 @@ def build_router(container: "AppContainer") -> APIRouter:
     router = APIRouter()
     principal_dep = container.principal_dependency
     user_context_dep = container.user_context_dependency
-    workspace_admin = container.workspace_admin
-    share_service = container.share_service
-    shared_skills_dep = build_shared_grants_dependency(
-        share_service, principal_dep, resource_type="skill_template"
-    )
 
     async def _parsed_body(req: Request):
         try:
@@ -106,19 +103,17 @@ def build_router(container: "AppContainer") -> APIRouter:
     async def list_skills(
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_skills_dep),
     ):
         """The caller's visible skills, newest first."""
         records = await service.list_visible(
             tenant_id=principal.tenant_id,
             visible_to=visible_to,
-            also_visible=also_visible,
         )
         return {
             "object": "list",
             "data": [
-                skill_payload(record, access=access_annotation(shared))
-                for record, shared in records
+                skill_payload(record, access=access.as_dict())
+                for record, access in records
             ],
         }
 
@@ -137,22 +132,26 @@ def build_router(container: "AppContainer") -> APIRouter:
             record = await service.create(
                 body,
                 tenant_id=principal.tenant_id,
-                owner_sub=(
-                    principal.sub
+                owner_user_id=(
+                    principal.user_id
                     if principal.kind in _SCOPED_KINDS
                     else None
                 ),
             )
         except SkillValidationError as exc:
             return error_response(400, str(exc), "invalid_request_error")
-        return skill_payload(record)
+        access = ResourceAccess(
+            AccessMode.OWNER
+            if principal.kind in _SCOPED_KINDS
+            else AccessMode.UNSCOPED
+        )
+        return skill_payload(record, access=access.as_dict())
 
     @router.get("/v1/skills/{skill_id}/markdown")
     async def export_skill_markdown(
         skill_id: str,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_skills_dep),
     ):
         """One visible skill as its SKILL.md document (text/markdown)."""
         try:
@@ -160,7 +159,6 @@ def build_router(container: "AppContainer") -> APIRouter:
                 skill_id,
                 tenant_id=principal.tenant_id,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
         except SkillNotFound:
             return error_response(404, "Skill nicht gefunden", "not_found")
@@ -202,15 +200,20 @@ def build_router(container: "AppContainer") -> APIRouter:
             record = await service.create(
                 payload,
                 tenant_id=principal.tenant_id,
-                owner_sub=(
-                    principal.sub
+                owner_user_id=(
+                    principal.user_id
                     if principal.kind in _SCOPED_KINDS
                     else None
                 ),
             )
         except SkillValidationError as exc:
             return error_response(400, str(exc), "invalid_request_error")
-        return skill_payload(record)
+        access = ResourceAccess(
+            AccessMode.OWNER
+            if principal.kind in _SCOPED_KINDS
+            else AccessMode.UNSCOPED
+        )
+        return skill_payload(record, access=access.as_dict())
 
     @router.put("/v1/skills/{skill_id}")
     async def update_skill(
@@ -218,28 +221,25 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_skills_dep),
     ):
         """Replace the writable fields (edit grant required).
 
-        ``expected_updated_at`` (unix seconds) is the optional
-        optimistic-concurrency precondition; a stale value yields 409.
+        ``expected_revision`` is mandatory; a stale value yields 409.
         """
         body = await _parsed_body(req)
         if body is None:
             return error_response(
                 400, "Ungueltiger JSON-Body", "invalid_request_error"
             )
-        raw_expected = body.get("expected_updated_at")
-        # `bool` is an `int` subclass — reject it explicitly so the
-        # contract ("a number") holds (the template router's rule).
-        if raw_expected is not None and (
+        raw_expected = body.get("expected_revision")
+        if (
             isinstance(raw_expected, bool)
-            or not isinstance(raw_expected, (int, float))
+            or not isinstance(raw_expected, int)
+            or raw_expected < 1
         ):
             return error_response(
                 400,
-                "Feld 'expected_updated_at' muss eine Zahl sein",
+                "Feld 'expected_revision' muss eine positive ganze Zahl sein",
                 "invalid_request_error",
             )
         try:
@@ -247,30 +247,38 @@ def build_router(container: "AppContainer") -> APIRouter:
                 skill_id,
                 body,
                 tenant_id=principal.tenant_id,
-                expected_updated_at=(
-                    float(raw_expected) if raw_expected is not None else None
-                ),
+                expected_revision=raw_expected,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
         except SkillValidationError as exc:
             return error_response(400, str(exc), "invalid_request_error")
-        except SkillConflict:
+        except SkillConflict as exc:
             return error_response(
                 409,
                 "Der Skill wurde zwischenzeitlich geaendert",
                 "conflict",
+                current_revision=exc.current_revision,
             )
         except SkillNotFound:
             return error_response(404, "Skill nicht gefunden", "not_found")
-        return skill_payload(record)
+        mode = (
+            AccessMode.OWNER
+            if record.owner_user_id == principal.user_id
+            else AccessMode.UNSCOPED
+            if record.owner_user_id is None
+            else AccessMode.SHARED
+        )
+        access = ResourceAccess(
+            mode,
+            SharePermission.EDIT if mode is AccessMode.SHARED else None,
+        )
+        return skill_payload(record, access=access.as_dict())
 
     @router.delete("/v1/skills/{skill_id}", status_code=204)
     async def delete_skill(
         skill_id: str,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_skills_dep),
     ):
         """Delete one skill (owner-only) and revoke its shares."""
         try:
@@ -278,22 +286,8 @@ def build_router(container: "AppContainer") -> APIRouter:
                 skill_id,
                 tenant_id=principal.tenant_id,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
         except SkillNotFound:
             return error_response(404, "Skill nicht gefunden", "not_found")
-        if workspace_admin is not None and share_service is not None:
-            revoked = await workspace_admin.revoke_shares_for_resource(
-                tenant_id=principal.tenant_id,
-                resource_type="skill_template",
-                resource_id=skill_id,
-                revoked_by_sub=principal.sub,
-            )
-            if revoked:
-                log.info(
-                    "Skill %s geloescht; %d Freigaben entzogen",
-                    skill_id,
-                    revoked,
-                )
 
     return router

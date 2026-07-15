@@ -23,6 +23,7 @@ def build_router(container: "AppContainer") -> APIRouter:
     """Bind the knowledge-maintenance surface against the container."""
     router = APIRouter()
     provider = container.auth_provider
+    principal_dep = container.principal_dependency
 
     @router.post("/v1/admin/knowledge/reconcile")
     async def reconcile(request: Request):
@@ -32,7 +33,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         Postgres-canonical tier owns this reconcile; on other stores it is a
         visible 409 rather than a silent no-op.
         """
-        _resolved, error = await require_instance_admin(provider, request)
+        _resolved, error = await require_instance_admin(
+            provider, request, principal_dep
+        )
         if error is not None:
             return error
         service = container.knowledge_service

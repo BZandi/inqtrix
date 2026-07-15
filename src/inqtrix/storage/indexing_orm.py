@@ -42,7 +42,7 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSON, UUID
 
 indexing_metadata = MetaData()
 
@@ -68,7 +68,7 @@ indexing_jobs = Table(
         server_default=text("'queued'"),
     ),
     Column("workspace_id", Text, nullable=True),
-    Column("created_by_sub", Text, nullable=True),
+    Column("created_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("created_by_tenant_id", Text, nullable=True),
     Column("total_documents", Integer, nullable=False, server_default=text("0")),
     Column(
@@ -100,7 +100,7 @@ indexing_jobs = Table(
         "uq_indexing_jobs_active_collection",
         "collection_id",
         unique=True,
-        postgresql_where=text("status IN ('queued', 'running')"),
+        postgresql_where=text("status IN ('queued', 'running', 'cancelling')"),
     ),
 )
 """Durable reindex-job records — the source of truth once

@@ -154,10 +154,10 @@ class RunRequest(BaseModel):
         ),
     )
     """Explicitly attached skill ids (plan M3). The runs router admits them (visible-to-caller check — an invisible skill is a loud 404 — and the ``skills_max_attached`` cap); the agent runtime injects their instructions, runs the clarification point check, and applies ``requires_plan``/``allowed_tools``. Inert for every non-agent mode."""
-    skill_revisions: dict[str, float] = Field(
+    skill_revisions: dict[str, int] = Field(
         default_factory=dict,
         description=(
-            "Server-admitted updated_at revision for every attached skill; "
+            "Server-admitted integer revision for every attached skill; "
             "used to prevent policy drift between admission and resume."
         ),
     )

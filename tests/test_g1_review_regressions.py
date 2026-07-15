@@ -16,7 +16,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.testclient import TestClient
 
 import inqtrix.research.web_research as web_research_module
-from inqtrix.auth.principal import STATIC_PRINCIPAL
+from inqtrix.auth.principal import STATIC_PRINCIPAL, resolve_live_principal
 from inqtrix.core.algorithms import AlgorithmRegistry
 from inqtrix.providers.base import ProviderContext
 from inqtrix.search_result import GroundedSearchResult
@@ -102,6 +102,51 @@ def test_async_gate_direct_resolution_fails_loudly():
     provider = CallableGateAuthProvider(gate=async_gate)
     with pytest.raises(TypeError, match="build_principal_dependency"):
         provider.resolve_principal(object())
+
+
+@pytest.mark.asyncio
+async def test_callable_gate_live_resolution_replays_parameterized_di():
+    """An SSE frame re-runs Header injection instead of calling DI directly."""
+    from starlette.requests import Request
+
+    from inqtrix.auth.api_key import CallableGateAuthProvider
+
+    calls: list[str] = []
+
+    async def gate(authorization: str = Header(...)) -> None:
+        calls.append(authorization)
+        if authorization != "Bearer current":
+            raise HTTPException(status_code=401, detail="revoked")
+
+    app = FastAPI()
+    dependency = CallableGateAuthProvider(
+        gate=gate
+    ).build_principal_dependency()
+
+    def request_for(value: str) -> Request:
+        return Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/events",
+                "raw_path": b"/events",
+                "query_string": b"",
+                "headers": [(b"authorization", value.encode())],
+                "scheme": "http",
+                "server": ("testserver", 80),
+                "client": ("testclient", 50000),
+                "root_path": "",
+                "app": app,
+            }
+        )
+
+    assert await resolve_live_principal(
+        dependency, request_for("Bearer current")
+    ) is STATIC_PRINCIPAL
+    with pytest.raises(HTTPException) as rejected:
+        await resolve_live_principal(dependency, request_for("Bearer old"))
+    assert rejected.value.status_code == 401
+    assert calls == ["Bearer current", "Bearer old"]
 
 
 # ------------------------------------------------------------------ #

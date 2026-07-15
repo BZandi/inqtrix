@@ -13,8 +13,11 @@ Like editor documents, an asset carries a heavy ``extracted_text`` body:
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
+
+from inqtrix.project.scoped_upsert import ResourceScope
 
 
 class SectionNotFound(KeyError):
@@ -38,7 +41,7 @@ class AssetSection:
         kind: ``temporary`` or ``custom``.
         title: Section label.
         created_at/updated_at: Unix timestamps.
-        tenant_id/created_by_sub/workspace_id: The scope.
+        tenant_id/created_by_user_id/workspace_id: The scope.
     """
 
     id: str
@@ -47,7 +50,7 @@ class AssetSection:
     created_at: float
     updated_at: float
     tenant_id: str = "default"
-    created_by_sub: str | None = None
+    created_by_user_id: uuid.UUID | None = None
     workspace_id: str | None = None
 
 
@@ -61,7 +64,7 @@ class AssetGroup:
     created_at: float
     updated_at: float
     tenant_id: str = "default"
-    created_by_sub: str | None = None
+    created_by_user_id: uuid.UUID | None = None
     workspace_id: str | None = None
 
 
@@ -106,7 +109,7 @@ class AssetRecord:
     created_at: float = 0.0
     updated_at: float = 0.0
     tenant_id: str = "default"
-    created_by_sub: str | None = None
+    created_by_user_id: uuid.UUID | None = None
     workspace_id: str | None = None
 
 
@@ -124,15 +127,17 @@ class AssetStore(Protocol):
         title: str,
         created_at: float,
         updated_at: float,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> AssetSection: ...
 
     async def list_sections(
-        self, *, created_by_sub: str | None, workspace_id: str | None
+        self, *, created_by_user_id: uuid.UUID | None, workspace_id: str | None
     ) -> list[AssetSection]: ...
 
-    async def delete_section(self, section_id: str) -> None: ...
+    async def delete_section(
+        self, section_id: str, *, scope: ResourceScope
+    ) -> None: ...
 
     # -- groups ----------------------------------------------------------- #
 
@@ -144,15 +149,17 @@ class AssetStore(Protocol):
         title: str,
         created_at: float,
         updated_at: float,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> AssetGroup: ...
 
     async def list_groups(
-        self, *, created_by_sub: str | None, workspace_id: str | None
+        self, *, created_by_user_id: uuid.UUID | None, workspace_id: str | None
     ) -> list[AssetGroup]: ...
 
-    async def delete_group(self, group_id: str) -> None: ...
+    async def delete_group(
+        self, group_id: str, *, scope: ResourceScope
+    ) -> None: ...
 
     # -- assets ----------------------------------------------------------- #
 
@@ -177,14 +184,14 @@ class AssetStore(Protocol):
         extracted_text: str,
         created_at: float,
         updated_at: float,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> AssetRecord: ...
 
     async def list_assets_page(
         self,
         *,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
         limit: int,
         after: tuple[float, str] | None,
@@ -198,6 +205,8 @@ class AssetStore(Protocol):
         :class:`AssetNotFound`."""
         ...
 
-    async def delete_asset(self, asset_id: str) -> None: ...
+    async def delete_asset(
+        self, asset_id: str, *, scope: ResourceScope
+    ) -> None: ...
 
     async def aclose(self) -> None: ...

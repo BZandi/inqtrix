@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   agentSessionHistoryTimeIso,
+  canEditAgentRun,
   isActiveAgentRun,
   isGateAgentRun,
   restoredAgentSessionId,
@@ -50,6 +51,26 @@ describe('agent run status predicates', () => {
         expect(isActiveAgentRun(status as ResearchRunStatus)).toBe(true)
       }
     }
+  })
+})
+
+describe('agent run permission gate', () => {
+  const runWithAccess = (
+    access: import('@/features/researchRuns/types').ResearchRunAccess,
+  ) => ({ access }) as import('./model').AgentRunRecord
+
+  it('blocks every mutation for view shares only', () => {
+    expect(canEditAgentRun(undefined)).toBe(false)
+    expect(canEditAgentRun(runWithAccess({ mode: 'owner' }))).toBe(true)
+    expect(canEditAgentRun(runWithAccess({ mode: 'unscoped' }))).toBe(true)
+    expect(canEditAgentRun(runWithAccess({
+      mode: 'shared',
+      permission: 'edit',
+    }))).toBe(true)
+    expect(canEditAgentRun(runWithAccess({
+      mode: 'shared',
+      permission: 'view',
+    }))).toBe(false)
   })
 })
 

@@ -11,6 +11,7 @@ data is lost on restart, which is exactly why the durable tier exists.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import replace
 
 from inqtrix.pagination import keyset_page
@@ -18,8 +19,10 @@ from inqtrix.project.chat_ports import (
     ChatMessage,
     ChatThread,
     ChatThreadGroup,
+    ThreadGroupNotFound,
     ThreadNotFound,
 )
+from inqtrix.project.scoped_upsert import ResourceScope, require_memory_scope
 
 
 class MemoryChatStore:
@@ -43,11 +46,26 @@ class MemoryChatStore:
         group_id: str | None,
         created_at: float,
         updated_at: float,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> ChatThread:
+        if group_id is not None:
+            require_memory_scope(
+                self._groups.get(group_id),
+                created_by_user_id=created_by_user_id,
+                workspace_id=workspace_id,
+                resource_id=group_id,
+                not_found=ThreadGroupNotFound,
+            )
         existing = self._threads.get(id)
         if existing is not None:
+            require_memory_scope(
+                existing,
+                created_by_user_id=created_by_user_id,
+                workspace_id=workspace_id,
+                resource_id=id,
+                not_found=ThreadNotFound,
+            )
             thread = replace(
                 existing,
                 title=title,
@@ -65,7 +83,7 @@ class MemoryChatStore:
                 group_id=group_id,
                 created_at=created_at,
                 updated_at=updated_at,
-                created_by_sub=created_by_sub,
+                created_by_user_id=created_by_user_id,
                 workspace_id=workspace_id,
             )
         self._threads[id] = thread
@@ -74,14 +92,14 @@ class MemoryChatStore:
     async def list_threads_page(
         self,
         *,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
         limit: int,
         after: tuple[float, str] | None,
     ) -> tuple[list[ChatThread], str | None]:
         items = list(self._threads.values())
-        if created_by_sub is not None:
-            items = [t for t in items if t.created_by_sub == created_by_sub]
+        if created_by_user_id is not None:
+            items = [t for t in items if t.created_by_user_id == created_by_user_id]
         if workspace_id is not None:
             items = [t for t in items if t.workspace_id == workspace_id]
         items.sort(key=lambda t: (t.created_at, t.id), reverse=True)
@@ -99,7 +117,16 @@ class MemoryChatStore:
         except KeyError as exc:
             raise ThreadNotFound(thread_id) from exc
 
-    async def delete_thread(self, thread_id: str) -> None:
+    async def delete_thread(
+        self, thread_id: str, *, scope: ResourceScope
+    ) -> None:
+        require_memory_scope(
+            self._threads.get(thread_id),
+            created_by_user_id=scope.created_by_user_id,
+            workspace_id=scope.workspace_id,
+            resource_id=thread_id,
+            not_found=ThreadNotFound,
+        )
         self._threads.pop(thread_id, None)
         self._messages = {
             key: message
@@ -108,8 +135,20 @@ class MemoryChatStore:
         }
 
     async def append_messages(
-        self, messages: list[ChatMessage]
+        self,
+        messages: list[ChatMessage],
+        *,
+        expected_created_by_user_id: uuid.UUID | None,
+        expected_workspace_id: str | None,
     ) -> list[ChatMessage]:
+        for thread_id in {message.thread_id for message in messages}:
+            require_memory_scope(
+                self._threads.get(thread_id),
+                created_by_user_id=expected_created_by_user_id,
+                workspace_id=expected_workspace_id,
+                resource_id=thread_id,
+                not_found=ThreadNotFound,
+            )
         stored: list[ChatMessage] = []
         for message in messages:
             key = (message.thread_id, message.id)
@@ -127,7 +166,21 @@ class MemoryChatStore:
             stored.append(merged)
         return stored
 
-    async def delete_message(self, thread_id: str, message_id: str) -> None:
+    async def delete_message(
+        self,
+        thread_id: str,
+        message_id: str,
+        *,
+        expected_created_by_user_id: uuid.UUID | None,
+        expected_workspace_id: str | None,
+    ) -> None:
+        require_memory_scope(
+            self._threads.get(thread_id),
+            created_by_user_id=expected_created_by_user_id,
+            workspace_id=expected_workspace_id,
+            resource_id=thread_id,
+            not_found=ThreadNotFound,
+        )
         self._messages.pop((thread_id, message_id), None)
 
     async def list_messages_page(
@@ -154,11 +207,18 @@ class MemoryChatStore:
         title: str,
         created_at: float,
         updated_at: float,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> ChatThreadGroup:
         existing = self._groups.get(id)
         if existing is not None:
+            require_memory_scope(
+                existing,
+                created_by_user_id=created_by_user_id,
+                workspace_id=workspace_id,
+                resource_id=id,
+                not_found=ThreadGroupNotFound,
+            )
             group = replace(existing, title=title, updated_at=updated_at)
         else:
             group = ChatThreadGroup(
@@ -166,7 +226,7 @@ class MemoryChatStore:
                 title=title,
                 created_at=created_at,
                 updated_at=updated_at,
-                created_by_sub=created_by_sub,
+                created_by_user_id=created_by_user_id,
                 workspace_id=workspace_id,
             )
         self._groups[id] = group
@@ -175,18 +235,27 @@ class MemoryChatStore:
     async def list_groups(
         self,
         *,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> list[ChatThreadGroup]:
         items = list(self._groups.values())
-        if created_by_sub is not None:
-            items = [g for g in items if g.created_by_sub == created_by_sub]
+        if created_by_user_id is not None:
+            items = [g for g in items if g.created_by_user_id == created_by_user_id]
         if workspace_id is not None:
             items = [g for g in items if g.workspace_id == workspace_id]
         items.sort(key=lambda g: (g.created_at, g.id), reverse=True)
         return items
 
-    async def delete_group(self, group_id: str) -> None:
+    async def delete_group(
+        self, group_id: str, *, scope: ResourceScope
+    ) -> None:
+        require_memory_scope(
+            self._groups.get(group_id),
+            created_by_user_id=scope.created_by_user_id,
+            workspace_id=scope.workspace_id,
+            resource_id=group_id,
+            not_found=ThreadGroupNotFound,
+        )
         self._groups.pop(group_id, None)
         for tid, thread in list(self._threads.items()):
             if thread.group_id == group_id:

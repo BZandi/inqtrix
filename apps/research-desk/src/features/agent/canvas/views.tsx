@@ -77,6 +77,7 @@ import { cn } from '@/lib/utils'
 import { suggestionDiffSegments } from '@/features/editor/suggestionDiff'
 import { AgentActivityLine, AgentPulseTrack } from '../AgentPulseTrack'
 import {
+  canEditAgentRun,
   type AgentChildProgressRecord,
   type AgentPlanTaskRecord,
   isActiveAgentRun,
@@ -165,7 +166,7 @@ export function DocumentCanvasView({
     artifact
     && !writing
     && artifact.contentMarkdown !== undefined
-    && run?.access?.permission !== 'view',
+    && canEditAgentRun(run),
   )
   const references = useMemo(
     () => agentArtifactReferences(artifact?.refs),
@@ -173,6 +174,16 @@ export function DocumentCanvasView({
   )
 
   useEffect(() => setEditing(false), [descriptor.artifactId])
+
+  useEffect(() => {
+    if (canEdit) return
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current)
+      saveTimerRef.current = null
+    }
+    pendingRef.current = null
+    setEditing(false)
+  }, [canEdit])
 
   useEffect(() => {
     if (artifact && artifact.contentMarkdown !== undefined && pendingRef.current === null) {
@@ -576,13 +587,14 @@ export function PlanCanvasView({
   }, [context, descriptor.runId, hasPlan, hasRun, planStale])
   if (!run) return <CanvasMissing label={t.agent.plan.noPlan} />
   const pending = planApproval.pendingApproval
+  const canEdit = canEditAgentRun(run)
   return (
     <ScrollArea className="min-h-0 flex-1">
       <div className={cn(canvasSurfaceClass, 'space-y-3')}>
         <PlanReviewBody
           density="full"
           draft={planApproval.draft}
-          editable={Boolean(pending)}
+          editable={Boolean(pending) && canEdit}
           planSource={context.planSource}
           run={run}
           updateDraft={planApproval.updateDraft}
@@ -608,7 +620,7 @@ export function PlanCanvasView({
         {planApproval.error && (
           <p className="t-meta-sm text-destructive">{planApproval.error}</p>
         )}
-        {pending && (
+        {pending && canEdit && (
           <div className="flex items-center justify-end gap-1.5">
             <Button
               className="h-7 px-2.5 text-xs"
@@ -922,6 +934,7 @@ export function PatchCanvasView({
   if (!patch) return <CanvasMissing label="…" />
   const gatesActive = isGateAgentRun(run.status)
   const decided = patch.status !== 'pending'
+  const canEdit = canEditAgentRun(run)
 
   return (
     <ScrollArea className="min-h-0 flex-1">
@@ -963,7 +976,7 @@ export function PatchCanvasView({
         {review.notice && (
           <p className="t-meta text-warning">{review.notice}</p>
         )}
-        {review.pendingApproval && gatesActive && !decided && (
+        {review.pendingApproval && gatesActive && !decided && canEdit && (
           <div className="flex items-center justify-end gap-1.5">
             <Button
               className="h-7 px-2.5 text-xs"
@@ -1624,7 +1637,7 @@ function TaskDetailView({
     localActivityHistory,
     displayedError,
   )
-  const canCancel = Boolean(context.clientOptions) && (
+  const canCancel = canEditAgentRun(run) && Boolean(context.clientOptions) && (
     status === 'pending' || status === 'running'
   )
   const cancellationPending = cancelling || status === 'cancel_requested'

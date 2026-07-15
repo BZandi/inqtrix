@@ -220,6 +220,7 @@ export function demoRunSummary(
         ? 'chat'
         : 'canvas'
   return {
+    access: { mode: 'owner' },
     run_id: runId,
     status,
     queue_position: null,
@@ -1578,7 +1579,7 @@ function demoApproval(runId: string): AgentApprovalWire {
     payload: {},
     decision: '',
     note: '',
-    decided_by_sub: '',
+    decided_by_user_id: null,
     created_at: Date.now() / 1000,
     decided_at: null,
   }
@@ -1622,7 +1623,7 @@ function demoClarification(runId: string): AgentClarificationWire {
     status: 'pending',
     answer: '',
     option_id: '',
-    answered_by_sub: '',
+    answered_by_user_id: null,
     created_at: Date.now() / 1000,
     answered_at: null,
   }

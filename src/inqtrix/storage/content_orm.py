@@ -26,6 +26,7 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.dialects.postgresql import UUID
 
 content_metadata = MetaData()
 
@@ -34,7 +35,7 @@ files = Table(
     content_metadata,
     Column("id", Text, primary_key=True),
     Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
-    Column("owner_sub", Text, nullable=False),
+    Column("owner_user_id", UUID(as_uuid=True), nullable=True),
     Column("workspace_id", Text, nullable=True),
     Column("file_name", Text, nullable=False),
     Column("content_type", Text, nullable=False),
@@ -42,7 +43,7 @@ files = Table(
     Column("sha256", Text, nullable=False),
     Column("object_key", Text, nullable=False, unique=True),
     Column("created_at", Float, nullable=False),
-    Index("ix_files_tenant_owner", "tenant_id", "owner_sub"),
+    Index("ix_files_tenant_owner", "tenant_id", "owner_user_id"),
     Index("ix_files_tenant_created", "tenant_id", "created_at"),
 )
 """Uploaded-file metadata; the bytes live in the object store under

@@ -410,20 +410,43 @@ The `.t-*` roles apply to **non-Markdown UI text only**.
 Performance changes may adjust how this renderer warms up, caches syntax highlighting, or shows an
 intermediate structural fallback. Those changes must preserve the final Markdown typography and
 component styling above; they are not permission to introduce a second Markdown look.
+All variants use the same synchronous Markdown parse; asynchronous work is limited to Shiki tokens
+and Mermaid SVGs inside their frame-one structural shells.
 
 **Mermaid figures** (plan M1 S6): a ```` ```mermaid ```` fence renders as a diagram via
 [`src/components/markdown/MermaidFigure.tsx`](src/components/markdown/MermaidFigure.tsx) — the ONE
-integration point is the fence dispatch inside `PrettyCodePre`, so every renderer consumer (chat,
+integration point is the fence dispatch inside `MarkdownCodePre`, so every renderer consumer (chat,
 knowledge, reports, agent canvas, inline answers) gets it. A successful diagram is **unboxed** and
-uses the full document width; only parser errors retain a warning frame. The diagram itself is
+keeps Mermaid's native width up to the available document width: wide diagrams shrink responsively,
+while compact diagrams are never enlarged beyond their intended inline type scale. The viewer may
+apply only a modest enlargement before the viewport limit; only parser errors retain a warning frame.
+The diagram itself is
 token-mapped through mermaid's `base` theme with `themeVariables` read from the CSS custom
 properties (`--surface`/`--background`/`--foreground`), so nodes render like Inqtrix surfaces in
 both light and dark, while connectors and arrowheads use `--foreground` (ink in light mode, white in
 dark mode) for publication-grade contrast. It follows the highlighter's warm-up allowance: a stable
-hull with a "Diagramm wird erstellt …" hint fills in asynchronously ONCE per (code, theme) from a
-module cache; render errors show a **warning-tone box** (border-warning, AlertTriangle) with the
-parser message plus the source — content never disappears silently. Security stays
-`securityLevel: 'strict'` + `htmlLabels: false`; do not relax it.
+hull with a "Diagramm wird erstellt …" hint fills in asynchronously from a shared 256-entry LRU
+cache keyed by (code, theme, preset, contrast). Visible figures render immediately; figures within 1200px of the
+nearest scroll viewport warm during browser idle time. Render errors show a **warning-tone box**
+(border-warning, AlertTriangle) with the parser message plus the source — content never disappears
+silently. Security stays `securityLevel: 'strict'` + `htmlLabels: false`; do not relax it. Shiki
+highlighting follows the same visible-now / near-viewport-idle policy and uses its own 256-entry LRU,
+while preserving the frame-one plaintext code shell required by the synchronous chat contract.
+
+**Rendered Markdown blocks** use one shared 16px vertical rhythm and one
+`MarkdownBlockFrame` action pattern across chat, knowledge, reports, file previews, Agent Canvas,
+and inline Agent Desk answers. Mermaid figures expose expand, source-copy, and high-resolution PNG;
+tables expose exact Markdown-source copy plus high-resolution PNG and UTF-8 CSV. The vertical
+icon-button rail appears on hover or keyboard focus and stays visible on no-hover devices. It may sit
+in the reading-column gutter only when the nearest horizontal clipping boundary has enough measured
+space for the complete rail and its hit-testable gap; otherwise it sits inside the block at the top
+right. PNG work is loaded only on demand, and export failures must stay visible and announced. Do not
+add workspace-specific table or Mermaid wrappers beside this shared integration.
+
+External Markdown images are a privacy boundary: relative and same-origin HTTP(S) sources may load
+directly, while cross-origin HTTP(S) sources render an explicit load control first. Approved images
+use lazy decoding and `referrerPolicy="no-referrer"`; do not reintroduce automatic cross-origin image
+requests or a second image policy in individual consumers.
 
 ---
 

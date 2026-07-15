@@ -20,6 +20,7 @@ import type {
   ChatThreadGroupRecord,
   ChatThreadRecord,
   EditorCommentKind,
+  EditorCommentOutboxEntry,
   EditorCommentStatus,
   EditorCommentThreadRecord,
   EditorDocumentRecord,
@@ -49,10 +50,8 @@ import type {
   VectorIndexRunHistoryEntry,
   VectorIndexStatus,
 } from '@/features/project/types'
-import {
-  DEFAULT_KNOWLEDGE_SESSION_ID,
-  DEFAULT_KNOWLEDGE_SESSION_TITLE,
-} from '@/features/project/knowledgeSessionDefaults'
+import { DEFAULT_KNOWLEDGE_SESSION_TITLE } from '@/features/project/knowledgeSessionDefaults'
+import { createProjectEntityId as createId } from '@/features/project/entityId'
 import {
   clampPanelLayoutSize,
   type ProjectPanelLayoutKey,
@@ -164,8 +163,20 @@ export type ResearchDeskAction =
   | { commentId: string; status: EditorCommentStatus; type: 'setEditorCommentStatus' }
   | { commentId: string; kind: EditorCommentKind; type: 'setEditorCommentKind' }
   | { commentId: string; preset: EditorEvidencePreset | null; type: 'setEditorCommentEvidencePreset' }
+  | {
+      acknowledgements: Array<{
+        commentId: string
+        operation: 'delete' | 'upsert'
+        updatedAt?: string
+      }>
+      type: 'acknowledgeEditorCommentOutbox'
+    }
   | { group: EditorSuggestionGroupRecord; suggestions: EditorSuggestionRecord[]; type: 'createEditorSuggestionGroup' }
-  | { suggestionId: string; type: 'acceptEditorSuggestion' }
+  | {
+      collaborationPublication?: EditorSuggestionRecord['collaborationPublication']
+      suggestionId: string
+      type: 'acceptEditorSuggestion'
+    }
   | { suggestionId: string; type: 'rejectEditorSuggestion' }
   | { suggestionId: string; type: 'markEditorSuggestionStale' }
   | {
@@ -187,7 +198,14 @@ export type ResearchDeskAction =
   | { draft: string; type: 'setEditorAssistantDraft' }
   | { tab: EditorPanelTab; type: 'setEditorPanelTab' }
   | { mode: EditorViewMode; type: 'setEditorViewMode' }
-  | { documentId: string; type: 'setEditorDiffAnchor' }
+  | { contentMarkdown: string; documentId: string; type: 'setEditorDiffAnchor' }
+  | {
+      confirmedAt: string
+      contentMarkdown: string
+      documentId: string
+      sequence: number
+      type: 'confirmEditorCollaborationProjection'
+    }
   | { isVisible: boolean; type: 'setEditorDiffVisible' }
   | { runId: string; type: 'importResearchReportToEditor' }
   | { contentMarkdown: string; messageId: string; threadId: string; type: 'editChatUserMessage' }
@@ -233,6 +251,12 @@ export type ResearchDeskAction =
   | { type: 'markApiRunError'; message: string; runId: string }
   | { type: 'upsertApiRunSummary'; select?: boolean; summary: ResearchRunSummary }
   | {
+      sourceRunId: string
+      summary: ResearchRunSummary
+      type: 'adoptImportedApiRun'
+    }
+  | { summaries: ResearchRunSummary[]; type: 'replaceApiRunSummaries' }
+  | {
     /** Append new ids to the END of the order (older load-more pages) rather
      * than prepending (the page-1 hydrate / newest). */
     append?: boolean
@@ -244,8 +268,20 @@ export type ResearchDeskAction =
   | { groups: ChatThreadGroupRecord[]; type: 'upsertServerChatThreadGroups' }
   | { enabled: boolean; persistLocal?: boolean; type: 'setServerSyncEnabled' }
   | { documents: EditorDocumentRecord[]; type: 'upsertServerEditorDocuments' }
+  | {
+      collaboration: NonNullable<EditorDocumentRecord['collaboration']>
+      documentId: string
+      metadataRevision: number
+      type: 'activateEditorDocumentCollaboration'
+    }
+  | { document: EditorDocumentRecord; type: 'setServerEditorDocumentDetail' }
   | { contentMarkdown: string; documentId: string; type: 'setServerEditorDocumentBody' }
   | { documentId: string; revision: number; type: 'adoptEditorDocumentRevision' }
+  | {
+      documentId: string
+      metadataRevision: number
+      type: 'adoptEditorDocumentMetadataRevision'
+    }
   | {
       contentMarkdown: string
       documentId: string
@@ -255,7 +291,14 @@ export type ResearchDeskAction =
     }
   | { folders: EditorFolderRecord[]; type: 'upsertServerEditorFolders' }
   | { comments: EditorCommentThreadRecord[]; type: 'upsertServerEditorComments' }
+  | {
+      comments: EditorCommentThreadRecord[]
+      documentId: string
+      preserveCommentIds: string[]
+      type: 'reconcileServerEditorComments'
+    }
   | { sections: FileLibrarySectionRecord[]; type: 'upsertServerAssetSections' }
+  | { replacements: Record<string, string>; type: 'rekeyFileLibrarySectionIds' }
   | { groups: FileGroupRecord[]; type: 'upsertServerAssetGroups' }
   | { assets: FileAssetRecord[]; type: 'upsertServerAssetMetadata' }
   | { assetId: string; extractedText: string; type: 'setServerAssetBody' }
@@ -360,6 +403,7 @@ export type ResearchDeskAction =
   | { type: 'selectKnowledgeSession'; sessionId: string }
   | { groups: KnowledgeSessionGroupRecord[]; type: 'upsertServerKnowledgeSessionGroups' }
   | { memberships: Record<string, string | null>; sessions: KnowledgeSessionRecord[]; type: 'upsertServerKnowledgeSessions' }
+  | { replacements: Record<string, string>; type: 'rekeyKnowledgeSessionIds' }
   | { serverIds: string[]; type: 'pruneLocalPlaceholderKnowledgeSessions' }
   | { items: KnowledgeThreadItemRecord[]; sessionId: string; type: 'setServerKnowledgeSessionItems' }
   | { item: KnowledgeThreadItemRecord; type: 'startKnowledgeAsk' }
@@ -393,6 +437,71 @@ export function researchDeskReducer(
     // previous project's synced fingerprints into a delete. The loaded state's
     // own (ephemeral, unserialized) epoch is discarded on purpose.
     return { ...action.state, projectEpoch: state.projectEpoch + 1 }
+  }
+  if (action.type === 'rekeyFileLibrarySectionIds') {
+    const replacements = Object.entries(action.replacements).filter(
+      ([from, to]) => from !== to && Boolean(state.fileLibrarySections[from]),
+    )
+    if (replacements.length === 0) return state
+    const replaceId = (id: string) => action.replacements[id] ?? id
+    const fileLibrarySections = { ...state.fileLibrarySections }
+    for (const [from, to] of replacements) {
+      const section = fileLibrarySections[from]
+      delete fileLibrarySections[from]
+      fileLibrarySections[to] = { ...section, id: to }
+    }
+    return {
+      ...state,
+      dirty: true,
+      fileAssets: Object.fromEntries(Object.entries(state.fileAssets).map(([id, asset]) => [
+        id,
+        { ...asset, sectionId: replaceId(asset.sectionId) },
+      ])),
+      fileGroups: Object.fromEntries(Object.entries(state.fileGroups).map(([id, group]) => [
+        id,
+        { ...group, sectionId: replaceId(group.sectionId) },
+      ])),
+      fileLibrarySectionOrder: state.fileLibrarySectionOrder.map(replaceId),
+      fileLibrarySections,
+    }
+  }
+  if (action.type === 'rekeyKnowledgeSessionIds') {
+    const replacements = Object.entries(action.replacements).filter(
+      ([from, to]) => from !== to && Boolean(state.knowledgeSessions[from]),
+    )
+    if (replacements.length === 0) return state
+    const replaceId = (id: string) => action.replacements[id] ?? id
+    const knowledgeSessions = { ...state.knowledgeSessions }
+    const knowledgeSessionGroupMemberships = { ...state.knowledgeSessionGroupMemberships }
+    for (const [from, to] of replacements) {
+      const session = knowledgeSessions[from]
+      delete knowledgeSessions[from]
+      knowledgeSessions[to] = { ...session, id: to }
+      const groupId = knowledgeSessionGroupMemberships[from]
+      delete knowledgeSessionGroupMemberships[from]
+      knowledgeSessionGroupMemberships[to] = groupId ?? null
+    }
+    return {
+      ...state,
+      dirty: true,
+      knowledgeItems: Object.fromEntries(Object.entries(state.knowledgeItems).map(([id, item]) => [
+        id,
+        { ...item, sessionId: replaceId(item.sessionId) },
+      ])),
+      knowledgeSessionGroupMemberships,
+      knowledgeSessionOrder: state.knowledgeSessionOrder.map(replaceId),
+      knowledgeSessions,
+      selectedKnowledgeSessionId: state.selectedKnowledgeSessionId
+        ? replaceId(state.selectedKnowledgeSessionId)
+        : null,
+      ui: {
+        ...state.ui,
+        pinnedExplorer: {
+          ...state.ui.pinnedExplorer,
+          knowledgeSessionIds: state.ui.pinnedExplorer.knowledgeSessionIds.map(replaceId),
+        },
+      },
+    }
   }
   if (action.type === 'setDemoMode') {
     const base = action.enabled ? createSeedProjectState() : createEmptyProjectState()
@@ -777,6 +886,11 @@ export function researchDeskReducer(
     const editorComments = Object.fromEntries(
       Object.entries(state.editorComments).filter(([, comment]) => comment.documentId !== action.documentId),
     )
+    const editorCommentOutbox = Object.fromEntries(
+      Object.entries(state.editorCommentOutbox ?? {}).filter(([, entry]) => (
+        entry.documentId !== action.documentId
+      )),
+    )
     const editorDocumentOrder = state.editorDocumentOrder.filter((id) => id !== action.documentId)
     const openDocumentIds = state.editorUi.openDocumentIds.filter((id) => id !== action.documentId)
     const activeDocumentId = state.editorUi.activeDocumentId === action.documentId
@@ -785,6 +899,7 @@ export function researchDeskReducer(
     return {
       ...state,
       dirty: true,
+      editorCommentOutbox,
       editorComments,
       editorDocumentOrder,
       editorDocuments,
@@ -847,9 +962,25 @@ export function researchDeskReducer(
       },
     }
   }
+  if (action.type === 'acknowledgeEditorCommentOutbox') {
+    const current = state.editorCommentOutbox ?? {}
+    let changed = false
+    const editorCommentOutbox = { ...current }
+    for (const acknowledgement of action.acknowledgements) {
+      const pending = editorCommentOutbox[acknowledgement.commentId]
+      if (
+        !pending
+        || pending.operation !== acknowledgement.operation
+        || pending.updatedAt !== acknowledgement.updatedAt
+      ) continue
+      delete editorCommentOutbox[acknowledgement.commentId]
+      changed = true
+    }
+    return changed ? { ...state, editorCommentOutbox } : state
+  }
   if (action.type === 'createEditorComment') {
     if (!state.editorDocuments[action.comment.documentId]) return state
-    return {
+    return markEditorCommentOutbox({
       ...state,
       dirty: true,
       editorComments: {
@@ -862,13 +993,13 @@ export function researchDeskReducer(
         panelTab: 'comments',
         selectedCommentId: action.comment.id,
       },
-    }
+    }, action.comment, 'upsert')
   }
   if (action.type === 'resolveEditorComment') {
     const comment = state.editorComments[action.commentId]
     if (!comment || comment.status === 'resolved') return state
     const now = new Date().toISOString()
-    return {
+    return markEditorCommentOutbox({
       ...state,
       dirty: true,
       editorComments: {
@@ -884,23 +1015,24 @@ export function researchDeskReducer(
         new Set([comment.id]),
         now,
       ),
-    }
+    }, { ...comment, status: 'resolved', updatedAt: now }, 'upsert')
   }
   if (action.type === 'setEditorCommentStatus') {
     const comment = state.editorComments[action.commentId]
     if (!comment || comment.status === action.status) return state
     const now = new Date().toISOString()
-    return {
+    const updatedComment = { ...comment, status: action.status, updatedAt: now }
+    return markEditorCommentOutbox({
       ...state,
       dirty: true,
       editorComments: {
         ...state.editorComments,
-        [comment.id]: { ...comment, status: action.status, updatedAt: now },
+        [comment.id]: updatedComment,
       },
       editorSuggestions: action.status === 'resolved'
         ? retireActiveEditorSuggestionsForComments(state.editorSuggestions, new Set([comment.id]), now)
         : state.editorSuggestions,
-    }
+    }, updatedComment, 'upsert')
   }
   if (action.type === 'setEditorCommentKind') {
     const comment = state.editorComments[action.commentId]
@@ -909,47 +1041,50 @@ export function researchDeskReducer(
     const evidencePreset = action.kind === 'evidence_review'
       ? comment.evidencePreset ?? 'add_sources'
       : undefined
-    return {
+    const updatedComment = { ...comment, evidencePreset, kind: action.kind, updatedAt: now }
+    return markEditorCommentOutbox({
       ...state,
       dirty: true,
       editorComments: {
         ...state.editorComments,
-        [comment.id]: { ...comment, evidencePreset, kind: action.kind, updatedAt: now },
+        [comment.id]: updatedComment,
       },
       editorSuggestions: retireActiveEditorSuggestionsForComments(
         state.editorSuggestions,
         new Set([comment.id]),
         now,
       ),
-    }
+    }, updatedComment, 'upsert')
   }
   if (action.type === 'setEditorCommentEvidencePreset') {
     const comment = state.editorComments[action.commentId]
     if (!comment) return state
     const now = new Date().toISOString()
-    return {
+    const updatedComment = { ...comment, evidencePreset: action.preset ?? undefined, updatedAt: now }
+    return markEditorCommentOutbox({
       ...state,
       dirty: true,
       editorComments: {
         ...state.editorComments,
-        [comment.id]: { ...comment, evidencePreset: action.preset ?? undefined, updatedAt: now },
+        [comment.id]: updatedComment,
       },
       editorSuggestions: retireActiveEditorSuggestionsForComments(
         state.editorSuggestions,
         new Set([comment.id]),
         now,
       ),
-    }
+    }, updatedComment, 'upsert')
   }
   if (action.type === 'deleteEditorComment') {
-    if (!state.editorComments[action.commentId]) return state
+    const comment = state.editorComments[action.commentId]
+    if (!comment) return state
     const editorComments = { ...state.editorComments }
     delete editorComments[action.commentId]
     const editorSuggestions = Object.fromEntries(
       Object.entries(state.editorSuggestions).filter(([, suggestion]) =>
         suggestion.origin.commentId !== action.commentId),
     )
-    return {
+    return markEditorCommentOutbox({
       ...state,
       dirty: true,
       editorComments,
@@ -960,26 +1095,27 @@ export function researchDeskReducer(
           ? null
           : state.editorUi.selectedCommentId,
       },
-    }
+    }, comment, 'delete')
   }
   if (action.type === 'updateEditorCommentText') {
     const comment = state.editorComments[action.commentId]
     const text = action.contentMarkdown.trim()
     if (!comment || !text || comment.commentMarkdown === text) return state
     const now = new Date().toISOString()
-    return {
+    const updatedComment = { ...comment, commentMarkdown: text, updatedAt: now }
+    return markEditorCommentOutbox({
       ...state,
       dirty: true,
       editorComments: {
         ...state.editorComments,
-        [comment.id]: { ...comment, commentMarkdown: text, updatedAt: now },
+        [comment.id]: updatedComment,
       },
       editorSuggestions: retireActiveEditorSuggestionsForComments(
         state.editorSuggestions,
         new Set([comment.id]),
         now,
       ),
-    }
+    }, updatedComment, 'upsert')
   }
   if (action.type === 'createEditorSuggestionGroup') {
     const now = new Date().toISOString()
@@ -1035,7 +1171,14 @@ export function researchDeskReducer(
       dirty: true,
       editorSuggestions: {
         ...state.editorSuggestions,
-        [suggestion.id]: { ...suggestion, status, updatedAt: new Date().toISOString() },
+        [suggestion.id]: {
+          ...suggestion,
+          ...(action.type === 'acceptEditorSuggestion' && action.collaborationPublication
+            ? { collaborationPublication: action.collaborationPublication }
+            : {}),
+          status,
+          updatedAt: new Date().toISOString(),
+        },
       },
     }
     if (action.type !== 'acceptEditorSuggestion' || !suggestion.origin.commentId) {
@@ -1043,17 +1186,18 @@ export function researchDeskReducer(
     }
     const comment = state.editorComments[suggestion.origin.commentId]
     if (!comment || comment.status === 'resolved') return nextState
-    return {
+    const updatedComment = { ...comment, status: 'resolved' as const, updatedAt: new Date().toISOString() }
+    return markEditorCommentOutbox({
       ...nextState,
       editorComments: {
         ...nextState.editorComments,
-        [comment.id]: { ...comment, status: 'resolved', updatedAt: new Date().toISOString() },
+        [comment.id]: updatedComment,
       },
       editorUi: {
         ...nextState.editorUi,
         selectedCommentId: nextOpenEditorCommentId(nextState, comment.id),
       },
-    }
+    }, updatedComment, 'upsert')
   }
   if (action.type === 'updateEditorSuggestionProposal') {
     const suggestion = state.editorSuggestions[action.suggestionId]
@@ -1160,8 +1304,28 @@ export function researchDeskReducer(
         ...state.editorDocuments,
         [document.id]: {
           ...document,
-          diffAnchorMarkdown: document.contentMarkdown,
+          diffAnchorMarkdown: action.contentMarkdown,
           diffAnchorUpdatedAt: now,
+        },
+      },
+    }
+  }
+  if (action.type === 'confirmEditorCollaborationProjection') {
+    const document = state.editorDocuments[action.documentId]
+    if (!document || !document.collaboration) return state
+    return {
+      ...state,
+      editorDocuments: {
+        ...state.editorDocuments,
+        [document.id]: {
+          ...document,
+          collaboration: {
+            ...document.collaboration,
+            persistedSequence: action.sequence,
+            projectionSequence: action.sequence,
+            projectionUpdatedAt: action.confirmedAt,
+          },
+          contentMarkdown: action.contentMarkdown,
         },
       },
     }
@@ -1198,6 +1362,12 @@ export function researchDeskReducer(
         selectedJobId: run.runId,
       },
     }
+  }
+  if (action.type === 'replaceApiRunSummaries') {
+    return replaceApiRunSummaries(state, action.summaries)
+  }
+  if (action.type === 'adoptImportedApiRun') {
+    return adoptImportedApiRun(state, action.sourceRunId, action.summary)
   }
   if (action.type === 'upsertApiRunSummary') {
     // Knowledge-mode runs are owned by the Knowledge thread. Keeping them out of
@@ -1566,6 +1736,7 @@ export function researchDeskReducer(
           updatedAt: serverUpdatedAt,
           runIds: [],
           sourcePolicy: metadata.sourcePolicy,
+          persistable: true,
         }
         if (!agentSessionOrder.includes(wire.id)) {
           agentSessionOrder = [...agentSessionOrder, wire.id]
@@ -1583,7 +1754,11 @@ export function researchDeskReducer(
             metadata?.sourcePolicy
             ?? existing.sourcePolicy
             ?? { ...DEFAULT_AGENT_SOURCE_POLICY },
+          persistable: true,
         }
+      } else if (existing.persistable === false) {
+        // A real server session wins over an identically keyed derived shell.
+        agentSessions[wire.id] = { ...existing, persistable: true }
       }
     }
     const agentSessionGroups = { ...state.agentSessionGroups }
@@ -1814,6 +1989,25 @@ export function researchDeskReducer(
       : state.editorDocumentOrder
     return { ...state, editorDocumentOrder, editorDocuments }
   }
+  if (action.type === 'activateEditorDocumentCollaboration') {
+    const document = state.editorDocuments[action.documentId]
+    if (!document) return state
+    const metadataRevision = Number.isSafeInteger(action.metadataRevision)
+      ? Math.max(document.metadataRevision ?? 0, action.metadataRevision)
+      : document.metadataRevision
+    return {
+      ...state,
+      editorDocuments: {
+        ...state.editorDocuments,
+        [document.id]: {
+          ...document,
+          collaboration: action.collaboration,
+          contentMode: 'collaboration',
+          ...(metadataRevision === undefined ? {} : { metadataRevision }),
+        },
+      },
+    }
+  }
   if (action.type === 'setServerEditorDocumentBody') {
     // Load-on-open: fill a document's body from the server. Never changes
     // updatedAt (so the autosave does not read it back as a local edit)
@@ -1846,6 +2040,25 @@ export function researchDeskReducer(
         [action.documentId]: {
           ...document,
           revision: action.revision,
+        },
+      },
+    }
+  }
+  if (action.type === 'adoptEditorDocumentMetadataRevision') {
+    const document = state.editorDocuments[action.documentId]
+    const currentRevision = document?.metadataRevision ?? 0
+    if (
+      !document
+      || !Number.isSafeInteger(action.metadataRevision)
+      || action.metadataRevision <= currentRevision
+    ) return state
+    return {
+      ...state,
+      editorDocuments: {
+        ...state.editorDocuments,
+        [action.documentId]: {
+          ...document,
+          metadataRevision: action.metadataRevision,
         },
       },
     }
@@ -1911,6 +2124,17 @@ export function researchDeskReducer(
       : state.editorFolderOrder
     return { ...state, editorFolderOrder, editorFolders }
   }
+  if (action.type === 'setServerEditorDocumentDetail') {
+    const existing = state.editorDocuments[action.document.id]
+    if (!existing) return state
+    return {
+      ...state,
+      editorDocuments: {
+        ...state.editorDocuments,
+        [action.document.id]: action.document,
+      },
+    }
+  }
   if (action.type === 'upsertServerEditorComments') {
     // Load-on-open: merge a document's comments from the server, by id,
     // local-newer-wins, never dirty. (Comments have no order array — the
@@ -1924,6 +2148,45 @@ export function researchDeskReducer(
       }
     }
     return { ...state, editorComments }
+  }
+  if (action.type === 'reconcileServerEditorComments') {
+    const preserveCommentIds = new Set(action.preserveCommentIds)
+    const incomingById = new Map(
+      action.comments
+        .filter((comment) => comment.documentId === action.documentId)
+        .map((comment) => [comment.id, comment]),
+    )
+    const editorComments = { ...state.editorComments }
+    const removedCommentIds = new Set<string>()
+    for (const comment of Object.values(state.editorComments)) {
+      if (
+        comment.documentId !== action.documentId
+        || preserveCommentIds.has(comment.id)
+      ) continue
+      if (!incomingById.has(comment.id)) {
+        delete editorComments[comment.id]
+        removedCommentIds.add(comment.id)
+      }
+    }
+    for (const incoming of incomingById.values()) {
+      if (preserveCommentIds.has(incoming.id) && editorComments[incoming.id]) continue
+      editorComments[incoming.id] = incoming
+    }
+    const editorSuggestions = removedCommentIds.size === 0
+      ? state.editorSuggestions
+      : Object.fromEntries(Object.entries(state.editorSuggestions).filter(([, suggestion]) => (
+          !suggestion.origin.commentId
+          || !removedCommentIds.has(suggestion.origin.commentId)
+        )))
+    return {
+      ...state,
+      editorComments,
+      editorSuggestions,
+      editorUi: state.editorUi.selectedCommentId
+        && removedCommentIds.has(state.editorUi.selectedCommentId)
+        ? { ...state.editorUi, selectedCommentId: null }
+        : state.editorUi,
+    }
   }
   if (action.type === 'upsertServerAssetSections') {
     // Hydrate file-library section metadata (M6c). Additive + local-newer-
@@ -2263,7 +2526,12 @@ export function researchDeskReducer(
       dirty: true,
       knowledgeSessions: {
         ...state.knowledgeSessions,
-        [session.id]: { ...session, title, updatedAt: new Date().toISOString() },
+        [session.id]: {
+          ...session,
+          isBootstrapPlaceholder: false,
+          title,
+          updatedAt: new Date().toISOString(),
+        },
       },
     }
   }
@@ -2372,7 +2640,7 @@ export function researchDeskReducer(
     const isPristineBootstrap = (sessionId: string) => {
       const session = state.knowledgeSessions[sessionId]
       return Boolean(session)
-        && sessionId === DEFAULT_KNOWLEDGE_SESSION_ID
+        && session.isBootstrapPlaceholder === true
         && session.title === DEFAULT_KNOWLEDGE_SESSION_TITLE
         && !sessionHasItems(sessionId)
     }
@@ -2458,6 +2726,7 @@ export function researchDeskReducer(
     const updatedSession = session
       ? {
         ...session,
+        isBootstrapPlaceholder: false,
         title: !sessionHasItems && isPlaceholderKnowledgeSessionTitle(session.title)
           ? knowledgeSessionTitleFromQuestion(action.item.question)
           : session.title,
@@ -4451,10 +4720,6 @@ function reportLabel(title: string, runId: string) {
   return runId.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 48) || 'report'
 }
 
-function createId(prefix: string) {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-}
-
 function knowledgeSessionTitleFromQuestion(question: string): string {
   const title = question.trim().replace(/\s+/g, ' ').slice(0, 48)
   return title || 'Knowledge session'
@@ -4644,6 +4909,24 @@ function nextOpenEditorCommentId(state: ProjectState, currentCommentId: string) 
   return ordered[currentIndex + 1]?.id ?? ordered[currentIndex - 1]?.id ?? null
 }
 
+function markEditorCommentOutbox(
+  state: ProjectState,
+  comment: EditorCommentThreadRecord,
+  operation: EditorCommentOutboxEntry['operation'],
+): ProjectState {
+  return {
+    ...state,
+    editorCommentOutbox: {
+      ...(state.editorCommentOutbox ?? {}),
+      [comment.id]: {
+        documentId: comment.documentId,
+        operation,
+        ...(operation === 'upsert' ? { updatedAt: comment.updatedAt } : {}),
+      },
+    },
+  }
+}
+
 function retireActiveEditorSuggestionsForComments(
   suggestions: ProjectState['editorSuggestions'],
   commentIds: Set<string>,
@@ -4726,6 +5009,208 @@ function resolveVisibleSelection(
   return selectedJobIsVisible ? selectedJobId : visibleRunIds[0] ?? null
 }
 
+/**
+ * Atomically reconcile the complete run listing. Server-backed rows absent
+ * from the successful listing are removed (including revoked shares), while
+ * imported/mock rows remain local. Incoming summaries still merge onto live
+ * event/result state through the normal reducer path.
+ */
+export function replaceApiRunSummaries(
+  state: ProjectState,
+  summaries: readonly ResearchRunSummary[],
+): ProjectState {
+  let merged = state
+  for (const summary of summaries) {
+    merged = researchDeskReducer(merged, {
+      summary,
+      type: 'upsertApiRunSummary',
+    })
+  }
+
+  const researchServerOrder: string[] = []
+  const visibleResearchIds = new Set<string>()
+  const visibleAgentIds = new Set<string>()
+  for (const summary of summaries) {
+    if (summary.mode === 'knowledge' || summary.kind === 'agent_child') continue
+    if (isAgentRunSummary(summary)) {
+      visibleAgentIds.add(summary.run_id)
+    } else if (!visibleResearchIds.has(summary.run_id)) {
+      visibleResearchIds.add(summary.run_id)
+      researchServerOrder.push(summary.run_id)
+    }
+  }
+
+  const researchRuns = Object.fromEntries(
+    Object.entries(merged.researchRuns).filter(
+      ([runId, run]) => run.source !== 'api' || visibleResearchIds.has(runId),
+    ),
+  )
+  const localResearchOrder = merged.researchRunOrder.filter((runId) => {
+    const run = researchRuns[runId]
+    return run !== undefined && run.source !== 'api'
+  })
+  const researchRunOrder = [...researchServerOrder, ...localResearchOrder]
+  const selectedJobId = resolveVisibleSelection(
+    researchRunOrder,
+    researchRuns,
+    merged.ui.activeFilter,
+    merged.ui.selectedJobId,
+  )
+
+  // The paginated root listing intentionally does not hydrate child summaries.
+  // Keep already-loaded descendants while their root remains visible; if the
+  // root disappears (delete/share revoke), prune every descendant with it.
+  const retainedAgentIds = retainedAgentTreeIds(merged.agentRuns, visibleAgentIds)
+  const agentRuns = Object.fromEntries(
+    Object.entries(merged.agentRuns).filter(([runId]) => retainedAgentIds.has(runId)),
+  )
+  const agentSessions = Object.fromEntries(
+    merged.agentSessionOrder.flatMap((sessionId) => {
+      const session = merged.agentSessions[sessionId]
+      if (!session) return []
+      const runIds = session.runIds.filter((runId) => agentRuns[runId] !== undefined)
+      // Derived shared-run views and run-id-keyed transient shells disappear
+      // with their last run; real empty server sessions remain available.
+      if (runIds.length === 0 && (
+        session.persistable === false
+        || (
+          visibleAgentIds.has(sessionId) === false
+          && merged.agentRuns[sessionId] !== undefined
+        )
+      )) {
+        return []
+      }
+      return [[sessionId, { ...session, runIds }]]
+    }),
+  ) as Record<string, AgentSessionRecord>
+  const agentSessionOrder = merged.agentSessionOrder.filter(
+    (sessionId) => agentSessions[sessionId] !== undefined,
+  )
+  const selectedAgentSessionId = merged.selectedAgentSessionId
+    && agentSessions[merged.selectedAgentSessionId]
+    ? merged.selectedAgentSessionId
+    : agentSessionOrder[0] ?? null
+
+  return {
+    ...merged,
+    agentCanvas: agentCanvasForSelection(merged, selectedAgentSessionId),
+    agentRuns,
+    agentSessionOrder,
+    agentSessions,
+    researchRunOrder,
+    researchRuns,
+    selectedAgentSessionId,
+    ui: {
+      ...merged.ui,
+      expandedJobId: merged.ui.expandedJobId
+        && researchRuns[merged.ui.expandedJobId]
+        ? merged.ui.expandedJobId
+        : selectedJobId,
+      pendingChatReportRunId: merged.ui.pendingChatReportRunId
+        && researchRuns[merged.ui.pendingChatReportRunId]
+        ? merged.ui.pendingChatReportRunId
+        : null,
+      pinnedExplorer: {
+        ...merged.ui.pinnedExplorer,
+        agentSessionIds: merged.ui.pinnedExplorer.agentSessionIds.filter(
+          (sessionId) => agentSessions[sessionId] !== undefined,
+        ),
+      },
+      selectedAgentSessionId,
+      selectedJobId,
+    },
+  }
+}
+
+/**
+ * Replace one imported project-local run id with the canonical id allocated by
+ * ``POST /v1/runs/import``. The report body and event history stay intact while
+ * every in-project reference follows the new id atomically, so a later delete,
+ * share, selection, or attachment always addresses the durable resource.
+ */
+export function adoptImportedApiRun(
+  state: ProjectState,
+  sourceRunId: string,
+  summary: ResearchRunSummary,
+): ProjectState {
+  const imported = state.researchRuns[sourceRunId]
+  if (!imported || imported.source !== 'imported') return state
+  const canonicalRunId = summary.run_id
+  const run = mergeRunSummary(imported, summary, state.ui.selectedStack)
+  const researchRuns = { ...state.researchRuns }
+  delete researchRuns[sourceRunId]
+  researchRuns[canonicalRunId] = run
+  const researchRunOrder = state.researchRunOrder
+    .map((runId) => runId === sourceRunId ? canonicalRunId : runId)
+    .filter((runId, index, ids) => ids.indexOf(runId) === index)
+  const replaceRunId = (runId: string | null) =>
+    runId === sourceRunId ? canonicalRunId : runId
+  const pendingChatAttachmentRefs = state.ui.pendingChatAttachmentRefs.map((ref) =>
+    ref.kind === 'research-report' && ref.runId === sourceRunId
+      ? { ...ref, runId: canonicalRunId }
+      : ref)
+  const editorDocuments = Object.fromEntries(
+    Object.entries(state.editorDocuments).map(([documentId, document]) => [
+      documentId,
+      document.sourceRunId === sourceRunId
+        ? { ...document, sourceRunId: canonicalRunId }
+        : document,
+    ]),
+  )
+  const chatThreads = Object.fromEntries(
+    Object.entries(state.chatThreads).map(([threadId, thread]) => [
+      threadId,
+      {
+        ...thread,
+        messages: thread.messages.map((message) => ({
+          ...message,
+          attachments: message.attachments?.map((attachment) =>
+            attachment.kind === 'research-report' && attachment.runId === sourceRunId
+              ? { ...attachment, runId: canonicalRunId }
+              : attachment),
+        })),
+      },
+    ]),
+  )
+  return {
+    ...state,
+    chatThreads,
+    editorDocuments,
+    researchRunOrder,
+    researchRuns,
+    ui: {
+      ...state.ui,
+      expandedJobId: replaceRunId(state.ui.expandedJobId),
+      pendingChatAttachmentRefs,
+      pendingChatReportRunId: replaceRunId(state.ui.pendingChatReportRunId),
+      selectedJobId: replaceRunId(state.ui.selectedJobId),
+    },
+  }
+}
+
+function retainedAgentTreeIds(
+  agentRuns: Readonly<Record<string, AgentRunRecord>>,
+  visibleRootIds: ReadonlySet<string>,
+): Set<string> {
+  const retained = new Set(visibleRootIds)
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const [runId, run] of Object.entries(agentRuns)) {
+      if (retained.has(runId) || run.kind !== 'agent_child') continue
+      const rootVisible = run.rootRunId !== undefined
+        && visibleRootIds.has(run.rootRunId)
+      const parentRetained = run.parentRunId !== undefined
+        && retained.has(run.parentRunId)
+      if (rootVisible || parentRetained) {
+        retained.add(runId)
+        changed = true
+      }
+    }
+  }
+  return retained
+}
+
 /** Merge an agent-run summary and keep its session's turn list in sync.
  * Runs without a session id get a synthetic one keyed by the run id so
  * they stay visible. Never sets `dirty` (server-derived rows). */
@@ -4789,6 +5274,7 @@ function withAgentRunSummary(
       updatedAt: run.createdAt,
       runIds: [run.runId],
       sourcePolicy: { ...DEFAULT_AGENT_SOURCE_POLICY },
+      ...(run.access?.mode === 'shared' ? { persistable: false } : {}),
     }
     agentSessions = { ...agentSessions, [sessionId]: session }
     agentSessionOrder = [sessionId, ...agentSessionOrder]

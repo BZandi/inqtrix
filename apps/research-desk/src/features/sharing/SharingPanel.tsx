@@ -19,26 +19,27 @@ import { SettingsSection, StatusBadge } from '@/features/settings/parts'
 import { useLocale } from '@/i18n/LocaleProvider'
 import type { TranslationDictionary } from '@/i18n/translations'
 import { ShareDialog } from './ShareDialog'
+import { sharePermissionLabel } from './shareModel'
 import type { InboxShare, OutgoingShare, SharePermissionValue } from './types'
 import type { SharingInboxHandle } from './useSharingInbox'
 
 type SharingPanelProps = {
   /** Demo resolves the inbox + dialog from seeded data (no backend). */
   demo: boolean
-  /** Navigate to the shared resource's home view (run -> research, collection
-   * -> database, template -> prompt library). View-level only by design — the
-   * accepted item already surfaces in that view's list (runs in the "Mit mir
-   * geteilt" divider), so it takes only the type, no per-entity focus. */
-  onOpen: (resourceType: string) => void
+  /** Navigate to and focus the exact accepted resource. */
+  onOpen: (share: InboxShare) => void
   /** The current user, shown as owner in the reused share dialog. */
   ownerEmail: string | null
   ownerName: string | null
+  refreshToken: number
   sharing: SharingInboxHandle
 }
 
 const KIND_ICON: Record<string, LucideIcon> = {
   knowledge_collection: BookOpen,
+  editor_document: FileText,
   prompt_template: Library,
+  skill_template: Library,
   run: Globe2,
 }
 
@@ -46,7 +47,11 @@ function kindIcon(resourceType: string): LucideIcon {
   return KIND_ICON[resourceType] ?? FileText
 }
 
-function kindLabel(t: TranslationDictionary, resourceType: string): string {
+function kindLabel(
+  t: TranslationDictionary,
+  locale: 'de' | 'en',
+  resourceType: string,
+): string {
   switch (resourceType) {
     case 'run':
       return t.sharingManagement.kindRun
@@ -54,6 +59,10 @@ function kindLabel(t: TranslationDictionary, resourceType: string): string {
       return t.sharingManagement.kindCollection
     case 'prompt_template':
       return t.sharingManagement.kindTemplate
+    case 'skill_template':
+      return t.skills.title
+    case 'editor_document':
+      return locale === 'de' ? 'Editor-Dokument' : 'Editor document'
     default:
       return t.sharingManagement.kindOther
   }
@@ -61,15 +70,17 @@ function kindLabel(t: TranslationDictionary, resourceType: string): string {
 
 function permissionLabel(
   t: TranslationDictionary,
+  locale: 'de' | 'en',
   permission: SharePermissionValue,
 ): string {
-  return permission === 'edit'
-    ? t.sharingManagement.permissionEdit
-    : t.sharingManagement.permissionView
+  return sharePermissionLabel(permission, locale, {
+    edit: t.sharingManagement.permissionEdit,
+    view: t.sharingManagement.permissionView,
+  })
 }
 
 function grantorName(share: InboxShare): string {
-  return share.granted_by_display_name ?? share.granted_by_sub
+  return share.granted_by_display_name ?? share.granted_by_user_id
 }
 
 function peopleLabel(t: TranslationDictionary, count: number): string {
@@ -123,9 +134,10 @@ export function SharingPanel({
   onOpen,
   ownerEmail,
   ownerName,
+  refreshToken,
   sharing,
 }: SharingPanelProps) {
-  const { t } = useLocale()
+  const { locale, t } = useLocale()
   const { accepted, mutationError, outgoing, pending, status } = sharing.state
   const [confirm, setConfirm] = useState<
     { mode: 'decline' | 'leave'; share: InboxShare } | null
@@ -167,7 +179,7 @@ export function SharingPanel({
                 />
               }
               title={share.resource_title}
-              subtitle={`${kindLabel(t, share.resource_type)} · ${t.sharingManagement.sharedBy.replace('{name}', grantorName(share))} · ${permissionLabel(t, share.permission)}`}
+              subtitle={`${kindLabel(t, locale, share.resource_type)} · ${t.sharingManagement.sharedBy.replace('{name}', grantorName(share))} · ${permissionLabel(t, locale, share.permission)}`}
               trailing={
                 <>
                   <StatusBadge
@@ -214,7 +226,7 @@ export function SharingPanel({
                 />
               }
               title={share.resource_title}
-              subtitle={`${kindLabel(t, share.resource_type)} · ${t.sharingManagement.sharedBy.replace('{name}', grantorName(share))} · ${permissionLabel(t, share.permission)}`}
+              subtitle={`${kindLabel(t, locale, share.resource_type)} · ${t.sharingManagement.sharedBy.replace('{name}', grantorName(share))} · ${permissionLabel(t, locale, share.permission)}`}
               trailing={
                 <>
                   <StatusBadge
@@ -223,7 +235,7 @@ export function SharingPanel({
                     tone="success"
                   />
                   <Button
-                    onClick={() => onOpen(share.resource_type)}
+                    onClick={() => onOpen(share)}
                     size="sm"
                     variant="ghost"
                   >
@@ -264,7 +276,7 @@ export function SharingPanel({
                   </span>
                 }
                 title={item.resource_title}
-                subtitle={`${kindLabel(t, item.resource_type)} · ${peopleLabel(t, item.share_count)}`}
+                subtitle={`${kindLabel(t, locale, item.resource_type)} · ${peopleLabel(t, item.share_count)}`}
                 trailing={
                   <>
                     {item.pending_count > 0 ? (
@@ -326,6 +338,7 @@ export function SharingPanel({
           onClose={() => setManage(null)}
           ownerEmail={ownerEmail}
           ownerName={ownerName}
+          refreshToken={refreshToken}
           resourceId={manage.resource_id}
           resourceTitle={manage.resource_title}
           resourceType={manage.resource_type}

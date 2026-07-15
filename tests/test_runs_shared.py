@@ -62,34 +62,35 @@ def test_snapshot_event_itself_gets_no_companion():
 # ------------------------------------------------------------------ #
 
 
-def test_access_permits_edit_none_is_owned_run():
-    """No ``access`` key means an owned run — full access, mutation allowed."""
-    assert access_permits_edit(None) is True
+def test_access_permits_edit_requires_explicit_access_annotation():
+    """A missing annotation is malformed and must fail closed."""
+    assert access_permits_edit(None) is False
+
+
+@pytest.mark.parametrize("mode", ["owner", "unscoped"])
+def test_access_permits_edit_allows_owner_modes(mode):
+    assert access_permits_edit({"mode": mode}) is True
 
 
 @pytest.mark.parametrize(
     "permission, allowed",
     [
         ("view", False),
-        ("comment", False),
         ("edit", True),
-        ("manage", True),
     ],
 )
 def test_access_permits_edit_respects_ordered_permission(permission, allowed):
-    """A shared-in grant permits mutation iff it is edit-or-higher.
-
-    The ``manage`` case is the regression guard: a raw ``== "edit"`` compare
-    would wrongly deny a manage grant (the highest permission), a 404 for a
-    caller who may do MORE than edit.
-    """
-    access = {"via": "share", "permission": permission}
+    """A shared-in grant permits mutation only for ``edit``."""
+    access = {"mode": "shared", "permission": permission}
     assert access_permits_edit(access) is allowed
 
 
 def test_access_permits_edit_unknown_permission_denies():
     """An unrecognized permission string is treated as no access, not a crash."""
-    assert access_permits_edit({"via": "share", "permission": "bogus"}) is False
+    assert (
+        access_permits_edit({"mode": "shared", "permission": "bogus"})
+        is False
+    )
 
 
 # ------------------------------------------------------------------ #

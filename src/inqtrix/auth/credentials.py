@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import secrets
 import threading
+import uuid
 from dataclasses import dataclass, replace
 from typing import Protocol
 
@@ -86,6 +87,7 @@ class LocalCredential:
             denied at login. ``None`` means active.
     """
 
+    user_id: uuid.UUID
     subject: str
     email: str
     password_hash: str
@@ -128,20 +130,20 @@ class CredentialStore(Protocol):
         """The account for *email* (case-insensitive), or ``None``."""
         ...
 
-    async def get_by_subject(
-        self, *, tenant_id: str, subject: str
+    async def get_by_user_id(
+        self, *, tenant_id: str, user_id: uuid.UUID
     ) -> LocalCredential | None:
         """The account for *subject*, or ``None``."""
         ...
 
     async def set_password(
-        self, *, tenant_id: str, subject: str, password_hash: str
+        self, *, tenant_id: str, user_id: uuid.UUID, password_hash: str
     ) -> bool:
         """Replace the password hash; ``True`` when a row changed."""
         ...
 
     async def set_disabled(
-        self, *, tenant_id: str, subject: str, disabled_at: float | None
+        self, *, tenant_id: str, user_id: uuid.UUID, disabled_at: float | None
     ) -> bool:
         """Set/clear the soft-disable timestamp; ``True`` when a row changed."""
         ...
@@ -160,8 +162,8 @@ class MemoryCredentialStore:
     """
 
     def __init__(self) -> None:
-        self._by_subject: dict[tuple[str, str], LocalCredential] = {}
-        self._lock = threading.Lock()
+        self._by_user: dict[tuple[str, uuid.UUID], LocalCredential] = {}
+        self._lock = threading.RLock()
 
     @staticmethod
     def _email_key(email: str) -> str:
@@ -169,23 +171,23 @@ class MemoryCredentialStore:
 
     async def count(self, *, tenant_id: str) -> int:
         with self._lock:
-            return sum(1 for (t, _s) in self._by_subject if t == tenant_id)
+            return sum(1 for (t, _user_id) in self._by_user if t == tenant_id)
 
     async def create(
         self, credential: LocalCredential, *, tenant_id: str, allow_first_only: bool = False
     ) -> bool:
         with self._lock:
             if allow_first_only and any(
-                t == tenant_id for (t, _s) in self._by_subject
+                t == tenant_id for (t, _user_id) in self._by_user
             ):
                 return False
             email_key = self._email_key(credential.email)
             if any(
                 t == tenant_id and self._email_key(c.email) == email_key
-                for (t, _s), c in self._by_subject.items()
+                for (t, _user_id), c in self._by_user.items()
             ):
                 return False
-            self._by_subject[(tenant_id, credential.subject)] = credential
+            self._by_user[(tenant_id, credential.user_id)] = credential
             return True
 
     async def get_by_email(
@@ -193,37 +195,37 @@ class MemoryCredentialStore:
     ) -> LocalCredential | None:
         email_key = self._email_key(email)
         with self._lock:
-            for (t, _s), c in self._by_subject.items():
+            for (t, _user_id), c in self._by_user.items():
                 if t == tenant_id and self._email_key(c.email) == email_key:
                     return c
         return None
 
-    async def get_by_subject(
-        self, *, tenant_id: str, subject: str
+    async def get_by_user_id(
+        self, *, tenant_id: str, user_id: uuid.UUID
     ) -> LocalCredential | None:
         with self._lock:
-            return self._by_subject.get((tenant_id, subject))
+            return self._by_user.get((tenant_id, user_id))
 
     async def set_password(
-        self, *, tenant_id: str, subject: str, password_hash: str
+        self, *, tenant_id: str, user_id: uuid.UUID, password_hash: str
     ) -> bool:
         with self._lock:
-            existing = self._by_subject.get((tenant_id, subject))
+            existing = self._by_user.get((tenant_id, user_id))
             if existing is None:
                 return False
-            self._by_subject[(tenant_id, subject)] = replace(
+            self._by_user[(tenant_id, user_id)] = replace(
                 existing, password_hash=password_hash
             )
             return True
 
     async def set_disabled(
-        self, *, tenant_id: str, subject: str, disabled_at: float | None
+        self, *, tenant_id: str, user_id: uuid.UUID, disabled_at: float | None
     ) -> bool:
         with self._lock:
-            existing = self._by_subject.get((tenant_id, subject))
+            existing = self._by_user.get((tenant_id, user_id))
             if existing is None:
                 return False
-            self._by_subject[(tenant_id, subject)] = replace(
+            self._by_user[(tenant_id, user_id)] = replace(
                 existing, disabled_at=disabled_at
             )
             return True
@@ -232,7 +234,7 @@ class MemoryCredentialStore:
         with self._lock:
             return tuple(
                 c
-                for (t, _s), c in self._by_subject.items()
+                for (t, _user_id), c in self._by_user.items()
                 if t == tenant_id
             )
 
@@ -265,14 +267,14 @@ class LocalAuthenticator:
             raise CredentialError("Ungueltige Anmeldedaten.")
         if not verify_password(credential.password_hash, password):
             log.warning(
-                "Local login failed: wrong password for sub=%s.",
-                credential.subject,
+                "Local login failed: wrong password for user_id=%s.",
+                credential.user_id,
             )
             raise CredentialError("Ungueltige Anmeldedaten.")
         if credential.disabled_at is not None:
             log.warning(
-                "Local login denied: account disabled sub=%s.",
-                credential.subject,
+                "Local login denied: account disabled user_id=%s.",
+                credential.user_id,
             )
             raise CredentialError("Ungueltige Anmeldedaten.")
         return credential

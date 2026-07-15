@@ -22,6 +22,7 @@ Design decisions (the 0030 pattern):
 from __future__ import annotations
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     Column,
     Float,
@@ -32,7 +33,7 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSON, JSONB, UUID
 
 from inqtrix.project.editor_patch_ports import PATCH_SOURCES, PATCH_STATUSES
 
@@ -59,10 +60,21 @@ editor_patches = Table(
     Column("summary", Text, nullable=False, server_default=text("''")),
     Column("warnings", JSON, nullable=False, server_default=text("'[]'")),
     Column("revision_before", Integer, nullable=False),
+    Column("collaboration_generation", BigInteger, nullable=True),
+    Column("base_sequence", BigInteger, nullable=True),
+    Column("decision_sequence", BigInteger, nullable=True),
+    Column(
+        "suggestion_ids",
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+    ),
     Column("applied_revision", Integer, nullable=True),
     Column("applied_edit_ids", JSON, nullable=True),
     Column("note", Text, nullable=False, server_default=text("''")),
-    Column("created_by_sub", Text, nullable=True),
+    Column("created_by_user_id", UUID(as_uuid=True), nullable=True),
+    Column("decided_by_user_id", UUID(as_uuid=True), nullable=True),
+    Column("command_id", UUID(as_uuid=True), nullable=True),
     Column("created_at", Float, nullable=False),
     Column("decided_at", Float, nullable=True),
     CheckConstraint(
@@ -71,12 +83,31 @@ editor_patches = Table(
     CheckConstraint(
         f"status IN ({_values(PATCH_STATUSES)})", name="ck_editor_patches_status"
     ),
+    CheckConstraint(
+        "(collaboration_generation IS NULL "
+        "AND base_sequence IS NULL AND decision_sequence IS NULL) OR "
+        "(collaboration_generation >= 1 AND base_sequence >= 0 "
+        "AND (decision_sequence IS NULL OR decision_sequence >= 1))",
+        name="ck_editor_patches_collaboration_state",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(suggestion_ids) = 'array'",
+        name="ck_editor_patches_suggestion_ids",
+    ),
     Index(
         "ix_editor_patches_tenant_document",
         "tenant_id",
         "document_id",
         "created_at",
         "patch_id",
+    ),
+    Index(
+        "ix_editor_patches_collaboration_command",
+        "tenant_id",
+        "document_id",
+        "collaboration_generation",
+        "command_id",
+        postgresql_where=text("command_id IS NOT NULL"),
     ),
 )
 """Proposed anchored document edits with their apply/reject lifecycle;

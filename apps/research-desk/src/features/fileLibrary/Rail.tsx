@@ -16,11 +16,13 @@ import { cn } from '@/lib/utils'
 import { QuotaMeterSection } from '@/features/quota/QuotaMeterSection'
 import type { EmbeddingQuota } from '@/features/quota/useEmbeddingQuota'
 import type { VectorIndexStatus } from '@/features/project/types'
+import type { ResearchRunAccess } from '@/features/researchRuns/types'
 import { formatBytes } from './helpers'
 import { FILE_QUOTA_BYTES, isInternalFileDrag, type ActiveTarget } from './constants'
 
 export type RailCollection = { count: number; id: string; title: string }
 export type RailIndex = { count: number; id: string; status: VectorIndexStatus; title: string }
+export type RailServerCollection = { access: ResearchRunAccess; count: number; id: string; title: string }
 
 const INDEX_DOT: Record<VectorIndexStatus, { className: string; pulse: boolean }> = {
   ready: { className: 'bg-success', pulse: false },
@@ -165,7 +167,9 @@ export function Rail({
   onSelectAll,
   onSelectCollection,
   onSelectIndex,
+  onSelectServerCollection,
   query,
+  serverCollections,
   storage,
   embeddingQuota,
   totalDocCount,
@@ -182,7 +186,9 @@ export function Rail({
   onSelectAll: () => void
   onSelectCollection: (sectionId: string) => void
   onSelectIndex: (indexId: string) => void
+  onSelectServerCollection: (collectionId: string) => void
   query: string
+  serverCollections: RailServerCollection[]
   storage: { collectionCount: number; docCount: number; indexCount: number; usedBytes: number }
   totalDocCount: number
 }) {
@@ -253,6 +259,22 @@ export function Rail({
             />
           ))}
           <AddButton label={t.fileLibrary.newCollection} onClick={onNewCollection} />
+        </div>
+
+        <div className="mt-3 flex items-center gap-1.5 px-1.5 pb-1 pt-1">
+          <p className="t-caption text-muted-foreground/80">{t.fileLibrary.sectionServerCollections}</p>
+        </div>
+        <div className="flex flex-col gap-0.5">
+          {serverCollections.map((collection) => (
+            <NavItem
+              active={active.kind === 'server-collection' && active.collectionId === collection.id}
+              count={collection.count}
+              icon={Database}
+              key={collection.id}
+              label={collection.title}
+              onClick={() => onSelectServerCollection(collection.id)}
+            />
+          ))}
         </div>
 
         <div className="mt-3 flex items-center gap-1.5 px-1.5 pb-1 pt-1">

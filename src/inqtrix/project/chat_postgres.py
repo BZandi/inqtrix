@@ -1,7 +1,7 @@
 """Postgres-backed chat-history store (the durable project tier).
 
 Threads, their grouping, and messages persist relationally, scoped per
-``(tenant_id, created_by_sub, workspace_id)`` and joinable for the
+``(tenant_id, created_by_user_id, workspace_id)`` and joinable for the
 owner/share visibility rule. Every operation runs inside
 :func:`~inqtrix.storage.db.tenant_session` (restricted role +
 transaction-local tenant GUC), with an explicit tenant predicate as
@@ -20,6 +20,8 @@ documents.
 
 from __future__ import annotations
 
+import uuid
+
 from sqlalchemy import delete, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -28,7 +30,14 @@ from inqtrix.project.chat_ports import (
     ChatMessage,
     ChatThread,
     ChatThreadGroup,
+    ThreadGroupNotFound,
     ThreadNotFound,
+)
+from inqtrix.project.scoped_upsert import (
+    ResourceScope,
+    delete_scoped_postgres,
+    require_scoped_parent,
+    scoped_postgres_upsert,
 )
 from inqtrix.storage.chat_orm import (
     chat_messages,
@@ -60,13 +69,13 @@ class PostgresChatStore(BaseSessionStore):
         group_id: str | None,
         created_at: float,
         updated_at: float,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> ChatThread:
-        stmt = pg_insert(chat_threads).values(
+        values = dict(
             id=id,
             tenant_id=_DEFAULT_TENANT,
-            created_by_sub=created_by_sub,
+            created_by_user_id=created_by_user_id,
             workspace_id=workspace_id,
             title=title,
             preview=preview,
@@ -75,24 +84,32 @@ class PostgresChatStore(BaseSessionStore):
             created_at=created_at,
             updated_at=updated_at,
         )
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[chat_threads.c.id],
-            set_={
-                "title": stmt.excluded.title,
-                "preview": stmt.excluded.preview,
-                "source": stmt.excluded.source,
-                "group_id": stmt.excluded.group_id,
-                "updated_at": stmt.excluded.updated_at,
-            },
+        stmt = scoped_postgres_upsert(
+            pg_insert(chat_threads),
+            chat_threads,
+            values,
+            ["title", "preview", "source", "group_id", "updated_at"],
         ).returning(chat_threads)
         async with self._session() as session:
-            row = (await session.execute(stmt)).one()
+            if group_id is not None:
+                await require_scoped_parent(
+                    session,
+                    table=chat_thread_groups,
+                    parent_id=group_id,
+                    tenant_id=_DEFAULT_TENANT,
+                    created_by_user_id=created_by_user_id,
+                    workspace_id=workspace_id,
+                    not_found=ThreadGroupNotFound,
+                )
+            row = (await session.execute(stmt)).first()
+            if row is None:
+                raise ThreadNotFound(id)
         return self._thread_from_row(row)
 
     async def list_threads_page(
         self,
         *,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
         limit: int,
         after: tuple[float, str] | None,
@@ -100,8 +117,8 @@ class PostgresChatStore(BaseSessionStore):
         query = select(chat_threads).where(
             chat_threads.c.tenant_id == _DEFAULT_TENANT
         )
-        if created_by_sub is not None:
-            query = query.where(chat_threads.c.created_by_sub == created_by_sub)
+        if created_by_user_id is not None:
+            query = query.where(chat_threads.c.created_by_user_id == created_by_user_id)
         if workspace_id is not None:
             query = query.where(chat_threads.c.workspace_id == workspace_id)
         if after is not None:
@@ -128,19 +145,24 @@ class PostgresChatStore(BaseSessionStore):
             row = await self._thread_row(session, thread_id)
         return self._thread_from_row(row)
 
-    async def delete_thread(self, thread_id: str) -> None:
+    async def delete_thread(
+        self, thread_id: str, *, scope: ResourceScope
+    ) -> None:
         async with self._session() as session:
-            await session.execute(
-                delete(chat_threads).where(
-                    chat_threads.c.tenant_id == _DEFAULT_TENANT,
-                    chat_threads.c.id == thread_id,
-                )
+            await delete_scoped_postgres(
+                session, table=chat_threads, resource_id=thread_id,
+                tenant_id=_DEFAULT_TENANT, scope=scope,
+                not_found=ThreadNotFound,
             )
 
     # -- messages --------------------------------------------------------- #
 
     async def append_messages(
-        self, messages: list[ChatMessage]
+        self,
+        messages: list[ChatMessage],
+        *,
+        expected_created_by_user_id: uuid.UUID | None,
+        expected_workspace_id: str | None,
     ) -> list[ChatMessage]:
         if not messages:
             return []
@@ -171,11 +193,37 @@ class PostgresChatStore(BaseSessionStore):
             },
         )
         async with self._session() as session:
+            for thread_id in sorted({message.thread_id for message in messages}):
+                await require_scoped_parent(
+                    session,
+                    table=chat_threads,
+                    parent_id=thread_id,
+                    tenant_id=_DEFAULT_TENANT,
+                    created_by_user_id=expected_created_by_user_id,
+                    workspace_id=expected_workspace_id,
+                    not_found=ThreadNotFound,
+                )
             await session.execute(stmt)
         return messages
 
-    async def delete_message(self, thread_id: str, message_id: str) -> None:
+    async def delete_message(
+        self,
+        thread_id: str,
+        message_id: str,
+        *,
+        expected_created_by_user_id: uuid.UUID | None,
+        expected_workspace_id: str | None,
+    ) -> None:
         async with self._session() as session:
+            await require_scoped_parent(
+                session,
+                table=chat_threads,
+                parent_id=thread_id,
+                tenant_id=_DEFAULT_TENANT,
+                created_by_user_id=expected_created_by_user_id,
+                workspace_id=expected_workspace_id,
+                not_found=ThreadNotFound,
+            )
             await session.execute(
                 delete(chat_messages).where(
                     chat_messages.c.tenant_id == _DEFAULT_TENANT,
@@ -223,41 +271,42 @@ class PostgresChatStore(BaseSessionStore):
         title: str,
         created_at: float,
         updated_at: float,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> ChatThreadGroup:
-        stmt = pg_insert(chat_thread_groups).values(
+        values = dict(
             id=id,
             tenant_id=_DEFAULT_TENANT,
-            created_by_sub=created_by_sub,
+            created_by_user_id=created_by_user_id,
             workspace_id=workspace_id,
             title=title,
             created_at=created_at,
             updated_at=updated_at,
         )
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[chat_thread_groups.c.id],
-            set_={
-                "title": stmt.excluded.title,
-                "updated_at": stmt.excluded.updated_at,
-            },
+        stmt = scoped_postgres_upsert(
+            pg_insert(chat_thread_groups),
+            chat_thread_groups,
+            values,
+            ["title", "updated_at"],
         ).returning(chat_thread_groups)
         async with self._session() as session:
-            row = (await session.execute(stmt)).one()
+            row = (await session.execute(stmt)).first()
+            if row is None:
+                raise ThreadGroupNotFound(id)
         return self._group_from_row(row)
 
     async def list_groups(
         self,
         *,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> list[ChatThreadGroup]:
         query = select(chat_thread_groups).where(
             chat_thread_groups.c.tenant_id == _DEFAULT_TENANT
         )
-        if created_by_sub is not None:
+        if created_by_user_id is not None:
             query = query.where(
-                chat_thread_groups.c.created_by_sub == created_by_sub
+                chat_thread_groups.c.created_by_user_id == created_by_user_id
             )
         if workspace_id is not None:
             query = query.where(
@@ -271,13 +320,14 @@ class PostgresChatStore(BaseSessionStore):
             rows = (await session.execute(query)).all()
         return [self._group_from_row(row) for row in rows]
 
-    async def delete_group(self, group_id: str) -> None:
+    async def delete_group(
+        self, group_id: str, *, scope: ResourceScope
+    ) -> None:
         async with self._session() as session:
-            await session.execute(
-                delete(chat_thread_groups).where(
-                    chat_thread_groups.c.tenant_id == _DEFAULT_TENANT,
-                    chat_thread_groups.c.id == group_id,
-                )
+            await delete_scoped_postgres(
+                session, table=chat_thread_groups, resource_id=group_id,
+                tenant_id=_DEFAULT_TENANT, scope=scope,
+                not_found=ThreadGroupNotFound,
             )
 
     # -- row mapping ------------------------------------------------------ #
@@ -306,7 +356,7 @@ class PostgresChatStore(BaseSessionStore):
             created_at=row.created_at,
             updated_at=row.updated_at,
             tenant_id=row.tenant_id,
-            created_by_sub=row.created_by_sub,
+            created_by_user_id=row.created_by_user_id,
             workspace_id=row.workspace_id,
         )
 
@@ -318,7 +368,7 @@ class PostgresChatStore(BaseSessionStore):
             created_at=row.created_at,
             updated_at=row.updated_at,
             tenant_id=row.tenant_id,
-            created_by_sub=row.created_by_sub,
+            created_by_user_id=row.created_by_user_id,
             workspace_id=row.workspace_id,
         )
 

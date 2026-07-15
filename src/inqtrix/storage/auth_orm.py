@@ -21,7 +21,7 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 auth_metadata = MetaData()
 
@@ -30,8 +30,9 @@ auth_sessions = Table(
     auth_metadata,
     Column("id", Text, primary_key=True),
     Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
-    Column("sub", Text, nullable=False),
+    Column("user_id", UUID(as_uuid=True), nullable=False),
     Column("issuer", Text, nullable=False),
+    Column("subject", Text, nullable=False),
     Column("email", Text, nullable=True),
     Column("display_name", Text, nullable=True),
     Column("groups", JSONB, nullable=False, server_default=text("'[]'")),

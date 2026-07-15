@@ -230,6 +230,7 @@ venv/
 *.env
 !.env.example
 !deploy/.env.stack.example
+!deploy/.env.migrate.example
 inqtrix.yaml
 inqtrix.yml
 .inqtrix.yaml

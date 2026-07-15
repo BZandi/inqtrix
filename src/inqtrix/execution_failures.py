@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from inqtrix.execution_authority import AuthorizationRevoked
 from inqtrix.exceptions import (
     AgentCancelled,
     AgentModelCapacityError,
@@ -120,6 +121,8 @@ def classify_execution_failure(
         return "token_budget_exceeded"
     if isinstance(exc, AgentCancelled):
         return "client_requested_cancel"
+    if isinstance(exc, AuthorizationRevoked):
+        return AuthorizationRevoked.code
     capability_code = getattr(exc, "code", None)
     capability_status = getattr(exc, "http_status", None)
     if isinstance(capability_code, str) and isinstance(

@@ -1,7 +1,7 @@
 """Postgres-backed file-asset-record store (M6c durable project tier).
 
 Sections, groups, and asset records persist relationally, scoped per
-``(tenant_id, created_by_sub, workspace_id)`` with RLS + the inherited
+``(tenant_id, created_by_user_id, workspace_id)`` with RLS + the inherited
 tenant-session lifecycle (:class:`BaseSessionStore`). Like editor
 documents, ``list_assets_page`` SELECTs metadata columns only (NOT the
 heavy ``extracted_text``); ``get_asset`` SELECTs the full row.
@@ -9,7 +9,8 @@ heavy ``extracted_text``); ``get_asset`` SELECTs the full row.
 
 from __future__ import annotations
 
-from sqlalchemy import delete, select, tuple_
+import uuid
+from sqlalchemy import select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from inqtrix.pagination import encode_cursor
@@ -22,6 +23,14 @@ from inqtrix.project.asset_records_ports import (
     AssetNotFound,
     AssetRecord,
     AssetSection,
+    GroupNotFound,
+    SectionNotFound,
+)
+from inqtrix.project.scoped_upsert import (
+    ResourceScope,
+    delete_scoped_postgres,
+    require_scoped_parent,
+    scoped_postgres_upsert,
 )
 from inqtrix.storage.asset_records_orm import (
     asset_groups,
@@ -34,7 +43,7 @@ from inqtrix.storage.asset_records_orm import (
 _ASSET_META_COLUMNS = (
     asset_records.c.id,
     asset_records.c.tenant_id,
-    asset_records.c.created_by_sub,
+    asset_records.c.created_by_user_id,
     asset_records.c.workspace_id,
     asset_records.c.section_id,
     asset_records.c.group_id,
@@ -65,58 +74,83 @@ class PostgresAssetStore(BaseSessionStore):
     # -- sections --------------------------------------------------------- #
 
     async def upsert_section(
-        self, *, id, kind, title, created_at, updated_at, created_by_sub, workspace_id
+        self, *, id, kind, title, created_at, updated_at,
+        created_by_user_id: uuid.UUID | None, workspace_id
     ) -> AssetSection:
-        stmt = _with_set(pg_insert(asset_sections), asset_sections, dict(
-            id=id, tenant_id=_DEFAULT_TENANT, created_by_sub=created_by_sub,
+        stmt = scoped_postgres_upsert(pg_insert(asset_sections), asset_sections, dict(
+            id=id, tenant_id=_DEFAULT_TENANT, created_by_user_id=created_by_user_id,
             workspace_id=workspace_id, kind=kind, title=title,
             created_at=created_at, updated_at=updated_at,
         ), ["kind", "title", "updated_at"]).returning(asset_sections)
         async with self._session() as session:
-            row = (await session.execute(stmt)).one()
+            row = (await session.execute(stmt)).first()
+            if row is None:
+                raise SectionNotFound(id)
         return self._section_from_row(row)
 
-    async def list_sections(self, *, created_by_sub, workspace_id) -> list[AssetSection]:
-        query = _scoped_query(select(asset_sections), asset_sections, created_by_sub, workspace_id)
+    async def list_sections(
+        self, *, created_by_user_id: uuid.UUID | None, workspace_id
+    ) -> list[AssetSection]:
+        query = _scoped_query(select(asset_sections), asset_sections, created_by_user_id, workspace_id)
         query = query.order_by(asset_sections.c.created_at.desc(), asset_sections.c.id.desc())
         async with self._session() as session:
             rows = (await session.execute(query)).all()
         return [self._section_from_row(row) for row in rows]
 
-    async def delete_section(self, section_id: str) -> None:
+    async def delete_section(
+        self, section_id: str, *, scope: ResourceScope
+    ) -> None:
         async with self._session() as session:
-            await session.execute(delete(asset_sections).where(
-                asset_sections.c.tenant_id == _DEFAULT_TENANT,
-                asset_sections.c.id == section_id,
-            ))
+            await delete_scoped_postgres(
+                session, table=asset_sections, resource_id=section_id,
+                tenant_id=_DEFAULT_TENANT, scope=scope,
+                not_found=SectionNotFound,
+            )
 
     # -- groups ----------------------------------------------------------- #
 
     async def upsert_group(
-        self, *, id, section_id, title, created_at, updated_at, created_by_sub, workspace_id
+        self, *, id, section_id, title, created_at, updated_at,
+        created_by_user_id: uuid.UUID | None, workspace_id
     ) -> AssetGroup:
-        stmt = _with_set(pg_insert(asset_groups), asset_groups, dict(
-            id=id, tenant_id=_DEFAULT_TENANT, created_by_sub=created_by_sub,
+        stmt = scoped_postgres_upsert(pg_insert(asset_groups), asset_groups, dict(
+            id=id, tenant_id=_DEFAULT_TENANT, created_by_user_id=created_by_user_id,
             workspace_id=workspace_id, section_id=section_id, title=title,
             created_at=created_at, updated_at=updated_at,
         ), ["section_id", "title", "updated_at"]).returning(asset_groups)
         async with self._session() as session:
-            row = (await session.execute(stmt)).one()
+            await require_scoped_parent(
+                session,
+                table=asset_sections,
+                parent_id=section_id,
+                tenant_id=_DEFAULT_TENANT,
+                created_by_user_id=created_by_user_id,
+                workspace_id=workspace_id,
+                not_found=SectionNotFound,
+            )
+            row = (await session.execute(stmt)).first()
+            if row is None:
+                raise GroupNotFound(id)
         return self._group_from_row(row)
 
-    async def list_groups(self, *, created_by_sub, workspace_id) -> list[AssetGroup]:
-        query = _scoped_query(select(asset_groups), asset_groups, created_by_sub, workspace_id)
+    async def list_groups(
+        self, *, created_by_user_id: uuid.UUID | None, workspace_id
+    ) -> list[AssetGroup]:
+        query = _scoped_query(select(asset_groups), asset_groups, created_by_user_id, workspace_id)
         query = query.order_by(asset_groups.c.created_at.desc(), asset_groups.c.id.desc())
         async with self._session() as session:
             rows = (await session.execute(query)).all()
         return [self._group_from_row(row) for row in rows]
 
-    async def delete_group(self, group_id: str) -> None:
+    async def delete_group(
+        self, group_id: str, *, scope: ResourceScope
+    ) -> None:
         async with self._session() as session:
-            await session.execute(delete(asset_groups).where(
-                asset_groups.c.tenant_id == _DEFAULT_TENANT,
-                asset_groups.c.id == group_id,
-            ))
+            await delete_scoped_postgres(
+                session, table=asset_groups, resource_id=group_id,
+                tenant_id=_DEFAULT_TENANT, scope=scope,
+                not_found=GroupNotFound,
+            )
 
     # -- assets ----------------------------------------------------------- #
 
@@ -124,10 +158,10 @@ class PostgresAssetStore(BaseSessionStore):
         self, *, id, section_id, group_id, title, label, file_name, mime_type,
         origin, page_count, parse_status, parse_warning, text_truncated,
         size_bytes, server_file_id, parser_id=None, extracted_text, created_at,
-        updated_at, created_by_sub, workspace_id,
+        updated_at, created_by_user_id: uuid.UUID | None, workspace_id,
     ) -> AssetRecord:
         values = dict(
-            id=id, tenant_id=_DEFAULT_TENANT, created_by_sub=created_by_sub,
+            id=id, tenant_id=_DEFAULT_TENANT, created_by_user_id=created_by_user_id,
             workspace_id=workspace_id, section_id=section_id, group_id=group_id,
             title=title, label=label, file_name=file_name, mime_type=mime_type,
             origin=origin, page_count=page_count, parse_status=parse_status,
@@ -140,15 +174,39 @@ class PostgresAssetStore(BaseSessionStore):
                    "mime_type", "origin", "page_count", "parse_status",
                    "parse_warning", "text_truncated", "size_bytes",
                    "server_file_id", "parser_id", "extracted_text", "updated_at"]
-        stmt = _with_set(pg_insert(asset_records), asset_records, values, mutable).returning(asset_records)
+        stmt = scoped_postgres_upsert(
+            pg_insert(asset_records), asset_records, values, mutable
+        ).returning(asset_records)
         async with self._session() as session:
-            row = (await session.execute(stmt)).one()
+            await require_scoped_parent(
+                session,
+                table=asset_sections,
+                parent_id=section_id,
+                tenant_id=_DEFAULT_TENANT,
+                created_by_user_id=created_by_user_id,
+                workspace_id=workspace_id,
+                not_found=SectionNotFound,
+            )
+            if group_id is not None:
+                await require_scoped_parent(
+                    session,
+                    table=asset_groups,
+                    parent_id=group_id,
+                    tenant_id=_DEFAULT_TENANT,
+                    created_by_user_id=created_by_user_id,
+                    workspace_id=workspace_id,
+                    not_found=GroupNotFound,
+                    extra_condition=asset_groups.c.section_id == section_id,
+                )
+            row = (await session.execute(stmt)).first()
+            if row is None:
+                raise AssetNotFound(id)
         return self._asset_from_row(row)
 
     async def list_assets_page(
-        self, *, created_by_sub, workspace_id, limit, after
+        self, *, created_by_user_id: uuid.UUID | None, workspace_id, limit, after
     ) -> tuple[list[AssetRecord], str | None]:
-        query = _scoped_query(select(*_ASSET_META_COLUMNS), asset_records, created_by_sub, workspace_id)
+        query = _scoped_query(select(*_ASSET_META_COLUMNS), asset_records, created_by_user_id, workspace_id)
         if after is not None:
             query = query.where(
                 tuple_(asset_records.c.created_at, asset_records.c.id)
@@ -176,12 +234,15 @@ class PostgresAssetStore(BaseSessionStore):
             raise AssetNotFound(asset_id)
         return self._asset_from_row(row)
 
-    async def delete_asset(self, asset_id: str) -> None:
+    async def delete_asset(
+        self, asset_id: str, *, scope: ResourceScope
+    ) -> None:
         async with self._session() as session:
-            await session.execute(delete(asset_records).where(
-                asset_records.c.tenant_id == _DEFAULT_TENANT,
-                asset_records.c.id == asset_id,
-            ))
+            await delete_scoped_postgres(
+                session, table=asset_records, resource_id=asset_id,
+                tenant_id=_DEFAULT_TENANT, scope=scope,
+                not_found=AssetNotFound,
+            )
 
     # -- row mapping ------------------------------------------------------ #
 
@@ -190,7 +251,7 @@ class PostgresAssetStore(BaseSessionStore):
         return AssetSection(
             id=row.id, kind=row.kind, title=row.title, created_at=row.created_at,
             updated_at=row.updated_at, tenant_id=row.tenant_id,
-            created_by_sub=row.created_by_sub, workspace_id=row.workspace_id,
+            created_by_user_id=row.created_by_user_id, workspace_id=row.workspace_id,
         )
 
     @staticmethod
@@ -198,7 +259,7 @@ class PostgresAssetStore(BaseSessionStore):
         return AssetGroup(
             id=row.id, section_id=row.section_id, title=row.title,
             created_at=row.created_at, updated_at=row.updated_at,
-            tenant_id=row.tenant_id, created_by_sub=row.created_by_sub,
+            tenant_id=row.tenant_id, created_by_user_id=row.created_by_user_id,
             workspace_id=row.workspace_id,
         )
 
@@ -214,25 +275,17 @@ class PostgresAssetStore(BaseSessionStore):
             parser_id=row.parser_id,
             extracted_text=getattr(row, "extracted_text", "") or "",
             created_at=row.created_at, updated_at=row.updated_at,
-            tenant_id=row.tenant_id, created_by_sub=row.created_by_sub,
+            tenant_id=row.tenant_id, created_by_user_id=row.created_by_user_id,
             workspace_id=row.workspace_id,
         )
 
 
-def _scoped_query(query, table, created_by_sub, workspace_id):
+def _scoped_query(
+    query, table, created_by_user_id: uuid.UUID | None, workspace_id
+):
     query = query.where(table.c.tenant_id == _DEFAULT_TENANT)
-    if created_by_sub is not None:
-        query = query.where(table.c.created_by_sub == created_by_sub)
+    if created_by_user_id is not None:
+        query = query.where(table.c.created_by_user_id == created_by_user_id)
     if workspace_id is not None:
         query = query.where(table.c.workspace_id == workspace_id)
     return query
-
-
-def _with_set(stmt, table, values, mutable_columns):
-    """A values()+on_conflict_do_update(set_=mutable) upsert keyed on the PK,
-    never reassigning created_at / ownership."""
-    stmt = stmt.values(**values)
-    return stmt.on_conflict_do_update(
-        index_elements=[table.c.id],
-        set_={col: getattr(stmt.excluded, col) for col in mutable_columns},
-    )

@@ -324,6 +324,39 @@ def create_multi_stack_app(
                 search_label,
                 bundle.description or "(none)",
             )
+        from inqtrix.services.system_runtime import (
+            database_runtime_contract_ready,
+        )
+
+        database_ready = await database_runtime_contract_ready(
+            _app.state.container
+        )
+        _app.state.database_contract_ready = database_ready
+        if not database_ready:
+            log.warning(
+                "Database runtime contract is not ready; multi-stack "
+                "business routes remain gated until /readyz succeeds."
+            )
+        if database_ready and settings.sharing.restrict_to_workspace_members:
+            from inqtrix.services.workspace_administration import (
+                ensure_workspace_share_reconciliation,
+            )
+
+            revoked = await ensure_workspace_share_reconciliation(
+                _app,
+                container.workspace_admin,
+                tenant_id="default",
+            )
+            if revoked:
+                log.warning(
+                    "Workspace-Share-Reconciliation revoked %d invalid "
+                    "active share(s) before multi-stack readiness.",
+                    revoked,
+                )
+            else:
+                log.info(
+                    "Workspace-Share-Reconciliation completed without changes."
+                )
         try:
             yield
         finally:
@@ -331,6 +364,11 @@ def create_multi_stack_app(
                 "Inqtrix multi-stack server stopping | stacks=%d",
                 len(resolved_stacks),
             )
+            collaboration_service = getattr(
+                container, "editor_collaboration_service", None
+            )
+            if collaboration_service is not None:
+                await collaboration_service.aclose()
 
     app_router = create_router()
 
@@ -344,7 +382,7 @@ def create_multi_stack_app(
         else settings.agent
     )
 
-    register_routes(
+    container = register_routes(
         app_router,
         providers=default_bundle.providers,
         strategies=default_bundle.strategies or create_default_strategies(
@@ -384,5 +422,16 @@ def create_multi_stack_app(
     if cors_kwargs is not None:
         app.add_middleware(CORSMiddleware, **cors_kwargs)
     app.include_router(app_router)
+    app.state.container = container
+
+    from inqtrix.auth.principal_generation import (
+        install_principal_generation_error_handler,
+    )
+
+    install_principal_generation_error_handler(app)
+
+    from inqtrix.server.database_gate import install_database_contract_gate
+
+    install_database_contract_gate(app, container=container)
 
     return app

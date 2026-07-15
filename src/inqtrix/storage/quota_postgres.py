@@ -13,13 +13,14 @@ is simply a new row at 0 — old months linger as harmless history and
 from __future__ import annotations
 
 import time
+import uuid
 from typing import TYPE_CHECKING, Sequence
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from inqtrix.quota.models import QuotaDimension, current_period_start
-from inqtrix.quota.models import DEFAULT_SUBJECT, STOCK_PERIOD
+from inqtrix.quota.models import DEFAULT_USER_ID, STOCK_PERIOD
 from inqtrix.storage.db import (
     build_engine,
     build_session_factory,
@@ -83,7 +84,7 @@ class PostgresQuotaStore:
         self,
         *,
         tenant_id: str,
-        subject_sub: str,
+        subject_user_id: uuid.UUID,
         dimension: QuotaDimension,
         period_start: float,
         amount: int,
@@ -93,7 +94,7 @@ class PostgresQuotaStore:
         async with self._session(tenant_id) as session:
             stmt = pg_insert(quota_usage_counters).values(
                 tenant_id=tenant_id,
-                subject_sub=subject_sub,
+                subject_user_id=subject_user_id,
                 dimension=dimension.value,
                 period_start=period_start,
                 used=seed,
@@ -104,7 +105,7 @@ class PostgresQuotaStore:
             stmt = stmt.on_conflict_do_update(
                 index_elements=[
                     quota_usage_counters.c.tenant_id,
-                    quota_usage_counters.c.subject_sub,
+                    quota_usage_counters.c.subject_user_id,
                     quota_usage_counters.c.dimension,
                     quota_usage_counters.c.period_start,
                 ],
@@ -122,48 +123,48 @@ class PostgresQuotaStore:
         self,
         *,
         tenant_id: str,
-        subject_subs: Sequence[str],
+        subject_user_ids: Sequence[uuid.UUID],
         dimensions: Sequence[QuotaDimension],
         now: float,
-    ) -> dict[str, dict[QuotaDimension, int]]:
-        subs = list(subject_subs)
+    ) -> dict[uuid.UUID, dict[QuotaDimension, int]]:
+        user_ids = list(subject_user_ids)
         dim_values = [d.value for d in dimensions]
         # Pre-fill 0 for every requested dimension so the shape matches
         # the memory store (a missing counter reads as 0, not absent).
-        result: dict[str, dict[QuotaDimension, int]] = {
-            sub: {d: 0 for d in dimensions} for sub in subs
+        result: dict[uuid.UUID, dict[QuotaDimension, int]] = {
+            user_id: {d: 0 for d in dimensions} for user_id in user_ids
         }
-        if not subs or not dim_values:
+        if not user_ids or not dim_values:
             return result
         active = {d: _active_period(d, now) for d in dimensions}
         async with self._session(tenant_id) as session:
             rows = (
                 await session.execute(
                     select(
-                        quota_usage_counters.c.subject_sub,
+                        quota_usage_counters.c.subject_user_id,
                         quota_usage_counters.c.dimension,
                         quota_usage_counters.c.period_start,
                         quota_usage_counters.c.used,
                     ).where(
                         quota_usage_counters.c.tenant_id == tenant_id,
-                        quota_usage_counters.c.subject_sub.in_(subs),
+                        quota_usage_counters.c.subject_user_id.in_(user_ids),
                         quota_usage_counters.c.dimension.in_(dim_values),
                     )
                 )
             ).all()
-        for sub, dim_value, period_start, used in rows:
+        for user_id, dim_value, period_start, used in rows:
             dimension = QuotaDimension(dim_value)
             # Only the active window counts; a stale-period row reads as
             # absent (lazy rollover) without being rewritten here.
             if period_start == active[dimension]:
-                result[sub][dimension] = int(used)
+                result[user_id][dimension] = int(used)
         return result
 
     async def reset_usage(
         self,
         *,
         tenant_id: str,
-        subject_sub: str,
+        subject_user_id: uuid.UUID,
         dimension: QuotaDimension,
         now: float,
     ) -> None:
@@ -178,7 +179,7 @@ class PostgresQuotaStore:
         async with self._session(tenant_id) as session:
             stmt = pg_insert(quota_usage_counters).values(
                 tenant_id=tenant_id,
-                subject_sub=subject_sub,
+                subject_user_id=subject_user_id,
                 dimension=dimension.value,
                 period_start=active,
                 used=0,
@@ -187,7 +188,7 @@ class PostgresQuotaStore:
             stmt = stmt.on_conflict_do_update(
                 index_elements=[
                     quota_usage_counters.c.tenant_id,
-                    quota_usage_counters.c.subject_sub,
+                    quota_usage_counters.c.subject_user_id,
                     quota_usage_counters.c.dimension,
                     quota_usage_counters.c.period_start,
                 ],
@@ -199,24 +200,30 @@ class PostgresQuotaStore:
         self,
         *,
         tenant_id: str,
-        subject_subs: Sequence[str],
+        subject_user_ids: Sequence[uuid.UUID | None],
         dimensions: Sequence[QuotaDimension],
-    ) -> dict[str, dict[QuotaDimension, int]]:
-        subs = list(subject_subs)
+    ) -> dict[uuid.UUID | None, dict[QuotaDimension, int]]:
+        subs = list(subject_user_ids)
         dim_values = [d.value for d in dimensions]
-        result: dict[str, dict[QuotaDimension, int]] = {}
+        result: dict[uuid.UUID | None, dict[QuotaDimension, int]] = {}
         if not subs or not dim_values:
             return result
+        real_user_ids = [user_id for user_id in subs if user_id is not None]
+        includes_default = None in subs
+        subject_filter = or_(
+            quota_limits.c.subject_user_id.in_(real_user_ids),
+            quota_limits.c.subject_user_id.is_(None) if includes_default else False,
+        )
         async with self._session(tenant_id) as session:
             rows = (
                 await session.execute(
                     select(
-                        quota_limits.c.subject_sub,
+                        quota_limits.c.subject_user_id,
                         quota_limits.c.dimension,
                         quota_limits.c.limit_value,
                     ).where(
                         quota_limits.c.tenant_id == tenant_id,
-                        quota_limits.c.subject_sub.in_(subs),
+                        subject_filter,
                         quota_limits.c.dimension.in_(dim_values),
                     )
                 )
@@ -229,30 +236,35 @@ class PostgresQuotaStore:
         self,
         *,
         tenant_id: str,
-        subject_sub: str,
+        subject_user_id: uuid.UUID | None,
         dimension: QuotaDimension,
         value: int,
-        set_by_sub: str,
+        set_by_user_id: uuid.UUID,
     ) -> None:
         now = time.time()
         async with self._session(tenant_id) as session:
             stmt = pg_insert(quota_limits).values(
                 tenant_id=tenant_id,
-                subject_sub=subject_sub,
+                subject_user_id=subject_user_id,
                 dimension=dimension.value,
                 limit_value=value,
-                set_by_sub=set_by_sub,
+                set_by_user_id=set_by_user_id,
                 set_at=now,
             )
+            index_elements = [quota_limits.c.tenant_id]
+            if subject_user_id is not None:
+                index_elements.append(quota_limits.c.subject_user_id)
+            index_elements.append(quota_limits.c.dimension)
             stmt = stmt.on_conflict_do_update(
-                index_elements=[
-                    quota_limits.c.tenant_id,
-                    quota_limits.c.subject_sub,
-                    quota_limits.c.dimension,
-                ],
+                index_elements=index_elements,
+                index_where=text(
+                    "subject_user_id IS NOT NULL"
+                    if subject_user_id is not None
+                    else "subject_user_id IS NULL"
+                ),
                 set_={
                     "limit_value": value,
-                    "set_by_sub": set_by_sub,
+                    "set_by_user_id": set_by_user_id,
                     "set_at": now,
                 },
             )
@@ -262,34 +274,34 @@ class PostgresQuotaStore:
         self,
         *,
         tenant_id: str,
-        subject_sub: str,
+        subject_user_id: uuid.UUID | None,
         dimension: QuotaDimension,
     ) -> None:
         async with self._session(tenant_id) as session:
             await session.execute(
                 delete(quota_limits).where(
                     quota_limits.c.tenant_id == tenant_id,
-                    quota_limits.c.subject_sub == subject_sub,
+                    quota_limits.c.subject_user_id == subject_user_id,
                     quota_limits.c.dimension == dimension.value,
                 )
             )
 
-    async def list_subjects(self, *, tenant_id: str) -> list[str]:
+    async def list_subjects(self, *, tenant_id: str) -> list[uuid.UUID]:
         async with self._session(tenant_id) as session:
             counter_subs = (
                 await session.execute(
-                    select(quota_usage_counters.c.subject_sub)
+                    select(quota_usage_counters.c.subject_user_id)
                     .where(quota_usage_counters.c.tenant_id == tenant_id)
                     .distinct()
                 )
             ).scalars().all()
             limit_subs = (
                 await session.execute(
-                    select(quota_limits.c.subject_sub)
+                    select(quota_limits.c.subject_user_id)
                     .where(quota_limits.c.tenant_id == tenant_id)
                     .distinct()
                 )
             ).scalars().all()
         subs = set(counter_subs) | set(limit_subs)
-        subs.discard(DEFAULT_SUBJECT)
+        subs.discard(DEFAULT_USER_ID)
         return sorted(subs)

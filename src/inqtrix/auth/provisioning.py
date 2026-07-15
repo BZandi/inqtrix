@@ -10,6 +10,7 @@ does not import.
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -20,8 +21,7 @@ async def apply_admin_grant(
     users: "UserDirectory",
     *,
     tenant_id: str,
-    issuer: str,
-    subject: str,
+    user_id: uuid.UUID,
     is_admin: bool,
     first_login_owner: bool,
 ) -> None:
@@ -33,9 +33,7 @@ async def apply_admin_grant(
     Args:
         users: The local user mirror to mutate.
         tenant_id: Tenant anchor (currently always ``"default"``).
-        issuer: Identity issuer — the real OIDC issuer or a synthetic
-            transport issuer (``"ldap"``).
-        subject: Stable subject id within *issuer*.
+        user_id: Canonical local user UUID returned by login provisioning.
         is_admin: Whether the directory/IdP signalled admin for this user.
         first_login_owner: When no admin signal is present, whether the
             first ever login bootstraps the instance owner.
@@ -51,9 +49,9 @@ async def apply_admin_grant(
     """
     if is_admin:
         await users.set_instance_role(
-            tenant_id=tenant_id, issuer=issuer, subject=subject, role="admin"
+            tenant_id=tenant_id, user_id=user_id, role="admin"
         )
     elif first_login_owner:
         await users.promote_if_no_admin(
-            tenant_id=tenant_id, issuer=issuer, subject=subject
+            tenant_id=tenant_id, user_id=user_id
         )

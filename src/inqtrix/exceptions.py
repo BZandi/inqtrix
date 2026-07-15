@@ -157,20 +157,24 @@ class AgentStructuredOutputError(Exception):
 
 
 class AgentCancelled(Exception):
-    """Raised when a node observes its per-run cancel event has been set.
+    """Raised when a run observes its per-run cancel event has been set.
 
     Used by the implicit-cancel-on-disconnect pathway in the HTTP
-    server: when the SSE client disconnects, the streaming layer flips
-    a :class:`threading.Event` carried inside the agent state and the
-    next node-boundary :func:`inqtrix.state.check_cancel_event` probe
-    raises this exception. :func:`inqtrix.graph.run` catches it and
-    returns a result marked ``cancelled=True`` instead of propagating.
+    server and by explicit run cancellation: the layer that owns the
+    run flips a :class:`threading.Event` carried inside the agent
+    state, and the next cancellation checkpoint raises this exception.
+    :func:`inqtrix.graph.run` catches it and returns a result marked
+    ``cancelled=True`` instead of propagating.
 
-    In-flight provider HTTP calls are not aborted by this exception —
-    cancel only takes effect at node boundaries. Latency from the
-    disconnect to the actual stop equals the remaining duration of the
-    currently running provider call, bounded by its configured operation
-    timeout.
+    Checkpoints are: node entry (:func:`inqtrix.state.check_cancel_event`),
+    every provider retry attempt and backoff sleep
+    (:func:`inqtrix.providers.base.provider_cancel_scope`), the search and
+    claim-extraction fan-out coordinators, and the per-section loop of
+    answer composition. An in-flight provider HTTP attempt is still not
+    aborted mid-request — the residual latency from the request to the
+    actual stop is the remainder of that ONE attempt, bounded by its
+    transport timeout (full transport-level abort remains a deferred
+    design decision, OPEN-MS-4).
     """
 
 

@@ -7,12 +7,14 @@ port, same error types, same ordering. HTTP-loop only (NullPool engine via
 deliberate exception: the decision/answer writers built by
 :meth:`decide_approval_and_resume` / :meth:`answer_clarification_and_resume`
 run inside the RUN STORE's resume transaction on the run store's private
-loop (rule R9) — they therefore use only the session they are handed,
-never ``self._session``.
+loop (rule R9). Task-cancel and user-artifact writers use the same callback
+shape for live run authorization. These writers therefore use only the
+session they are handed, never ``self._session``.
 """
 
 from __future__ import annotations
 
+import uuid
 import json
 import time
 from dataclasses import replace
@@ -44,8 +46,11 @@ from inqtrix.agents.control_ports import (
     transitioned_plan_task,
     requested_task_cancellation,
 )
+from inqtrix.auth.permissions import SharePermission
+from inqtrix.execution_authority import AuthorizationRevoked
 from inqtrix.pagination import encode_cursor
 from inqtrix.project.base_session_store import BaseSessionStore
+from inqtrix.runs.durable_store import DEFAULT_TENANT
 from inqtrix.storage.agent_control_orm import (
     run_approvals,
     run_artifact_revisions,
@@ -54,6 +59,8 @@ from inqtrix.storage.agent_control_orm import (
     run_plan_tasks,
     run_plans,
 )
+from inqtrix.storage.resource_access import lock_resource_access
+from inqtrix.storage.runs_orm import runs
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -78,6 +85,58 @@ _ARTIFACT_META_COLUMNS = (
 class PostgresAgentControlStore(BaseSessionStore):
     """Postgres :class:`~inqtrix.agents.control_ports.AgentControlStore`."""
 
+    def __init__(
+        self,
+        *,
+        engine: "AsyncEngine",
+        app_role: str,
+        restrict_to_workspace_members: bool = False,
+    ) -> None:
+        super().__init__(engine=engine, app_role=app_role)
+        self._restrict_to_workspace_members = restrict_to_workspace_members
+
+    async def _lock_runtime_authority(
+        self, session: "AsyncSession", run_id: str
+    ) -> None:
+        """Lock the run and the effective actor's live edit authority.
+
+        Agent-runtime control rows are part of the run's durable result. The
+        actor pointer is sampled before the canonical user->resource->share
+        lock order, then re-read after the run row lock lands. A concurrent
+        handoff aborts this old segment instead of writing under either
+        actor's stale authority.
+        """
+        actor_user_id = (
+            await session.execute(
+                select(runs.c.execution_actor_user_id).where(
+                    runs.c.run_id == run_id
+                )
+            )
+        ).scalar_one_or_none()
+        access = await lock_resource_access(
+            session,
+            tenant_id=DEFAULT_TENANT,
+            actor_user_id=actor_user_id,
+            resource_type="run",
+            resource_table=runs,
+            id_column=runs.c.run_id,
+            resource_id=run_id,
+            owner_column=runs.c.created_by_user_id,
+            minimum=SharePermission.EDIT,
+            restrict_to_workspace_members=self._restrict_to_workspace_members,
+        )
+        if access is None:
+            raise AuthorizationRevoked("run execution authority was revoked")
+        current_actor = (
+            await session.execute(
+                select(runs.c.execution_actor_user_id).where(
+                    runs.c.run_id == run_id
+                )
+            )
+        ).scalar_one_or_none()
+        if current_actor != actor_user_id:
+            raise AuthorizationRevoked("run execution actor changed")
+
     # -- plans ----------------------------------------------------------- #
 
     async def save_plan(
@@ -88,6 +147,7 @@ class PostgresAgentControlStore(BaseSessionStore):
         tasks: list[PlanTaskRecord],
     ) -> PlanRecord:
         async with self._session() as session:
+            await self._lock_runtime_authority(session, run_id)
             return await _save_plan_tx(
                 session, run_id=run_id, plan=plan, tasks=tasks
             )
@@ -145,6 +205,7 @@ class PostgresAgentControlStore(BaseSessionStore):
         result_payload: dict[str, Any] | None = None,
     ) -> PlanTaskRecord:
         async with self._session() as session:
+            await self._lock_runtime_authority(session, run_id)
             row = (
                 await session.execute(
                     select(run_plan_tasks)
@@ -187,8 +248,11 @@ class PostgresAgentControlStore(BaseSessionStore):
         run_id: str,
         plan_id: str,
         task_id: str,
-    ) -> PlanTaskRecord:
-        async with self._session() as session:
+        authorize: Any,
+    ) -> tuple[PlanTaskRecord, str | None]:
+        async def _write(
+            session: "AsyncSession", cancel_child: Any
+        ) -> tuple[PlanTaskRecord, str | None]:
             row = (
                 await session.execute(
                     select(run_plan_tasks)
@@ -216,26 +280,29 @@ class PostgresAgentControlStore(BaseSessionStore):
                     result_payload=stored.result_payload,
                 )
             )
-            return stored
+            child_status = (
+                await cancel_child(stored.child_run_id)
+                if stored.child_run_id
+                and stored.status in {"cancel_requested", "cancelled"}
+                else None
+            )
+            return stored, child_status
+
+        return await authorize(_write)
 
     # -- approvals -------------------------------------------------------- #
 
     async def create_approval(self, approval: ApprovalRecord) -> ApprovalRecord:
         async with self._session() as session:
+            await self._lock_runtime_authority(session, approval.run_id)
             created_at = approval.created_at or time.time()
-            if approval.subject_type == "plan" and not approval.subject_id:
-                version = int(approval.payload.get("plan_version", 0) or 0)
-                query = select(run_plans.c.plan_id).where(
-                    run_plans.c.run_id == approval.run_id
+            if approval.subject_type == "plan":
+                approval = replace(
+                    approval,
+                    subject_id=await _resolve_approval_plan_subject_tx(
+                        session, approval
+                    ),
                 )
-                if version > 0:
-                    query = query.where(run_plans.c.version == version)
-                else:
-                    query = query.order_by(run_plans.c.version.desc()).limit(1)
-                plan_id = (await session.execute(query)).scalar_one_or_none()
-                if plan_id is None:
-                    raise PlanNotFound(approval.run_id)
-                approval = replace(approval, subject_id=plan_id)
             await session.execute(
                 insert(run_approvals).values(
                     approval_id=approval.approval_id,
@@ -248,7 +315,7 @@ class PostgresAgentControlStore(BaseSessionStore):
                     decision=approval.decision,
                     decision_payload=dict(approval.decision_payload),
                     note=approval.note,
-                    decided_by_sub=approval.decided_by_sub,
+                    decided_by_user_id=approval.decided_by_user_id,
                     interrupt_key=approval.interrupt_key,
                     created_at=created_at,
                     decided_at=approval.decided_at,
@@ -286,7 +353,7 @@ class PostgresAgentControlStore(BaseSessionStore):
         decision: str,
         decision_payload: dict[str, Any],
         note: str,
-        decided_by_sub: str | None,
+        decided_by_user_id: uuid.UUID | None,
         resume: Any,
         edited_plan: PlanRecord | None = None,
         edited_tasks: list[PlanTaskRecord] | None = None,
@@ -308,7 +375,7 @@ class PostgresAgentControlStore(BaseSessionStore):
                         decision=decision,
                         decision_payload=dict(decision_payload),
                         note=note,
-                        decided_by_sub=decided_by_sub,
+                        decided_by_user_id=decided_by_user_id,
                         decided_at=time.time(),
                     )
                     .returning(
@@ -355,6 +422,9 @@ class PostgresAgentControlStore(BaseSessionStore):
         self, clarification: ClarificationRecord
     ) -> ClarificationRecord:
         async with self._session() as session:
+            await self._lock_runtime_authority(
+                session, clarification.run_id
+            )
             created_at = clarification.created_at or time.time()
             await session.execute(
                 insert(run_clarifications).values(
@@ -371,7 +441,7 @@ class PostgresAgentControlStore(BaseSessionStore):
                     status=clarification.status,
                     answer=clarification.answer,
                     option_id=clarification.option_id,
-                    answered_by_sub=clarification.answered_by_sub,
+                    answered_by_user_id=clarification.answered_by_user_id,
                     created_at=created_at,
                     answered_at=clarification.answered_at,
                 )
@@ -412,7 +482,7 @@ class PostgresAgentControlStore(BaseSessionStore):
         answer: str,
         option_id: str,
         answers: dict[str, Any],
-        answered_by_sub: str | None,
+        answered_by_user_id: uuid.UUID | None,
         resume: Any,
     ) -> tuple[ClarificationRecord, dict[str, Any]]:
         async def _writer(session: "AsyncSession") -> None:
@@ -430,7 +500,7 @@ class PostgresAgentControlStore(BaseSessionStore):
                         answer=answer,
                         option_id=option_id,
                         answers=dict(answers),
-                        answered_by_sub=answered_by_sub,
+                        answered_by_user_id=answered_by_user_id,
                         answered_at=time.time(),
                     )
                     .returning(run_clarifications.c.clarification_id)
@@ -463,6 +533,7 @@ class PostgresAgentControlStore(BaseSessionStore):
         expected_revision: int | None = None,
     ) -> ArtifactRecord:
         async with self._session() as session:
+            await self._lock_runtime_authority(session, run_id)
             existing = await _find_upsert_target(
                 session,
                 artifact_id=artifact_id,
@@ -610,6 +681,7 @@ class PostgresAgentControlStore(BaseSessionStore):
         if not revisions:
             return []
         async with self._session() as session:
+            await self._lock_runtime_authority(session, run_id)
             rows = (
                 await session.execute(
                     select(run_artifacts)
@@ -674,8 +746,11 @@ class PostgresAgentControlStore(BaseSessionStore):
         artifact_id: str,
         content_markdown: str,
         expected_revision: int,
+        authorize: Any,
     ) -> ArtifactRecord:
-        async with self._session() as session:
+        async def _write(
+            session: "AsyncSession", _cancel_child: Any
+        ) -> ArtifactRecord:
             now = time.time()
             row = (
                 (
@@ -731,6 +806,8 @@ class PostgresAgentControlStore(BaseSessionStore):
                 )
             )
             return _artifact_from_row(row)
+
+        return await authorize(_write)
 
     async def get_artifact(
         self, run_id: str, artifact_id: str, *, revision: int | None = None
@@ -899,6 +976,38 @@ class PostgresAgentControlStore(BaseSessionStore):
 
 
 # -- transaction bodies shared with the R9 writers -------------------------- #
+
+
+async def _resolve_approval_plan_subject_tx(
+    session: "AsyncSession", approval: ApprovalRecord
+) -> str:
+    """Resolve and lock a plan subject in the approval's tenant and run.
+
+    An explicit client subject is validated just like the legacy empty-subject
+    path.  The key-share lock keeps the parent stable until the approval insert
+    commits, and the run predicate prevents a globally valid plan id from being
+    attached to another run.
+    """
+    query = select(run_plans.c.plan_id).where(
+        run_plans.c.tenant_id == DEFAULT_TENANT,
+        run_plans.c.run_id == approval.run_id,
+    )
+    if approval.subject_id:
+        query = query.where(run_plans.c.plan_id == approval.subject_id)
+    else:
+        version = int(approval.payload.get("plan_version", 0) or 0)
+        if version > 0:
+            query = query.where(run_plans.c.version == version)
+        else:
+            query = query.order_by(run_plans.c.version.desc()).limit(1)
+    plan_id = (
+        await session.execute(
+            query.with_for_update(read=True, key_share=True)
+        )
+    ).scalar_one_or_none()
+    if plan_id is None:
+        raise PlanNotFound(approval.run_id)
+    return str(plan_id)
 
 
 async def _save_plan_tx(
@@ -1123,7 +1232,7 @@ def _approval_from_row(row: Any) -> ApprovalRecord:
         decision=row["decision"],
         decision_payload=_json_dict(row["decision_payload"]),
         note=row["note"],
-        decided_by_sub=row["decided_by_sub"],
+        decided_by_user_id=row["decided_by_user_id"],
         interrupt_key=row["interrupt_key"],
         created_at=row["created_at"],
         decided_at=row["decided_at"],
@@ -1142,7 +1251,7 @@ def _clarification_from_row(row: Any) -> ClarificationRecord:
         status=row["status"],
         answer=row["answer"],
         option_id=row["option_id"],
-        answered_by_sub=row["answered_by_sub"],
+        answered_by_user_id=row["answered_by_user_id"],
         created_at=row["created_at"],
         answered_at=row["answered_at"],
     )

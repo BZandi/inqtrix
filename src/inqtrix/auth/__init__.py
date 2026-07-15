@@ -16,8 +16,9 @@ Modules:
   plus the settings-to-provider bridge ``build_auth_provider``.
 * :mod:`inqtrix.auth.permissions` — the authorization chokepoint:
   ordered roles/permissions, repository ports, and the
-  ``PermissionService`` combining workspace roles, direct shares,
-  and group shares (denials hidden as not-found, audited loudly).
+  ``AuthorizationService`` keeping workspace membership separate from
+  owner-or-direct-share resource access (denials hidden as not-found,
+  audited loudly).
 * :mod:`inqtrix.auth.identity_memory` — the no-infrastructure
   identity backend implementing every permission-layer port.
 
@@ -29,10 +30,9 @@ from inqtrix.auth.api_key import ApiKeyAuthProvider, build_auth_provider
 from inqtrix.auth.identity_memory import MemoryIdentityStore
 from inqtrix.auth.permissions import (
     AuditEntry,
-    PermissionService,
+    AuthorizationService,
     ResourceNotFound,
     SharePermission,
-    SubjectRef,
     WorkspaceNotFound,
     WorkspaceRole,
 )
@@ -55,11 +55,10 @@ __all__ = [
     "AuthProvider",
     "MemoryIdentityStore",
     "NoneAuthProvider",
-    "PermissionService",
+    "AuthorizationService",
     "Principal",
     "ResourceNotFound",
     "SharePermission",
-    "SubjectRef",
     "UserContext",
     "WorkspaceNotFound",
     "WorkspaceRole",

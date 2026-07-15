@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   acceptShare,
-  fetchOutgoingShares,
+  fetchMyShares,
   fetchSharingInbox,
   revokeShare,
 } from '@/api/inqtrixClient'
@@ -56,13 +56,23 @@ function errorText(error: unknown): string {
 export function useSharingInbox({
   demo,
   enabled,
+  onResourcesChanged,
+  refreshToken = 0,
 }: {
   demo: boolean
   enabled: boolean
+  onResourcesChanged?: () => void
+  refreshToken?: number
 }): SharingInboxHandle {
   const [state, setState] = useState<SharingInboxState>(EMPTY)
+  const controllerRef = useRef<AbortController | null>(null)
+  const generationRef = useRef(0)
 
   const reload = useCallback(async () => {
+    controllerRef.current?.abort()
+    controllerRef.current = null
+    const generation = generationRef.current + 1
+    generationRef.current = generation
     if (!enabled) {
       setState(EMPTY)
       return
@@ -83,11 +93,14 @@ export function useSharingInbox({
       ...prev,
       status: prev.status === 'ready' ? 'ready' : 'loading',
     }))
+    const controller = new AbortController()
+    controllerRef.current = controller
     try {
       const [inbox, outgoing] = await Promise.all([
-        fetchSharingInbox(),
-        fetchOutgoingShares(),
+        fetchSharingInbox({ signal: controller.signal }),
+        fetchMyShares({ signal: controller.signal }),
       ])
+      if (controller.signal.aborted || generation !== generationRef.current) return
       setState({
         accepted: inbox.accepted,
         error: null,
@@ -97,13 +110,17 @@ export function useSharingInbox({
         status: 'ready',
       })
     } catch (error) {
+      if (controller.signal.aborted || generation !== generationRef.current) return
       setState((prev) => ({ ...prev, error: errorText(error), status: 'error' }))
+    } finally {
+      if (controllerRef.current === controller) controllerRef.current = null
     }
   }, [demo, enabled])
 
   useEffect(() => {
     void reload()
-  }, [reload])
+    return () => controllerRef.current?.abort()
+  }, [refreshToken, reload])
 
   const accept = useCallback(
     async (shareId: string) => {
@@ -111,12 +128,13 @@ export function useSharingInbox({
       try {
         if (demo) acceptDemoShare(shareId)
         else await acceptShare(shareId)
+        onResourcesChanged?.()
         await reload()
       } catch (error) {
         setState((prev) => ({ ...prev, mutationError: errorText(error) }))
       }
     },
-    [demo, reload],
+    [demo, onResourcesChanged, reload],
   )
 
   const drop = useCallback(
@@ -125,12 +143,13 @@ export function useSharingInbox({
       try {
         if (demo) dropDemoInboxShare(shareId)
         else await revokeShare(shareId)
+        onResourcesChanged?.()
         await reload()
       } catch (error) {
         setState((prev) => ({ ...prev, mutationError: errorText(error) }))
       }
     },
-    [demo, reload],
+    [demo, onResourcesChanged, reload],
   )
 
   return { accept, drop, pendingCount: state.pending.length, reload, state }

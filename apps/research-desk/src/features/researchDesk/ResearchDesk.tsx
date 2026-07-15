@@ -12,12 +12,14 @@ import {
   createChatCompletion,
   fetchKnowledgeDocumentText,
   fetchServerFileContent,
+  fetchServerFileInfo,
   fetchServerFileText,
   hasHttpStatus,
   listResearchRuns,
   loginLdap,
   loginLocal,
   searchKnowledge,
+  setExpectedUserIdentity,
   streamChatCompletion,
   type AuthConfig,
   type ChatCompletionMessage,
@@ -35,11 +37,18 @@ import {
 } from '@/features/chat/retry'
 import { useChatHistoryApi } from '@/features/chat/useChatHistoryApi'
 import { clearScrollMemory } from '@/features/scroll/scrollMemory'
+import { hydrateSharedEditorTarget } from '@/features/sharing/sharedEditorTarget'
 import { useEditorHistoryApi } from '@/features/editor/useEditorHistoryApi'
+import {
+  confirmedProjectionFallback,
+  flushCollaborationProjectionBarrier,
+  type CollaborationProjectionController,
+} from '@/features/editor/collaborationProjection'
 import { useAssetHistoryApi } from '@/features/fileLibrary/useAssetHistoryApi'
 import { useVectorIndexHistoryApi } from '@/features/fileLibrary/useVectorIndexHistoryApi'
 import { useAccountPreferences } from '@/features/account/useAccountPreferences'
 import { useProjectServerImport } from '@/features/project/useProjectServerImport'
+import { prepareProjectFileImport } from '@/features/project/detachedImport'
 import EditorWorkspace from '@/features/editor/EditorWorkspace'
 import { exportProject, loadProject, saveProject } from '@/features/project/fileSystem'
 import {
@@ -74,14 +83,16 @@ import type {
   ChatMessageRecord,
   ChatThreadRecord,
   EmbedModelDescriptor,
+  EditorDocumentRecord,
   KnowledgeAnswerRecord,
   KnowledgeSessionRecord,
   KnowledgeThreadItemRecord,
   ProjectPreferences,
+  ProjectState,
 } from '@/features/project/types'
 import { EMBED_MODELS, type FileAssetRecord } from '@/features/project/types'
 import { isPillKind } from '@/features/composer/mentionDoc'
-import { useResearchRunApi } from '@/features/researchRuns/useResearchRunApi'
+import { RunStillCancellingError, useResearchRunApi } from '@/features/researchRuns/useResearchRunApi'
 import { useResearchRunImport } from '@/features/researchRuns/useResearchRunImport'
 import { useServerDiscovery } from '@/features/researchRuns/useServerDiscovery'
 import { deriveChatStepTimeoutMs, isMissingServerTimeouts } from '@/features/researchRuns/clientTimeouts'
@@ -121,7 +132,12 @@ import {
   resolveKnowledgeDefaultProfileId,
 } from '@/features/knowledge/profileOptions'
 import type { KnowledgeCollectionOption, KnowledgeDataSource } from '@/features/knowledge/types'
-import { useAuthSession } from '@/features/auth/useAuthSession'
+import { reloadApplication, useAuthSession } from '@/features/auth/useAuthSession'
+import { flushActiveCollaborationDocuments } from '@/features/editor/useCollaborationDocument'
+import {
+  knowledgeCollectionOptions,
+  useKnowledgeCollectionsApi,
+} from '@/features/knowledge/useKnowledgeCollectionsApi'
 import { QuotaMeterProvider } from '@/features/quota/QuotaMeterContext'
 import { ShareDialog } from '@/features/sharing/ShareDialog'
 import { DEMO_OWNER } from '@/features/sharing/demoShares'
@@ -130,9 +146,13 @@ import {
   DEMO_RUNNING_RUN_ID,
 } from '@/features/project/seedProject'
 import { isSharingEnabled } from '@/features/sharing/gate'
-import { personLabel } from '@/features/sharing/shareModel'
-import { useOutgoingShareCounts, useSharedWithMe } from '@/features/sharing/useShareSignals'
+import {
+  outgoingShareCounts,
+  sharedResourceDestination,
+} from '@/features/sharing/shareModel'
 import { useSharingInbox } from '@/features/sharing/useSharingInbox'
+import { useUserInvalidationEvents } from '@/features/sharing/useUserInvalidationEvents'
+import type { InboxShare } from '@/features/sharing/types'
 import { seedSystemHealth } from '@/features/admin/demo'
 import { useTemplateSync } from '@/features/promptLibrary/useTemplateSync'
 import { FileLibraryWorkspace } from '@/features/fileLibrary/FileLibraryWorkspace'
@@ -142,7 +162,8 @@ import { useSkillsApi } from '@/features/skills/useSkillsApi'
 import { ingestFiles, scheduleServerParse, type ServerFileUpload } from '@/features/files/ingest'
 import { chatStateForIncognito, ingestIncognitoFiles } from './incognitoAttachments'
 import { moveItem } from '@/features/composer/reorder'
-import { FILE_SECTION_TEMP_ID } from '@/features/files/sections'
+import { temporaryFileSectionId } from '@/features/files/sections'
+import { createProjectEntityId as createClientId } from '@/features/project/entityId'
 import {
   evaluateBudget,
   shouldShowAttachmentBudgetNotice,
@@ -186,6 +207,8 @@ type ChatModelOptionsState = {
   options: ChatModelOption[]
   status: 'available' | 'missing' | 'unresolved'
 }
+
+type SharedOpenTarget = Pick<InboxShare, 'resource_id' | 'resource_type'>
 
 const INCOGNITO_THREAD_ID = 'chat-incognito-session'
 
@@ -238,10 +261,11 @@ export function ResearchDesk({
   // beyond a successful submit.
   const [authIdentifier, setAuthIdentifier] = useState('')
   const [authPassword, setAuthPassword] = useState('')
+  const [localResourceRefreshRevision, setLocalResourceRefreshRevision] = useState(0)
+  const [sharedOpenTarget, setSharedOpenTarget] = useState<SharedOpenTarget | null>(null)
+  const [sharedResourceError, setSharedResourceError] = useState<string | null>(null)
   // Mirrors the cookie session's authenticated state for the run-list hook
-  // (declared before it; the session itself resolves later from health). An
-  // anonymous->authenticated flip re-hydrates the run list after an in-app
-  // local/ldap login, which mints no remount.
+  // (declared before it; the session itself resolves later from health).
   const [cookieAuthed, setCookieAuthed] = useState(false)
   const [cancelSubmittingRunIds, setCancelSubmittingRunIds] = useState<ReadonlySet<string>>(() => new Set())
   const [cancelErrorByRunId, setCancelErrorByRunId] = useState<Record<string, string>>({})
@@ -265,6 +289,18 @@ export function ResearchDesk({
   const chatControllerByThreadIdRef = useRef<Map<string, AbortController>>(new Map())
   const chatFlushFrameByThreadIdRef = useRef<Map<string, number>>(new Map())
   const chatStreamContentByThreadIdRef = useRef<Map<string, string>>(new Map())
+  const activeCollaborationControllerRef = useRef<{
+    controller: CollaborationProjectionController
+    documentId: string
+  } | null>(null)
+  const handleCollaborationControllerChange = useCallback((
+    registration: {
+      controller: CollaborationProjectionController
+      documentId: string
+    } | null,
+  ) => {
+    activeCollaborationControllerRef.current = registration
+  }, [])
   const scheduledChatContentByThreadIdRef = useRef<Map<string, ScheduledChatContent>>(new Map())
   const allJobs = useMemo(
     () => projectResearchJobs(state),
@@ -274,6 +310,22 @@ export function ResearchDesk({
     () => visibleResearchJobs(allJobs, state.ui.activeFilter),
     [allJobs, state.ui.activeFilter],
   )
+  useEffect(() => {
+    if (sharedOpenTarget?.resource_type !== 'run') return
+    if (allJobs.some((job) => job.id === sharedOpenTarget.resource_id)) {
+      dispatch({ jobId: sharedOpenTarget.resource_id, type: 'selectJob' })
+      setSharedOpenTarget(null)
+      return
+    }
+    const agentRun = state.agentRuns[sharedOpenTarget.resource_id]
+    if (!agentRun) return
+    dispatch({
+      sessionId: agentRun.sessionId ?? agentRun.runId,
+      type: 'selectAgentSession',
+    })
+    dispatch({ type: 'setActiveView', view: 'agent' })
+    setSharedOpenTarget(null)
+  }, [allJobs, sharedOpenTarget, state.agentRuns])
   // Stable identity so the memoized ReportPanel isn't re-rendered on every
   // unrelated desk dispatch (dispatch is stable, so this never changes).
   const handleReportVisibleChange = useCallback(
@@ -472,7 +524,10 @@ export function ResearchDesk({
     const existingLabels = projectFileAssets(state).map((asset) => asset.label)
     const assets = await ingestFiles(
       files,
-      { kind: 'chat', sectionId: FILE_SECTION_TEMP_ID },
+      {
+        kind: 'chat',
+        sectionId: temporaryFileSectionId(Object.values(state.fileLibrarySections)),
+      },
       undefined,
       existingLabels,
       serverFileUpload,
@@ -517,6 +572,12 @@ export function ResearchDesk({
   )
   const handleApiSummary = useCallback((summary: ResearchRunSummary, options?: { select?: boolean }) => {
     dispatch({ select: options?.select, summary, type: 'upsertApiRunSummary' })
+  }, [])
+  const handleApiSummaryReplacement = useCallback((summaries: ResearchRunSummary[]) => {
+    dispatch({ summaries, type: 'replaceApiRunSummaries' })
+  }, [])
+  const handleImportedRun = useCallback((sourceRunId: string, summary: ResearchRunSummary) => {
+    dispatch({ sourceRunId, summary, type: 'adoptImportedApiRun' })
   }, [])
   const handleApiEvent = useCallback((event: ResearchRunEvent) => {
     dispatch({ event, type: 'appendApiRunEvent' })
@@ -575,8 +636,26 @@ export function ResearchDesk({
     session: authSession,
     login: ssoLogin,
     logout: ssoLogout,
-    refresh: refreshAuthSession,
-  } = useAuthSession(isCookieMode, state.workspaceId)
+    logoutError,
+  } = useAuthSession(
+    isCookieMode,
+    state.workspaceId,
+    flushActiveCollaborationDocuments,
+  )
+  useEffect(() => {
+    setExpectedUserIdentity(
+      isCookieMode && authSession.status === 'authenticated'
+        ? authSession.user?.id ?? null
+        : null,
+    )
+    return () => setExpectedUserIdentity(null)
+  }, [authSession.status, authSession.user?.id, isCookieMode])
+  const handleLogout = useCallback(async () => {
+    const succeeded = await ssoLogout()
+    if (succeeded) return
+    setSettingsRequestedSection('security')
+    dispatch({ type: 'setActiveView', view: 'settings' })
+  }, [ssoLogout])
   // Project-persistence tier (M6): durable server persistence is offered only
   // by a Postgres backend (not demo). For an authenticated cookie-session user
   // (local/oidc/ldap) it is AUTOMATIC -- serverSyncEnabled is derived from the
@@ -608,9 +687,28 @@ export function ResearchDesk({
     && authSession.projectNamespace
       ? authSession.projectNamespace
       : state.workspaceId
+  const userInvalidation = useUserInvalidationEvents({
+    enabled: !isDemoMode
+      && isCookieMode
+      && authSession.status === 'authenticated',
+    userId: authSession.user?.id ?? null,
+  })
+  const resourceRefreshToken =
+    userInvalidation.revision + localResourceRefreshRevision
+  const requestResourceRefresh = useCallback(() => {
+    setLocalResourceRefreshRevision((current) => current + 1)
+  }, [])
+  const contentClientOptions = useMemo<ClientOptions>(
+    () => ({
+      apiKey: apiKey.trim() || undefined,
+      workspaceId: effectiveWorkspaceId,
+    }),
+    [apiKey, effectiveWorkspaceId],
+  )
   // Skill library (plan M3): server-first behind features.skills; the
   // demo serves its in-memory list so the tab stays demo-visible.
-  const skillsEnabled = isDemoMode || capabilities?.features.skills === true
+  const skillsEnabled = isDemoMode
+    || (capabilities?.features.skills === true && authUnlocked)
   // Memoized: an inline literal would give useSkillsApi.refresh a new
   // identity per render, and its load effect would refetch /v1/skills
   // in a loop (every completed fetch renders the next one).
@@ -618,16 +716,16 @@ export function ResearchDesk({
     () =>
       isDemoMode
         ? null
-        : {
-          apiKey: apiKey.trim() || undefined,
-          workspaceId: effectiveWorkspaceId,
-        },
-    [apiKey, effectiveWorkspaceId, isDemoMode],
+        : authUnlocked
+          ? contentClientOptions
+          : null,
+    [authUnlocked, contentClientOptions, isDemoMode],
   )
   const skillsApi = useSkillsApi({
     clientOptions: skillsClientOptions,
     demo: isDemoMode,
     enabled: skillsEnabled,
+    refreshToken: resourceRefreshToken,
   })
   const {
     cancelRun,
@@ -646,11 +744,13 @@ export function ResearchDesk({
     onEvent: handleApiEvent,
     onResult: handleApiResult,
     onRunError: handleApiRunError,
+    onReplace: handleApiSummaryReplacement,
     onSummary: handleApiSummary,
+    refreshToken: resourceRefreshToken,
     workspaceId: effectiveWorkspaceId,
   })
   // One badge for any API error: discovery probes or run operations.
-  const apiError = discoveryError ?? runError
+  const apiError = logoutError ?? discoveryError ?? runError
   const singleStackLabel = useMemo(() => resolveSingleStackLabel(effectiveHealth), [effectiveHealth])
   const knowledgeAvailable = !isDemoMode && capabilities?.features.knowledge === true
   const embedCatalog = useMemo<readonly EmbedModelDescriptor[]>(() => {
@@ -677,6 +777,29 @@ export function ResearchDesk({
         }
       : null),
     [apiKey, knowledgeAvailable, serverParserAvailable, effectiveWorkspaceId],
+  )
+  const projectKnowledgeIndexes = useMemo(
+    () => projectVectorIndexes(state),
+    [state.vectorIndexOrder, state.vectorIndexes],
+  )
+  const knowledgeCollectionsApi = useKnowledgeCollectionsApi({
+    clientOptions: knowledgeAvailable && authUnlocked
+      ? contentClientOptions
+      : null,
+    enabled: discoveryReady && knowledgeAvailable && authUnlocked,
+    refreshToken: resourceRefreshToken,
+  })
+  const liveKnowledgeCollectionOptions = useMemo(
+    () => knowledgeCollectionOptions({
+      localIndexes: projectKnowledgeIndexes,
+      serverCollections: knowledgeCollectionsApi.collections,
+      serverLoaded: knowledgeCollectionsApi.loaded,
+    }),
+    [
+      knowledgeCollectionsApi.collections,
+      knowledgeCollectionsApi.loaded,
+      projectKnowledgeIndexes,
+    ],
   )
   const serverFileUpload = useMemo<ServerFileUpload | undefined>(() => {
     if (!serverFilesAvailable) return undefined
@@ -743,17 +866,70 @@ export function ResearchDesk({
     syncActive: projectSyncActive,
     workspaceId: effectiveWorkspaceId,
   })
-  const { error: editorSyncError } = useEditorHistoryApi({
+  const {
+    error: editorSyncError,
+    flushDocumentForShare,
+    registerOpenedServerDocument,
+  } = useEditorHistoryApi({
     apiKey: apiKey.trim() || undefined,
     dispatch,
+    editorCommentOutbox: state.editorCommentOutbox,
     editorComments: state.editorComments,
     editorDocuments: state.editorDocuments,
     editorFolders: state.editorFolders,
     projectEpoch: state.projectEpoch,
+    refreshToken: resourceRefreshToken,
     selectedDocumentId: state.editorUi.activeDocumentId,
     syncActive: projectSyncActive,
     workspaceId: effectiveWorkspaceId,
   })
+  useEffect(() => {
+    if (sharedOpenTarget?.resource_type !== 'editor_document') return
+    const target = sharedOpenTarget
+    const consumeTarget = () => {
+      setSharedOpenTarget((current) => (
+        current?.resource_type === target.resource_type
+          && current.resource_id === target.resource_id
+          ? null
+          : current
+      ))
+    }
+    if (isDemoMode) {
+      setSharedResourceError(locale === 'de'
+        ? 'Das geteilte Editor-Dokument ist in dieser Demo nicht verfügbar.'
+        : 'The shared editor document is not available in this demo.')
+      consumeTarget()
+      return
+    }
+
+    const controller = new AbortController()
+    void hydrateSharedEditorTarget(
+      target.resource_id,
+      { ...contentClientOptions, signal: controller.signal },
+      locale,
+    ).then((document) => {
+      if (controller.signal.aborted) return
+      registerOpenedServerDocument(document, 'exact_detail')
+      dispatch({ documents: [document], type: 'upsertServerEditorDocuments' })
+      dispatch({ document, type: 'setServerEditorDocumentDetail' })
+      dispatch({ documentId: document.id, type: 'openEditorDocument' })
+      setSharedResourceError(null)
+      consumeTarget()
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted) return
+      console.warn('Shared editor document hydration failed.', error)
+      setSharedResourceError(messageFromError(error))
+      consumeTarget()
+    })
+    return () => controller.abort()
+  }, [
+    contentClientOptions,
+    dispatch,
+    isDemoMode,
+    locale,
+    registerOpenedServerDocument,
+    sharedOpenTarget,
+  ])
   const { error: assetSyncError, ensureAssetBodiesLoaded } = useAssetHistoryApi({
     apiKey: apiKey.trim() || undefined,
     dispatch,
@@ -817,23 +993,19 @@ export function ResearchDesk({
     enabled: projectSyncActive,
     researchRuns: state.researchRuns,
     researchRunOrder: state.researchRunOrder,
+    onImported: handleImportedRun,
     workspaceId: effectiveWorkspaceId,
   })
   // Any entity's background autosave failure surfaces on the one badge.
   const serverSyncError =
-    chatSyncError ?? editorSyncError ?? assetSyncError ?? vectorIndexSyncError
-    ?? knowledgeSessionSyncError ?? accountPreferencesError ?? runImportError
+    sharedResourceError ?? chatSyncError ?? editorSyncError ?? assetSyncError ?? vectorIndexSyncError
+    ?? knowledgeSessionSyncError ?? knowledgeCollectionsApi.error
+    ?? userInvalidation.error ?? accountPreferencesError ?? runImportError
   const [selectedKnowledgeIndexIds, setSelectedKnowledgeIndexIds] = useState<string[]>([])
   const knowledgeIndexOptions = useMemo<KnowledgeIndexOption[] | null>(() => {
     if (!knowledgeAvailable) return null
-    return projectVectorIndexes(state)
-      .filter((index) => index.status === 'ready' && index.serverCollectionId)
-      .map((index) => ({
-        collectionId: index.serverCollectionId as string,
-        id: index.id,
-        title: index.title,
-      }))
-  }, [knowledgeAvailable, state.vectorIndexOrder, state.vectorIndexes])
+    return liveKnowledgeCollectionOptions
+  }, [knowledgeAvailable, liveKnowledgeCollectionOptions])
   useEffect(() => {
     if (!knowledgeIndexOptions) {
       if (selectedKnowledgeIndexIds.length > 0) setSelectedKnowledgeIndexIds([])
@@ -908,15 +1080,27 @@ export function ResearchDesk({
   const incognitoKnowledgeItemsRef = useRef<KnowledgeThreadItemRecord[]>([])
   const knowledgeCollections = useMemo<KnowledgeCollectionOption[]>(() => {
     if (!knowledgeWorkspaceVisible) return []
-    return projectVectorIndexes(state)
-      .filter((index) => isDemoMode || index.status === 'ready')
-      .filter((index) => isDemoMode || Boolean(index.serverCollectionId))
-      .map((index) => ({
-        collectionId: isDemoMode ? index.id : (index.serverCollectionId as string),
-        id: index.id,
-        title: index.title,
-      }))
-  }, [isDemoMode, knowledgeWorkspaceVisible, state])
+    if (!isDemoMode) return liveKnowledgeCollectionOptions
+    return projectKnowledgeIndexes.map((index) => ({
+      collectionId: index.id,
+      id: index.id,
+      title: index.title,
+    }))
+  }, [
+    isDemoMode,
+    knowledgeWorkspaceVisible,
+    liveKnowledgeCollectionOptions,
+    projectKnowledgeIndexes,
+  ])
+  useEffect(() => {
+    if (sharedOpenTarget?.resource_type !== 'knowledge_collection') return
+    const option = knowledgeCollections.find(
+      (collection) => collection.collectionId === sharedOpenTarget.resource_id,
+    )
+    if (!option) return
+    setKnowledgeCollectionIds([option.id])
+    setSharedOpenTarget(null)
+  }, [knowledgeCollections, sharedOpenTarget])
 
   // Patchable editor documents: in demo every local document works; live
   // requires the server-persisted tier (the id IS the server id there).
@@ -1011,20 +1195,32 @@ export function ResearchDesk({
   const knowledgeDataSource = useMemo<KnowledgeDataSource>(() => {
     if (isDemoMode) return createDemoKnowledgeDataSource()
     const clientOptions = { apiKey: apiKey.trim() || undefined, workspaceId: effectiveWorkspaceId }
+    const fileContentAvailable = serverFilesAvailable || projectPersistenceAvailable
     return {
+      canLoadFileContent: fileContentAvailable
+        ? async (fileId) => {
+          try {
+            await fetchServerFileInfo(fileId, clientOptions)
+            return true
+          } catch (error) {
+            if (hasHttpStatus(error, 404)) return false
+            throw error
+          }
+        }
+        : null,
       loadDocumentText: (documentId) => fetchKnowledgeDocumentText(documentId, clientOptions),
       // An original file exists whenever it was uploaded to the files server —
       // independent of the knowledge `features.files` flag — so gate this the
       // SAME way as the file-library preview (which works on the persistence
       // tier). Gating on serverFilesAvailable alone hid the "Quelle" PDF tab on
       // deployments that have persistence but not the files capability.
-      loadFileContent: serverFilesAvailable || projectPersistenceAvailable
+      loadFileContent: fileContentAvailable
         ? (fileId) => fetchServerFileContent(fileId, clientOptions)
         : null,
       search: (query, collectionIds, topK) =>
         searchKnowledge({ collectionIds, query, topK }, clientOptions),
     }
-  }, [apiKey, isDemoMode, serverFilesAvailable, projectPersistenceAvailable, effectiveWorkspaceId])
+  }, [apiKey, isDemoMode, serverFilesAvailable, projectPersistenceAvailable, effectiveWorkspaceId, resourceRefreshToken])
 
   useEffect(() => {
     incognitoKnowledgeItemsRef.current = incognitoKnowledgeItems
@@ -1523,6 +1719,10 @@ export function ResearchDesk({
     !isDemoMode
     && !authUnlocked
     && (!isCookieMode || authSession.status !== 'unknown')
+  // Exactly the silent window the lock screen deliberately leaves open
+  // (cookie mode, first session probe in flight): submission is visibly
+  // disabled there instead of handleComposerSubmit no-op'ing a click.
+  const isAuthResolving = !isDemoMode && !authUnlocked && !isAuthLocked
   const canImproveText = !isDemoMode && authUnlocked
   // Sharing exists on the oidc surface with a live session; the capability
   // flag keeps none/apikey deployments byte-identical. Demo mode simulates it
@@ -1539,21 +1739,24 @@ export function ResearchDesk({
   const sharingInbox = useSharingInbox({
     demo: isDemoMode,
     enabled: sharingEnabled,
+    onResourcesChanged: requestResourceRefresh,
+    refreshToken: resourceRefreshToken,
   })
-  // "Öffnen" in the sharing panel: navigate to the resource's home view. The
-  // accepted item already surfaces in that view's list (runs in the "Mit mir
-  // geteilt" divider, collections/templates in their lists), so no per-entity
-  // focus plumbing is built (would mean 3 divergent mechanisms).
-  const openSharedResource = useCallback((resourceType: string) => {
-    const view =
-      resourceType === 'knowledge_collection'
-        ? 'database'
-        : resourceType === 'prompt_template'
-          ? 'prompt-library'
-          : 'research'
+  // "Open" retains the entity id until its authoritative list has hydrated;
+  // each workspace then consumes the same one-shot target when it can focus it.
+  const openSharedResource = useCallback((share: InboxShare) => {
+    setSharedResourceError(null)
+    setSharedOpenTarget({
+      resource_id: share.resource_id,
+      resource_type: share.resource_type,
+    })
+    requestResourceRefresh()
     setSettingsRequestedSection(null)
-    dispatch({ type: 'setActiveView', view })
-  }, [dispatch])
+    dispatch({
+      type: 'setActiveView',
+      view: sharedResourceDestination(share.resource_type),
+    })
+  }, [dispatch, requestResourceRefresh])
   // The quota meter follows the same cookie-session + capability gate;
   // demo mode shows seeded figures so the feature is visible offline.
   const quotaMeterEnabled =
@@ -1564,18 +1767,17 @@ export function ResearchDesk({
   const [shareTarget, setShareTarget] = useState<
     { resourceId: string; resourceType: string; title: string } | null
   >(null)
-  const ownApiRunIds = useMemo(
-    () => (sharingEnabled
-      ? allJobs.filter((job) => !job.access).map((job) => job.id)
-      : []),
-    [allJobs, sharingEnabled],
-  )
-  const { counts: shareCountByRunId, refresh: refreshShareCounts } =
-    useOutgoingShareCounts('run', ownApiRunIds, sharingEnabled, isDemoMode)
-  const { byResourceId: sharedWithMeByRunId } = useSharedWithMe(
-    'run',
-    sharingEnabled,
-    isDemoMode,
+  const handleShareEditorDocument = useCallback((document: EditorDocumentRecord) => {
+    if (document.access?.mode === 'shared') return
+    setShareTarget({
+      resourceId: document.id,
+      resourceType: 'editor_document',
+      title: document.title,
+    })
+  }, [])
+  const shareCountByRunId = useMemo(
+    () => outgoingShareCounts(sharingInbox.state.outgoing, 'run'),
+    [sharingInbox.state.outgoing],
   )
   // Prompt templates persist server-side whenever the capability is
   // live and the caller is unlocked (works in apikey/none too);
@@ -1585,21 +1787,12 @@ export function ResearchDesk({
     && capabilities?.features.prompt_templates === true
     && authUnlocked
   const templateSync = useTemplateSync({
+    clientOptions: contentClientOptions,
     dispatch,
     enabled: templatesEnabled,
     localRules: chatRules,
+    refreshToken: resourceRefreshToken,
   })
-  const sharedByLabelByRunId = useMemo(() => {
-    const labels = new Map<string, string>()
-    for (const [runId, entry] of sharedWithMeByRunId) {
-      labels.set(
-        runId,
-        personLabel(entry.granted_by_display_name, null, entry.granted_by_sub),
-      )
-    }
-    return labels
-  }, [sharedWithMeByRunId])
-
   const flushScheduledChatContent = useCallback((threadId: string) => {
     const scheduled = scheduledChatContentByThreadIdRef.current.get(threadId)
     if (!scheduled) return
@@ -1684,7 +1877,12 @@ export function ResearchDesk({
   async function handleLoadProject() {
     setProjectActionError(null)
     try {
-      const nextState = await loadProject({ onWorkStart: () => setProjectAction('load') })
+      const loadedState = await loadProject({ onWorkStart: () => setProjectAction('load') })
+      const nextState = prepareProjectFileImport(
+        loadedState,
+        effectiveWorkspaceId,
+        accountSyncActive,
+      )
       abortAllChatRequests()
       // Account preferences (theme/locale/contrast/bubble tone) are an account tier, not
       // project data: while a real per-user session drives them, a loaded
@@ -1707,8 +1905,18 @@ export function ResearchDesk({
   async function handleExportProject() {
     setProjectActionError(null)
     try {
-      const result = await exportProject(
+      setProjectAction('export')
+      const prepared = await prepareCollaborationProjectExport(
         projectStateWithPreferences(state, currentPreferences),
+        contentClientOptions,
+        activeCollaborationControllerRef.current,
+      )
+      if (prepared.staleDocuments.length > 0 && !confirmStaleCollaborationExport(
+        prepared.staleDocuments,
+        locale,
+      )) return
+      const result = await exportProject(
+        prepared.state,
         { onWorkStart: () => setProjectAction('export') },
       )
       dispatch({
@@ -1727,8 +1935,18 @@ export function ResearchDesk({
   async function handleSaveProject() {
     setProjectActionError(null)
     try {
-      const result = await saveProject(
+      setProjectAction('save')
+      const prepared = await prepareCollaborationProjectExport(
         projectStateWithPreferences(state, currentPreferences),
+        contentClientOptions,
+        activeCollaborationControllerRef.current,
+      )
+      if (prepared.staleDocuments.length > 0 && !confirmStaleCollaborationExport(
+        prepared.staleDocuments,
+        locale,
+      )) return
+      const result = await saveProject(
+        prepared.state,
         { onWorkStart: () => setProjectAction('save') },
       )
       dispatch({
@@ -2664,8 +2882,9 @@ export function ResearchDesk({
         ? loginLdap(credentials)
         : loginLocal(credentials))
       setAuthPassword('')
-      // The login set the session cookie; re-probe so the lock lifts.
-      await refreshAuthSession()
+      // A document reload is the only account-switch boundary that also
+      // discards every reducer, draft, cache, and live stream.
+      reloadApplication()
     } catch (error) {
       setAuthLockError(
         hasHttpStatus(error, 429)
@@ -2738,11 +2957,23 @@ export function ResearchDesk({
       return
     }
     try {
-      await deleteRun(runId)
+      // cancelIfActive: deleting an active run cancels it first and waits
+      // (bounded) for the terminal transition before deleting.
+      await deleteRun(runId, { cancelIfActive: true })
       dispatch({ jobId: runId, type: 'deleteJob' })
-    } catch {
-      // A real failure (e.g. 409 while still active) is surfaced via runError
-      // -> the apiError banner; keep the run in the list so it stays visible.
+    } catch (error) {
+      if (error instanceof RunStillCancellingError) {
+        // The cancel is accepted but the worker has not stopped within the
+        // bounded wait: keep the run visible (it carries the "cancelling"
+        // badge) and explain on the card why the delete has to be retried.
+        setCancelErrorByRunId((current) => ({
+          ...current,
+          [runId]: t.runCard.deletePendingCancel,
+        }))
+        return
+      }
+      // Other real failures are surfaced via runError -> the apiError
+      // banner; keep the run in the list so it stays visible.
     }
   }
 
@@ -2782,7 +3013,7 @@ export function ResearchDesk({
               isDemo={isDemoMode}
               session={authSession}
               onLogin={ssoLogin}
-              onLogout={() => void ssoLogout()}
+              onLogout={() => void handleLogout()}
               onOpenSecuritySettings={() => {
                 setSettingsRequestedSection('security')
                 dispatch({ type: 'setActiveView', view: 'settings' })
@@ -2799,6 +3030,7 @@ export function ResearchDesk({
               isComposerVisible={state.ui.isComposerVisible}
               isDesktop={isDesktop}
               isReportVisible={state.ui.isReportVisible}
+              isSubmitDisabled={isAuthResolving}
               jobs={visibleJobs}
               cancelErrorByRunId={cancelErrorByRunId}
               cancelSubmittingRunIds={cancelSubmittingRunIds}
@@ -2835,7 +3067,6 @@ export function ResearchDesk({
               selectedRun={selectedRun}
               selectedStack={displayedSelectedStack}
               shareCountByRunId={shareCountByRunId}
-              sharedByLabelByRunId={sharedByLabelByRunId}
             />
           ) : state.ui.activeView === 'chat' ? (
             <ChatWorkspace
@@ -2984,6 +3215,10 @@ export function ResearchDesk({
               defaultChatModel={defaultChatModel}
               dispatch={dispatch}
               ensureAssetBodiesLoaded={ensureAssetBodiesLoaded}
+              onCollaborationControllerChange={handleCollaborationControllerChange}
+              onFlushDocumentForShare={projectSyncActive ? flushDocumentForShare : undefined}
+              onShareDocument={sharingEnabled ? handleShareEditorDocument : undefined}
+              onServerDocumentObserved={registerOpenedServerDocument}
               reportOptions={reportOptions}
               selectedModelTier={state.ui.selectedChatModelTier}
               state={state}
@@ -3108,6 +3343,14 @@ export function ResearchDesk({
           ) : state.ui.activeView === 'prompt-library' ? (
             <PromptLibraryWorkspace
               dispatch={dispatch}
+              onRequestedResourceHandled={() => setSharedOpenTarget(null)}
+              requestedResource={sharedOpenTarget?.resource_type === 'prompt_template'
+                || sharedOpenTarget?.resource_type === 'skill_template'
+                ? {
+                  resourceId: sharedOpenTarget.resource_id,
+                  resourceType: sharedOpenTarget.resource_type,
+                }
+                : null}
               skillsApi={skillsEnabled ? skillsApi : null}
               sharing={sharingEnabled
                 ? {
@@ -3117,6 +3360,14 @@ export function ResearchDesk({
                       resourceId: rule.serverTemplateId,
                       resourceType: 'prompt_template',
                       title: rule.title,
+                    })
+                  },
+                  onShareSkill: (skill) => {
+                    if (skill.access.mode !== 'owner') return
+                    setShareTarget({
+                      resourceId: skill.id,
+                      resourceType: 'skill_template',
+                      title: skill.title,
                     })
                   },
                 }
@@ -3138,6 +3389,20 @@ export function ResearchDesk({
               fileApiOptions={fileApiOptions}
               knowledgeSync={knowledgeSyncOptions}
               onAssetsIngested={runServerParse}
+              onRefreshServerCollections={knowledgeCollectionsApi.refresh}
+              onShareServerCollection={sharingEnabled
+                ? (collection) => {
+                  if (collection.access.mode !== 'owner') return
+                  setShareTarget({
+                    resourceId: collection.id,
+                    resourceType: 'knowledge_collection',
+                    title: collection.name,
+                  })
+                }
+                : undefined}
+              serverCollections={knowledgeCollectionsApi.collections}
+              serverCollectionsLoaded={knowledgeCollectionsApi.loaded}
+              serverCollectionsRefreshToken={resourceRefreshToken}
               serverFeatureLabels={serverFeatureLabels}
               serverFileUpload={serverFileUpload}
               state={state}
@@ -3152,7 +3417,8 @@ export function ResearchDesk({
               authSession={authSession}
               patAvailable={authConfig?.pat_available}
               onSsoLogin={ssoLogin}
-              onSsoLogout={() => void ssoLogout()}
+              onSsoLogout={() => void handleLogout()}
+              logoutError={logoutError}
               isDemoMode={isDemoMode}
               onApiKeyChange={handleSettingsApiKeyChange}
               onDemoModeChange={(enabled) => dispatch({ enabled, type: 'setDemoMode' })}
@@ -3161,6 +3427,7 @@ export function ResearchDesk({
               selectedStack={displayedSelectedStack}
               requestedSection={settingsRequestedSection}
               sharing={sharingEnabled ? sharingInbox : null}
+              sharingRefreshToken={resourceRefreshToken}
               onOpenSharedResource={openSharedResource}
               stackDiscoveryStatus={stackDiscoveryStatus}
               stackOptions={effectiveStackOptions}
@@ -3171,10 +3438,13 @@ export function ResearchDesk({
       {sharingEnabled && shareTarget && (
         <ShareDialog
           demo={isDemoMode}
-          onChanged={() => void refreshShareCounts()}
+          onChanged={() => {
+            requestResourceRefresh()
+          }}
           onClose={() => setShareTarget(null)}
-          ownerEmail={isDemoMode ? DEMO_OWNER.email : authSession.email}
-          ownerName={isDemoMode ? DEMO_OWNER.displayName : authSession.displayName}
+          ownerEmail={isDemoMode ? DEMO_OWNER.email : authSession.user?.email ?? null}
+          ownerName={isDemoMode ? DEMO_OWNER.displayName : authSession.user?.displayName ?? null}
+          refreshToken={resourceRefreshToken}
           resourceId={shareTarget.resourceId}
           resourceTitle={shareTarget.title}
           resourceType={shareTarget.resourceType}
@@ -3441,6 +3711,74 @@ function projectStateWithPreferences(
   }
 }
 
+async function prepareCollaborationProjectExport(
+  state: ProjectState,
+  clientOptions: ClientOptions,
+  activeController: {
+    controller: CollaborationProjectionController
+    documentId: string
+  } | null,
+): Promise<{ staleDocuments: ProjectState['editorDocuments'][string][]; state: ProjectState }> {
+  const editorDocuments = { ...state.editorDocuments }
+  const staleDocuments: ProjectState['editorDocuments'][string][] = []
+  for (const documentId of state.editorDocumentOrder) {
+    const document = state.editorDocuments[documentId]
+    if (
+      !document
+      || document.contentMode !== 'collaboration'
+      || document.access?.mode === 'shared'
+    ) continue
+    try {
+      const localController = activeController?.documentId === document.id
+        ? activeController.controller
+        : null
+      const projection = await flushCollaborationProjectionBarrier({
+        clientOptions,
+        controller: localController,
+        documentId: document.id,
+        generation: document.collaboration?.generation,
+        requireLocal: state.editorUi.activeDocumentId === document.id,
+      })
+      editorDocuments[document.id] = {
+        ...document,
+        collaboration: document.collaboration
+          ? {
+              ...document.collaboration,
+              persistedSequence: projection.sequence,
+              projectionSequence: projection.sequence,
+              projectionUpdatedAt: projection.confirmedAt,
+            }
+          : document.collaboration,
+        contentMarkdown: projection.markdown,
+      }
+    } catch (error) {
+      console.warn('Collaboration projection flush failed before project export.', error)
+      if (!confirmedProjectionFallback(document)) throw error
+      staleDocuments.push(document)
+    }
+  }
+  return {
+    staleDocuments,
+    state: { ...state, editorDocuments },
+  }
+}
+
+function confirmStaleCollaborationExport(
+  documents: ProjectState['editorDocuments'][string][],
+  locale: 'de' | 'en',
+): boolean {
+  const details = documents
+    .map((document) => {
+      const timestamp = document.collaboration!.projectionUpdatedAt!
+      return `${document.title} (${new Date(timestamp).toLocaleString(locale)})`
+    })
+    .join('\n')
+  const message = locale === 'de'
+    ? `Die Live-Version konnte nicht abgerufen werden. Letzten gespeicherten Stand exportieren?\n\n${details}`
+    : `The live version could not be retrieved. Export the last saved state?\n\n${details}`
+  return window.confirm(message)
+}
+
 function buildChatMessages(
   history: ChatMessageRecord[],
   contentMarkdown: string,
@@ -3626,10 +3964,6 @@ function stoppedChatContent(partialContent: string, stoppedLabel: string) {
   const trimmed = partialContent.trim()
   if (!trimmed) return stoppedLabel
   return `${partialContent.trimEnd()}\n\n_${stoppedLabel}_`
-}
-
-function createClientId(prefix: string) {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
 function logProjectActionError(error: unknown) {

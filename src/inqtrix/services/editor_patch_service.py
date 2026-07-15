@@ -7,14 +7,12 @@ propose snapshots the document revision, apply is a CAS against the
 document's CURRENT revision plus the deterministic server-side edit
 application (:func:`apply_edits`), reject records the decision.
 
-Visibility: EVERY method resolves the parent DOCUMENT through the editor
-persistence service with the caller's ``(visible_to, also_visible)``
-first — an unknown or foreign document answers with the same indistinct
-not-found the document routes use (denial == absence). Patch-scoped
-methods convert that into :class:`PatchNotFound` so a foreign caller
-cannot learn that a patch exists at all. Mutations (propose/apply/
-reject) additionally require at least an edit grant, mirroring
-``save_document``.
+Access: EVERY method resolves the parent DOCUMENT through the editor
+persistence service with the caller's ``visible_to`` context first — an
+unknown or foreign document answers with the same indistinct not-found
+the document routes use (denial == absence). Patch-scoped methods convert
+that into :class:`PatchNotFound` so a foreign caller cannot learn that a
+patch exists at all.
 """
 
 from __future__ import annotations
@@ -22,13 +20,9 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Literal
 
-from inqtrix.auth.permissions import (
-    AuditEntry,
-    SharePermission,
-    resolve_owned_access,
-)
+from inqtrix.auth.permissions import AuditEntry, SharePermission
 from inqtrix.project.editor_patch_ports import (
     PATCH_SOURCES,
     PATCH_STATUSES,
@@ -48,6 +42,9 @@ if TYPE_CHECKING:
     from inqtrix.project.editor_patch_ports import EditorPatchStore
     from inqtrix.services.editor_persistence_service import (
         EditorPersistenceService,
+    )
+    from inqtrix.services.editor_collaboration_service import (
+        EditorCollaborationService,
     )
 
 log = logging.getLogger("inqtrix")
@@ -203,11 +200,13 @@ class EditorPatchService:
         *,
         store: "EditorPatchStore",
         editor_persistence: "EditorPersistenceService",
+        collaboration: "EditorCollaborationService | None" = None,
         audit: Any = None,
         durable: bool = False,
     ) -> None:
         self._store = store
         self._editor_persistence = editor_persistence
+        self._collaboration = collaboration
         self._audit = audit
         self._durable = durable
 
@@ -232,9 +231,8 @@ class EditorPatchService:
         edits: list[dict[str, Any]],
         summary: str,
         warnings: list[str],
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         visible_to: "UserContext | None",
-        also_visible: "Mapping[str, SharePermission] | None" = None,
         principal: "Principal | None" = None,
     ) -> EditorPatchRecord:
         """Persist one pending patch against a document the caller may edit.
@@ -252,14 +250,17 @@ class EditorPatchService:
         """
         if source not in PATCH_SOURCES:
             raise EditorPatchValidationError(f"unknown patch source: {source!r}")
-        document = await self._document_for(
+        document = await self._editor_persistence.get_document_for_ai(
             document_id,
             visible_to=visible_to,
-            also_visible=also_visible,
-            require_edit=True,
+            minimum=SharePermission.SUGGEST,
         )
         record = EditorPatchRecord(
-            patch_id=f"pch_{uuid.uuid4().hex}",
+            patch_id=(
+                str(uuid.uuid4())
+                if document.content_mode == "collaboration"
+                else f"pch_{uuid.uuid4().hex}"
+            ),
             document_id=document.id,
             run_id=run_id,
             source=source,
@@ -270,7 +271,25 @@ class EditorPatchService:
             summary=summary,
             warnings=tuple(warnings),
             revision_before=document.revision,
-            created_by_sub=created_by_sub,
+            collaboration_generation=(
+                document.collaboration_generation
+                if document.content_mode == "collaboration"
+                else None
+            ),
+            base_sequence=(
+                document.persisted_sequence
+                if document.content_mode == "collaboration"
+                else None
+            ),
+            created_by_user_id=(
+                created_by_user_id
+                or (
+                    principal.user_id
+                    if document.content_mode == "collaboration"
+                    and principal is not None
+                    else None
+                )
+            ),
             created_at=time.time(),
         )
         stored = await self._store.create(record)
@@ -292,7 +311,6 @@ class EditorPatchService:
         patch_id: str,
         *,
         visible_to: "UserContext | None",
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ) -> tuple[EditorPatchRecord, int]:
         """One patch plus the document's CURRENT revision.
 
@@ -305,7 +323,12 @@ class EditorPatchService:
         """
         patch = await self._store.get(patch_id)
         document = await self._patch_document(
-            patch, visible_to=visible_to, also_visible=also_visible
+            patch,
+            visible_to=visible_to,
+            minimum=SharePermission.VIEW,
+        )
+        self._require_private_patch_access(
+            patch, document=document, visible_to=visible_to
         )
         return patch, document.revision
 
@@ -315,7 +338,6 @@ class EditorPatchService:
         *,
         status: str | None,
         visible_to: "UserContext | None",
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ) -> list[EditorPatchRecord]:
         """All patches of a readable document, newest first.
 
@@ -325,21 +347,34 @@ class EditorPatchService:
         """
         if status is not None and status not in PATCH_STATUSES:
             raise EditorPatchValidationError(f"unknown patch status: {status!r}")
-        await self._document_for(
+        document = await self._document_for(
             document_id,
             visible_to=visible_to,
-            also_visible=also_visible,
-            require_edit=False,
+            minimum=SharePermission.VIEW,
         )
-        return await self._store.list_for_document(document_id, status=status)
+        patches = await self._store.list_for_document(document_id, status=status)
+        return [
+            patch
+            for patch in patches
+            if self._private_patch_visible(
+                patch, document=document, visible_to=visible_to
+            )
+            and not (
+                document.content_mode == "collaboration"
+                and patch.source == "human"
+                and patch.status == "pending"
+                and not patch.suggestion_ids
+            )
+        ]
 
     async def apply(
         self,
         patch_id: str,
         *,
-        expected_revision: int,
+        expected_revision: int | None,
+        expected_sequence: int | None = None,
+        decision_id: uuid.UUID | None = None,
         visible_to: "UserContext | None",
-        also_visible: "Mapping[str, SharePermission] | None" = None,
         principal: "Principal | None" = None,
     ) -> EditorPatchRecord:
         """Apply a pending patch to its document (CAS + server-side edits).
@@ -366,9 +401,27 @@ class EditorPatchService:
         document = await self._patch_document(
             patch,
             visible_to=visible_to,
-            also_visible=also_visible,
-            require_edit=True,
+            minimum=SharePermission.VIEW,
         )
+        self._require_private_patch_access(
+            patch, document=document, visible_to=visible_to
+        )
+        if document.content_mode == "collaboration":
+            return await self._apply_collaboration_patch(
+                patch,
+                document=document,
+                expected_sequence=expected_sequence,
+                decision_id=decision_id,
+                visible_to=visible_to,
+                principal=principal,
+            )
+        await self._document_for(
+            document.id,
+            visible_to=visible_to,
+            minimum=SharePermission.EDIT,
+        )
+        if expected_revision is None:
+            raise EditorPatchValidationError("expected_revision is required")
         if patch.status != "pending":
             replay = self._applied_replay(patch, expected_revision)
             if replay is not None:
@@ -414,7 +467,6 @@ class EditorPatchService:
                 content_markdown=new_content,
                 revision=applied_revision,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
         except DocumentRevisionConflict as exc:
             # The document moved under us. Two shapes lose the CAS:
@@ -437,8 +489,7 @@ class EditorPatchService:
             current = await self._patch_document(
                 patch,
                 visible_to=visible_to,
-                also_visible=also_visible,
-                require_edit=True,
+                minimum=SharePermission.EDIT,
             )
             if current.content_markdown != new_content:
                 raise PatchRevisionConflict(
@@ -476,8 +527,9 @@ class EditorPatchService:
         patch_id: str,
         *,
         note: str,
+        expected_sequence: int | None = None,
+        decision_id: uuid.UUID | None = None,
         visible_to: "UserContext | None",
-        also_visible: "Mapping[str, SharePermission] | None" = None,
         principal: "Principal | None" = None,
     ) -> EditorPatchRecord:
         """Reject a pending patch (records the optional note).
@@ -490,8 +542,28 @@ class EditorPatchService:
         document = await self._patch_document(
             patch,
             visible_to=visible_to,
-            also_visible=also_visible,
-            require_edit=True,
+            minimum=SharePermission.VIEW,
+        )
+        self._require_private_patch_access(
+            patch, document=document, visible_to=visible_to
+        )
+        if document.content_mode == "collaboration" and patch.suggestion_ids:
+            return await self._decide_collaboration_patch(
+                patch,
+                decision="reject",
+                expected_sequence=expected_sequence,
+                decision_id=decision_id,
+                visible_to=visible_to,
+                principal=principal,
+            )
+        await self._document_for(
+            document.id,
+            visible_to=visible_to,
+            minimum=(
+                SharePermission.SUGGEST
+                if document.content_mode == "collaboration"
+                else SharePermission.EDIT
+            ),
         )
         if patch.status == "rejected":
             return patch
@@ -509,6 +581,131 @@ class EditorPatchService:
             action="editor.patch_rejected",
             document_id=document.id,
             detail={"patch_id": patch_id},
+        )
+        return updated
+
+    async def _apply_collaboration_patch(
+        self,
+        patch: EditorPatchRecord,
+        *,
+        document: EditorDocument,
+        expected_sequence: int | None,
+        decision_id: uuid.UUID | None,
+        visible_to: "UserContext | None",
+        principal: "Principal | None",
+    ) -> EditorPatchRecord:
+        """Publish a private AI patch or accept an already shared patch."""
+        if self._collaboration is None or principal is None:
+            raise EditorPatchValidationError("collaboration is unavailable")
+        if expected_sequence is None or decision_id is None:
+            raise EditorPatchValidationError(
+                "expected_sequence and decision_id are required"
+            )
+        if patch.status != "pending":
+            if patch.status == "accepted" and patch.command_id == decision_id:
+                return patch
+            raise PatchAlreadyDecided(patch)
+        if patch.command_id == decision_id and patch.suggestion_ids:
+            return patch
+        if patch.suggestion_ids:
+            return await self._decide_collaboration_patch(
+                patch,
+                decision="accept",
+                expected_sequence=expected_sequence,
+                decision_id=decision_id,
+                visible_to=visible_to,
+                principal=principal,
+            )
+        if patch.source == "human":
+            raise EditorPatchValidationError("empty human suggestion cannot be applied")
+        fresh_document = await self._editor_persistence.get_document_for_ai(
+            document.id,
+            visible_to=visible_to,
+            minimum=SharePermission.SUGGEST,
+        )
+        target_markdown, _ = apply_edits(
+            fresh_document.content_markdown, list(patch.edits)
+        )
+        result = await self._collaboration.publish_suggestion(
+            document_id=document.id,
+            patch_id=patch.patch_id,
+            target_markdown=target_markdown,
+            actor_kind="agent" if patch.source == "agent" else "assistant",
+            expected_sequence=expected_sequence,
+            command_id=decision_id,
+            principal=principal,
+            visible_to=visible_to,
+        )
+        updated = await self._store.get(patch.patch_id)
+        if set(updated.suggestion_ids) != set(result.suggestion_ids):
+            log.error(
+                "Collaboration patch %s was persisted without matching suggestions.",
+                patch.patch_id,
+            )
+            raise RuntimeError("collaboration patch metadata is inconsistent")
+        await self._record_audit(
+            principal,
+            action="editor.patch_shared",
+            document_id=document.id,
+            detail={
+                "patch_id": patch.patch_id,
+                "sequence": str(result.sequence),
+            },
+        )
+        return updated
+
+    async def _decide_collaboration_patch(
+        self,
+        patch: EditorPatchRecord,
+        *,
+        decision: Literal["accept", "reject"],
+        expected_sequence: int | None,
+        decision_id: uuid.UUID | None,
+        visible_to: "UserContext | None",
+        principal: "Principal | None",
+    ) -> EditorPatchRecord:
+        """Accept or reject one shared patch through the serialized Node queue."""
+        if self._collaboration is None or principal is None:
+            raise EditorPatchValidationError("collaboration is unavailable")
+        if expected_sequence is None or decision_id is None:
+            raise EditorPatchValidationError(
+                "expected_sequence and decision_id are required"
+            )
+        expected_status = "accepted" if decision == "accept" else "rejected"
+        if patch.status != "pending":
+            if patch.status == expected_status and patch.command_id == decision_id:
+                return patch
+            raise PatchAlreadyDecided(patch)
+        await self._document_for(
+            patch.document_id,
+            visible_to=visible_to,
+            minimum=SharePermission.EDIT,
+        )
+        await self._collaboration.decide(
+            document_id=patch.document_id,
+            patch_ids=(patch.patch_id,),
+            decision=decision,
+            expected_sequence=expected_sequence,
+            command_id=decision_id,
+            principal=principal,
+            visible_to=visible_to,
+        )
+        updated = await self._store.get(patch.patch_id)
+        if updated.status != expected_status or updated.command_id != decision_id:
+            log.error(
+                "Collaboration decision %s did not update patch %s atomically.",
+                decision_id,
+                patch.patch_id,
+            )
+            raise RuntimeError("collaboration decision metadata is inconsistent")
+        await self._record_audit(
+            principal,
+            action=f"editor.patch_{expected_status}",
+            document_id=patch.document_id,
+            detail={
+                "patch_id": patch.patch_id,
+                "sequence": str(updated.decision_sequence),
+            },
         )
         return updated
 
@@ -537,16 +734,14 @@ class EditorPatchService:
         patch: EditorPatchRecord,
         *,
         visible_to: "UserContext | None",
-        also_visible: "Mapping[str, SharePermission] | None",
-        require_edit: bool = False,
+        minimum: SharePermission,
     ) -> EditorDocument:
         """The patch's parent document, or the indistinct PatchNotFound."""
         try:
             return await self._document_for(
                 patch.document_id,
                 visible_to=visible_to,
-                also_visible=also_visible,
-                require_edit=require_edit,
+                minimum=minimum,
             )
         except DocumentNotFound:
             # A foreign caller must not learn the patch exists at all.
@@ -557,24 +752,42 @@ class EditorPatchService:
         document_id: str,
         *,
         visible_to: "UserContext | None",
-        also_visible: "Mapping[str, SharePermission] | None",
-        require_edit: bool,
+        minimum: SharePermission,
     ) -> EditorDocument:
-        document = await self._editor_persistence.get_document(
-            document_id, visible_to=visible_to, also_visible=also_visible
+        return await self._editor_persistence.get_document(
+            document_id,
+            visible_to=visible_to,
+            minimum=minimum,
         )
-        if require_edit:
-            shared = resolve_owned_access(
-                owner_sub=document.created_by_sub,
-                resource_tenant_id=document.tenant_id,
-                resource_id=document.id,
-                visible_to=visible_to,
-                also_visible=also_visible,
-                not_found=DocumentNotFound,
-            )
-            if shared is not None and not shared.at_least(SharePermission.EDIT):
-                raise DocumentNotFound(document_id)
-        return document
+
+    @staticmethod
+    def _private_patch_visible(
+        patch: EditorPatchRecord,
+        *,
+        document: EditorDocument,
+        visible_to: "UserContext | None",
+    ) -> bool:
+        if (
+            document.content_mode != "collaboration"
+            or patch.suggestion_ids
+            or patch.source == "human"
+        ):
+            return True
+        caller = visible_to.principal.user_id if visible_to is not None else None
+        return caller is not None and caller == patch.created_by_user_id
+
+    @classmethod
+    def _require_private_patch_access(
+        cls,
+        patch: EditorPatchRecord,
+        *,
+        document: EditorDocument,
+        visible_to: "UserContext | None",
+    ) -> None:
+        if not cls._private_patch_visible(
+            patch, document=document, visible_to=visible_to
+        ):
+            raise PatchNotFound(patch.patch_id)
 
     async def _save_applied_document(
         self,
@@ -583,7 +796,6 @@ class EditorPatchService:
         content_markdown: str,
         revision: int,
         visible_to: "UserContext | None",
-        also_visible: "Mapping[str, SharePermission] | None",
     ) -> None:
         """Persist the applied body with the bumped revision, all other
         fields preserved (owner/created_at stay stable in the service)."""
@@ -599,10 +811,9 @@ class EditorPatchService:
             diff_anchor_updated_at=document.diff_anchor_updated_at,
             created_at=document.created_at,
             updated_at=time.time(),
-            caller_sub=document.created_by_sub,
+            caller_user_id=document.created_by_user_id,
             workspace_id=document.workspace_id,
             visible_to=visible_to,
-            also_visible=also_visible,
         )
 
     @staticmethod
@@ -638,14 +849,14 @@ class EditorPatchService:
         await self._audit.record(
             AuditEntry(
                 tenant_id=principal.tenant_id,
-                actor_sub=principal.sub,
+                actor_user_id=principal.user_id,
                 action=action,
                 resource_type="editor_document",
                 resource_id=document_id,
                 detail=detail,
-                # ``agent`` when a workspace-agent run proposed the edits on
-                # the owner's behalf (E6); ``actor_sub`` still carries the
-                # owner. Apply/reject stay user actions (the default).
+                # ``agent`` when a workspace-agent run proposed the edits;
+                # ``actor_user_id`` still carries the effective actor.
+                # Apply/reject stay user actions (the default).
                 actor_type=actor_type,
             )
         )

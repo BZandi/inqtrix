@@ -86,6 +86,8 @@ def _deps(assert_collections) -> SimpleNamespace:
             workspace_id=None,
             run_id="run_x",
         ),
+        request=SimpleNamespace(knowledge_filters={}),
+        knowledge_collection_ids=None,
         visible_to=None,
         runtime=SimpleNamespace(
             registry=SimpleNamespace(get=lambda _mode: SimpleNamespace())

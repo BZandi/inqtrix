@@ -9,6 +9,7 @@ default) and the Postgres backend
 
 from __future__ import annotations
 
+import uuid
 from typing import Protocol, Sequence, runtime_checkable
 
 from inqtrix.quota.models import QuotaDimension
@@ -22,7 +23,7 @@ class QuotaStore(Protocol):
         self,
         *,
         tenant_id: str,
-        subject_sub: str,
+        subject_user_id: uuid.UUID,
         dimension: QuotaDimension,
         period_start: float,
         amount: int,
@@ -42,10 +43,10 @@ class QuotaStore(Protocol):
         self,
         *,
         tenant_id: str,
-        subject_subs: Sequence[str],
+        subject_user_ids: Sequence[uuid.UUID],
         dimensions: Sequence[QuotaDimension],
         now: float,
-    ) -> dict[str, dict[QuotaDimension, int]]:
+    ) -> dict[uuid.UUID, dict[QuotaDimension, int]]:
         """Current usage per subject per dimension for the active window.
 
         Flow dimensions report the current calendar month (a stale-period
@@ -58,7 +59,7 @@ class QuotaStore(Protocol):
         self,
         *,
         tenant_id: str,
-        subject_sub: str,
+        subject_user_id: uuid.UUID,
         dimension: QuotaDimension,
         now: float,
     ) -> None:
@@ -75,14 +76,14 @@ class QuotaStore(Protocol):
         self,
         *,
         tenant_id: str,
-        subject_subs: Sequence[str],
+        subject_user_ids: Sequence[uuid.UUID | None],
         dimensions: Sequence[QuotaDimension],
-    ) -> dict[str, dict[QuotaDimension, int]]:
+    ) -> dict[uuid.UUID | None, dict[QuotaDimension, int]]:
         """Stored limit values per subject per dimension.
 
         Only rows that exist are returned; absence means "fall through
         to the next layer" in :func:`~inqtrix.quota.models.effective_limit`.
-        Pass ``DEFAULT_SUBJECT`` among *subject_subs* to fetch the
+        Pass ``DEFAULT_USER_ID`` among *subject_user_ids* to fetch the
         tenant-wide admin default alongside per-user overrides.
         """
         ...
@@ -91,13 +92,13 @@ class QuotaStore(Protocol):
         self,
         *,
         tenant_id: str,
-        subject_sub: str,
+        subject_user_id: uuid.UUID | None,
         dimension: QuotaDimension,
         value: int,
-        set_by_sub: str,
+        set_by_user_id: uuid.UUID,
     ) -> None:
         """Upsert one limit (a per-user override or, with
-        ``DEFAULT_SUBJECT``, the tenant default). ``0`` stores an
+        ``DEFAULT_USER_ID``, the tenant default). ``0`` stores an
         explicit unlimited."""
         ...
 
@@ -105,17 +106,17 @@ class QuotaStore(Protocol):
         self,
         *,
         tenant_id: str,
-        subject_sub: str,
+        subject_user_id: uuid.UUID | None,
         dimension: QuotaDimension,
     ) -> None:
         """Remove one limit row so it falls through to the next layer."""
         ...
 
-    async def list_subjects(self, *, tenant_id: str) -> list[str]:
+    async def list_subjects(self, *, tenant_id: str) -> list[uuid.UUID]:
         """Distinct real subjects that carry usage or an override.
 
         The admin overview source: every subject the tenant has metered
-        or limited, EXCLUDING the ``DEFAULT_SUBJECT`` sentinel (which is
+        or limited, EXCLUDING the ``DEFAULT_USER_ID`` sentinel (which is
         the tenant-wide default, surfaced separately). Subjects with no
         counter and no override are implicitly on the default and need
         no row. Order is unspecified.

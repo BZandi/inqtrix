@@ -3,7 +3,7 @@
 This is the enterprise boundary around provider-backed memory. Routers and
 the agent pass a verified :class:`~inqtrix.auth.principal.Principal`; client
 payloads never carry owner identifiers. The service derives a provider
-namespace from ``(tenant_id, sub)`` and rejects anonymous/static principals
+namespace from ``(tenant_id, user_id)`` and rejects anonymous/static principals
 for long-term memory.
 """
 
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import uuid
 import re
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -141,7 +142,7 @@ class AgentMemoryService:
             return False
         try:
             prefs = await self._account_preferences.get_preferences(
-                sub=principal.sub
+                user_id=principal.user_id
             )
         except Exception:  # noqa: BLE001 — memory is non-essential; degrade OFF
             log.warning(
@@ -233,7 +234,7 @@ class AgentMemoryService:
         confidence: float,
         source_run_id: str,
     ) -> AgentMemoryCandidate:
-        tenant_id, sub = self._principal_key(principal)
+        tenant_id, user_id = self._principal_key(principal)
         scope = self._validate_scope(scope)
         category = self._validate_category(category)
         content = self._validate_content(content)
@@ -242,7 +243,7 @@ class AgentMemoryService:
             AgentMemoryCandidate(
                 candidate_id=f"memcand_{uuid.uuid4().hex}",
                 tenant_id=tenant_id,
-                sub=sub,
+                user_id=user_id,
                 scope=scope,
                 category=category,
                 content=content,
@@ -285,11 +286,11 @@ class AgentMemoryService:
         principal: Principal,
         status: str | None = None,
     ) -> list[AgentMemoryCandidate]:
-        tenant_id, sub = self._principal_key(principal)
+        tenant_id, user_id = self._principal_key(principal)
         if status is not None and status not in MEMORY_CANDIDATE_STATUSES:
             raise AgentMemoryValidationError(f"unknown status: {status}")
         return await self._candidate_store.list_candidates(
-            tenant_id=tenant_id, sub=sub, status=status
+            tenant_id=tenant_id, user_id=user_id, status=status
         )
 
     async def accept_candidate(
@@ -299,10 +300,10 @@ class AgentMemoryService:
         candidate_id: str,
         content: str | None = None,
     ) -> AgentMemoryCandidate:
-        tenant_id, sub = self._principal_key(principal)
+        tenant_id, user_id = self._principal_key(principal)
         candidate = await self._candidate_store.get_candidate(
             tenant_id=tenant_id,
-            sub=sub,
+            user_id=user_id,
             candidate_id=candidate_id,
         )
         if candidate.status == "accepted":
@@ -319,7 +320,7 @@ class AgentMemoryService:
         )
         return await self._candidate_store.update_candidate(
             tenant_id=tenant_id,
-            sub=sub,
+            user_id=user_id,
             candidate_id=candidate_id,
             status="accepted",
             content=content,
@@ -329,9 +330,9 @@ class AgentMemoryService:
     async def reject_candidate(
         self, *, principal: Principal, candidate_id: str
     ) -> AgentMemoryCandidate:
-        tenant_id, sub = self._principal_key(principal)
+        tenant_id, user_id = self._principal_key(principal)
         candidate = await self._candidate_store.get_candidate(
-            tenant_id=tenant_id, sub=sub, candidate_id=candidate_id
+            tenant_id=tenant_id, user_id=user_id, candidate_id=candidate_id
         )
         if candidate.status == "rejected":
             return candidate
@@ -339,7 +340,7 @@ class AgentMemoryService:
             raise AgentMemoryValidationError("candidate is not pending")
         return await self._candidate_store.update_candidate(
             tenant_id=tenant_id,
-            sub=sub,
+            user_id=user_id,
             candidate_id=candidate_id,
             status="rejected",
         )
@@ -385,7 +386,7 @@ class AgentMemoryService:
         feedback: str,
         reason: str,
     ) -> AgentFeedbackRecord:
-        tenant_id, sub = self._principal_key(principal)
+        tenant_id, user_id = self._principal_key(principal)
         normalized = self._validate_feedback(feedback)
         trimmed_memory_id = _trim(memory_id, 240)
         trimmed_reason = _trim(reason, 1200)
@@ -400,7 +401,7 @@ class AgentMemoryService:
             AgentFeedbackRecord(
                 feedback_id=f"agfb_{uuid.uuid4().hex}",
                 tenant_id=tenant_id,
-                sub=sub,
+                user_id=user_id,
                 run_id=_trim(run_id, 160),
                 memory_id=trimmed_memory_id,
                 feedback=normalized,
@@ -415,22 +416,22 @@ class AgentMemoryService:
         run_id: str | None = None,
         limit: int = 100,
     ) -> list[AgentFeedbackRecord]:
-        tenant_id, sub = self._principal_key(principal)
+        tenant_id, user_id = self._principal_key(principal)
         return await self._feedback_store.list_feedback(
             tenant_id=tenant_id,
-            sub=sub,
+            user_id=user_id,
             run_id=_trim(run_id or "", 160) or None,
             limit=_clamp_limit(limit),
         )
 
-    def _principal_key(self, principal: Principal) -> tuple[str, str]:
+    def _principal_key(self, principal: Principal) -> tuple[str, uuid.UUID]:
         if not self._is_principal_eligible(principal):
             raise AgentMemoryUnavailable("Memory requires an authenticated user")
-        return principal.tenant_id or "default", principal.sub
+        return principal.tenant_id or "default", principal.user_id
 
     def _namespace_for(self, principal: Principal) -> str:
-        tenant_id, sub = self._principal_key(principal)
-        digest = hashlib.sha256(f"{tenant_id}:{sub}".encode("utf-8")).hexdigest()
+        tenant_id, user_id = self._principal_key(principal)
+        digest = hashlib.sha256(f"{tenant_id}:{user_id}".encode("utf-8")).hexdigest()
         return f"inqtrix_{tenant_id}_{digest[:48]}"
 
     def _require_provider(self) -> AgentMemoryProvider:
@@ -444,7 +445,7 @@ class AgentMemoryService:
     def _is_principal_eligible(principal: Principal) -> bool:
         return (
             principal.kind in _LONG_TERM_KINDS
-            and principal.sub not in _INELIGIBLE_SUBS
+            and principal.user_id is not None
         )
 
     @staticmethod

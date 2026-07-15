@@ -26,6 +26,9 @@ docker compose $CF up -d --build
 # With optional profiles (mix as needed)
 docker compose $CF --profile knowledge --profile workers up -d --build
 
+# Live editor collaboration (requires matching env settings and cookie auth)
+docker compose $CF --profile collaboration up -d --build
+
 # A specific setup: point --env-file at its own file instead
 docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/env/azure.env up -d
 ```
@@ -36,6 +39,7 @@ docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/env/azure.
 docker compose $CF ps                 # wait for healthy
 docker compose $CF logs -f api        # follow the API (startup config errors land here)
 docker compose $CF logs migrate       # one-shot migration output
+docker compose $CF logs -f collaboration # fencing/readiness/persistence status
 ```
 
 ## Stop / restart
@@ -43,18 +47,44 @@ docker compose $CF logs migrate       # one-shot migration output
 ```bash
 docker compose $CF down               # stop, KEEP volumes/data
 docker compose $CF restart api web    # restart without rebuilding
+docker compose $CF restart api collaboration web # collaboration-enabled stack
 ```
 
 ## Update
 
-Pull the new code, rebuild, re-run migrations explicitly, then restart:
+Pull the new code, then choose the update path that matches the configured
+migration RLS mode. Bundled/`auto` and dedicated `bypass` installations use
+normal Compose orchestration:
 
 ```bash
 git pull
-docker compose $CF build
-docker compose $CF up migrate         # one-shot; runs to completion
-docker compose $CF up -d api web
+docker compose $CF up -d --build
+
+# Preserve active profiles in the same orchestrated update
+docker compose $CF --profile collaboration up -d --build
 ```
+
+Managed PostgreSQL `owner` mode uses the maintenance wrapper instead; do not
+run `compose up` first:
+
+```bash
+git pull
+deploy/scripts/compose-owner-upgrade.sh
+```
+
+The wrapper builds the new images before draining active database clients,
+runs the one-shot migration, then rolls the previously active API, worker,
+Collaboration and web services to those images. A failure before the migration
+attempt restores old containers; an interrupted or failed attempt leaves all
+database clients stopped because its commit state is not safe to infer from a
+CLI exit code. Verify the job and database revision before recovery. Set
+`INQTRIX_COMPOSE_FILE` and `INQTRIX_STACK_ENV_FILE` when the Compose file or
+stack env lives outside the repository defaults.
+
+Do not run `inqtrix-migrate` manually during a normal update. Managed
+PostgreSQL uses a separate migration env file and explicit RLS mode. See
+[Database migrations](database-migrations.md). A manual command is break-glass
+only after a verified backup and full workload drain.
 
 ## Local development (changing the code)
 
@@ -79,7 +109,7 @@ Edit files under `apps/research-desk/` and the browser updates instantly. To als
 
 ## Backup
 
-Capture **both** the Postgres database and the object-store volume — uploaded blobs live outside Postgres.
+Capture **both** the Postgres database and the object-store volume - uploaded blobs live outside Postgres. PostgreSQL already contains every collaboration update, snapshot, projection, lease, and decision row; the Node service has no separate volume to back up.
 
 ```bash
 # Postgres dump
@@ -93,6 +123,12 @@ docker run --rm -v inqtrix_objectstore:/data -v "$PWD:/out" \
 If you run `--profile knowledge`, also snapshot the Qdrant volume (`inqtrix_qdrant_storage`) the same way; re-ingestion can rebuild it, so it is optional.
 
 ## Restore
+
+For a collaboration-enabled deployment, stop the API and Node writer before
+restore. Restore a matching application/schema version, then start FastAPI
+before exactly one collaboration instance. Node reconstructs each room from
+the verified snapshot plus update tail; never reconstruct it from Markdown
+alone. See [Deploy editor collaboration](editor-collaboration.md#backup-and-restore).
 
 ```bash
 # Postgres (into a fresh, migrated database)
@@ -111,9 +147,17 @@ docker compose $CF down -v            # removes containers AND named volumes
 
 Re-running `up -d --build` then re-migrates a clean database.
 
+## Collaboration kill switch
+
+Set `INQTRIX_COLLABORATION_ENABLED=false`, restart FastAPI, and then stop the
+collaboration service. Legacy Markdown editing continues. Existing
+collaboration documents retain their binary PostgreSQL state and expose only
+the last saved Markdown projection read-only; the switch does not convert or
+delete them.
+
 ## Related docs
 
 - [Stack quickstart](../getting-started/stack-quickstart.md)
 - [Platform components](../getting-started/platform-components.md)
 - [Security hardening](security-hardening.md)
-- [Provider recipes](../getting-started/provider-recipes.md)
+- [Editor collaboration](editor-collaboration.md)

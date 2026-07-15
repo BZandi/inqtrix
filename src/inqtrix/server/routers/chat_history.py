@@ -20,6 +20,7 @@ conversations.
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Request
@@ -48,10 +49,10 @@ if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
 
-def _caller_sub(principal: Principal) -> str | None:
+def _caller_user_id(principal: Principal) -> uuid.UUID | None:
     """Owner anchor: scoped principals own what they create; the
     anonymous/static principals stay unscoped (the established rule)."""
-    return principal.sub if principal.kind in ("oidc_session", "pat") else None
+    return principal.user_id if principal.kind in ("oidc_session", "pat") else None
 
 
 def _thread_payload(thread: ChatThread) -> dict[str, Any]:
@@ -118,7 +119,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(400, "Ungueltiger Cursor", "invalid_cursor")
         limit = clamp_limit(req.query_params.get("limit"))
         threads, next_cursor = await service.list_threads(
-            caller_sub=_caller_sub(principal),
+            caller_user_id=_caller_user_id(principal),
             workspace_id=workspace_id_from_request(req),
             limit=limit,
             after=after,
@@ -165,7 +166,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 group_id=group_id,
                 created_at=float(created_at),
                 updated_at=float(updated_at),
-                caller_sub=_caller_sub(principal),
+                caller_user_id=_caller_user_id(principal),
                 workspace_id=workspace_id_from_request(req),
                 visible_to=visible_to,
             )
@@ -275,7 +276,7 @@ def build_router(container: "AppContainer") -> APIRouter:
     ):
         """All of the caller's thread groups (newest first)."""
         groups = await service.list_groups(
-            caller_sub=_caller_sub(principal),
+            caller_user_id=_caller_user_id(principal),
             workspace_id=workspace_id_from_request(req),
         )
         return {
@@ -312,7 +313,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 title=str(body.get("title", "")),
                 created_at=float(created_at),
                 updated_at=float(updated_at),
-                caller_sub=_caller_sub(principal),
+                caller_user_id=_caller_user_id(principal),
                 workspace_id=workspace_id_from_request(req),
                 visible_to=visible_to,
             )

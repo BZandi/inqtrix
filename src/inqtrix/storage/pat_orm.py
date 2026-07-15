@@ -4,18 +4,17 @@ Separate ``MetaData`` on purpose (immutable-snapshot rule): the table
 arrives with revision 0005. Timestamps are unix-seconds doubles,
 mirroring the in-memory records and the session tables exactly.
 
-The token id is both the primary key and the public identifier; only
-the peppered HMAC of the secret is stored. The owner is anchored as
-``(owner_issuer, owner_sub)`` text columns — consistent with
-``auth_sessions``/``workspace_members``, deliberately NOT a foreign
-key into the ``users`` mirror so token validity never depends on the
-mirror row's lifecycle.
+The token id is both the primary key and the public identifier; only the
+peppered HMAC of the secret is stored. ``owner_user_id`` is the canonical local
+identity. Migration 0045 adds its cross-metadata ``users(id) ON DELETE
+RESTRICT`` foreign key; token resolution additionally checks current user
+status on every request.
 """
 
 from __future__ import annotations
 
 from sqlalchemy import Column, Float, Index, MetaData, Table, Text, text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 pat_metadata = MetaData()
 
@@ -26,8 +25,7 @@ personal_access_tokens = Table(
     Column(
         "tenant_id", Text, nullable=False, server_default=text("'default'")
     ),
-    Column("owner_issuer", Text, nullable=False),
-    Column("owner_sub", Text, nullable=False),
+    Column("owner_user_id", UUID(as_uuid=True), nullable=False),
     Column("name", Text, nullable=False),
     Column("secret_hmac", Text, nullable=False),
     Column("scopes", JSONB, nullable=False, server_default=text("'[]'")),
@@ -35,7 +33,7 @@ personal_access_tokens = Table(
     Column("expires_at", Float, nullable=True),
     Column("last_used_at", Float, nullable=True),
     Column("revoked_at", Float, nullable=True),
-    Index("ix_pat_owner", "tenant_id", "owner_issuer", "owner_sub"),
+    Index("ix_pat_owner", "tenant_id", "owner_user_id"),
 )
 """Personal access tokens. The primary key serves the verification
 lookup; ``ix_pat_owner`` serves listing and the disable cascade. No

@@ -2,7 +2,7 @@
  *
  * Sync model (Google-Drive rule): the SERVER record is the one truth
  * for synced rules — hydrate always takes the server state. Updates use
- * OPTIMISTIC concurrency: a save carries the `updated_at` it loaded as
+ * OPTIMISTIC concurrency: a save carries the integer `revision` it loaded as
  * a precondition, and a server-side conflict (someone else saved in
  * between) surfaces instead of silently overwriting. Local-only rules
  * (no serverTemplateId) stay untouched until their first save uploads
@@ -10,38 +10,38 @@
  */
 
 import type { ChatRuleCategory, ChatRuleRecord } from '@/features/project/types'
+import type { ResourceAccess } from '@/features/sharing/types'
 
 /** A save was rejected because the template changed server-side since
  * it was loaded — the optimistic-concurrency conflict (HTTP 409).
  *
  * `refreshed` says whether the conflict recovery managed to reload the
- * current version into local state: `true` (the editor now shows the
- * latest, re-save will land) drives a different message than `false`
- * (the refresh fetch itself failed, so nothing was reloaded and a
- * blind re-save would just 409 again). */
+ * current version into local state. A refreshed conflict still does not
+ * lend that newer revision to the dirty draft: the user must explicitly
+ * keep the draft as a new copy or discard it for the server version. */
 export class TemplateConflictError extends Error {
+  readonly currentRevision: number
   readonly refreshed: boolean
-  constructor(refreshed: boolean) {
+  constructor(refreshed: boolean, currentRevision: number) {
     super('prompt template was modified by someone else')
     this.name = 'TemplateConflictError'
     this.refreshed = refreshed
+    this.currentRevision = currentRevision
   }
 }
 
-export type PromptTemplateAccess = {
-  permission: 'edit' | 'view'
-  via: 'share'
-}
+export type PromptTemplateAccess = ResourceAccess
 
 /** Wire shape of one `/v1/prompt-templates` record. */
 export type PromptTemplateInfo = {
-  access?: PromptTemplateAccess
+  access: PromptTemplateAccess
   category: ChatRuleCategory | null
   content_markdown: string
   created_at: number
   id: string
   include_in_autocomplete: boolean
   label: string
+  revision: number
   title: string
   updated_at: number
   visibility: { chat?: boolean; editor?: boolean }
@@ -50,9 +50,6 @@ export type PromptTemplateInfo = {
 export type PromptTemplatePayload = {
   category: ChatRuleCategory | null
   content_markdown: string
-  /** Optimistic-concurrency precondition (unix seconds) — the server
-   * `updated_at` the editor loaded; omitted on create. */
-  expected_updated_at?: number
   include_in_autocomplete: boolean
   label: string
   title: string
@@ -84,12 +81,8 @@ export function ruleFromTemplate(
     includeInAutocomplete: info.include_in_autocomplete,
     label: info.label,
     linkedContextRefs: existing?.linkedContextRefs,
+    serverRevision: info.revision,
     serverTemplateId: info.id,
-    // The EXACT server timestamp (unix seconds), carried raw as the
-    // optimistic-concurrency precondition — never via the ISO
-    // `updatedAt`, whose millisecond truncation would mismatch the
-    // microsecond float the server stores and trip a false 409.
-    serverUpdatedAt: info.updated_at,
     title: info.title,
     updatedAt: isoFromUnix(info.updated_at),
     visibility: {
@@ -107,6 +100,7 @@ export function isSameSyncedRule(
 ): boolean {
   return (
     existing.id === incoming.id
+    && existing.serverRevision === incoming.serverRevision
     && existing.updatedAt === incoming.updatedAt
     && existing.contentMarkdown === incoming.contentMarkdown
     && existing.title === incoming.title
@@ -152,10 +146,39 @@ export function staleSyncedRuleIds(
 
 /** Whether the caller may edit/save this rule (view shares cannot). */
 export function canEditRule(rule: ChatRuleRecord | null): boolean {
-  return rule?.access?.permission !== 'view'
+  return rule?.access?.mode !== 'shared' || rule.access.permission !== 'view'
+}
+
+/** Whether the current draft still has a writable destination.
+ *
+ * A draft loaded from a synced template retains that template id even when
+ * an authoritative refresh removes the local rule after deletion or share
+ * revocation. Such a draft must never fall through to the local-rule create
+ * path: only a genuinely new/local draft has no source template id.
+ */
+export function canSavePromptDraft(
+  sourceTemplateId: string | null,
+  rule: ChatRuleRecord | null,
+  baseRevision: number | null = null,
+): boolean {
+  if (sourceTemplateId !== null && rule === null) return false
+  if (!canEditRule(rule)) return false
+  return !hasPromptDraftConflict(sourceTemplateId, rule, baseRevision)
+}
+
+/** Whether a dirty draft is based on an older authoritative revision. */
+export function hasPromptDraftConflict(
+  sourceTemplateId: string | null,
+  rule: ChatRuleRecord | null,
+  baseRevision: number | null,
+): boolean {
+  return sourceTemplateId !== null
+    && rule?.serverRevision !== undefined
+    && baseRevision !== null
+    && rule.serverRevision !== baseRevision
 }
 
 /** Whether the caller may delete this rule (shared-in never deletes). */
 export function canDeleteRule(rule: ChatRuleRecord | null): boolean {
-  return rule !== null && rule.access === undefined
+  return rule !== null && rule.access?.mode !== 'shared'
 }

@@ -1,7 +1,7 @@
 """In-process quota store: the zero-infrastructure default.
 
 Thread-safe like the other memory backends. Counters are keyed by
-``(tenant_id, subject_sub, dimension, period_start)`` — exactly the
+``(tenant_id, subject_user_id, dimension, period_start)`` — exactly the
 Postgres primary key — so both backends keep per-window history and
 read the active window identically; lazy rollover falls out of the
 keying (a new month is a new key at 0). Limits live in a parallel
@@ -12,17 +12,18 @@ atomic.
 from __future__ import annotations
 
 import threading
+import uuid
 from typing import Sequence
 
 from inqtrix.quota.models import (
-    DEFAULT_SUBJECT,
+    DEFAULT_USER_ID,
     STOCK_PERIOD,
     QuotaDimension,
     current_period_start,
 )
 
-_CounterKey = tuple[str, str, QuotaDimension, float]
-_LimitKey = tuple[str, str, QuotaDimension]
+_CounterKey = tuple[str, uuid.UUID, QuotaDimension, float]
+_LimitKey = tuple[str, uuid.UUID | None, QuotaDimension]
 
 
 def _active_period(dimension: QuotaDimension, now: float) -> float:
@@ -41,12 +42,12 @@ class MemoryQuotaStore:
         self,
         *,
         tenant_id: str,
-        subject_sub: str,
+        subject_user_id: uuid.UUID,
         dimension: QuotaDimension,
         period_start: float,
         amount: int,
     ) -> int:
-        key: _CounterKey = (tenant_id, subject_sub, dimension, period_start)
+        key: _CounterKey = (tenant_id, subject_user_id, dimension, period_start)
         with self._lock:
             # max(0, ...) clamps a stock release; a new window is simply
             # an unseen key that starts at 0.
@@ -58,13 +59,13 @@ class MemoryQuotaStore:
         self,
         *,
         tenant_id: str,
-        subject_subs: Sequence[str],
+        subject_user_ids: Sequence[uuid.UUID],
         dimensions: Sequence[QuotaDimension],
         now: float,
-    ) -> dict[str, dict[QuotaDimension, int]]:
-        result: dict[str, dict[QuotaDimension, int]] = {}
+    ) -> dict[uuid.UUID, dict[QuotaDimension, int]]:
+        result: dict[uuid.UUID, dict[QuotaDimension, int]] = {}
         with self._lock:
-            for sub in subject_subs:
+            for sub in subject_user_ids:
                 result[sub] = {
                     dimension: self._counters.get(
                         (
@@ -83,7 +84,7 @@ class MemoryQuotaStore:
         self,
         *,
         tenant_id: str,
-        subject_sub: str,
+        subject_user_id: uuid.UUID,
         dimension: QuotaDimension,
         now: float,
     ) -> None:
@@ -98,7 +99,7 @@ class MemoryQuotaStore:
             self._counters[
                 (
                     tenant_id,
-                    subject_sub,
+                    subject_user_id,
                     dimension,
                     _active_period(dimension, now),
                 )
@@ -108,52 +109,52 @@ class MemoryQuotaStore:
         self,
         *,
         tenant_id: str,
-        subject_subs: Sequence[str],
+        subject_user_ids: Sequence[uuid.UUID | None],
         dimensions: Sequence[QuotaDimension],
-    ) -> dict[str, dict[QuotaDimension, int]]:
+    ) -> dict[uuid.UUID | None, dict[QuotaDimension, int]]:
         wanted = set(dimensions)
-        result: dict[str, dict[QuotaDimension, int]] = {}
+        result: dict[uuid.UUID | None, dict[QuotaDimension, int]] = {}
         with self._lock:
-            for (t_id, s_sub, dimension), value in self._limits.items():
+            for (t_id, subject_user_id, dimension), value in self._limits.items():
                 if (
                     t_id == tenant_id
-                    and s_sub in subject_subs
+                    and subject_user_id in subject_user_ids
                     and dimension in wanted
                 ):
-                    result.setdefault(s_sub, {})[dimension] = value
+                    result.setdefault(subject_user_id, {})[dimension] = value
         return result
 
     async def set_limit(
         self,
         *,
         tenant_id: str,
-        subject_sub: str,
+        subject_user_id: uuid.UUID | None,
         dimension: QuotaDimension,
         value: int,
-        set_by_sub: str,
+        set_by_user_id: uuid.UUID,
     ) -> None:
         with self._lock:
-            self._limits[(tenant_id, subject_sub, dimension)] = value
+            self._limits[(tenant_id, subject_user_id, dimension)] = value
 
     async def clear_limit(
         self,
         *,
         tenant_id: str,
-        subject_sub: str,
+        subject_user_id: uuid.UUID | None,
         dimension: QuotaDimension,
     ) -> None:
         with self._lock:
-            self._limits.pop((tenant_id, subject_sub, dimension), None)
+            self._limits.pop((tenant_id, subject_user_id, dimension), None)
 
-    async def list_subjects(self, *, tenant_id: str) -> list[str]:
+    async def list_subjects(self, *, tenant_id: str) -> list[uuid.UUID]:
         with self._lock:
-            subs = {
+            user_ids = {
                 key[1]
                 for key in self._counters
                 if key[0] == tenant_id
             }
-            subs.update(
+            user_ids.update(
                 key[1] for key in self._limits if key[0] == tenant_id
             )
-        subs.discard(DEFAULT_SUBJECT)
-        return sorted(subs)
+        user_ids.discard(DEFAULT_USER_ID)
+        return sorted(user_ids)

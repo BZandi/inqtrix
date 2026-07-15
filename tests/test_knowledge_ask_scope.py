@@ -22,6 +22,8 @@ see-everything view — pinned in the anonymous world at the bottom.
 from __future__ import annotations
 
 import asyncio
+import time
+import uuid
 
 import pytest
 from fastapi import FastAPI
@@ -29,7 +31,7 @@ from fastapi.testclient import TestClient
 
 from inqtrix.auth.directory import MemoryUserDirectory
 from inqtrix.auth.identity_memory import MemoryIdentityStore
-from inqtrix.auth.permissions import PermissionService
+from inqtrix.auth.permissions import AuthorizationService
 from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
 from inqtrix.knowledge.stores.ports import KnowledgeProviderContext
 from inqtrix.providers.base import ProviderContext
@@ -67,14 +69,18 @@ def make_ask_world() -> tuple[TestClient, KnowledgeStubLLM, MemoryKnowledgeStore
     users = MemoryUserDirectory()
 
     async def mirror() -> None:
-        for sub, name in ((OWNER, "Olga Owner"), (RECIPIENT, "Rita Recipient")):
+        for user_id, name in (
+            (OWNER, "Olga Owner"),
+            (RECIPIENT, "Rita Recipient"),
+        ):
             await users.record_login(
                 tenant_id="default",
                 issuer="http://idp.example",
-                subject=sub,
-                email=f"{sub}@example.com",
+                subject=str(user_id),
+                email=f"{user_id}@example.com",
                 email_verified=True,
                 display_name=name,
+                canonical_user_id=user_id,
             )
 
     asyncio.run(mirror())
@@ -89,8 +95,8 @@ def make_ask_world() -> tuple[TestClient, KnowledgeStubLLM, MemoryKnowledgeStore
         ),
         semaphore_factory=lambda: asyncio.Semaphore(1),
         auth_provider=OidcHeaderProvider(users),
-        permissions=PermissionService(
-            members=identity, groups=identity, shares=identity, audit=identity
+        permissions=AuthorizationService(
+            members=identity, shares=identity, audit=identity
         ),
         workspace_admin=identity,
         knowledge=KnowledgeProviderContext(
@@ -108,11 +114,11 @@ def make_ask_world() -> tuple[TestClient, KnowledgeStubLLM, MemoryKnowledgeStore
     return TestClient(app), llm, store
 
 
-def as_user(sub: str) -> dict[str, str]:
-    return {SUB_HEADER: sub}
+def as_user(user_id: uuid.UUID) -> dict[str, str]:
+    return {SUB_HEADER: str(user_id)}
 
 
-def make_collection(client: TestClient, *, sub: str, name: str) -> str:
+def make_collection(client: TestClient, *, sub: uuid.UUID, name: str) -> str:
     response = client.post(
         "/v1/knowledge/collections", json={"name": name}, headers=as_user(sub)
     )
@@ -120,7 +126,13 @@ def make_collection(client: TestClient, *, sub: str, name: str) -> str:
     return response.json()["id"]
 
 
-def add_doc(client: TestClient, collection_id: str, *, sub: str, text: str) -> str:
+def add_doc(
+    client: TestClient,
+    collection_id: str,
+    *,
+    sub: uuid.UUID,
+    text: str,
+) -> str:
     response = client.post(
         f"/v1/knowledge/collections/{collection_id}/documents",
         json={"title": "Notiz", "text": text},
@@ -136,7 +148,9 @@ def accept_view_grant(client: TestClient, collection_id: str) -> None:
         json={
             "resource_type": "knowledge_collection",
             "resource_id": collection_id,
-            "invitees": [{"subject_id": RECIPIENT, "permission": "view"}],
+            "invitees": [
+                {"user_id": str(RECIPIENT), "permission": "view"}
+            ],
         },
         headers=as_user(OWNER),
     )
@@ -149,7 +163,7 @@ def accept_view_grant(client: TestClient, collection_id: str) -> None:
 
 
 def run_knowledge_ask(
-    client: TestClient, *, sub: str, filters: dict | None
+    client: TestClient, *, sub: uuid.UUID, filters: dict | None
 ) -> dict:
     body: dict = {"question": "Wie lange ist die Frist?", "mode": "knowledge"}
     if filters is not None:
@@ -157,7 +171,18 @@ def run_knowledge_ask(
     created = client.post("/v1/runs", json=body, headers=as_user(sub))
     assert created.status_code == 202, created.text
     run_id = created.json()["run_id"]
-    wait_for_run_status(client, run_id, "completed")
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        summary = client.get(
+            f"/v1/runs/{run_id}", headers=as_user(sub)
+        ).json()
+        if summary.get("status") == "completed":
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError(
+            f"run {run_id} did not complete; last summary: {summary}"
+        )
     result = client.get(f"/v1/runs/{run_id}/result", headers=as_user(sub))
     assert result.status_code == 200
     return result.json()
@@ -272,7 +297,7 @@ def test_mixed_model_visible_set_narrows_to_default_model():
         recipient_doc = add_doc(
             client, recipient_cid, sub=RECIPIENT, text=RECIPIENT_TEXT
         )
-        # Legacy (created_by_sub=None) collection with a DIFFERENT
+        # Legacy (created_by_user_id=None) collection with a DIFFERENT
         # embedding model/dimension: visible to everyone, so the
         # recipient's visible set now spans two models.
         legacy = asyncio.run(

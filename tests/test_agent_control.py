@@ -11,6 +11,8 @@ import asyncio
 import threading
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -30,9 +32,13 @@ from inqtrix.agents.control_ports import (
     PlanTaskRecord,
     settle_terminal_plan_tasks,
 )
+from inqtrix.auth.directory import MemoryUserDirectory
 from inqtrix.auth.identity_memory import MemoryIdentityStore
-from inqtrix.auth.principal import Principal
-from inqtrix.server.runs import RunActive, RunHandle, RunStore
+from inqtrix.auth.memory_authority import MemoryAuthorityCoordinator
+from inqtrix.auth.permissions import SharePermission
+from inqtrix.auth.principal import Principal, UserContext
+from inqtrix.execution_authority import AuthorizationRevoked
+from inqtrix.server.runs import RunActive, RunHandle, RunNotFound, RunStore
 from inqtrix.services.agent_control_service import (
     AgentControlService,
     AgentControlUnavailable,
@@ -40,8 +46,31 @@ from inqtrix.services.agent_control_service import (
 )
 
 PRINCIPAL = Principal(
-    sub="owner-1", kind="oidc_session", tenant_id="default", role="member"
+    user_id=uuid.UUID("11111111-1111-4111-8111-111111111111"),
+    kind="oidc_session",
+    tenant_id="default",
+    role="member",
 )
+VISIBLE = UserContext(principal=PRINCIPAL)
+
+
+async def _request_task_cancel_unscoped(
+    store: MemoryAgentControlStore,
+    *,
+    run_id: str,
+    plan_id: str,
+    task_id: str,
+) -> PlanTaskRecord:
+    async def _authorize(control_write: Any) -> Any:
+        return control_write(None, lambda _child_run_id: "cancelled")
+
+    task, _child_status = await store.request_plan_task_cancel(
+        run_id=run_id,
+        plan_id=plan_id,
+        task_id=task_id,
+        authorize=_authorize,
+    )
+    return task
 
 
 def _wait_until(predicate: Callable[[], bool], *, timeout: float = 2.0) -> None:
@@ -79,10 +108,45 @@ def service(run_store: RunStore, identity: MemoryIdentityStore) -> AgentControlS
     )
 
 
+async def _bind_scoped_control_authority(
+    *,
+    run_store: RunStore,
+    identity: MemoryIdentityStore,
+    control: MemoryAgentControlStore,
+    user_ids: tuple[uuid.UUID, ...],
+) -> MemoryUserDirectory:
+    """Compose the production memory authority boundary for focused races."""
+    users = MemoryUserDirectory()
+    for index, user_id in enumerate(user_ids):
+        await users.record_login(
+            tenant_id="default",
+            issuer="https://issuer.example",
+            subject=f"user-{index}",
+            email=f"user-{index}@example.com",
+            email_verified=True,
+            display_name=f"User {index}",
+            canonical_user_id=user_id,
+        )
+    authority = MemoryAuthorityCoordinator()
+    authority.bind_users(users)
+    identity.bind_authority_coordinator(authority)
+    run_store.bind_authorization(
+        share_lookup=identity.permission_for_sync,
+        share_workspace_check=identity.share_workspace_sync,
+        resource_access_guard=identity.resource_access_guard_sync,
+        restrict_to_workspace_members=False,
+    )
+    run_store.bind_authority_coordinator(authority)
+    control.bind_authority_coordinator(authority)
+    control.bind_execution_guard(run_store.execution_control_guard)
+    return users
+
+
 def _parked_agent_run(
     run_store: RunStore,
     *,
     resumed_release: threading.Event | None = None,
+    knowledge_collection_ids: list[str] | None = None,
 ) -> str:
     """Submit an agent run that parks itself and completes on resume."""
     calls = {"count": 0}
@@ -102,10 +166,24 @@ def _parked_agent_run(
         work=segmented,
         kind="agent",
         session_id="sess-1",
+        created_by_user_id=PRINCIPAL.user_id,
+        created_by_tenant_id=PRINCIPAL.tenant_id,
+        request_payload={
+            "body": {
+                "knowledge_filters": {
+                    "collection_ids": list(
+                        knowledge_collection_ids
+                        if knowledge_collection_ids is not None
+                        else []
+                    )
+                }
+            }
+        },
     )
     run_id = summary["run_id"]
     _wait_until(
-        lambda: run_store.get(run_id)["status"] == "waiting_for_approval"
+        lambda: run_store.get(run_id, visible_to=VISIBLE)["status"]
+        == "waiting_for_approval"
     )
     return run_id
 
@@ -144,6 +222,87 @@ def _plan_body() -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
+async def test_memory_decision_stays_pending_until_resume_invokes_writer() -> None:
+    """A failed/blocked resume never exposes a transient decided row."""
+    store = MemoryAgentControlStore()
+    approval = await store.create_approval(_approval("run-atomic"))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_resume(writer: Any) -> dict[str, Any]:
+        assert callable(writer)
+        entered.set()
+        await release.wait()
+        raise RunActive("resume rejected")
+
+    decision = asyncio.create_task(
+        store.decide_approval_and_resume(
+            run_id="run-atomic",
+            approval_id=approval.approval_id,
+            decision="approve",
+            decision_payload={},
+            note="",
+            decided_by_user_id=PRINCIPAL.user_id,
+            resume=blocked_resume,
+        )
+    )
+    await entered.wait()
+    assert (
+        await store.get_approval("run-atomic", approval.approval_id)
+    ).status == "pending"
+    release.set()
+    with pytest.raises(RunActive):
+        await decision
+    assert (
+        await store.get_approval("run-atomic", approval.approval_id)
+    ).status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_disabled_actor_cannot_commit_memory_decision_or_resume(
+    run_store: RunStore, identity: MemoryIdentityStore
+) -> None:
+    """The shared authority boundary revalidates active user at resume."""
+    control = MemoryAgentControlStore()
+    users = await _bind_scoped_control_authority(
+        run_store=run_store,
+        identity=identity,
+        control=control,
+        user_ids=(PRINCIPAL.user_id,),
+    )
+    service = AgentControlService(
+        store=control,
+        run_store=run_store,
+        audit=None,
+        editor_persistence=None,
+        durable=False,
+    )
+    run_id = _parked_agent_run(run_store)
+    approval = await control.create_approval(_approval(run_id))
+    assert await users.set_disabled(
+        tenant_id="default",
+        user_id=PRINCIPAL.user_id,
+        disabled_at=time.time(),
+    )
+
+    with pytest.raises(RunNotFound):
+        await service.decide_approval(
+            run_id=run_id,
+            approval_id=approval.approval_id,
+            decision="approve",
+            plan_body=None,
+            note="",
+            principal=PRINCIPAL,
+        )
+
+    assert (await control.get_approval(run_id, approval.approval_id)).status == (
+        "pending"
+    )
+    with run_store._lock:
+        assert run_store._records[run_id].status.value == "waiting_for_approval"
+
+
+@pytest.mark.asyncio
 async def test_approve_decision_resumes_run_and_audits(
     service: AgentControlService,
     run_store: RunStore,
@@ -169,12 +328,15 @@ async def test_approve_decision_resumes_run_and_audits(
 
     assert not replayed
     assert decided.status == "approved"
-    assert decided.decided_by_sub == "owner-1"
+    assert decided.decided_by_user_id == PRINCIPAL.user_id
     assert decided.note == "passt"
     assert summary["status"] in {"queued", "running", "completed"}
-    _wait_until(lambda: run_store.get(run_id)["status"] == "completed")
+    _wait_until(
+        lambda: run_store.get(run_id, visible_to=VISIBLE)["status"]
+        == "completed"
+    )
 
-    subscription = run_store.subscribe(run_id)
+    subscription = run_store.subscribe(run_id, visible_to=VISIBLE)
     try:
         decision_event = next(
             event
@@ -246,9 +408,14 @@ async def test_decision_on_non_waiting_run_rolls_back(
         stack_name="default",
         work=lambda handle: handle.complete({}),
         kind="agent",
+        created_by_user_id=PRINCIPAL.user_id,
+        created_by_tenant_id=PRINCIPAL.tenant_id,
     )
     run_id = summary["run_id"]
-    _wait_until(lambda: run_store.get(run_id)["status"] == "completed")
+    _wait_until(
+        lambda: run_store.get(run_id, visible_to=VISIBLE)["status"]
+        == "completed"
+    )
     approval = await service.store.create_approval(_approval(run_id))
 
     with pytest.raises(RunActive):
@@ -264,7 +431,7 @@ async def test_decision_on_non_waiting_run_rolls_back(
     # The decision must NOT stand: the approval stays pending (R9).
     stored = await service.store.get_approval(run_id, approval.approval_id)
     assert stored.status == "pending"
-    subscription = run_store.subscribe(run_id)
+    subscription = run_store.subscribe(run_id, visible_to=VISIBLE)
     try:
         assert "inqtrix.agent.approval.decided" not in {
             event["type"] for event in subscription.replay
@@ -538,7 +705,8 @@ async def test_task_cancellation_is_atomic_idempotent_and_source_only(
         status="running",
     )
 
-    pending = await service.store.request_plan_task_cancel(
+    pending = await _request_task_cancel_unscoped(
+        service.store,
         run_id=plan.run_id,
         plan_id=plan.plan_id,
         task_id="pending",
@@ -546,14 +714,16 @@ async def test_task_cancellation_is_atomic_idempotent_and_source_only(
     assert pending.status == "cancelled"
     assert pending.result_payload["failure_code"] == "task_cancelled"
     assert (
-        await service.store.request_plan_task_cancel(
+        await _request_task_cancel_unscoped(
+            service.store,
             run_id=plan.run_id,
             plan_id=plan.plan_id,
             task_id="pending",
         )
     ) == pending
 
-    running = await service.store.request_plan_task_cancel(
+    running = await _request_task_cancel_unscoped(
+        service.store,
         run_id=plan.run_id,
         plan_id=plan.plan_id,
         task_id="running",
@@ -573,11 +743,175 @@ async def test_task_cancellation_is_atomic_idempotent_and_source_only(
     }
 
     with pytest.raises(PlanTaskCancellationConflict):
-        await service.store.request_plan_task_cancel(
+        await _request_task_cancel_unscoped(
+            service.store,
             run_id=plan.run_id,
             plan_id=plan.plan_id,
             task_id="s",
         )
+
+
+@pytest.mark.asyncio
+async def test_shared_editor_task_cancel_reaches_the_running_child(
+    service: AgentControlService,
+    run_store: RunStore,
+    identity: MemoryIdentityStore,
+) -> None:
+    """The caller's root edit grant governs the child cancel atomically."""
+    run_store.bind_authorization(
+        share_lookup=identity.permission_for_sync,
+        share_workspace_check=identity.share_workspace_sync,
+        resource_access_guard=identity.resource_access_guard_sync,
+        restrict_to_workspace_members=False,
+    )
+    run_id = _parked_agent_run(run_store)
+    child_started = threading.Event()
+    child_release = threading.Event()
+
+    def child_work(handle: RunHandle) -> None:
+        child_started.set()
+        assert child_release.wait(timeout=5.0)
+        if handle.cancel_event.is_set():
+            handle.cancel("task_cancelled")
+        else:
+            handle.complete({"answer": "late"})
+
+    child = run_store.submit(
+        question="Child research",
+        stack_name="default",
+        work=child_work,
+        kind="agent_child",
+        parent_run_id=run_id,
+        root_run_id=run_id,
+        request_payload={
+            "body": {
+                "parent_task_id": "research",
+                "parent_task_attempt": 1,
+            }
+        },
+        created_by_user_id=PRINCIPAL.user_id,
+        created_by_tenant_id=PRINCIPAL.tenant_id,
+    )
+    assert child_started.wait(timeout=2.0)
+    await service.store.save_plan(
+        run_id=run_id,
+        plan=PlanRecord(
+            plan_id="plan-shared-child-cancel",
+            run_id=run_id,
+            version=1,
+            status="approved",
+            created_by="agent",
+        ),
+        tasks=[
+            PlanTaskRecord(
+                task_id="research",
+                plan_id="plan-shared-child-cancel",
+                run_id=run_id,
+                ordinal=0,
+                title="Research",
+                tool_kind="web_research",
+                status="running",
+                child_run_id=child["run_id"],
+            )
+        ],
+    )
+    recipient_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
+    recipient_principal = Principal(
+        user_id=recipient_id,
+        kind="oidc_session",
+        tenant_id="default",
+        role="member",
+    )
+    recipient = UserContext(principal=recipient_principal)
+    users = MemoryUserDirectory()
+    await users.record_login(
+        tenant_id="default",
+        issuer="https://issuer.example",
+        subject="owner",
+        email="owner@example.com",
+        email_verified=True,
+        display_name="Owner",
+        canonical_user_id=PRINCIPAL.user_id,
+    )
+    await users.record_login(
+        tenant_id="default",
+        issuer="https://issuer.example",
+        subject="editor",
+        email="editor@example.com",
+        email_verified=True,
+        display_name="Editor",
+        canonical_user_id=recipient_id,
+    )
+    authority = MemoryAuthorityCoordinator()
+    authority.bind_users(users)
+    identity.bind_authority_coordinator(authority)
+    run_store.bind_authority_coordinator(authority)
+    identity.add_share(
+        recipient_user_id=recipient_id,
+        resource_type="run",
+        resource_id=run_id,
+        permission=SharePermission.EDIT,
+        granted_by_user_id=PRINCIPAL.user_id,
+    )
+
+    try:
+        task = await service.request_task_cancel(
+            run_id,
+            "research",
+            workspace_id=None,
+            principal=recipient_principal,
+            visible_to=recipient,
+        )
+        assert task.status == "cancel_requested"
+        child_release.set()
+        _wait_until(
+            lambda: run_store.get(child["run_id"], visible_to=VISIBLE)["status"]
+            == "cancelled"
+        )
+    finally:
+        child_release.set()
+
+
+@pytest.mark.asyncio
+async def test_task_cancel_missing_child_rolls_back_the_control_row(
+    service: AgentControlService,
+    run_store: RunStore,
+) -> None:
+    run_id = _parked_agent_run(run_store)
+    await service.store.save_plan(
+        run_id=run_id,
+        plan=PlanRecord(
+            plan_id="plan-missing-child",
+            run_id=run_id,
+            version=1,
+            status="approved",
+            created_by="agent",
+        ),
+        tasks=[
+            PlanTaskRecord(
+                task_id="research",
+                plan_id="plan-missing-child",
+                run_id=run_id,
+                ordinal=0,
+                title="Research",
+                tool_kind="web_research",
+                status="running",
+                child_run_id="run-missing-child",
+            )
+        ],
+    )
+
+    with pytest.raises(RunNotFound):
+        await service.request_task_cancel(
+            run_id,
+            "research",
+            workspace_id=None,
+            principal=PRINCIPAL,
+            visible_to=VISIBLE,
+        )
+
+    _plan, tasks = await service.store.get_plan(run_id)
+    assert tasks[0].status == "running"
 
 
 @pytest.mark.asyncio
@@ -603,9 +937,14 @@ async def test_cancel_settlement_folds_child_completed_before_parent_cancel(
         request_payload={
             "body": {"parent_task_id": "r", "parent_task_attempt": 1}
         },
+        created_by_user_id=PRINCIPAL.user_id,
+        created_by_tenant_id=PRINCIPAL.tenant_id,
     )
     child_id = child["run_id"]
-    _wait_until(lambda: run_store.get(child_id)["status"] == "completed")
+    _wait_until(
+        lambda: run_store.get(child_id, visible_to=VISIBLE)["status"]
+        == "completed"
+    )
     await service.store.save_plan(
         run_id=run_id,
         plan=PlanRecord(
@@ -638,7 +977,7 @@ async def test_cancel_settlement_folds_child_completed_before_parent_cancel(
         ],
     )
 
-    assert run_store.cancel(run_id)["status"] == "cancelled"
+    assert run_store.cancel(run_id, visible_to=VISIBLE)["status"] == "cancelled"
     await service.settle_cancelled_tasks(run_id)
 
     _plan, tasks, _versions = await service.get_plan(run_id)
@@ -668,10 +1007,13 @@ async def test_tree_cancel_reconciles_nested_agent_plan_rows(
         parent_run_id=root_id,
         root_run_id=root_id,
         request_payload={"body": {"mode": "workspace_agent"}},
+        created_by_user_id=PRINCIPAL.user_id,
+        created_by_tenant_id=PRINCIPAL.tenant_id,
     )
     child_id = child["run_id"]
     _wait_until(
-        lambda: run_store.get(child_id)["status"] == "waiting_for_input"
+        lambda: run_store.get(child_id, visible_to=VISIBLE)["status"]
+        == "waiting_for_input"
     )
     await service.store.save_plan(
         run_id=child_id,
@@ -703,7 +1045,7 @@ async def test_tree_cancel_reconciles_nested_agent_plan_rows(
         ],
     )
 
-    summary, affected = run_store.cancel_tree(root_id)
+    summary, affected = run_store.cancel_tree(root_id, visible_to=VISIBLE)
     assert summary["status"] == "cancelled"
     assert child_id in affected
     await service.reconcile_terminal_run_tree(affected)
@@ -739,12 +1081,46 @@ async def test_plan_read_repairs_cancelled_run_after_post_commit_gap(
             )
         ],
     )
-    assert run_store.cancel(run_id)["status"] == "cancelled"
+    assert run_store.cancel(run_id, visible_to=VISIBLE)["status"] == "cancelled"
     _raw_plan, raw_tasks = await service.store.get_plan(run_id)
     assert raw_tasks[0].status == "pending"
 
     _plan, repaired, _versions = await service.get_plan(run_id)
     assert repaired[0].status == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_rejects_subject_from_another_run() -> None:
+    store = MemoryAgentControlStore()
+    await store.save_plan(
+        run_id="run-a",
+        plan=PlanRecord(
+            plan_id="plan-a", run_id="run-a", version=1,
+            status="proposed", created_by="agent",
+        ),
+        tasks=[],
+    )
+    await store.save_plan(
+        run_id="run-b",
+        plan=PlanRecord(
+            plan_id="plan-b", run_id="run-b", version=1,
+            status="proposed", created_by="agent",
+        ),
+        tasks=[],
+    )
+
+    with pytest.raises(PlanNotFound):
+        await store.create_approval(
+            ApprovalRecord(
+                approval_id="apr-cross-run",
+                run_id="run-a",
+                kind="plan",
+                subject_type="plan",
+                subject_id="plan-b",
+            )
+        )
+
+    assert await store.list_approvals("run-a") == []
 
 
 @pytest.mark.asyncio
@@ -838,7 +1214,10 @@ async def test_plan_update_failure_leaves_memory_approval_pending(
 
     stored = await store.get_approval(run_id, approval.approval_id)
     assert stored.status == "pending"
-    assert run_store.get(run_id)["status"] == "waiting_for_approval"
+    assert (
+        run_store.get(run_id, visible_to=VISIBLE)["status"]
+        == "waiting_for_approval"
+    )
 
 
 @pytest.mark.asyncio
@@ -910,9 +1289,13 @@ async def test_edited_research_plan_uses_server_selected_profile(
         work=lambda handle: handle.complete({"answer": "done"}),
         kind="agent",
         agent_overrides={"depth": depth},
+        created_by_user_id=PRINCIPAL.user_id,
+        created_by_tenant_id=PRINCIPAL.tenant_id,
     )
     _wait_until(
-        lambda: run_store.get(summary["run_id"])["status"] == "completed"
+        lambda: run_store.get(
+            summary["run_id"], visible_to=VISIBLE
+        )["status"] == "completed"
     )
     if accepted:
         _plan, tasks = await service._parse_edited_plan(
@@ -954,7 +1337,9 @@ async def test_edited_plan_preflights_collection_visibility(
         knowledge=knowledge,
         durable=False,
     )
-    run_id = _parked_agent_run(run_store)
+    run_id = _parked_agent_run(
+        run_store, knowledge_collection_ids=["kc_visible"]
+    )
     approval = await service.store.create_approval(_approval(run_id))
     body = _plan_body()
     body["tasks"][0]["params"] = {
@@ -1004,7 +1389,9 @@ async def test_edited_plan_canonicalizes_collection_names(
         knowledge=CatalogKnowledge(),
         durable=False,
     )
-    run_id = _parked_agent_run(run_store)
+    run_id = _parked_agent_run(
+        run_store, knowledge_collection_ids=["kc_18d4"]
+    )
     approval = await service.store.create_approval(_approval(run_id))
     body = _plan_body()
     body["tasks"][0]["params"] = {
@@ -1023,6 +1410,59 @@ async def test_edited_plan_canonicalizes_collection_names(
 
     _plan, tasks = await service.store.get_plan(run_id)
     assert tasks[0].params["collection_ids"] == ["kc_18d4"]
+
+
+@pytest.mark.asyncio
+async def test_edited_plan_cannot_expand_parked_run_collection_scope(
+    run_store: RunStore, identity: MemoryIdentityStore
+) -> None:
+    """A late share is visible to the editor but outside the admitted run."""
+
+    class CatalogKnowledge:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def list_collections(self, *, visible_to=None):
+            self.calls += 1
+            return [
+                SimpleNamespace(id="kc_initial", name="Initial"),
+                SimpleNamespace(id="kc_late", name="Late share"),
+            ]
+
+    knowledge = CatalogKnowledge()
+    service = AgentControlService(
+        store=MemoryAgentControlStore(),
+        run_store=run_store,
+        audit=identity,
+        knowledge=knowledge,
+        durable=False,
+    )
+    run_id = _parked_agent_run(
+        run_store, knowledge_collection_ids=["kc_initial"]
+    )
+    approval = await service.store.create_approval(_approval(run_id))
+    body = _plan_body()
+    body["tasks"][0]["params"] = {
+        "profile": "standard",
+        "collection_ids": ["kc_late"],
+    }
+
+    with pytest.raises(AgentControlValidationError) as exc_info:
+        await service.decide_approval(
+            run_id=run_id,
+            approval_id=approval.approval_id,
+            decision="edit",
+            plan_body=body,
+            note="",
+            principal=PRINCIPAL,
+        )
+
+    assert knowledge.calls == 1
+    assert any("kc_late" in error for error in exc_info.value.errors)
+    stored = await service.store.get_approval(run_id, approval.approval_id)
+    assert stored.status == "pending"
+    with pytest.raises(PlanNotFound):
+        await service.store.get_plan(run_id)
 
 
 @pytest.mark.asyncio
@@ -1109,7 +1549,10 @@ async def test_tool_edit_replaces_args_and_resumes(
             {"tool": "web_instant", "args": {"query": "EU AI Act 2027"}}
         ]
     }
-    _wait_until(lambda: run_store.get(run_id)["status"] == "completed")
+    _wait_until(
+        lambda: run_store.get(run_id, visible_to=VISIBLE)["status"]
+        == "completed"
+    )
 
 
 @pytest.mark.asyncio
@@ -1202,7 +1645,10 @@ async def test_tool_edit_replay_same_actions_is_idempotent(
         principal=PRINCIPAL,
         actions_body=edited,
     )
-    _wait_until(lambda: run_store.get(run_id)["status"] == "completed")
+    _wait_until(
+        lambda: run_store.get(run_id, visible_to=VISIBLE)["status"]
+        == "completed"
+    )
 
     replay, _summary, replayed = await service.decide_approval(
         run_id=run_id,
@@ -1276,7 +1722,10 @@ async def test_clarification_answer_resumes_and_validates_options(
     assert answered.status == "answered"
     assert answered.option_id == "q2"
     assert summary["status"] in {"queued", "running", "completed"}
-    _wait_until(lambda: run_store.get(run_id)["status"] == "completed")
+    _wait_until(
+        lambda: run_store.get(run_id, visible_to=VISIBLE)["status"]
+        == "completed"
+    )
 
     # Replay of the same answer is idempotent.
     _answered, _summary, replayed = await service.answer_clarification(
@@ -1289,7 +1738,127 @@ async def test_clarification_answer_resumes_and_validates_options(
     assert replayed
 
 
+@pytest.mark.asyncio
+async def test_failed_clarification_resume_emits_no_answered_signal(
+    service: AgentControlService, run_store: RunStore
+) -> None:
+    """Signals follow the composed row+resume commit, never precede it."""
+    run_id = _parked_agent_run(run_store)
+    clarification = await service.store.create_clarification(
+        ClarificationRecord(
+            clarification_id="clr-failed-resume",
+            run_id=run_id,
+            question="Welcher Zeitraum?",
+        )
+    )
+    with run_store._lock:
+        run_store._records[run_id].work = None
+
+    with pytest.raises(RunActive):
+        await service.answer_clarification(
+            run_id=run_id,
+            clarification_id=clarification.clarification_id,
+            answer="Q1",
+            option_id=None,
+            principal=PRINCIPAL,
+        )
+
+    stored = await service.store.get_clarification(
+        run_id, clarification.clarification_id
+    )
+    assert stored.status == "pending"
+    subscription = run_store.subscribe(run_id, visible_to=VISIBLE)
+    try:
+        assert all(
+            event["type"] != "inqtrix.agent.clarification.answered"
+            for event in subscription.replay
+        )
+    finally:
+        subscription.close()
+
+
 # -- artifacts -------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_runtime_control_write_revalidates_effective_actor_after_revoke(
+    run_store: RunStore, identity: MemoryIdentityStore
+) -> None:
+    """A stale tool segment cannot persist canvas/control state after revoke."""
+    editor_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
+    control = MemoryAgentControlStore()
+    await _bind_scoped_control_authority(
+        run_store=run_store,
+        identity=identity,
+        control=control,
+        user_ids=(PRINCIPAL.user_id, editor_id),
+    )
+    calls = {"count": 0}
+    resumed = threading.Event()
+    release = threading.Event()
+
+    def segmented(handle: RunHandle) -> None:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            handle.wait("waiting_for_approval")
+            return
+        resumed.set()
+        assert release.wait(timeout=5.0)
+        handle.complete({"answer": "done"})
+
+    summary = run_store.submit(
+        question="Agentenauftrag",
+        stack_name="default",
+        work=segmented,
+        kind="agent",
+        session_id="sess-revoked-runtime-write",
+        created_by_user_id=PRINCIPAL.user_id,
+        created_by_tenant_id="default",
+    )
+    run_id = summary["run_id"]
+    _wait_until(
+        lambda: run_store.get(run_id, visible_to=VISIBLE)["status"]
+        == "waiting_for_approval"
+    )
+    identity.add_share(
+        recipient_user_id=editor_id,
+        resource_type="run",
+        resource_id=run_id,
+        permission=SharePermission.EDIT,
+        granted_by_user_id=PRINCIPAL.user_id,
+    )
+    try:
+        run_store.resume_run(
+            run_id,
+            actor_user_id=editor_id,
+            execution_scopes=frozenset({"agent:write"}),
+        )
+        assert await asyncio.to_thread(resumed.wait, 2.0)
+        identity.revoke_share(
+            recipient_user_id=editor_id,
+            resource_type="run",
+            resource_id=run_id,
+        )
+
+        with pytest.raises(AuthorizationRevoked):
+            await control.upsert_artifact(
+                run_id=run_id,
+                kind="memo",
+                session_id="sess-revoked-runtime-write",
+                title="Forbidden",
+                status="writing",
+                content_markdown="must not land",
+                payload={},
+                refs=[],
+                updated_by="agent",
+                artifact_id="art-revoked-runtime-write",
+            )
+        with pytest.raises(ArtifactNotFound):
+            await control.get_artifact(
+                run_id, "art-revoked-runtime-write"
+            )
+    finally:
+        release.set()
 
 
 @pytest.mark.asyncio
@@ -1426,6 +1995,100 @@ async def test_artifact_upsert_versioning_and_user_edit_matrix(
 
 
 @pytest.mark.asyncio
+async def test_artifact_edit_and_revoke_have_one_memory_linearization_order(
+    service: AgentControlService,
+    run_store: RunStore,
+    identity: MemoryIdentityStore,
+) -> None:
+    run_id = _parked_agent_run(run_store)
+    await service.store.upsert_artifact(
+        run_id=run_id,
+        kind="memo",
+        session_id="sess-revoke-race",
+        title="Memo",
+        status="ready",
+        content_markdown="# V1",
+        payload={},
+        refs=[],
+        updated_by="agent",
+        artifact_id="art-revoke-race",
+    )
+    recipient_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
+    recipient_principal = Principal(
+        user_id=recipient_id,
+        kind="oidc_session",
+        tenant_id="default",
+        role="member",
+    )
+    recipient = UserContext(principal=recipient_principal)
+    identity.add_share(
+        recipient_user_id=recipient_id,
+        resource_type="run",
+        resource_id=run_id,
+        permission=SharePermission.EDIT,
+        granted_by_user_id=PRINCIPAL.user_id,
+    )
+    authority_entered = threading.Event()
+    release_write = threading.Event()
+
+    @contextmanager
+    def blocking_guard(**kwargs: Any) -> Iterator[None]:
+        with identity.resource_access_guard_sync(**kwargs):
+            if kwargs["actor_user_id"] == recipient_id:
+                authority_entered.set()
+                assert release_write.wait(timeout=5.0)
+            yield
+
+    run_store.bind_authorization(
+        share_lookup=identity.permission_for_sync,
+        share_workspace_check=identity.share_workspace_sync,
+        resource_access_guard=blocking_guard,
+        restrict_to_workspace_members=False,
+    )
+    edit = asyncio.create_task(
+        service.user_update_artifact(
+            run_id=run_id,
+            artifact_id="art-revoke-race",
+            content_markdown="# V2",
+            expected_revision=1,
+            principal=recipient_principal,
+            visible_to=recipient,
+        )
+    )
+    assert await asyncio.to_thread(authority_entered.wait, 2.0)
+    revoke_started = threading.Event()
+
+    def revoke() -> None:
+        revoke_started.set()
+        identity.revoke_share(
+            recipient_user_id=recipient_id,
+            resource_type="run",
+            resource_id=run_id,
+        )
+
+    revoke_task = asyncio.create_task(asyncio.to_thread(revoke))
+    assert await asyncio.to_thread(revoke_started.wait, 2.0)
+    release_write.set()
+    edited, _ = await asyncio.gather(edit, revoke_task)
+
+    assert edited.revision == 2
+    with pytest.raises(RunNotFound):
+        await service.user_update_artifact(
+            run_id=run_id,
+            artifact_id="art-revoke-race",
+            content_markdown="# forbidden",
+            expected_revision=2,
+            principal=recipient_principal,
+            visible_to=recipient,
+        )
+    stored, _revisions = await service.store.get_artifact(
+        run_id, "art-revoke-race"
+    )
+    assert stored.revision == 2
+    assert stored.content_markdown == "# V2"
+
+
+@pytest.mark.asyncio
 async def test_session_memo_lineage_read_and_agent_cas(
     service: AgentControlService, run_store: RunStore
 ) -> None:
@@ -1461,8 +2124,8 @@ async def test_session_memo_lineage_read_and_agent_cas(
     assert edited.revision == 2
 
     # The follow-up run cannot see the memo run-scoped (different run)...
-    run_store.cancel(run1)
-    assert run_store.get(run1)["status"] == "cancelled"
+    run_store.cancel(run1, visible_to=VISIBLE)
+    assert run_store.get(run1, visible_to=VISIBLE)["status"] == "cancelled"
     run2 = _parked_agent_run(run_store)
     with pytest.raises(ArtifactNotFound):
         await store.get_artifact(run2, "art_lin_memo")
@@ -1598,7 +2261,7 @@ async def test_export_without_editor_persistence_fails_loudly(
             title=None,
             folder_id=None,
             principal=PRINCIPAL,
-            caller_sub="owner-1",
+            caller_user_id=PRINCIPAL.user_id,
             workspace_id=None,
         )
 
@@ -1641,7 +2304,10 @@ async def test_concurrent_decides_yield_exactly_one_resume(
     assert len(results) == 2
     # Exactly one actually decided; the other took the replay path.
     assert sorted(result[2] for result in results) == [False, True]
-    _wait_until(lambda: run_store.get(run_id)["status"] == "completed")
+    _wait_until(
+        lambda: run_store.get(run_id, visible_to=VISIBLE)["status"]
+        == "completed"
+    )
 
 
 @pytest.mark.asyncio
@@ -1699,9 +2365,14 @@ async def test_failed_edit_resume_restores_prior_plan_status(
         stack_name="default",
         work=lambda handle: handle.complete({}),
         kind="agent",
+        created_by_user_id=PRINCIPAL.user_id,
+        created_by_tenant_id=PRINCIPAL.tenant_id,
     )
     run_id = summary["run_id"]
-    _wait_until(lambda: run_store.get(run_id)["status"] == "completed")
+    _wait_until(
+        lambda: run_store.get(run_id, visible_to=VISIBLE)["status"]
+        == "completed"
+    )
     await service.store.save_plan(
         run_id=run_id,
         plan=PlanRecord(

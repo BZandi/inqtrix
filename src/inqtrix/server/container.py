@@ -12,6 +12,8 @@ exactly one wiring truth.
 from __future__ import annotations
 
 import logging
+import os
+import uuid
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,8 +22,10 @@ from typing import TYPE_CHECKING, Any, Callable
 from fastapi import Depends
 
 from inqtrix.auth.api_key import CallableGateAuthProvider
+from inqtrix.auth.directory import MemoryUserDirectory
 from inqtrix.auth.identity_memory import MemoryIdentityStore
-from inqtrix.auth.permissions import PermissionService
+from inqtrix.auth.memory_authority import MemoryAuthorityCoordinator
+from inqtrix.auth.permissions import AuthorizationService
 from inqtrix.content.memory import MemoryFileRegistry
 from inqtrix.capabilities import build_capability_registry
 from inqtrix.services.file_service import FileService
@@ -91,13 +95,14 @@ class PlatformPersistence:
             store.
     """
 
-    permissions: PermissionService
+    permissions: AuthorizationService
     file_registry: "FileRegistry"
     audit: Any
     session_factory: Any | None
     workspace_admin: Any = None
     prompt_templates: Any = None
     skills: Any = None
+    user_event_store: Any = None
 
 
 def build_platform_persistence_bundle(
@@ -149,15 +154,24 @@ def build_platform_persistence_bundle(
         backend = PostgresIdentityBackend(
             session_factory=session_factory,
             app_role=settings.storage.app_role,
+            restrict_to_workspace_members=(
+                settings.sharing.restrict_to_workspace_members
+            ),
         )
         from inqtrix.storage.prompt_templates_postgres import (
             PostgresPromptTemplateRepository,
         )
         from inqtrix.storage.skills_postgres import PostgresSkillRepository
+        from inqtrix.storage.user_events_postgres import PostgresUserEventStore
 
         return PlatformPersistence(
-            permissions=PermissionService(
-                members=backend, groups=backend, shares=backend, audit=backend
+            permissions=AuthorizationService(
+                members=backend,
+                shares=backend,
+                audit=backend,
+                restrict_to_workspace_members=(
+                    settings.sharing.restrict_to_workspace_members
+                ),
             ),
             file_registry=PostgresFileRegistry(
                 session_factory=session_factory,
@@ -169,8 +183,18 @@ def build_platform_persistence_bundle(
             prompt_templates=PostgresPromptTemplateRepository(
                 session_factory=session_factory,
                 app_role=settings.storage.app_role,
+                restrict_to_workspace_members=(
+                    settings.sharing.restrict_to_workspace_members
+                ),
             ),
             skills=PostgresSkillRepository(
+                session_factory=session_factory,
+                app_role=settings.storage.app_role,
+                restrict_to_workspace_members=(
+                    settings.sharing.restrict_to_workspace_members
+                ),
+            ),
+            user_event_store=PostgresUserEventStore(
                 session_factory=session_factory,
                 app_role=settings.storage.app_role,
             ),
@@ -179,11 +203,21 @@ def build_platform_persistence_bundle(
         MemoryPromptTemplateRepository,
     )
     from inqtrix.content.skills import MemorySkillRepository
+    from inqtrix.user_events import MemoryUserEventStore
 
-    store = MemoryIdentityStore()
+    store = MemoryIdentityStore(
+        restrict_to_workspace_members=(
+            settings.sharing.restrict_to_workspace_members
+        )
+    )
     return PlatformPersistence(
-        permissions=PermissionService(
-            members=store, groups=store, shares=store, audit=store
+        permissions=AuthorizationService(
+            members=store,
+            shares=store,
+            audit=store,
+            restrict_to_workspace_members=(
+                settings.sharing.restrict_to_workspace_members
+            ),
         ),
         file_registry=MemoryFileRegistry(),
         audit=store,
@@ -191,12 +225,13 @@ def build_platform_persistence_bundle(
         workspace_admin=store,
         prompt_templates=MemoryPromptTemplateRepository(),
         skills=MemorySkillRepository(),
+        user_event_store=MemoryUserEventStore(),
     )
 
 
 def build_platform_persistence(
     settings: Settings,
-) -> tuple[PermissionService, "FileRegistry"]:
+) -> tuple[AuthorizationService, "FileRegistry"]:
     """Legacy 2-tuple view of :func:`build_platform_persistence_bundle`."""
     bundle = build_platform_persistence_bundle(settings)
     return bundle.permissions, bundle.file_registry
@@ -288,6 +323,9 @@ def build_run_store(settings: Settings) -> "RunStorePort":
         worker_id=f"api-{socket.gethostname()}-{os.getpid()}",
         audit=audit,
         max_concurrent_per_user=settings.server.run_max_concurrent_per_user,
+        restrict_to_workspace_members=(
+            settings.sharing.restrict_to_workspace_members
+        ),
     )
 
 
@@ -338,6 +376,9 @@ def build_indexing_store(settings: Settings) -> Any:
         completed_ttl_seconds=settings.knowledge.reindex_completed_ttl_seconds,
         history_limit=settings.knowledge.reindex_history_limit,
         worker_id=f"api-{socket.gethostname()}-{os.getpid()}",
+        restrict_to_workspace_members=(
+            settings.sharing.restrict_to_workspace_members
+        ),
     )
 
 
@@ -392,6 +433,9 @@ def build_editor_store(settings: Settings) -> Any:
     return PostgresEditorStore(
         engine=build_engine(settings.storage.database_url, null_pool=True),
         app_role=settings.storage.app_role,
+        restrict_to_workspace_members=(
+            settings.sharing.restrict_to_workspace_members
+        ),
     )
 
 
@@ -629,6 +673,9 @@ def build_agent_control_store(settings: Settings) -> Any:
     return PostgresAgentControlStore(
         engine=build_engine(settings.storage.database_url, null_pool=True),
         app_role=settings.storage.app_role,
+        restrict_to_workspace_members=(
+            settings.sharing.restrict_to_workspace_members
+        ),
     )
 
 
@@ -656,7 +703,7 @@ def build_agent_session_store(settings: Settings) -> Any:
     )
 
 
-def build_permission_service(settings: Settings) -> PermissionService:
+def build_permission_service(settings: Settings) -> AuthorizationService:
     """Permission-service half of :func:`build_platform_persistence`.
 
     Kept as the established seam for callers and tests that need only
@@ -688,38 +735,63 @@ def _require_shareable_object_store(settings: Settings) -> None:
 def build_object_store(settings: Settings) -> "ObjectStore":
     """Settings bridge for the blob store (env-coupled surface).
 
-    ``local`` (default) needs nothing; ``s3`` without endpoint or
-    credentials is a contradiction and fails at startup — as does
-    ``local`` with more than one declared replica (blobs would be
-    invisible across replicas).
+    ``local`` (default) needs nothing. ``s3`` accepts either explicit
+    credentials or boto3's default credential chain; the
+    :class:`~inqtrix.settings.StorageSettings` contract rejects incomplete
+    combinations before this bridge runs. A configured private CA must be a
+    readable file. ``local`` with more than one declared replica is rejected
+    because blobs would be invisible across replicas.
     """
     from inqtrix.storage.object_store import LocalFSObjectStore, S3ObjectStore
 
     _require_shareable_object_store(settings)
     storage = settings.storage
     if storage.object_store_backend == "s3":
-        if (
-            not storage.s3_endpoint_url.strip()
-            or not storage.s3_access_key
-            or not storage.s3_secret_key
+        if storage.s3_auth_mode == "static" and (
+            not storage.s3_access_key or not storage.s3_secret_key
         ):
             raise RuntimeError(
-                "INQTRIX_OBJECT_STORE_BACKEND=s3 verlangt gesetzte "
-                "INQTRIX_S3_ENDPOINT_URL, INQTRIX_S3_ACCESS_KEY und "
-                "INQTRIX_S3_SECRET_KEY."
+                "INQTRIX_S3_AUTH_MODE=static verlangt gesetzte "
+                "INQTRIX_S3_ACCESS_KEY und INQTRIX_S3_SECRET_KEY."
             )
+        ca_bundle = storage.s3_ca_bundle or None
+        if ca_bundle is not None:
+            ca_path = Path(ca_bundle)
+            if not ca_path.is_file() or not os.access(ca_path, os.R_OK):
+                raise RuntimeError(
+                    "INQTRIX_S3_CA_BUNDLE muss auf eine lesbare Datei "
+                    f"zeigen: {ca_path}"
+                )
         return S3ObjectStore(
-            endpoint_url=storage.s3_endpoint_url,
             bucket=storage.s3_bucket,
-            access_key=storage.s3_access_key,
-            secret_key=storage.s3_secret_key,
+            endpoint_url=storage.s3_endpoint_url or None,
+            access_key=(
+                storage.s3_access_key
+                if storage.s3_auth_mode == "static"
+                else None
+            ),
+            secret_key=(
+                storage.s3_secret_key
+                if storage.s3_auth_mode == "static"
+                else None
+            ),
+            session_token=(
+                storage.s3_session_token or None
+                if storage.s3_auth_mode == "static"
+                else None
+            ),
             region=storage.s3_region,
+            addressing_style=storage.s3_addressing_style,
+            bucket_provisioning=storage.s3_bucket_provisioning,
+            ca_bundle=ca_bundle,
+            server_side_encryption=storage.s3_server_side_encryption,
+            kms_key_id=storage.s3_kms_key_id or None,
         )
     return LocalFSObjectStore(root=Path(storage.object_store_path))
 
 
 def build_user_context_dependency(
-    permissions: PermissionService,
+    permissions: AuthorizationService,
     principal_dependency: Callable[..., Principal],
 ) -> Callable[..., Any]:
     """Build the FastAPI dependency resolving the request's user context.
@@ -823,6 +895,9 @@ def build_knowledge_context(
             ),
             app_role=settings.storage.app_role,
             vector_index=vector_index,
+            restrict_to_workspace_members=(
+                settings.sharing.restrict_to_workspace_members
+            ),
         )
     elif settings.knowledge.vector_backend == "qdrant":
         from inqtrix.knowledge.stores.qdrant_store import QdrantKnowledgeStore
@@ -967,7 +1042,7 @@ class AppContainer:
     runtime: RuntimeContext
     auth_provider: AuthProvider
     principal_dependency: Callable[..., Principal]
-    permission_service: PermissionService
+    permission_service: AuthorizationService
     user_context_dependency: Callable[..., Any]
     resolver: AgentContextResolver
     chat_service: ChatService
@@ -990,6 +1065,8 @@ class AppContainer:
     """Editor-patch lifecycle (propose/apply/reject over the patch store
     pair, M7); consumed by the patch router and the workspace-agent
     patch phase. ``None`` only in hand-built test containers."""
+    editor_collaboration_service: Any = None
+    """Optional Postgres-backed editor collaboration orchestration."""
     agent_control_service: Any = None
     """Agent run control orchestration (plans/approvals/clarifications/
     artifacts, M4); ``None`` only in hand-built test containers."""
@@ -1000,6 +1077,9 @@ class AppContainer:
     document_parser: Any = None
     vector_index_service: Any = None
     account_preferences_service: Any = None
+    user_event_store: Any = None
+    session_factory: Any | None = None
+    """Canonical HTTP-loop session factory used by DB readiness checks."""
     agent_memory_service: Any = None
     capability_registry: Any = None
     object_store_backend: str = "none"
@@ -1021,7 +1101,7 @@ def build_container(
     indexing_store: Any = None,
     registry: AlgorithmRegistry | None = None,
     knowledge: KnowledgeProviderContext | None = None,
-    permissions: PermissionService | None = None,
+    permissions: AuthorizationService | None = None,
     file_service: FileService | None = None,
     workspace_admin: Any = None,
     object_store_impl: "ObjectStore | None" = None,
@@ -1048,6 +1128,16 @@ def build_container(
     threads via ``asyncio.run`` use a loop-agnostic NullPool engine
     (the API leaves it ``False`` and keeps the pooled engine).
     """
+    if (
+        settings.storage.backend == "postgres"
+        and settings.storage.runtime_login_policy == "bundled_legacy"
+    ):
+        log.warning(
+            "Database runtime login policy bundled_legacy is active. This "
+            "compatibility boundary is supported only for the provided "
+            "bundled PostgreSQL stack; managed/custom deployments must use "
+            "a restricted runtime login."
+        )
     if auth_provider is None:
         if api_key_dependency is not None:
             auth_provider = CallableGateAuthProvider(gate=api_key_dependency)
@@ -1068,16 +1158,7 @@ def build_container(
         from inqtrix.knowledge.parsing import MarkItDownParser
 
         document_parser = MarkItDownParser()
-    knowledge_service = (
-        KnowledgeService(
-            knowledge=active_knowledge,
-            chunk_max_chars=settings.knowledge.chunk_max_chars,
-            max_document_chars=settings.knowledge.max_document_chars,
-            parser=document_parser,
-        )
-        if active_knowledge is not None
-        else None
-    )
+    knowledge_service = None
 
     active_registry = registry or build_default_registry()
     knowledge_ceiling: KnowledgeStageCeiling | None = None
@@ -1150,6 +1231,133 @@ def build_container(
     active_workspace_admin = workspace_admin or (
         bundle.workspace_admin if bundle is not None else None
     )
+    provider_users = getattr(auth_provider, "users", None)
+    resource_invalidator = None
+    if (
+        active_workspace_admin is not None
+        and bundle is not None
+        and bundle.user_event_store is not None
+    ):
+        from inqtrix.user_events import ResourceInvalidator
+
+        resource_invalidator = ResourceInvalidator(
+            shares=active_workspace_admin,
+            events=bundle.user_event_store,
+        )
+    if isinstance(active_workspace_admin, MemoryIdentityStore):
+        active_workspace_admin.restrict_to_workspace_members = (
+            settings.sharing.restrict_to_workspace_members
+        )
+        if bundle is None or bundle.user_event_store is None:
+            raise RuntimeError(
+                "The in-memory identity backend requires a user-event store "
+                "so atomic workspace/share effects cannot be dropped."
+            )
+        append_nowait = getattr(bundle.user_event_store, "append_nowait", None)
+        if append_nowait is None:
+            raise RuntimeError(
+                "The in-memory identity backend requires a synchronous "
+                "in-memory user-event sink."
+            )
+        active_admin_user_ids = getattr(
+            provider_users, "active_admin_user_ids_nowait", None
+        )
+        active_workspace_admin.bind_user_event_sink(
+            append_nowait,
+            active_admin_user_ids=(
+                active_admin_user_ids
+                if callable(active_admin_user_ids)
+                else None
+            ),
+        )
+        if not active_workspace_admin.atomic_workspace_effects:
+            raise RuntimeError(
+                "The in-memory identity backend failed to bind atomic effects."
+            )
+    lifecycle = getattr(auth_provider, "lifecycle", None)
+    bind_lifecycle_events = getattr(lifecycle, "bind_user_event_sink", None)
+    if callable(bind_lifecycle_events):
+        event_store = bundle.user_event_store if bundle is not None else None
+        append_nowait = getattr(event_store, "append_nowait", None)
+        if callable(append_nowait):
+            bind_lifecycle_events(append_nowait)
+    if (
+        auth_provider.mode in {"oidc", "local", "ldap"}
+        and lifecycle is not None
+        and not getattr(lifecycle, "atomic_effects", True)
+    ):
+        raise RuntimeError(
+            "The scoped memory lifecycle requires the app user-event sink."
+        )
+    memory_authority: MemoryAuthorityCoordinator | None = None
+    if (
+        isinstance(active_workspace_admin, MemoryIdentityStore)
+        and auth_provider.mode in {"oidc", "local", "ldap"}
+        and isinstance(provider_users, MemoryUserDirectory)
+    ):
+        memory_authority = MemoryAuthorityCoordinator()
+        memory_authority.bind_users(provider_users)
+        active_workspace_admin.bind_authority_coordinator(memory_authority)
+        bind_lifecycle_authority = getattr(
+            lifecycle, "bind_authority_coordinator", None
+        )
+        if callable(bind_lifecycle_authority):
+            bind_lifecycle_authority(memory_authority)
+    elif (
+        isinstance(active_workspace_admin, MemoryIdentityStore)
+        and auth_provider.mode in {"oidc", "local", "ldap"}
+        and lifecycle is not None
+    ):
+        raise RuntimeError(
+            "The in-memory identity backend requires the canonical "
+            "in-memory user directory."
+        )
+    if isinstance(active_run_store, RunStore):
+        if not isinstance(active_workspace_admin, MemoryIdentityStore):
+            raise RuntimeError(
+                "The in-memory run store requires the in-memory identity "
+                "backend for live share authorization."
+            )
+        active_run_store.bind_authorization(
+            share_lookup=active_workspace_admin.permission_for_sync,
+            share_workspace_check=active_workspace_admin.share_workspace_sync,
+            resource_access_guard=(
+                active_workspace_admin.resource_access_guard_sync
+            ),
+            restrict_to_workspace_members=(
+                settings.sharing.restrict_to_workspace_members
+            ),
+        )
+        if memory_authority is not None:
+            active_run_store.bind_authority_coordinator(memory_authority)
+    if (
+        active_knowledge is not None
+        and isinstance(active_knowledge.store, MemoryKnowledgeStore)
+    ):
+        if isinstance(active_workspace_admin, MemoryIdentityStore):
+            active_knowledge.store.bind_authorization(
+                resource_access_guard=(
+                    active_workspace_admin.resource_access_guard_sync
+                )
+            )
+            if memory_authority is not None:
+                active_knowledge.store.bind_authority_coordinator(
+                    memory_authority
+                )
+        elif auth_provider.mode in {"oidc", "local", "ldap"}:
+            raise RuntimeError(
+                "The in-memory knowledge store requires the in-memory "
+                "identity backend for atomic shared collection writes."
+            )
+    if active_knowledge is not None:
+        knowledge_service = KnowledgeService(
+            knowledge=active_knowledge,
+            authorization=active_permissions,
+            chunk_max_chars=settings.knowledge.chunk_max_chars,
+            max_document_chars=settings.knowledge.max_document_chars,
+            parser=document_parser,
+            invalidator=resource_invalidator,
+        )
     from inqtrix.services.prompt_template_service import (
         PromptTemplateService,
     )
@@ -1164,12 +1372,19 @@ def build_container(
         )
 
         template_repository = MemoryPromptTemplateRepository()
+    bind_template_authority = getattr(
+        template_repository, "bind_authority_coordinator", None
+    )
+    if memory_authority is not None and callable(bind_template_authority):
+        bind_template_authority(memory_authority)
     prompt_template_service = PromptTemplateService(
         repository=template_repository,
+        authorization=active_permissions,
         # Only the Postgres backend survives restarts; the capability
         # manifest must not invite browsers to sync against a store
         # that reads as "everything deleted" after a bounce.
         durable=settings.storage.backend == "postgres",
+        invalidator=resource_invalidator,
     )
     from inqtrix.services.skill_service import SkillService
 
@@ -1179,12 +1394,89 @@ def build_container(
         from inqtrix.content.skills import MemorySkillRepository
 
         skill_repository = MemorySkillRepository()
+    bind_skill_authority = getattr(
+        skill_repository, "bind_authority_coordinator", None
+    )
+    if memory_authority is not None and callable(bind_skill_authority):
+        bind_skill_authority(memory_authority)
     skill_service = SkillService(
         repository=skill_repository,
+        authorization=active_permissions,
         durable=settings.storage.backend == "postgres",
+        invalidator=resource_invalidator,
+    )
+    collaboration_store = None
+    collaboration_users = None
+    if settings.collaboration.enabled:
+        if settings.storage.backend != "postgres":
+            raise RuntimeError(
+                "INQTRIX_COLLABORATION_ENABLED=true requires "
+                "INQTRIX_STORAGE_BACKEND=postgres."
+            )
+        # The cookie-session requirement is a DEPLOYMENT property. The API
+        # proves it through its active provider; the queue worker never
+        # builds one (it serves no HTTP and composes with NoneAuthProvider),
+        # so the env-resolved mode is the truthful witness there — without
+        # it, enabling collaboration crash-looped every worker replica and
+        # queued runs were never claimed.
+        from inqtrix.auth.principal import resolve_auth_mode
+
+        deployment_auth_mode = resolve_auth_mode(
+            settings.auth, settings.server
+        )
+        if (
+            auth_provider.mode not in {"oidc", "local", "ldap"}
+            and deployment_auth_mode not in {"oidc", "local", "ldap"}
+        ):
+            raise RuntimeError(
+                "INQTRIX_COLLABORATION_ENABLED=true requires cookie-based "
+                "OIDC, local, or LDAP authentication."
+            )
+        if bundle is None or bundle.session_factory is None:
+            raise RuntimeError(
+                "Editor collaboration requires the canonical platform "
+                "Postgres session factory."
+            )
+        if settings.collaboration.secret == settings.auth.session_secret:
+            raise RuntimeError(
+                "INQTRIX_COLLABORATION_SECRET must not reuse "
+                "INQTRIX_SESSION_SECRET."
+            )
+        collaboration_users = provider_users
+        if collaboration_users is None:
+            # Non-serving processes fall back to the canonical directory on
+            # the platform bundle engine (NullPool in the worker), so the
+            # projection consumer keeps working without an auth provider.
+            from inqtrix.storage.auth_postgres import PostgresUserDirectory
+
+            collaboration_users = PostgresUserDirectory(
+                session_factory=bundle.session_factory,
+                app_role=settings.storage.app_role,
+            )
+        from inqtrix.storage.editor_collaboration_postgres import (
+            PostgresEditorCollaborationStore,
+        )
+
+        collaboration_store = PostgresEditorCollaborationStore(
+            session_factory=bundle.session_factory,
+            app_role=settings.storage.app_role,
+            restrict_to_workspace_members=(
+                settings.sharing.restrict_to_workspace_members
+            ),
+        )
+    # Editor persistence is constructed before sharing because editor
+    # documents reuse the platform ShareService owner/title resolver maps.
+    from inqtrix.services.editor_persistence_service import (
+        EditorPersistenceService,
+    )
+
+    editor_persistence_service = EditorPersistenceService(
+        store=build_editor_store(settings),
+        durable=settings.storage.backend == "postgres",
+        authorization=active_permissions,
+        collaboration_store=collaboration_store,
     )
     share_service = None
-    provider_users = getattr(auth_provider, "users", None)
     # Sharing needs scoped principals + a user mirror — every cookie-session
     # mode qualifies (oidc/local/ldap), not just oidc. The single-operator
     # none/apikey modes are deliberately excluded: their unscoped principal
@@ -1198,24 +1490,33 @@ def build_container(
         from inqtrix.auth.shares import ShareService
 
         async def _run_owner(tenant_id: str, resource_id: str):
-            return active_run_store.owner_sub(resource_id)
+            return active_run_store.owner_user_id(resource_id)
 
         async def _run_title(tenant_id: str, resource_id: str):
             return active_run_store.title(resource_id)
 
-        async def _user_exists(tenant_id: str, sub: str) -> bool:
-            return await provider_users.has_subject(
-                tenant_id=tenant_id, sub=sub
+        async def _user_exists(tenant_id: str, user_id: uuid.UUID) -> bool:
+            return await provider_users.has_user_id(
+                tenant_id=tenant_id, user_id=user_id
             )
 
         owner_resolvers: dict = {"run": _run_owner}
-        # Title resolvers (recipient inbox + "shared by me" listing) mirror the
+        unsupported_share_types: set[str] = set()
+        # Title resolvers (recipient inbox + owner lifecycle listing) mirror the
         # owner resolvers one-for-one: same keys, owner-bypassing reads so a
         # pending recipient sees what they were offered — only titles/names
         # (run question, collection name, template title), never content or
         # any sensitive field.
         title_resolvers: dict = {"run": _run_title}
-        if knowledge_service is not None:
+        collection_sharing_supported = bool(
+            knowledge_service is not None
+            and getattr(
+                knowledge_service.knowledge.store,
+                "supports_collection_sharing",
+                False,
+            )
+        )
+        if collection_sharing_supported and knowledge_service is not None:
 
             async def _collection(tenant_id: str, resource_id: str):
                 from inqtrix.knowledge.stores.ports import CollectionNotFound
@@ -1229,10 +1530,10 @@ def build_container(
 
             async def _collection_owner(tenant_id: str, resource_id: str):
                 collection = await _collection(tenant_id, resource_id)
-                # Legacy collections (created_by_sub None) have no
+                # Legacy collections (created_by_user_id None) have no
                 # owner and need none — they are visible to everyone
                 # already; None makes them unshareable (404).
-                return collection.created_by_sub if collection else None
+                return collection.created_by_user_id if collection else None
 
             async def _collection_title(tenant_id: str, resource_id: str):
                 collection = await _collection(tenant_id, resource_id)
@@ -1240,9 +1541,11 @@ def build_container(
 
             owner_resolvers["knowledge_collection"] = _collection_owner
             title_resolvers["knowledge_collection"] = _collection_title
+        else:
+            unsupported_share_types.add("knowledge_collection")
 
         async def _template_owner(tenant_id: str, resource_id: str):
-            return await prompt_template_service.owner_sub(
+            return await prompt_template_service.owner_user_id(
                 tenant_id, resource_id
             )
 
@@ -1255,13 +1558,30 @@ def build_container(
         title_resolvers["prompt_template"] = _template_title
 
         async def _skill_owner(tenant_id: str, resource_id: str):
-            return await skill_service.owner_sub(tenant_id, resource_id)
+            return await skill_service.owner_user_id(tenant_id, resource_id)
 
         async def _skill_title(tenant_id: str, resource_id: str):
             return await skill_service.title(tenant_id, resource_id)
 
         owner_resolvers["skill_template"] = _skill_owner
         title_resolvers["skill_template"] = _skill_title
+
+        async def _editor_document_owner(
+            tenant_id: str, resource_id: str
+        ):
+            return await editor_persistence_service.share_owner_user_id(
+                tenant_id, resource_id
+            )
+
+        async def _editor_document_title(
+            tenant_id: str, resource_id: str
+        ):
+            return await editor_persistence_service.share_title(
+                tenant_id, resource_id
+            )
+
+        owner_resolvers["editor_document"] = _editor_document_owner
+        title_resolvers["editor_document"] = _editor_document_title
 
         share_service = ShareService(
             shares=active_workspace_admin,
@@ -1271,6 +1591,8 @@ def build_container(
             audit=active_workspace_admin,
             restrict_to_members=settings.sharing.restrict_to_workspace_members,
             title_resolvers=title_resolvers,
+            invalidator=resource_invalidator,
+            unsupported_resource_types=tuple(unsupported_share_types),
         )
     # Quota service: only when enabled AND a multi-user mode
     # (oidc/local/ldap). The single-operator none/apikey/demo modes are
@@ -1300,12 +1622,26 @@ def build_container(
     # without knowledge byte-identical (no reindex surface).
     indexing_service = None
     if knowledge_service is not None:
+        from inqtrix.services.execution_dependency_authority import (
+            CollectionEditAuthorizer,
+        )
         from inqtrix.services.indexing_service import IndexingService
 
+        active_indexing_store = indexing_store or build_indexing_store(settings)
+        bind_indexing_authority = getattr(
+            active_indexing_store, "bind_authority_coordinator", None
+        )
+        if memory_authority is not None and callable(bind_indexing_authority):
+            bind_indexing_authority(memory_authority)
         indexing_service = IndexingService(
             knowledge_service=knowledge_service,
-            job_store=indexing_store or build_indexing_store(settings),
+            job_store=active_indexing_store,
             quota_service=quota_service,
+            authority=CollectionEditAuthorizer(
+                authorization=active_permissions,
+                knowledge_service=knowledge_service,
+                user_lookup=getattr(auth_provider, "users", None),
+            ),
         )
     # Project-persistence tier (M6a): chat history becomes server-persistent
     # when a Postgres backend is present. Always wired (the memory store is
@@ -1318,23 +1654,39 @@ def build_container(
         store=build_chat_store(settings),
         durable=settings.storage.backend == "postgres",
     )
-    # Editor persistence (M6b): same project-persistence tier as chat, same
-    # durability gate (the capability flag reflects the whole tier).
-    from inqtrix.services.editor_persistence_service import (
-        EditorPersistenceService,
-    )
-
-    editor_persistence_service = EditorPersistenceService(
-        store=build_editor_store(settings),
-        durable=settings.storage.backend == "postgres",
-    )
+    editor_collaboration_service = None
+    if settings.collaboration.enabled:
+        from inqtrix.services.collaboration_client import (
+            CollaborationNodeClient,
+        )
+        from inqtrix.services.editor_collaboration_service import (
+            EditorCollaborationService,
+        )
+        assert collaboration_store is not None
+        assert collaboration_users is not None
+        collaboration_node = CollaborationNodeClient(
+            base_url=settings.collaboration.http_url,
+            secret=settings.collaboration.secret,
+        )
+        editor_collaboration_service = EditorCollaborationService(
+            store=collaboration_store,
+            documents=editor_persistence_service,
+            node=collaboration_node,
+            settings=settings.collaboration,
+            users=collaboration_users,
+        )
+        editor_persistence_service.bind_collaboration_projector(
+            editor_collaboration_service.flush_projection
+        )
     # Editor patches (M7): the persisted proposal/decision lifecycle over
-    # the documents above; audit through the platform sink.
+    # the documents above; collaboration patches delegate their Yjs mutation
+    # to the optional serialized sidecar instead of writing Markdown.
     from inqtrix.services.editor_patch_service import EditorPatchService
 
     editor_patch_service = EditorPatchService(
         store=build_editor_patch_store(settings),
         editor_persistence=editor_persistence_service,
+        collaboration=editor_collaboration_service,
         audit=active_workspace_admin,
         durable=settings.storage.backend == "postgres",
     )
@@ -1386,8 +1738,19 @@ def build_container(
     from inqtrix.services.agent_control_service import AgentControlService
     from inqtrix.services.agent_sessions_service import AgentSessionsService
 
+    agent_control_store = build_agent_control_store(settings)
+    bind_control_authority = getattr(
+        agent_control_store, "bind_authority_coordinator", None
+    )
+    bind_control_execution = getattr(
+        agent_control_store, "bind_execution_guard", None
+    )
+    if memory_authority is not None and callable(bind_control_authority):
+        bind_control_authority(memory_authority)
+    if isinstance(active_run_store, RunStore) and callable(bind_control_execution):
+        bind_control_execution(active_run_store.execution_control_guard)
     agent_control_service = AgentControlService(
-        store=build_agent_control_store(settings),
+        store=agent_control_store,
         run_store=active_run_store,
         audit=active_workspace_admin,
         editor_persistence=editor_persistence_service,
@@ -1402,11 +1765,21 @@ def build_container(
         run_store=active_run_store,
         durable=settings.storage.backend == "postgres",
     )
+    from inqtrix.services.execution_dependency_authority import (
+        ExecutionDependencyAuthorizer,
+    )
+
     run_service = RunService(
         registry=active_registry,
         runtime=runtime,
         run_store=active_run_store,
         quota_service=quota_service,
+        user_lookup=getattr(auth_provider, "users", None),
+        dependency_authorizer=ExecutionDependencyAuthorizer(
+            authorization=active_permissions,
+            knowledge_service=knowledge_service,
+            skill_service=skill_service,
+        ),
     )
     capability_registry_instance = build_capability_registry(
         knowledge_service=knowledge_service,
@@ -1488,7 +1861,11 @@ def build_container(
                     skill_service=skill_service,
                 )
             )
-    principal_dependency = auth_provider.build_principal_dependency()
+    from inqtrix.auth.principal_generation import bind_principal_generation
+
+    principal_dependency = bind_principal_generation(
+        auth_provider.build_principal_dependency()
+    )
 
     return AppContainer(
         settings=settings,
@@ -1526,6 +1903,7 @@ def build_container(
         chat_history_service=chat_history_service,
         editor_persistence_service=editor_persistence_service,
         editor_patch_service=editor_patch_service,
+        editor_collaboration_service=editor_collaboration_service,
         asset_records_service=asset_records_service,
         knowledge_sessions_service=knowledge_sessions_service,
         agent_control_service=agent_control_service,
@@ -1533,6 +1911,8 @@ def build_container(
         document_parser=document_parser,
         vector_index_service=vector_index_service,
         account_preferences_service=account_preferences_service,
+        user_event_store=(bundle.user_event_store if bundle is not None else None),
+        session_factory=(bundle.session_factory if bundle is not None else None),
         agent_memory_service=agent_memory_service,
         capability_registry=capability_registry_instance,
         object_store_backend=active_object_store_backend,

@@ -9,6 +9,7 @@ refused). Memory backend, secure_cookies off for the http TestClient.
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
@@ -16,6 +17,10 @@ from fastapi.testclient import TestClient
 from inqtrix.auth.api_key import build_local_provider
 from inqtrix.auth.credentials import LOCAL_ISSUER
 from inqtrix.auth.directory import MemoryUserDirectory
+from inqtrix.auth.principal_generation import (
+    bind_principal_generation,
+    install_principal_generation_error_handler,
+)
 from inqtrix.server.routers.admin import build_admin_router
 from inqtrix.server.routers.auth import build_auth_router
 from inqtrix.settings import AuthSettings, Settings
@@ -34,13 +39,16 @@ def make_client() -> TestClient:
     )
     provider = build_local_provider(settings)
     app = FastAPI()
-    app.include_router(build_auth_router(provider))
-    app.include_router(build_admin_router(provider))
-    principal_dep = provider.build_principal_dependency()
+    principal_dep = bind_principal_generation(
+        provider.build_principal_dependency()
+    )
+    install_principal_generation_error_handler(app)
+    app.include_router(build_auth_router(provider, principal_dep))
+    app.include_router(build_admin_router(provider, principal_dep))
 
     @app.get("/v1/protected")
     async def protected(principal=Depends(principal_dep)):
-        return {"sub": principal.sub}
+        return {"sub": principal.user_id}
 
     return TestClient(app, base_url="http://127.0.0.1:5100")
 
@@ -55,15 +63,15 @@ def _owner_client():
     return client, csrf
 
 
-def _subject_of(client, csrf, email):
+def _user_id_of(client, csrf, email):
     rows = client.get("/v1/admin/users").json()["users"]
-    return next(u["subject"] for u in rows if u["email"] == email)
+    return next(u["id"] for u in rows if u["email"] == email)
 
 
 def test_owner_setup_becomes_admin_and_session_reports_role():
     client, _csrf = _owner_client()
     info = client.get("/api/auth/session").json()
-    assert info["role"] == "admin"
+    assert info["user"]["role"] == "admin"
     rows = client.get("/v1/admin/users").json()["users"]
     assert len(rows) == 1
     assert rows[0]["instance_role"] == "admin"
@@ -92,16 +100,92 @@ def test_admin_routes_require_session_admin():
     assert client.get("/v1/admin/users").status_code == 404
 
 
+def test_stale_browser_generation_cannot_mutate_new_principal() -> None:
+    client, owner_csrf = _owner_client()
+    owner_id = _user_id_of(client, owner_csrf, OWNER[0])
+    created = client.post(
+        "/v1/admin/users",
+        json={
+            "email": "second-admin@example.com",
+            "password": "another-strong-password",
+            "instance_role": "admin",
+        },
+        headers={"X-CSRF-Token": owner_csrf},
+    )
+    assert created.status_code == 201
+
+    client.post(
+        "/api/auth/logout",
+        headers={"X-CSRF-Token": owner_csrf},
+    )
+    login = client.post(
+        "/api/auth/login/local",
+        json={
+            "email": "second-admin@example.com",
+            "password": "another-strong-password",
+        },
+    )
+    assert login.status_code == 200
+    second_session = client.get("/api/auth/session").json()
+    second_csrf = second_session["csrf_token"]
+    second_id = second_session["user"]["id"]
+    stale_headers = {
+        "X-CSRF-Token": second_csrf,
+        "X-Inqtrix-Expected-User-Id": owner_id,
+    }
+
+    admin_mutation = client.post(
+        "/v1/admin/users",
+        json={
+            "email": "must-not-exist@example.com",
+            "password": "another-strong-password",
+        },
+        headers=stale_headers,
+    )
+    token_mutation = client.post(
+        "/api/auth/tokens",
+        json={"name": "must-not-be-minted"},
+        headers=stale_headers,
+    )
+    password_mutation = client.post(
+        "/api/auth/password",
+        json={
+            "current_password": "another-strong-password",
+            "new_password": "replacement-strong-password",
+        },
+        headers=stale_headers,
+    )
+    logout = client.post("/api/auth/logout", headers=stale_headers)
+
+    for response in (
+        admin_mutation,
+        token_mutation,
+        password_mutation,
+        logout,
+    ):
+        assert response.status_code == 409
+        assert response.json()["error"]["type"] == "principal_changed"
+
+    assert client.get("/api/auth/tokens").json() == {"tokens": []}
+    users = client.get("/v1/admin/users").json()["users"]
+    assert not any(
+        user["email"] == "must-not-exist@example.com" for user in users
+    )
+    live_session = client.get("/api/auth/session").json()
+    assert live_session["authenticated"] is True
+    assert live_session["user"]["id"] == second_id
+
+
 def test_create_and_promote_and_last_admin_guard():
     client, csrf = _owner_client()
     headers = {"X-CSRF-Token": csrf}
-    owner_sub = _subject_of(client, csrf, OWNER[0])
+    owner_user_id = _user_id_of(client, csrf, OWNER[0])
 
     # Self-demote is blocked. (The caller is always the last/only admin when
     # demoting self, so the self-guard fires first; the atomic last-admin
     # invariant is covered by test_atomic_last_admin_guard_is_race_free.)
     demote = client.patch(
-        f"/v1/admin/users/{owner_sub}",
+        f"/v1/admin/users/{owner_user_id}",
         json={"instance_role": "user"},
         headers=headers,
     )
@@ -114,7 +198,7 @@ def test_create_and_promote_and_last_admin_guard():
         json={"email": "bob@example.com", "password": "another-strong-pw-1", "instance_role": "admin"},
         headers=headers,
     )
-    bob_sub = _subject_of(client, csrf, "bob@example.com")
+    bob_sub = _user_id_of(client, csrf, "bob@example.com")
     ok = client.patch(
         f"/v1/admin/users/{bob_sub}",
         json={"instance_role": "user"},
@@ -124,7 +208,7 @@ def test_create_and_promote_and_last_admin_guard():
     # The owner still cannot demote themselves (self-guard).
     assert (
         client.patch(
-            f"/v1/admin/users/{owner_sub}",
+            f"/v1/admin/users/{owner_user_id}",
             json={"instance_role": "user"},
             headers=headers,
         ).json()["error"]["type"]
@@ -140,7 +224,7 @@ def test_admin_reset_password():
         json={"email": "bob@example.com", "password": "another-strong-pw-1", "instance_role": "user"},
         headers=headers,
     )
-    bob_sub = _subject_of(client, csrf, "bob@example.com")
+    bob_sub = _user_id_of(client, csrf, "bob@example.com")
 
     reset = client.post(
         f"/v1/admin/users/{bob_sub}:reset-password",
@@ -151,7 +235,7 @@ def test_admin_reset_password():
     # Resetting an unknown subject is a 404 (done while still the owner).
     assert (
         client.post(
-            "/v1/admin/users/ghost-subject:reset-password",
+            f"/v1/admin/users/{uuid.uuid4()}:reset-password",
             json={"password": "x" * 12},
             headers=headers,
         ).status_code
@@ -177,9 +261,9 @@ def test_admin_reset_password():
 
 def test_self_disable_blocked():
     client, csrf = _owner_client()
-    owner_sub = _subject_of(client, csrf, OWNER[0])
+    owner_user_id = _user_id_of(client, csrf, OWNER[0])
     resp = client.post(
-        f"/v1/admin/users/{owner_sub}:disable", headers={"X-CSRF-Token": csrf}
+        f"/v1/admin/users/{owner_user_id}:disable", headers={"X-CSRF-Token": csrf}
     )
     assert resp.status_code == 409
     assert resp.json()["error"]["type"] == "self_disable"
@@ -194,7 +278,7 @@ def test_disable_cascade_blocks_login_and_purges_session():
         json={"email": "bob@example.com", "password": "another-strong-pw-1"},
         headers=headers,
     )
-    bob_sub = _subject_of(client, csrf, "bob@example.com")
+    bob_sub = _user_id_of(client, csrf, "bob@example.com")
 
     # Disable bob (a failed login below does not change the owner's cookie).
     dis = client.post(f"/v1/admin/users/{bob_sub}:disable", headers=headers)
@@ -236,20 +320,19 @@ def test_disabled_mirror_reports_session_logged_out():
     client = TestClient(app, base_url="http://127.0.0.1:5100")
     client.post("/api/setup/owner", json={"email": OWNER[0], "password": OWNER[1]})
     info = client.get("/api/auth/session").json()
-    assert info["authenticated"] is True and info["role"] == "admin"
+    assert info["authenticated"] is True and info["user"]["role"] == "admin"
     asyncio.run(
         provider.users.set_disabled(
             tenant_id="default",
-            issuer=LOCAL_ISSUER,
-            subject=info["sub"],
+            user_id=uuid.UUID(info["user"]["id"]),
             disabled_at=1.0,
         )
     )
     assert client.get("/api/auth/session").json()["authenticated"] is False
 
 
-def _seed_admin(directory: MemoryUserDirectory, subject: str) -> None:
-    asyncio.run(
+def _seed_admin(directory: MemoryUserDirectory, subject: str) -> uuid.UUID:
+    user = asyncio.run(
         directory.record_login(
             tenant_id="default",
             issuer=LOCAL_ISSUER,
@@ -261,43 +344,44 @@ def _seed_admin(directory: MemoryUserDirectory, subject: str) -> None:
     )
     asyncio.run(
         directory.set_instance_role(
-            tenant_id="default", issuer=LOCAL_ISSUER, subject=subject, role="admin"
+            tenant_id="default", user_id=user.user_id, role="admin"
         )
     )
+    return user.user_id
 
 
 def test_atomic_last_admin_guard_is_race_free():
     # The check-and-write is one operation, so the guard holds even without
     # the router's pre-read. Sole admin -> both guarded ops refuse (False).
     directory = MemoryUserDirectory()
-    _seed_admin(directory, "a")
+    user_a = _seed_admin(directory, "a")
 
-    def demote(sub: str) -> bool:
+    def demote(user_id: uuid.UUID) -> bool:
         return asyncio.run(
             directory.demote_if_not_last_admin(
-                tenant_id="default", issuer=LOCAL_ISSUER, subject=sub
+                tenant_id="default", user_id=user_id
             )
         )
 
-    def disable(sub: str) -> bool:
+    def disable(user_id: uuid.UUID) -> bool:
         return asyncio.run(
             directory.disable_if_not_last_admin(
-                tenant_id="default", issuer=LOCAL_ISSUER, subject=sub, disabled_at=1.0
+                tenant_id="default", user_id=user_id, disabled_at=1.0
             )
         )
 
-    assert demote("a") is False
-    assert disable("a") is False
+    assert demote(user_a) is False
+    assert disable(user_a) is False
 
     # A second admin -> demoting the first is allowed; "b" is then the last
     # active admin and can be neither demoted nor disabled.
-    _seed_admin(directory, "b")
-    assert demote("a") is True
-    assert disable("b") is False
-    assert demote("b") is False
+    user_b = _seed_admin(directory, "b")
+    assert demote(user_a) is True
+    assert disable(user_b) is False
+    assert demote(user_b) is False
 
     # Disabling a plain user never trips the admin guard.
-    asyncio.run(
+    user_c = asyncio.run(
         directory.record_login(
             tenant_id="default",
             issuer=LOCAL_ISSUER,
@@ -307,4 +391,4 @@ def test_atomic_last_admin_guard_is_race_free():
             display_name="c",
         )
     )
-    assert disable("c") is True
+    assert disable(user_c.user_id) is True

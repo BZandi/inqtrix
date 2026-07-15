@@ -9,6 +9,7 @@ store shares the identity bundle's HTTP-loop engine.
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING
 
 from sqlalchemy import or_, select, update
@@ -27,8 +28,7 @@ def _record_from_row(row) -> PersonalAccessToken:
     return PersonalAccessToken(
         token_id=row.token_id,
         tenant_id=row.tenant_id,
-        owner_issuer=row.owner_issuer,
-        owner_sub=row.owner_sub,
+        owner_user_id=row.owner_user_id,
         name=row.name,
         secret_hmac=row.secret_hmac,
         created_at=row.created_at,
@@ -70,8 +70,7 @@ class PostgresPatStore:
                 pats.insert().values(
                     token_id=token.token_id,
                     tenant_id=token.tenant_id,
-                    owner_issuer=token.owner_issuer,
-                    owner_sub=token.owner_sub,
+                    owner_user_id=token.owner_user_id,
                     name=token.name,
                     secret_hmac=token.secret_hmac,
                     scopes=list(token.scopes),
@@ -92,7 +91,7 @@ class PostgresPatStore:
         return _record_from_row(row) if row is not None else None
 
     async def list_for_owner(
-        self, *, tenant_id: str, owner_issuer: str, owner_sub: str
+        self, *, tenant_id: str, owner_user_id: uuid.UUID
     ) -> tuple[PersonalAccessToken, ...]:
         async with self._scope() as db:
             rows = (
@@ -100,8 +99,7 @@ class PostgresPatStore:
                     select(pats)
                     .where(
                         pats.c.tenant_id == tenant_id,
-                        pats.c.owner_issuer == owner_issuer,
-                        pats.c.owner_sub == owner_sub,
+                        pats.c.owner_user_id == owner_user_id,
                         pats.c.revoked_at.is_(None),
                     )
                     .order_by(pats.c.created_at.desc())
@@ -114,8 +112,7 @@ class PostgresPatStore:
         *,
         tenant_id: str,
         token_id: str,
-        owner_issuer: str,
-        owner_sub: str,
+        owner_user_id: uuid.UUID,
         now: float,
     ) -> bool:
         """Guarded soft-revoke: only a LIVE row of THIS owner flips.
@@ -129,8 +126,7 @@ class PostgresPatStore:
                 .where(
                     pats.c.tenant_id == tenant_id,
                     pats.c.token_id == token_id,
-                    pats.c.owner_issuer == owner_issuer,
-                    pats.c.owner_sub == owner_sub,
+                    pats.c.owner_user_id == owner_user_id,
                     pats.c.revoked_at.is_(None),
                 )
                 .values(revoked_at=now)
@@ -157,15 +153,14 @@ class PostgresPatStore:
             )
 
     async def revoke_all_for_owner(
-        self, *, tenant_id: str, owner_issuer: str, owner_sub: str, now: float
+        self, *, tenant_id: str, owner_user_id: uuid.UUID, now: float
     ) -> int:
         async with self._scope() as db:
             result = await db.execute(
                 update(pats)
                 .where(
                     pats.c.tenant_id == tenant_id,
-                    pats.c.owner_issuer == owner_issuer,
-                    pats.c.owner_sub == owner_sub,
+                    pats.c.owner_user_id == owner_user_id,
                     pats.c.revoked_at.is_(None),
                 )
                 .values(revoked_at=now)

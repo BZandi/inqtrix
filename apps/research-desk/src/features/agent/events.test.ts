@@ -6,6 +6,7 @@ import type { ResearchRunEvent, ResearchRunSummary } from '@/features/researchRu
 
 function summary(overrides: Partial<ResearchRunSummary> = {}): ResearchRunSummary {
   return {
+    access: { mode: 'owner' },
     run_id: 'run_agent_1',
     status: 'running',
     queue_position: null,

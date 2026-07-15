@@ -1,5 +1,6 @@
 import type {
   ResearchSource,
+  ResearchRunAccess,
 } from '@/features/researchRuns/types'
 import type {
   ChatContextReferenceRecord,
@@ -222,13 +223,13 @@ export function serializeChatRule(
     linked_context_refs: linkedContextRefsToFrontmatter(normalized.linkedContextRefs ?? []),
     rule_id: rule.id,
     schema_version: PROJECT_SCHEMA_VERSION,
-    // The sync link, the precondition anchor, and the shared-in marker
+    // The sync link, mandatory revision anchor, and access metadata
     // must survive the round-trip — losing serverTemplateId re-uploads
     // the rule as a brand-new server template on its next save, and
-    // losing serverUpdatedAt would silently drop the stale-write guard
+    // losing serverRevision would prevent safe server updates
     // until the next hydrate.
     server_template_id: rule.serverTemplateId ?? null,
-    server_updated_at: rule.serverUpdatedAt ?? null,
+    server_revision: rule.serverRevision ?? null,
     access: rule.access ?? null,
     title: rule.title,
     updated_at: rule.updatedAt,
@@ -276,16 +277,20 @@ export function serializeEditorDocument(
   state: Pick<ProjectState, 'editorComments'>,
   path = defaultEditorDocumentPath(document),
 ): ProjectFile {
+  const detachedCollaboration = document.contentMode === 'collaboration'
   const comments = Object.values(state.editorComments)
     .filter((comment) => comment.documentId === document.id)
     .sort((a, b) => a.anchor.from - b.anchor.from || a.createdAt.localeCompare(b.createdAt))
   const frontmatter = {
     comments,
     created_at: document.createdAt,
+    ...(detachedCollaboration ? { detached_from_collaboration: true } : {}),
+    // A diff anchor is a self-contained markdown snapshot. It remains valid in
+    // a detached export and does not reconnect the imported document to Yjs.
     diff_anchor_markdown: document.diffAnchorMarkdown ?? null,
     diff_anchor_updated_at: document.diffAnchorUpdatedAt ?? null,
     document_id: document.id,
-    folder_id: document.folderId,
+    folder_id: detachedCollaboration ? null : document.folderId,
     kind: 'inqtrix.editor_document',
     revision: document.revision,
     schema_version: PROJECT_SCHEMA_VERSION,
@@ -311,7 +316,7 @@ function buildProjectExportPlan(state: ProjectState): ProjectExportPlan {
 
   for (const ruleId of state.chatRuleOrder) {
     const rule = state.chatRules[ruleId]
-    if (!rule) continue
+    if (!rule || !isProjectAutosaveEligible(rule)) continue
     chatRules.push({
       id: rule.id,
       item: rule,
@@ -323,7 +328,13 @@ function buildProjectExportPlan(state: ProjectState): ProjectExportPlan {
 
   for (const runId of state.researchRunOrder) {
     const run = state.researchRuns[runId]
-    if (!run || run.mode === 'knowledge' || run.status !== 'completed' || !run.result?.markdown) continue
+    if (
+      !run
+      || !isProjectAutosaveEligible(run)
+      || run.mode === 'knowledge'
+      || run.status !== 'completed'
+      || !run.result?.markdown
+    ) continue
     researchRuns.push({
       id: run.runId,
       item: run,
@@ -335,7 +346,7 @@ function buildProjectExportPlan(state: ProjectState): ProjectExportPlan {
 
   for (const documentId of state.editorDocumentOrder) {
     const document = state.editorDocuments[documentId]
-    if (!document) continue
+    if (!document || document.access?.mode === 'shared') continue
     editorDocuments.push({
       id: document.id,
       item: document,
@@ -376,6 +387,15 @@ function buildProjectExportPlan(state: ProjectState): ProjectExportPlan {
     fileAssets,
     researchRuns,
   }
+}
+
+/** Automatic project persistence must not turn live shared access into an
+ * owned copy. Explicit duplicate/export commands are separate user actions
+ * and do not use this autosave policy. */
+function isProjectAutosaveEligible(
+  resource: { access?: ResearchRunAccess },
+): boolean {
+  return resource.access?.mode !== 'shared'
 }
 
 function renderProjectManifestBody(state: ProjectState, exportPlan: ProjectExportPlan) {
@@ -506,13 +526,16 @@ export function parseResearchRun(markdown: string): ResearchRunRecord {
   }
 }
 
-/** Frontmatter guard for the additive shared-in annotation. */
-function isRunAccess(value: unknown): value is { permission: 'edit' | 'view'; via: 'share' } {
+/** Frontmatter guard for canonical resource authorization metadata. */
+function isRunAccess(value: unknown): value is ResearchRunAccess {
   if (typeof value !== 'object' || value === null) return false
-  const candidate = value as { permission?: unknown; via?: unknown }
+  const candidate = value as { mode?: unknown; permission?: unknown }
+  if (candidate.mode === 'shared') {
+    return candidate.permission === 'view' || candidate.permission === 'edit'
+  }
   return (
-    candidate.via === 'share'
-    && (candidate.permission === 'view' || candidate.permission === 'edit')
+    (candidate.mode === 'owner' || candidate.mode === 'unscoped')
+    && candidate.permission === undefined
   )
 }
 
@@ -554,8 +577,8 @@ export function parseChatRule(markdown: string): ChatRuleRecord {
     ...(typeof data.server_template_id === 'string' && data.server_template_id
       ? { serverTemplateId: data.server_template_id }
       : {}),
-    ...(typeof data.server_updated_at === 'number'
-      ? { serverUpdatedAt: data.server_updated_at }
+    ...(Number.isInteger(data.server_revision) && Number(data.server_revision) > 0
+      ? { serverRevision: Number(data.server_revision) }
       : {}),
     ...(isRunAccess(data.access) ? { access: data.access } : {}),
   }
@@ -636,8 +659,13 @@ export function parseEditorDocument(markdown: string): {
   const parsed = parseFrontmatter(markdown)
   const data = parsed.data
   requireKind(data, 'inqtrix.editor_document')
-  const documentId = stringValue(data.document_id)
-  const comments = normalizeEditorComments(data.comments, documentId)
+  const detachedCollaboration = data.detached_from_collaboration === true
+  const documentId = detachedCollaboration
+    ? createDetachedEntityId('editor-doc')
+    : stringValue(data.document_id)
+  const comments = normalizeEditorComments(data.comments, documentId, {
+    remapIdentity: detachedCollaboration,
+  })
 
   return {
     comments,
@@ -648,13 +676,21 @@ export function parseEditorDocument(markdown: string): {
       diffAnchorUpdatedAt: asString(data.diff_anchor_updated_at),
       folderId: asString(data.folder_id) ?? null,
       id: documentId,
-      revision: typeof data.revision === 'number' ? data.revision : 1,
+      revision: detachedCollaboration
+        ? 0
+        : typeof data.revision === 'number' ? data.revision : 1,
       source: editorDocumentSourceOrDefault(data.source),
       sourceRunId: asString(data.source_run_id),
       title: normalizeEditorTitle(stringValue(data.title)),
       updatedAt: stringValue(data.updated_at),
     },
   }
+}
+
+function createDetachedEntityId(prefix: 'editor-comment' | 'editor-doc'): string {
+  const randomId = globalThis.crypto?.randomUUID?.()
+  if (randomId) return `${prefix}-${randomId}`
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
 export function withFrontmatter(data: Record<string, unknown>, body: string) {
@@ -1092,23 +1128,26 @@ function normalizeEditorTitle(value: string) {
 function normalizeEditorComments(
   value: unknown,
   fallbackDocumentId: string,
+  { remapIdentity = false }: { remapIdentity?: boolean } = {},
 ): EditorCommentThreadRecord[] {
   if (!Array.isArray(value)) return []
   return value.flatMap((item) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return []
     const record = item as Record<string, unknown>
     const anchor = normalizeEditorCommentAnchor(record.anchor)
-    const id = asString(record.id)
+    const serializedId = asString(record.id)
     const commentMarkdown = asString(record.commentMarkdown ?? record.comment_markdown)
-    if (!id || !anchor || !commentMarkdown) return []
+    if ((!serializedId && !remapIdentity) || !anchor || !commentMarkdown) return []
     const evidencePreset = editorEvidencePresetOrUndefined(record.evidencePreset ?? record.evidence_preset)
     return [{
       anchor,
       commentMarkdown,
       createdAt: stringOrNow(record.createdAt ?? record.created_at),
-      documentId: asString(record.documentId ?? record.document_id) ?? fallbackDocumentId,
+      documentId: remapIdentity
+        ? fallbackDocumentId
+        : asString(record.documentId ?? record.document_id) ?? fallbackDocumentId,
       ...(evidencePreset ? { evidencePreset } : {}),
-      id,
+      id: remapIdentity ? createDetachedEntityId('editor-comment') : serializedId!,
       kind: editorCommentKindOrDefault(record.kind),
       status: editorCommentStatusOrDefault(record.status),
       updatedAt: stringOrNow(record.updatedAt ?? record.updated_at),

@@ -34,7 +34,7 @@ Native runs are short-lived server resources addressed by an opaque `run_id`:
 | `/v1/agent/runs/{run_id}/feedback` | POST | Store personal run feedback (`positive`/`negative`/`neutral`, optional `reason`, optional owner-checked `memory_id`). Shared run access does not grant personal memory access. |
 | `/v1/runs/{run_id}/result` | GET | Fetch the final `ResearchResult.to_export_payload()` report after completion; current Agent Desk results include the same canonical `execution` block as the live snapshot. |
 | `/v1/runs/{run_id}/cancel` | POST | Cancel a queued run or request cancellation for a running run. Cancelling an agent run cascades over its child runs. |
-| `/v1/runs/{run_id}` | DELETE | Permanently delete a terminal run (owner-only); returns 409 while the run is still active. Revokes any shares on the run. |
+| `/v1/runs/{run_id}` | DELETE | Permanently delete a terminal run (owner-only); returns 409 while the run is still active. Revokes any shares on the run. To delete an active run, cancel it first, poll the summary until it turns terminal (its summary carries `cancel_requested: true` in the meantime), then delete — the reference web client automates exactly this flow. |
 
 The `run_id` identifies the job, not a user. Future authentication can add a user or tenant owner beside it; clients should still address work by `run_id`.
 
@@ -264,7 +264,7 @@ clients reconcile via the GET endpoints above):
 
 | Event | When emitted | Important data |
 |---|---|---|
-| `inqtrix.agent.approval.decided` | A user decided an approval. | `approval_id`, `status`, `decided_by_sub` |
+| `inqtrix.agent.approval.decided` | A user decided an approval. | `approval_id`, `status`, `decided_by_user_id` |
 | `inqtrix.agent.clarification.answered` | A user answered a clarification. | `clarification_id` |
 | `inqtrix.agent.artifact.updated` | An artifact revision advanced through a user PUT (multi-tab signal); agent-side writes emit it with the agent runtime. | `artifact_id`, `revision`, `updated_by` |
 | `inqtrix.agent.artifact.edit_conflict` | A follow-up turn found the session memo edited by the user since it read it (E13); the agent preserved that text and appended its update instead of overwriting. The client refetches the reconciled memo. | `artifact_id`, `kind` |
@@ -362,7 +362,8 @@ Agent-side events (`plan.proposed`, `task.*`, `artifact.created`,
 User actions on agent runs are audited as `agent.approval_decided`,
 `agent.clarification_answered`, `agent.artifact_edited`, and
 `agent.artifact_exported` (audit `actor_type` stays `user`). The runtime's
-OWN writes use `actor_type: agent` with the owner as `actor_sub` (E6): a
+OWN writes use `actor_type: agent` with the effective actor as
+`actor_user_id` (E6): a
 document-targeted run records `editor.patch_proposed` when it proposes
 edits (M7), alongside the user's `editor.patch_applied` /
 `editor.patch_rejected` on the decision.
@@ -373,12 +374,24 @@ Background knowledge reindex jobs use the same endpoint and event model on a par
 
 Cancellation is a two-step lifecycle for running jobs. `POST
 /v1/runs/{run_id}/cancel` returns the current summary, but a running summary can
-still have `status="running"` because the cancel request is observed at the next
-agent node boundary. The intermediate `inqtrix.run.cancel_requested` event tells
-clients that the request was accepted; it is not terminal and should not move a
-card to the cancelled bucket. Only `inqtrix.run.cancelled` or a summary with
-`status="cancelled"` should do that. Queued jobs can skip the intermediate
-event and become cancelled immediately.
+still have `status="running"` because the cancel request is observed at the
+run's next cancellation checkpoint. While the cancel is pending, the summary
+additionally carries `cancel_requested: true` (emitted only in that state, so
+historical summaries are unchanged). The intermediate
+`inqtrix.run.cancel_requested` event tells clients that the request was
+accepted; it is not terminal and should not move a card to the cancelled
+bucket. Only `inqtrix.run.cancelled` or a summary with `status="cancelled"`
+should do that. Queued jobs can skip the intermediate event and become
+cancelled immediately.
+
+Checkpoints are dense: besides the node boundaries, every provider retry
+ladder checks before each attempt and during backoff sleeps, the search and
+claim-extraction fan-outs abandon queued calls (visible as a warning progress
+message plus the `cancel_abandoned_work` iteration-log marker with
+`abandoned`/`in_flight`/`total` counts), and answer composition stops between
+report sections. Typical time from cancel request to the terminal event is
+therefore a few seconds; the residual worst case is the remainder of ONE
+in-flight provider HTTP attempt (bounded by its transport timeout).
 
 `inqtrix.progress.message` is the user-facing agent protocol. Native UIs should
 prefer these messages for visible timelines because they match the terminal

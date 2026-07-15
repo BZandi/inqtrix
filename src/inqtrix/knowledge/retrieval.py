@@ -10,11 +10,13 @@ dense search.
 from __future__ import annotations
 
 import asyncio
+from typing import Any, Callable
 
 from inqtrix.knowledge.stores.ports import (
     KnowledgeProviderContext,
     RetrievalCandidate,
 )
+from inqtrix.providers.base import observe_provider_retries
 
 
 async def retrieve(
@@ -25,6 +27,7 @@ async def retrieve(
     top_k: int,
     use_reranker: bool = True,
     rerank_candidate_depth: int | None = None,
+    on_provider_retry: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[RetrievalCandidate]:
     """Run the full retrieval pipeline for one query.
 
@@ -41,6 +44,11 @@ async def retrieve(
         rerank_candidate_depth: Profile hook — candidate pool fetched
             ahead of the rerank stage; ``None`` uses the configured
             default depth.
+        on_provider_retry: Optional observer for rerank-provider retry
+            notices (the shared ``_RetryNoticeMixin`` dict shape).
+            Retries would otherwise only reach the server log; callers
+            with an event surface forward them there (no silent
+            fallbacks). ``None`` keeps the historical behaviour.
     """
     embedding_model = knowledge.embeddings.default_model
     if collection_ids:
@@ -81,12 +89,23 @@ async def retrieve(
 
     if reranker is None or len(candidates) <= 1:
         return candidates[:top_k]
-    results = await asyncio.to_thread(
-        reranker.rerank,
-        query,
-        [candidate.chunk.text for candidate in candidates],
-        top_n=top_k,
-    )
+    candidate_texts = [candidate.chunk.text for candidate in candidates]
+
+    def _rerank_observed() -> list[Any]:
+        # Observer binding, the call, and the thread-local cleanup must all
+        # run on the SAME thread as the rerank (the mixin state is
+        # threading.local), hence one closure handed to to_thread.
+        with observe_provider_retries(reranker, on_provider_retry):
+            try:
+                return reranker.rerank(query, candidate_texts, top_n=top_k)
+            finally:
+                consume = getattr(reranker, "consume_retry_notices", None)
+                if callable(consume):
+                    # Clear leftover notices so a reused executor thread
+                    # cannot bleed them into a later request.
+                    consume()
+
+    results = await asyncio.to_thread(_rerank_observed)
     return [
         RetrievalCandidate(
             chunk=candidates[result.index].chunk,

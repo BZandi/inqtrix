@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +48,10 @@ class PostgresEditorPatchStore(BaseSessionStore):
                     summary=patch.summary,
                     warnings=list(patch.warnings),
                     revision_before=patch.revision_before,
+                    collaboration_generation=patch.collaboration_generation,
+                    base_sequence=patch.base_sequence,
+                    decision_sequence=patch.decision_sequence,
+                    suggestion_ids=list(patch.suggestion_ids),
                     applied_revision=patch.applied_revision,
                     applied_edit_ids=(
                         list(patch.applied_edit_ids)
@@ -54,7 +59,9 @@ class PostgresEditorPatchStore(BaseSessionStore):
                         else None
                     ),
                     note=patch.note,
-                    created_by_sub=patch.created_by_sub,
+                    created_by_user_id=patch.created_by_user_id,
+                    decided_by_user_id=patch.decided_by_user_id,
+                    command_id=patch.command_id,
                     created_at=created_at,
                     decided_at=patch.decided_at,
                 )
@@ -94,6 +101,9 @@ class PostgresEditorPatchStore(BaseSessionStore):
         *,
         applied_revision: int,
         applied_edit_ids: list[str],
+        decision_sequence: int | None = None,
+        decided_by_user_id: uuid.UUID | None = None,
+        command_id: uuid.UUID | None = None,
     ) -> EditorPatchRecord:
         async with self._session() as session:
             row = (
@@ -108,6 +118,9 @@ class PostgresEditorPatchStore(BaseSessionStore):
                             status="accepted",
                             applied_revision=applied_revision,
                             applied_edit_ids=list(applied_edit_ids),
+                            decision_sequence=decision_sequence,
+                            decided_by_user_id=decided_by_user_id,
+                            command_id=command_id,
                             decided_at=time.time(),
                         )
                         .returning(editor_patches)
@@ -120,7 +133,15 @@ class PostgresEditorPatchStore(BaseSessionStore):
                 raise await _patch_cas_miss(session, patch_id)
             return _patch_from_row(row)
 
-    async def mark_rejected(self, patch_id: str, *, note: str) -> EditorPatchRecord:
+    async def mark_rejected(
+        self,
+        patch_id: str,
+        *,
+        note: str,
+        decision_sequence: int | None = None,
+        decided_by_user_id: uuid.UUID | None = None,
+        command_id: uuid.UUID | None = None,
+    ) -> EditorPatchRecord:
         async with self._session() as session:
             row = (
                 (
@@ -133,6 +154,9 @@ class PostgresEditorPatchStore(BaseSessionStore):
                         .values(
                             status="rejected",
                             note=note,
+                            decision_sequence=decision_sequence,
+                            decided_by_user_id=decided_by_user_id,
+                            command_id=command_id,
                             decided_at=time.time(),
                         )
                         .returning(editor_patches)
@@ -186,6 +210,10 @@ def _patch_from_row(row: Any) -> EditorPatchRecord:
         summary=row["summary"],
         warnings=tuple(_json_list(row["warnings"])),
         revision_before=row["revision_before"],
+        collaboration_generation=row["collaboration_generation"],
+        base_sequence=row["base_sequence"],
+        decision_sequence=row["decision_sequence"],
+        suggestion_ids=tuple(_json_list(row["suggestion_ids"])),
         applied_revision=row["applied_revision"],
         applied_edit_ids=(
             tuple(_json_list(applied_edit_ids))
@@ -193,7 +221,9 @@ def _patch_from_row(row: Any) -> EditorPatchRecord:
             else None
         ),
         note=row["note"],
-        created_by_sub=row["created_by_sub"],
+        created_by_user_id=row["created_by_user_id"],
+        decided_by_user_id=row["decided_by_user_id"],
+        command_id=row["command_id"],
         created_at=row["created_at"],
         decided_at=row["decided_at"],
     )

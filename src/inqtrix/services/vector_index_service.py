@@ -1,18 +1,18 @@
 """Vector-index-record persistence service (M6c project tier).
 
 The vector-index counterpart of the asset-records service: payload
-validation, the shared owner/share access rule
-(:func:`~inqtrix.auth.permissions.resolve_owned_access`), and owner
-resolution before the store query. Indexes are private per-user in M6c (no
-sharing surface — the indexed *collections* are shared via the knowledge
-layer, not these client records); all denials are the indistinct not-found.
+validation, the owner-only access rule
+(:func:`~inqtrix.auth.permissions.require_owned_access`), and owner
+resolution before the store query. Index records are private per-user in
+M6c; all denials are the indistinct not-found.
 """
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING
 
-from inqtrix.auth.permissions import SharePermission, resolve_owned_access
+from inqtrix.auth.permissions import require_owned_access
 from inqtrix.services.workspace_guard import deny_cross_workspace
 from inqtrix.project.vector_index_ports import (
     VectorIndexHistoryEntry,
@@ -21,6 +21,7 @@ from inqtrix.project.vector_index_ports import (
     VectorIndexRecord,
     VectorIndexStore,
 )
+from inqtrix.project.scoped_upsert import ResourceScope
 
 if TYPE_CHECKING:
     from inqtrix.auth.principal import UserContext
@@ -55,7 +56,7 @@ class VectorIndexService:
     async def save_index(
         self, *, id, title, handle, model, dims, status, server_collection_id,
         server_collection_model, last_error, members, history, created_at,
-        updated_at, caller_sub, workspace_id, visible_to, also_visible=None,
+        updated_at, caller_user_id: uuid.UUID | None, workspace_id, visible_to,
     ) -> VectorIndexRecord:
         if status not in _VALID_STATUS:
             raise VectorIndexValidationError(f"unknown index status: {status!r}")
@@ -80,47 +81,47 @@ class VectorIndexService:
         except VectorIndexNotFound:
             existing = None
         if existing is not None:
-            shared = resolve_owned_access(
-                owner_sub=existing.created_by_sub, resource_tenant_id=existing.tenant_id,
+            require_owned_access(
+                owner_user_id=existing.created_by_user_id, resource_tenant_id=existing.tenant_id,
                 resource_id=existing.id, visible_to=visible_to,
-                also_visible=also_visible, not_found=VectorIndexNotFound,
+                not_found=VectorIndexNotFound,
             )
-            if shared is not None and not shared.at_least(SharePermission.EDIT):
-                raise VectorIndexNotFound(id)
-            owner_sub, owner_ws = existing.created_by_sub, existing.workspace_id
+            owner_user_id, owner_ws = existing.created_by_user_id, existing.workspace_id
         else:
-            owner_sub, owner_ws = caller_sub, workspace_id
+            owner_user_id, owner_ws = caller_user_id, workspace_id
         return await self._store.upsert_index(
             id=id, title=title, handle=handle, model=model, dims=dims,
             status=status, server_collection_id=server_collection_id,
             server_collection_model=server_collection_model,
             last_error=last_error, members=tuple(members), history=tuple(history),
-            created_at=created_at, updated_at=updated_at, created_by_sub=owner_sub,
+            created_at=created_at, updated_at=updated_at, created_by_user_id=owner_user_id,
             workspace_id=owner_ws,
         )
 
-    async def list_indexes(self, *, caller_sub, workspace_id, limit, after):
+    async def list_indexes(
+        self, *, caller_user_id: uuid.UUID | None, workspace_id, limit, after
+    ):
         return await self._store.list_indexes_page(
-            created_by_sub=caller_sub, workspace_id=workspace_id, limit=limit, after=after
+            created_by_user_id=caller_user_id, workspace_id=workspace_id, limit=limit, after=after
         )
 
     async def delete_index(
-        self, index_id, *, visible_to, also_visible=None, request_workspace_id=None
+        self, index_id, *, visible_to, request_workspace_id=None
     ) -> None:
         index = await self._store.get_index(index_id)
-        shared = resolve_owned_access(
-            owner_sub=index.created_by_sub, resource_tenant_id=index.tenant_id,
-            resource_id=index.id, visible_to=visible_to, also_visible=also_visible,
+        require_owned_access(
+            owner_user_id=index.created_by_user_id, resource_tenant_id=index.tenant_id,
+            resource_id=index.id, visible_to=visible_to,
             not_found=VectorIndexNotFound,
         )
-        if shared is not None:
-            raise VectorIndexNotFound(index_id)
         deny_cross_workspace(
             resource_workspace_id=index.workspace_id,
             request_workspace_id=request_workspace_id,
             not_found=lambda: VectorIndexNotFound(index_id),
         )
-        await self._store.delete_index(index_id)
+        await self._store.delete_index(
+            index_id, scope=ResourceScope.from_record(index)
+        )
 
 
 def _dedupe_members(members) -> tuple[VectorIndexMember, ...]:

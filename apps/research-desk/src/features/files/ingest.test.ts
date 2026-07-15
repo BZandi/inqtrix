@@ -40,7 +40,7 @@ describe('ingestFiles', () => {
   it('de-duplicates labels against existing and incoming files', async () => {
     const assets = await ingestFiles(
       [textFile('Doc.txt'), textFile('Doc.txt')],
-      { kind: 'chat' },
+      { kind: 'chat', sectionId: 'sec-1' },
       stubParser,
       ['doc'],
     )
@@ -50,7 +50,7 @@ describe('ingestFiles', () => {
   it('uploads the original bytes and tags the upload as client-parsed', async () => {
     const assets = await ingestFiles(
       [textFile('Doc.txt')],
-      { kind: 'chat' },
+      { kind: 'chat', sectionId: 'sec-1' },
       stubParser,
       [],
       async () => 'srv-file-1',
@@ -66,7 +66,7 @@ describe('ingestFiles', () => {
   it('keeps the asset local with a visible warning when the upload fails', async () => {
     const assets = await ingestFiles(
       [textFile('Doc.txt')],
-      { kind: 'chat' },
+      { kind: 'chat', sectionId: 'sec-1' },
       stubParser,
       [],
       async () => {
@@ -81,7 +81,11 @@ describe('ingestFiles', () => {
   })
 
   it('stays purely local without a server upload function', async () => {
-    const assets = await ingestFiles([textFile('Doc.txt')], { kind: 'chat' }, stubParser)
+    const assets = await ingestFiles(
+      [textFile('Doc.txt')],
+      { kind: 'chat', sectionId: 'sec-1' },
+      stubParser,
+    )
     expect(assets[0].serverFileId).toBeNull()
     expect(assets[0].parserId).toBe('client')
   })

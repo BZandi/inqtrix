@@ -4,7 +4,11 @@
 
 ## Scope
 
-Everything exported from `inqtrix` — what library callers see. Type-safe, backwards-compatible, lazy-initialised. If you are writing a script that calls `inqtrix.ResearchAgent(...)`, this page is the contract.
+This page covers the typed library entry point and the cross-resource HTTP
+contracts that applications must treat consistently. The library surface is
+lazy-initialised and backwards-compatible. The v0.2 platform HTTP contract is
+a hard cut: clients must use canonical UUID identities, direct shares, and
+integer revisions rather than legacy subject or cached-grant fields.
 
 ## `ResearchAgent`
 
@@ -125,6 +129,72 @@ print([source.url for source in result.top_sources[:3]])
 Use the public result when building applications. Inspect raw state only in
 debugging or parity tooling, because internal ledger shapes can evolve more
 quickly than the public model.
+
+## Platform HTTP contract (v0.2)
+
+### Identity and access annotations
+
+`GET /api/auth/session` exposes the current local user as
+`user.id` (`UUID` string). `GET /v1/users/search` returns that same `id` plus
+display name and email. Admin, workspace-member, quota, sharing, session, PAT,
+audit, and actor contracts all refer to this UUID; external OIDC/LDAP issuer
+and subject values never cross into resource APIs.
+
+Regular lists for runs, knowledge collections, prompt templates, and skills
+combine owned and accepted-shared resources. Each record carries one
+authoritative access annotation:
+
+```json
+{"access":{"mode":"shared","permission":"edit"}}
+```
+
+`mode` is `unscoped`, `owner`, or `shared`. `permission` is present only for a
+shared record and is `view` or `edit`. The annotation explains the response;
+it is not a reusable authorization token. The server re-evaluates access on
+every subsequent read or mutation. Missing or unauthorized resources use the
+same 404 response to avoid existence disclosure.
+
+### Direct shares
+
+`resource_shares` is a direct user-to-resource lifecycle for `run`,
+`knowledge_collection`, `prompt_template`, and `skill_template`. Pending
+shares grant no access. `POST /v1/shares` validates the complete invitee batch
+before writing; duplicate or malformed recipients return 400 with zero writes,
+and an already-active direct share returns 409. A recipient accepts with
+`POST /v1/shares/{share_id}/accept`; the owner revokes, or the recipient
+declines/leaves, with `DELETE /v1/shares/{share_id}`. A later re-share creates
+a new id and requires new consent.
+
+Only the resource owner manages shares. An accepted editor may perform the
+resource-specific edit operations but may not delete or re-share the resource.
+`GET /v1/shares/inbox` and `GET /v1/shares/mine` are lifecycle views; there are
+no `/shared-with-me` or `/outgoing` resource-list endpoints. See
+[Authentication modes](../deployment/auth-modes.md#canonical-identity-and-direct-sharing)
+for request examples and the endpoint matrix.
+
+### Revisions and imports
+
+Share permission updates, prompt updates, and skill updates use mandatory
+integer optimistic concurrency. The client sends `expected_revision`; the
+server performs a compare-and-swap, increments `revision` on success, and
+returns HTTP 409 with `current_revision` when another editor won. There is no
+force-overwrite or timestamp fallback.
+
+`POST /v1/runs/import` requires `source_run_id`, but that value is provenance
+and an owner-scoped idempotency key only. The server always generates the
+public `run_id`. While an imported run exists, re-importing the same
+`source_run_id` for the same owner is idempotent; after retention removes it,
+a later import receives a new server id. A historical share therefore cannot
+attach to a newly imported report through client-controlled id reuse.
+
+### Collection and file boundary
+
+Sharing a knowledge collection grants access to its metadata and extracted,
+indexed text according to `view`/`edit`. It does not share the uploader's
+original binary. Files remain owner-bound and there is no generic file-share
+contract. A shared editor may ingest extracted content into the collection;
+that content becomes part of the collection even if the editor later leaves,
+while the source binary remains owned by its uploader.
 
 ## Related docs
 

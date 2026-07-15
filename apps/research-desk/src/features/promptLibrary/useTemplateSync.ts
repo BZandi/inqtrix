@@ -6,6 +6,8 @@ import {
   hasHttpStatus,
   listPromptTemplates,
   updatePromptTemplate,
+  type ClientOptions,
+  type InqtrixRequestError,
 } from '@/api/inqtrixClient'
 import type { ChatRuleRecord } from '@/features/project/types'
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
@@ -25,11 +27,11 @@ export type TemplateSyncHandle = {
   /**
    * Server-first save. Local rules without a serverTemplateId upload
    * on their first save (the legacy-adoption rule); synced rules PUT
-   * with an optimistic-concurrency precondition (the loaded
-   * `serverUpdatedAt`). A server-side conflict re-hydrates the current
+   * with an optimistic-concurrency precondition (the loaded integer
+   * `serverRevision`). A server-side conflict re-hydrates the current
    * version into local state and throws {@link TemplateConflictError}
    * so the caller can keep the draft and prompt a re-save. Returns the
-   * rule enriched with the fresh server id + timestamp on success.
+   * rule enriched with the fresh server id, access, revision, and timestamp.
    */
   saveRule: (rule: ChatRuleRecord) => Promise<ChatRuleRecord>
 }
@@ -42,13 +44,17 @@ export type TemplateSyncHandle = {
  * server record vanished (deleted or share revoked).
  */
 export function useTemplateSync({
+  clientOptions,
   dispatch,
   enabled,
   localRules,
+  refreshToken = 0,
 }: {
+  clientOptions: ClientOptions
   dispatch: Dispatch<ResearchDeskAction>
   enabled: boolean
   localRules: readonly ChatRuleRecord[]
+  refreshToken?: number
 }): TemplateSyncHandle | null {
   const [error, setError] = useState<string | null>(null)
   // Hydration must compare against the rules AT FETCH TIME without
@@ -62,7 +68,8 @@ export function useTemplateSync({
   useEffect(() => {
     if (!enabled) return
     let cancelled = false
-    listPromptTemplates()
+    const controller = new AbortController()
+    listPromptTemplates({ ...clientOptions, signal: controller.signal })
       .then((templates) => {
         if (cancelled) return
         const localRules = localRulesRef.current
@@ -85,16 +92,11 @@ export function useTemplateSync({
             dispatch({ ruleId: existing.id, type: 'deleteChatRule' })
           }
         }
-        // The stale-drop treats the server as truth for synced rules
-        // — but an EMPTY listing is just as likely a fresh volatile
-        // store (memory backend after restart); deleting every local
-        // rule on that signal would be data loss, so it never acts
-        // on an empty server set.
-        if (templates.length > 0) {
-          const serverIds = new Set(templates.map((template) => template.id))
-          for (const ruleId of staleSyncedRuleIds(localRules, serverIds)) {
-            dispatch({ ruleId, type: 'deleteChatRule' })
-          }
+        // A successful empty list is authoritative too: remove only records
+        // carrying a server id. Browser-local rules remain untouched.
+        const serverIds = new Set(templates.map((template) => template.id))
+        for (const ruleId of staleSyncedRuleIds(localRules, serverIds)) {
+          dispatch({ ruleId, type: 'deleteChatRule' })
         }
         setError(null)
       })
@@ -104,8 +106,9 @@ export function useTemplateSync({
       })
     return () => {
       cancelled = true
+      controller.abort()
     }
-  }, [dispatch, enabled])
+  }, [clientOptions, dispatch, enabled, refreshToken])
 
   // Auto-push local-only rules (no serverTemplateId) to the server. A rule
   // arrives local-only when it was loaded from a project file (or seeded)
@@ -127,14 +130,15 @@ export function useTemplateSync({
     )
     for (const rule of pending) {
       pushedLocalRuleIdsRef.current.add(rule.id)
-      createPromptTemplate(templatePayloadFromRule(rule))
+      createPromptTemplate(templatePayloadFromRule(rule), clientOptions)
         .then((saved) => {
           if (cancelled) return
           dispatch({
             rule: {
               ...rule,
+              access: saved.access,
+              serverRevision: saved.revision,
               serverTemplateId: saved.id,
-              serverUpdatedAt: saved.updated_at,
               updatedAt: new Date(saved.updated_at * 1000).toISOString(),
             },
             type: 'upsertChatRule',
@@ -151,7 +155,7 @@ export function useTemplateSync({
     return () => {
       cancelled = true
     }
-  }, [dispatch, enabled, localRules])
+  }, [clientOptions, dispatch, enabled, localRules])
 
   // Refresh ONE template from the server into local state (the
   // conflict path). Re-uses the list endpoint — templates are few —
@@ -166,7 +170,7 @@ export function useTemplateSync({
       existing: ChatRuleRecord,
     ): Promise<boolean> => {
       try {
-        const templates = await listPromptTemplates()
+        const templates = await listPromptTemplates(clientOptions)
         const current = templates.find((t) => t.id === serverTemplateId)
         if (current) {
           dispatch({
@@ -183,7 +187,7 @@ export function useTemplateSync({
         return false
       }
     },
-    [dispatch],
+    [clientOptions, dispatch],
   )
 
   const saveRule = useCallback(async (rule: ChatRuleRecord) => {
@@ -202,17 +206,15 @@ export function useTemplateSync({
       const saved = rule.serverTemplateId
         ? await updatePromptTemplate(rule.serverTemplateId, {
             ...payload,
-            // The exact loaded timestamp guards against overwriting an
-            // edit that landed since; omitted (legacy LWW) only when
-            // unknown, e.g. a save before the first hydrate.
-            expected_updated_at: rule.serverUpdatedAt,
-          })
-        : await createPromptTemplate(payload)
+            expected_revision: requiredServerRevision(rule),
+          }, clientOptions)
+        : await createPromptTemplate(payload, clientOptions)
       setError(null)
       return {
         ...rule,
+        access: saved.access,
+        serverRevision: saved.revision,
         serverTemplateId: saved.id,
-        serverUpdatedAt: saved.updated_at,
         updatedAt: new Date(saved.updated_at * 1000).toISOString(),
       }
     } catch (cause) {
@@ -222,14 +224,20 @@ export function useTemplateSync({
         pushedLocalRuleIdsRef.current.delete(rule.id)
       }
       if (rule.serverTemplateId && hasHttpStatus(cause, 409)) {
-        // Someone saved a newer version. Re-hydrate it into local state
-        // (so the editor and access list reflect the current truth) and
-        // signal the conflict — the caller keeps the user's draft and
-        // asks them to re-save against the refreshed version. If the
-        // refresh fetch itself failed, say so (refreshed=false) so the
-        // caller does not falsely promise the latest was loaded.
+        // Someone saved a newer version. Re-hydrate it into the authoritative
+        // list and signal the conflict. The caller keeps the old draft
+        // revision so a normal retry cannot overwrite the remote winner.
+        const currentRevision = conflictRevision(cause)
+        if (currentRevision === null) {
+          const contractError = new Error(
+            'Prompt-template conflict response omitted current_revision.',
+          )
+          console.warn(contractError.message, cause)
+          setError(contractError.message)
+          throw contractError
+        }
         const refreshed = await reloadOne(rule.serverTemplateId, rule)
-        const conflict = new TemplateConflictError(refreshed)
+        const conflict = new TemplateConflictError(refreshed, currentRevision)
         setError(conflict.message)
         throw conflict
       }
@@ -237,12 +245,12 @@ export function useTemplateSync({
       setError(message)
       throw cause
     }
-  }, [reloadOne])
+  }, [clientOptions, reloadOne])
 
   const deleteRule = useCallback(async (rule: ChatRuleRecord) => {
     if (!rule.serverTemplateId) return
     try {
-      await deletePromptTemplate(rule.serverTemplateId)
+      await deletePromptTemplate(rule.serverTemplateId, clientOptions)
       setError(null)
     } catch (cause) {
       // An already-deleted server record must not block the local
@@ -255,8 +263,23 @@ export function useTemplateSync({
       setError(message)
       throw cause
     }
-  }, [])
+  }, [clientOptions])
 
   if (!enabled) return null
   return { deleteRule, error, saveRule }
+}
+
+function requiredServerRevision(rule: ChatRuleRecord): number {
+  if (Number.isInteger(rule.serverRevision) && Number(rule.serverRevision) > 0) {
+    return Number(rule.serverRevision)
+  }
+  throw new Error(
+    'A synced prompt template cannot be saved without its server revision.',
+  )
+}
+
+function conflictRevision(error: unknown): number | null {
+  const value = (error as InqtrixRequestError | undefined)?.detail
+    ?.current_revision
+  return Number.isInteger(value) && Number(value) > 0 ? Number(value) : null
 }

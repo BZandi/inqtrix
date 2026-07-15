@@ -18,6 +18,21 @@
 # the chart cannot mutate a user-managed Secret. The bundled Postgres is the
 # exception (its image needs a fixed UID) -- keep it OFF here and point
 # INQTRIX_DATABASE_URL at an external/managed database.
+#
+# Managed PostgreSQL upgrades should give only the migration hook a direct,
+# dedicated DSN. Configure migrations.databaseSecret.name/key and choose
+# migrations.rlsMode=bypass or owner. In owner mode,
+# migrations.ownerMaintenanceConfirmed=true authorizes the chart's narrow
+# pre-upgrade hook to scale API/worker/collaboration to zero and wait for their
+# pods to terminate before the migration job. The hook revokes its own
+# RoleBinding before exit; API autoscaling is reactivated with minReplicas only
+# after the migration succeeds.
+#
+# ROSA/OpenShift workload identity for managed S3 belongs only on the API and
+# worker ServiceAccounts. Configure serviceAccount.api/worker independently;
+# leave the shared account tokenless for web/collaboration. For NooBaa or
+# private S3-compatible endpoints, s3.caBundle may reference a ConfigMap that
+# is mounted only into API/worker.
 openshift:
   enabled: true
 

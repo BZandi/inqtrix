@@ -1,10 +1,9 @@
-"""Skill CRUD with the owned-resource visibility rule (plan M3 `3.1`).
+"""Skill CRUD with live owner/direct-share authorization.
 
-Same enforcement shape as prompt templates: the router resolves the
-caller's shared-in grants into ``also_visible``, the service decides per
-record via :func:`~inqtrix.auth.permissions.grant_for_owned_resource`.
-Reads need view, updates need edit, deletion stays owner-only.
-Conflict policy is optimistic concurrency over ``updated_at``.
+Reads need view, updates need edit, and deletion stays owner-only. No grant
+map crosses a request, worker, or capability boundary.
+Updates require an integer revision; timestamp-based last-write-wins is not
+an authorization-safe editor contract.
 
 The skill-specific validation lives here: the ``/``-label shape, the
 enum fields, the clarification-point sanitizer (deterministic ids,
@@ -19,12 +18,10 @@ from __future__ import annotations
 
 import re
 import time
+import uuid
 from typing import TYPE_CHECKING, Any, Mapping
 
-from inqtrix.auth.permissions import (
-    SharePermission,
-    grant_for_owned_resource,
-)
+from inqtrix.auth.permissions import AccessMode, ResourceAccess, SharePermission
 from inqtrix.content.skills import (
     MAX_CLARIFICATION_POINTS,
     MAX_POINT_OPTIONS,
@@ -44,11 +41,12 @@ __all__ = [
     "SkillValidationError",
     "SkillConflict",
     "extract_placeholders",
-    "skill_access",
 ]
 
 if TYPE_CHECKING:
+    from inqtrix.auth.permissions import AuthorizationService
     from inqtrix.auth.principal import UserContext
+    from inqtrix.user_events import ResourceInvalidator
 
 
 class SkillValidationError(ValueError):
@@ -75,28 +73,6 @@ def extract_placeholders(instructions_markdown: str) -> list[str]:
         if name not in seen:
             seen.append(name)
     return seen
-
-
-def skill_access(
-    record: SkillRecord,
-    visible_to: "UserContext | None",
-    also_visible: "Mapping[str, SharePermission] | None" = None,
-) -> SharePermission | None:
-    """The caller's grant on *record*; raises the indistinct 404.
-
-    ``None`` means full access (unscoped caller, ownerless skill, or
-    the owner); a permission means shared-in access at that level.
-    """
-    visible, shared = grant_for_owned_resource(
-        owner_sub=record.owner_sub,
-        resource_tenant_id=record.tenant_id,
-        resource_id=record.id,
-        visible_to=visible_to,
-        also_visible=also_visible,
-    )
-    if not visible:
-        raise SkillNotFound(record.id)
-    return shared
 
 
 def _sanitized_points(raw: Any) -> tuple[dict[str, Any], ...]:
@@ -284,10 +260,14 @@ class SkillService:
         self,
         *,
         repository: SkillRepository,
+        authorization: "AuthorizationService",
         durable: bool = True,
+        invalidator: "ResourceInvalidator | None" = None,
     ) -> None:
         self._repository = repository
+        self._authorization = authorization
         self._durable = durable
+        self._invalidator = invalidator
 
     @property
     def durable(self) -> bool:
@@ -299,19 +279,21 @@ class SkillService:
         payload: Mapping[str, Any],
         *,
         tenant_id: str,
-        owner_sub: str | None,
+        owner_user_id: uuid.UUID | None,
     ) -> SkillRecord:
         """Create one skill; scoped principals own what they create."""
         now = time.time()
         record = SkillRecord(
             id=new_skill_id(),
             tenant_id=tenant_id,
-            owner_sub=owner_sub,
+            owner_user_id=owner_user_id,
             created_at=now,
             updated_at=now,
             **_validated_fields(payload),
         )
-        return await self._repository.create(record)
+        stored = await self._repository.create(record)
+        await self._invalidate(stored)
+        return stored
 
     async def get_visible(
         self,
@@ -319,42 +301,38 @@ class SkillService:
         *,
         tenant_id: str,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
-    ) -> tuple[SkillRecord, SharePermission | None]:
-        """One visible skill with its shared-in grant (loud 404)."""
+    ) -> tuple[SkillRecord, ResourceAccess]:
+        """One visible skill with its authoritative access annotation."""
         record = await self._repository.get(skill_id, tenant_id=tenant_id)
-        shared = skill_access(record, visible_to, also_visible)
-        return record, shared
-
-    async def get_admitted(
-        self, skill_id: str, *, tenant_id: str
-    ) -> SkillRecord:
-        """One skill WITHOUT a visibility check — for admitted runs only.
-
-        The runs router already enforced visibility (incl. shared-in
-        grants) at submission; the worker segment merely re-loads what
-        was admitted and must not re-derive grants it cannot resolve.
-        Every other caller uses :meth:`get_visible`.
-        """
-        return await self._repository.get(skill_id, tenant_id=tenant_id)
+        access = await self._access(record, visible_to)
+        return record, access
 
     async def list_visible(
         self,
         *,
         tenant_id: str,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
-    ) -> list[tuple[SkillRecord, SharePermission | None]]:
-        """Visible skills with their shared-in grant (annotation)."""
-        visible: list[tuple[SkillRecord, SharePermission | None]] = []
+    ) -> list[tuple[SkillRecord, ResourceAccess]]:
+        """Visible skills with authoritative access annotations."""
+        optimized = getattr(self._repository, "list_visible_for_user", None)
+        if callable(optimized):
+            return await optimized(
+                tenant_id=tenant_id,
+                actor_user_id=(
+                    visible_to.principal.user_id
+                    if visible_to is not None
+                    else None
+                ),
+            )
+        visible: list[tuple[SkillRecord, ResourceAccess]] = []
         for record in await self._repository.list_for_tenant(
             tenant_id=tenant_id
         ):
             try:
-                shared = skill_access(record, visible_to, also_visible)
+                access = await self._access(record, visible_to)
             except SkillNotFound:
                 continue
-            visible.append((record, shared))
+            visible.append((record, access))
         return visible
 
     async def update(
@@ -363,26 +341,30 @@ class SkillService:
         payload: Mapping[str, Any],
         *,
         tenant_id: str,
-        expected_updated_at: float | None = None,
+        expected_revision: int,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ) -> SkillRecord:
         """Replace the writable fields (edit grant required)."""
         current = await self._repository.get(skill_id, tenant_id=tenant_id)
-        shared = skill_access(current, visible_to, also_visible)
-        if shared is not None and not shared.at_least(SharePermission.EDIT):
-            raise SkillNotFound(skill_id)
+        await self._access(current, visible_to, minimum=SharePermission.EDIT)
         updated = SkillRecord(
             id=current.id,
             tenant_id=current.tenant_id,
-            owner_sub=current.owner_sub,
+            owner_user_id=current.owner_user_id,
+            revision=current.revision,
             created_at=current.created_at,
             updated_at=time.time(),
             **_validated_fields(payload),
         )
-        return await self._repository.update(
-            updated, expected_updated_at=expected_updated_at
+        stored = await self._repository.update(
+            updated,
+            expected_revision=expected_revision,
+            actor_user_id=(
+                visible_to.principal.user_id if visible_to is not None else None
+            ),
         )
+        await self._invalidate(stored)
+        return stored
 
     async def delete(
         self,
@@ -390,22 +372,82 @@ class SkillService:
         *,
         tenant_id: str,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ) -> None:
         """Delete one skill (owner-only; shares never delete)."""
         current = await self._repository.get(skill_id, tenant_id=tenant_id)
-        shared = skill_access(current, visible_to, also_visible)
-        if shared is not None:
+        access = await self._access(current, visible_to)
+        if access.mode is AccessMode.SHARED:
             raise SkillNotFound(skill_id)
-        await self._repository.delete(skill_id, tenant_id=tenant_id)
+        await self._repository.delete(
+            skill_id,
+            tenant_id=tenant_id,
+            actor_user_id=(
+                visible_to.principal.user_id if visible_to is not None else None
+            ),
+        )
+        if self._invalidator is not None and not getattr(
+            self._repository, "atomic_resource_effects", False
+        ):
+            await self._invalidator.revoke_deleted(
+                tenant_id=current.tenant_id,
+                owner_user_id=current.owner_user_id,
+                resource_type="skill_template",
+                resource_id=current.id,
+                scope="skills",
+                actor_user_id=(
+                    visible_to.principal.user_id
+                    if visible_to is not None
+                    else None
+                ),
+            )
 
-    async def owner_sub(self, tenant_id: str, skill_id: str) -> str | None:
+    async def _invalidate(self, record: SkillRecord) -> None:
+        """Publish fallback effects only for volatile repositories."""
+        if self._invalidator is None or getattr(
+            self._repository, "atomic_resource_effects", False
+        ):
+            return
+        await self._invalidator.invalidate(
+            tenant_id=record.tenant_id,
+            owner_user_id=record.owner_user_id,
+            resource_type="skill_template",
+            resource_id=record.id,
+            scope="skills",
+        )
+
+    async def _access(
+        self,
+        record: SkillRecord,
+        visible_to: "UserContext | None",
+        *,
+        minimum: SharePermission = SharePermission.VIEW,
+    ) -> ResourceAccess:
+        """Resolve current owner/direct-share access for one skill."""
+        if visible_to is None:
+            if record.owner_user_id is None:
+                return ResourceAccess(AccessMode.UNSCOPED)
+            raise SkillNotFound(record.id)
+        access = await self._authorization.resolve_resource_access(
+            visible_to.principal,
+            owner_user_id=record.owner_user_id,
+            resource_tenant_id=record.tenant_id,
+            resource_type="skill_template",
+            resource_id=record.id,
+            minimum=minimum,
+        )
+        if access is None:
+            raise SkillNotFound(record.id)
+        return access
+
+    async def owner_user_id(
+        self, tenant_id: str, skill_id: str
+    ) -> uuid.UUID | None:
         """Owner lookup for the share layer (``None`` = unshareable)."""
         try:
             record = await self._repository.get(skill_id, tenant_id=tenant_id)
         except SkillNotFound:
             return None
-        return record.owner_sub
+        return record.owner_user_id
 
     async def title(self, tenant_id: str, skill_id: str) -> str | None:
         """Title lookup for the share surface (``None`` = absent)."""

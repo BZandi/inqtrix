@@ -10,6 +10,7 @@ import {
   deleteResearchRun,
   fetchRunEventsPage,
   fetchResearchRunResult,
+  fetchResearchRunSummary,
   hasHttpStatus,
   listResearchRuns,
 } from '@/api/inqtrixClient'
@@ -20,6 +21,7 @@ import type {
   ResearchRunResult,
   ResearchRunSummary,
 } from './types'
+import { isTerminalRunStatus } from './utils'
 
 /** Runs per keyset page during history hydration; the loop follows
  * `next_cursor` so the full working set still hydrates while each server
@@ -43,6 +45,11 @@ type UseResearchRunApiOptions = LiveRunCallbacks & {
    * cookie session). Flipping false->true (e.g. an in-app local/ldap login)
    * re-runs run-list hydration without a remount; false aborts live streams. */
   canList: boolean
+  /** Re-run the authoritative list after a user invalidation wake-up. */
+  refreshToken?: number
+  /** Replace every server-backed run after the complete paginated listing
+   * succeeds. Failed/aborted listings never prune local state. */
+  onReplace: (summaries: ResearchRunSummary[]) => void
   /** The workspace namespace every run operation scopes to -- the per-user
    * project namespace when authenticated, the browser-local id otherwise.
    * Resolved by the parent (after server discovery + the auth session), so a run
@@ -67,7 +74,9 @@ export function useResearchRunApi({
   onEvent,
   onResult,
   onRunError,
+  onReplace,
   onSummary,
+  refreshToken = 0,
   workspaceId,
 }: UseResearchRunApiOptions) {
   const [lastError, setLastError] = useState<string | null>(null)
@@ -81,6 +90,10 @@ export function useResearchRunApi({
   const streamsRef = useRef(new Map<string, AbortController>())
   const replayedTerminalRunIdsRef = useRef(new Set<string>())
   const perRunCallbacksRef = useRef(new Map<string, PerRunCallbacks>())
+  const streamScopeRef = useRef<{
+    apiKey: string | undefined
+    workspaceId: string
+  } | null>(null)
   const callbacksRef = useRef<LiveRunCallbacks>({
     onEvent,
     onResult,
@@ -270,25 +283,63 @@ export function useResearchRunApi({
       // 409 while still active) is a real error the caller must see.
       if (hasHttpStatus(error, 404)) return
       if (options?.cancelIfActive && hasHttpStatus(error, 409)) {
+        let cancelled: ResearchRunSummary | null = null
         try {
-          await cancelResearchRun(runId, { apiKey, workspaceId })
-        } catch (cancelError) {
-          if (!hasHttpStatus(cancelError, 404)) throw cancelError
-          return
-        }
-        try {
-          await deleteResearchRun(runId, { apiKey, workspaceId })
-          return
-        } catch (deleteError) {
-          if (hasHttpStatus(deleteError, 404)) return
-          throw deleteError
+          try {
+            cancelled = await cancelResearchRun(runId, { apiKey, workspaceId })
+          } catch (cancelError) {
+            if (!hasHttpStatus(cancelError, 404)) throw cancelError
+            return
+          }
+          // Keep the card honest while we wait: the summary now carries
+          // cancel_requested, which renders the "cancelling" badge.
+          callbacksRef.current.onSummary(cancelled)
+          if (!isTerminalRunStatus(cancelled.status)) {
+            // A cancel of a RUNNING run is asynchronous (the worker stops
+            // at its next checkpoint); only queued/waiting runs cancel to
+            // a terminal state synchronously. Wait for the transition
+            // instead of retrying the delete into another 409.
+            let terminal: ResearchRunSummary | null
+            try {
+              terminal = await waitForRunTerminal({
+                fetchSummary: () =>
+                  fetchResearchRunSummary(runId, { apiKey, workspaceId }),
+              })
+            } catch (waitError) {
+              // The run vanished while waiting (expired/foreign delete):
+              // the goal state is reached.
+              if (hasHttpStatus(waitError, 404)) return
+              throw waitError
+            }
+            if (terminal === null) throw new RunStillCancellingError(runId)
+          }
+          try {
+            await deleteResearchRun(runId, { apiKey, workspaceId })
+            return
+          } catch (deleteError) {
+            if (hasHttpStatus(deleteError, 404)) return
+            throw deleteError
+          }
+        } catch (flowError) {
+          // The run survives a failed cancel-and-delete flow, but its live
+          // stream was aborted above — reattach it so the card keeps
+          // following the run (and flips to "cancelled" once the worker
+          // stops) instead of freezing on the "cancelling" badge.
+          if (cancelled !== null) startStream(cancelled)
+          if (flowError instanceof RunStillCancellingError) {
+            // Surfaced once by the caller on the run card; no banner.
+            throw flowError
+          }
+          const message = messageFromError(flowError)
+          setLastError(message)
+          throw new Error(message, { cause: flowError })
         }
       }
       const message = messageFromError(error)
       setLastError(message)
       throw new Error(message, { cause: error })
     }
-  }, [apiKey, workspaceId])
+  }, [apiKey, startStream, workspaceId])
 
   useEffect(() => {
     if (!enabled || !canList) {
@@ -300,38 +351,57 @@ export function useResearchRunApi({
       streamsRef.current.clear()
       perRunCallbacksRef.current.clear()
       replayedTerminalRunIdsRef.current.clear()
+      streamScopeRef.current = null
       setRunsHydrated(false)
       return undefined
     }
 
     let ignore = false
-    for (const controller of streamsRef.current.values()) {
-      controller.abort()
+    const listController = new AbortController()
+    const previousScope = streamScopeRef.current
+    const scopeChanged = previousScope === null
+      || previousScope.apiKey !== apiKey
+      || previousScope.workspaceId !== workspaceId
+    streamScopeRef.current = { apiKey, workspaceId }
+    if (scopeChanged) {
+      for (const controller of streamsRef.current.values()) controller.abort()
+      streamsRef.current.clear()
+      perRunCallbacksRef.current.clear()
+      replayedTerminalRunIdsRef.current.clear()
+      setRunsHydrated(false)
     }
-    streamsRef.current.clear()
-    perRunCallbacksRef.current.clear()
-    replayedTerminalRunIdsRef.current.clear()
-    setRunsHydrated(false)
 
     async function hydrate() {
       try {
         let cursor: string | undefined
+        const summaries: ResearchRunSummary[] = []
         do {
           const page = await listResearchRuns({
             apiKey,
             cursor,
             limit: RUN_PAGE_LIMIT,
+            signal: listController.signal,
             workspaceId,
           })
           if (ignore) return
-          for (const summary of page.data) {
-            callbacksRef.current.onSummary(summary)
-            startStream(summary)
-          }
+          summaries.push(...page.data)
           cursor = page.next_cursor ?? undefined
         } while (cursor)
+        if (ignore) return
+        onReplace(summaries)
+        const visibleIds = new Set(summaries.map((summary) => summary.run_id))
+        for (const [runId, controller] of streamsRef.current) {
+          if (visibleIds.has(runId)) continue
+          controller.abort()
+          streamsRef.current.delete(runId)
+          perRunCallbacksRef.current.delete(runId)
+        }
+        for (const summary of summaries) startStream(summary)
+        setLastError(null)
       } catch (error) {
-        if (!ignore) setLastError(messageFromError(error))
+        if (!ignore && !listController.signal.aborted) {
+          setLastError(messageFromError(error))
+        }
       } finally {
         // "Settled", not "succeeded": a failed listing surfaces via
         // lastError — the loading state must still end either way.
@@ -343,8 +413,9 @@ export function useResearchRunApi({
 
     return () => {
       ignore = true
+      listController.abort()
     }
-  }, [apiKey, canList, enabled, startStream, workspaceId])
+  }, [apiKey, canList, enabled, onReplace, refreshToken, startStream, workspaceId])
 
   useEffect(() => {
     return () => {
@@ -405,6 +476,50 @@ export async function replayTerminalEventPages({
       throw new Error('Terminal agent event replay ended before a terminal page.')
     }
     afterSequence = latest
+  }
+}
+
+/** Thrown by `deleteRun` when a cancelled run did not reach a terminal
+ * state within the bounded wait. The message is diagnostic only: callers
+ * detect the class and render their own localized copy. */
+export class RunStillCancellingError extends Error {
+  constructor(runId: string) {
+    super(`run ${runId} is still cancelling; retry the delete once it stopped`)
+    this.name = 'RunStillCancellingError'
+  }
+}
+
+/** Poll one run's summary until it reaches a terminal status.
+ *
+ * Returns the terminal summary, or `null` once `maxWaitMs` is exhausted.
+ * The bound caps only how long the UI auto-waits before surfacing a
+ * visible "still cancelling" error — it never truncates a server-side
+ * operation, so it intentionally needs no capabilities-derived budget
+ * (unlike request timeouts, see researchRuns/clientTimeouts.ts). Expected
+ * post-cancel latency is seconds; 30s covers a slow in-flight provider
+ * attempt without leaving the user staring at a silent spinner forever.
+ */
+export async function waitForRunTerminal({
+  fetchSummary,
+  pollMs = 2000,
+  maxWaitMs = 30000,
+  sleep = (ms: number) =>
+    new Promise<void>((resolve) => {
+      window.setTimeout(resolve, ms)
+    }),
+}: {
+  fetchSummary: () => Promise<ResearchRunSummary>
+  pollMs?: number
+  maxWaitMs?: number
+  sleep?: (ms: number) => Promise<void>
+}): Promise<ResearchRunSummary | null> {
+  let waitedMs = 0
+  for (;;) {
+    const summary = await fetchSummary()
+    if (isTerminalRunStatus(summary.status)) return summary
+    if (waitedMs >= maxWaitMs) return null
+    await sleep(pollMs)
+    waitedMs += pollMs
   }
 }
 

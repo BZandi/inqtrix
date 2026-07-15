@@ -45,6 +45,8 @@ def _configured_runtime_container():
             object_store_backend="s3",
             s3_endpoint_url="https://s3.secret.example",
             s3_bucket="private-bucket",
+            s3_access_key="runtime-test-access",
+            s3_secret_key="runtime-test-secret",
         ),
         queue=QueueSettings(
             backend="valkey",
@@ -215,3 +217,57 @@ def test_admin_runtime_endpoint_requires_session_admin():
     )
 
     assert client.get("/v1/admin/system/runtime").status_code == 404
+
+
+def test_bounded_probe_timeout_names_the_bound(monkeypatch, caplog):
+    """A probe timeout must not degrade to an empty diagnostic.
+
+    ``str(TimeoutError())`` is empty on Python >= 3.11; the log line has to
+    name the bound and point at the backend's own detailed warning.
+    """
+    import logging
+
+    monkeypatch.setattr(
+        system_runtime_module, "_RUNTIME_PROBE_TIMEOUT_SECONDS", 0.05
+    )
+
+    async def hanging_probe() -> bool:
+        await asyncio.sleep(1.0)
+        return True
+
+    logger = logging.getLogger("inqtrix")
+    logger.addHandler(caplog.handler)
+    try:
+        result = asyncio.run(
+            system_runtime_module._bounded_probe("object_store", hanging_probe)
+        )
+    finally:
+        logger.removeHandler(caplog.handler)
+
+    assert result is False
+    assert any(
+        "object_store" in record.message and "timed out after" in record.message
+        for record in caplog.records
+    )
+
+
+def test_bounded_probe_names_exception_type(caplog):
+    import logging
+
+    async def broken_probe() -> bool:
+        raise ValueError("boom")
+
+    logger = logging.getLogger("inqtrix")
+    logger.addHandler(caplog.handler)
+    try:
+        result = asyncio.run(
+            system_runtime_module._bounded_probe("vector_store", broken_probe)
+        )
+    finally:
+        logger.removeHandler(caplog.handler)
+
+    assert result is False
+    assert any(
+        "vector_store" in record.message and "ValueError" in record.message
+        for record in caplog.records
+    )

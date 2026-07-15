@@ -1,27 +1,19 @@
-"""Prompt-template CRUD with the owned-resource visibility rule.
+"""Prompt-template CRUD with live owner/direct-share authorization.
 
-Same enforcement shape as knowledge collections (the strand's
-established pattern): the router resolves the caller's shared-in
-grants into ``also_visible``, the service decides per record via
-:func:`~inqtrix.auth.permissions.grant_for_owned_resource`. Reads
-need view, updates need edit, deletion stays owner-only; ownerless
-templates (anonymous/static creators) stay open for everyone.
-Conflict policy is OPTIMISTIC concurrency: an update may carry the
-``updated_at`` it loaded as a precondition; a mismatch raises
-:class:`PromptTemplateConflict` (HTTP 409) instead of silently
-overwriting the intervening edit. A caller that omits the precondition
-keeps the legacy unconditional (last-write-wins) overwrite.
+Reads need view, updates need edit, and deletion stays owner-only. No grant
+map crosses a request boundary; each decision resolves the current share row.
+Updates require the integer revision the caller loaded. A stale revision
+raises :class:`PromptTemplateConflict` (HTTP 409); there is no unconditional
+last-write-wins path.
 """
 
 from __future__ import annotations
 
 import time
+import uuid
 from typing import TYPE_CHECKING, Any, Mapping
 
-from inqtrix.auth.permissions import (
-    SharePermission,
-    grant_for_owned_resource,
-)
+from inqtrix.auth.permissions import AccessMode, ResourceAccess, SharePermission
 from inqtrix.content.prompt_templates import (
     TEMPLATE_CATEGORIES,
     PromptTemplateConflict,
@@ -35,37 +27,16 @@ __all__ = [
     "PromptTemplateService",
     "PromptTemplateValidationError",
     "PromptTemplateConflict",
-    "template_access",
 ]
 
 if TYPE_CHECKING:
+    from inqtrix.auth.permissions import AuthorizationService
     from inqtrix.auth.principal import UserContext
+    from inqtrix.user_events import ResourceInvalidator
 
 
 class PromptTemplateValidationError(ValueError):
     """Raised for client-payload problems (maps to HTTP 400)."""
-
-
-def template_access(
-    record: PromptTemplateRecord,
-    visible_to: "UserContext | None",
-    also_visible: "Mapping[str, SharePermission] | None" = None,
-) -> SharePermission | None:
-    """The caller's grant on *record*; raises the indistinct 404.
-
-    ``None`` means full access (unscoped caller, ownerless template,
-    or the owner); a permission means shared-in access at that level.
-    """
-    visible, shared = grant_for_owned_resource(
-        owner_sub=record.owner_sub,
-        resource_tenant_id=record.tenant_id,
-        resource_id=record.id,
-        visible_to=visible_to,
-        also_visible=also_visible,
-    )
-    if not visible:
-        raise PromptTemplateNotFound(record.id)
-    return shared
 
 
 def _validated_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -127,10 +98,14 @@ class PromptTemplateService:
         self,
         *,
         repository: PromptTemplateRepository,
+        authorization: "AuthorizationService",
         durable: bool = True,
+        invalidator: "ResourceInvalidator | None" = None,
     ) -> None:
         self._repository = repository
+        self._authorization = authorization
         self._durable = durable
+        self._invalidator = invalidator
 
     @property
     def durable(self) -> bool:
@@ -142,37 +117,48 @@ class PromptTemplateService:
         payload: Mapping[str, Any],
         *,
         tenant_id: str,
-        owner_sub: str | None,
+        owner_user_id: uuid.UUID | None,
     ) -> PromptTemplateRecord:
         """Create one template; scoped principals own what they create."""
         now = time.time()
         record = PromptTemplateRecord(
             id=new_template_id(),
             tenant_id=tenant_id,
-            owner_sub=owner_sub,
+            owner_user_id=owner_user_id,
             created_at=now,
             updated_at=now,
             **_validated_fields(payload),
         )
-        return await self._repository.create(record)
+        stored = await self._repository.create(record)
+        await self._invalidate(stored)
+        return stored
 
     async def list_visible(
         self,
         *,
         tenant_id: str,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
-    ) -> list[tuple[PromptTemplateRecord, SharePermission | None]]:
-        """Visible templates with their shared-in grant (annotation)."""
-        visible: list[tuple[PromptTemplateRecord, SharePermission | None]] = []
+    ) -> list[tuple[PromptTemplateRecord, ResourceAccess]]:
+        """Visible templates with the public authoritative access annotation."""
+        optimized = getattr(self._repository, "list_visible_for_user", None)
+        if callable(optimized):
+            return await optimized(
+                tenant_id=tenant_id,
+                actor_user_id=(
+                    visible_to.principal.user_id
+                    if visible_to is not None
+                    else None
+                ),
+            )
+        visible: list[tuple[PromptTemplateRecord, ResourceAccess]] = []
         for record in await self._repository.list_for_tenant(
             tenant_id=tenant_id
         ):
             try:
-                shared = template_access(record, visible_to, also_visible)
+                access = await self._access(record, visible_to)
             except PromptTemplateNotFound:
                 continue
-            visible.append((record, shared))
+            visible.append((record, access))
         return visible
 
     async def update(
@@ -181,33 +167,33 @@ class PromptTemplateService:
         payload: Mapping[str, Any],
         *,
         tenant_id: str,
-        expected_updated_at: float | None = None,
+        expected_revision: int,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ) -> PromptTemplateRecord:
         """Replace the writable fields (edit grant required).
 
-        *expected_updated_at* is the optimistic-concurrency
-        precondition: the ``updated_at`` the caller loaded. When given
-        and the stored record moved on, the repository raises
-        :class:`PromptTemplateConflict` (HTTP 409). Omitting it keeps
-        the legacy unconditional overwrite.
+        *expected_revision* is the mandatory compare-and-swap precondition.
         """
         current = await self._repository.get(template_id, tenant_id=tenant_id)
-        shared = template_access(current, visible_to, also_visible)
-        if shared is not None and not shared.at_least(SharePermission.EDIT):
-            raise PromptTemplateNotFound(template_id)
+        await self._access(current, visible_to, minimum=SharePermission.EDIT)
         updated = PromptTemplateRecord(
             id=current.id,
             tenant_id=current.tenant_id,
-            owner_sub=current.owner_sub,
+            owner_user_id=current.owner_user_id,
+            revision=current.revision,
             created_at=current.created_at,
             updated_at=time.time(),
             **_validated_fields(payload),
         )
-        return await self._repository.update(
-            updated, expected_updated_at=expected_updated_at
+        stored = await self._repository.update(
+            updated,
+            expected_revision=expected_revision,
+            actor_user_id=(
+                visible_to.principal.user_id if visible_to is not None else None
+            ),
         )
+        await self._invalidate(stored)
+        return stored
 
     async def delete(
         self,
@@ -215,16 +201,76 @@ class PromptTemplateService:
         *,
         tenant_id: str,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ) -> None:
         """Delete one template (owner-only; shares never delete)."""
         current = await self._repository.get(template_id, tenant_id=tenant_id)
-        shared = template_access(current, visible_to, also_visible)
-        if shared is not None:
+        access = await self._access(current, visible_to)
+        if access.mode is AccessMode.SHARED:
             raise PromptTemplateNotFound(template_id)
-        await self._repository.delete(template_id, tenant_id=tenant_id)
+        await self._repository.delete(
+            template_id,
+            tenant_id=tenant_id,
+            actor_user_id=(
+                visible_to.principal.user_id if visible_to is not None else None
+            ),
+        )
+        if self._invalidator is not None and not getattr(
+            self._repository, "atomic_resource_effects", False
+        ):
+            await self._invalidator.revoke_deleted(
+                tenant_id=current.tenant_id,
+                owner_user_id=current.owner_user_id,
+                resource_type="prompt_template",
+                resource_id=current.id,
+                scope="prompt_templates",
+                actor_user_id=(
+                    visible_to.principal.user_id
+                    if visible_to is not None
+                    else None
+                ),
+            )
 
-    async def owner_sub(self, tenant_id: str, template_id: str) -> str | None:
+    async def _invalidate(self, record: PromptTemplateRecord) -> None:
+        """Publish fallback effects only for volatile repositories."""
+        if self._invalidator is None or getattr(
+            self._repository, "atomic_resource_effects", False
+        ):
+            return
+        await self._invalidator.invalidate(
+            tenant_id=record.tenant_id,
+            owner_user_id=record.owner_user_id,
+            resource_type="prompt_template",
+            resource_id=record.id,
+            scope="prompt_templates",
+        )
+
+    async def _access(
+        self,
+        record: PromptTemplateRecord,
+        visible_to: "UserContext | None",
+        *,
+        minimum: SharePermission = SharePermission.VIEW,
+    ) -> ResourceAccess:
+        """Resolve current owner/direct-share access for one record."""
+        if visible_to is None:
+            if record.owner_user_id is None:
+                return ResourceAccess(AccessMode.UNSCOPED)
+            raise PromptTemplateNotFound(record.id)
+        access = await self._authorization.resolve_resource_access(
+            visible_to.principal,
+            owner_user_id=record.owner_user_id,
+            resource_tenant_id=record.tenant_id,
+            resource_type="prompt_template",
+            resource_id=record.id,
+            minimum=minimum,
+        )
+        if access is None:
+            raise PromptTemplateNotFound(record.id)
+        return access
+
+    async def owner_user_id(
+        self, tenant_id: str, template_id: str
+    ) -> uuid.UUID | None:
         """Owner lookup for the share layer (``None`` = unshareable)."""
         try:
             record = await self._repository.get(
@@ -232,11 +278,11 @@ class PromptTemplateService:
             )
         except PromptTemplateNotFound:
             return None
-        return record.owner_sub
+        return record.owner_user_id
 
     async def title(self, tenant_id: str, template_id: str) -> str | None:
         """Title lookup for the share surface (``None`` = absent, so the
-        inbox/outgoing listing skips it)."""
+        share lifecycle views skip it)."""
         try:
             record = await self._repository.get(
                 template_id, tenant_id=tenant_id

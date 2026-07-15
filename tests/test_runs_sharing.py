@@ -1,6 +1,6 @@
 """WP-C-C: shared-in run enforcement (store matrix + recipient HTTP path).
 
-The store half pins the ``also_visible`` contract on the in-memory
+The store half pins live direct-share resolution on the in-memory
 :class:`~inqtrix.server.runs.RunStore`: the listing union with the
 additive ``access`` annotation, the workspace-namespace bypass for
 shared-in rows, view-grantees blocked from cancel (deny before
@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+import uuid
 from typing import Any
 
 import pytest
@@ -23,7 +24,8 @@ from fastapi.testclient import TestClient
 
 from inqtrix.auth.directory import MemoryUserDirectory
 from inqtrix.auth.identity_memory import MemoryIdentityStore
-from inqtrix.auth.permissions import PermissionService, SharePermission
+from inqtrix.auth.memory_authority import MemoryAuthorityCoordinator
+from inqtrix.auth.permissions import AuthorizationService, SharePermission
 from inqtrix.auth.principal import (
     ANONYMOUS_PRINCIPAL,
     AuthMode,
@@ -37,47 +39,65 @@ from inqtrix.server.routers import runs as runs_router
 from inqtrix.server.routers.shares import build_router as build_shares_router
 from inqtrix.server.runs import RunNotFound, RunStore
 from inqtrix.settings import Settings, StorageSettings
+from inqtrix.user_events import MemoryUserEventStore
 
 from tests.contract._app import StubLLM, StubSearch, minimal_agent_result
 
-SUB_HEADER = "X-Test-Sub"
+USER_ID_HEADER = "X-Test-User-Id"
+# Shared route-test import retained while the consuming prompt/skill fixtures
+# migrate their variable names; the header itself is canonical-user-id based.
+SUB_HEADER = USER_ID_HEADER
 WORKSPACE_HEADER = "X-Inqtrix-Workspace-Id"
 
-OWNER = "user-owner"
-RECIPIENT = "user-recipient"
-STRANGER = "user-stranger"
+OWNER = uuid.UUID("11111111-1111-4111-8111-111111111111")
+RECIPIENT = uuid.UUID("22222222-2222-4222-8222-222222222222")
+STRANGER = uuid.UUID("33333333-3333-4333-8333-333333333333")
 
 
 # ---------------------------------------------------------------------------
-# Store-level matrix (memory RunStore, also_visible passed directly)
+# Store-level matrix (memory RunStore with a live identity backend)
 # ---------------------------------------------------------------------------
 
 
-def make_store() -> RunStore:
-    return RunStore(
+def make_store() -> tuple[RunStore, MemoryIdentityStore]:
+    identity = MemoryIdentityStore()
+    store = RunStore(
         max_concurrent=1,
         max_queue_size=8,
         completed_ttl_seconds=60,
         event_buffer_size=16,
     )
+    store.bind_authorization(
+        share_lookup=identity.permission_for_sync,
+        share_workspace_check=identity.share_workspace_sync,
+        resource_access_guard=identity.resource_access_guard_sync,
+        restrict_to_workspace_members=False,
+    )
+    return store, identity
 
 
-def scoped(sub: str, *, tenant_id: str = "default") -> UserContext:
+def scoped(user_id: uuid.UUID, *, tenant_id: str = "default") -> UserContext:
     return UserContext(
         principal=Principal(
-            sub=sub, kind="oidc_session", tenant_id=tenant_id, role="member"
+            user_id=user_id,
+            kind="oidc_session",
+            tenant_id=tenant_id,
+            role="member",
         )
     )
 
 
 def submit_completed(
-    store: RunStore, *, sub: str = OWNER, workspace_id: str | None = None
+    store: RunStore,
+    *,
+    user_id: uuid.UUID = OWNER,
+    workspace_id: str | None = None,
 ) -> str:
     summary = store.submit(
         question="Testfrage?",
         stack_name="default",
         work=lambda handle: handle.complete({"answer": "ok"}),
-        created_by_sub=sub,
+        created_by_user_id=user_id,
         created_by_tenant_id="default",
         workspace_id=workspace_id,
     )
@@ -85,7 +105,7 @@ def submit_completed(
     deadline = time.time() + 2.0
     while time.time() < deadline:
         if (
-            store.get(run_id, visible_to=scoped(sub))["status"]
+            store.get(run_id, visible_to=scoped(user_id))["status"]
             == "completed"
         ):
             return run_id
@@ -93,20 +113,91 @@ def submit_completed(
     raise AssertionError(f"run {run_id} did not complete")
 
 
+@pytest.mark.asyncio
+async def test_memory_run_retention_revokes_share_and_invalidates_atomically():
+    """TTL cleanup cannot leave a live share pointing at a removed run."""
+    users = MemoryUserDirectory()
+    for user_id, subject in ((OWNER, "owner"), (RECIPIENT, "recipient")):
+        await users.record_login(
+            tenant_id="default",
+            issuer="https://issuer.example",
+            subject=subject,
+            email=f"{subject}@example.com",
+            email_verified=True,
+            display_name=subject.title(),
+            canonical_user_id=user_id,
+        )
+    identity = MemoryIdentityStore()
+    events = MemoryUserEventStore()
+    identity.bind_user_event_sink(events.append_nowait)
+    authority = MemoryAuthorityCoordinator()
+    authority.bind_users(users)
+    identity.bind_authority_coordinator(authority)
+    store = RunStore(
+        max_concurrent=1,
+        max_queue_size=1,
+        completed_ttl_seconds=0,
+        event_buffer_size=8,
+    )
+    store.bind_authority_coordinator(authority)
+    imported = store.import_completed_run(
+        source_run_id="external-run",
+        question="Imported",
+        stack_name="default",
+        result={"answer": "done"},
+        created_by_user_id=OWNER,
+        created_by_tenant_id="default",
+    )
+    run_id = imported["run_id"]
+    identity.add_share(
+        recipient_user_id=RECIPIENT,
+        resource_type="run",
+        resource_id=run_id,
+        permission=SharePermission.VIEW,
+        granted_by_user_id=OWNER,
+    )
+
+    assert store.list(visible_to=scoped(OWNER)) == []
+    assert identity.permission_for_sync(
+        tenant_id="default",
+        resource_type="run",
+        resource_id=run_id,
+        recipient_user_id=RECIPIENT,
+    ) is None
+    assert any(
+        entry.action == "run.retention_deleted"
+        and entry.resource_id == run_id
+        for entry in identity.audit_entries
+    )
+    page = await events.page_after(
+        tenant_id="default", target_user_id=RECIPIENT, cursor=0
+    )
+    assert any(
+        event.scope == "runs" and event.resource_id == run_id
+        for event in page.events
+    )
+
+
 def test_view_grantee_reads_but_cannot_cancel():
-    store = make_store()
+    store, identity = make_store()
     run_id = submit_completed(store)
-    grants = {run_id: SharePermission.VIEW}
+    identity.add_share(
+        recipient_user_id=RECIPIENT,
+        resource_type="run",
+        resource_id=run_id,
+        permission=SharePermission.VIEW,
+        granted_by_user_id=OWNER,
+    )
     recipient = scoped(RECIPIENT)
 
-    summary = store.get(run_id, visible_to=recipient, also_visible=grants)
-    assert summary["access"] == {"via": "share", "permission": "view"}
+    summary = store.get(run_id, visible_to=recipient)
+    assert summary["access"] == {"mode": "shared", "permission": "view"}
 
-    result = store.result(run_id, visible_to=recipient, also_visible=grants)
+    result = store.result(run_id, visible_to=recipient)
     assert result["answer"] == "ok"
 
     subscription = store.subscribe(
-        run_id, visible_to=recipient, also_visible=grants
+        run_id, visible_to=recipient
     )
     try:
         assert any(
@@ -117,48 +208,56 @@ def test_view_grantee_reads_but_cannot_cancel():
         subscription.close()
 
     with pytest.raises(RunNotFound):
-        store.cancel(run_id, visible_to=recipient, also_visible=grants)
+        store.cancel(run_id, visible_to=recipient)
 
 
-def test_owner_summary_has_no_access_key():
-    store = make_store()
+def test_owner_summary_reports_owner_access_mode():
+    store, _identity = make_store()
     run_id = submit_completed(store)
     summary = store.get(run_id, visible_to=scoped(OWNER))
-    assert "access" not in summary
+    assert summary["access"] == {"mode": "owner"}
 
 
 def test_stranger_stays_blind_despite_other_grants():
     """A grant map for OTHER runs must not admit this one."""
-    store = make_store()
+    store, identity = make_store()
     run_id = submit_completed(store)
+    identity.add_share(
+        recipient_user_id=STRANGER,
+        resource_type="run",
+        resource_id="run_other",
+        permission=SharePermission.VIEW,
+        granted_by_user_id=OWNER,
+    )
     with pytest.raises(RunNotFound):
-        store.get(
-            run_id,
-            visible_to=scoped(STRANGER),
-            also_visible={"run_other": SharePermission.VIEW},
-        )
+        store.get(run_id, visible_to=scoped(STRANGER))
 
 
 def test_list_union_bypasses_workspace_filter():
     """Shared-in rows join the listing regardless of the caller's
     workspace namespace — they carry the grantor's workspace id."""
-    store = make_store()
+    store, identity = make_store()
     shared_run = submit_completed(store, workspace_id="ws-owner")
     own_run = submit_completed(
-        store, sub=RECIPIENT, workspace_id="ws-recipient"
+        store, user_id=RECIPIENT, workspace_id="ws-recipient"
     )
-    grants = {shared_run: SharePermission.VIEW}
+    identity.add_share(
+        recipient_user_id=RECIPIENT,
+        resource_type="run",
+        resource_id=shared_run,
+        permission=SharePermission.VIEW,
+        granted_by_user_id=OWNER,
+    )
 
     listed = store.list(
         workspace_id="ws-recipient",
         visible_to=scoped(RECIPIENT),
-        also_visible=grants,
     )
     by_id = {item["run_id"]: item for item in listed}
     assert set(by_id) == {own_run, shared_run}
-    assert "access" not in by_id[own_run]
+    assert by_id[own_run]["access"] == {"mode": "owner"}
     assert by_id[shared_run]["access"] == {
-        "via": "share",
+        "mode": "shared",
         "permission": "view",
     }
     # The shared-in row keeps the GRANTOR's workspace id visible.
@@ -167,7 +266,7 @@ def test_list_union_bypasses_workspace_filter():
 
 def test_view_cancel_denies_before_mutating_running_run():
     """A view grantee's cancel must not set the cancel event."""
-    store = make_store()
+    store, identity = make_store()
     started = threading.Event()
     release = threading.Event()
 
@@ -180,25 +279,39 @@ def test_view_cancel_denies_before_mutating_running_run():
         question="Testfrage?",
         stack_name="default",
         work=blocking_work,
-        created_by_sub=OWNER,
+        created_by_user_id=OWNER,
         created_by_tenant_id="default",
     )["run_id"]
     assert started.wait(timeout=5)
     try:
+        identity.add_share(
+            recipient_user_id=RECIPIENT,
+            resource_type="run",
+            resource_id=run_id,
+            permission=SharePermission.VIEW,
+            granted_by_user_id=OWNER,
+        )
         with pytest.raises(RunNotFound):
-            store.cancel(
-                run_id,
-                visible_to=scoped(RECIPIENT),
-                also_visible={run_id: SharePermission.VIEW},
-            )
+            store.cancel(run_id, visible_to=scoped(RECIPIENT))
         record = store._records[run_id]
         assert not record.cancel_event.is_set()
 
-        edit_summary = store.cancel(
-            run_id,
-            visible_to=scoped(RECIPIENT),
-            also_visible={run_id: SharePermission.EDIT},
+        active = asyncio.run(
+            identity.inbox_for_recipient(
+                tenant_id="default", recipient_user_id=RECIPIENT
+            )
+        )[0]
+        updated = asyncio.run(
+            identity.update_share_permission(
+                tenant_id="default",
+                share_id=active.id,
+                permission=SharePermission.EDIT,
+                expected_revision=active.revision,
+                actor_user_id=OWNER,
+            )
         )
+        assert updated is not None
+        edit_summary = store.cancel(run_id, visible_to=scoped(RECIPIENT))
         assert record.cancel_event.is_set()
         assert edit_summary["status"] == "running"
     finally:
@@ -211,7 +324,7 @@ def test_view_cancel_denies_before_mutating_running_run():
 
 
 class OidcHeaderProvider(AuthProvider):
-    """Test-only oidc-mode provider: the sub header IS the identity.
+    """Test-only OIDC-mode provider over canonical user UUID headers.
 
     Reports ``mode == "oidc"`` and exposes a users mirror so
     ``build_container`` wires the real :class:`ShareService` with the
@@ -221,6 +334,7 @@ class OidcHeaderProvider(AuthProvider):
 
     def __init__(self, users: MemoryUserDirectory) -> None:
         self._users = users
+        self.revoke_live = False
 
     @property
     def mode(self) -> AuthMode:
@@ -231,11 +345,18 @@ class OidcHeaderProvider(AuthProvider):
         return self._users
 
     def resolve_principal(self, request: Request) -> Principal:
-        sub = request.headers.get(SUB_HEADER, "")
-        if not sub:
+        raw_user_id = request.headers.get(USER_ID_HEADER, "")
+        if not raw_user_id:
+            return ANONYMOUS_PRINCIPAL
+        try:
+            user_id = uuid.UUID(raw_user_id)
+        except ValueError:
             return ANONYMOUS_PRINCIPAL
         return Principal(
-            sub=sub, kind="oidc_session", tenant_id="default", role="member"
+            user_id=user_id,
+            kind="oidc_session",
+            tenant_id="default",
+            role="member",
         )
 
     def build_principal_dependency(self):
@@ -244,6 +365,14 @@ class OidcHeaderProvider(AuthProvider):
         async def _dependency(request: Request) -> Principal:
             return self.resolve_principal(request)
 
+        async def _live_dependency(request: Request) -> Principal:
+            if self.revoke_live:
+                from fastapi import HTTPException
+
+                raise HTTPException(status_code=401, detail="revoked")
+            return self.resolve_principal(request)
+
+        setattr(_dependency, "__inqtrix_live_resolver__", _live_dependency)
         return _dependency
 
 
@@ -256,21 +385,23 @@ def make_sharing_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     users = MemoryUserDirectory()
 
     async def mirror_all() -> None:
-        for sub, name in (
-            (OWNER, "Olga Owner"),
-            (RECIPIENT, "Rita Recipient"),
-            (STRANGER, "Stefan Stranger"),
+        for user_id, subject, name in (
+            (OWNER, "user-owner", "Olga Owner"),
+            (RECIPIENT, "user-recipient", "Rita Recipient"),
+            (STRANGER, "user-stranger", "Stefan Stranger"),
         ):
             await users.record_login(
                 tenant_id="default",
                 issuer="http://idp.example",
-                subject=sub,
-                email=f"{sub}@example.com",
+                subject=subject,
+                email=f"{subject}@example.com",
                 email_verified=True,
                 display_name=name,
+                canonical_user_id=user_id,
             )
 
     asyncio.run(mirror_all())
+    auth_provider = OidcHeaderProvider(users)
     container = build_container(
         providers=ProviderContext(llm=StubLLM(), search=StubSearch()),
         strategies=None,
@@ -278,10 +409,9 @@ def make_sharing_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
             storage=StorageSettings(backend="memory", database_url="")
         ),
         semaphore_factory=lambda: asyncio.Semaphore(1),
-        auth_provider=OidcHeaderProvider(users),
-        permissions=PermissionService(
+        auth_provider=auth_provider,
+        permissions=AuthorizationService(
             members=identity,
-            groups=identity,
             shares=identity,
             audit=identity,
         ),
@@ -302,19 +432,29 @@ def make_sharing_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     # artifacts are store-level primitives until the M5 runtime).
     client.run_store = container.run_store  # type: ignore[attr-defined]
     client.agent_control = container.agent_control_service  # type: ignore[attr-defined]
+    client.auth_provider = auth_provider  # type: ignore[attr-defined]
     return client
 
 
-def create_completed_run(client: TestClient, *, sub: str = OWNER) -> str:
+def user_headers(user_id: uuid.UUID) -> dict[str, str]:
+    """Return the test provider's canonical identity header."""
+    return {USER_ID_HEADER: str(user_id)}
+
+
+def create_completed_run(
+    client: TestClient, *, user_id: uuid.UUID = OWNER
+) -> str:
     response = client.post(
-        "/v1/runs", json={"question": "Testfrage?"}, headers={SUB_HEADER: sub}
+        "/v1/runs",
+        json={"question": "Testfrage?"},
+        headers=user_headers(user_id),
     )
     assert response.status_code == 202
     run_id = response.json()["run_id"]
     deadline = time.time() + 2.0
     while time.time() < deadline:
         summary = client.get(
-            f"/v1/runs/{run_id}", headers={SUB_HEADER: sub}
+            f"/v1/runs/{run_id}", headers=user_headers(user_id)
         ).json()
         if summary.get("status") == "completed":
             return run_id
@@ -331,10 +471,10 @@ def grant_via_http(
             "resource_type": "run",
             "resource_id": run_id,
             "invitees": [
-                {"subject_id": RECIPIENT, "permission": permission}
+                {"user_id": str(RECIPIENT), "permission": permission}
             ],
         },
-        headers={SUB_HEADER: OWNER},
+        headers=user_headers(OWNER),
     )
     assert response.status_code == 201
     return response.json()["data"][0]
@@ -342,9 +482,29 @@ def grant_via_http(
 
 def accept_via_http(client: TestClient, share_id: str) -> None:
     response = client.post(
-        f"/v1/shares/{share_id}/accept", headers={SUB_HEADER: RECIPIENT}
+        f"/v1/shares/{share_id}/accept", headers=user_headers(RECIPIENT)
     )
     assert response.status_code == 200
+
+
+def update_share_via_http(
+    client: TestClient,
+    share_id: str,
+    *,
+    permission: str,
+    expected_revision: int,
+) -> dict[str, Any]:
+    """Update one share through the owner-only revision contract."""
+    response = client.patch(
+        f"/v1/shares/{share_id}",
+        json={
+            "permission": permission,
+            "expected_revision": expected_revision,
+        },
+        headers=user_headers(OWNER),
+    )
+    assert response.status_code == 200
+    return response.json()["data"]
 
 
 def test_http_recipient_sees_shared_run_until_revoked(monkeypatch):
@@ -353,7 +513,7 @@ def test_http_recipient_sees_shared_run_until_revoked(monkeypatch):
         run_id = create_completed_run(client)
 
         before_grant = client.get(
-            f"/v1/runs/{run_id}", headers={SUB_HEADER: RECIPIENT}
+            f"/v1/runs/{run_id}", headers=user_headers(RECIPIENT)
         )
         assert before_grant.status_code == 404
 
@@ -361,73 +521,96 @@ def test_http_recipient_sees_shared_run_until_revoked(monkeypatch):
 
         # Consent gate: a pending share grants nothing — still hidden.
         pending = client.get(
-            f"/v1/runs/{run_id}", headers={SUB_HEADER: RECIPIENT}
+            f"/v1/runs/{run_id}", headers=user_headers(RECIPIENT)
         )
         assert pending.status_code == 404
 
         accept_via_http(client, share["id"])
 
         summary = client.get(
-            f"/v1/runs/{run_id}", headers={SUB_HEADER: RECIPIENT}
+            f"/v1/runs/{run_id}", headers=user_headers(RECIPIENT)
         )
         assert summary.status_code == 200
         assert summary.json()["access"] == {
-            "via": "share",
+            "mode": "shared",
             "permission": "view",
         }
 
         result = client.get(
-            f"/v1/runs/{run_id}/result", headers={SUB_HEADER: RECIPIENT}
+            f"/v1/runs/{run_id}/result", headers=user_headers(RECIPIENT)
         )
         assert result.status_code == 200
         assert "answer" in result.json()
 
         events = client.get(
-            f"/v1/runs/{run_id}/events", headers={SUB_HEADER: RECIPIENT}
+            f"/v1/runs/{run_id}/events", headers=user_headers(RECIPIENT)
         )
         assert events.status_code == 200
         assert '"inqtrix.run.completed"' in events.text
 
         revoked = client.delete(
-            f"/v1/shares/{share['id']}", headers={SUB_HEADER: OWNER}
+            f"/v1/shares/{share['id']}", headers=user_headers(OWNER)
         )
-        assert revoked.status_code == 200
+        assert revoked.status_code == 204
         after_revoke = client.get(
-            f"/v1/runs/{run_id}", headers={SUB_HEADER: RECIPIENT}
+            f"/v1/runs/{run_id}", headers=user_headers(RECIPIENT)
         )
         assert after_revoke.status_code == 404
 
 
-def test_http_listing_union_and_shared_with_me(monkeypatch):
+def test_run_stream_stops_before_replay_when_credential_is_revoked(monkeypatch):
+    """The SSE frame boundary re-resolves credentials after route admission."""
+    client = make_sharing_client(monkeypatch)
+    with client:
+        run_id = create_completed_run(client)
+        client.auth_provider.revoke_live = True  # type: ignore[attr-defined]
+
+        events = client.get(
+            f"/v1/runs/{run_id}/events", headers=user_headers(OWNER)
+        )
+
+    assert events.status_code == 200
+    assert events.text == ""
+
+
+def test_run_polling_rechecks_credential_before_returning_replay(monkeypatch):
+    """The JSON fallback has the same final authorization boundary as SSE."""
+    client = make_sharing_client(monkeypatch)
+    with client:
+        run_id = create_completed_run(client)
+        client.auth_provider.revoke_live = True  # type: ignore[attr-defined]
+
+        events = client.get(
+            f"/v1/runs/{run_id}/events?format=json",
+            headers=user_headers(OWNER),
+        )
+
+    assert events.status_code == 404
+    assert events.json() == {
+        "error": {"message": "Run nicht gefunden", "type": "not_found"}
+    }
+
+
+def test_http_listing_union_uses_live_accepted_shares(monkeypatch):
     client = make_sharing_client(monkeypatch)
     with client:
         shared_run = create_completed_run(client)
-        own_run = create_completed_run(client, sub=RECIPIENT)
+        own_run = create_completed_run(client, user_id=RECIPIENT)
         accept_via_http(client, grant_via_http(client, shared_run)["id"])
 
         listed = client.get(
-            "/v1/runs", headers={SUB_HEADER: RECIPIENT}
+            "/v1/runs", headers=user_headers(RECIPIENT)
         ).json()["data"]
         by_id = {item["run_id"]: item for item in listed}
         assert set(by_id) == {own_run, shared_run}
-        assert "access" not in by_id[own_run]
+        assert by_id[own_run]["access"] == {"mode": "owner"}
         assert by_id[shared_run]["access"]["permission"] == "view"
 
         # The stranger's listing stays untouched by the grant.
         stranger_listed = client.get(
-            "/v1/runs", headers={SUB_HEADER: STRANGER}
+            "/v1/runs", headers=user_headers(STRANGER)
         ).json()["data"]
         assert stranger_listed == []
-
-        mine = client.get(
-            "/v1/shares/shared-with-me",
-            params={"resource_type": "run"},
-            headers={SUB_HEADER: RECIPIENT},
-        ).json()["data"]
-        assert [item["resource_id"] for item in mine] == [shared_run]
-        # The grantor's display name rides along for the
-        # "Geteilt von <Name>" badge (one batch join, no second call).
-        assert mine[0]["granted_by_display_name"] == "Olga Owner"
 
 
 def test_http_inbox_accept_and_leave(monkeypatch):
@@ -439,7 +622,7 @@ def test_http_inbox_accept_and_leave(monkeypatch):
         # The pending invitation shows in the recipient inbox, title-enriched
         # and carrying the grantor's display name.
         inbox = client.get(
-            "/v1/shares/inbox", headers={SUB_HEADER: RECIPIENT}
+            "/v1/shares/inbox", headers=user_headers(RECIPIENT)
         ).json()["data"]
         assert inbox["accepted"] == []
         assert len(inbox["pending"]) == 1
@@ -456,7 +639,7 @@ def test_http_inbox_accept_and_leave(monkeypatch):
         assert (
             client.post(
                 f"/v1/shares/{share['id']}/accept",
-                headers={SUB_HEADER: STRANGER},
+                headers=user_headers(STRANGER),
             ).status_code
             == 404
         )
@@ -465,7 +648,7 @@ def test_http_inbox_accept_and_leave(monkeypatch):
 
         # After consent it moves to the accepted section.
         accepted_inbox = client.get(
-            "/v1/shares/inbox", headers={SUB_HEADER: RECIPIENT}
+            "/v1/shares/inbox", headers=user_headers(RECIPIENT)
         ).json()["data"]
         assert accepted_inbox["pending"] == []
         assert len(accepted_inbox["accepted"]) == 1
@@ -473,15 +656,15 @@ def test_http_inbox_accept_and_leave(monkeypatch):
 
         # The recipient leaves: their own DELETE drops the share and access.
         left = client.delete(
-            f"/v1/shares/{share['id']}", headers={SUB_HEADER: RECIPIENT}
+            f"/v1/shares/{share['id']}", headers=user_headers(RECIPIENT)
         )
-        assert left.status_code == 200
+        assert left.status_code == 204
         assert client.get(
-            "/v1/shares/inbox", headers={SUB_HEADER: RECIPIENT}
+            "/v1/shares/inbox", headers=user_headers(RECIPIENT)
         ).json()["data"] == {"pending": [], "accepted": []}
         assert (
             client.get(
-                f"/v1/runs/{run_id}", headers={SUB_HEADER: RECIPIENT}
+                f"/v1/runs/{run_id}", headers=user_headers(RECIPIENT)
             ).status_code
             == 404
         )
@@ -494,19 +677,19 @@ def test_http_recipient_declines_pending(monkeypatch):
         share = grant_via_http(client, run_id)
         # Decline a pending invitation: the recipient's DELETE before accepting.
         declined = client.delete(
-            f"/v1/shares/{share['id']}", headers={SUB_HEADER: RECIPIENT}
+            f"/v1/shares/{share['id']}", headers=user_headers(RECIPIENT)
         )
-        assert declined.status_code == 200
+        assert declined.status_code == 204
         assert (
             client.get(
-                "/v1/shares/inbox", headers={SUB_HEADER: RECIPIENT}
+                "/v1/shares/inbox", headers=user_headers(RECIPIENT)
             ).json()["data"]["pending"]
             == []
         )
         # The owner's outgoing view no longer lists the resource.
         assert (
             client.get(
-                "/v1/shares/mine", headers={SUB_HEADER: OWNER}
+                "/v1/shares/mine", headers=user_headers(OWNER)
             ).json()["data"]
             == []
         )
@@ -520,11 +703,11 @@ def test_http_stranger_cannot_delete_share(monkeypatch):
         # Neither owner nor recipient: the DELETE dual-path denies (404), and
         # the invitation survives for the real recipient.
         denied = client.delete(
-            f"/v1/shares/{share['id']}", headers={SUB_HEADER: STRANGER}
+            f"/v1/shares/{share['id']}", headers=user_headers(STRANGER)
         )
         assert denied.status_code == 404
         inbox = client.get(
-            "/v1/shares/inbox", headers={SUB_HEADER: RECIPIENT}
+            "/v1/shares/inbox", headers=user_headers(RECIPIENT)
         ).json()["data"]
         assert len(inbox["pending"]) == 1
 
@@ -536,7 +719,7 @@ def test_http_mine_counts_pending_then_accepted(monkeypatch):
         share = grant_via_http(client, run_id)
 
         before = client.get(
-            "/v1/shares/mine", headers={SUB_HEADER: OWNER}
+            "/v1/shares/mine", headers=user_headers(OWNER)
         ).json()["data"]
         assert len(before) == 1
         assert before[0]["resource_id"] == run_id
@@ -546,7 +729,7 @@ def test_http_mine_counts_pending_then_accepted(monkeypatch):
 
         accept_via_http(client, share["id"])
         after = client.get(
-            "/v1/shares/mine", headers={SUB_HEADER: OWNER}
+            "/v1/shares/mine", headers=user_headers(OWNER)
         ).json()["data"]
         assert after[0]["share_count"] == 1
         assert after[0]["pending_count"] == 0
@@ -561,15 +744,21 @@ def test_http_cancel_needs_edit_grant(monkeypatch):
 
         # Accepted view grant: a view grantee still cannot cancel.
         denied = client.post(
-            f"/v1/runs/{run_id}/cancel", headers={SUB_HEADER: RECIPIENT}
+            f"/v1/runs/{run_id}/cancel", headers=user_headers(RECIPIENT)
         )
         assert denied.status_code == 404
 
-        # The owner upgrades to edit; the re-grant carries the recipient's
-        # consent forward, so edit access is live without a second accept.
-        grant_via_http(client, run_id, permission="edit")
+        # The owner upgrades the same accepted share through revision CAS;
+        # recipient consent remains live without a second accept.
+        updated = update_share_via_http(
+            client,
+            view_share["id"],
+            permission="edit",
+            expected_revision=view_share["revision"],
+        )
+        assert updated["revision"] == view_share["revision"] + 1
         allowed = client.post(
-            f"/v1/runs/{run_id}/cancel", headers={SUB_HEADER: RECIPIENT}
+            f"/v1/runs/{run_id}/cancel", headers=user_headers(RECIPIENT)
         )
         assert allowed.status_code == 200
 
@@ -579,14 +768,19 @@ def test_http_children_follow_parent_view_share(monkeypatch):
     client = make_sharing_client(monkeypatch)
     with client:
         store = client.run_store  # type: ignore[attr-defined]
+        release_parent = threading.Event()
         parent = store.submit(
             question="Agentenauftrag",
             stack_name="default",
-            work=lambda handle: handle.complete({"answer": "fertig"}),
+            work=lambda handle: (
+                release_parent.wait(timeout=2.0),
+                handle.complete({"answer": "fertig"}),
+            ),
             kind="agent",
-            created_by_sub=OWNER,
+            created_by_user_id=OWNER,
             created_by_tenant_id="default",
         )
+        release_parent.set()
         child = store.submit(
             question="Teilaufgabe",
             stack_name="default",
@@ -594,23 +788,29 @@ def test_http_children_follow_parent_view_share(monkeypatch):
             kind="agent_child",
             parent_run_id=parent["run_id"],
             root_run_id=parent["run_id"],
-            created_by_sub=OWNER,
+            created_by_user_id=OWNER,
             created_by_tenant_id="default",
         )
         deadline = time.time() + 2.0
         while time.time() < deadline:
             if (
-                store.get(parent["run_id"])["status"] == "completed"
-                and store.get(child["run_id"])["status"] == "completed"
+                store.get(
+                    parent["run_id"], visible_to=scoped(OWNER)
+                )["status"]
+                == "completed"
+                and store.get(
+                    child["run_id"], visible_to=scoped(OWNER)
+                )["status"]
+                == "completed"
             ):
                 break
             time.sleep(0.01)
 
         # Stranger and not-yet-invited recipient: indistinct 404.
-        for sub in (RECIPIENT, STRANGER):
+        for user_id in (RECIPIENT, STRANGER):
             denied = client.get(
                 f"/v1/runs/{parent['run_id']}/children",
-                headers={SUB_HEADER: sub},
+                headers=user_headers(user_id),
             )
             assert denied.status_code == 404
 
@@ -620,7 +820,7 @@ def test_http_children_follow_parent_view_share(monkeypatch):
 
         listing = client.get(
             f"/v1/runs/{parent['run_id']}/children",
-            headers={SUB_HEADER: RECIPIENT},
+            headers=user_headers(RECIPIENT),
         )
         assert listing.status_code == 200
         payload = listing.json()
@@ -630,6 +830,6 @@ def test_http_children_follow_parent_view_share(monkeypatch):
 
         # The child's DIRECT url stays owner-scoped (no grant on it).
         direct = client.get(
-            f"/v1/runs/{child['run_id']}", headers={SUB_HEADER: RECIPIENT}
+            f"/v1/runs/{child['run_id']}", headers=user_headers(RECIPIENT)
         )
         assert direct.status_code == 404

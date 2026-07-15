@@ -1,10 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { AgentArtifactRecord, AgentPlanTaskRecord } from './model'
-import {
-  agentRunCompletionRecap,
-  answerClampDecision,
-} from './runPresentation'
+import { agentRunCompletionRecap } from './runPresentation'
 
 const task = (taskId: string, status: string): AgentPlanTaskRecord => ({
   budget: {},
@@ -41,17 +38,5 @@ describe('agent run completion recap', () => {
       taskCount: 2,
       tasksCompleted: 2,
     })
-  })
-})
-
-describe('answerClampDecision', () => {
-  it('clamps only settled answers above the cap', () => {
-    expect(answerClampDecision(600, false)).toBe('clamped')
-    expect(answerClampDecision(200, false)).toBe('full')
-  })
-
-  it('never clamps while streaming or before measurement', () => {
-    expect(answerClampDecision(600, true)).toBe('full')
-    expect(answerClampDecision(null, false)).toBe('full')
   })
 })

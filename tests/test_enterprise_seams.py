@@ -159,3 +159,58 @@ def test_placeholder_secret_scan_flags_change_me_values():
     flagged = _placeholder_secret_fields(settings)
     assert "INQTRIX_SESSION_SECRET" in flagged
     assert "INQTRIX_PAT_PEPPER" not in flagged
+
+
+def _pg_collaboration_settings(auth_mode: str) -> Settings:
+    from inqtrix.settings import CollaborationSettings
+
+    return Settings(
+        server=ServerSettings(public_base_url=""),
+        storage=StorageSettings(
+            backend="postgres",
+            database_url="postgresql+asyncpg://u:p@localhost:5432/db",
+        ),
+        auth=AuthSettings(
+            mode=auth_mode,
+            session_secret="s" * 40,
+            pat_pepper="p" * 40,
+        ),
+        collaboration=CollaborationSettings(
+            enabled=True,
+            http_url="http://collaboration:1234",
+            ws_url="ws://collaboration:1234/collaboration",
+            secret="c" * 40,
+        ),
+    )
+
+
+def test_worker_shape_container_builds_with_collaboration_enabled():
+    # The queue worker composes WITHOUT an auth provider (it serves no HTTP,
+    # so build_container falls back to NoneAuthProvider). The collaboration
+    # gate must judge the DEPLOYMENT auth mode from settings there — before
+    # this, enabling collaboration in the shared stack env crash-looped every
+    # worker replica and queued runs were never claimed (live incident
+    # 2026-07-15). The projection consumer gets the canonical user directory
+    # from the platform bundle instead of the absent provider.
+    container = build_container(
+        providers=_providers(),
+        strategies=None,
+        settings=_pg_collaboration_settings("local"),
+        semaphore_factory=lambda: asyncio.Semaphore(1),
+        platform_persistence_null_pool=True,
+    )
+    assert container.editor_collaboration_service is not None
+
+
+def test_collaboration_still_fails_closed_without_cookie_auth():
+    # The API misconfiguration (collaboration on, deployment auth mode none)
+    # keeps the loud fail-closed startup error.
+    import pytest
+
+    with pytest.raises(RuntimeError, match="cookie-based"):
+        build_container(
+            providers=_providers(),
+            strategies=None,
+            settings=_pg_collaboration_settings("none"),
+            semaphore_factory=lambda: asyncio.Semaphore(1),
+        )

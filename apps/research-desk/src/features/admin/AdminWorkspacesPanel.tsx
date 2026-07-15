@@ -98,14 +98,14 @@ export function AdminWorkspacesPanel({
     (workspace) => workspace.workspace_id === selectedId,
   )
   const members = (selectedId && state.members[selectedId]) || []
-  const memberSubs = useMemo(
-    () => new Set(members.map((member) => member.sub)),
+  const memberUserIds = useMemo(
+    () => new Set(members.map((member) => member.user_id)),
     [members],
   )
   const addResults = useMemo(
     () =>
-      candidateUsers(users, memberSubs, debouncedQuery).slice(0, MAX_RESULTS),
-    [debouncedQuery, memberSubs, users],
+      candidateUsers(users, memberUserIds, debouncedQuery).slice(0, MAX_RESULTS),
+    [debouncedQuery, memberUserIds, users],
   )
 
   if (!state.available) {
@@ -145,7 +145,7 @@ export function AdminWorkspacesPanel({
       {
         display_name: candidate.display_name,
         email: candidate.email,
-        sub: candidate.subject,
+        user_id: candidate.id,
       },
       addRole,
     )
@@ -357,7 +357,7 @@ export function AdminWorkspacesPanel({
                       // guard (shared rule) — its role + remove are disabled.
                       const soleOwner = wouldOrphanLastOwner(
                         members,
-                        member.sub,
+                        member.user_id,
                         false,
                       )
                       return (
@@ -366,7 +366,7 @@ export function AdminWorkspacesPanel({
                             MEMBER_GRID,
                             'rounded-md px-3 py-2 transition-colors hover:bg-accent/40',
                           )}
-                          key={member.sub}
+                          key={member.user_id}
                         >
                           <div className="flex min-w-0 items-center gap-2.5">
                             <InitialsAvatar
@@ -375,7 +375,7 @@ export function AdminWorkspacesPanel({
                             />
                             <div className="min-w-0">
                               <span className="t-list block truncate text-foreground">
-                                {member.display_name ?? member.email ?? member.sub}
+                                {member.display_name ?? member.email ?? member.user_id}
                               </span>
                               {member.email ? (
                                 <span className="t-meta-sm block truncate text-muted-foreground">
@@ -389,7 +389,7 @@ export function AdminWorkspacesPanel({
                             onValueChange={(value) =>
                               void admin.setMemberRole(
                                 selected.workspace_id,
-                                member.sub,
+                                member.user_id,
                                 value as WorkspaceRoleValue,
                               )
                             }
@@ -419,7 +419,7 @@ export function AdminWorkspacesPanel({
                             onClick={() =>
                               void admin.removeMember(
                                 selected.workspace_id,
-                                member.sub,
+                                member.user_id,
                               )
                             }
                             size="icon"
@@ -486,7 +486,7 @@ export function AdminWorkspacesPanel({
                     ) : (
                       <ul className="max-h-44 overflow-y-auto">
                         {addResults.map((candidate) => (
-                          <li key={candidate.subject}>
+                          <li key={candidate.id}>
                             <button
                               className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-accent"
                               onMouseDown={(event) => {
@@ -503,7 +503,7 @@ export function AdminWorkspacesPanel({
                                 <span className="t-list block truncate text-foreground">
                                   {candidate.display_name ??
                                     candidate.email ??
-                                    candidate.subject}
+                                    candidate.id}
                                 </span>
                                 {candidate.email ? (
                                   <span className="t-meta-sm block truncate text-muted-foreground">

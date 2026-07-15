@@ -95,9 +95,18 @@ failures (default 10) for a `(identifier, source_ip)` within
 
 The counters are **process-local**, so a **multi-replica** deployment should
 ALSO rate-limit per-IP at the reverse proxy / WAF (e.g. on `/api/auth/login/*`)
-— the in-app limit then complements, not replaces, the edge limit. For the
-client IP to be correct, the ingress must set `X-Forwarded-For` (the bundled
-nginx does).
+— the in-app limit then complements, not replaces, the edge limit.
+
+The client IP is read from the **right** of `X-Forwarded-For`, at the depth set
+by `INQTRIX_TRUSTED_PROXY_HOPS` (default `1`, matching the single bundled proxy
+— the nginx `web` container or `scripts/run_research_desk.py`, both of which
+append the real peer). The right-most hop is written by that proxy and is not
+client-spoofable, so an attacker cannot rotate a forged left-most value to mint
+a fresh throttle key per attempt. Set it to the **exact** number of chained
+proxies in front of the server (e.g. `2` for an external load balancer in front
+of the bundled proxy); a value **higher** than the real chain lets a client
+backfill the gap and spoof again. Set it to `0` only when the API server is
+exposed directly with no reverse proxy — then just the socket peer is trusted.
 
 ## Pre-flight checklist
 

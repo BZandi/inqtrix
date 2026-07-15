@@ -5,11 +5,13 @@ import {
   buildProjectFiles,
   parseChatThread,
   parseChatRule,
+  parseEditorDocument,
   parseFileAsset,
   parseProjectManifest,
   parseResearchRun,
   serializeChatThread,
   serializeChatRule,
+  serializeEditorDocument,
   serializeFileAsset,
   serializeProjectManifest,
   serializeResearchRun,
@@ -17,6 +19,8 @@ import {
 import type {
   ChatRuleRecord,
   ChatThreadRecord,
+  EditorCommentThreadRecord,
+  EditorDocumentRecord,
   FileAssetRecord,
   FileGroupRecord,
   ProjectState,
@@ -53,6 +57,23 @@ function makeRule(overrides: Partial<ChatRuleRecord> = {}): ChatRuleRecord {
     id: 'rule-1',
     label: 'profile',
     title: 'Profile',
+    updatedAt: '2026-01-02T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function makeEditorDocument(
+  id: string,
+  overrides: Partial<EditorDocumentRecord> = {},
+): EditorDocumentRecord {
+  return {
+    contentMarkdown: `# ${id}`,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    folderId: null,
+    id,
+    revision: 1,
+    source: 'blank',
+    title: `${id}.md`,
     updatedAt: '2026-01-02T00:00:00.000Z',
     ...overrides,
   }
@@ -263,6 +284,146 @@ describe('project file export plan', () => {
 
     expect(paths.some((path) => path.includes('run-research'))).toBe(true)
     expect(paths.some((path) => path.includes('run-knowledge'))).toBe(false)
+  })
+
+  it('never materializes shared resources into recipient-owned project files', () => {
+    const ownedRun = makeResearchRun('run-owned', {
+      access: { mode: 'owner' },
+    })
+    const sharedRun = makeResearchRun('run-shared', {
+      access: { mode: 'shared', permission: 'edit' },
+    })
+    const ownedRule = makeRule({
+      access: { mode: 'owner' },
+      id: 'rule-owned',
+      label: 'owned-rule',
+    })
+    const sharedRule = makeRule({
+      access: { mode: 'shared', permission: 'view' },
+      id: 'rule-shared',
+      label: 'shared-rule',
+    })
+    const ownedDocument = makeEditorDocument('doc-owned')
+    const sharedDocument = makeEditorDocument('doc-shared', {
+      access: { mode: 'shared', permission: 'suggest' },
+      contentMode: 'collaboration',
+    })
+    const state: ProjectState = {
+      ...createEmptyProjectState(),
+      chatRuleOrder: ['rule-owned', 'rule-shared'],
+      chatRules: {
+        'rule-owned': ownedRule,
+        'rule-shared': sharedRule,
+      },
+      editorDocumentOrder: ['doc-owned', 'doc-shared'],
+      editorDocuments: {
+        'doc-owned': ownedDocument,
+        'doc-shared': sharedDocument,
+      },
+      researchRunOrder: ['run-owned', 'run-shared'],
+      researchRuns: {
+        'run-owned': ownedRun,
+        'run-shared': sharedRun,
+      },
+    }
+
+    const paths = buildProjectFiles(state).map((file) => file.path)
+
+    expect(paths.some((path) => path.includes('run-owned'))).toBe(true)
+    expect(paths.some((path) => path.includes('run-shared'))).toBe(false)
+    expect(paths).toContain('rules/owned-rule.md')
+    expect(paths).not.toContain('rules/shared-rule.md')
+    expect(paths.some((path) => path.includes('doc-owned'))).toBe(true)
+    expect(paths.some((path) => path.includes('doc-shared'))).toBe(false)
+  })
+
+  it('round-trips a collaboration export with entirely detached document and comment identities', () => {
+    const document = makeEditorDocument('live-document', {
+      access: { mode: 'owner', permission: 'edit' },
+      collaboration: {
+        generation: 3,
+        persistedSequence: 41,
+        projectionSequence: 41,
+        projectionUpdatedAt: '2026-01-02T00:00:00.000Z',
+        schemaVersion: 1,
+      },
+      contentMode: 'collaboration',
+      diffAnchorMarkdown: '# Earlier projection',
+      diffAnchorUpdatedAt: '2026-01-01T12:00:00.000Z',
+      folderId: 'owner-folder',
+      metadataRevision: 4,
+      revision: 17,
+    })
+    const comments: EditorCommentThreadRecord[] = [
+      {
+        anchor: {
+          blockId: 'paragraph-1',
+          from: 2,
+          quoteAfter: ' after one',
+          quoteBefore: 'before one ',
+          selectedMarkdown: '**first**',
+          selectedText: 'first',
+          to: 7,
+        },
+        commentMarkdown: 'First private note',
+        createdAt: '2026-01-01T13:00:00.000Z',
+        documentId: document.id,
+        id: 'live-comment-1',
+        kind: 'collect',
+        status: 'open',
+        updatedAt: '2026-01-01T13:05:00.000Z',
+      },
+      {
+        anchor: {
+          from: 11,
+          quoteAfter: ' after two',
+          quoteBefore: 'before two ',
+          selectedText: 'second',
+          to: 17,
+        },
+        commentMarkdown: 'Second private note',
+        createdAt: '2026-01-01T14:00:00.000Z',
+        documentId: document.id,
+        evidencePreset: 'fact_check',
+        id: 'live-comment-2',
+        kind: 'evidence_review',
+        status: 'resolved',
+        updatedAt: '2026-01-01T14:05:00.000Z',
+      },
+    ]
+
+    const parsed = parseEditorDocument(serializeEditorDocument(document, {
+      editorComments: Object.fromEntries(comments.map((comment) => [comment.id, comment])),
+    }).contents)
+
+    expect(parsed.document.id).not.toBe(document.id)
+    expect(parsed.document.id).toMatch(/^editor-doc-/)
+    expect(parsed.document.contentMarkdown).toBe(document.contentMarkdown)
+    expect(parsed.document.contentMode).toBeUndefined()
+    expect(parsed.document.collaboration).toBeUndefined()
+    expect(parsed.document.access).toBeUndefined()
+    expect(parsed.document.diffAnchorMarkdown).toBe('# Earlier projection')
+    expect(parsed.document.diffAnchorUpdatedAt).toBe('2026-01-01T12:00:00.000Z')
+    expect(parsed.document.folderId).toBeNull()
+    expect(parsed.document.revision).toBe(0)
+    expect(parsed.comments).toHaveLength(2)
+    expect(new Set(parsed.comments.map((comment) => comment.id)).size).toBe(2)
+    expect(parsed.comments.every((comment) => comment.id.startsWith('editor-comment-'))).toBe(true)
+    expect(parsed.comments.every((comment) => !comments.some((source) => source.id === comment.id))).toBe(true)
+    expect(parsed.comments.every((comment) => comment.documentId === parsed.document.id)).toBe(true)
+    expect(parsed.comments.map((comment) => ({
+      anchor: comment.anchor,
+      commentMarkdown: comment.commentMarkdown,
+      evidencePreset: comment.evidencePreset,
+      kind: comment.kind,
+      status: comment.status,
+    }))).toEqual(comments.map((comment) => ({
+      anchor: comment.anchor,
+      commentMarkdown: comment.commentMarkdown,
+      evidencePreset: comment.evidencePreset,
+      kind: comment.kind,
+      status: comment.status,
+    })))
   })
 })
 

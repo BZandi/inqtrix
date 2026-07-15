@@ -11,17 +11,19 @@ so a login email maps to exactly one account.
 from __future__ import annotations
 
 from sqlalchemy import Column, Float, Index, MetaData, Table, Text, func, text
+from sqlalchemy.dialects.postgresql import UUID
 
 credentials_metadata = MetaData()
 
 local_credentials = Table(
     "local_credentials",
     credentials_metadata,
-    Column("subject", Text, primary_key=True),
+    Column("user_id", UUID(as_uuid=True), primary_key=True),
     Column(
         "tenant_id", Text, nullable=False, server_default=text("'default'")
     ),
     Column("email", Text, nullable=False),
+    Column("subject", Text, nullable=False, unique=True),
     Column("password_hash", Text, nullable=False),
     Column("display_name", Text, nullable=True),
     Column("created_at", Float, nullable=False),

@@ -1,116 +1,72 @@
-"""Share administration: the CRUD side of ``resource_shares``.
+"""Direct user-to-resource sharing lifecycle.
 
-The READ side (``ShareRepository.permission_for``) has powered the
-permission layer since the identity schema landed; this module adds
-the missing write/listing surface plus the service the ``/v1/shares``
-routes call. Google-Drive model: a share grants access to THE ONE
-server resource (no copies); recipients list shared-in resources via
-``shares_for_subjects``.
-
-v1 scope (binding): direct USER shares only (``subject_type='user'``)
-and the permissions ``view``/``edit``. Group shares and ``manage``
-grants stay schema-supported for later — the permission layer already
-unions them — but no UI/endpoint mints them yet.
+The v0.2 contract deliberately has one share model: one active direct share
+per recipient and resource, with explicit consent and optimistic revisions.
+Owners are read from the resource itself; ``granted_by_user_id`` is audit
+metadata and never a second ownership source.
 """
 
 from __future__ import annotations
 
 import logging
-import time
+import uuid
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Awaitable, Callable, Mapping, Protocol, Sequence
 
 from inqtrix.auth.permissions import (
+    SHARE_PERMISSIONS_BY_RESOURCE_TYPE,
     AuditEntry,
     SharePermission,
-    SubjectRef,
+    share_permissions_for_resource,
 )
 
 if TYPE_CHECKING:
-    from inqtrix.auth.permissions import AuditSink, PermissionService
+    from inqtrix.auth.permissions import AuditSink, AuthorizationService
     from inqtrix.auth.principal import Principal
+    from inqtrix.user_events import ResourceInvalidator
 
 log = logging.getLogger("inqtrix")
 
-GRANTABLE_PERMISSIONS = (SharePermission.VIEW, SharePermission.EDIT)
-"""Permissions the v1 surface may mint. ``manage`` stays reserved for
-owners; ``comment`` waits for a commenting surface."""
+SHAREABLE_RESOURCE_TYPES = frozenset(SHARE_PERMISSIONS_BY_RESOURCE_TYPE)
 
 
 @dataclass(frozen=True)
 class ShareRecord:
-    """One share grant (the full row, not just the permission).
-
-    Attributes:
-        id: Server-assigned share identifier (revocation handle).
-        tenant_id: Tenant scope.
-        subject_type: ``"user"`` in v1 (groups later).
-        subject_id: The recipient's ``sub``.
-        resource_type: Polymorphic resource kind (``"run"``,
-            ``"knowledge_collection"``, ``"prompt_template"``).
-        resource_id: Identifier within the resource kind.
-        permission: Granted level.
-        granted_by_sub: Granting subject (audit/display).
-        created_at: Unix seconds.
-        accepted_at: Unix seconds the recipient consented, or ``None`` while
-            the share is still pending. ``None`` grants no access (the consent
-            gate); a non-``None`` value is what every visibility query filters
-            on. Defaults to ``None`` so a freshly minted grant starts pending.
-    """
+    """One direct share row."""
 
     id: str
     tenant_id: str
-    subject_type: str
-    subject_id: str
+    recipient_user_id: uuid.UUID
     resource_type: str
     resource_id: str
     permission: SharePermission
-    granted_by_sub: str
+    revision: int
+    granted_by_user_id: uuid.UUID
     created_at: float
     accepted_at: float | None = None
+    revoked_at: float | None = None
+    revoked_by_user_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True)
 class InboxItem:
-    """One share addressed to the caller, title-enriched for the inbox.
-
-    The recipient-facing view of a :class:`ShareRecord`: it adds the resolved
-    resource title (a pending recipient has no access yet, so the title comes
-    from an owner-bypassing read) and keeps ``accepted_at`` so the surface can
-    split pending invitations from accepted (active) shares.
-
-    Attributes:
-        share_id: Revocation/accept handle.
-        resource_type: Polymorphic kind.
-        resource_id: Identifier within the kind.
-        resource_title: Human-readable title, resolved server-side.
-        permission: Granted level.
-        granted_by_sub: The grantor (the router joins the display name).
-        created_at: Unix seconds the grant was minted.
-        accepted_at: Unix seconds the caller consented, or ``None`` (pending).
-    """
+    """Title-enriched recipient lifecycle item."""
 
     share_id: str
     resource_type: str
     resource_id: str
     resource_title: str
     permission: SharePermission
-    granted_by_sub: str
+    revision: int
+    granted_by_user_id: uuid.UUID
     created_at: float
     accepted_at: float | None
 
 
 @dataclass(frozen=True)
 class OutgoingItem:
-    """One resource the caller has shared out, grouped across its recipients.
-
-    Attributes:
-        resource_type: Polymorphic kind.
-        resource_id: Identifier within the kind.
-        resource_title: Human-readable title, resolved server-side.
-        share_count: Active shares on the resource granted by the caller.
-        pending_count: Of those, how many are still awaiting consent.
-    """
+    """One owner resource grouped across active outgoing shares."""
 
     resource_type: str
     resource_id: str
@@ -119,59 +75,99 @@ class OutgoingItem:
     pending_count: int
 
 
+class ShareRemoval(StrEnum):
+    """Observable lifecycle result of DELETE ``/v1/shares/{id}``."""
+
+    REVOKED = "revoked"
+    DECLINED = "declined"
+    LEFT = "left"
+
+
+@dataclass(frozen=True)
+class ShareRemovalResult:
+    """Removed row and its lifecycle meaning."""
+
+    record: ShareRecord
+    action: ShareRemoval
+
+
 class ShareNotAllowed(Exception):
-    """Raised when a share operation is not permitted.
-
-    Two cases, both hidden behind the same 404 (denial indistinguishable
-    from absence — the surface convention): the caller may not manage shares
-    on the resource, OR — under workspace-scoped sharing — the invitee is not
-    a co-member (and so must not be revealed as existing). Carries no detail
-    on purpose; the operator-facing visibility happens via log + audit.
-    """
+    """The share or resource must remain hidden from the caller."""
 
 
-class ShareValidationError(Exception):
-    """Raised on invalid grant input (German message for the 400)."""
+class ShareValidationError(ValueError):
+    """The request is invalid and must produce no writes."""
+
+
+class ShareBackendUnsupported(RuntimeError):
+    """A known resource kind lacks a safe sharing boundary in this deployment."""
+
+
+class ShareConflict(RuntimeError):
+    """An active tuple exists or an optimistic revision is stale."""
+
+    def __init__(self, message: str, *, current_revision: int | None = None) -> None:
+        super().__init__(message)
+        self.current_revision = current_revision
 
 
 class ShareAdminRepository(Protocol):
-    """Write/listing port over ``resource_shares``."""
+    """Persistence port for atomic direct-share commands and lifecycle views."""
 
-    async def create_share(
+    async def create_shares(
         self,
         *,
         tenant_id: str,
-        subject_type: str,
-        subject_id: str,
         resource_type: str,
         resource_id: str,
-        permission: SharePermission,
-        granted_by_sub: str,
-    ) -> ShareRecord:
-        """Grant (or re-grant) one share.
-
-        Re-granting an existing active tuple REPLACES its permission
-        (soft-revoke + insert in the Postgres backend, honoring the
-        partial unique index) — the caller's intent "share with X as
-        editor" must win over a stale earlier grant.
-        """
+        owner_user_id: uuid.UUID,
+        granted_by_user_id: uuid.UUID,
+        invitees: Sequence[tuple[uuid.UUID, SharePermission]],
+        restrict_to_members: bool = False,
+    ) -> tuple[ShareRecord, ...]:
+        """Insert every share or none; active tuple conflicts are explicit."""
         ...
 
     async def get_share(
         self, *, tenant_id: str, share_id: str
     ) -> ShareRecord | None:
-        """One ACTIVE share by id (authorization happens above)."""
+        """Return one active share."""
+        ...
+
+    async def update_share_permission(
+        self,
+        *,
+        tenant_id: str,
+        share_id: str,
+        permission: SharePermission,
+        expected_revision: int,
+        actor_user_id: uuid.UUID,
+        restrict_to_members: bool = False,
+    ) -> ShareRecord | None:
+        """CAS-update permission and increment revision."""
+        ...
+
+    async def accept_share_by_id(
+        self,
+        *,
+        tenant_id: str,
+        share_id: str,
+        recipient_user_id: uuid.UUID,
+        owner_user_id: uuid.UUID,
+        restrict_to_members: bool = False,
+    ) -> ShareRecord | None:
+        """Accept pending or return the already accepted active row."""
         ...
 
     async def revoke_share_by_id(
-        self, *, tenant_id: str, share_id: str, revoked_by_sub: str
+        self,
+        *,
+        tenant_id: str,
+        share_id: str,
+        revoked_by_user_id: uuid.UUID,
+        owner_user_id: uuid.UUID,
     ) -> ShareRecord | None:
-        """Soft-revoke one ACTIVE share; returns it, or ``None``.
-
-        Named with the ``_by_id`` suffix because the memory identity
-        store already carries a tuple-keyed ``revoke_share`` test
-        seam — a same-name overload would shadow it.
-        """
+        """Soft-revoke one active row."""
         ...
 
     async def revoke_shares_for_resource(
@@ -180,131 +176,59 @@ class ShareAdminRepository(Protocol):
         tenant_id: str,
         resource_type: str,
         resource_id: str,
-        revoked_by_sub: str,
+        revoked_by_user_id: uuid.UUID,
     ) -> int:
-        """Soft-revoke EVERY active share on one resource.
-
-        The cleanup half of resource deletion (a deleted knowledge
-        collection must not leave grants dangling); returns the number
-        of revoked shares. Authorization is the deleting caller's —
-        the deletion itself already passed the owner gate.
-        """
+        """Revoke every active share on a deleted resource."""
         ...
 
     async def list_shares_for_resource(
         self, *, tenant_id: str, resource_type: str, resource_id: str
     ) -> tuple[ShareRecord, ...]:
-        """Active shares on one resource, oldest first."""
+        """List active shares for an owner-managed resource."""
         ...
 
-    async def shares_for_subjects(
+    async def shares_for_recipient(
         self,
         *,
         tenant_id: str,
         resource_type: str,
-        subjects: Sequence[SubjectRef],
+        recipient_user_id: uuid.UUID,
     ) -> Mapping[str, ShareRecord]:
-        """``resource_id -> highest-permission share`` for the subjects.
-
-        Powers shared-with-me listings and the run-visibility union;
-        one indexed query per request.
-        """
+        """Accepted direct shares keyed by resource id."""
         ...
 
-    async def share_counts_for_resources(
-        self,
-        *,
-        tenant_id: str,
-        resource_type: str,
-        resource_ids: Sequence[str],
-    ) -> Mapping[str, int]:
-        """Active-share count per resource (badge numbers)."""
-        ...
-
-    async def accept_share_by_id(
-        self, *, tenant_id: str, share_id: str, subject_sub: str
-    ) -> ShareRecord | None:
-        """Mark one pending share accepted; returns it, or ``None``.
-
-        Only flips a share that is active, still pending
-        (``accepted_at IS NULL``), and addressed to *subject_sub* (the
-        recipient is the sole party who can consent). Returns ``None`` for an
-        unknown id, a foreign recipient, an already-accepted share, or a
-        revoked one — all indistinguishable (the surface's 404 rule).
-        """
-        ...
-
-    async def inbox_for_subjects(
-        self,
-        *,
-        tenant_id: str,
-        subjects: Sequence[SubjectRef],
+    async def inbox_for_recipient(
+        self, *, tenant_id: str, recipient_user_id: uuid.UUID
     ) -> tuple[ShareRecord, ...]:
-        """Every active (pending OR accepted) share addressed to the
-        subjects, across ALL resource kinds — the recipient inbox source.
-
-        Distinct from :meth:`shares_for_subjects`, which is accepted-only
-        (the access union) and single-kind: the inbox needs the pending rows
-        too so the recipient can consent to them.
-        """
+        """Pending and accepted active shares for one recipient."""
         ...
 
-    async def outgoing_shares_for_grantor(
-        self, *, tenant_id: str, grantor_sub: str
+    async def list_active_shares(
+        self, *, tenant_id: str
     ) -> tuple[ShareRecord, ...]:
-        """Every active share *grantor_sub* granted, across all resource
-        kinds — the "shared by me" source (oldest first)."""
+        """List active lifecycle rows without treating audit fields as owner."""
         ...
 
 
-OwnerResolver = Callable[[str, str], Awaitable[str | None]]
-"""``(tenant_id, resource_id) -> owner_sub`` or ``None`` when the
-resource does not exist. One resolver per shareable resource type,
-registered by the composition root."""
-
+OwnerResolver = Callable[[str, str], Awaitable[uuid.UUID | None]]
 TitleResolver = Callable[[str, str], Awaitable[str | None]]
-"""``(tenant_id, resource_id) -> human-readable title`` or ``None`` when
-the resource is gone. The same shape as :data:`OwnerResolver` but a
-distinct registry: it reads the resource's display title (owner-bypassing,
-so a pending recipient can see what they were offered). A missing resolver
-for a kind simply yields no title — the inbox/outgoing listing skips that
-row rather than inventing one."""
 
 
 class ShareService:
-    """Orchestrates grants behind the ``/v1/shares`` routes.
-
-    Args:
-        shares: The share write/listing repository.
-        permissions: The permission chokepoint (manage checks and
-            subject assembly).
-        owner_resolvers: ``resource_type -> resolver``; an unknown
-            type is a 400, a vanished resource a 404.
-        title_resolvers: ``resource_type -> title resolver`` for the
-            recipient inbox and the "shared by me" listing. Optional and
-            additive: a kind with no resolver yields untitled rows that the
-            listings skip, so the access/grant surface is unaffected.
-        user_lookup: Async ``(tenant_id, sub) -> bool`` existence
-            check for invitees (typo guard against granting to
-            nonexistent subjects). The users mirror backs it.
-        audit: Audit sink for grant/revoke events.
-        restrict_to_members: When true, a grant is permitted only between
-            workspace co-members (``settings.sharing.restrict_to_workspace_members``).
-            Default false keeps sharing tenant-wide, byte-identical. It is a
-            grant-time (write) check only — the read/``can`` semantics are
-            unchanged, so flipping it never revokes an existing grant.
-    """
+    """Validate and orchestrate the direct-share lifecycle."""
 
     def __init__(
         self,
         *,
         shares: ShareAdminRepository,
-        permissions: "PermissionService",
+        permissions: "AuthorizationService",
         owner_resolvers: Mapping[str, OwnerResolver],
-        user_lookup: Callable[[str, str], Awaitable[bool]],
+        user_lookup: Callable[[str, uuid.UUID], Awaitable[bool]],
         audit: "AuditSink | None" = None,
         restrict_to_members: bool = False,
         title_resolvers: Mapping[str, TitleResolver] | None = None,
+        invalidator: "ResourceInvalidator | None" = None,
+        unsupported_resource_types: Sequence[str] = (),
     ) -> None:
         self._shares = shares
         self._permissions = permissions
@@ -313,35 +237,40 @@ class ShareService:
         self._user_lookup = user_lookup
         self._audit = audit
         self._restrict_to_members = restrict_to_members
+        self._invalidator = invalidator
+        self._unsupported_resource_types = frozenset(unsupported_resource_types)
 
     @property
     def resource_types(self) -> tuple[str, ...]:
-        """The shareable resource kinds this deployment knows."""
+        """Shareable resource kinds wired by this deployment."""
         return tuple(sorted(self._owner_resolvers))
 
-    async def _owner_or_manager(
+    @staticmethod
+    def _require_grantable_permission(
+        resource_type: str,
+        permission: SharePermission,
+    ) -> None:
+        """Reject a grant level unsupported by the target resource kind."""
+        allowed = share_permissions_for_resource(resource_type)
+        if permission in allowed:
+            return
+        allowed_values = ", ".join(f"'{item.value}'" for item in allowed)
+        raise ShareValidationError(
+            "Berechtigung ist fuer diesen Ressourcentyp ungueltig; "
+            f"erlaubt sind {allowed_values}"
+        )
+
+    async def _require_owner(
         self, principal: "Principal", resource_type: str, resource_id: str
-    ) -> str:
-        """The resource owner's sub; raises when the caller may not
-        manage shares (owner or an explicit ``manage`` grant)."""
+    ) -> uuid.UUID:
+        self._require_supported_backend(resource_type)
         resolver = self._owner_resolvers.get(resource_type)
-        if resolver is None:
-            raise ShareValidationError(
-                "Unbekannter Ressourcentyp: " + resource_type
-            )
-        owner_sub = await resolver(principal.tenant_id, resource_id)
-        if owner_sub is None:
+        if resolver is None or resource_type not in SHAREABLE_RESOURCE_TYPES:
+            raise ShareValidationError("Unbekannter Ressourcentyp: " + resource_type)
+        owner_user_id = await resolver(principal.tenant_id, resource_id)
+        if owner_user_id is None or owner_user_id != principal.user_id:
             raise ShareNotAllowed()
-        if owner_sub == principal.sub:
-            return owner_sub
-        if await self._permissions.can(
-            principal,
-            SharePermission.MANAGE,
-            resource_type=resource_type,
-            resource_id=resource_id,
-        ):
-            return owner_sub
-        raise ShareNotAllowed()
+        return owner_user_id
 
     async def grant(
         self,
@@ -349,220 +278,247 @@ class ShareService:
         *,
         resource_type: str,
         resource_id: str,
-        invitees: Sequence[tuple[str, SharePermission]],
+        invitees: Sequence[tuple[uuid.UUID, SharePermission]],
     ) -> tuple[ShareRecord, ...]:
-        """Grant shares to *invitees* (``(subject_sub, permission)``).
-
-        Invitees are validated and written one at a time in order, so a later
-        invitee that fails any check (including the workspace-member boundary)
-        raises AFTER earlier valid ones were already persisted —
-        first-failure-wins, no rollback. The ``/v1/shares`` UI sends one
-        invitee per request, so this partial-write window is not user-visible;
-        a multi-invitee caller must treat a raised error as "earlier grants in
-        the list may have landed".
-
-        Raises:
-            ShareValidationError: Unknown resource type, ungrantable
-                permission, self/owner grants, or (tenant-wide sharing) an
-                unknown invitee.
-            ShareNotAllowed: Caller may not manage the resource, or — when
-                workspace-scoped sharing is on — the invitee is not a
-                co-member. Both render 404 (denial hidden behind absence);
-                the boundary denial is logged + audited.
-        """
-        owner_sub = await self._owner_or_manager(
+        """Create a fully validated all-or-nothing invite batch."""
+        owner_user_id = await self._require_owner(
             principal, resource_type, resource_id
         )
-        created: list[ShareRecord] = []
-        for subject_sub, permission in invitees:
-            if permission not in GRANTABLE_PERMISSIONS:
-                raise ShareValidationError(
-                    "Berechtigung muss 'view' oder 'edit' sein"
-                )
-            if subject_sub == principal.sub:
-                raise ShareValidationError(
-                    "Eine Freigabe an sich selbst ist nicht moeglich"
-                )
-            if subject_sub == owner_sub:
-                raise ShareValidationError(
-                    "Die Eigentuemerin braucht keine Freigabe"
-                )
-            if self._restrict_to_members:
-                # Workspace-scoped sharing: the invitee must be a co-member.
-                # A non-co-member — or a non-existent sub, which belongs to no
-                # workspace — is hidden behind the SAME 404 as a foreign
-                # resource (indistinguishable, consistent with the scoped
-                # typeahead that never offers them, so co-membership is not an
-                # existence oracle). The denial is operator-visible via
-                # log + audit, never silent (Designprinzip 1).
-                if not await self._permissions.share_workspace(
-                    tenant_id=principal.tenant_id,
-                    sub_a=principal.sub,
-                    sub_b=subject_sub,
-                ):
+        if not invitees:
+            raise ShareValidationError("Mindestens eine Einladung ist erforderlich")
+        recipient_ids = [recipient for recipient, _permission in invitees]
+        if len(recipient_ids) != len(set(recipient_ids)):
+            raise ShareValidationError("Empfaenger duerfen nicht doppelt vorkommen")
+
+        for recipient_user_id, permission in invitees:
+            self._require_grantable_permission(resource_type, permission)
+            if recipient_user_id == owner_user_id:
+                raise ShareValidationError("Die Eigentuemerin braucht keine Freigabe")
+
+        if self._restrict_to_members:
+            allowed = await self._permissions.share_workspace_filter(
+                tenant_id=principal.tenant_id,
+                grantor_user_id=owner_user_id,
+                candidate_user_ids=tuple(recipient_ids),
+            )
+            if allowed != set(recipient_ids):
+                for denied in sorted(set(recipient_ids) - allowed, key=str):
                     await self._deny_share(
-                        principal, resource_type, resource_id, subject_sub
+                        principal, resource_type, resource_id, denied
                     )
-                    raise ShareNotAllowed()
-            elif not await self._user_lookup(
-                principal.tenant_id, subject_sub
+                raise ShareNotAllowed()
+
+        for recipient_user_id in recipient_ids:
+            if not await self._user_lookup(
+                principal.tenant_id, recipient_user_id
             ):
                 raise ShareValidationError(
-                    "Nutzer nicht gefunden: " + subject_sub
+                    "Nutzer nicht gefunden: " + str(recipient_user_id)
                 )
-            record = await self._shares.create_share(
+
+        created = await self._shares.create_shares(
+            tenant_id=principal.tenant_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            owner_user_id=owner_user_id,
+            granted_by_user_id=principal.user_id,
+            invitees=tuple(invitees),
+            restrict_to_members=self._restrict_to_members,
+        )
+        if not getattr(self._shares, "atomic_share_effects", False):
+            for record in created:
+                await self._audit_event(
+                    principal,
+                    "share.granted",
+                    resource_type,
+                    resource_id,
+                    {
+                        "recipient_user_id": str(record.recipient_user_id),
+                        "permission": record.permission.value,
+                    },
+                )
+            await self._invalidate(
                 tenant_id=principal.tenant_id,
-                subject_type="user",
-                subject_id=subject_sub,
+                owner_user_id=owner_user_id,
                 resource_type=resource_type,
                 resource_id=resource_id,
-                permission=permission,
-                granted_by_sub=principal.sub,
+                additional_targets=tuple(recipient_ids),
             )
-            created.append(record)
+        return created
+
+    async def update_permission(
+        self,
+        principal: "Principal",
+        *,
+        share_id: str,
+        permission: SharePermission,
+        expected_revision: int,
+    ) -> ShareRecord:
+        """Change an active share without resetting recipient consent."""
+        if expected_revision < 1:
+            raise ShareValidationError("expected_revision muss positiv sein")
+        pointer = await self._shares.get_share(
+            tenant_id=principal.tenant_id, share_id=share_id
+        )
+        if pointer is None:
+            raise ShareNotAllowed()
+        owner_user_id = await self._require_owner(
+            principal, pointer.resource_type, pointer.resource_id
+        )
+        self._require_grantable_permission(pointer.resource_type, permission)
+        updated = await self._shares.update_share_permission(
+            tenant_id=principal.tenant_id,
+            share_id=share_id,
+            permission=permission,
+            expected_revision=expected_revision,
+            actor_user_id=principal.user_id,
+            restrict_to_members=self._restrict_to_members,
+        )
+        if updated is None:
+            raise ShareNotAllowed()
+        if not getattr(self._shares, "atomic_share_effects", False):
             await self._audit_event(
-                principal, "share.granted", resource_type, resource_id,
-                {"subject": subject_sub, "permission": permission.value},
+                principal,
+                "share.permission_updated",
+                updated.resource_type,
+                updated.resource_id,
+                {
+                    "recipient_user_id": str(updated.recipient_user_id),
+                    "permission": updated.permission.value,
+                    "revision": str(updated.revision),
+                },
             )
-        return tuple(created)
+            await self._invalidate(
+                tenant_id=principal.tenant_id,
+                owner_user_id=owner_user_id,
+                resource_type=updated.resource_type,
+                resource_id=updated.resource_id,
+                additional_targets=(updated.recipient_user_id,),
+            )
+        return updated
 
-    async def revoke(
+    async def accept(
         self, principal: "Principal", *, share_id: str
-    ) -> bool:
-        """Revoke one share the caller may manage.
+    ) -> ShareRecord | None:
+        """Accept a pending share; an accepted own share is idempotent."""
+        pointer = await self._shares.get_share(
+            tenant_id=principal.tenant_id, share_id=share_id
+        )
+        if pointer is None or pointer.recipient_user_id != principal.user_id:
+            return None
+        if pointer.permission not in share_permissions_for_resource(
+            pointer.resource_type
+        ):
+            return None
+        owner_user_id = await self._resolve_owner(
+            principal.tenant_id, pointer.resource_type, pointer.resource_id
+        )
+        if owner_user_id is None:
+            return None
+        if self._restrict_to_members and not await self._permissions.share_workspace(
+            tenant_id=principal.tenant_id,
+            user_id_a=owner_user_id,
+            user_id_b=pointer.recipient_user_id,
+        ):
+            return None
+        accepted = await self._shares.accept_share_by_id(
+            tenant_id=principal.tenant_id,
+            share_id=share_id,
+            recipient_user_id=principal.user_id,
+            owner_user_id=owner_user_id,
+            restrict_to_members=self._restrict_to_members,
+        )
+        if accepted is None:
+            return None
+        if pointer.accepted_at is None and not getattr(
+            self._shares, "atomic_share_effects", False
+        ):
+            await self._audit_event(
+                principal,
+                "share.accepted",
+                accepted.resource_type,
+                accepted.resource_id,
+                {"owner_user_id": str(owner_user_id)},
+            )
+            await self._invalidate(
+                tenant_id=principal.tenant_id,
+                owner_user_id=owner_user_id,
+                resource_type=accepted.resource_type,
+                resource_id=accepted.resource_id,
+                additional_targets=(accepted.recipient_user_id,),
+            )
+        return accepted
 
-        Authorization runs BEFORE the write: the share is read, the
-        manage check applies to ITS resource, and only then does the
-        guarded revoke land. Unknown ids and foreign resources are
-        indistinguishable ``False`` (the router's 404).
-        """
+    async def remove(
+        self, principal: "Principal", *, share_id: str
+    ) -> ShareRemovalResult | None:
+        """Owner revoke or recipient decline/leave through one operation."""
         share = await self._shares.get_share(
             tenant_id=principal.tenant_id, share_id=share_id
         )
         if share is None:
-            return False
-        try:
-            await self._owner_or_manager(
-                principal, share.resource_type, share.resource_id
+            return None
+        owner_user_id = await self._resolve_owner(
+            principal.tenant_id, share.resource_type, share.resource_id
+        )
+        if principal.user_id == owner_user_id:
+            action = ShareRemoval.REVOKED
+        elif principal.user_id == share.recipient_user_id:
+            action = (
+                ShareRemoval.DECLINED
+                if share.accepted_at is None
+                else ShareRemoval.LEFT
             )
-        except (ShareNotAllowed, ShareValidationError):
-            return False
-        revoked = await self._shares.revoke_share_by_id(
+        else:
+            return None
+        removed = await self._shares.revoke_share_by_id(
             tenant_id=principal.tenant_id,
             share_id=share_id,
-            revoked_by_sub=principal.sub,
+            revoked_by_user_id=principal.user_id,
+            owner_user_id=owner_user_id,
         )
-        if revoked is None:
-            return False
-        await self._audit_event(
-            principal,
-            "share.revoked",
-            revoked.resource_type,
-            revoked.resource_id,
-            {"subject": revoked.subject_id},
-        )
-        return True
+        if removed is None:
+            return None
+        if not getattr(self._shares, "atomic_share_effects", False):
+            await self._audit_event(
+                principal,
+                f"share.{action.value}",
+                removed.resource_type,
+                removed.resource_id,
+                {"recipient_user_id": str(removed.recipient_user_id)},
+            )
+            await self._invalidate(
+                tenant_id=principal.tenant_id,
+                owner_user_id=owner_user_id,
+                resource_type=removed.resource_type,
+                resource_id=removed.resource_id,
+                additional_targets=(removed.recipient_user_id,),
+            )
+        return ShareRemovalResult(record=removed, action=action)
 
-    async def accept(
-        self, principal: "Principal", *, share_id: str
-    ) -> bool:
-        """Accept one pending share addressed to the caller.
-
-        Consent is the recipient's alone: the repository flips the share only
-        when it is active, still pending, and has ``subject_id ==
-        principal.sub``. Until this lands the share grants nothing — the
-        accepted timestamp is exactly what every visibility query filters on.
-
-        A successful acceptance is audited as ``share.accepted`` so the consent
-        is operator-visible. A denial (unknown id, foreign recipient,
-        already-accepted, revoked) returns an indistinguishable ``False`` — the
-        same 404-hiding convention as the owner-side :meth:`revoke`, and not an
-        audited security event: the benign cases dominate and the share id is a
-        UUID a foreign caller cannot guess, so loud auditing here would be noise
-        without signal (Designprinzip 5).
-        """
-        accepted = await self._shares.accept_share_by_id(
+    async def list_for_resource(
+        self, principal: "Principal", *, resource_type: str, resource_id: str
+    ) -> tuple[ShareRecord, ...]:
+        """List recipients; only the resource owner may manage sharing."""
+        await self._require_owner(principal, resource_type, resource_id)
+        return await self._shares.list_shares_for_resource(
             tenant_id=principal.tenant_id,
-            share_id=share_id,
-            subject_sub=principal.sub,
+            resource_type=resource_type,
+            resource_id=resource_id,
         )
-        if accepted is None:
-            return False
-        await self._audit_event(
-            principal,
-            "share.accepted",
-            accepted.resource_type,
-            accepted.resource_id,
-            {"granted_by": accepted.granted_by_sub},
-        )
-        return True
-
-    async def recipient_drop(
-        self, principal: "Principal", *, share_id: str
-    ) -> bool:
-        """Remove the caller's OWN share — decline a pending invitation or
-        leave an accepted one.
-
-        The recipient is the only party this empowers (the owner uses
-        :meth:`revoke` instead): the share must be a user share addressed to
-        ``principal.sub``. It soft-revokes, stamped with the recipient as
-        ``revoked_by_sub``, and audits ``share.declined`` (was pending) or
-        ``share.left`` (was accepted) so the action is operator-visible. A
-        foreign or unknown share is an indistinguishable ``False`` (the
-        router's 404).
-        """
-        share = await self._shares.get_share(
-            tenant_id=principal.tenant_id, share_id=share_id
-        )
-        if (
-            share is None
-            or share.subject_type != "user"
-            or share.subject_id != principal.sub
-        ):
-            return False
-        dropped = await self._shares.revoke_share_by_id(
-            tenant_id=principal.tenant_id,
-            share_id=share_id,
-            revoked_by_sub=principal.sub,
-        )
-        if dropped is None:
-            return False
-        action = (
-            "share.declined" if dropped.accepted_at is None else "share.left"
-        )
-        await self._audit_event(
-            principal,
-            action,
-            dropped.resource_type,
-            dropped.resource_id,
-            {"granted_by": dropped.granted_by_sub},
-        )
-        return True
 
     async def inbox(self, principal: "Principal") -> tuple[InboxItem, ...]:
-        """The caller's incoming DIRECT shares (pending + accepted), all kinds,
-        title-enriched and oldest first.
-
-        Pending rows are the consent queue; accepted rows are the "shared with
-        me" list — the surface splits them on ``accepted_at``. Rows whose
-        resource has vanished (no title) are dropped: an orphaned grant is
-        nothing the recipient can act on. The grantor display name is joined by
-        the router, which owns the users mirror.
-
-        Only the caller's OWN user shares are listed — NOT shares to groups the
-        caller belongs to. The inbox is the per-user consent surface, so every
-        row must be one the caller can accept or drop themselves; a group share
-        is a group-admin concern (and is schema-supported but never minted in
-        v1). This keeps the inbox symmetric with :meth:`recipient_drop` — no
-        undeclinable rows — and isolated from the permission/visibility union,
-        which keeps unioning groups via ``subjects_for``.
-        """
-        subject = SubjectRef(subject_type="user", subject_id=principal.sub)
-        records = await self._shares.inbox_for_subjects(
-            tenant_id=principal.tenant_id, subjects=(subject,)
+        """Return title-enriched pending and accepted lifecycle items."""
+        records = await self._shares.inbox_for_recipient(
+            tenant_id=principal.tenant_id,
+            recipient_user_id=principal.user_id,
         )
         items: list[InboxItem] = []
         for record in records:
+            if record.permission not in share_permissions_for_resource(
+                record.resource_type
+            ):
+                continue
             title = await self._resolve_title(
                 principal.tenant_id, record.resource_type, record.resource_id
             )
@@ -575,162 +531,119 @@ class ShareService:
                     resource_id=record.resource_id,
                     resource_title=title,
                     permission=record.permission,
-                    granted_by_sub=record.granted_by_sub,
+                    revision=record.revision,
+                    granted_by_user_id=record.granted_by_user_id,
                     created_at=record.created_at,
                     accepted_at=record.accepted_at,
                 )
             )
         return tuple(items)
 
-    async def outgoing(
-        self, principal: "Principal"
-    ) -> tuple[OutgoingItem, ...]:
-        """The resources the caller has shared out, grouped per resource with
-        active and pending counts, title-enriched (oldest resource first).
-
-        v1 reads ``granted_by_sub == caller`` — only owners mint shares today,
-        so this is exactly "what I shared". Resources without a title (deleted)
-        are dropped, mirroring :meth:`inbox`. (v2 note: if ``manage`` grants
-        become grantable, a co-manager's re-grant would list under the
-        re-grantor here, not the owner — revisit whether outgoing should track
-        the originating owner separately.)
-        """
-        records = await self._shares.outgoing_shares_for_grantor(
-            tenant_id=principal.tenant_id, grantor_sub=principal.sub
+    async def mine(self, principal: "Principal") -> tuple[OutgoingItem, ...]:
+        """Return owner lifecycle rows grouped per resource."""
+        if principal.user_id is None:
+            return ()
+        records = await self._shares.list_active_shares(
+            tenant_id=principal.tenant_id
         )
         grouped: dict[tuple[str, str], list[ShareRecord]] = {}
         for record in records:
-            grouped.setdefault(
-                (record.resource_type, record.resource_id), []
-            ).append(record)
+            grouped.setdefault((record.resource_type, record.resource_id), []).append(
+                record
+            )
         items: list[OutgoingItem] = []
         for (resource_type, resource_id), group in grouped.items():
+            owner_user_id = await self._resolve_owner(
+                principal.tenant_id, resource_type, resource_id
+            )
+            if owner_user_id != principal.user_id:
+                continue
             title = await self._resolve_title(
                 principal.tenant_id, resource_type, resource_id
             )
             if title is None:
                 continue
-            pending = sum(1 for record in group if record.accepted_at is None)
             items.append(
                 OutgoingItem(
                     resource_type=resource_type,
                     resource_id=resource_id,
                     resource_title=title,
                     share_count=len(group),
-                    pending_count=pending,
+                    pending_count=sum(row.accepted_at is None for row in group),
                 )
             )
         return tuple(items)
 
+    async def accepted_for_recipient(
+        self, principal: "Principal", *, resource_type: str
+    ) -> Mapping[str, ShareRecord]:
+        """Internal list-query seam; never exposed as a share HTTP route."""
+        if (
+            resource_type not in SHAREABLE_RESOURCE_TYPES
+            or resource_type in self._unsupported_resource_types
+        ):
+            return {}
+        records = await self._shares.shares_for_recipient(
+            tenant_id=principal.tenant_id,
+            resource_type=resource_type,
+            recipient_user_id=principal.user_id,
+        )
+        allowed = share_permissions_for_resource(resource_type)
+        return {
+            resource_id: record
+            for resource_id, record in records.items()
+            if record.permission in allowed
+        }
+
+    async def _resolve_owner(
+        self, tenant_id: str, resource_type: str, resource_id: str
+    ) -> uuid.UUID | None:
+        self._require_supported_backend(resource_type)
+        resolver = self._owner_resolvers.get(resource_type)
+        if resolver is None:
+            return None
+        return await resolver(tenant_id, resource_id)
+
     async def _resolve_title(
         self, tenant_id: str, resource_type: str, resource_id: str
     ) -> str | None:
-        """Human-readable title for one resource, or ``None`` when the kind has
-        no resolver or the resource is gone — the listings skip such rows
-        rather than showing a bare id."""
+        self._require_supported_backend(resource_type)
         resolver = self._title_resolvers.get(resource_type)
         if resolver is None:
             return None
         return await resolver(tenant_id, resource_id)
 
-    async def list_for_resource(
-        self, principal: "Principal", *, resource_type: str, resource_id: str
-    ) -> tuple[ShareRecord, ...]:
-        """Active shares on a resource the caller may at least view."""
-        resolver = self._owner_resolvers.get(resource_type)
-        if resolver is None:
-            raise ShareValidationError(
-                "Unbekannter Ressourcentyp: " + resource_type
+    def _require_supported_backend(self, resource_type: str) -> None:
+        """Reject known resource kinds whose store cannot transact sharing."""
+        if resource_type in self._unsupported_resource_types:
+            raise ShareBackendUnsupported(
+                f"Sharing is unsupported for {resource_type} in this deployment"
             )
-        owner_sub = await resolver(principal.tenant_id, resource_id)
-        if owner_sub is None:
-            raise ShareNotAllowed()
-        if owner_sub != principal.sub and not await self._permissions.can(
-            principal,
-            SharePermission.VIEW,
-            resource_type=resource_type,
-            resource_id=resource_id,
-        ):
-            raise ShareNotAllowed()
-        return await self._shares.list_shares_for_resource(
-            tenant_id=principal.tenant_id,
-            resource_type=resource_type,
-            resource_id=resource_id,
-        )
-
-    async def shared_with_me(
-        self, principal: "Principal", *, resource_type: str
-    ) -> Mapping[str, ShareRecord]:
-        """Shared-in resources of one kind for the caller."""
-        subjects = await self._permissions.subjects_for(principal)
-        return await self._shares.shares_for_subjects(
-            tenant_id=principal.tenant_id,
-            resource_type=resource_type,
-            subjects=subjects,
-        )
-
-    async def outgoing_counts(
-        self,
-        principal: "Principal",
-        *,
-        resource_type: str,
-        resource_ids: Sequence[str],
-    ) -> Mapping[str, int]:
-        """Active-share counts for badge rendering — owned ids only.
-
-        Foreign ids are silently dropped BEFORE counting: counts are
-        an existence/metadata oracle, and a caller probing resources
-        they do not own must learn nothing (the same hiding rule as
-        every other denial on this surface).
-
-        Raises:
-            ShareValidationError: Unknown resource type.
-        """
-        resolver = self._owner_resolvers.get(resource_type)
-        if resolver is None:
-            raise ShareValidationError(
-                "Unbekannter Ressourcentyp: " + resource_type
-            )
-        owned_ids = []
-        for resource_id in resource_ids:
-            owner_sub = await resolver(principal.tenant_id, resource_id)
-            if owner_sub == principal.sub:
-                owned_ids.append(resource_id)
-        if not owned_ids:
-            return {}
-        return await self._shares.share_counts_for_resources(
-            tenant_id=principal.tenant_id,
-            resource_type=resource_type,
-            resource_ids=owned_ids,
-        )
 
     async def _deny_share(
         self,
         principal: "Principal",
         resource_type: str,
         resource_id: str,
-        subject_sub: str,
+        recipient_user_id: uuid.UUID,
     ) -> None:
-        """Make a workspace-boundary share denial operator-visible.
-
-        Logged AND audited (mirroring :meth:`PermissionService._deny`) even
-        though the caller only ever sees an indistinct 404 — an authorization
-        denial must never be silent (Designprinzip 1).
-        """
         log.warning(
-            "share denied: actor=%s resource=%s/%s subject=%s "
+            "share denied: actor=%s resource=%s/%s recipient=%s "
             "reason=not_workspace_member",
-            principal.sub,
+            principal.user_id,
             resource_type,
             resource_id,
-            subject_sub,
+            recipient_user_id,
         )
         await self._audit_event(
             principal,
             "share.denied",
             resource_type,
             resource_id,
-            {"subject": subject_sub, "reason": "not_workspace_member"},
+            {
+                "recipient_user_id": str(recipient_user_id),
+                "reason": "not_workspace_member",
+            },
         )
 
     async def _audit_event(
@@ -746,10 +659,31 @@ class ShareService:
         await self._audit.record(
             AuditEntry(
                 tenant_id=principal.tenant_id,
-                actor_sub=principal.sub,
+                actor_user_id=principal.user_id,
                 action=action,
                 resource_type=resource_type,
                 resource_id=resource_id,
                 detail=detail,
             )
+        )
+
+    async def _invalidate(
+        self,
+        *,
+        tenant_id: str,
+        owner_user_id: uuid.UUID | None,
+        resource_type: str,
+        resource_id: str,
+        additional_targets: Sequence[uuid.UUID] = (),
+    ) -> None:
+        """Publish one memory-backend sharing invalidation fan-out."""
+        if self._invalidator is None:
+            return
+        await self._invalidator.invalidate(
+            tenant_id=tenant_id,
+            owner_user_id=owner_user_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            scope="sharing",
+            additional_targets=additional_targets,
         )

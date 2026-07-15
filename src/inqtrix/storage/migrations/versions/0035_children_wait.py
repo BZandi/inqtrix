@@ -7,24 +7,24 @@ An agent parent no longer block-polls its child research runs out of
 the shared execution pool: it parks slot-free in the NEW
 ``waiting_for_children`` status and the store re-queues it when the
 last child terminates. The ``ck_runs_status`` CHECK is rebuilt from the
-LIVE ``RunStatus`` enum, following 0029's precedent exactly: fresh
-installs already get the widened set via 0003/0029, existing databases
-get it here. No columns change — the park reuses ``waiting_since`` and
-the 0029 waiting machinery.
+status vocabulary deployed with this revision. The literal keeps later
+application-enum changes from rewriting migration history. No columns change
+-- the park reuses ``waiting_since`` and the 0029 waiting machinery.
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-from inqtrix.server.runs import RunStatus
-
 revision = "0035_children_wait"
 down_revision = "0034_agent_memory_feedback"
 branch_labels = None
 depends_on = None
 
-_STATUS_VALUES = ", ".join(f"'{status.value}'" for status in RunStatus)
+_STATUS_VALUES = (
+    "'queued', 'running', 'waiting_for_approval', 'waiting_for_input', "
+    "'waiting_for_children', 'completed', 'failed', 'cancelled', 'expired'"
+)
 
 
 def upgrade() -> None:

@@ -33,11 +33,31 @@ identity and therefore no user management or sharing.
   Administration section. The `/api/auth/session` payload's `role` field is the
   instance role; the UI gate is default-closed (anything that is not exactly
   `admin` yields no admin surface).
-- **Workspace role** (viewer / commenter / editor / owner) — per workspace, for
-  sharing runs/collections/templates. Managed in the share dialog, not here.
+- **Workspace role** (viewer / commenter / editor / owner) — membership and
+  administration inside one workspace. It never implies access to a run,
+  collection, prompt, or skill; those resources use explicit direct
+  `view`/`edit` shares. Workspace membership only limits who may share when
+  `INQTRIX_SHARING_RESTRICT_TO_WORKSPACE_MEMBERS=true`.
 
 Promoting someone to instance `admin` does not change their workspace roles, and
 vice versa.
+
+### Multiple admins do not require workspaces
+
+An instance may have two, three, or more active admins. Creating an account as
+an instance admin does **not** create a workspace and does not require a
+workspace membership. The two authorization axes stay independent:
+
+- an instance admin without any workspace membership can administer users,
+  quotas, and workspaces;
+- a workspace membership does not make a user an instance admin; and
+- the only cardinality guard is that the deployment must retain at least one
+  active instance admin.
+
+Quotas are independent as well. With `INQTRIX_QUOTA_ENABLED=false`, adding
+users or admins does not activate metering or impose an implicit limit. Query
+parameters such as `limit=100` on list APIs are page-size controls, not usage
+quotas.
 
 ## `local`: first-run owner setup
 
@@ -90,7 +110,8 @@ In **Settings → Administration → Users** an admin can, per row:
 - **Disable / enable** via the status switch — disabling is a complete cut-off:
   the mirror flag is set, live sessions are purged, personal access tokens are
   revoked, and (for `local`) the password credential is disabled so login is
-  refused. Re-enabling clears the flag.
+  refused. Re-enabling permits a fresh login but restores no old session or
+  token; the user must sign in again and create new tokens when needed.
 
 Two invariants protect the deployment from locking itself out, enforced
 server-side (atomic) and reflected in the UI (the control is disabled with a

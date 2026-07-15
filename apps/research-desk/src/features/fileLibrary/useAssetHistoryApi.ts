@@ -30,7 +30,6 @@ import {
   deleteAssetGroup,
   deleteAssetSection,
   getAsset,
-  hasHttpStatus,
   listAssetGroups,
   listAssetSections,
   listAssets,
@@ -57,6 +56,7 @@ import {
   type SyncLifecycleToken,
 } from '@/features/project/useProjectSyncLifecycle'
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
+import { legacyFileSectionIdReplacements } from '@/features/files/sections'
 
 const AUTOSAVE_DEBOUNCE_MS = 1_500
 const PAGE_LIMIT = 200
@@ -67,7 +67,7 @@ function messageFromError(error: unknown): string {
 
 /** Swallow a 404 on delete (the section-cascade case): see deleteTolerant404. */
 function deleteTolerant(run: () => Promise<void>): Promise<void> {
-  return deleteTolerant404(run, (error) => hasHttpStatus(error, 404))
+  return deleteTolerant404(run)
 }
 
 type UseAssetHistoryApiOptions = {
@@ -287,6 +287,13 @@ export function useAssetHistoryApi({
           cursor = page.next_cursor ?? undefined
         } while (cursor)
         if (token.cancelled) return
+        const sectionReplacements = legacyFileSectionIdReplacements(
+          sectionsRef.current,
+          new Set(sectionRecords.map((record) => record.id)),
+        )
+        if (Object.keys(sectionReplacements).length > 0) {
+          dispatch({ replacements: sectionReplacements, type: 'rekeyFileLibrarySectionIds' })
+        }
         // Assets already in the local project carry an authoritative body
         // (loaded from the markdown). Captured BEFORE the merge dispatch so a
         // server-only asset (hydrated with extractedText="") is distinguishable.

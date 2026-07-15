@@ -8,6 +8,7 @@ foreign/unknown token ids are indistinguishable 404s.
 
 from __future__ import annotations
 
+from inqtrix.auth.directory import MemoryUserDirectory
 from inqtrix.auth.pat import MemoryPatStore, PatService, PatVerifier
 
 from tests.test_oidc_bff import (
@@ -24,9 +25,15 @@ def make_pat_client():
     """Logged-in client whose provider carries the PAT collaborators."""
     idp = FakeIdp()
     store = MemoryPatStore()
+    users = MemoryUserDirectory()
     provider, _users = make_provider(
         idp,
-        pats=PatVerifier(store=store, pepper=PEPPER),
+        users=users,
+        pats=PatVerifier(
+            store=store,
+            pepper=PEPPER,
+            user_lookup=users,
+        ),
         pat_service=PatService(store=store, pepper=PEPPER, max_per_user=2),
     )
     client = make_app(provider)
@@ -61,6 +68,7 @@ def test_create_returns_plaintext_exactly_once():
 def test_bearer_request_succeeds_without_csrf():
     client, csrf = make_pat_client()
     token = create_token(client, csrf).json()["token"]
+    user_id = client.get("/api/auth/session").json()["user"]["id"]
     # POST is an unsafe method; with a Bearer PAT no CSRF header is
     # needed because no cookie-bound ambient authority is in play.
     client.cookies.clear()
@@ -68,7 +76,7 @@ def test_bearer_request_succeeds_without_csrf():
         "/v1/protected", headers={"Authorization": f"Bearer {token}"}
     )
     assert response.status_code == 200
-    assert response.json()["sub"] == "user-1234"
+    assert response.json()["sub"] == user_id
 
 
 def test_bearer_never_falls_through_to_the_cookie():

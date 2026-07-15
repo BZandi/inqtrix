@@ -49,7 +49,7 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSON, UUID
 
 knowledge_metadata = MetaData()
 
@@ -61,12 +61,12 @@ knowledge_collections = Table(
     Column("name", Text, nullable=False),
     Column("embedding_model", Text, nullable=False),
     Column("embedding_dim", Integer, nullable=False),
-    Column("created_by_sub", Text, nullable=True),
+    Column("created_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("created_at", Float, nullable=False),
     Index("ix_knowledge_collections_tenant_created", "tenant_id", "created_at"),
 )
 """Logical knowledge collections. ``embedding_model``/``embedding_dim``
-are immutable after creation; ``created_by_sub`` is the ownership anchor
+are immutable after creation; ``created_by_user_id`` is the ownership anchor
 (``None`` = legacy/unscoped, visible to all — the established rule). Knowledge
 is the cross-workspace SHARING surface (owner + ACL via resource_shares), NOT
 per-workspace project data, so there is deliberately NO workspace_id dimension

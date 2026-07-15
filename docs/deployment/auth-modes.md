@@ -12,11 +12,11 @@ Misconfiguration raises at startup instead of silently downgrading.
 
 | Mode | Scenario | Principal | Credential per request |
 |---|---|---|---|
-| `none` | Single user, local machine, or behind your own gateway | `__anonymous__` | none |
-| `apikey` | One shared token for scripts and a trusted UI | `__static__` | `Authorization: Bearer <key>` |
-| `oidc` | Multi-user browser deployment against an identity provider | IdP subject (`oidc_session`) | session cookie + CSRF token |
-| `local` | Multi-user with native email/password accounts (no external IdP) | local user (`oidc_session`, issuer `local`) | session cookie + CSRF token |
-| `ldap` | Multi-user bound to an existing LDAP/AD directory | directory user (`oidc_session`, issuer `ldap`) | session cookie + CSRF token |
+| `none` | Single user, local machine, or behind your own gateway | anonymous, `user_id=null` | none |
+| `apikey` | One shared token for scripts and a trusted UI | static, `user_id=null` | `Authorization: Bearer <key>` |
+| `oidc` | Multi-user browser deployment against an identity provider | canonical `users.id` UUID (`oidc_session`) | session cookie + CSRF token |
+| `local` | Multi-user with native email/password accounts (no external IdP) | canonical `users.id` UUID (`oidc_session`) | session cookie + CSRF token |
+| `ldap` | Multi-user bound to an existing LDAP/AD directory | canonical `users.id` UUID (`oidc_session`) | session cookie + CSRF token |
 
 ### Mode resolution when `INQTRIX_AUTH_MODE` is unset
 
@@ -49,6 +49,13 @@ gates register them — `/v1/files*`, `/v1/knowledge/*`, `/v1/sources/*`.
 In `oidc` mode the `/api/auth/*` routes are additionally mounted; they are
 the credential surface itself (only `/api/auth/logout` requires an
 authenticated session).
+
+`GET /v1/stacks` is capability discovery, not a required business-data read.
+A single-stack deployment may answer 404 to indicate that no stack registry is
+available; the research desk treats that result as an expected capability
+outcome. Likewise, a 404 while deleting an already-absent synchronized asset is
+an idempotent success for that delete. Neither optional 404 is a global server
+synchronization failure.
 
 ## Mode `none`
 
@@ -109,7 +116,9 @@ GET /api/auth/callback?code=&state=
                                an HttpOnly session cookie and a
                                JS-readable CSRF cookie
 GET /api/auth/session          SPA bootstrap: {"authenticated": true,
-                               "sub": ..., "email": ..., "display_name": ...,
+                               "user": {"id": "<uuid>", "email": ...,
+                               "display_name": ..., "role": ...},
+                               "project_namespace": ...,
                                "csrf_token": ...} — or {"authenticated": false}
 POST /api/auth/logout          destroys the server-side session
                                (CSRF-protected like every unsafe request)
@@ -119,6 +128,15 @@ Every unsafe method (`POST`/`PUT`/`PATCH`/`DELETE`) of a cookie-authenticated
 request must carry the bootstrap token in the `X-CSRF-Token` header; a
 missing or invalid token returns 403 with `"type": "csrf_error"`.
 
+After session bootstrap, the Research Desk also sends
+`X-Inqtrix-Expected-User-Id` on protected API requests. This is not an
+authentication credential: the server still resolves the cookie/PAT normally,
+then compares the live principal with the user whose state the SPA rendered.
+If another tab changed the cookie session, the request is rejected before the
+domain operation with `409 principal_changed` and the SPA reloads. API clients
+that omit the additive header keep the existing contract. The per-user SSE
+stream repeats the live check before data and quiet keepalive frames.
+
 Session, login-flow, and user records follow `INQTRIX_STORAGE_BACKEND`:
 `memory` (default, single process, logins lost on restart) or `postgres`
 (logins survive restarts and replica switches). See
@@ -127,9 +145,13 @@ Session, login-flow, and user records follow `INQTRIX_STORAGE_BACKEND`:
 ## Bring your own IdP
 
 Inqtrix speaks only standard OIDC — discovery, authorization code + PKCE —
-and hardwires no identity provider (ADR-AUTH-1). Dex, Keycloak, Entra ID,
-Okta, and authentik are configuration, not code. The identity anchor is
-`(issuer, subject)`; email is display metadata, never an identity key.
+and hardwires no identity provider. Dex, Keycloak, Entra ID, Okta, and
+authentik are configuration, not code. `(issuer, subject)` is retained only
+inside the authentication adapter as the external-account binding. A
+successful login resolves that binding to the deployment-local `users.id`
+UUID; every ownership, membership, quota, sharing, session, PAT, audit, and
+actor decision uses that UUID. Email is display metadata, never an identity
+key.
 
 Beyond the connection variables above, the claim-mapping contract:
 
@@ -146,7 +168,7 @@ Beyond the connection variables above, the claim-mapping contract:
 | `INQTRIX_OIDC_ADMIN_GROUPS` | empty | comma-separated group values that grant instance-admin on login (grant-only) |
 | `INQTRIX_OIDC_CLAIM_SEPARATORS` | space + comma | characters a string-valued group/role claim is split on (a JSON array is used as-is) |
 | `INQTRIX_OIDC_GROUPS_STRIP_PATH_PREFIX` | `false` | strip one leading `/` from group values (Keycloak full-path groups) |
-| `INQTRIX_OIDC_SKIP_EMAIL_VERIFIED` | `false` | accept tokens without `email_verified=true` |
+| `INQTRIX_OIDC_SKIP_EMAIL_VERIFIED` | `false` | explicitly bypass the requirement that `email_verified` is exactly `true`; missing and `false` are rejected alike, and enabling this bypass logs a warning |
 | `INQTRIX_OIDC_DISCOVERY_URL` | empty | metadata URL override; the document's `issuer` must still match `INQTRIX_OIDC_ISSUER` |
 | `INQTRIX_OIDC_USERINFO_FALLBACK` | `true` | fetch userinfo when the id_token lacks mapped claims (incl. the roles claim when admin elevation is configured) |
 | `INQTRIX_OIDC_PROVIDER_NAME` | empty | SSO button display name surfaced by `GET /api/auth/config` (e.g. `Okta`) |
@@ -255,16 +277,53 @@ copy-paste recipe is the
 - **Cookies** — HttpOnly session cookie with the `__Host-` prefix,
   `Secure`, and `SameSite=Lax` in secure mode.
 - **`Cache-Control: no-store`** on every `/api/auth/*` response.
+- **Live account status** — cookie sessions and PATs resolve the canonical
+  user on every request. Disabling a user invalidates existing credentials;
+  re-enabling the account does not restore old sessions or PATs.
+
+## Canonical identity and direct sharing
+
+`users.id` (`UUID`) is the only application-level user identifier. Public
+session, user-search, admin, quota, workspace-member, and sharing contracts use
+`user.id` or `user_id`; they do not expose or accept IdP subjects. Anonymous
+and static-key deployments deliberately keep `user_id=null`, create no
+synthetic user, and do not expose sharing.
+
+Resource sharing is a direct user-to-resource consent contract. It supports
+`view` and `edit` for `run`, `knowledge_collection`, `prompt_template`, and
+`skill_template`. Collaboration-mode `editor_document` resources additionally
+support `suggest`; that value is rejected for every other resource type. There
+are no local sharing groups, inherited workspace resource rights, direct file
+shares, or `comment`/`manage` permissions.
+Workspace roles remain useful for workspace administration and, when enabled,
+for constraining which users may receive a direct share; they do not themselves
+grant access to a resource.
+
+The lifecycle routes are:
+
+| Route | Behaviour |
+|---|---|
+| `GET /v1/users/search?q=...` | Returns `id`, display name, and email for share recipients. |
+| `POST /v1/shares` | Atomically creates only new pending shares. Body: `{"resource_type":"prompt_template","resource_id":"pt_...","invitees":[{"user_id":"<uuid>","permission":"edit"}]}`. Duplicate/invalid invitees return 400 with no writes; an existing active share returns 409. |
+| `GET /v1/shares?resource_type=...&resource_id=...` | Owner-only lifecycle view for one resource. |
+| `PATCH /v1/shares/{share_id}` | Owner-only permission update with `permission` and integer `expected_revision`; stale revisions return 409 with `current_revision`. Acceptance is retained for this same share. |
+| `POST /v1/shares/{share_id}/accept` | Recipient-only, idempotent acceptance. Pending becomes active; an already accepted share returns its current record; revoked or foreign ids are indistinguishable 404s. |
+| `DELETE /v1/shares/{share_id}` | Owner revokes, or recipient declines/leaves; returns 204. |
+| `GET /v1/shares/inbox` | Incoming pending and accepted lifecycle records. It is not the resource list. |
+| `GET /v1/shares/mine` | Owner summary of resources with outgoing shares. It is not the resource list. |
+
+Revoking and sharing again creates a new share id and requires fresh consent.
+Regular resource lists return owned and accepted-shared records together with
+an `access` object: `{"mode":"unscoped"}`, `{"mode":"owner"}`, or
+`{"mode":"shared","permission":"view|edit"}`; editor documents may also
+return `permission="suggest"`. Authorization is checked
+live at each read or mutation boundary; a list result or frontend cache is not
+an authorization grant. Owner-only operations include resource deletion and
+share management. An `edit` recipient may mutate the supported resource but
+cannot re-share or delete it.
 
 TLS, CORS, and request limits are covered in
 [Security hardening](security-hardening.md).
-
-## Related docs
-
-- [Security hardening](security-hardening.md)
-- [Web server mode](webserver-mode.md)
-- [Settings and env](../configuration/settings-and-env.md)
-- [React UI](react-ui.md)
 
 ## Personal access tokens (oidc, local, ldap)
 
@@ -287,6 +346,11 @@ PAT cannot mint or revoke PATs. Tuning: `INQTRIX_PAT_MAX_PER_USER`
 (default 10), `INQTRIX_PAT_DEFAULT_TTL_DAYS` (default 0 = no expiry).
 Tokens persist only with the postgres storage backend; the memory
 default logs a loud warning that they vanish on restart.
+
+PATs can access ordinary resource APIs according to their principal, but they
+cannot obtain a live editor collaboration lease. That transport requires the
+cookie session id so lease rotation and immediate session revocation remain
+bound to the active browser login.
 
 ## Invitation-gated registration (oidc mode)
 
@@ -319,12 +383,18 @@ mutation is audited (`quota.override` / `quota.override_cleared` /
 `quota.reset`). The self-meter `GET /v1/quota/usage` is separate and available
 to any scoped principal.
 
+With `INQTRIX_QUOTA_ENABLED=false`, quota accounting is disabled for every
+user, independently of account count, instance role, and workspace membership.
+No workspace is created as a side effect of creating or promoting an admin.
+List parameters named `limit` remain pagination controls and do not enable a
+quota.
+
 | Route | Effect |
 |-------|--------|
-| `GET /v1/admin/quota` | Overview: metered subjects with usage, effective limits, and operator ceilings. |
-| `PUT /v1/admin/quota/limits` | Set the tenant default or a per-user override (`{"subject_id": "<sub>\|__quota_default__", "dimension": ..., "value": <int>=0>}`; `0` = unlimited). |
-| `DELETE /v1/admin/quota/limits?subject_id=...&dimension=...` | Drop a limit so it falls back to the next layer (204). |
-| `POST /v1/admin/quota/reset` | Zero one subject's current-window flow usage (`{"subject_id": ..., "dimension": ...}`; stock dimensions are a 400). |
+| `GET /v1/admin/quota` | Overview: metered users with usage, effective limits, and operator ceilings. |
+| `PUT /v1/admin/quota/limits` | Set the tenant default or a per-user override (`{"user_id": "<uuid>\|default", "dimension": ..., "value": <int>=0>}`; `0` = unlimited). |
+| `DELETE /v1/admin/quota/limits?user_id=...&dimension=...` | Drop a limit so it falls back to the next layer (204). |
+| `POST /v1/admin/quota/reset` | Zero one user's current-window flow usage (`{"user_id": "<uuid>", "dimension": ...}`; stock dimensions are a 400). |
 
 (Before v0.2.0 these lived under `/v1/workspaces/{id}/quota*` and were gated on
 the workspace OWNER; the move to `/v1/admin/quota*` aligns them with the
@@ -339,6 +409,10 @@ ownership. Available in every cookie-session mode (`oidc`/`local`/`ldap`) when
 a user mirror and the membership store are wired; denials hide behind 404 (a
 non-admin session, a PAT, or anonymous). Every mutation is audited.
 
+Workspace membership is optional for an instance admin. Multiple admins with
+no workspace membership are supported; workspace creation and assignment are
+explicit administrative actions rather than account-creation side effects.
+
 | Route | Effect |
 |-------|--------|
 | `GET /v1/admin/workspaces` | List every workspace with its member count. |
@@ -346,9 +420,9 @@ non-admin session, a PAT, or anonymous). Every mutation is audited.
 | `PATCH /v1/admin/workspaces/{id}` | Rename (`{"name": "..."}`). |
 | `DELETE /v1/admin/workspaces/{id}` | Delete the workspace; memberships cascade. |
 | `GET /v1/admin/workspaces/{id}/members` | Members with display name + email. |
-| `POST /v1/admin/workspaces/{id}/members` | Assign a user (`{"sub": ..., "role": "viewer\|commenter\|editor\|owner"}`); an unknown or disabled user is 404. |
-| `PATCH /v1/admin/workspaces/{id}/members/{sub}` | Change a member's role; demoting the last OWNER is refused (409). |
-| `DELETE /v1/admin/workspaces/{id}/members/{sub}` | Remove a member; removing the last OWNER is refused (409). |
+| `POST /v1/admin/workspaces/{id}/members` | Assign a user (`{"user_id": "<uuid>", "role": "viewer\|commenter\|editor\|owner"}`); an unknown or disabled user is 404. |
+| `PATCH /v1/admin/workspaces/{id}/members/{user_id}` | Change a member's role; demoting the last OWNER is refused (409). |
+| `DELETE /v1/admin/workspaces/{id}/members/{user_id}` | Remove a member; removing the last OWNER is refused (409). |
 
 ### Confining sharing to workspaces
 
@@ -357,8 +431,19 @@ share target, and the share typeahead (`GET /v1/users/search`) searches the
 whole tenant. Set `INQTRIX_SHARING_RESTRICT_TO_WORKSPACE_MEMBERS=true` to
 confine collaboration to workspace boundaries — a user may then only share
 with people they share at least one workspace with, and the typeahead is
-scoped the same way. The check runs at grant time (`POST /v1/shares` returns a
-400 for a non-co-member), so the typeahead filter is convenience, not the
-boundary. Default `false` keeps the historical tenant-wide behaviour
-byte-identical and never revokes an existing grant.
+scoped the same way. The typeahead remains convenience only; grant, accept,
+and every live resource access enforce the same boundary fail-closed.
 
+The constraint is continuous. Removing a member or deleting a workspace
+revokes pending and accepted shares in either direction when that was the last
+common workspace; another common workspace preserves them. Startup reconciles
+existing shares before readiness whenever the setting is enabled. Turning the
+setting off stops this workspace check but does not resurrect previously
+revoked shares.
+
+## Related docs
+
+- [Security hardening](security-hardening.md)
+- [Editor collaboration](editor-collaboration.md)
+- [Settings and env](../configuration/settings-and-env.md)
+- [React UI](react-ui.md)

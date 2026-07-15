@@ -8,16 +8,14 @@ production, in-process for dev/test); original binaries live in the
 object store. This store owns the canonical half and delegates vectors
 to the index, hydrating retrieval hits back from Postgres.
 
-Sync is flag-based, not an outbox: the canonical rows commit first with
-``vector_synced=false``, then the vectors upsert to the index and the
-flag flips to ``true``. If the vector upsert fails, the exception
-propagates (visible) and the row stays ``vector_synced=false`` — a
-durable, queryable "vectors out of sync" diagnostic (No Silent
-Fallbacks). Repair is by re-running reindex, which re-embeds the
-collection's documents from their canonical Postgres text and flips the
-flag back to ``true``. No vector duplication in Postgres and no separate
-sync worker; an automatic reconcile sweep keyed on the flag (the run
-store's orphan-sweep analogue) is a deliberate follow-up.
+Sync is flag-based, not an outbox: document mutations hold the collection
+row lock while the vector side effect runs, then commit the canonical rows
+with ``vector_synced=true``. Reindex submit takes that same lock and therefore
+cannot snapshot a half-finished mutation. A vector failure propagates and
+rolls back the canonical transaction. A partial first insert is an orphan the
+existing reconcile removes; a failed in-place replacement remains a visible
+failed reindex and is repaired by rerunning that same operation. There is no
+vector duplication in Postgres and no separate sync worker.
 
 Every operation runs inside :func:`~inqtrix.storage.db.tenant_session`
 (restricted role + transaction-local tenant GUC), with explicit tenant
@@ -36,10 +34,12 @@ import time
 import uuid
 
 from sqlalchemy import delete, func, insert, select, tuple_, update
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from inqtrix.auth.permissions import ResourceAccess, SharePermission
 from inqtrix.pagination import encode_cursor
 from inqtrix.knowledge.stores.ports import (
+    CollectionMaintenanceActive,
     CollectionNotFound,
     DocumentChunk,
     DocumentNotFound,
@@ -57,6 +57,17 @@ from inqtrix.storage.knowledge_orm import (
     knowledge_chunks,
     knowledge_collections,
     knowledge_documents,
+)
+from inqtrix.server.indexing import ACTIVE_INDEXING_STATUS_VALUES
+from inqtrix.storage.indexing_orm import indexing_jobs
+from inqtrix.storage.resource_access import (
+    VISIBLE_SHARE_PERMISSION,
+    append_resource_effects,
+    listed_resource_access,
+    lock_active_users,
+    lock_resource_access,
+    revoke_resource_shares,
+    visible_resource_select,
 )
 
 _DEFAULT_TENANT = "default"
@@ -82,11 +93,28 @@ class PostgresKnowledgeStore:
         engine: AsyncEngine,
         app_role: str,
         vector_index: VectorIndex,
+        restrict_to_workspace_members: bool = False,
     ) -> None:
         self._engine = engine
         self._session_factory = build_session_factory(engine)
         self._app_role = app_role
         self._vectors = vector_index
+        self._restrict_to_workspace_members = restrict_to_workspace_members
+
+    @property
+    def atomic_resource_effects(self) -> bool:
+        """Audit, invalidation, and share cleanup join canonical writes."""
+        return True
+
+    @property
+    def supports_safe_reindex(self) -> bool:
+        """Collection-row locking serializes jobs against canonical writes."""
+        return True
+
+    @property
+    def supports_collection_sharing(self) -> bool:
+        """Canonical collection and share rows share Postgres transactions."""
+        return True
 
     @property
     def supports_hybrid(self) -> bool:
@@ -194,7 +222,7 @@ class PostgresKnowledgeStore:
         name: str,
         embedding_model: str,
         embedding_dim: int,
-        created_by_sub: str | None = None,
+        created_by_user_id: uuid.UUID | None = None,
     ) -> KnowledgeCollection:
         """Create a collection with its immutable embedding identity."""
         if embedding_dim <= 0:
@@ -212,9 +240,18 @@ class PostgresKnowledgeStore:
             created_at=time.time(),
             document_count=0,
             tenant_id=_DEFAULT_TENANT,
-            created_by_sub=created_by_sub,
+            created_by_user_id=created_by_user_id,
         )
         async with self._session() as session:
+            if (
+                created_by_user_id is not None
+                and not await lock_active_users(
+                    session,
+                    tenant_id=_DEFAULT_TENANT,
+                    user_ids=(created_by_user_id,),
+                )
+            ):
+                raise CollectionNotFound(collection.id)
             await session.execute(
                 insert(knowledge_collections).values(
                     id=collection.id,
@@ -222,9 +259,19 @@ class PostgresKnowledgeStore:
                     name=collection.name,
                     embedding_model=collection.embedding_model,
                     embedding_dim=collection.embedding_dim,
-                    created_by_sub=collection.created_by_sub,
+                    created_by_user_id=collection.created_by_user_id,
                     created_at=collection.created_at,
                 )
+            )
+            await append_resource_effects(
+                session,
+                tenant_id=_DEFAULT_TENANT,
+                actor_user_id=created_by_user_id,
+                owner_user_id=created_by_user_id,
+                action="knowledge_collection.created",
+                resource_type="knowledge_collection",
+                resource_id=collection.id,
+                scope="knowledge_collections",
             )
         return collection
 
@@ -241,6 +288,34 @@ class PostgresKnowledgeStore:
             counts = await self._document_counts(session)
         return [self._collection_from_row(row, counts) for row in rows]
 
+    async def list_visible_collections(
+        self, *, actor_user_id: uuid.UUID | None
+    ) -> list[tuple[KnowledgeCollection, ResourceAccess]]:
+        """List owned and accepted-shared collections in one live SQL query."""
+        statement = visible_resource_select(
+            resource_table=knowledge_collections,
+            id_column=knowledge_collections.c.id,
+            owner_column=knowledge_collections.c.created_by_user_id,
+            resource_type="knowledge_collection",
+            tenant_id=_DEFAULT_TENANT,
+            actor_user_id=actor_user_id,
+            restrict_to_workspace_members=self._restrict_to_workspace_members,
+        ).order_by(knowledge_collections.c.created_at.desc())
+        async with self._session() as session:
+            rows = (await session.execute(statement)).all()
+            counts = await self._document_counts(session)
+        return [
+            (
+                self._collection_from_row(row, counts),
+                listed_resource_access(
+                    owner_user_id=row.created_by_user_id,
+                    actor_user_id=actor_user_id,
+                    share_permission=getattr(row, VISIBLE_SHARE_PERMISSION),
+                ),
+            )
+            for row in rows
+        ]
+
     async def get_collection(self, collection_id: str) -> KnowledgeCollection:
         """One collection or :class:`CollectionNotFound`."""
         async with self._session() as session:
@@ -248,20 +323,52 @@ class PostgresKnowledgeStore:
             counts = await self._document_counts(session, collection_id)
         return self._collection_from_row(row, counts)
 
-    async def delete_collection(self, collection_id: str) -> None:
+    async def delete_collection(
+        self,
+        collection_id: str,
+        *,
+        actor_user_id: uuid.UUID | None = None,
+    ) -> None:
         """Delete a collection with all documents/chunks (DB cascade + vectors)."""
         async with self._session() as session:
-            row = await self._collection_row(session, collection_id)
+            row, access = await self._mutable_collection_row(
+                session,
+                collection_id,
+                actor_user_id=actor_user_id,
+                owner_only=True,
+            )
             embedding_model = row.embedding_model
+            recipients = await revoke_resource_shares(
+                session,
+                tenant_id=_DEFAULT_TENANT,
+                resource_type="knowledge_collection",
+                resource_id=collection_id,
+                revoked_by_user_id=actor_user_id,
+            )
             await session.execute(
                 delete(knowledge_collections).where(
                     knowledge_collections.c.tenant_id == _DEFAULT_TENANT,
                     knowledge_collections.c.id == collection_id,
                 )
             )
-        await self._vectors.delete_collection(
-            embedding_model=embedding_model, collection_id=collection_id
-        )
+            await append_resource_effects(
+                session,
+                tenant_id=_DEFAULT_TENANT,
+                actor_user_id=actor_user_id,
+                owner_user_id=access.owner_user_id,
+                action="knowledge_collection.deleted",
+                resource_type="knowledge_collection",
+                resource_id=collection_id,
+                scope="knowledge_collections",
+                additional_targets=recipients,
+            )
+            # Keep the collection row lock until the external side effect
+            # finishes. Reindex submit takes the same row lock, so it cannot
+            # snapshot a half-finished delete and later resurrect vectors.
+            await self._vectors.delete_collection(
+                embedding_model=embedding_model,
+                collection_id=collection_id,
+            )
 
     # -- documents --------------------------------------------------------- #
 
@@ -276,10 +383,15 @@ class PostgresKnowledgeStore:
         embeddings: list[list[float]],
         source_chunks: list[str] | None = None,
         page_numbers: list[int | None] | None = None,
+        actor_user_id: uuid.UUID | None = None,
     ) -> KnowledgeDocument:
         """Store a document's canonical rows, then sync its vectors."""
         async with self._session() as session:
-            collection = await self._collection_row(session, collection_id)
+            collection, access = await self._mutable_collection_row(
+                session,
+                collection_id,
+                actor_user_id=actor_user_id,
+            )
             self._validate_embeddings(chunks, embeddings, collection.embedding_dim)
             document_id = _new_id("kd")
             created_at = time.time()
@@ -306,14 +418,25 @@ class PostgresKnowledgeStore:
             )
             if chunk_rows:
                 await session.execute(insert(knowledge_chunks), chunk_rows)
+            await append_resource_effects(
+                session,
+                tenant_id=_DEFAULT_TENANT,
+                actor_user_id=actor_user_id,
+                owner_user_id=access.owner_user_id,
+                action="knowledge_document.created",
+                resource_type="knowledge_collection",
+                resource_id=collection_id,
+                scope="knowledge_collections",
+            )
             embedding_model = collection.embedding_model
-        await self._sync_vectors(
-            embedding_model=embedding_model,
-            collection_id=collection_id,
-            document_id=document_id,
-            chunk_rows=chunk_rows,
-            embeddings=embeddings,
-        )
+            await self._sync_vectors(
+                session=session,
+                embedding_model=embedding_model,
+                collection_id=collection_id,
+                document_id=document_id,
+                chunk_rows=chunk_rows,
+                embeddings=embeddings,
+            )
         return KnowledgeDocument(
             id=document_id,
             collection_id=collection_id,
@@ -421,21 +544,48 @@ class PostgresKnowledgeStore:
             for row in rows
         ]
 
-    async def delete_document(self, document_id: str) -> None:
+    async def delete_document(
+        self,
+        document_id: str,
+        *,
+        actor_user_id: uuid.UUID | None = None,
+    ) -> None:
         """Delete one document and its chunks (DB cascade + vectors)."""
         async with self._session() as session:
-            row = await self._document_row(session, document_id)
-            collection = await self._collection_row(session, row.collection_id)
+            preliminary = await self._document_row(session, document_id)
+            collection, access = await self._mutable_collection_row(
+                session,
+                preliminary.collection_id,
+                actor_user_id=actor_user_id,
+            )
+            row = await self._document_row(
+                session, document_id, for_update=True
+            )
+            if row.collection_id != preliminary.collection_id:
+                raise DocumentNotFound(document_id)
             embedding_model = collection.embedding_model
-            await session.execute(
+            result = await session.execute(
                 delete(knowledge_documents).where(
                     knowledge_documents.c.tenant_id == _DEFAULT_TENANT,
                     knowledge_documents.c.id == document_id,
                 )
             )
-        await self._vectors.delete_document(
-            embedding_model=embedding_model, document_id=document_id
-        )
+            if not result.rowcount:
+                raise DocumentNotFound(document_id)
+            await append_resource_effects(
+                session,
+                tenant_id=_DEFAULT_TENANT,
+                actor_user_id=actor_user_id,
+                owner_user_id=access.owner_user_id,
+                action="knowledge_document.deleted",
+                resource_type="knowledge_collection",
+                resource_id=row.collection_id,
+                scope="knowledge_collections",
+            )
+            await self._vectors.delete_document(
+                embedding_model=embedding_model,
+                document_id=document_id,
+            )
 
     async def reembed_document(
         self,
@@ -445,11 +595,22 @@ class PostgresKnowledgeStore:
         embeddings: list[list[float]],
         source_chunks: list[str] | None = None,
         page_numbers: list[int | None] | None = None,
+        actor_user_id: uuid.UUID | None = None,
     ) -> KnowledgeDocument:
         """Rebuild one document's chunks/vectors in place (keep its id)."""
         async with self._session() as session:
-            document = await self._document_row(session, document_id)
-            collection = await self._collection_row(session, document.collection_id)
+            preliminary = await self._document_row(session, document_id)
+            collection, access = await self._mutable_collection_row(
+                session,
+                preliminary.collection_id,
+                actor_user_id=actor_user_id,
+                allow_active_maintenance=True,
+            )
+            document = await self._document_row(
+                session, document_id, for_update=True
+            )
+            if document.collection_id != preliminary.collection_id:
+                raise DocumentNotFound(document_id)
             self._validate_embeddings(chunks, embeddings, collection.embedding_dim)
             created_at = time.time()
             # Reuse chunk ids by position so a re-embed keeps exact
@@ -507,16 +668,31 @@ class PostgresKnowledgeStore:
                 chunk_count=len(chunks),
                 created_at=document.created_at,
             )
-        await self._vectors.delete_document(
-            embedding_model=embedding_model, document_id=document_id
-        )
-        await self._sync_vectors(
-            embedding_model=embedding_model,
-            collection_id=collection_id,
-            document_id=document_id,
-            chunk_rows=chunk_rows,
-            embeddings=embeddings,
-        )
+            await append_resource_effects(
+                session,
+                tenant_id=_DEFAULT_TENANT,
+                actor_user_id=actor_user_id,
+                owner_user_id=access.owner_user_id,
+                action="knowledge_document.reembedded",
+                resource_type="knowledge_collection",
+                resource_id=document.collection_id,
+                scope="knowledge_collections",
+            )
+            # Delete+replace is one collection maintenance write. The row
+            # lock remains held across both vector calls, so cancel, revoke,
+            # reindex submit and user mutations observe one linear order.
+            await self._vectors.delete_document(
+                embedding_model=embedding_model,
+                document_id=document_id,
+            )
+            await self._sync_vectors(
+                session=session,
+                embedding_model=embedding_model,
+                collection_id=collection_id,
+                document_id=document_id,
+                chunk_rows=chunk_rows,
+                embeddings=embeddings,
+            )
         return updated
 
     # -- retrieval --------------------------------------------------------- #
@@ -565,28 +741,84 @@ class PostgresKnowledgeStore:
 
     # -- internals --------------------------------------------------------- #
 
-    async def _collection_row(self, session, collection_id: str):
-        row = (
-            await session.execute(
-                select(knowledge_collections).where(
-                    knowledge_collections.c.tenant_id == _DEFAULT_TENANT,
-                    knowledge_collections.c.id == collection_id,
-                )
-            )
-        ).one_or_none()
+    async def _collection_row(
+        self, session, collection_id: str, *, for_update: bool = False
+    ):
+        statement = select(knowledge_collections).where(
+            knowledge_collections.c.tenant_id == _DEFAULT_TENANT,
+            knowledge_collections.c.id == collection_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = (await session.execute(statement)).one_or_none()
         if row is None:
             raise CollectionNotFound(collection_id)
         return row
 
-    async def _document_row(self, session, document_id: str):
-        row = (
-            await session.execute(
-                select(knowledge_documents).where(
-                    knowledge_documents.c.tenant_id == _DEFAULT_TENANT,
-                    knowledge_documents.c.id == document_id,
-                )
+    async def _mutable_collection_row(
+        self,
+        session,
+        collection_id: str,
+        *,
+        actor_user_id: uuid.UUID | None,
+        owner_only: bool = False,
+        allow_active_maintenance: bool = False,
+    ):
+        """Lock a collection and reject active reindex maintenance.
+
+        Reindex submission takes the same short row lock before inserting its
+        active job. Therefore either the mutation commits first and belongs to
+        the reindex snapshot, or the job row lands first and this mutation gets
+        the visible ``collection_maintenance`` conflict.
+        """
+        access = await lock_resource_access(
+            session,
+            tenant_id=_DEFAULT_TENANT,
+            actor_user_id=actor_user_id,
+            resource_type="knowledge_collection",
+            resource_table=knowledge_collections,
+            id_column=knowledge_collections.c.id,
+            resource_id=collection_id,
+            owner_column=knowledge_collections.c.created_by_user_id,
+            minimum=(
+                SharePermission.VIEW if owner_only else SharePermission.EDIT
+            ),
+            restrict_to_workspace_members=(
+                self._restrict_to_workspace_members
+            ),
+            owner_only=owner_only,
+        )
+        if access is None:
+            raise CollectionNotFound(collection_id)
+        row = await self._collection_row(session, collection_id)
+        if allow_active_maintenance:
+            return row, access
+        active_job_id = await session.scalar(
+            select(indexing_jobs.c.job_id)
+            .where(
+                indexing_jobs.c.collection_id == collection_id,
+                indexing_jobs.c.status.in_(ACTIVE_INDEXING_STATUS_VALUES),
             )
-        ).one_or_none()
+            .limit(1)
+        )
+        if active_job_id is not None:
+            raise CollectionMaintenanceActive(collection_id)
+        return row, access
+
+    async def _document_row(
+        self,
+        session,
+        document_id: str,
+        *,
+        for_update: bool = False,
+    ):
+        statement = select(knowledge_documents).where(
+            knowledge_documents.c.tenant_id == _DEFAULT_TENANT,
+            knowledge_documents.c.id == document_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = (await session.execute(statement)).one_or_none()
         if row is None:
             raise DocumentNotFound(document_id)
         return row
@@ -615,7 +847,7 @@ class PostgresKnowledgeStore:
             created_at=row.created_at,
             document_count=counts.get(row.id, 0),
             tenant_id=row.tenant_id,
-            created_by_sub=row.created_by_sub,
+            created_by_user_id=row.created_by_user_id,
         )
 
     def _document_from_row(self, row) -> KnowledgeDocument:
@@ -683,16 +915,18 @@ class PostgresKnowledgeStore:
     async def _sync_vectors(
         self,
         *,
+        session: AsyncSession,
         embedding_model: str,
         collection_id: str,
         document_id: str,
         chunk_rows: list[dict],
         embeddings: list[list[float]],
     ) -> None:
-        """Upsert vectors, then flip ``vector_synced`` to true.
+        """Upsert vectors and mark the locked canonical row synchronized.
 
-        A failure here propagates (visible) and leaves ``vector_synced``
-        false, so reindex re-embeds the document from its canonical text.
+        The caller owns the collection-row transaction. A failure propagates
+        and rolls back the canonical mutation; reindex submission cannot pass
+        that row lock while the vector side effect is still in flight.
         """
         vectors = [
             ChunkVector(
@@ -708,15 +942,14 @@ class PostgresKnowledgeStore:
             document_id=document_id,
             vectors=vectors,
         )
-        async with self._session() as session:
-            await session.execute(
-                update(knowledge_documents)
-                .where(
-                    knowledge_documents.c.tenant_id == _DEFAULT_TENANT,
-                    knowledge_documents.c.id == document_id,
-                )
-                .values(vector_synced=True)
+        await session.execute(
+            update(knowledge_documents)
+            .where(
+                knowledge_documents.c.tenant_id == _DEFAULT_TENANT,
+                knowledge_documents.c.id == document_id,
             )
+            .values(vector_synced=True)
+        )
 
     async def _resolve_scope(
         self, embedding_model: str | None, collection_ids: list[str] | None

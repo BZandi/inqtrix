@@ -44,7 +44,6 @@ import {
 } from '@/components/ui/resizable'
 import { ResponsiveSidePanel } from '@/components/ui/responsive-side-panel'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { useMarkdownCodePreload } from '@/components/markdown/useMarkdownCodePreload'
 import { ConversationSkeleton } from '@/components/ui/conversation-skeleton'
 import { WelcomeState } from '@/components/ui/welcome-state'
 import { CanvasHost } from '@/features/canvas/CanvasHost'
@@ -79,6 +78,7 @@ import {
 import { routeAgentRunToView } from './followTarget'
 import { agentOverridesFromSelection } from '@/features/researchRuns/modelSelection'
 import {
+  canEditAgentRun,
   isActiveAgentRun,
   restoredAgentSessionId,
   type AgentRunRecord,
@@ -447,35 +447,6 @@ export function AgentWorkspace({
       .filter((run): run is AgentRunRecord => Boolean(run))
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   }, [selectedSession, state.agentRuns])
-  // Warm the shiki token cache for every markdown body already in memory
-  // (answers auto-fetch, memo/report bodies load on tab open) — parity
-  // with Chat/Knowledge, so opening a task/answer never pays the
-  // highlighter cold start. SETTLED runs only: a live run streams events
-  // every second, and re-extracting the whole session's code fences per
-  // event would be pure churn (the streaming surface renders its code
-  // through the same token cache anyway).
-  const agentHighlightFingerprint = useMemo(() => {
-    const markdowns: string[] = []
-    for (const run of sessionRuns) {
-      if (isActiveAgentRun(run.status)) continue
-      for (const artifactId of run.artifactOrder) {
-        const body = run.artifacts[artifactId]?.contentMarkdown
-        if (body && body.trim().length > 0) markdowns.push(body)
-      }
-    }
-    return markdowns.join('\u0000')
-  }, [sessionRuns])
-  // Keyed on the joined CONTENT, not on sessionRuns identity — a live
-  // run re-derives sessionRuns on every SSE event, and the preload
-  // effect must only re-arm when a settled body actually changed.
-  const agentMarkdownsForHighlight = useMemo(
-    () =>
-      agentHighlightFingerprint
-        ? agentHighlightFingerprint.split('\u0000')
-        : [],
-    [agentHighlightFingerprint],
-  )
-  useMarkdownCodePreload(agentMarkdownsForHighlight)
   const latestRun = sessionRuns.at(-1)
   const runningRun = sessionRuns.find((run) => isActiveAgentRun(run.status))
   const statusExecution = useMemo(
@@ -499,9 +470,11 @@ export function AgentWorkspace({
   )
 
   const setPlanDraft = useCallback(
-    (runId: string, draft: Parameters<AgentCanvasContextValue['setPlanDraft']>[1]) =>
-      dispatch({ draft, runId, type: 'setAgentPlanDraft' }),
-    [dispatch],
+    (runId: string, draft: Parameters<AgentCanvasContextValue['setPlanDraft']>[1]) => {
+      if (!canEditAgentRun(state.agentRuns[runId])) return
+      dispatch({ draft, runId, type: 'setAgentPlanDraft' })
+    },
+    [dispatch, state.agentRuns],
   )
 
   const requestPlanRefresh = useCallback(
@@ -602,7 +575,9 @@ export function AgentWorkspace({
       rejectPatch: demo ? demo.rejectPatch : control.rejectPatch,
       onCancelRun: demo
         ? (runId) => demo.cancel(runId)
-        : (runId) => void cancelRun(runId),
+        : (runId) => {
+          if (canEditAgentRun(state.agentRuns[runId])) void cancelRun(runId)
+        },
       onOpenCanvas: openCanvasView,
       planDrafts: state.agentPlanDrafts,
       planSource,
@@ -616,6 +591,7 @@ export function AgentWorkspace({
       planSource,
       setPlanDraft,
       state.agentPlanDrafts,
+      state.agentRuns,
     ],
   )
 
@@ -633,6 +609,7 @@ export function AgentWorkspace({
       skillIds,
       sourcePolicy: submitSourcePolicy,
     }: AgentComposerSubmit) => {
+      if (runningRun && !canEditAgentRun(runningRun)) return false
       // A pending clarification absorbs the send (ONE input locus, plan
       // B3): free text answers the gate instead of racing a new run.
       const gate = runningRun ? pendingGate(runningRun) : null
@@ -650,7 +627,13 @@ export function AgentWorkspace({
         await pendingSaveRef.current()
       }
       let sessionId = state.selectedAgentSessionId
-      if (!sessionId || !state.agentSessions[sessionId]) {
+      const selectedSession = sessionId
+        ? state.agentSessions[sessionId]
+        : undefined
+      if (!sessionId || !selectedSession || selectedSession.persistable === false) {
+        // A shared-run view is read-only session scaffolding. A recipient's
+        // new run starts in their own syncable session and never sends the
+        // derived view id back through the run/session persistence surfaces.
         sessionId = `agent-session-${Date.now().toString(36)}`
         const now = new Date().toISOString()
         dispatch({
@@ -785,13 +768,16 @@ export function AgentWorkspace({
         dispatch({ title: t.agent.sessions.createGroup, type: 'createAgentSessionGroup' })}
       onDeleteSession={(sessionId) => {
         const session = state.agentSessions[sessionId]
+        if (session?.persistable === false) return
         if (session && !demo) {
           for (const runId of session.runIds) void deleteRun(runId)
         }
         dispatch({ sessionId, type: 'deleteAgentSession' })
       }}
-      onRenameSession={(sessionId, title) =>
-        dispatch({ sessionId, title, type: 'renameAgentSession' })}
+      onRenameSession={(sessionId, title) => {
+        if (state.agentSessions[sessionId]?.persistable === false) return
+        dispatch({ sessionId, title, type: 'renameAgentSession' })
+      }}
       onSelectSession={(sessionId) => {
         dispatch({ sessionId, type: 'selectAgentSession' })
         if (!isDesktop) setIsMobileSessionsOpen(false)
@@ -878,7 +864,10 @@ export function AgentWorkspace({
         autonomy={selectedAutonomy}
         autonomyModes={autonomyModes}
         collections={collections}
-        disabled={!agentAvailable}
+        disabled={
+          !agentAvailable
+          || Boolean(runningRun && !canEditAgentRun(runningRun))
+        }
         documents={documents}
         draftQuestion={draftQuestion}
         depthMode={selectedDepth}
@@ -890,7 +879,13 @@ export function AgentWorkspace({
         kernelSelectable={kernelSelectable}
         memoryEnabled={memoryEnabled}
         modelPicker={modelPicker}
-        notice={agentAvailable ? null : t.agent.composer.notAvailable}
+        notice={
+          !agentAvailable
+            ? t.agent.composer.notAvailable
+            : runningRun && !canEditAgentRun(runningRun)
+              ? t.sharing.sharedViewOnly
+              : null
+        }
         onAutonomyChange={onAutonomyChange}
         onDepthModeChange={onDepthChange}
         onDraftQuestionChange={onDraftQuestionChange}
@@ -898,7 +893,7 @@ export function AgentWorkspace({
         onSelectedCollectionIdsChange={onSelectedCollectionIdsChange}
         onSelectedDocumentIdChange={onSelectedDocumentIdChange}
         onStop={() => {
-          if (!runningRun) return
+          if (!runningRun || !canEditAgentRun(runningRun)) return
           if (demo) demo.cancel(runningRun.runId)
           else void cancelRun(runningRun.runId)
         }}

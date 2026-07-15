@@ -175,7 +175,11 @@ def task_result_payload(
 
 
 def project_child_run_outcome(
-    run_store: Any, child_id: str, attempt: int
+    run_store: Any,
+    child_id: str,
+    attempt: int,
+    *,
+    visible_to: Any = None,
 ) -> TaskOutcome | None:
     """Project one child run row/result into the shared task outcome.
 
@@ -184,7 +188,11 @@ def project_child_run_outcome(
     the synchronous cancel route use exactly one projection contract.
     """
     try:
-        child = run_store.get(child_id)
+        child = (
+            run_store.get(child_id, visible_to=visible_to)
+            if visible_to is not None
+            else run_store.get(child_id)
+        )
     except RunNotFound:
         log.warning(
             "Kind-Run %s ist nicht mehr abrufbar (Retention abgelaufen "
@@ -220,7 +228,11 @@ def project_child_run_outcome(
                 and failure_code in RETRYABLE_AGENT_TASK_ORCHESTRATION_CODES
             ),
         )
-    result = run_store.result(child_id)
+    result = (
+        run_store.result(child_id, visible_to=visible_to)
+        if visible_to is not None
+        else run_store.result(child_id)
+    )
     references = [
         dict(ref)
         for ref in result.get("references", [])

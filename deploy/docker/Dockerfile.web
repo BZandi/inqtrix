@@ -13,10 +13,13 @@ WORKDIR /repo
 # the exact pnpm version from package.json "packageManager".
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/research-desk/package.json apps/research-desk/
+COPY packages/editor-schema/package.json packages/editor-schema/
+COPY patches ./patches
 RUN corepack pnpm install --frozen-lockfile
 
 # Source, then build. ui:build -> tsc -b && vite build -> apps/research-desk/dist.
 COPY apps/research-desk ./apps/research-desk
+COPY packages/editor-schema ./packages/editor-schema
 COPY scripts/run_research_desk_ui.mjs ./scripts/run_research_desk_ui.mjs
 RUN corepack pnpm run ui:build
 
@@ -30,6 +33,11 @@ RUN corepack pnpm run ui:build
 # deployment while nginx runtime vars stay intact. Default keeps compose working.
 FROM nginxinc/nginx-unprivileged:1.27-alpine
 ENV INQTRIX_API_UPSTREAM=api:5100
+# The public proxy boundary overwrites X-Forwarded-Proto with this trusted
+# deployment value. Helm sets https for TLS ingress/Route; Compose injects its
+# explicit INQTRIX_EXTERNAL_SCHEME value and retains this HTTP default only for
+# the documented direct loopback setup.
+ENV INQTRIX_EXTERNAL_SCHEME=http
 # nginx upload body-size cap. Default sits just above the API's
 # INQTRIX_MAX_FILE_BYTES default (100 MiB) plus multipart envelope, so the API
 # stays the authoritative limit (its 413 carries a message). Raise both

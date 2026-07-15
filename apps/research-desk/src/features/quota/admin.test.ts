@@ -6,7 +6,7 @@ import {
   GIB,
   gbToBytes,
   parseStorageGb,
-  QUOTA_DEFAULT_SUBJECT,
+  QUOTA_DEFAULT_USER_ID,
   quotaAdminAvailable,
   quotaPeriodReset,
   quotaPeriodStart,
@@ -73,7 +73,7 @@ describe('seedQuotaAdminSnapshot (demo)', () => {
   })
 
   it('does not surface the tenant-default sentinel as a subject', () => {
-    expect(snapshot.subjects.some((s) => s.sub === QUOTA_DEFAULT_SUBJECT)).toBe(
+    expect(snapshot.subjects.some((s) => s.user_id === QUOTA_DEFAULT_USER_ID)).toBe(
       false,
     )
   })
@@ -171,9 +171,9 @@ describe('storage GB codec', () => {
 
 describe('filterAdminSubjects', () => {
   const snapshot = seedQuotaAdminSnapshot(JUNE)
-  it('matches name, email and sub, blank returns all', () => {
-    expect(filterAdminSubjects(snapshot.subjects, 'rita').map((s) => s.sub)).toEqual([
-      'user-rita',
+  it('matches name, email and user id, blank returns all', () => {
+    expect(filterAdminSubjects(snapshot.subjects, 'rita').map((s) => s.user_id)).toEqual([
+      '00000000-0000-4000-8000-000000000002',
     ])
     expect(filterAdminSubjects(snapshot.subjects, 'example.com')).toHaveLength(3)
     expect(filterAdminSubjects(snapshot.subjects, '   ')).toHaveLength(3)
@@ -214,8 +214,8 @@ describe('sortAdminSubjects', () => {
   })
 
   it('does not mutate the input array', () => {
-    const before = snapshot.subjects.map((s) => s.sub)
+    const before = snapshot.subjects.map((s) => s.user_id)
     sortAdminSubjects(snapshot.subjects, { dir: 'desc', key: 'runs' })
-    expect(snapshot.subjects.map((s) => s.sub)).toEqual(before)
+    expect(snapshot.subjects.map((s) => s.user_id)).toEqual(before)
   })
 })

@@ -278,6 +278,20 @@ def create_app(
             auth_provider.mode,
             "on" if cors_active else "off",
         )
+        from inqtrix.services.system_runtime import (
+            database_runtime_contract_ready,
+        )
+
+        database_ready = await database_runtime_contract_ready(
+            _app.state.container
+        )
+        _app.state.database_contract_ready = database_ready
+        if not database_ready:
+            log.warning(
+                "Database runtime contract is not ready; business routes "
+                "remain gated until /readyz verifies the migrated schema "
+                "and restricted application role."
+            )
         if settings.storage.backend == "postgres":
             # Reviewable connection budget (Sichtbarkeit): count the
             # pooled engines this process ACTUALLY builds, not a literal,
@@ -324,6 +338,30 @@ def create_app(
                 settings.server.run_max_concurrent_per_user,
                 settings.agent_platform.max_parallel_children,
             )
+        if database_ready and settings.sharing.restrict_to_workspace_members:
+            from inqtrix.services.workspace_administration import (
+                ensure_workspace_share_reconciliation,
+            )
+
+            startup_container = getattr(_app.state, "container", None)
+            workspace_admin = getattr(
+                startup_container, "workspace_admin", None
+            )
+            revoked = await ensure_workspace_share_reconciliation(
+                _app,
+                workspace_admin,
+                tenant_id="default",
+            )
+            if revoked:
+                log.warning(
+                    "Workspace-Share-Reconciliation revoked %d invalid "
+                    "active share(s) before readiness.",
+                    revoked,
+                )
+            else:
+                log.info(
+                    "Workspace-Share-Reconciliation completed without changes."
+                )
         try:
             yield
         finally:
@@ -396,6 +434,11 @@ def create_app(
             knowledge_sessions_store = getattr(knowledge_sessions_service, "store", None)
             if knowledge_sessions_store is not None and hasattr(knowledge_sessions_store, "aclose"):
                 await knowledge_sessions_store.aclose()
+            collaboration_service = getattr(
+                container, "editor_collaboration_service", None
+            )
+            if collaboration_service is not None:
+                await collaboration_service.aclose()
 
     # Fresh router per create_app() call to avoid duplicate route handlers
     app_router = create_router()
@@ -429,6 +472,16 @@ def create_app(
 
     app.include_router(app_router)
     app.state.container = container
+
+    from inqtrix.auth.principal_generation import (
+        install_principal_generation_error_handler,
+    )
+
+    install_principal_generation_error_handler(app)
+
+    from inqtrix.server.database_gate import install_database_contract_gate
+
+    install_database_contract_gate(app, container=container)
 
     from inqtrix.server.metrics import setup_metrics
 

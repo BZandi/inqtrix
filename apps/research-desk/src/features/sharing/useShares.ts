@@ -3,11 +3,13 @@ import {
   createShares,
   listShares,
   revokeShare,
+  updateShare,
 } from '@/api/inqtrixClient'
 import {
   grantDemoShares,
   listDemoShares,
   revokeDemoShare,
+  updateDemoShare,
 } from './demoShares'
 import type { ShareInvitee, ShareRecordInfo } from './types'
 
@@ -21,12 +23,14 @@ export type SharesState = {
  * Server-truth share state for ONE resource (the open dialog). No
  * ProjectState involvement by design: shares live on the server, the
  * dialog is their only surface, and every mutation re-reads the
- * listing so re-grants and races resolve to what the server says.
+ * listing. The shell refresh token also re-reads an already-open dialog
+ * after remote lifecycle changes, so revisions and recipients cannot drift.
  */
 export function useShares(
   resourceType: string,
   resourceId: string | null,
   demo = false,
+  refreshToken = 0,
 ) {
   const [state, setState] = useState<SharesState>({
     error: null,
@@ -62,7 +66,7 @@ export function useShares(
       return
     }
     void reload()
-  }, [reload, resourceId])
+  }, [refreshToken, reload, resourceId])
 
   const grant = useCallback(
     async (invitees: ShareInvitee[]) => {
@@ -83,5 +87,18 @@ export function useShares(
     [demo, reload],
   )
 
-  return { grant, reload, revoke, state }
+  const updatePermission = useCallback(
+    async (
+      shareId: string,
+      permission: ShareRecordInfo['permission'],
+      expectedRevision: number,
+    ) => {
+      if (demo) updateDemoShare(shareId, permission, expectedRevision)
+      else await updateShare(shareId, { expectedRevision, permission })
+      await reload()
+    },
+    [demo, reload],
+  )
+
+  return { grant, reload, revoke, state, updatePermission }
 }

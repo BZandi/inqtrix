@@ -3,7 +3,6 @@ import {
   createKnowledgeCollection,
   deleteKnowledgeCollection,
   fetchKnowledgeDocumentText,
-  hasHttpStatus,
   ingestKnowledgeFile,
 } from '@/api/inqtrixClient'
 import type { FileAssetRecord, VectorIndexRecord } from '@/features/project/types'
@@ -57,7 +56,7 @@ function canUseFile(asset: FileAssetRecord, options: KnowledgeSyncOptions): bool
   )
 }
 
-type MemberIngestResult = {
+export type KnowledgeAssetIngestResult = {
   embeddedFileIds: string[]
   skippedFileIds: string[]
   skippedFiles: string[]
@@ -87,7 +86,7 @@ async function ingestMembersIntoCollection(
   memberAssets: FileAssetRecord[],
   options: KnowledgeSyncOptions,
   onMemberDone?: MemberProgress,
-): Promise<MemberIngestResult> {
+): Promise<KnowledgeAssetIngestResult> {
   const embeddedFileIds: string[] = []
   const skippedFileIds: string[] = []
   const skippedFiles: string[] = []
@@ -164,30 +163,22 @@ async function ingestMembersIntoCollection(
   return { embeddedFileIds, skippedFileIds, skippedFiles, reparsed, serverDocumentIds }
 }
 
-/** Rebuild one vector index as a backend knowledge collection.
+/** Create the server collection for a not-yet-built local vector index.
 
-Reindex semantics are rebuild-from-scratch: the previous collection (if
-any) is deleted and a fresh one is created with the index's CURRENT
-embedding model, then every uploadable member is ingested.
-This keeps the server collection an exact mirror of the client index —
-including model changes, removed members, and re-parsed files — without
-tracking per-document diffs. Members without extracted text are reported
-back as terminal skips; if all members are textless, the fresh collection
-intentionally remains empty so stale server vectors cannot survive. */
-export async function reindexVectorIndexOnServer(
+Once a collection exists its identity and embedding model are immutable from
+this local setup surface. Refreshes run in place through the indexing-job API;
+this function must therefore never delete or replace an existing collection
+(which would revoke shares and invalidate every server reference). */
+export async function createVectorIndexCollectionOnServer(
   index: VectorIndexRecord,
   memberAssets: FileAssetRecord[],
   options: KnowledgeSyncOptions,
   onMemberDone?: MemberProgress,
 ): Promise<KnowledgeReindexResult> {
   if (index.serverCollectionId) {
-    try {
-      await deleteKnowledgeCollection(index.serverCollectionId, options)
-    } catch (error) {
-      // A collection the server no longer knows is already the target
-      // state of this delete; everything else must fail the run.
-      if (!hasHttpStatus(error, 404)) throw error
-    }
+    throw new Error(
+      'createVectorIndexCollectionOnServer requires an index without a server collection.',
+    )
   }
 
   const collection = await createKnowledgeCollection(
@@ -195,7 +186,7 @@ export async function reindexVectorIndexOnServer(
     options,
   )
 
-  let ingest: MemberIngestResult
+  let ingest: KnowledgeAssetIngestResult
   try {
     ingest = await ingestMembersIntoCollection(
       collection.id, memberAssets, options, onMemberDone,
@@ -221,6 +212,18 @@ export async function reindexVectorIndexOnServer(
     reparsed: ingest.reparsed,
     serverDocumentIds: ingest.serverDocumentIds,
   }
+}
+
+/** Add local assets to an existing server collection. Used by both an owner's
+ * canonical collection view and an accepted editor share; no local VectorIndex
+ * record is created for the recipient. */
+export async function ingestAssetsIntoKnowledgeCollection(
+  collectionId: string,
+  assets: FileAssetRecord[],
+  options: KnowledgeSyncOptions,
+  onMemberDone?: MemberProgress,
+): Promise<KnowledgeAssetIngestResult> {
+  return ingestMembersIntoCollection(collectionId, assets, options, onMemberDone)
 }
 
 /** Incrementally ingest the index's newly-added (pending) members into its

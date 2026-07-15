@@ -1,41 +1,44 @@
 /** Wire types of the `/v1/shares*` + `/v1/users/search` surface. */
 
-export type SharePermissionValue = 'edit' | 'view'
+export type SharePermissionValue = 'edit' | 'suggest' | 'view'
+
+/** Existing shareable resources intentionally keep their original two-level
+ * access contract. `suggest` is grantable only for editor documents. */
+export type ViewEditSharePermissionValue = Exclude<SharePermissionValue, 'suggest'>
+
+/** Canonical resource-list authorization metadata. Every server-backed
+ * resource states whether it is unscoped, owned by the caller, or shared in;
+ * only shared resources carry a grant permission. */
+export type ResourceAccess =
+  | { mode: 'unscoped'; permission?: never }
+  | { mode: 'owner'; permission?: never }
+  | { mode: 'shared'; permission: ViewEditSharePermissionValue }
 
 /** One row of `/v1/users/search` — the share-dialog typeahead. */
 export type UserSearchResult = {
   display_name: string | null
   email: string | null
-  subject: string
+  id: string
 }
 
 /** One active share as listed/created by `/v1/shares` (profile-enriched). */
 export type ShareRecordInfo = {
+  accepted_at: number | null
   created_at: number
   display_name: string | null
   email: string | null
-  granted_by_sub: string
+  granted_by_user_id: string
   id: string
   permission: SharePermissionValue
+  recipient_user_id: string
   resource_id: string
   resource_type: string
-  subject_id: string
-  subject_type: string
-}
-
-/** One row of `/v1/shares/shared-with-me` (grantor name joined in). */
-export type SharedWithMeEntry = {
-  created_at: number
-  granted_by_display_name: string | null
-  granted_by_sub: string
-  permission: SharePermissionValue
-  resource_id: string
-  resource_type: string
+  revision: number
 }
 
 export type ShareInvitee = {
   permission: SharePermissionValue
-  subjectId: string
+  userId: string
 }
 
 /**
@@ -47,7 +50,7 @@ export type InboxShare = {
   accepted_at: number | null
   created_at: number
   granted_by_display_name: string | null
-  granted_by_sub: string
+  granted_by_user_id: string
   id: string
   permission: SharePermissionValue
   resource_id: string

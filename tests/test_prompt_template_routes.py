@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 
 import pytest
 from fastapi import FastAPI
@@ -18,7 +19,7 @@ from fastapi.testclient import TestClient
 
 from inqtrix.auth.directory import MemoryUserDirectory
 from inqtrix.auth.identity_memory import MemoryIdentityStore
-from inqtrix.auth.permissions import PermissionService
+from inqtrix.auth.permissions import AuthorizationService
 from inqtrix.content.prompt_templates import (
     PromptTemplateRecord,
     new_template_id,
@@ -32,7 +33,12 @@ from inqtrix.server.routers.shares import build_router as build_shares_router
 from inqtrix.settings import ServerSettings, Settings, StorageSettings
 
 from tests.contract._app import StubLLM, StubSearch
-from tests.test_runs_sharing import OWNER, RECIPIENT, SUB_HEADER, OidcHeaderProvider
+from tests.test_runs_sharing import (
+    OWNER,
+    RECIPIENT,
+    OidcHeaderProvider,
+    user_headers,
+)
 
 PAYLOAD = {
     "title": "Executive Briefing",
@@ -49,14 +55,18 @@ def make_world():
     users = MemoryUserDirectory()
 
     async def mirror() -> None:
-        for sub, name in ((OWNER, "Olga Owner"), (RECIPIENT, "Rita Recipient")):
+        for user_id, subject, name in (
+            (OWNER, "user-owner", "Olga Owner"),
+            (RECIPIENT, "user-recipient", "Rita Recipient"),
+        ):
             await users.record_login(
                 tenant_id="default",
                 issuer="http://idp.example",
-                subject=sub,
-                email=f"{sub}@example.com",
+                subject=subject,
+                email=f"{subject}@example.com",
                 email_verified=True,
                 display_name=name,
+                canonical_user_id=user_id,
             )
 
     asyncio.run(mirror())
@@ -69,8 +79,8 @@ def make_world():
         ),
         semaphore_factory=lambda: asyncio.Semaphore(1),
         auth_provider=OidcHeaderProvider(users),
-        permissions=PermissionService(
-            members=identity, groups=identity, shares=identity, audit=identity
+        permissions=AuthorizationService(
+            members=identity, shares=identity, audit=identity
         ),
         workspace_admin=identity,
     )
@@ -87,13 +97,15 @@ def world():
     return make_world()
 
 
-def as_user(sub: str) -> dict[str, str]:
-    return {SUB_HEADER: sub}
+def as_user(user_id: uuid.UUID) -> dict[str, str]:
+    return user_headers(user_id)
 
 
-def create_template(client: TestClient, *, sub: str = OWNER) -> dict:
+def create_template(
+    client: TestClient, *, user_id: uuid.UUID = OWNER
+) -> dict:
     response = client.post(
-        "/v1/prompt-templates", json=PAYLOAD, headers=as_user(sub)
+        "/v1/prompt-templates", json=PAYLOAD, headers=as_user(user_id)
     )
     assert response.status_code == 201
     return response.json()
@@ -105,20 +117,21 @@ def grant(client: TestClient, template_id: str, *, permission: str = "view"):
         json={
             "resource_type": "prompt_template",
             "resource_id": template_id,
-            "invitees": [{"subject_id": RECIPIENT, "permission": permission}],
+            "invitees": [
+                {"user_id": str(RECIPIENT), "permission": permission}
+            ],
         },
         headers=as_user(OWNER),
     )
     # These tests assert post-acceptance access, so the recipient consents
-    # here. A re-grant carries consent forward (already-accepted -> 404), so
-    # both outcomes are valid; the pending/consent flow itself is pinned in
-    # tests/test_runs_sharing.py and tests/test_shares.py.
+    # here. The pending/idempotent-consent lifecycle itself is pinned in the
+    # dedicated share tests.
     if response.status_code == 201:
         share_id = response.json()["data"][0]["id"]
         accepted = client.post(
             f"/v1/shares/{share_id}/accept", headers=as_user(RECIPIENT)
         )
-        assert accepted.status_code in (200, 404)
+        assert accepted.status_code == 200
     return response
 
 
@@ -128,7 +141,7 @@ def seed_ownerless(container) -> str:
     record = PromptTemplateRecord(
         id=new_template_id(),
         tenant_id="default",
-        owner_sub=None,
+        owner_user_id=None,
         title="Bestand",
         label="bestand",
         category=None,
@@ -146,7 +159,7 @@ def test_crud_roundtrip_for_the_owner(world):
     client, _container = world
     created = create_template(client)
     assert created["title"] == PAYLOAD["title"]
-    assert "access" not in created
+    assert created["access"] == {"mode": "owner"}
 
     listed = client.get(
         "/v1/prompt-templates", headers=as_user(OWNER)
@@ -155,7 +168,11 @@ def test_crud_roundtrip_for_the_owner(world):
 
     updated = client.put(
         f"/v1/prompt-templates/{created['id']}",
-        json={**PAYLOAD, "title": "Neuer Titel"},
+        json={
+            **PAYLOAD,
+            "title": "Neuer Titel",
+            "expected_revision": created["revision"],
+        },
         headers=as_user(OWNER),
     )
     assert updated.status_code == 200
@@ -186,7 +203,7 @@ def test_stranger_is_blind_and_cannot_write(world):
     )
     denied_update = client.put(
         f"/v1/prompt-templates/{created['id']}",
-        json=PAYLOAD,
+        json={**PAYLOAD, "expected_revision": created["revision"]},
         headers=as_user(RECIPIENT),
     )
     assert denied_update.status_code == 404
@@ -203,18 +220,18 @@ def test_stranger_is_blind_and_cannot_write(world):
 def test_ownerless_templates_stay_open(world):
     client, container = world
     template_id = seed_ownerless(container)
-    for sub in (OWNER, RECIPIENT):
-        listed = client.get(
-            "/v1/prompt-templates", headers=as_user(sub)
-        ).json()["data"]
-        assert [item["id"] for item in listed] == [template_id]
-        assert "access" not in listed[0]
-    # Open templates are writable by everyone (the legacy rule).
+    for user_id in (OWNER, RECIPIENT):
+        assert client.get(
+            "/v1/prompt-templates", headers=as_user(user_id)
+        ).json()["data"] == []
+    listed = client.get("/v1/prompt-templates").json()["data"]
+    assert [item["id"] for item in listed] == [template_id]
+    assert listed[0]["access"] == {"mode": "unscoped"}
+    # Ownerless legacy templates stay writable only in legacy unscoped mode.
     assert (
         client.put(
             f"/v1/prompt-templates/{template_id}",
-            json=PAYLOAD,
-            headers=as_user(RECIPIENT),
+            json={**PAYLOAD, "expected_revision": 1},
         ).status_code
         == 200
     )
@@ -231,12 +248,12 @@ def test_view_grant_admits_reads_not_writes(world):
         "/v1/prompt-templates", headers=as_user(RECIPIENT)
     ).json()["data"]
     assert [item["id"] for item in listed] == [created["id"]]
-    assert listed[0]["access"] == {"via": "share", "permission": "view"}
+    assert listed[0]["access"] == {"mode": "shared", "permission": "view"}
 
     assert (
         client.put(
             f"/v1/prompt-templates/{created['id']}",
-            json=PAYLOAD,
+            json={**PAYLOAD, "expected_revision": created["revision"]},
             headers=as_user(RECIPIENT),
         ).status_code
         == 404
@@ -250,7 +267,11 @@ def test_edit_grant_admits_updates_not_deletion(world):
 
     updated = client.put(
         f"/v1/prompt-templates/{created['id']}",
-        json={**PAYLOAD, "title": "Von Rita angepasst"},
+        json={
+            **PAYLOAD,
+            "title": "Von Rita angepasst",
+            "expected_revision": created["revision"],
+        },
         headers=as_user(RECIPIENT),
     )
     assert updated.status_code == 200
@@ -279,12 +300,10 @@ def test_deletion_revokes_shares(world):
         ).status_code
         == 204
     )
-    mine = client.get(
-        "/v1/shares/shared-with-me",
-        params={"resource_type": "prompt_template"},
-        headers=as_user(RECIPIENT),
+    inbox = client.get(
+        "/v1/shares/inbox", headers=as_user(RECIPIENT)
     ).json()["data"]
-    assert mine == []
+    assert inbox == {"pending": [], "accepted": []}
 
 
 def test_validation_envelope(world):
@@ -305,7 +324,7 @@ def test_validation_envelope(world):
 
 
 # ---------------------------------------------------------------------------
-# Punkt 3: optimistic-concurrency precondition (stale-write protection)
+# Mandatory integer revision (stale-write protection)
 # ---------------------------------------------------------------------------
 
 
@@ -317,28 +336,33 @@ def test_update_with_matching_precondition_succeeds(world):
         json={
             **PAYLOAD,
             "title": "Frisch",
-            "expected_updated_at": created["updated_at"],
+            "expected_revision": created["revision"],
         },
         headers=as_user(OWNER),
     )
     assert updated.status_code == 200
     assert updated.json()["title"] == "Frisch"
+    assert updated.json()["revision"] == created["revision"] + 1
     assert updated.json()["updated_at"] >= created["updated_at"]
 
 
 def test_stale_precondition_is_409_then_recoverable(world):
     client, _container = world
     created = create_template(client)
-    stale_anchor = created["updated_at"]
+    stale_revision = created["revision"]
 
-    # A first write (no precondition) moves the version forward.
+    # A first writer advances the version.
     first = client.put(
         f"/v1/prompt-templates/{created['id']}",
-        json={**PAYLOAD, "title": "Von A"},
+        json={
+            **PAYLOAD,
+            "title": "Von A",
+            "expected_revision": stale_revision,
+        },
         headers=as_user(OWNER),
     )
     assert first.status_code == 200
-    fresh_anchor = first.json()["updated_at"]
+    fresh_revision = first.json()["revision"]
 
     # A second writer who only saw the original version is rejected,
     # NOT silently overwriting A's edit.
@@ -347,11 +371,12 @@ def test_stale_precondition_is_409_then_recoverable(world):
         json={
             **PAYLOAD,
             "title": "Von B",
-            "expected_updated_at": stale_anchor,
+            "expected_revision": stale_revision,
         },
         headers=as_user(OWNER),
     )
     assert conflict.status_code == 409
+    assert conflict.json()["error"]["current_revision"] == fresh_revision
     assert "zwischenzeitlich" in conflict.json()["error"]["message"]
     # A's edit survived the rejected write.
     assert (
@@ -367,7 +392,7 @@ def test_stale_precondition_is_409_then_recoverable(world):
         json={
             **PAYLOAD,
             "title": "Von B",
-            "expected_updated_at": fresh_anchor,
+            "expected_revision": fresh_revision,
         },
         headers=as_user(OWNER),
     )
@@ -375,39 +400,34 @@ def test_stale_precondition_is_409_then_recoverable(world):
     assert retry.json()["title"] == "Von B"
 
 
-def test_update_without_precondition_stays_unconditional(world):
-    """Omitting the precondition keeps the legacy last-write-wins path."""
+def test_update_requires_revision(world):
     client, _container = world
     created = create_template(client)
-    for title in ("Eins", "Zwei"):
-        response = client.put(
-            f"/v1/prompt-templates/{created['id']}",
-            json={**PAYLOAD, "title": title},
-            headers=as_user(OWNER),
-        )
-        assert response.status_code == 200
-        assert response.json()["title"] == title
+    response = client.put(
+        f"/v1/prompt-templates/{created['id']}",
+        json={**PAYLOAD, "title": "Ohne Version"},
+        headers=as_user(OWNER),
+    )
+    assert response.status_code == 400
 
 
 def test_precondition_on_missing_template_is_404_not_409(world):
     client, _container = world
     missing = client.put(
         "/v1/prompt-templates/pt_does_not_exist",
-        json={**PAYLOAD, "expected_updated_at": 123.0},
+        json={**PAYLOAD, "expected_revision": 1},
         headers=as_user(OWNER),
     )
     assert missing.status_code == 404
 
 
-def test_non_numeric_precondition_is_400(world):
+def test_invalid_revision_is_400(world):
     client, _container = world
     created = create_template(client)
-    for bad_value in ("gestern", True, False):
-        # bool is an int subclass — it must NOT slip past the numeric
-        # guard and coerce to 1.0/0.0.
+    for bad_value in ("gestern", True, False, 0, 1.5):
         bad = client.put(
             f"/v1/prompt-templates/{created['id']}",
-            json={**PAYLOAD, "expected_updated_at": bad_value},
+            json={**PAYLOAD, "expected_revision": bad_value},
             headers=as_user(OWNER),
         )
         assert bad.status_code == 400, bad_value

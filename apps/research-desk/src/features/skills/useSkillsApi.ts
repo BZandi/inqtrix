@@ -8,6 +8,7 @@ import {
   listSkills,
   updateSkill,
   type ClientOptions,
+  type InqtrixRequestError,
 } from '@/api/inqtrixClient'
 import type { SkillInfo, SkillPayload } from './skillLibrary'
 
@@ -37,7 +38,7 @@ export type SkillsApiHandle = {
   update: (
     skillId: string,
     payload: SkillPayload,
-    expectedUpdatedAt: number,
+    expectedRevision: number,
   ) => Promise<SkillInfo | null>
   remove: (skillId: string) => Promise<boolean>
   /** SKILL.md text of one skill, or null on failure (error is set). */
@@ -48,6 +49,7 @@ export type SkillsApiHandle = {
 
 const DEMO_SKILLS: SkillInfo[] = [
   {
+    access: { mode: 'owner' },
     id: 'sk_demo_sprechzettel',
     label: 'sprechzettel',
     title: 'Sprechzettel',
@@ -86,10 +88,12 @@ const DEMO_SKILLS: SkillInfo[] = [
     model_tier: '',
     effort: '',
     include_in_autocomplete: true,
+    revision: 1,
     created_at: 1751328000,
     updated_at: 1751328000,
   },
   {
+    access: { mode: 'owner' },
     id: 'sk_demo_email_stil',
     label: 'email-stil',
     title: 'E-Mail-Stil',
@@ -116,6 +120,7 @@ const DEMO_SKILLS: SkillInfo[] = [
     model_tier: '',
     effort: '',
     include_in_autocomplete: true,
+    revision: 1,
     created_at: 1751328000,
     updated_at: 1751328000,
   },
@@ -125,6 +130,7 @@ export function useSkillsApi({
   clientOptions,
   demo,
   enabled,
+  refreshToken = 0,
 }: {
   /** Auth/workspace options for the server calls; null while locked. */
   clientOptions: ClientOptions | null
@@ -132,33 +138,67 @@ export function useSkillsApi({
   demo: boolean
   /** features.skills — false hides the tab, the hook stays inert. */
   enabled: boolean
+  /** User-invalidation revision for authoritative replacement. */
+  refreshToken?: number
 }): SkillsApiHandle {
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const demoCounter = useRef(0)
+  const refreshControllerRef = useRef<AbortController | null>(null)
+  const refreshGenerationRef = useRef(0)
 
   const refresh = useCallback(async () => {
-    if (!enabled) return
-    if (demo) {
-      setSkills((current) => (current.length ? current : [...DEMO_SKILLS]))
+    refreshControllerRef.current?.abort()
+    refreshControllerRef.current = null
+    const generation = refreshGenerationRef.current + 1
+    refreshGenerationRef.current = generation
+    if (!enabled) {
+      setSkills([])
+      setError('')
+      setLoading(false)
       return
     }
-    if (!clientOptions) return
+    if (demo) {
+      setSkills((current) => (current.length ? current : [...DEMO_SKILLS]))
+      setError('')
+      setLoading(false)
+      return
+    }
+    if (!clientOptions) {
+      setSkills([])
+      setError('')
+      setLoading(false)
+      return
+    }
+    const controller = new AbortController()
+    refreshControllerRef.current = controller
     setLoading(true)
     try {
-      setSkills(await listSkills(clientOptions))
+      const incoming = await listSkills({
+        ...clientOptions,
+        signal: controller.signal,
+      })
+      if (controller.signal.aborted || generation !== refreshGenerationRef.current) return
+      setSkills(incoming)
       setError('')
     } catch (cause) {
+      if (controller.signal.aborted || generation !== refreshGenerationRef.current) return
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setLoading(false)
+      if (generation === refreshGenerationRef.current) {
+        setLoading(false)
+        if (refreshControllerRef.current === controller) {
+          refreshControllerRef.current = null
+        }
+      }
     }
   }, [clientOptions, demo, enabled])
 
   useEffect(() => {
     void refresh()
-  }, [refresh])
+    return () => refreshControllerRef.current?.abort()
+  }, [refresh, refreshToken])
 
   const create = useCallback(
     async (payload: SkillPayload) => {
@@ -167,7 +207,9 @@ export function useSkillsApi({
         const now = Date.now() / 1000
         const record: SkillInfo = {
           ...payload,
+          access: { mode: 'owner' },
           id: `sk_demo_neu_${demoCounter.current}`,
+          revision: 1,
           created_at: now,
           updated_at: now,
         }
@@ -192,7 +234,7 @@ export function useSkillsApi({
     async (
       skillId: string,
       payload: SkillPayload,
-      expectedUpdatedAt: number,
+      expectedRevision: number,
     ) => {
       if (demo) {
         // Computed from the CURRENT list, not inside the state updater:
@@ -200,9 +242,14 @@ export function useSkillsApi({
         // runs it eagerly — deferred, the return value would be null.
         const existing = skills.find((skill) => skill.id === skillId)
         if (!existing) return null
+        if (existing.revision !== expectedRevision) {
+          setError('Der Skill wurde zwischenzeitlich geändert.')
+          return null
+        }
         const updated: SkillInfo = {
           ...existing,
           ...payload,
+          revision: existing.revision + 1,
           updated_at: Date.now() / 1000,
         }
         setSkills((current) =>
@@ -213,7 +260,7 @@ export function useSkillsApi({
       try {
         const record = await updateSkill(
           skillId,
-          { ...payload, expected_updated_at: expectedUpdatedAt },
+          { ...payload, expected_revision: expectedRevision },
           clientOptions,
         )
         setSkills((current) =>
@@ -222,20 +269,20 @@ export function useSkillsApi({
         return record
       } catch (cause) {
         if (hasHttpStatus(cause, 409)) {
-          // Conflict recovery: pull the winning server version so the
-          // editor can rebase its precondition — without this every
-          // retry hits the same 409 until a full reload.
-          try {
-            setSkills(await listSkills(clientOptions))
-          } catch {
-            // The stale list stays; the conflict error below is shown.
+          // Pull the winner for comparison, but never update the draft's
+          // precondition automatically: a retry with borrowed authority would
+          // silently overwrite the remote edit.
+          const currentRevision = conflictRevisionFromError(cause)
+          if (currentRevision === null) {
+            console.warn('Skill conflict response omitted current_revision.', cause)
           }
+          await refresh()
         }
         setError(cause instanceof Error ? cause.message : String(cause))
         return null
       }
     },
-    [clientOptions, demo, skills],
+    [clientOptions, demo, refresh, skills],
   )
 
   const remove = useCallback(
@@ -304,4 +351,10 @@ export function useSkillsApi({
     exportMarkdown,
     importMarkdown,
   }
+}
+
+function conflictRevisionFromError(error: unknown): number | null {
+  const value = (error as InqtrixRequestError | undefined)?.detail
+    ?.current_revision
+  return Number.isInteger(value) && Number(value) > 0 ? Number(value) : null
 }

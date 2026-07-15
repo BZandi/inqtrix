@@ -15,8 +15,8 @@ export type GuardResult = { allowed: true } | { allowed: false; reason: GuardRea
 const ALLOWED: GuardResult = { allowed: true }
 
 /** Whether *user* is the signed-in caller (the "you" row). */
-export function isSelf(user: AdminUser, sessionSub: string | null): boolean {
-  return sessionSub != null && user.subject === sessionSub
+export function isSelf(user: AdminUser, sessionUserId: string | null): boolean {
+  return sessionUserId != null && user.id === sessionUserId
 }
 
 /** Active instance admins (admin role and not disabled). */
@@ -40,12 +40,12 @@ export function isLastActiveAdmin(
 export function canSetRole(
   users: readonly AdminUser[],
   user: AdminUser,
-  sessionSub: string | null,
+  sessionUserId: string | null,
   nextRole: 'admin' | 'user',
 ): GuardResult {
   if (nextRole === user.instance_role) return ALLOWED
   if (nextRole === 'user') {
-    if (isSelf(user, sessionSub)) return { allowed: false, reason: 'self' }
+    if (isSelf(user, sessionUserId)) return { allowed: false, reason: 'self' }
     if (isLastActiveAdmin(users, user)) {
       return { allowed: false, reason: 'last_admin' }
     }
@@ -57,9 +57,9 @@ export function canSetRole(
 export function canDisable(
   users: readonly AdminUser[],
   user: AdminUser,
-  sessionSub: string | null,
+  sessionUserId: string | null,
 ): GuardResult {
-  if (isSelf(user, sessionSub)) return { allowed: false, reason: 'self' }
+  if (isSelf(user, sessionUserId)) return { allowed: false, reason: 'self' }
   if (isLastActiveAdmin(users, user)) {
     return { allowed: false, reason: 'last_admin' }
   }

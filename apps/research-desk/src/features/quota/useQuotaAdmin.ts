@@ -129,16 +129,16 @@ export function useQuotaAdmin({ instanceAdmin }: { instanceAdmin: boolean }) {
   )
 
   const setLimit = useCallback(
-    (subjectId: string, dimension: string, value: number) =>
+    (userId: string, dimension: string, value: number) =>
       runMutation(() =>
-        setQuotaLimit({ dimension, subject_id: subjectId, value }),
+        setQuotaLimit({ dimension, user_id: userId, value }),
       ),
     [runMutation],
   )
 
   const clearLimit = useCallback(
-    (subjectId: string, dimension: string) =>
-      runMutation(() => clearQuotaLimit(subjectId, dimension)),
+    (userId: string, dimension: string) =>
+      runMutation(() => clearQuotaLimit(userId, dimension)),
     [runMutation],
   )
 
@@ -147,17 +147,17 @@ export function useQuotaAdmin({ instanceAdmin }: { instanceAdmin: boolean }) {
    * snapshot reloads once (not per field). ``value: null`` clears a row. */
   const applyOverrides = useCallback(
     (
-      subjectId: string,
+      userId: string,
       changes: ReadonlyArray<{ dimension: string; value: number | null }>,
     ) =>
       runMutation(async () => {
         for (const change of changes) {
           if (change.value == null) {
-            await clearQuotaLimit(subjectId, change.dimension)
+            await clearQuotaLimit(userId, change.dimension)
           } else {
             await setQuotaLimit({
               dimension: change.dimension,
-              subject_id: subjectId,
+              user_id: userId,
               value: change.value,
             })
           }
@@ -166,12 +166,12 @@ export function useQuotaAdmin({ instanceAdmin }: { instanceAdmin: boolean }) {
     [runMutation],
   )
 
-  /** Reset every flow window for one subject (the row-level "reset usage"). */
+  /** Reset every flow window for one user (the row-level "reset usage"). */
   const resetUsage = useCallback(
-    (subjectId: string, dimensions: ReadonlyArray<string>) =>
+    (userId: string, dimensions: ReadonlyArray<string>) =>
       runMutation(async () => {
         for (const dimension of dimensions) {
-          await resetQuota({ dimension, subject_id: subjectId })
+          await resetQuota({ dimension, user_id: userId })
         }
       }),
     [runMutation],

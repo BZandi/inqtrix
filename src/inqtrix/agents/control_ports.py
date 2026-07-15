@@ -11,9 +11,10 @@ Two implementations behind one port:
 :class:`~inqtrix.agents.control_memory.MemoryAgentControlStore` (offline/test)
 and
 :class:`~inqtrix.storage.agent_control_postgres.PostgresAgentControlStore`.
-Scoping stays OUT of the store: every row hangs off a run, and the router
-resolves the run with the caller's visibility first (denial == absence), so
-the store never sees principals.
+Control rows remain principal-agnostic, but user mutations are composed with
+the run store's live authorization callback. The router's first visibility
+check is only an early indistinct-404 gate; the callback locks the canonical
+run/share boundary again in the same transaction as the control write.
 
 Retention: all control rows are children of their run row (``ON DELETE
 CASCADE`` in Postgres, mirrored in memory) — the durable run retention window
@@ -24,6 +25,7 @@ turns because every turn re-anchors it onto the newest run via
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, runtime_checkable
 
@@ -629,7 +631,7 @@ class ApprovalRecord:
         decision_payload: The edited plan for ``edit`` decisions; empty
             otherwise.
         note: Optional free-text the decider attached.
-        decided_by_sub: Verified subject that decided.
+        decided_by_user_id: Verified subject that decided.
         interrupt_key: Checkpoint correlation key for the M5 resume
             (opaque to this layer).
         created_at/decided_at: Unix seconds.
@@ -645,7 +647,7 @@ class ApprovalRecord:
     decision: str = ""
     decision_payload: dict[str, Any] = field(default_factory=dict)
     note: str = ""
-    decided_by_sub: str | None = None
+    decided_by_user_id: uuid.UUID | None = None
     interrupt_key: str = ""
     created_at: float = 0.0
     decided_at: float | None = None
@@ -682,7 +684,7 @@ class ClarificationRecord:
         answer: Whole-round free-text answer (empty when structured
             ``answers`` or a legacy option was given).
         option_id: Picked legacy option id (empty otherwise).
-        answered_by_sub: Verified subject that answered.
+        answered_by_user_id: Verified subject that answered.
         created_at/answered_at: Unix seconds.
     """
 
@@ -696,7 +698,7 @@ class ClarificationRecord:
     status: str = "pending"
     answer: str = ""
     option_id: str = ""
-    answered_by_sub: str | None = None
+    answered_by_user_id: uuid.UUID | None = None
     created_at: float = 0.0
     answered_at: float | None = None
 
@@ -843,8 +845,15 @@ class AgentControlStore(Protocol):
         run_id: str,
         plan_id: str,
         task_id: str,
-    ) -> PlanTaskRecord:
-        """Atomically request cancellation of one source task."""
+        authorize: Any,
+    ) -> tuple[PlanTaskRecord, str | None]:
+        """Request task cancellation under the run's live edit authority.
+
+        ``authorize(control_write)`` composes the task-row CAS with the run
+        store. The callback receives the backend transaction and a child-run
+        cancellation function, so a missing/unauthorized child rolls the task
+        row back instead of being reported as already terminal.
+        """
         ...
 
     # -- approvals ------------------------------------------------------ #
@@ -868,7 +877,7 @@ class AgentControlStore(Protocol):
         decision: str,
         decision_payload: dict[str, Any],
         note: str,
-        decided_by_sub: str | None,
+        decided_by_user_id: uuid.UUID | None,
         resume: Any,
         edited_plan: PlanRecord | None = None,
         edited_tasks: list[PlanTaskRecord] | None = None,
@@ -879,12 +888,12 @@ class AgentControlStore(Protocol):
         *resume* is an AWAITABLE callable ``await resume(control_write)
         -> run summary``
         supplied by the service (it wraps ``run_store.resume_run``): the
-        memory store calls ``resume(None)`` after its in-lock decision CAS
-        (reverting the CAS when the resume fails); the Postgres store hands
-        ``resume`` a coroutine writer that performs the decision CAS — and
-        the ``edit`` decision's new plan version — INSIDE the run store's
-        ``waiting -> queued`` transaction, so a crash can never separate
-        the decision from the resume.
+        memory store hands ``resume`` a synchronous writer executed under the
+        shared authority/run lock; the Postgres store hands it a coroutine
+        writer executed in the run transaction. Both perform the decision CAS
+        — and the ``edit`` decision's new plan version — INSIDE the run store's
+        ``waiting -> queued`` boundary, so no observer can see one without the
+        other.
 
         ``edit`` decisions carry *edited_plan* (``version`` assigned by the
         store as latest+1; older versions flip to ``superseded``) and
@@ -921,7 +930,7 @@ class AgentControlStore(Protocol):
         answer: str,
         option_id: str,
         answers: dict[str, Any],
-        answered_by_sub: str | None,
+        answered_by_user_id: uuid.UUID | None,
         resume: Any,
     ) -> tuple[ClarificationRecord, dict[str, Any]]:
         """Record the answer AND resume the waiting run (rule R9).
@@ -1047,8 +1056,14 @@ class AgentControlStore(Protocol):
         artifact_id: str,
         content_markdown: str,
         expected_revision: int,
+        authorize: Any,
     ) -> ArtifactRecord:
-        """Optimistic user edit (E13).
+        """Optimistic user edit under the run's live edit authority (E13).
+
+        ``authorize(control_write)`` executes the artifact CAS inside the
+        same authorization boundary that locks the canonical run root and an
+        accepted direct share. Revocation and this write therefore have one
+        observable order.
 
         Raises :class:`ArtifactNotFound`, :class:`ArtifactLocked` (status
         ``writing``), or :class:`ArtifactRevisionConflict` (revision CAS

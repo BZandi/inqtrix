@@ -17,11 +17,14 @@ accounts so the password login is refused too.
 
 from __future__ import annotations
 
+import logging
 import time
-from typing import TYPE_CHECKING
+import uuid
+from typing import TYPE_CHECKING, Any, Callable
 
 from fastapi import APIRouter, Request
 
+from inqtrix.auth.lifecycle import AdminAuthorizationError, UserLifecycleStatus
 from inqtrix.server.routers._admin_guard import require_instance_admin
 from inqtrix.services.request_parsing import error_response
 
@@ -30,11 +33,12 @@ if TYPE_CHECKING:
 
 TENANT = "default"
 _MIN_PASSWORD_LEN = 12
+log = logging.getLogger("inqtrix")
 
 
 def _user_payload(user: "MirroredUser") -> dict:
     return {
-        "subject": user.subject,
+        "id": str(user.user_id),
         "email": user.email,
         "display_name": user.display_name,
         "instance_role": user.instance_role,
@@ -43,10 +47,27 @@ def _user_payload(user: "MirroredUser") -> dict:
     }
 
 
-def build_admin_router(provider) -> APIRouter:
+def _revoked_admin_response(
+    *, actor_user_id: uuid.UUID | None, command: str
+):
+    """Hide a lifecycle-time admin revocation while keeping it observable."""
+    log.warning(
+        "instance-admin lifecycle denied after live revalidation: "
+        "actor_user_id=%s command=%s",
+        actor_user_id,
+        command,
+    )
+    return error_response(404, "Nicht gefunden", "not_found")
+
+
+def build_admin_router(
+    provider: Any,
+    principal_dependency: Callable[..., Any] | None = None,
+) -> APIRouter:
     """Bind the admin routes against one cookie-session provider."""
     router = APIRouter()
     users = provider.users
+    lifecycle = provider.lifecycle
 
     async def _require_admin(request: Request):
         """Resolve a session principal and require instance admin.
@@ -57,14 +78,14 @@ def build_admin_router(provider) -> APIRouter:
         byte-identically. The local name keeps the call sites below
         unchanged.
         """
-        return await require_instance_admin(provider, request)
+        return await require_instance_admin(
+            provider,
+            request,
+            principal_dependency,
+        )
 
-    async def _find_target(subject: str) -> "MirroredUser | None":
-        """Resolve a target by its subject (carries the issuer for ops)."""
-        for user in await users.list_users(tenant_id=TENANT):
-            if user.subject == subject:
-                return user
-        return None
+    async def _find_target(user_id: uuid.UUID) -> "MirroredUser | None":
+        return await users.find_by_user_id(tenant_id=TENANT, user_id=user_id)
 
     @router.get("/v1/admin/users")
     async def list_users(request: Request):
@@ -74,12 +95,12 @@ def build_admin_router(provider) -> APIRouter:
         rows = await users.list_users(tenant_id=TENANT)
         return {"users": [_user_payload(user) for user in rows]}
 
-    @router.patch("/v1/admin/users/{subject}")
-    async def set_role(subject: str, request: Request):
+    @router.patch("/v1/admin/users/{user_id}")
+    async def set_role(user_id: uuid.UUID, request: Request):
         resolved, error = await _require_admin(request)
         if error is not None:
             return error
-        _principal, session, _mirror = resolved
+        principal, session, _mirror = resolved
         try:
             body = await request.json()
         except Exception:
@@ -93,10 +114,10 @@ def build_admin_router(provider) -> APIRouter:
                 "Feld 'instance_role' muss 'admin' oder 'user' sein",
                 "invalid_request_error",
             )
-        target = await _find_target(subject)
+        target = await _find_target(user_id)
         if target is None:
             return error_response(404, "Benutzer nicht gefunden", "not_found")
-        if role == "user" and target.subject == session.sub:
+        if role == "user" and target.user_id == session.user_id:
             # Self-demotion is blocked (mirrors the self-disable guard and the
             # UI): an admin must not silently drop their own access — another
             # admin demotes them. The last-admin guard below is the separate,
@@ -104,94 +125,81 @@ def build_admin_router(provider) -> APIRouter:
             return error_response(
                 409, "Sie koennen sich nicht selbst herabstufen", "self_demote"
             )
-        if role == "user":
-            # Atomic last-admin guard: demoting the only active admin would
-            # lock the instance out of its own administration. The check and
-            # the write are ONE operation, so concurrent demotions cannot both
-            # pass a stale count and strand the instance with zero admins.
-            if not await users.demote_if_not_last_admin(
-                tenant_id=TENANT, issuer=target.issuer, subject=target.subject
-            ):
-                return error_response(
-                    409,
-                    "Der letzte Admin kann nicht herabgestuft werden",
-                    "last_admin",
-                )
-        else:
-            await users.set_instance_role(
-                tenant_id=TENANT,
-                issuer=target.issuer,
-                subject=target.subject,
-                role="admin",
+        if lifecycle is None:
+            return error_response(
+                503, "Nutzerverwaltung ist nicht verfuegbar", "server_error"
             )
-        updated = await _find_target(subject)
+        try:
+            outcome = await lifecycle.set_role(
+                tenant_id=TENANT,
+                user_id=target.user_id,
+                role=role,
+                actor_user_id=principal.user_id,
+            )
+        except AdminAuthorizationError:
+            return _revoked_admin_response(
+                actor_user_id=principal.user_id, command="set_role"
+            )
+        if outcome is UserLifecycleStatus.LAST_ADMIN:
+            return error_response(
+                409,
+                "Der letzte Admin kann nicht herabgestuft werden",
+                "last_admin",
+            )
+        if outcome is UserLifecycleStatus.NOT_FOUND:
+            return error_response(404, "Benutzer nicht gefunden", "not_found")
+        updated = await _find_target(user_id)
         return _user_payload(updated)
 
-    async def _set_user_disabled(subject: str, *, disabled: bool, request: Request):
+    async def _set_user_disabled(
+        user_id: uuid.UUID, *, disabled: bool, request: Request
+    ):
         resolved, error = await _require_admin(request)
         if error is not None:
             return error
-        _principal, session, _mirror = resolved
-        target = await _find_target(subject)
+        principal, session, _mirror = resolved
+        target = await _find_target(user_id)
         if target is None:
             return error_response(404, "Benutzer nicht gefunden", "not_found")
-        if disabled and target.subject == session.sub:
+        if disabled and target.user_id == session.user_id:
             return error_response(
                 409, "Sie koennen sich nicht selbst deaktivieren", "self_disable"
             )
         now = time.time()
         disabled_at = now if disabled else None
-        if disabled:
-            # Atomic last-admin guard (same race-free contract as demote):
-            # the durable mirror flag is set only when this is not the last
-            # active admin. Denies oidc/ldap re-admission once set.
-            if not await users.disable_if_not_last_admin(
+        if lifecycle is None:
+            return error_response(
+                503, "Nutzerverwaltung ist nicht verfuegbar", "server_error"
+            )
+        try:
+            outcome = await lifecycle.set_disabled(
                 tenant_id=TENANT,
-                issuer=target.issuer,
-                subject=target.subject,
-                disabled_at=now,
-            ):
-                return error_response(
-                    409,
-                    "Der letzte Admin kann nicht deaktiviert werden",
-                    "last_admin",
-                )
-        else:
-            # Re-enable clears the flag; enabling never reduces admins.
-            await users.set_disabled(
-                tenant_id=TENANT,
-                issuer=target.issuer,
-                subject=target.subject,
-                disabled_at=None,
+                user_id=target.user_id,
+                disabled_at=disabled_at,
+                actor_user_id=principal.user_id,
             )
-        # Local accounts: the credential is the source of truth for the
-        # password login, so disable/enable it too.
-        credentials = getattr(provider, "credentials", None)
-        if credentials is not None:
-            await credentials.set_disabled(
-                tenant_id=TENANT, subject=target.subject, disabled_at=disabled_at
+        except AdminAuthorizationError:
+            return _revoked_admin_response(
+                actor_user_id=principal.user_id, command="set_disabled"
             )
-        if disabled:
-            # Cut off live access immediately: sessions + tokens.
-            await provider.sessions.delete_for_owner(
-                issuer=target.issuer, sub=target.subject
+        if outcome is UserLifecycleStatus.LAST_ADMIN:
+            return error_response(
+                409,
+                "Der letzte Admin kann nicht deaktiviert werden",
+                "last_admin",
             )
-            if provider.pat_service is not None:
-                await provider.pat_service.revoke_all_for_owner(
-                    tenant_id=TENANT,
-                    owner_issuer=target.issuer,
-                    owner_sub=target.subject,
-                )
-        updated = await _find_target(subject)
+        if outcome is UserLifecycleStatus.NOT_FOUND:
+            return error_response(404, "Benutzer nicht gefunden", "not_found")
+        updated = await _find_target(user_id)
         return _user_payload(updated)
 
-    @router.post("/v1/admin/users/{subject}:disable")
-    async def disable_user(subject: str, request: Request):
-        return await _set_user_disabled(subject, disabled=True, request=request)
+    @router.post("/v1/admin/users/{user_id}:disable")
+    async def disable_user(user_id: uuid.UUID, request: Request):
+        return await _set_user_disabled(user_id, disabled=True, request=request)
 
-    @router.post("/v1/admin/users/{subject}:enable")
-    async def enable_user(subject: str, request: Request):
-        return await _set_user_disabled(subject, disabled=False, request=request)
+    @router.post("/v1/admin/users/{user_id}:enable")
+    async def enable_user(user_id: uuid.UUID, request: Request):
+        return await _set_user_disabled(user_id, disabled=False, request=request)
 
     if provider.mode == "local":
         from inqtrix.auth.credentials import (
@@ -206,6 +214,7 @@ def build_admin_router(provider) -> APIRouter:
             resolved, error = await _require_admin(request)
             if error is not None:
                 return error
+            principal, _session, _mirror = resolved
             try:
                 body = await request.json()
             except Exception:
@@ -233,40 +242,38 @@ def build_admin_router(provider) -> APIRouter:
                 )
             display_name = str((body or {}).get("display_name", "")).strip() or email
             credential = LocalCredential(
+                user_id=uuid.uuid4(),
                 subject=new_subject(),
                 email=email,
                 password_hash=hash_password(password),
                 display_name=display_name,
                 created_at=time.time(),
             )
-            created = await provider.credentials.create(
-                credential, tenant_id=TENANT, allow_first_only=False
-            )
-            if not created:
+            if lifecycle is None:
+                return error_response(
+                    503, "Nutzerverwaltung ist nicht verfuegbar", "server_error"
+                )
+            try:
+                user = await lifecycle.create_local_account(
+                    tenant_id=TENANT,
+                    credential=credential,
+                    role=role,
+                    first_only=False,
+                    actor_user_id=principal.user_id,
+                )
+            except AdminAuthorizationError:
+                return _revoked_admin_response(
+                    actor_user_id=principal.user_id,
+                    command="create_local_account",
+                )
+            if user is None:
                 return error_response(
                     409, "E-Mail-Adresse ist bereits vergeben", "duplicate_email"
                 )
-            if users is not None:
-                await users.record_login(
-                    tenant_id=TENANT,
-                    issuer=LOCAL_ISSUER,
-                    subject=credential.subject,
-                    email=email,
-                    email_verified=True,
-                    display_name=display_name,
-                )
-                if role == "admin":
-                    await users.set_instance_role(
-                        tenant_id=TENANT,
-                        issuer=LOCAL_ISSUER,
-                        subject=credential.subject,
-                        role="admin",
-                    )
-            target = await _find_target(credential.subject)
-            return _user_payload(target)
+            return _user_payload(user)
 
-        @router.post("/v1/admin/users/{subject}:reset-password")
-        async def reset_password(subject: str, request: Request):
+        @router.post("/v1/admin/users/{user_id}:reset-password")
+        async def reset_password(user_id: uuid.UUID, request: Request):
             """Admin sets a new password for a local account.
 
             Forgotten-password recovery without email: the admin supplies the
@@ -278,6 +285,7 @@ def build_admin_router(provider) -> APIRouter:
             resolved, error = await _require_admin(request)
             if error is not None:
                 return error
+            principal, _session, _mirror = resolved
             try:
                 body = await request.json()
             except Exception:
@@ -291,21 +299,26 @@ def build_admin_router(provider) -> APIRouter:
                     f"Passwort muss mindestens {_MIN_PASSWORD_LEN} Zeichen lang sein",
                     "invalid_request_error",
                 )
-            credential = await provider.credentials.get_by_subject(
-                tenant_id=TENANT, subject=subject
-            )
-            if credential is None:
+            if lifecycle is None:
+                return error_response(
+                    503, "Nutzerverwaltung ist nicht verfuegbar", "server_error"
+                )
+            try:
+                changed = await lifecycle.reset_local_password(
+                    tenant_id=TENANT,
+                    user_id=user_id,
+                    password_hash=hash_password(password),
+                    actor_user_id=principal.user_id,
+                )
+            except AdminAuthorizationError:
+                return _revoked_admin_response(
+                    actor_user_id=principal.user_id,
+                    command="reset_local_password",
+                )
+            if not changed:
                 return error_response(
                     404, "Kein lokales Konto gefunden", "not_found"
                 )
-            await provider.credentials.set_password(
-                tenant_id=TENANT,
-                subject=subject,
-                password_hash=hash_password(password),
-            )
-            await provider.sessions.delete_for_owner(
-                issuer=LOCAL_ISSUER, sub=subject
-            )
             return {"reset": True}
 
     return router

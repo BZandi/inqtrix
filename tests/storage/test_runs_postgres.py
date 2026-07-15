@@ -13,13 +13,16 @@ from __future__ import annotations
 import os
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from importlib import import_module
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from inqtrix.auth.permissions import SharePermission
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.exceptions import AgentProviderTimeout, AgentRateLimited
 from inqtrix.runs.postgres_store import PostgresRunStore
@@ -30,6 +33,8 @@ from inqtrix.server.runs import (
     RunSessionActive,
 )
 from inqtrix.storage.db import build_engine, build_session_factory
+from inqtrix.storage.identity_orm import resource_shares, users
+from inqtrix.storage.identity_postgres import PostgresIdentityBackend
 from inqtrix.storage.migrate import run_migrations
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
@@ -40,6 +45,22 @@ pytestmark = pytest.mark.skipif(
 )
 
 APP_ROLE = "inqtrix_app"
+USER_A = uuid.UUID("11111111-1111-4111-8111-111111111111")
+USER_B = uuid.UUID("22222222-2222-4222-8222-222222222222")
+OWNER_1 = uuid.UUID("33333333-3333-4333-8333-333333333333")
+OWNER_2 = uuid.UUID("44444444-4444-4444-8444-444444444444")
+INTRUDER = uuid.UUID("55555555-5555-4555-8555-555555555555")
+SHARE_OWNER = uuid.UUID("66666666-6666-4666-8666-666666666666")
+SHARE_RECIPIENT = uuid.UUID("77777777-7777-4777-8777-777777777777")
+RUN_TEST_USERS = (
+    USER_A,
+    USER_B,
+    OWNER_1,
+    OWNER_2,
+    INTRUDER,
+    SHARE_OWNER,
+    SHARE_RECIPIENT,
+)
 
 RUN_SUMMARY_KEYS = {
     "run_id",
@@ -71,12 +92,6 @@ def runs_schema_migrated():
 @pytest_asyncio.fixture()
 async def engine():
     engine = build_engine(TEST_DATABASE_URL)
-    yield engine
-    await engine.dispose()
-
-
-@pytest_asyncio.fixture()
-async def store(engine):
     factory = build_session_factory(engine)
     async with factory() as session:
         async with session.begin():
@@ -94,7 +109,40 @@ async def store(engine):
                     "superuser/BYPASSRLS user for cross-tenant cleanup."
                 )
             await session.execute(text("DELETE FROM run_events"))
+            await session.execute(
+                resource_shares.delete().where(
+                    resource_shares.c.resource_type == "run"
+                )
+            )
             await session.execute(text("DELETE FROM runs"))
+            for user_id in RUN_TEST_USERS:
+                label = f"runs-pg-{user_id.hex}"
+                await session.execute(
+                    pg_insert(users)
+                    .values(
+                        id=user_id,
+                        tenant_id="default",
+                        issuer="https://runs-tests.example",
+                        subject=label,
+                        email=f"{label}@example.com",
+                    )
+                    .on_conflict_do_update(
+                        index_elements=(users.c.id,),
+                        set_={
+                            "tenant_id": "default",
+                            "issuer": "https://runs-tests.example",
+                            "subject": label,
+                            "email": f"{label}@example.com",
+                            "disabled_at": None,
+                        },
+                    )
+                )
+    yield engine
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture()
+async def store(engine):
     store = PostgresRunStore(
         engine=build_engine(TEST_DATABASE_URL),
         app_role=APP_ROLE,
@@ -697,78 +745,85 @@ def test_metrics_snapshot_counts_running_rows(store):
 
 def test_import_completed_run_is_idempotent_and_owner_scoped(store):
     summary = store.import_completed_run(
-        run_id="run_imported_pg",
+        source_run_id="local_imported_pg",
         question="imported report",
         stack_name="default",
         result={"answer": "the report body", "metrics": {"rounds": 1}},
         created_at=1000.0,
         workspace_id="ws_owner",
-        created_by_sub="owner-1",
+        created_by_user_id=OWNER_1,
         created_by_tenant_id="default",
     )
     assert set(summary.keys()) == RUN_SUMMARY_KEYS
-    assert summary["run_id"] == "run_imported_pg"
+    run_id = summary["run_id"]
+    assert run_id != "local_imported_pg"
     assert summary["status"] == "completed"
-    assert store.result("run_imported_pg")["answer"] == "the report body"
+    assert store.result(run_id)["answer"] == "the report body"
 
     # Idempotent re-import for the same owner: same row, body untouched.
     again = store.import_completed_run(
-        run_id="run_imported_pg",
+        source_run_id="local_imported_pg",
         question="imported report",
         stack_name="default",
         result={"answer": "ignored on re-import"},
-        created_by_sub="owner-1",
+        created_by_user_id=OWNER_1,
         created_by_tenant_id="default",
     )
-    assert again["run_id"] == "run_imported_pg"
-    assert store.result("run_imported_pg")["answer"] == "the report body"
+    assert again["run_id"] == run_id
+    assert store.result(run_id)["answer"] == "the report body"
 
     # A foreign principal importing the SAME id gets a fresh id; A stays intact.
     foreign = store.import_completed_run(
-        run_id="run_imported_pg",
+        source_run_id="local_imported_pg",
         question="B",
         stack_name="default",
         result={"answer": "owner B body"},
-        created_by_sub="owner-2",
+        created_by_user_id=OWNER_2,
         created_by_tenant_id="default",
     )
-    assert foreign["run_id"] != "run_imported_pg"
-    assert store.result("run_imported_pg")["answer"] == "the report body"
+    assert foreign["run_id"] != run_id
+    assert store.result(run_id)["answer"] == "the report body"
     assert store.result(foreign["run_id"])["answer"] == "owner B body"
 
 
 def test_delete_removes_terminal_run_owner_scoped(store):
-    store.import_completed_run(
-        run_id="run_delete_pg",
+    imported = store.import_completed_run(
+        source_run_id="local_delete_pg",
         question="report",
         stack_name="default",
         result={"answer": "the body", "metrics": {"rounds": 1}},
         workspace_id="ws_owner",
-        created_by_sub="owner-1",
+        created_by_user_id=OWNER_1,
         created_by_tenant_id="default",
     )
 
-    # Owner-only, namespace-scoped: a foreign sub and the wrong workspace are
+    run_id = imported["run_id"]
+    # Owner-only, namespace-scoped: a foreign user and the wrong workspace are
     # both the indistinct 404, and the row stays.
     with pytest.raises(RunNotFound):
         store.delete(
-            "run_delete_pg", workspace_id="ws_owner", requester_sub="intruder"
+            run_id,
+            workspace_id="ws_owner",
+            requester_user_id=INTRUDER,
         )
     with pytest.raises(RunNotFound):
         store.delete(
-            "run_delete_pg", workspace_id="ws_other", requester_sub="owner-1"
+            run_id,
+            workspace_id="ws_other",
+            requester_user_id=OWNER_1,
         )
     assert (
-        store.get("run_delete_pg", workspace_id="ws_owner")["run_id"]
-        == "run_delete_pg"
+        store.get(run_id, workspace_id="ws_owner")["run_id"] == run_id
     )
 
     # The owner deletes it durably; the row (and its cascaded events) are gone.
     store.delete(
-        "run_delete_pg", workspace_id="ws_owner", requester_sub="owner-1"
+        run_id,
+        workspace_id="ws_owner",
+        requester_user_id=OWNER_1,
     )
     with pytest.raises(RunNotFound):
-        store.get("run_delete_pg", workspace_id="ws_owner")
+        store.get(run_id, workspace_id="ws_owner")
 
 
 def test_event_stream_is_gap_free_with_companions_first(store):
@@ -868,18 +923,49 @@ def test_cancel_of_queued_run_is_immediate(store):
         wait_for_status(store, second["run_id"], {"completed"})
 
 
+def test_cancel_pending_summary_exposes_cancel_requested(store):
+    """Parity with the in-memory store: pending cancel is summary-visible.
+
+    ``cancel_requested`` is absent on a plain running summary, ``True``
+    while a cancel of a RUNNING run is pending, and absent again after
+    the terminal transition (historical shape byte-identical).
+    """
+    import threading
+
+    started = threading.Event()
+
+    def cancellable(handle):
+        started.set()
+        if handle.cancel_event.wait(10):
+            handle.cancel("client_requested_cancel")
+
+    summary = submit_noop(store, work=cancellable)
+    run_id = summary["run_id"]
+    assert started.wait(10)
+    running = wait_for_status(store, run_id, {"running"})
+    assert "cancel_requested" not in running
+
+    cancelled = store.cancel(run_id)
+
+    assert cancelled["status"] == "running"
+    assert cancelled["cancel_requested"] is True
+    final = wait_for_status(store, run_id, {"cancelled"})
+    assert "cancel_requested" not in final
+
+
 def test_scoped_visibility_denies_with_404_semantics(store):
     summary = submit_noop(
-        store, created_by_sub="user-a", created_by_tenant_id="default"
+        store,
+        created_by_user_id=USER_A,
+        created_by_tenant_id="default",
     )
     wait_for_status(store, summary["run_id"], {"completed"})
 
     foreign = UserContext(
         principal=Principal(
-            sub="user-b", kind="oidc_session", tenant_id="default"
+            user_id=USER_B, kind="oidc_session", tenant_id="default"
         ),
         workspace_ids=(),
-        groups=(),
     )
     with pytest.raises(RunNotFound):
         store.get(summary["run_id"], visible_to=foreign)
@@ -887,10 +973,9 @@ def test_scoped_visibility_denies_with_404_semantics(store):
 
     owner = UserContext(
         principal=Principal(
-            sub="user-a", kind="oidc_session", tenant_id="default"
+            user_id=USER_A, kind="oidc_session", tenant_id="default"
         ),
         workspace_ids=(),
-        groups=(),
     )
     assert store.get(summary["run_id"], visible_to=owner)["status"] == (
         "completed"
@@ -1115,67 +1200,86 @@ def test_ttl_cleanup_removes_old_terminal_runs(store):
         store.close()
 
 
-def _scoped(sub: str) -> UserContext:
+def _scoped(user_id: uuid.UUID) -> UserContext:
     return UserContext(
         principal=Principal(
-            sub=sub, kind="oidc_session", tenant_id="default"
+            user_id=user_id, kind="oidc_session", tenant_id="default"
         ),
         workspace_ids=(),
-        groups=(),
     )
 
 
-def test_shared_in_grants_admit_reads_and_gate_cancel(store):
-    """WP-C-C parity: the also_visible contract on the durable store.
+def test_live_direct_share_admits_reads_and_gates_cancel(store):
+    """The durable store resolves consent, permission, and revoke live.
 
-    Mirrors tests/test_runs_sharing.py — shared-in rows bypass the
-    workspace filter, carry the additive access annotation, admit
-    result/replay, and cancel needs at least an edit grant.
+    Accepted shared-in runs bypass the recipient's workspace namespace and
+    carry the canonical access object. A view share admits reads but not
+    mutation; a committed edit upgrade is effective immediately, and revoke
+    removes the resource without a caller-supplied grant cache.
     """
-    from inqtrix.auth.permissions import SharePermission
 
     shared = submit_noop(
         store,
-        created_by_sub="user-owner",
+        created_by_user_id=SHARE_OWNER,
         created_by_tenant_id="default",
         workspace_id="ws-owner",
     )
     own = submit_noop(
         store,
-        created_by_sub="user-recipient",
+        created_by_user_id=SHARE_RECIPIENT,
         created_by_tenant_id="default",
         workspace_id="ws-recipient",
     )
     wait_for_status(store, shared["run_id"], {"completed"})
     wait_for_status(store, own["run_id"], {"completed"})
-    recipient = _scoped("user-recipient")
-    grants = {shared["run_id"]: SharePermission.VIEW}
-
-    summary = store.get(
-        shared["run_id"], visible_to=recipient, also_visible=grants
+    recipient = _scoped(SHARE_RECIPIENT)
+    identity = PostgresIdentityBackend(
+        session_factory=store._session_factory,
+        app_role=APP_ROLE,
     )
-    assert summary["access"] == {"via": "share", "permission": "view"}
-    assert "access" not in store.get(own["run_id"], visible_to=recipient)
+    (pending_share,) = store._call(
+        identity.create_shares(
+            tenant_id="default",
+            resource_type="run",
+            resource_id=shared["run_id"],
+            owner_user_id=SHARE_OWNER,
+            granted_by_user_id=SHARE_OWNER,
+            invitees=((SHARE_RECIPIENT, SharePermission.VIEW),),
+        )
+    )
+
+    with pytest.raises(RunNotFound):
+        store.get(shared["run_id"], visible_to=recipient)
+    accepted_share = store._call(
+        identity.accept_share_by_id(
+            tenant_id="default",
+            share_id=pending_share.id,
+            recipient_user_id=SHARE_RECIPIENT,
+            owner_user_id=SHARE_OWNER,
+        )
+    )
+    assert accepted_share is not None
+
+    summary = store.get(shared["run_id"], visible_to=recipient)
+    assert summary["access"] == {"mode": "shared", "permission": "view"}
+    assert store.get(own["run_id"], visible_to=recipient)["access"] == {
+        "mode": "owner"
+    }
 
     listed = store.list(
         workspace_id="ws-recipient",
         visible_to=recipient,
-        also_visible=grants,
     )
     by_id = {item["run_id"]: item for item in listed}
     assert set(by_id) == {own["run_id"], shared["run_id"]}
     assert by_id[shared["run_id"]]["workspace_id"] == "ws-owner"
     assert by_id[shared["run_id"]]["access"]["permission"] == "view"
-    assert "access" not in by_id[own["run_id"]]
+    assert by_id[own["run_id"]]["access"] == {"mode": "owner"}
 
-    result = store.result(
-        shared["run_id"], visible_to=recipient, also_visible=grants
-    )
+    result = store.result(shared["run_id"], visible_to=recipient)
     assert result["answer"] == "fertig"
 
-    subscription = store.subscribe(
-        shared["run_id"], visible_to=recipient, also_visible=grants
-    )
+    subscription = store.subscribe(shared["run_id"], visible_to=recipient)
     try:
         assert any(
             event["type"] == "inqtrix.run.completed"
@@ -1185,18 +1289,40 @@ def test_shared_in_grants_admit_reads_and_gate_cancel(store):
         subscription.close()
 
     with pytest.raises(RunNotFound):
-        store.cancel(
-            shared["run_id"], visible_to=recipient, also_visible=grants
+        store.cancel(shared["run_id"], visible_to=recipient)
+    updated_share = store._call(
+        identity.update_share_permission(
+            tenant_id="default",
+            share_id=pending_share.id,
+            permission=SharePermission.EDIT,
+            expected_revision=accepted_share.revision,
+            actor_user_id=SHARE_OWNER,
         )
-    cancelled = store.cancel(
-        shared["run_id"],
-        visible_to=recipient,
-        also_visible={shared["run_id"]: SharePermission.EDIT},
     )
+    assert updated_share is not None
+    cancelled = store.cancel(shared["run_id"], visible_to=recipient)
     assert cancelled["status"] == "completed"
+    assert cancelled["access"] == {"mode": "shared", "permission": "edit"}
 
+    revoked_share = store._call(
+        identity.revoke_share_by_id(
+            tenant_id="default",
+            share_id=pending_share.id,
+            revoked_by_user_id=SHARE_OWNER,
+            owner_user_id=SHARE_OWNER,
+        )
+    )
+    assert revoked_share is not None
     with pytest.raises(RunNotFound):
-        store.get(shared["run_id"], visible_to=_scoped("user-stranger"))
+        store.get(shared["run_id"], visible_to=recipient)
+    assert {
+        item["run_id"]
+        for item in store.list(
+            workspace_id="ws-recipient", visible_to=recipient
+        )
+    } == {own["run_id"]}
+    with pytest.raises(RunNotFound):
+        store.get(shared["run_id"], visible_to=_scoped(INTRUDER))
 
 
 # ---------------------------------------------------------------------------
@@ -2026,22 +2152,22 @@ def test_per_user_cap_admission_counts_queued_and_running(engine):
         hold.wait(timeout=10.0)
         handle.complete({"answer": "ok", "metrics": {}})
 
-    def submit(sub):
+    def submit(user_id: uuid.UUID):
         return store.submit(
             question="F",
             stack_name="default",
             work=slow,
             request_payload={"question": "F"},
-            created_by_sub=sub,
+            created_by_user_id=user_id,
         )
 
     try:
-        submit("user-a")
-        submit("user-a")
+        submit(USER_A)
+        submit(USER_A)
         with pytest.raises(RunPerUserLimit):
-            submit("user-a")
-        # Distinct subject unaffected; anonymous never capped.
-        submit("user-b")
+            submit(USER_A)
+        # A distinct canonical user is unaffected; anonymous is never capped.
+        submit(USER_B)
         store.submit(
             question="F",
             stack_name="default",

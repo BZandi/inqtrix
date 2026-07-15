@@ -14,7 +14,7 @@ import os
 import threading
 import time
 import uuid
-from typing import Callable
+from typing import Any, Callable
 
 import pytest
 import pytest_asyncio
@@ -24,6 +24,7 @@ from inqtrix.agents.control_ports import (
     ApprovalRecord,
     ArtifactBatchRevision,
     ArtifactLocked,
+    ArtifactNotFound,
     ArtifactRevisionConflict,
     ClarificationRecord,
     PlanNotFound,
@@ -31,15 +32,21 @@ from inqtrix.agents.control_ports import (
     PlanTaskRecord,
     settle_terminal_plan_tasks,
 )
+from inqtrix.auth.permissions import SharePermission
+from inqtrix.auth.principal import Principal, UserContext
+from inqtrix.execution_authority import AuthorizationRevoked
 from inqtrix.runs.postgres_store import PostgresRunStore
-from inqtrix.server.runs import RunActive
+from inqtrix.server.runs import RunActive, RunNotFound
 from inqtrix.services.agent_control_service import (
     AgentControlService,
     AgentControlValidationError,
 )
 from inqtrix.storage.agent_control_postgres import PostgresAgentControlStore
 from inqtrix.storage.db import build_engine, build_session_factory
+from inqtrix.storage.identity_postgres import PostgresIdentityBackend
 from inqtrix.storage.migrate import run_migrations
+
+from tests.storage._canonical_users import ensure_canonical_users
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
@@ -49,6 +56,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 APP_ROLE = "inqtrix_app"
+OWNER_USER_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
+EDITOR_USER_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
 
 _MIGRATION_0043 = import_module(
     "inqtrix.storage.migrations.versions."
@@ -84,9 +93,15 @@ async def wiped():
                 )
             # Control rows cascade with their runs.
             await session.execute(text("DELETE FROM run_events"))
+            await session.execute(
+                text("DELETE FROM resource_shares WHERE resource_type = 'run'")
+            )
             await session.execute(text("DELETE FROM runs"))
             await session.execute(text("DELETE FROM agent_sessions"))
             await session.execute(text("DELETE FROM agent_session_groups"))
+            await ensure_canonical_users(
+                session, (OWNER_USER_ID, EDITOR_USER_ID)
+            )
     await engine.dispose()
     yield
 
@@ -140,6 +155,7 @@ def _parked_agent_run(
     *,
     resumed_release: threading.Event | None = None,
     session_id: str = "sess-pg",
+    owner_user_id: uuid.UUID | None = None,
 ) -> str:
     calls = {"count": 0}
 
@@ -159,12 +175,56 @@ def _parked_agent_run(
         request_payload={"question": "x", "body": {"mode": "research"}},
         kind="agent",
         session_id=session_id,
+        created_by_user_id=owner_user_id,
+        created_by_tenant_id="default" if owner_user_id is not None else None,
     )
     run_id = summary["run_id"]
+    visible_to = _scoped(owner_user_id) if owner_user_id is not None else None
     _wait_until(
-        lambda: run_store.get(run_id)["status"] == "waiting_for_approval"
+        lambda: run_store.get(run_id, visible_to=visible_to)["status"]
+        == "waiting_for_approval"
     )
     return run_id
+
+
+def _scoped(user_id: uuid.UUID) -> UserContext:
+    return UserContext(
+        principal=Principal(
+            user_id=user_id,
+            kind="oidc_session",
+            tenant_id="default",
+            role="member",
+        )
+    )
+
+
+def _grant_edit_share(
+    run_store: PostgresRunStore, run_id: str
+) -> str:
+    identity = PostgresIdentityBackend(
+        session_factory=run_store._session_factory,
+        app_role=APP_ROLE,
+    )
+    (pending,) = run_store._call(
+        identity.create_shares(
+            tenant_id="default",
+            resource_type="run",
+            resource_id=run_id,
+            owner_user_id=OWNER_USER_ID,
+            granted_by_user_id=OWNER_USER_ID,
+            invitees=((EDITOR_USER_ID, SharePermission.EDIT),),
+        )
+    )
+    accepted = run_store._call(
+        identity.accept_share_by_id(
+            tenant_id="default",
+            share_id=pending.id,
+            recipient_user_id=EDITOR_USER_ID,
+            owner_user_id=OWNER_USER_ID,
+        )
+    )
+    assert accepted is not None
+    return pending.id
 
 
 def _approval(run_id: str, *, kind: str = "plan") -> ApprovalRecord:
@@ -215,6 +275,43 @@ async def test_decision_and_resume_commit_together(service, run_store):
         assert resumed[0]["sequence"] < decision_event["sequence"]
     finally:
         events.close()
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_rejects_subject_from_another_run(
+    service, run_store
+):
+    run_a = _parked_agent_run(run_store)
+    run_b = _parked_agent_run(run_store)
+    await service.store.save_plan(
+        run_id=run_a,
+        plan=PlanRecord(
+            plan_id="plan-pg-a", run_id=run_a, version=1,
+            status="proposed", created_by="agent",
+        ),
+        tasks=[],
+    )
+    await service.store.save_plan(
+        run_id=run_b,
+        plan=PlanRecord(
+            plan_id="plan-pg-b", run_id=run_b, version=1,
+            status="proposed", created_by="agent",
+        ),
+        tasks=[],
+    )
+
+    with pytest.raises(PlanNotFound):
+        await service.store.create_approval(
+            ApprovalRecord(
+                approval_id="apr-cross-run-pg",
+                run_id=run_a,
+                kind="plan",
+                subject_type="plan",
+                subject_id="plan-pg-b",
+            )
+        )
+
+    assert await service.store.list_approvals(run_a) == []
 
 
 @pytest.mark.asyncio
@@ -418,15 +515,17 @@ async def test_task_cancellation_state_machine_postgres(service, run_store):
         status="running",
     )
 
-    pending = await service.store.request_plan_task_cancel(
-        run_id=run_id,
-        plan_id=plan.plan_id,
-        task_id="pending-pg",
+    pending = await service.request_task_cancel(
+        run_id,
+        "pending-pg",
+        workspace_id=None,
+        principal=None,
     )
-    running = await service.store.request_plan_task_cancel(
-        run_id=run_id,
-        plan_id=plan.plan_id,
-        task_id="running-pg",
+    running = await service.request_task_cancel(
+        run_id,
+        "running-pg",
+        workspace_id=None,
+        principal=None,
     )
 
     assert pending.status == "cancelled"
@@ -440,6 +539,126 @@ async def test_task_cancellation_state_machine_postgres(service, run_store):
         "failure_code": "task_cancelled",
         "failure_reason": "user_requested_task_cancel",
     }
+
+
+@pytest.mark.asyncio
+async def test_shared_editor_task_cancel_reaches_child_postgres(
+    service, run_store
+) -> None:
+    run_id = _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
+    _grant_edit_share(run_store, run_id)
+    child_started = threading.Event()
+    child_release = threading.Event()
+
+    def child_work(handle: Any) -> None:
+        child_started.set()
+        assert child_release.wait(timeout=10.0)
+        if handle.cancel_event.is_set():
+            handle.cancel("task_cancelled")
+        else:
+            handle.complete({"answer": "late"})
+
+    child = run_store.submit(
+        question="Child research",
+        stack_name="default",
+        work=child_work,
+        request_payload={
+            "question": "Child research",
+            "body": {
+                "mode": "research",
+                "parent_task_id": "research",
+                "parent_task_attempt": 1,
+            },
+        },
+        kind="agent_child",
+        parent_run_id=run_id,
+        root_run_id=run_id,
+        created_by_user_id=OWNER_USER_ID,
+        created_by_tenant_id="default",
+    )
+    assert child_started.wait(timeout=5.0)
+    await service.store.save_plan(
+        run_id=run_id,
+        plan=PlanRecord(
+            plan_id="plan-shared-child-pg",
+            run_id=run_id,
+            version=1,
+            status="approved",
+            created_by="agent",
+        ),
+        tasks=[
+            PlanTaskRecord(
+                task_id="research",
+                plan_id="plan-shared-child-pg",
+                run_id=run_id,
+                ordinal=0,
+                title="Research",
+                tool_kind="web_research",
+                status="running",
+                child_run_id=child["run_id"],
+            )
+        ],
+    )
+    editor = _scoped(EDITOR_USER_ID)
+
+    try:
+        task = await service.request_task_cancel(
+            run_id,
+            "research",
+            workspace_id=None,
+            principal=editor.principal,
+            visible_to=editor,
+        )
+        assert task.status == "cancel_requested"
+        child_release.set()
+        _wait_until(
+            lambda: run_store.get(
+                child["run_id"], visible_to=_scoped(OWNER_USER_ID)
+            )["status"]
+            == "cancelled"
+        )
+    finally:
+        child_release.set()
+
+
+@pytest.mark.asyncio
+async def test_missing_child_rolls_back_task_cancel_postgres(
+    service, run_store
+) -> None:
+    run_id = _parked_agent_run(run_store)
+    await service.store.save_plan(
+        run_id=run_id,
+        plan=PlanRecord(
+            plan_id="plan-missing-child-pg",
+            run_id=run_id,
+            version=1,
+            status="approved",
+            created_by="agent",
+        ),
+        tasks=[
+            PlanTaskRecord(
+                task_id="research",
+                plan_id="plan-missing-child-pg",
+                run_id=run_id,
+                ordinal=0,
+                title="Research",
+                tool_kind="web_research",
+                status="running",
+                child_run_id="run-missing-child-pg",
+            )
+        ],
+    )
+
+    with pytest.raises(RunNotFound):
+        await service.request_task_cancel(
+            run_id,
+            "research",
+            workspace_id=None,
+            principal=None,
+        )
+
+    _plan, tasks = await service.store.get_plan(run_id)
+    assert tasks[0].status == "running"
 
 
 @pytest.mark.asyncio
@@ -625,19 +844,21 @@ async def test_artifact_matrix_and_revisions(service, run_store, control_store):
     assert bumped.revision == 2
 
     with pytest.raises(ArtifactRevisionConflict) as conflict:
-        await control_store.user_update_artifact(
+        await service.user_update_artifact(
             run_id=run_id,
             artifact_id="art_pg",
             content_markdown="# stale",
             expected_revision=1,
+            principal=None,
         )
     assert conflict.value.current_revision == 2
 
-    edited = await control_store.user_update_artifact(
+    edited = await service.user_update_artifact(
         run_id=run_id,
         artifact_id="art_pg",
         content_markdown="# V3",
         expected_revision=2,
+        principal=None,
     )
     assert edited.revision == 3
     assert edited.updated_by == "user"
@@ -654,11 +875,12 @@ async def test_artifact_matrix_and_revisions(service, run_store, control_store):
         updated_by="agent",
     )
     with pytest.raises(ArtifactLocked):
-        await control_store.user_update_artifact(
+        await service.user_update_artifact(
             run_id=run_id,
             artifact_id="art_pg",
             content_markdown="# x",
             expected_revision=4,
+            principal=None,
         )
 
     artifact, revisions = await control_store.get_artifact(run_id, "art_pg")
@@ -671,6 +893,123 @@ async def test_artifact_matrix_and_revisions(service, run_store, control_store):
     assert [row.artifact_id for row in page] == ["art_pg"]
     assert cursor is None
     assert page[0].content_markdown == ""
+
+
+@pytest.mark.asyncio
+async def test_revoked_editor_cannot_update_artifact_postgres(
+    service, run_store, control_store
+) -> None:
+    run_id = _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
+    share_id = _grant_edit_share(run_store, run_id)
+    await control_store.upsert_artifact(
+        run_id=run_id,
+        kind="memo",
+        session_id="sess-revoked-editor-pg",
+        title="Memo",
+        status="ready",
+        content_markdown="# V1",
+        payload={},
+        refs=[],
+        updated_by="agent",
+        artifact_id="art-revoked-editor-pg",
+    )
+    editor = _scoped(EDITOR_USER_ID)
+    edited = await service.user_update_artifact(
+        run_id=run_id,
+        artifact_id="art-revoked-editor-pg",
+        content_markdown="# V2",
+        expected_revision=1,
+        principal=editor.principal,
+        visible_to=editor,
+    )
+    assert edited.revision == 2
+    identity = PostgresIdentityBackend(
+        session_factory=run_store._session_factory,
+        app_role=APP_ROLE,
+    )
+    revoked = run_store._call(
+        identity.revoke_share_by_id(
+            tenant_id="default",
+            share_id=share_id,
+            revoked_by_user_id=OWNER_USER_ID,
+            owner_user_id=OWNER_USER_ID,
+        )
+    )
+    assert revoked is not None
+
+    with pytest.raises(RunNotFound):
+        await service.user_update_artifact(
+            run_id=run_id,
+            artifact_id="art-revoked-editor-pg",
+            content_markdown="# forbidden",
+            expected_revision=2,
+            principal=editor.principal,
+            visible_to=editor,
+        )
+    stored, _revisions = await control_store.get_artifact(
+        run_id, "art-revoked-editor-pg"
+    )
+    assert stored.revision == 2
+    assert stored.content_markdown == "# V2"
+
+
+@pytest.mark.asyncio
+async def test_revoked_effective_actor_cannot_persist_runtime_artifact_postgres(
+    run_store, control_store
+) -> None:
+    """Agent writes lock the same live run/share boundary as user edits."""
+    release = threading.Event()
+    run_id = _parked_agent_run(
+        run_store,
+        resumed_release=release,
+        owner_user_id=OWNER_USER_ID,
+        session_id="sess-runtime-revoke-pg",
+    )
+    share_id = _grant_edit_share(run_store, run_id)
+    editor = _scoped(EDITOR_USER_ID)
+    try:
+        run_store.resume_run(
+            run_id,
+            actor_user_id=EDITOR_USER_ID,
+            execution_scopes=frozenset({"agent:write"}),
+        )
+        _wait_until(
+            lambda: run_store.get(run_id, visible_to=editor)["status"]
+            == "running"
+        )
+        identity = PostgresIdentityBackend(
+            session_factory=run_store._session_factory,
+            app_role=APP_ROLE,
+        )
+        revoked = run_store._call(
+            identity.revoke_share_by_id(
+                tenant_id="default",
+                share_id=share_id,
+                revoked_by_user_id=OWNER_USER_ID,
+                owner_user_id=OWNER_USER_ID,
+            )
+        )
+        assert revoked is not None
+
+        with pytest.raises(AuthorizationRevoked):
+            await control_store.upsert_artifact(
+                run_id=run_id,
+                kind="memo",
+                session_id="sess-runtime-revoke-pg",
+                title="Forbidden",
+                status="writing",
+                content_markdown="must not land",
+                payload={},
+                refs=[],
+                updated_by="agent",
+                artifact_id="art-runtime-revoke-pg",
+            )
+        with pytest.raises(ArtifactNotFound):
+            await control_store.get_artifact(
+                run_id, "art-runtime-revoke-pg"
+            )
+    finally:
+        release.set()
 
 
 @pytest.mark.asyncio
@@ -748,11 +1087,12 @@ async def test_session_memo_lineage_and_agent_cas_on_postgres(
         updated_by="agent",
         artifact_id="art_pg_lin",
     )
-    edited = await control_store.user_update_artifact(
+    edited = await service.user_update_artifact(
         run_id=run1,
         artifact_id="art_pg_lin",
         content_markdown="# Turn 1 + Nutzer",
         expected_revision=1,
+        principal=None,
     )
     assert edited.revision == 2
 

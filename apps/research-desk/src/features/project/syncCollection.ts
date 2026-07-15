@@ -70,7 +70,11 @@ function idOf(item: unknown): string {
  */
 export async function deleteTolerant404(
   run: () => Promise<void>,
-  isNotFound: (error: unknown) => boolean,
+  isNotFound: (error: unknown) => boolean = (error) => (
+    error instanceof Error
+    && 'status' in error
+    && error.status === 404
+  ),
 ): Promise<void> {
   try {
     await run()

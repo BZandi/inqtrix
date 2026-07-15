@@ -24,7 +24,6 @@ import type { Dispatch } from 'react'
 
 import {
   deleteVectorIndex,
-  hasHttpStatus,
   listVectorIndexes,
   saveVectorIndex,
 } from '@/api/inqtrixClient'
@@ -111,7 +110,6 @@ export function useVectorIndexHistoryApi({
         deleteOne: (id) =>
           deleteTolerant404(
             () => deleteVectorIndex(id, optionsRef.current),
-            (caught) => hasHttpStatus(caught, 404),
           ),
       })
       setError(null)

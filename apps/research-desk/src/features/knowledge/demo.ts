@@ -409,6 +409,7 @@ function demoDocumentText(documentId: string): KnowledgeDocumentText {
 /** Demo implementation of the workspace data source (no network). */
 export function createDemoKnowledgeDataSource(): KnowledgeDataSource {
   return {
+    canLoadFileContent: null,
     loadDocumentText: (documentId) => Promise.resolve(demoDocumentText(documentId)),
     loadFileContent: null,
     search: (query, collectionIds) => Promise.resolve(searchDemoCorpus(query, collectionIds)),

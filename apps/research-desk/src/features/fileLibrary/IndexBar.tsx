@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useReducedMotion } from 'motion/react'
-import { AlertTriangle, ChevronDown, Clock3, Database, Info, Layers, Link, RotateCcw, Sparkles, XCircle } from '@/components/icons'
+import { AlertTriangle, ChevronDown, Clock3, Info, Layers, Link, RotateCcw, Sparkles, XCircle } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { OptionMenuHeader, OptionMenuItem, optionMenuContentClassName } from '@/components/ui/option-menu'
@@ -52,7 +52,6 @@ export function IndexBar({
   onDelete,
   onModel,
   onReindex,
-  onRebuild,
   serverBacked,
   serverFeatureLabels = null,
 }: {
@@ -67,10 +66,6 @@ export function IndexBar({
   onDelete: (indexId: string) => void
   onModel: (indexId: string, model: EmbedModelId) => void
   onReindex: (indexId: string) => void
-  /** "Neu aufbauen": full re-ingest from the original files (migrates old docs to
-   * ingest-time provenance). Heavier than the default reindex; offered only for a
-   * built server collection. */
-  onRebuild: (indexId: string) => void
   serverBacked: boolean
   serverFeatureLabels?: string[] | null
 }) {
@@ -193,35 +188,6 @@ export function IndexBar({
                 ? t.vectorIndex.reindexPending.replace('{count}', String(pendingCount))
                 : t.vectorIndex.reindex}
           </Button>
-          {/* Secondary "Neu aufbauen" (full re-ingest from files) for a built
-              collection — migrates old docs to ingest-time provenance. Heavier
-              than the default refresh, so it lives in a small menu, not a second
-              prominent button. */}
-          {!indexing && index.serverCollectionId ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  aria-label={t.vectorIndex.moreActions}
-                  className="size-8 px-0 text-muted-foreground hover:text-foreground"
-                  disabled={quotaBlocked}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  <ChevronDown className="size-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className={optionMenuContentClassName} sideOffset={6}>
-                <OptionMenuItem
-                  active={false}
-                  description={t.vectorIndex.rebuildFromFilesHint}
-                  icon={Database}
-                  label={t.vectorIndex.rebuildFromFiles}
-                  onSelect={() => onRebuild(index.id)}
-                />
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : null}
           {indexing ? (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -253,7 +219,7 @@ export function IndexBar({
               <Button
                 aria-label={t.vectorIndex.embeddingModel}
                 className="mt-1 h-7 gap-1.5 px-2 font-mono text-xs font-semibold"
-                disabled={indexing}
+                disabled={indexing || Boolean(index.serverCollectionId)}
                 size="sm"
                 type="button"
                 variant="outline"

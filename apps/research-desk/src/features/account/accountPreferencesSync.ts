@@ -43,8 +43,8 @@ export function preferencesFromServer(
     // Boolean opt-in: an absent field (legacy row / old server) resolves to
     // the fallback, which is the privacy default OFF.
     agentMemoryEnabled:
-      typeof server.agent_memory_enabled === 'boolean'
-        ? server.agent_memory_enabled
+      typeof server.enable_agent_memory === 'boolean'
+        ? server.enable_agent_memory
         : fallback.agentMemoryEnabled,
     contrastMode: VALID_CONTRAST.has(server.contrast_mode)
       ? (server.contrast_mode as ContrastMode)
@@ -72,7 +72,7 @@ export function serverAccountPreferencesPayload(
   theme: string
   theme_preset: string
   user_bubble_tone: string
-  agent_memory_enabled: boolean
+  enable_agent_memory: boolean
   updated_at: number
 } {
   return {
@@ -83,7 +83,7 @@ export function serverAccountPreferencesPayload(
     user_bubble_tone: preferences.userBubbleTone,
     // Whole-row upsert: the opt-in MUST ride every save or the server resets
     // it to the default OFF.
-    agent_memory_enabled: preferences.agentMemoryEnabled,
+    enable_agent_memory: preferences.agentMemoryEnabled,
     updated_at: updatedAt,
   }
 }

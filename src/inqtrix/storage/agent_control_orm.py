@@ -39,7 +39,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSON, UUID
 
 from inqtrix.agents.control_ports import (
     APPROVAL_KINDS,
@@ -152,7 +152,7 @@ run_approvals = Table(
     Column("decision", Text, nullable=False, server_default=text("''")),
     Column("decision_payload", JSON, nullable=False, server_default=text("'{}'")),
     Column("note", Text, nullable=False, server_default=text("''")),
-    Column("decided_by_sub", Text, nullable=True),
+    Column("decided_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("interrupt_key", Text, nullable=False, server_default=text("''")),
     Column("created_at", Float, nullable=False),
     Column("decided_at", Float, nullable=True),
@@ -191,7 +191,7 @@ run_clarifications = Table(
     Column("status", Text, nullable=False, server_default=text("'pending'")),
     Column("answer", Text, nullable=False, server_default=text("''")),
     Column("option_id", Text, nullable=False, server_default=text("''")),
-    Column("answered_by_sub", Text, nullable=True),
+    Column("answered_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("created_at", Float, nullable=False),
     Column("answered_at", Float, nullable=True),
     CheckConstraint(

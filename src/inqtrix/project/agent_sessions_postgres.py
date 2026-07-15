@@ -1,6 +1,6 @@
 """Postgres-backed agent-session store (durable Agent-Desk tier).
 
-Sessions persist relationally, scoped per ``(tenant_id, created_by_sub,
+Sessions persist relationally, scoped per ``(tenant_id, created_by_user_id,
 workspace_id)`` with the inherited tenant-session lifecycle
 (:class:`BaseSessionStore`). ``list_sessions`` SELECTs metadata columns only
 (NOT the heavy ``items_json``); ``get_session`` SELECTs the full row.
@@ -8,7 +8,9 @@ workspace_id)`` with the inherited tenant-session lifecycle
 
 from __future__ import annotations
 
-from sqlalchemy import and_, delete, select
+import uuid
+
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from inqtrix.project.base_session_store import (
@@ -21,6 +23,12 @@ from inqtrix.project.agent_sessions_ports import (
     AgentSessionGroupNotFound,
     AgentSessionNotFound,
 )
+from inqtrix.project.scoped_upsert import (
+    ResourceScope,
+    delete_scoped_postgres,
+    require_scoped_parent,
+    scoped_postgres_upsert,
+)
 from inqtrix.storage.agent_sessions_orm import (
     agent_session_groups,
     agent_sessions,
@@ -30,7 +38,7 @@ from inqtrix.storage.agent_sessions_orm import (
 _META_COLUMNS = (
     agent_sessions.c.id,
     agent_sessions.c.tenant_id,
-    agent_sessions.c.created_by_sub,
+    agent_sessions.c.created_by_user_id,
     agent_sessions.c.workspace_id,
     agent_sessions.c.title,
     agent_sessions.c.group_id,
@@ -45,12 +53,12 @@ class PostgresAgentSessionStore(BaseSessionStore):
 
     async def claim_session(
         self, *, id: str, title: str, created_at: float,
-        created_by_sub: str | None, workspace_id: str | None,
+        created_by_user_id: uuid.UUID | None, workspace_id: str | None,
     ) -> AgentSession:
         values = dict(
             id=id,
             tenant_id=_DEFAULT_TENANT,
-            created_by_sub=created_by_sub,
+            created_by_user_id=created_by_user_id,
             workspace_id=workspace_id,
             title=title,
             group_id=None,
@@ -80,43 +88,42 @@ class PostgresAgentSessionStore(BaseSessionStore):
 
     async def upsert_session(
         self, *, id: str, title: str, items_json: str, group_id: str | None,
-        created_at: float, updated_at: float, created_by_sub: str | None,
+        created_at: float,
+        updated_at: float,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> AgentSession:
         values = dict(
-            id=id, tenant_id=_DEFAULT_TENANT, created_by_sub=created_by_sub,
+            id=id, tenant_id=_DEFAULT_TENANT, created_by_user_id=created_by_user_id,
             workspace_id=workspace_id, title=title, group_id=group_id,
             items_json=items_json,
             created_at=created_at, updated_at=updated_at,
         )
         mutable = ["title", "group_id", "items_json", "updated_at"]
-        insert_stmt = pg_insert(agent_sessions).values(**values)
-        stmt = insert_stmt.on_conflict_do_update(
-            index_elements=[agent_sessions.c.id],
-            set_={
-                column: getattr(insert_stmt.excluded, column)
-                for column in mutable
-            },
-            where=and_(
-                agent_sessions.c.created_by_sub.is_not_distinct_from(
-                    insert_stmt.excluded.created_by_sub
-                ),
-                agent_sessions.c.workspace_id.is_not_distinct_from(
-                    insert_stmt.excluded.workspace_id
-                ),
-            ),
+        stmt = scoped_postgres_upsert(
+            pg_insert(agent_sessions), agent_sessions, values, mutable
         ).returning(agent_sessions)
         async with self._session() as session:
+            if group_id is not None:
+                await require_scoped_parent(
+                    session,
+                    table=agent_session_groups,
+                    parent_id=group_id,
+                    tenant_id=_DEFAULT_TENANT,
+                    created_by_user_id=created_by_user_id,
+                    workspace_id=workspace_id,
+                    not_found=AgentSessionGroupNotFound,
+                )
             row = (await session.execute(stmt)).first()
         if row is None:
             raise AgentSessionNotFound(id)
         return _from_row(row)
 
     async def list_sessions(
-        self, *, created_by_sub: str | None, workspace_id: str | None
+        self, *, created_by_user_id: uuid.UUID | None, workspace_id: str | None
     ) -> list[AgentSession]:
         query = _scoped_query(
-            select(*_META_COLUMNS), agent_sessions, created_by_sub, workspace_id
+            select(*_META_COLUMNS), agent_sessions, created_by_user_id, workspace_id
         )
         query = query.order_by(
             agent_sessions.c.updated_at.desc(), agent_sessions.c.id.desc()
@@ -136,37 +143,30 @@ class PostgresAgentSessionStore(BaseSessionStore):
             raise AgentSessionNotFound(session_id)
         return _from_row(row)
 
-    async def delete_session(self, session_id: str) -> None:
+    async def delete_session(
+        self, session_id: str, *, scope: ResourceScope
+    ) -> None:
         async with self._session() as session:
-            await session.execute(delete(agent_sessions).where(
-                agent_sessions.c.tenant_id == _DEFAULT_TENANT,
-                agent_sessions.c.id == session_id,
-            ))
+            await delete_scoped_postgres(
+                session, table=agent_sessions, resource_id=session_id,
+                tenant_id=_DEFAULT_TENANT, scope=scope,
+                not_found=AgentSessionNotFound,
+            )
 
     async def upsert_group(
         self, *, id: str, title: str, created_at: float, updated_at: float,
-        created_by_sub: str | None, workspace_id: str | None,
+        created_by_user_id: uuid.UUID | None, workspace_id: str | None,
     ) -> AgentSessionGroup:
         values = dict(
-            id=id, tenant_id=_DEFAULT_TENANT, created_by_sub=created_by_sub,
+            id=id, tenant_id=_DEFAULT_TENANT, created_by_user_id=created_by_user_id,
             workspace_id=workspace_id, title=title, created_at=created_at,
             updated_at=updated_at,
         )
-        insert_stmt = pg_insert(agent_session_groups).values(**values)
-        stmt = insert_stmt.on_conflict_do_update(
-            index_elements=[agent_session_groups.c.id],
-            set_={
-                "title": insert_stmt.excluded.title,
-                "updated_at": insert_stmt.excluded.updated_at,
-            },
-            where=and_(
-                agent_session_groups.c.created_by_sub.is_not_distinct_from(
-                    insert_stmt.excluded.created_by_sub
-                ),
-                agent_session_groups.c.workspace_id.is_not_distinct_from(
-                    insert_stmt.excluded.workspace_id
-                ),
-            ),
+        stmt = scoped_postgres_upsert(
+            pg_insert(agent_session_groups),
+            agent_session_groups,
+            values,
+            ["title", "updated_at"],
         ).returning(agent_session_groups)
         async with self._session() as session:
             row = (await session.execute(stmt)).first()
@@ -176,11 +176,11 @@ class PostgresAgentSessionStore(BaseSessionStore):
 
     async def claim_group(
         self, *, id: str, title: str, created_at: float,
-        created_by_sub: str | None, workspace_id: str | None,
+        created_by_user_id: uuid.UUID | None, workspace_id: str | None,
     ) -> AgentSessionGroup:
         values = dict(
             id=id, tenant_id=_DEFAULT_TENANT,
-            created_by_sub=created_by_sub, workspace_id=workspace_id,
+            created_by_user_id=created_by_user_id, workspace_id=workspace_id,
             title=title, created_at=created_at, updated_at=created_at,
         )
         async with self._session() as session:
@@ -207,11 +207,11 @@ class PostgresAgentSessionStore(BaseSessionStore):
         return _group_from_row(row)
 
     async def list_groups(
-        self, *, created_by_sub: str | None, workspace_id: str | None
+        self, *, created_by_user_id: uuid.UUID | None, workspace_id: str | None
     ) -> list[AgentSessionGroup]:
         query = _scoped_query(
             select(agent_session_groups), agent_session_groups,
-            created_by_sub, workspace_id,
+            created_by_user_id, workspace_id,
         )
         query = query.order_by(
             agent_session_groups.c.created_at.desc(),
@@ -221,12 +221,15 @@ class PostgresAgentSessionStore(BaseSessionStore):
             rows = (await session.execute(query)).all()
         return [_group_from_row(row) for row in rows]
 
-    async def delete_group(self, group_id: str) -> None:
+    async def delete_group(
+        self, group_id: str, *, scope: ResourceScope
+    ) -> None:
         async with self._session() as session:
-            await session.execute(delete(agent_session_groups).where(
-                agent_session_groups.c.tenant_id == _DEFAULT_TENANT,
-                agent_session_groups.c.id == group_id,
-            ))
+            await delete_scoped_postgres(
+                session, table=agent_session_groups, resource_id=group_id,
+                tenant_id=_DEFAULT_TENANT, scope=scope,
+                not_found=AgentSessionGroupNotFound,
+            )
 
 
 def _from_row(row) -> AgentSession:
@@ -238,7 +241,7 @@ def _from_row(row) -> AgentSession:
         created_at=row.created_at,
         updated_at=row.updated_at,
         tenant_id=row.tenant_id,
-        created_by_sub=row.created_by_sub,
+        created_by_user_id=row.created_by_user_id,
         workspace_id=row.workspace_id,
     )
 
@@ -250,15 +253,17 @@ def _group_from_row(row) -> AgentSessionGroup:
         created_at=row.created_at,
         updated_at=row.updated_at,
         tenant_id=row.tenant_id,
-        created_by_sub=row.created_by_sub,
+        created_by_user_id=row.created_by_user_id,
         workspace_id=row.workspace_id,
     )
 
 
-def _scoped_query(query, table, created_by_sub, workspace_id):
+def _scoped_query(
+    query, table, created_by_user_id: uuid.UUID | None, workspace_id
+):
     query = query.where(table.c.tenant_id == _DEFAULT_TENANT)
-    if created_by_sub is not None:
-        query = query.where(table.c.created_by_sub == created_by_sub)
+    if created_by_user_id is not None:
+        query = query.where(table.c.created_by_user_id == created_by_user_id)
     if workspace_id is not None:
         query = query.where(table.c.workspace_id == workspace_id)
     return query

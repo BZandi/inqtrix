@@ -23,7 +23,7 @@ paired with Qdrant's IDF modifier) via reciprocal rank fusion.
 The port is async; the synchronous ``qdrant_client`` calls run off the
 event loop via ``asyncio.to_thread`` (proven sync bodies wrapped, not
 rewritten). Security note: payload filters are a performance boundary,
-not the authorization truth — access stays with the PermissionService.
+not the authorization truth — access stays with the AuthorizationService.
 """
 
 from __future__ import annotations
@@ -78,6 +78,15 @@ def _optional_int(value: Any) -> int | None:
 def _point_uuid(stable_id: str) -> str:
     """Deterministic Qdrant point id for a stable record/chunk id."""
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"inqtrix://{stable_id}"))
+
+
+def _payload_user_id(value: Any) -> uuid.UUID | None:
+    """Restore a canonical user UUID from Qdrant's JSON payload boundary."""
+    if value is None:
+        return None
+    if isinstance(value, uuid.UUID):
+        return value
+    return uuid.UUID(str(value))
 
 
 def _require_qdrant():
@@ -498,6 +507,16 @@ class QdrantKnowledgeStore:
         self._registry_ready = False
 
     @property
+    def supports_safe_reindex(self) -> bool:
+        """Legacy Qdrant-only storage has no cross-process mutation fence."""
+        return False
+
+    @property
+    def supports_collection_sharing(self) -> bool:
+        """Vector-only metadata cannot form an atomic sharing boundary."""
+        return False
+
+    @property
     def supports_hybrid(self) -> bool:
         return self._sparse_enabled
 
@@ -521,14 +540,19 @@ class QdrantKnowledgeStore:
     # -- async port (thin wrappers over the proven sync bodies) ---------- #
 
     async def create_collection(
-        self, *, name, embedding_model, embedding_dim, created_by_sub=None
+        self,
+        *,
+        name,
+        embedding_model,
+        embedding_dim,
+        created_by_user_id: uuid.UUID | None = None,
     ) -> KnowledgeCollection:
         return await asyncio.to_thread(
             self._sync_create_collection,
             name,
             embedding_model,
             embedding_dim,
-            created_by_sub,
+            created_by_user_id,
         )
 
     async def list_collections(self) -> list[KnowledgeCollection]:
@@ -537,7 +561,12 @@ class QdrantKnowledgeStore:
     async def get_collection(self, collection_id: str) -> KnowledgeCollection:
         return await asyncio.to_thread(self._sync_get_collection, collection_id)
 
-    async def delete_collection(self, collection_id: str) -> None:
+    async def delete_collection(
+        self,
+        collection_id: str,
+        *,
+        actor_user_id: uuid.UUID | None = None,
+    ) -> None:
         await asyncio.to_thread(self._sync_delete_collection, collection_id)
 
     async def add_document(
@@ -551,6 +580,7 @@ class QdrantKnowledgeStore:
         embeddings,
         source_chunks=None,
         page_numbers=None,
+        actor_user_id: uuid.UUID | None = None,
     ) -> KnowledgeDocument:
         return await asyncio.to_thread(
             self._sync_add_document,
@@ -592,11 +622,23 @@ class QdrantKnowledgeStore:
     async def get_document(self, document_id: str) -> KnowledgeDocument:
         return await asyncio.to_thread(self._sync_get_document, document_id)
 
-    async def delete_document(self, document_id: str) -> None:
+    async def delete_document(
+        self,
+        document_id: str,
+        *,
+        actor_user_id: uuid.UUID | None = None,
+    ) -> None:
         await asyncio.to_thread(self._sync_delete_document, document_id)
 
     async def reembed_document(
-        self, *, document_id, chunks, embeddings, source_chunks=None, page_numbers=None
+        self,
+        *,
+        document_id,
+        chunks,
+        embeddings,
+        source_chunks=None,
+        page_numbers=None,
+        actor_user_id: uuid.UUID | None = None,
     ) -> KnowledgeDocument:
         return await asyncio.to_thread(
             self._sync_reembed_document,
@@ -714,7 +756,9 @@ class QdrantKnowledgeStore:
             created_at=payload["created_at"],
             document_count=self._count_documents(payload["record_id"]),
             tenant_id=payload.get("tenant_id", "default"),
-            created_by_sub=payload.get("created_by_sub"),
+            created_by_user_id=_payload_user_id(
+                payload.get("created_by_user_id")
+            ),
         )
 
     def _document_payload(self, payload: dict[str, Any]) -> KnowledgeDocument:
@@ -750,7 +794,11 @@ class QdrantKnowledgeStore:
     # -- sync cores ------------------------------------------------------- #
 
     def _sync_create_collection(
-        self, name, embedding_model, embedding_dim, created_by_sub
+        self,
+        name,
+        embedding_model,
+        embedding_dim,
+        created_by_user_id: uuid.UUID | None,
     ) -> KnowledgeCollection:
         _client, models = _require_qdrant()
         collection_id = f"kc_{uuid.uuid4().hex[:20]}"
@@ -770,7 +818,7 @@ class QdrantKnowledgeStore:
                 "embedding_dim": embedding_dim,
                 "created_at": time.time(),
                 "tenant_id": "default",
-                "created_by_sub": created_by_sub,
+                "created_by_user_id": created_by_user_id,
             }
         )
         return self._sync_get_collection(collection_id)

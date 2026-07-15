@@ -19,8 +19,8 @@ import type { QuotaDimensionUsage } from '@/features/quota/model'
 import type {
   OutgoingShare,
   ShareInvitee,
+  SharePermissionValue,
   ShareRecordInfo,
-  SharedWithMeEntry,
   SharingInbox,
   UserSearchResult,
 } from '@/features/sharing/types'
@@ -60,6 +60,9 @@ import type {
 export type ClientOptions = {
   apiKey?: string
   baseUrl?: string
+  /** Resume cursor for fetch-based SSE reconnects. Ignored by ordinary
+   * JSON endpoints; event-stream callers send it as `Last-Event-ID`. */
+  lastEventId?: string
   signal?: AbortSignal
   workspaceId?: string
 }
@@ -151,6 +154,15 @@ type StreamChatCompletionOptions = ClientOptions & {
 
 const DEFAULT_BASE_URL = import.meta.env.VITE_INQTRIX_API_BASE_URL ?? ''
 const CHAT_MODEL_NAME = 'research-agent'
+const EXPECTED_USER_ID_HEADER = 'X-Inqtrix-Expected-User-Id'
+
+let expectedUserIdentity: string | null = null
+
+/** Bind subsequent cookie-session requests to the SPA's rendered principal.
+ * The value is a consistency generation, never an authentication credential. */
+export function setExpectedUserIdentity(userId: string | null) {
+  expectedUserIdentity = userId?.trim() || null
+}
 
 export type InqtrixRequestError = Error & {
   status?: number
@@ -199,7 +211,7 @@ export async function fetchQuotaAdmin(options: ClientOptions = {}) {
 }
 
 export async function setQuotaLimit(
-  body: { subject_id: string; dimension: string; value: number },
+  body: { user_id: string; dimension: string; value: number },
   options: ClientOptions = {},
 ) {
   await request('/v1/admin/quota/limits', {
@@ -210,11 +222,11 @@ export async function setQuotaLimit(
 }
 
 export async function clearQuotaLimit(
-  subjectId: string,
+  userId: string,
   dimension: string,
   options: ClientOptions = {},
 ) {
-  const query = new URLSearchParams({ dimension, subject_id: subjectId })
+  const query = new URLSearchParams({ dimension, user_id: userId })
   await request(`/v1/admin/quota/limits?${query}`, {
     ...options,
     method: 'DELETE',
@@ -222,7 +234,7 @@ export async function clearQuotaLimit(
 }
 
 export async function resetQuota(
-  body: { subject_id: string; dimension: string },
+  body: { user_id: string; dimension: string },
   options: ClientOptions = {},
 ) {
   await request('/v1/admin/quota/reset', {
@@ -238,6 +250,17 @@ export async function listKnowledgeCollections(options: ClientOptions = {}) {
     options,
   )
   return payload.data
+}
+
+/** One authoritative page of documents in a visible server collection. */
+export async function listKnowledgeDocuments(
+  collectionId: string,
+  options: PageOptions = {},
+) {
+  return requestJson<{ data: KnowledgeDocumentInfo[]; next_cursor: string | null }>(
+    `/v1/knowledge/collections/${collectionId}/documents${pageQuery(options)}`,
+    options,
+  )
 }
 
 export async function createKnowledgeCollection(
@@ -299,6 +322,7 @@ export async function uploadServerFile(
   const headers = new Headers()
   if (options.apiKey) headers.set('Authorization', `Bearer ${options.apiKey}`)
   if (options.workspaceId) headers.set('X-Inqtrix-Workspace-Id', options.workspaceId)
+  attachExpectedUserIdentity(headers)
   attachCsrfHeader(headers, 'POST')
   const body = new FormData()
   body.append('file', file, file.name)
@@ -309,7 +333,7 @@ export async function uploadServerFile(
     signal: options.signal,
     credentials: 'include',
   })
-  if (!response.ok) throw await requestError(response)
+  if (!response.ok) await throwRequestError(response)
   return (await response.json()) as ServerFileInfo
 }
 
@@ -317,6 +341,15 @@ export type ServerFileText = {
   file_id: string
   parser_id: string | null
   text: string
+}
+
+/** Metadata-only access probe for an original file. A 404 means the current
+ * principal cannot access it (the same indistinguishable response as absence). */
+export async function fetchServerFileInfo(
+  fileId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<ServerFileInfo>(`/v1/files/${fileId}`, options)
 }
 
 /**
@@ -443,10 +476,10 @@ export async function createPromptTemplate(
   })
 }
 
-/** Replace one template's writable fields (last write wins). */
+/** Replace one template using its mandatory compare-and-swap revision. */
 export async function updatePromptTemplate(
   templateId: string,
-  payload: PromptTemplatePayload,
+  payload: PromptTemplatePayload & { expected_revision: number },
   options: ClientOptions = {},
 ) {
   return requestJson<PromptTemplateInfo>(
@@ -489,13 +522,10 @@ export async function createSkill(
   })
 }
 
-/** Replace one skill's writable fields.
-
- * `expected_updated_at` (in the payload) is the optimistic-concurrency
- * precondition — a stale value answers 409. */
+/** Replace one skill using its mandatory compare-and-swap revision. */
 export async function updateSkill(
   skillId: string,
-  payload: SkillPayload & { expected_updated_at?: number },
+  payload: SkillPayload & { expected_revision: number },
   options: ClientOptions = {},
 ) {
   return requestJson<SkillInfo>(`/v1/skills/${skillId}`, {
@@ -575,10 +605,24 @@ export type ServerChatThreadGroup = {
 
 type PageOptions = ClientOptions & { cursor?: string; limit?: number }
 
+export type EditorDocumentListOptions = PageOptions & {
+  /** Omitted preserves the server's owned-only default. */
+  scope?: 'all' | 'owned'
+}
+
 function pageQuery(options: PageOptions): string {
   const params = new URLSearchParams()
   if (options.cursor) params.set('cursor', options.cursor)
   if (options.limit !== undefined) params.set('limit', String(options.limit))
+  const query = params.toString()
+  return query ? `?${query}` : ''
+}
+
+function editorDocumentListQuery(options: EditorDocumentListOptions): string {
+  const params = new URLSearchParams()
+  if (options.cursor) params.set('cursor', options.cursor)
+  if (options.limit !== undefined) params.set('limit', String(options.limit))
+  if (options.scope) params.set('scope', options.scope)
   const query = params.toString()
   return query ? `?${query}` : ''
 }
@@ -804,6 +848,19 @@ export async function deleteKnowledgeSession(
 
 /** One editor document as the server stores it. ``content_markdown`` is the
  * heavy body — present on getEditorDocument, ABSENT on the list. */
+export type ServerEditorAccess = {
+  mode: 'owner' | 'shared'
+  permission: 'edit' | 'suggest' | 'view'
+}
+
+export type ServerEditorCollaboration = {
+  generation: number
+  persisted_sequence: number
+  projection_sequence: number
+  projection_updated_at: number | null
+  schema_version: number
+}
+
 export type ServerEditorDocument = {
   id: string
   title: string
@@ -816,6 +873,124 @@ export type ServerEditorDocument = {
   diff_anchor_updated_at: number | null
   created_at: number
   updated_at: number
+  /** Added by collaboration-capable servers; absent means legacy markdown. */
+  content_mode?: 'collaboration' | 'markdown'
+  /** Independent compare-and-swap revision for title/folder metadata. */
+  metadata_revision?: number
+  /** Live caller relationship; absent on pre-collaboration servers. */
+  access?: ServerEditorAccess
+  collaboration?: ServerEditorCollaboration | null
+}
+
+export type EditorCollaborationUser = {
+  color: string
+  id: string
+  name: string
+}
+
+export type EditorCollaborationSession = {
+  access: 'edit' | 'suggest' | 'view'
+  expires_at: number
+  initial_write_mode: 'edit' | 'suggest' | 'view'
+  lease_token: string
+  provider_flush_ms?: number
+  protocol_version: number
+  refresh_after?: number
+  room: string
+  schema_version: number
+  user: EditorCollaborationUser
+  websocket_path: string
+}
+
+export type EditorCollaborationActivity = {
+  actor: { id: string | null; name: string }
+  actor_kind: 'assistant' | 'agent' | 'human' | 'system'
+  command_id: string | null
+  created_at: number
+  from_sequence: number
+  suggestion_ids: string[]
+  to_sequence: number
+  type: 'decision' | 'direct' | 'suggestion' | 'system'
+}
+
+export type EditorDocumentMetadataPatch = {
+  diff_anchor_markdown?: string | null
+  diff_anchor_updated_at?: number | null
+  expected_metadata_revision: number
+  folder_id?: string | null
+  title?: string
+}
+
+export type EditorCollaborationEnableRequest = {
+  expected_metadata_revision: number
+  expected_revision: number
+  schema_version: number
+}
+
+export type EditorCollaborationEnableResponse = {
+  content_mode: 'collaboration'
+  generation: number
+  persisted_sequence: number
+  projection_sequence: number
+  schema_hash: string
+  schema_version: number
+}
+
+export type EditorCollaborationSessionRequest = {
+  /** Omitted for initial join; supplied only to rotate the same lease. */
+  lease_token?: string
+  protocol_version: number
+  /** Stable across retries so a lost rotation response can be reconstructed. */
+  rotation_command_id?: string
+  schema_version: number
+}
+
+export type EditorCollaborationProjection = {
+  authoritative_sequence?: number
+  content_markdown: string
+  generation: number
+  projection_hash: string
+  sequence: number
+}
+
+type EditorCollaborationDecisionBase = {
+  decision: 'accept' | 'reject'
+  decision_id: string
+  expected_sequence: number
+}
+
+export type EditorCollaborationDecisionRequest = EditorCollaborationDecisionBase & (
+  | {
+    all_open?: false
+    confirm_all_open?: false
+    patch_ids: string[]
+  }
+  | {
+    all_open: true
+    confirm_all_open: true
+    patch_ids?: never
+  }
+)
+
+export type EditorCollaborationDecisionResponse = {
+  decision_id: string
+  sequence: number
+  suggestion_ids: string[]
+}
+
+export type EditorCollaborationSuggestionPublishRequest = {
+  actor_kind: 'assistant'
+  command_id: string
+  expected_sequence: number
+  patch_id: string
+  target_markdown: string
+}
+
+export type EditorCollaborationSuggestionPublishResponse = {
+  command_id: string
+  patch_id: string
+  sequence: number
+  suggestion_ids: string[]
 }
 
 /** One editor folder as the server stores it. */
@@ -839,10 +1014,10 @@ export type ServerEditorComment = {
   updated_at: number
 }
 
-/** One keyset page of the caller's documents (newest first, METADATA only). */
-export async function listEditorDocuments(options: PageOptions = {}) {
+/** One keyset page of documents (owned-only by default, METADATA only). */
+export async function listEditorDocuments(options: EditorDocumentListOptions = {}) {
   return requestJson<{ data: ServerEditorDocument[]; next_cursor: string | null }>(
-    `/v1/editor/documents${pageQuery(options)}`,
+    `/v1/editor/documents${editorDocumentListQuery(options)}`,
     options,
   )
 }
@@ -880,6 +1055,105 @@ export async function saveEditorDocument(
     body: payload,
     method: 'PUT',
   })
+}
+
+/** Update title/folder metadata without touching the authoritative body. */
+export async function patchEditorDocumentMetadata(
+  documentId: string,
+  payload: EditorDocumentMetadataPatch,
+  options: ClientOptions = {},
+) {
+  return requestJson<ServerEditorDocument>(`/v1/editor/documents/${documentId}`, {
+    ...options,
+    body: payload,
+    method: 'PATCH',
+  })
+}
+
+/** Atomically convert an owner-only markdown document to Yjs collaboration. */
+export async function enableEditorDocumentCollaboration(
+  documentId: string,
+  payload: EditorCollaborationEnableRequest,
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorCollaborationEnableResponse>(
+    `/v1/editor/documents/${documentId}/collaboration:enable`,
+    {
+      ...options,
+      body: payload,
+      method: 'POST',
+    },
+  )
+}
+
+/** Issue or rotate the current browser tab's collaboration lease. */
+export async function createEditorCollaborationSession(
+  documentId: string,
+  payload: EditorCollaborationSessionRequest,
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorCollaborationSession>(
+    `/v1/editor/documents/${documentId}/collaboration/session`,
+    { ...options, body: payload, method: 'POST' },
+  )
+}
+
+/** Compact, content-bounded durable activity for a future inspector surface. */
+export async function listEditorCollaborationActivity(
+  documentId: string,
+  options: PageOptions = {},
+) {
+  return requestJson<{
+    data: EditorCollaborationActivity[]
+    next_cursor: string | null
+    object: 'list'
+  }>(`/v1/editor/documents/${documentId}/activity${pageQuery(options)}`, options)
+}
+
+/** Drain durable updates and publish the canonical markdown projection. */
+export async function flushEditorCollaborationProjection(
+  documentId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorCollaborationProjection>(
+    `/v1/editor/documents/${documentId}/collaboration/projection:flush`,
+    {
+      ...options,
+      method: 'POST',
+    },
+  )
+}
+
+/** Publish one private assistant result as an attributable shared suggestion. */
+export async function publishEditorCollaborationSuggestion(
+  documentId: string,
+  payload: EditorCollaborationSuggestionPublishRequest,
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorCollaborationSuggestionPublishResponse>(
+    `/v1/editor/documents/${documentId}/suggestions:publish`,
+    {
+      ...options,
+      body: payload,
+      method: 'POST',
+    },
+  )
+}
+
+/** Apply one idempotent batch decision through the authoritative Yjs room. */
+export async function decideEditorCollaborationPatches(
+  documentId: string,
+  payload: EditorCollaborationDecisionRequest,
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorCollaborationDecisionResponse>(
+    `/v1/editor/documents/${documentId}/patches:decide`,
+    {
+      ...options,
+      body: payload,
+      method: 'POST',
+    },
+  )
 }
 
 /** Delete one document and its comments (owner-only; idempotent). */
@@ -1222,7 +1496,7 @@ export type ServerAccountPreferences = {
   theme: string
   theme_preset: string
   user_bubble_tone?: string
-  agent_memory_enabled?: boolean
+  enable_agent_memory?: boolean
   updated_at: number
 }
 
@@ -1246,7 +1520,7 @@ export async function saveAccountPreferences(
     theme: string
     theme_preset: string
     user_bubble_tone: string
-    agent_memory_enabled: boolean
+    enable_agent_memory: boolean
     updated_at: number
   },
   options: ClientOptions = {},
@@ -1296,7 +1570,7 @@ export async function createShares(
     body: {
       invitees: invitees.map((invitee) => ({
         permission: invitee.permission,
-        subject_id: invitee.subjectId,
+        user_id: invitee.userId,
       })),
       resource_id: resourceId,
       resource_type: resourceType,
@@ -1311,15 +1585,20 @@ export async function revokeShare(shareId: string, options: ClientOptions = {}) 
   await request(`/v1/shares/${shareId}`, { ...options, method: 'DELETE' })
 }
 
-/** Shared-in resources of one kind for the caller. */
-export async function listSharedWithMe(
-  resourceType: string,
+/** Compare-and-swap one active share's permission. Acceptance is retained. */
+export async function updateShare(
+  shareId: string,
+  requestBody: { expectedRevision: number; permission: SharePermissionValue },
   options: ClientOptions = {},
 ) {
-  const payload = await requestJson<{ data: SharedWithMeEntry[] }>(
-    `/v1/shares/shared-with-me?resource_type=${encodeURIComponent(resourceType)}`,
-    options,
-  )
+  const payload = await requestJson<{ data: ShareRecordInfo }>(`/v1/shares/${shareId}`, {
+    ...options,
+    body: {
+      expected_revision: requestBody.expectedRevision,
+      permission: requestBody.permission,
+    },
+    method: 'PATCH',
+  })
   return payload.data
 }
 
@@ -1334,7 +1613,7 @@ export async function fetchSharingInbox(options: ClientOptions = {}) {
 }
 
 /** The resources the caller has shared out, grouped per resource. */
-export async function fetchOutgoingShares(options: ClientOptions = {}) {
+export async function fetchMyShares(options: ClientOptions = {}) {
   const payload = await requestJson<{ data: OutgoingShare[] }>(
     '/v1/shares/mine',
     options,
@@ -1345,22 +1624,6 @@ export async function fetchOutgoingShares(options: ClientOptions = {}) {
 /** Accept one pending incoming share (the recipient's consent). */
 export async function acceptShare(shareId: string, options: ClientOptions = {}) {
   await request(`/v1/shares/${shareId}/accept`, { ...options, method: 'POST' })
-}
-
-/** Active-share counts for the badge layer, keyed by resource id. */
-export async function fetchOutgoingShareCounts(
-  resourceType: string,
-  resourceIds: readonly string[],
-  options: ClientOptions = {},
-) {
-  if (resourceIds.length === 0) return {} as Record<string, number>
-  const params = new URLSearchParams({ resource_type: resourceType })
-  for (const id of resourceIds) params.append('resource_id', id)
-  const payload = await requestJson<{ data: Record<string, number> }>(
-    `/v1/shares/outgoing?${params.toString()}`,
-    options,
-  )
-  return payload.data
 }
 
 /** One keyset page of visible research runs (newest first). */
@@ -1408,6 +1671,16 @@ export async function cancelResearchRun(
   })
 }
 
+/** Current summary of one run. Used to poll for the terminal transition
+ * after a cancel (a cancel of a RUNNING run is asynchronous: the summary
+ * stays `running` with `cancel_requested: true` until the worker stops). */
+export async function fetchResearchRunSummary(
+  runId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<ResearchRunSummary>(`/v1/runs/${runId}`, options)
+}
+
 /** Permanently delete one terminal run from the durable store (owner-only).
  * A run removed locally alone re-hydrates on the next list; this is what makes
  * deletion survive a reload. 409 when the run is still active (cancel first). */
@@ -1426,7 +1699,9 @@ export async function deleteResearchRun(
  * server result payload (answer/metrics/top_sources/top_claims/references/
  * usage) WITHOUT run_id/status (the result endpoint adds those on read). */
 export type ImportResearchRunPayload = {
-  run_id: string
+  /** Stable id from the imported project. The server always allocates the
+   * canonical public run id and returns it in the summary. */
+  source_run_id: string
   question: string
   stack: string
   mode?: string
@@ -2110,10 +2385,15 @@ export async function streamChatCompletion(
   emitDone()
 }
 
+export type ServerSentEventMetadata = {
+  event: string | null
+  id: string | null
+}
+
 type StreamEventsOptions<T> = ClientOptions & {
   /** Transport liveness, including comment-only heartbeat frames. */
   onActivity?: () => void
-  onEvent: (event: T) => void
+  onEvent: (event: T, metadata: ServerSentEventMetadata) => void
 }
 
 /**
@@ -2145,11 +2425,83 @@ export async function streamServerSentEvents<T>(
     buffer = frames.pop() ?? ''
 
     for (const frame of frames) {
-      const data = parseSseData(frame)
-      if (!data) continue
-      options.onEvent(JSON.parse(data) as T)
+      const parsed = parseSseFrame(frame)
+      if (!parsed.data) continue
+      options.onEvent(JSON.parse(parsed.data) as T, {
+        event: parsed.event,
+        id: parsed.id,
+      })
     }
   }
+}
+
+export type UserEvent =
+  | {
+    data: { cursor: string; user_id: string }
+    id: string | null
+    type: 'ready'
+  }
+  | {
+    data: {
+      resource_id?: string
+      resource_type?: string
+      scope: string
+    }
+    id: string | null
+    type: 'invalidate'
+  }
+  | {
+    data: Record<string, never>
+    id: string | null
+    type: 'reset'
+  }
+  | {
+    data: Record<string, unknown>
+    id: string | null
+    type: 'unknown'
+  }
+
+type StreamUserEventsOptions = ClientOptions & {
+  onEvent: (event: UserEvent) => void
+}
+
+/**
+ * User-scoped invalidation stream. Payloads deliberately remain hints: callers
+ * wake their authoritative list endpoints instead of applying entity patches
+ * from this channel.
+ */
+export async function streamUserEvents(options: StreamUserEventsOptions) {
+  return streamServerSentEvents<Record<string, unknown>>('/v1/user/events', {
+    ...options,
+    onEvent: (data, metadata) => {
+      const type = metadata.event
+      if (type === 'ready') {
+        options.onEvent({
+          data: data as { cursor: string; user_id: string },
+          id: metadata.id,
+          type,
+        })
+      } else if (type === 'invalidate') {
+        options.onEvent({
+          data: data as {
+            resource_id?: string
+            resource_type?: string
+            scope: string
+          },
+          id: metadata.id,
+          type,
+        })
+      } else if (type === 'reset') {
+        options.onEvent({
+          data: {},
+          id: metadata.id,
+          type,
+        })
+      } else {
+        options.onEvent({ data, id: metadata.id, type: 'unknown' })
+      }
+    },
+  })
 }
 
 export async function streamResearchRunEvents(
@@ -2238,6 +2590,10 @@ async function request(path: string, options: RequestJsonOptions = {}) {
   if (options.workspaceId) {
     headers.set('X-Inqtrix-Workspace-Id', options.workspaceId)
   }
+  if (options.lastEventId) {
+    headers.set('Last-Event-ID', options.lastEventId)
+  }
+  attachExpectedUserIdentity(headers)
   attachCsrfHeader(headers, method)
 
   const response = await fetch(resolveUrl(path, options.baseUrl), {
@@ -2249,7 +2605,7 @@ async function request(path: string, options: RequestJsonOptions = {}) {
   })
 
   if (!response.ok) {
-    throw await requestError(response)
+    await throwRequestError(response)
   }
 
   return response
@@ -2268,6 +2624,12 @@ function attachCsrfHeader(headers: Headers, method: string) {
   if (token) headers.set('X-CSRF-Token', token)
 }
 
+function attachExpectedUserIdentity(headers: Headers) {
+  if (expectedUserIdentity) {
+    headers.set(EXPECTED_USER_ID_HEADER, expectedUserIdentity)
+  }
+}
+
 function readCsrfCookie(): string | null {
   if (typeof document === 'undefined') return null
   for (const name of ['__Host-inqtrix_csrf', 'inqtrix_csrf']) {
@@ -2279,15 +2641,8 @@ function readCsrfCookie(): string | null {
   return null
 }
 
-/** Session facts the SPA bootstraps from `GET /api/auth/session`. */
-export type AuthSessionInfo = {
-  authenticated: boolean
+type AuthSessionBase = {
   csrf_token?: string
-  display_name?: string | null
-  email?: string | null
-  /** Instance role driving the admin-UI gate; absent reads as `user`. */
-  role?: string
-  sub?: string
   /** The user's canonical project namespace (a `ws_...` string), resolved
    * server-side: on the first authenticated boot the server ADOPTS the browser
    * namespace carried in the `X-Inqtrix-Workspace-Id` request header and returns
@@ -2296,6 +2651,20 @@ export type AuthSessionInfo = {
    * (or in non-cookie modes), in which case the desk keeps the browser-local id. */
   project_namespace?: string | null
 }
+
+/** Session facts the SPA bootstraps from `GET /api/auth/session`. */
+export type AuthSessionInfo = AuthSessionBase & (
+  | { authenticated: false }
+  | {
+    authenticated: true
+    user: {
+      display_name: string | null
+      email: string | null
+      id: string
+      role: string
+    }
+  }
+)
 
 /**
  * Fetch the current OIDC session state (cookie-driven, never 401s).
@@ -2465,7 +2834,7 @@ export async function fetchAdminSystemRuntime(options: ClientOptions = {}) {
 
 /** One row of the instance user list. */
 export type AdminUser = {
-  subject: string
+  id: string
   email: string | null
   display_name: string | null
   instance_role: 'admin' | 'user'
@@ -2480,25 +2849,25 @@ export async function listAdminUsers(options: ClientOptions = {}) {
 
 /** Change a user's instance role (last-admin demotion is refused, 409). */
 export async function setAdminUserRole(
-  subject: string,
+  userId: string,
   instanceRole: 'admin' | 'user',
   options: ClientOptions = {},
 ) {
   return requestJson<AdminUser>(
-    `/v1/admin/users/${encodeURIComponent(subject)}`,
+    `/v1/admin/users/${encodeURIComponent(userId)}`,
     { ...options, method: 'PATCH', body: { instance_role: instanceRole } },
   )
 }
 
 /** Disable or enable a user (disable cascades sessions + tokens). */
 export async function setAdminUserDisabled(
-  subject: string,
+  userId: string,
   disabled: boolean,
   options: ClientOptions = {},
 ) {
   const action = disabled ? 'disable' : 'enable'
   return requestJson<AdminUser>(
-    `/v1/admin/users/${encodeURIComponent(subject)}:${action}`,
+    `/v1/admin/users/${encodeURIComponent(userId)}:${action}`,
     { ...options, method: 'POST', body: {} },
   )
 }
@@ -2527,12 +2896,12 @@ export async function createAdminUser(
 
 /** Admin password reset for a local account (forgotten-password recovery). */
 export async function resetUserPassword(
-  subject: string,
+  userId: string,
   password: string,
   options: ClientOptions = {},
 ) {
   return requestJson<{ reset: boolean }>(
-    `/v1/admin/users/${encodeURIComponent(subject)}:reset-password`,
+    `/v1/admin/users/${encodeURIComponent(userId)}:reset-password`,
     { ...options, method: 'POST', body: { password } },
   )
 }
@@ -2547,13 +2916,13 @@ export type WorkspaceRoleValue = 'viewer' | 'commenter' | 'editor' | 'owner'
 export type AdminWorkspace = {
   workspace_id: string
   name: string
-  created_by_sub: string
+  created_by_user_id: string
   member_count: number
 }
 
 /** One member row of a workspace (enriched with the mirror profile). */
 export type WorkspaceMember = {
-  sub: string
+  user_id: string
   role: WorkspaceRoleValue
   display_name: string | null
   email: string | null
@@ -2617,25 +2986,25 @@ export async function listWorkspaceMembers(
 /** Assign a user to a workspace at a role (adds them as a member). */
 export async function addWorkspaceMember(
   workspaceId: string,
-  sub: string,
+  userId: string,
   role: WorkspaceRoleValue,
   options: ClientOptions = {},
 ) {
-  return requestJson<{ sub: string; role: WorkspaceRoleValue }>(
+  return requestJson<{ user_id: string; role: WorkspaceRoleValue }>(
     `/v1/admin/workspaces/${encodeURIComponent(workspaceId)}/members`,
-    { ...options, method: 'POST', body: { sub, role } },
+    { ...options, method: 'POST', body: { user_id: userId, role } },
   )
 }
 
 /** Change an existing member's role (last-owner demotion is refused, 409). */
 export async function setWorkspaceMemberRole(
   workspaceId: string,
-  sub: string,
+  userId: string,
   role: WorkspaceRoleValue,
   options: ClientOptions = {},
 ) {
-  return requestJson<{ sub: string; role: WorkspaceRoleValue }>(
-    `/v1/admin/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(sub)}`,
+  return requestJson<{ user_id: string; role: WorkspaceRoleValue }>(
+    `/v1/admin/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`,
     { ...options, method: 'PATCH', body: { role } },
   )
 }
@@ -2643,11 +3012,11 @@ export async function setWorkspaceMemberRole(
 /** Remove a member (last-owner removal is refused, 409). */
 export async function removeWorkspaceMember(
   workspaceId: string,
-  sub: string,
+  userId: string,
   options: ClientOptions = {},
 ) {
   await request(
-    `/v1/admin/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(sub)}`,
+    `/v1/admin/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`,
     { ...options, method: 'DELETE' },
   )
 }
@@ -2714,6 +3083,19 @@ async function requestError(response: Response) {
   return fallbackError
 }
 
+async function throwRequestError(response: Response): Promise<never> {
+  const error = await requestError(response)
+  if (
+    (error.name === 'principal_changed'
+      || (response.status === 401 && expectedUserIdentity !== null))
+    && typeof window !== 'undefined'
+    && typeof window.location?.reload === 'function'
+  ) {
+    window.location.reload()
+  }
+  throw error
+}
+
 function resolveUrl(path: string, baseUrl = DEFAULT_BASE_URL) {
   if (/^https?:\/\//.test(path)) return path
   const normalizedBase = baseUrl.replace(/\/$/, '')
@@ -2726,6 +3108,20 @@ function parseSseData(frame: string) {
     .filter((line) => line.startsWith('data:'))
     .map((line) => line.slice(5).trimStart())
   return dataLines.length > 0 ? dataLines.join('\n') : null
+}
+
+function parseSseFrame(frame: string): {
+  data: string | null
+  event: string | null
+  id: string | null
+} {
+  let event: string | null = null
+  let id: string | null = null
+  for (const line of frame.split(/\r?\n/)) {
+    if (line.startsWith('event:')) event = line.slice(6).trimStart()
+    if (line.startsWith('id:')) id = line.slice(3).trimStart()
+  }
+  return { data: parseSseData(frame), event, id }
 }
 
 function serializeOverrides(overrides?: AgentOverrides) {

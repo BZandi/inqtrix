@@ -30,7 +30,15 @@ from tests.test_runs_sharing import (
     accept_via_http,
     grant_via_http,
     make_sharing_client,
+    scoped,
 )
+
+OWNER_USER_ID = OWNER
+RECIPIENT_USER_ID = RECIPIENT
+STRANGER_USER_ID = STRANGER
+OWNER = str(OWNER_USER_ID)
+RECIPIENT = str(RECIPIENT_USER_ID)
+STRANGER = str(STRANGER_USER_ID)
 
 
 def _wait_until(predicate: Callable[[], bool], *, timeout: float = 2.0) -> None:
@@ -58,12 +66,14 @@ def _parked_agent_run(client, *, sub: str = OWNER) -> str:
         stack_name="default",
         work=segmented,
         kind="agent",
-        created_by_sub=sub,
+        created_by_user_id=uuid.UUID(sub),
         created_by_tenant_id="default",
     )
     run_id = summary["run_id"]
     _wait_until(
-        lambda: store.get(run_id)["status"] == "waiting_for_approval"
+        lambda: store.get(
+            run_id, visible_to=scoped(uuid.UUID(sub))
+        )["status"] == "waiting_for_approval"
     )
     return run_id
 

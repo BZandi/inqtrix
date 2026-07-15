@@ -17,12 +17,14 @@ Inqtrix has one codebase and several ways to run it. This page is the decision m
 | **Custom provider** | Your own LLM/search/storage backend | n/a | your choice | [Writing a custom provider](../providers/writing-a-custom-provider.md) |
 | **Enterprise OIDC** | SSO via your IdP | oidc | Postgres + IdP | [Auth modes](auth-modes.md) |
 | **Scaled workers** | Many concurrent / restart-surviving runs | any | Postgres + Valkey + workers | [Platform components](../getting-started/platform-components.md) |
-| **Kubernetes / OpenShift** | Enterprise clusters | local / oidc / ldap / apikey / none | Postgres (+ optional Qdrant/Valkey, or bundled for a demo) | [Kubernetes and OpenShift](kubernetes.md) |
+| **Collaborative editor** | Authenticated teams editing shared documents | local / oidc / ldap | Postgres + one private Node service | [Deploy editor collaboration](editor-collaboration.md) |
+| **Kubernetes / OpenShift** | Enterprise clusters | local / oidc / ldap / apikey / none | Managed Postgres + S3 (+ optional Qdrant/Valkey; bundled services for a demo) | [Kubernetes and OpenShift](kubernetes.md) |
 
 ## How to choose
 
 - **Just looking?** Local demo or the env server — no database, no containers.
-- **Running it for a team, want it to "just work"?** Stack mode — one command, Postgres for durable data, a built-in UI. Add the `knowledge`/`workers`/`s3` profiles as needs grow.
+- **Running it for a team, want it to "just work"?** Stack mode - one command, Postgres for durable data, a built-in UI. Add `knowledge`, `workers`, `s3`, or the single-replica `collaboration` profile only for the capabilities you need.
+- **Using managed PostgreSQL or S3?** Keep the runtime and migration database identities separate, and give only API/worker a workload identity for S3. The canonical contracts are [Database migrations](database-migrations.md) and [Object storage](object-storage.md).
 - **Building software on top of Inqtrix?** Library mode (in-process) or the HTTP server with the native `/v1/runs` API.
 - **Bringing your own backend or identity provider?** Inqtrix is a Baukasten — every provider, storage backend, and auth mode is swappable; see the custom-provider guide and [Auth modes](auth-modes.md).
 
@@ -38,3 +40,4 @@ Independently of the deployment mode, the LLM and search providers are chosen vi
 - [Provider recipes](../getting-started/provider-recipes.md)
 - [Auth modes](auth-modes.md)
 - [Runbooks](runbooks.md)
+- [Editor collaboration](editor-collaboration.md)

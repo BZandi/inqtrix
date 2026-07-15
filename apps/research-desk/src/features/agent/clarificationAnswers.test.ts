@@ -158,7 +158,7 @@ describe('agentClarificationFromWire', () => {
       status: 'answered',
       answer: '',
       option_id: '',
-      answered_by_sub: '',
+      answered_by_user_id: null,
       created_at: 1,
       answered_at: 2,
     }

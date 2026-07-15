@@ -4,7 +4,7 @@ Privacy posture: any AUTHENTICATED tenant user can find any other by
 prefix — acceptable for a closed deployment whose signup is gated by
 invitations; enumeration without a query is impossible (minimum two
 characters, capped results), disabled users never appear, and the
-payload carries only subject, display name, and email.
+payload carries only the canonical user id, display name, and email.
 
 When ``settings.sharing.restrict_to_workspace_members`` is on, the results
 are additionally narrowed to the caller's workspace co-members — the
@@ -56,26 +56,26 @@ def build_router(container: "AppContainer") -> APIRouter:
             tenant_id=principal.tenant_id,
             query=query,
             limit=_MAX_RESULTS,
-            exclude_subject=principal.sub,
+            exclude_user_id=principal.user_id,
         )
         if restrict_to_members:
             # Narrow to the caller's workspace co-members (mirrors the
-            # grant-time boundary); a non-co-member is simply not offered.
+            # continuous share boundary); a non-co-member is not offered.
             # The narrowing runs AFTER the result cap, so a scoped search may
             # return fewer than the cap even when more co-members would match
             # a longer prefix — typing more narrows it. The authoritative
-            # boundary is the grant-time check, so this is a convenience cap.
+            # grant/accept/live-access checks still revalidate independently.
             allowed = await permissions.share_workspace_filter(
                 tenant_id=principal.tenant_id,
-                grantor_sub=principal.sub,
-                candidate_subs=[user.subject for user in matches],
+                grantor_user_id=principal.user_id,
+                candidate_user_ids=[user.user_id for user in matches],
             )
-            matches = [user for user in matches if user.subject in allowed]
+            matches = [user for user in matches if user.user_id in allowed]
         return {
             "object": "list",
             "data": [
                 {
-                    "subject": user.subject,
+                    "id": str(user.user_id),
                     "display_name": user.display_name,
                     "email": user.email,
                 }

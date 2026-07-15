@@ -12,13 +12,16 @@ import {
 } from '@/components/icons'
 import {
   memo,
+  startTransition,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent,
   type UIEvent,
 } from 'react'
-import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
+import { motion, useReducedMotion } from 'motion/react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -35,6 +38,11 @@ import {
   statusBadgeClassName,
 } from '../researchDesk/components/runDisplay'
 import { MarkdownReport } from './MarkdownReport'
+import {
+  agentStepScrollDecision,
+  agentStepScrollTop,
+  isAgentStepScrollKey,
+} from './agentStepScroll'
 
 type ReportPanelProps = {
   onHide: () => void
@@ -68,6 +76,18 @@ export const ReportPanel = memo(function ReportPanel({
   const isRunningRun = panelState.mode === 'running'
   const isCompletedRun = panelState.mode === 'completed-with-report'
     || panelState.mode === 'completed-without-report'
+  // The surface body renders from DEFERRED values: mounting a full report
+  // markdown tree takes hundreds of ms of main-thread work, and rendering it
+  // in the same pass as the run selection would delay the click feedback
+  // (card highlight, header) by exactly that time. The swap is additionally
+  // held until the card's selection animation window has passed — the expand
+  // (grid-template-rows transition) and the neighbours' layout animations all
+  // run on the main thread, and a big commit inside that window drops frames.
+  const deferredRun = useAnimationSettledValue(selectedRun)
+  const deferredPanelState = useMemo(() => resolveReportPanelState(deferredRun), [deferredRun])
+  const deferredIsRunningRun = deferredPanelState.mode === 'running'
+  const deferredIsCompletedRun = deferredPanelState.mode === 'completed-with-report'
+    || deferredPanelState.mode === 'completed-without-report'
   const visibleEventCount = useMemo(
     () => (selectedRun ? selectedRun.events.filter(isDisplayableAgentEvent).length : 0),
     [selectedRun],
@@ -182,76 +202,87 @@ export const ReportPanel = memo(function ReportPanel({
           )}
         </div>
 
-        <AnimatePresence initial={false} mode="wait">
-          {panelState.mode === 'empty' ? (
-            <motion.div
-              animate={{ opacity: 1, y: 0 }}
-              className="flex min-h-0 flex-1"
-              exit={{ opacity: 0, y: -4 }}
-              initial={{ opacity: 0, y: 4 }}
-              key="empty"
-              transition={appMotion.panel}
-            >
-              <EmptyReportPanel />
-            </motion.div>
-          ) : isCompletedRun && selectedRun ? (
-            <motion.div
-              animate={{ opacity: 1, y: 0 }}
-              className="min-h-0 flex-1 overflow-hidden"
-              exit={{ opacity: 0, y: -4 }}
-              initial={{ opacity: 0, y: 4 }}
-              key={`${selectedRun.runId}-${panelState.mode}`}
-              transition={appMotion.panel}
-            >
-              <ScrollArea className="h-full min-h-0">
-                <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="preview">
-                  <ReportPreview run={selectedRun} markdown={panelState.markdown} />
-                </TabsContent>
-                <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="evidence">
-                  <ReportEvidence run={selectedRun} />
-                </TabsContent>
-                <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="agentSteps">
-                  <ReportAgentSteps run={selectedRun} />
-                </TabsContent>
-                <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="export">
-                  <ReportExport markdown={panelState.markdown} onSetAutocomplete={onSetReportAutocomplete} run={selectedRun} />
-                </TabsContent>
+        {/* Surface bodies are keyed by surface KIND, never by runId: a keyed
+            remount would replay the enter fade while the heavy report markdown
+            mounts at opacity 0 (visible blank on report-to-report switches).
+            Switching runs inside the same surface swaps content instantly; the
+            inner runId key only remounts the scroll container (scroll reset,
+            fresh per-run UI state) without any animation. */}
+        {!deferredRun ? (
+          <motion.div
+            animate={{ opacity: 1, y: 0 }}
+            className="flex min-h-0 flex-1"
+            initial={reduceMotion ? false : { opacity: 0, y: 4 }}
+            key="empty"
+            transition={appMotion.panel}
+          >
+            <EmptyReportPanel />
+          </motion.div>
+        ) : deferredIsCompletedRun ? (
+          <motion.div
+            animate={{ opacity: 1, y: 0 }}
+            className="min-h-0 flex-1 overflow-hidden"
+            initial={reduceMotion ? false : { opacity: 0, y: 4 }}
+            key="report"
+            transition={appMotion.panel}
+          >
+            <ScrollArea className="h-full min-h-0" key={deferredRun.runId}>
+              <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="preview">
+                <ReportPreview run={deferredRun} markdown={deferredPanelState.markdown} />
+              </TabsContent>
+              <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="evidence">
+                <ReportEvidence run={deferredRun} />
+              </TabsContent>
+              <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="agentSteps">
+                <ReportAgentSteps run={deferredRun} />
+              </TabsContent>
+              <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="export">
+                <ReportExport markdown={deferredPanelState.markdown} onSetAutocomplete={onSetReportAutocomplete} run={deferredRun} />
+              </TabsContent>
+            </ScrollArea>
+          </motion.div>
+        ) : (
+          <motion.div
+            animate={{ opacity: 1, y: 0 }}
+            className="min-h-0 flex-1 overflow-hidden"
+            initial={reduceMotion ? false : { opacity: 0, y: 4 }}
+            key="status"
+            transition={appMotion.panel}
+          >
+            {deferredIsRunningRun ? (
+              <RunStatusPanel key={deferredRun.runId} run={deferredRun} />
+            ) : (
+              <ScrollArea className="h-full min-h-0" key={deferredRun.runId}>
+                <RunStatusPanel run={deferredRun} />
               </ScrollArea>
-            </motion.div>
-          ) : selectedRun ? (
-            <motion.div
-              animate={{ opacity: 1, y: 0 }}
-              className="min-h-0 flex-1 overflow-hidden"
-              exit={{ opacity: 0, y: -4 }}
-              initial={{ opacity: 0, y: 4 }}
-              key={`${selectedRun.runId}-${panelState.mode}`}
-              transition={appMotion.panel}
-            >
-              {isRunningRun ? (
-                <RunStatusPanel run={selectedRun} />
-              ) : (
-                <ScrollArea className="h-full min-h-0">
-                  <RunStatusPanel run={selectedRun} />
-                </ScrollArea>
-              )}
-            </motion.div>
-          ) : (
-            <motion.div
-              animate={{ opacity: 1, y: 0 }}
-              className="flex min-h-0 flex-1"
-              exit={{ opacity: 0, y: -4 }}
-              initial={{ opacity: 0, y: 4 }}
-              key="fallback-empty"
-              transition={appMotion.panel}
-            >
-              <EmptyReportPanel />
-            </motion.div>
-          )}
-        </AnimatePresence>
+            )}
+          </motion.div>
+        )}
       </Tabs>
     </motion.aside>
   )
 })
+
+/* The run-card select/expand animations (appMotion.card 0.22s, the card's
+   200ms grid-template-rows transition, neighbour layout shifts) are all
+   main-thread bound, so the settle window must outlast the longest of them
+   before the heavy report commit is allowed to land. */
+const SELECTION_ANIMATION_SETTLE_MS = 300
+
+function useAnimationSettledValue<T>(value: T): T {
+  const [settled, setSettled] = useState(value)
+
+  useEffect(() => {
+    if (Object.is(value, settled)) return undefined
+
+    const handle = window.setTimeout(() => {
+      startTransition(() => setSettled(value))
+    }, SELECTION_ANIMATION_SETTLE_MS)
+    return () => window.clearTimeout(handle)
+  }, [value, settled])
+
+  return settled
+}
 
 function resolveReportPanelState(selectedRun: ResearchRunRecord | null): ReportPanelState {
   if (!selectedRun) {
@@ -544,24 +575,43 @@ function AgentStepTimeline({
     : -1
   const activeStepRef = useRef<HTMLLIElement | null>(null)
   const logScrollRef = useRef<HTMLDivElement | null>(null)
+  const positionedRunIdRef = useRef<string | null>(null)
   const userNavigatedLogRef = useRef(false)
   const [autoFollow, setAutoFollow] = useState(true)
   const [showJumpButton, setShowJumpButton] = useState(false)
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const activeStep = activeStepRef.current
     const scrollContainer = logScrollRef.current
 
-    if (!isLive || !activeStep || !scrollContainer || !autoFollow) return
+    if (!isLive || !activeStep || !scrollContainer) return
 
-    scrollContainer.scrollTo({
-      top: Math.max(
-        activeStep.offsetTop - scrollContainer.clientHeight + activeStep.offsetHeight + 18,
-        0,
-      ),
-      behavior: 'smooth',
+    const decision = agentStepScrollDecision({
+      autoFollow,
+      geometry: {
+        containerHeight: scrollContainer.clientHeight,
+        stepHeight: activeStep.offsetHeight,
+        stepTop: activeStep.offsetTop,
+      },
+      positionedRunId: positionedRunIdRef.current,
+      reducedMotion: reduceMotion,
+      runId: run.runId,
     })
-  }, [autoFollow, derivedActiveEventIndex, events.length, isLive])
+    if (!decision) return
+
+    if (decision.initializesRun) {
+      positionedRunIdRef.current = run.runId
+      userNavigatedLogRef.current = false
+      setAutoFollow(true)
+      setShowJumpButton(false)
+      scrollContainer.scrollTop = decision.top
+      return
+    }
+    scrollContainer.scrollTo({
+      behavior: decision.behavior,
+      top: decision.top,
+    })
+  }, [autoFollow, derivedActiveEventIndex, events.length, isLive, reduceMotion, run.runId])
 
   function handleEventScroll(event: UIEvent<HTMLDivElement>) {
     if (!isLive || !userNavigatedLogRef.current) return
@@ -579,6 +629,10 @@ function AgentStepTimeline({
     userNavigatedLogRef.current = true
   }
 
+  function handleLogKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (isAgentStepScrollKey(event.key)) markManualLogNavigation()
+  }
+
   function jumpToCurrentStep() {
     const activeStep = activeStepRef.current
     const scrollContainer = logScrollRef.current
@@ -590,11 +644,12 @@ function AgentStepTimeline({
     if (!activeStep || !scrollContainer) return
 
     scrollContainer.scrollTo({
-      top: Math.max(
-        activeStep.offsetTop - scrollContainer.clientHeight + activeStep.offsetHeight + 18,
-        0,
-      ),
-      behavior: 'smooth',
+      behavior: reduceMotion ? 'auto' : 'smooth',
+      top: agentStepScrollTop({
+        containerHeight: scrollContainer.clientHeight,
+        stepHeight: activeStep.offsetHeight,
+        stepTop: activeStep.offsetTop,
+      }),
     })
   }
 
@@ -611,6 +666,7 @@ function AgentStepTimeline({
       {events.length > 0 ? (
         <div className={cn('relative', isLive && 'min-h-0 flex-1 overflow-hidden')}>
           <div
+            aria-label={isLive ? t.report.agentStepsDescription : undefined}
             className={cn(
               isLive
                 ? [
@@ -622,8 +678,11 @@ function AgentStepTimeline({
                 ]
                 : 'overflow-visible',
             )}
+            onKeyDown={handleLogKeyDown}
             onScroll={handleEventScroll}
             ref={logScrollRef}
+            role={isLive ? 'region' : undefined}
+            tabIndex={isLive ? 0 : undefined}
           >
             <ol className="space-y-1">
               {events.map((event, index) => {

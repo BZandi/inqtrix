@@ -5,9 +5,10 @@ operation: re-embedding a knowledge collection's documents in the
 background so a browser can start a reindex, close, and return to a
 still-running job. It mirrors the run store's proven shape — daemon-thread
 dispatch, a bounded FIFO queue, per-job event buffers with replay, and
-``(tenant, sub)`` visibility — but stays its own type because reindex
-records carry progress fields runs lack, are keyed by ``collection_id``,
-and retain a per-collection history rather than a flat TTL set.
+canonical ``(tenant_id, user_id)`` visibility — but stays its own type
+because reindex records carry progress fields runs lack, are keyed by
+``collection_id``, and retain a per-collection history rather than a flat
+TTL set.
 
 A reindex is rebuild-in-place: each document keeps its identity and only
 its vectors are recomputed (see
@@ -24,21 +25,28 @@ import threading
 import time
 import uuid
 from collections import deque
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from enum import StrEnum
 from queue import Queue
 from typing import TYPE_CHECKING, Any, Callable
 
+from inqtrix.auth.permissions import SharePermission
+from inqtrix.execution_authority import AuthorizationRevoked
 from inqtrix.server.runs import format_sse_event
 from inqtrix.urls import sanitize_error
 
 if TYPE_CHECKING:
+    from inqtrix.auth.memory_authority import MemoryAuthorityCoordinator
     from inqtrix.auth.principal import UserContext
     from inqtrix.settings import KnowledgeSettings
 
 log = logging.getLogger("inqtrix")
 
 __all__ = [
+    "ACTIVE_INDEXING_STATUSES",
+    "ACTIVE_INDEXING_STATUS_VALUES",
     "IndexingJobConflict",
     "IndexingJobHandle",
     "IndexingJobNotFound",
@@ -62,6 +70,7 @@ class IndexingJobStatus(StrEnum):
 
     QUEUED = "queued"
     RUNNING = "running"
+    CANCELLING = "cancelling"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -75,6 +84,20 @@ TERMINAL_INDEXING_STATUSES = frozenset(
         IndexingJobStatus.CANCELLED,
     }
 )
+
+ACTIVE_INDEXING_STATUSES = frozenset(
+    {
+        IndexingJobStatus.QUEUED,
+        IndexingJobStatus.RUNNING,
+        IndexingJobStatus.CANCELLING,
+    }
+)
+"""States that reserve a collection's exclusive maintenance boundary."""
+
+ACTIVE_INDEXING_STATUS_VALUES = tuple(
+    status.value for status in ACTIVE_INDEXING_STATUSES
+)
+"""Database-ready representation of :data:`ACTIVE_INDEXING_STATUSES`."""
 
 TERMINAL_INDEXING_EVENTS = frozenset(
     {
@@ -122,12 +145,14 @@ class IndexingJobRecord:
     job (keyed by ``job_id``) onto the right index on resume — events
     never carry the client's id otherwise."""
     workspace_id: str | None = None
-    created_by_sub: str | None = None
-    """Verified subject that started the job (authorization fact,
-    server-resolved). ``None`` only for the unscoped principals."""
+    created_by_user_id: uuid.UUID | None = None
+    """Canonical user UUID that started the job.
+
+    The value is server-resolved authorization state. ``None`` is reserved
+    for unscoped principals.
+    """
     created_by_tenant_id: str | None = None
-    """Tenant of the submitting principal — a sub is unique only per
-    issuer, so visibility matches on (tenant, sub)."""
+    """Tenant paired with ``created_by_user_id`` for job visibility."""
     status: IndexingJobStatus = IndexingJobStatus.QUEUED
     started_at: float | None = None
     finished_at: float | None = None
@@ -265,7 +290,9 @@ class IndexingJobHandle:
         """Record the total document count once it is known."""
         self._store.set_total(self.job_id, total_documents)
 
-    def progress(self, *, completed_documents: int, current_document_title: str = "") -> None:
+    def progress(
+        self, *, completed_documents: int, current_document_title: str = ""
+    ) -> None:
         """Emit one progress step (documents re-embedded so far)."""
         self._store.progress(
             self.job_id,
@@ -336,6 +363,73 @@ class IndexingJobStore:
         self._pending: deque[str] = deque()
         self._running_count = 0
         self._lock = threading.RLock()
+        self._authority: MemoryAuthorityCoordinator | None = None
+
+    def bind_authority_coordinator(
+        self, coordinator: "MemoryAuthorityCoordinator"
+    ) -> None:
+        """Use the process-wide authority lock for job and collection writes."""
+        self._authority = coordinator
+        self._lock = coordinator.lock
+
+    def _job_authority_context_locked(
+        self,
+        record: IndexingJobRecord,
+        *,
+        actor_user_id: uuid.UUID | None = None,
+    ) -> Any:
+        actor = actor_user_id or record.created_by_user_id
+        if self._authority is None or actor is None:
+            return nullcontext()
+        if not record.created_by_tenant_id:
+            raise AuthorizationRevoked("reindex actor has no tenant authority")
+        return self._authority.registered_resource_access_guard(
+            tenant_id=record.created_by_tenant_id,
+            actor_user_id=actor,
+            resource_type="knowledge_collection",
+            resource_id=record.collection_id,
+            minimum=SharePermission.EDIT,
+        )
+
+    @contextmanager
+    def _submission_authority_context(
+        self,
+        *,
+        tenant_id: str | None,
+        actor_user_id: uuid.UUID | None,
+        collection_id: str,
+    ) -> Iterator[None]:
+        if self._authority is None or actor_user_id is None:
+            yield
+            return
+        if not tenant_id:
+            raise AuthorizationRevoked("reindex actor has no tenant authority")
+        with self._authority.registered_resource_access_guard(
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            resource_type="knowledge_collection",
+            resource_id=collection_id,
+            minimum=SharePermission.EDIT,
+        ):
+            yield
+
+    def _append_job_effect_locked(
+        self,
+        record: IndexingJobRecord,
+        *,
+        action: str,
+        actor_user_id: uuid.UUID | None = None,
+    ) -> None:
+        if self._authority is None or not record.created_by_tenant_id:
+            return
+        self._authority.append_registered_resource_effects(
+            tenant_id=record.created_by_tenant_id,
+            actor_user_id=actor_user_id or record.created_by_user_id,
+            action=action,
+            resource_type="knowledge_collection",
+            resource_id=record.collection_id,
+            scope="knowledge",
+        )
 
     @classmethod
     def from_settings(cls, settings: "KnowledgeSettings") -> "IndexingJobStore":
@@ -357,7 +451,7 @@ class IndexingJobStore:
         work: IndexingWork,
         index_id: str | None = None,
         workspace_id: str | None = None,
-        created_by_sub: str | None = None,
+        created_by_user_id: uuid.UUID | None = None,
         created_by_tenant_id: str | None = None,
     ) -> dict[str, Any]:
         """Create a queued reindex job and dispatch it if capacity allows.
@@ -367,7 +461,11 @@ class IndexingJobStore:
                 running reindex job (one active run per collection).
             IndexingQueueFull: The waiting queue is already full.
         """
-        with self._lock:
+        with self._lock, self._submission_authority_context(
+            tenant_id=created_by_tenant_id,
+            actor_user_id=created_by_user_id,
+            collection_id=collection_id,
+        ):
             self._cleanup_locked()
             if self._active_job_for_collection_locked(collection_id) is not None:
                 raise IndexingJobConflict(collection_id)
@@ -386,7 +484,7 @@ class IndexingJobStore:
                 work=work,
                 index_id=index_id,
                 workspace_id=workspace_id,
-                created_by_sub=created_by_sub,
+                created_by_user_id=created_by_user_id,
                 created_by_tenant_id=created_by_tenant_id,
             )
             record.events = deque(maxlen=self._event_buffer_size)
@@ -400,6 +498,7 @@ class IndexingJobStore:
                     "queue_position": self._queue_position_locked(job_id),
                 },
             )
+            self._append_job_effect_locked(record, action="indexing.submitted")
             self._dispatch_locked()
             return self._summary(record)
 
@@ -442,11 +541,37 @@ class IndexingJobStore:
             ):
                 if collection_id is not None and record.collection_id != collection_id:
                     continue
-                if _workspace_matches(record, workspace_id) and _visible_to_matches(
-                    record, visible_to
-                ):
+                if _workspace_matches(
+                    record, workspace_id
+                ) and self._visible_to_matches_locked(record, visible_to):
                     summaries.append(self._summary(record))
             return summaries
+
+    def has_active_job(self, collection_id: str) -> bool:
+        """Whether *collection_id* is reserved for reindex maintenance."""
+        with self._lock:
+            self._cleanup_locked()
+            return self._active_job_for_collection_locked(collection_id) is not None
+
+    def run_collection_mutation(
+        self, collection_id: str, mutation: Callable[[], Any]
+    ) -> Any:
+        """Run one in-memory mutation iff no reindex job is active.
+
+        The existing job-store lock is the memory backend's collection-row
+        boundary. The callback must contain only the final store mutation;
+        parsing and embedding happen before it.
+
+        Raises:
+            CollectionMaintenanceActive: An active job owns the collection.
+        """
+        from inqtrix.knowledge.stores.ports import CollectionMaintenanceActive
+
+        with self._lock:
+            self._cleanup_locked()
+            if self._active_job_for_collection_locked(collection_id) is not None:
+                raise CollectionMaintenanceActive(collection_id)
+            return mutation()
 
     def cancel(
         self,
@@ -454,6 +579,7 @@ class IndexingJobStore:
         *,
         workspace_id: str | None = None,
         visible_to: "UserContext | None" = None,
+        actor_user_id: uuid.UUID | None = None,
     ) -> dict[str, Any]:
         """Request cancellation for a queued or running reindex job."""
         with self._lock:
@@ -461,30 +587,52 @@ class IndexingJobStore:
             record = self._record_locked(
                 job_id, workspace_id=workspace_id, visible_to=visible_to
             )
-            if record.status == IndexingJobStatus.QUEUED:
-                self._remove_pending_locked(job_id)
-                record.cancel_event.set()
-                self._mark_terminal_locked(record, IndexingJobStatus.CANCELLED)
-                self._emit_locked(
-                    record,
-                    "inqtrix.index.cancelled",
-                    {
-                        "status": "cancelled",
-                        "reason": "cancelled_before_start",
-                        "snapshot": _job_snapshot(record),
-                    },
-                )
-                record.work = None
-                return self._summary(record)
-            if record.status == IndexingJobStatus.RUNNING:
-                record.cancel_event.set()
-                self._emit_locked(
-                    record,
-                    "inqtrix.index.cancel_requested",
-                    {"status": "running", "reason": "client_requested_cancel"},
-                )
-                return self._summary(record)
-            return self._summary(record)
+            try:
+                with self._job_authority_context_locked(
+                    record, actor_user_id=actor_user_id
+                ):
+                    canonical = self._records[job_id]
+                    if canonical.status == IndexingJobStatus.QUEUED:
+                        self._remove_pending_locked(job_id)
+                        canonical.cancel_event.set()
+                        self._mark_terminal_locked(
+                            canonical, IndexingJobStatus.CANCELLED
+                        )
+                        self._emit_locked(
+                            canonical,
+                            "inqtrix.index.cancelled",
+                            {
+                                "status": "cancelled",
+                                "reason": "cancelled_before_start",
+                                "snapshot": _job_snapshot(canonical),
+                            },
+                        )
+                        canonical.work = None
+                        self._append_job_effect_locked(
+                            canonical,
+                            action="indexing.cancelled",
+                            actor_user_id=actor_user_id,
+                        )
+                        return self._summary(canonical)
+                    if canonical.status == IndexingJobStatus.RUNNING:
+                        canonical.cancel_event.set()
+                        canonical.status = IndexingJobStatus.CANCELLING
+                        self._emit_locked(
+                            canonical,
+                            "inqtrix.index.cancel_requested",
+                            {
+                                "status": "cancelling",
+                                "reason": "client_requested_cancel",
+                            },
+                        )
+                        self._append_job_effect_locked(
+                            canonical,
+                            action="indexing.cancel_requested",
+                            actor_user_id=actor_user_id,
+                        )
+                    return self._summary(canonical)
+            except AuthorizationRevoked as exc:
+                raise IndexingJobNotFound(job_id) from exc
 
     def subscribe(
         self,
@@ -525,12 +673,13 @@ class IndexingJobStore:
             record = self._records.get(job_id)
             if record is None or record.status in TERMINAL_INDEXING_STATUSES:
                 return
-            record.total_documents = max(0, int(total_documents))
-            self._emit_locked(
-                record,
-                "inqtrix.index.progress",
-                {"snapshot": _job_snapshot(record)},
-            )
+            with self._job_authority_context_locked(record):
+                record.total_documents = max(0, int(total_documents))
+                self._emit_locked(
+                    record,
+                    "inqtrix.index.progress",
+                    {"snapshot": _job_snapshot(record)},
+                )
 
     def progress(
         self,
@@ -544,13 +693,14 @@ class IndexingJobStore:
             record = self._records.get(job_id)
             if record is None or record.status in TERMINAL_INDEXING_STATUSES:
                 return
-            record.completed_documents = max(0, int(completed_documents))
-            record.current_document_title = current_document_title
-            self._emit_locked(
-                record,
-                "inqtrix.index.progress",
-                {"snapshot": _job_snapshot(record)},
-            )
+            with self._job_authority_context_locked(record):
+                record.completed_documents = max(0, int(completed_documents))
+                record.current_document_title = current_document_title
+                self._emit_locked(
+                    record,
+                    "inqtrix.index.progress",
+                    {"snapshot": _job_snapshot(record)},
+                )
 
     def complete(self, job_id: str) -> None:
         """Mark the job completed."""
@@ -558,15 +708,42 @@ class IndexingJobStore:
             record = self._records.get(job_id)
             if record is None or record.status in TERMINAL_INDEXING_STATUSES:
                 return
-            record.current_document_title = ""
-            self._mark_terminal_locked(record, IndexingJobStatus.COMPLETED)
-            self._emit_locked(
-                record,
-                "inqtrix.index.completed",
-                {"status": "completed", "snapshot": _job_snapshot(record)},
-            )
+            with self._job_authority_context_locked(record):
+                if record.status == IndexingJobStatus.CANCELLING:
+                    self._mark_terminal_locked(
+                        record, IndexingJobStatus.CANCELLED
+                    )
+                    self._emit_locked(
+                        record,
+                        "inqtrix.index.cancelled",
+                        {
+                            "status": "cancelled",
+                            "reason": "client_requested_cancel",
+                            "snapshot": _job_snapshot(record),
+                        },
+                    )
+                    self._append_job_effect_locked(
+                        record, action="indexing.cancelled"
+                    )
+                    return
+                record.current_document_title = ""
+                self._mark_terminal_locked(record, IndexingJobStatus.COMPLETED)
+                self._emit_locked(
+                    record,
+                    "inqtrix.index.completed",
+                    {"status": "completed", "snapshot": _job_snapshot(record)},
+                )
+                self._append_job_effect_locked(
+                    record, action="indexing.completed"
+                )
 
-    def fail(self, job_id: str, message: str, *, error_type: str = "server_error") -> None:
+    def fail(
+        self,
+        job_id: str,
+        message: str,
+        *,
+        error_type: str = "server_error",
+    ) -> None:
         """Mark the job failed with a sanitized error payload."""
         with self._lock:
             record = self._records.get(job_id)
@@ -583,6 +760,7 @@ class IndexingJobStore:
                     "snapshot": _job_snapshot(record),
                 },
             )
+            self._append_job_effect_locked(record, action="indexing.failed")
 
     def mark_cancelled(self, job_id: str, *, reason: str) -> None:
         """Mark a running job cancelled after its worker exits."""
@@ -600,6 +778,7 @@ class IndexingJobStore:
                     "snapshot": _job_snapshot(record),
                 },
             )
+            self._append_job_effect_locked(record, action="indexing.cancelled")
 
     def document_completed(self, job_id: str, document_id: str) -> None:
         """Emit a per-document completion event (one document finished embedding).
@@ -613,11 +792,12 @@ class IndexingJobStore:
             record = self._records.get(job_id)
             if record is None or record.status in TERMINAL_INDEXING_STATUSES:
                 return
-            self._emit_locked(
-                record,
-                "inqtrix.index.document_completed",
-                {"document_id": document_id, "outcome": "embedded"},
-            )
+            with self._job_authority_context_locked(record):
+                self._emit_locked(
+                    record,
+                    "inqtrix.index.document_completed",
+                    {"document_id": document_id, "outcome": "embedded"},
+                )
 
     # -- internals -------------------------------------------------------- #
 
@@ -627,21 +807,16 @@ class IndexingJobStore:
         handle = IndexingJobHandle(self, job_id, cancel_event)
         try:
             work(handle)
-            with self._lock:
-                record = self._records.get(job_id)
-                if (
-                    record is not None
-                    and record.status not in TERMINAL_INDEXING_STATUSES
-                ):
-                    self._mark_terminal_locked(record, IndexingJobStatus.COMPLETED)
-                    self._emit_locked(
-                        record,
-                        "inqtrix.index.completed",
-                        {"status": "completed", "snapshot": _job_snapshot(record)},
-                    )
+            self.complete(job_id)
         except Exception as exc:  # noqa: BLE001 - workers must terminate cleanly
             log.exception("Reindex job %s failed", job_id)
-            self.fail(job_id, sanitize_error(exc))
+            from inqtrix.execution_failures import classify_execution_failure
+
+            self.fail(
+                job_id,
+                sanitize_error(exc),
+                error_type=classify_execution_failure(exc),
+            )
         finally:
             with self._lock:
                 record = self._records.get(job_id)
@@ -703,7 +878,10 @@ class IndexingJobStore:
             per_collection.setdefault(record.collection_id, []).append(record)
         doomed: set[str] = set()
         for records in per_collection.values():
-            records.sort(key=lambda item: item.finished_at or item.created_at, reverse=True)
+            records.sort(
+                key=lambda item: item.finished_at or item.created_at,
+                reverse=True,
+            )
             for record in records[self._history_limit :]:
                 if not record.subscribers:
                     doomed.add(record.job_id)
@@ -715,8 +893,7 @@ class IndexingJobStore:
         for record in self._records.values():
             if (
                 record.collection_id == collection_id
-                and record.status
-                not in TERMINAL_INDEXING_STATUSES
+                and record.status in ACTIVE_INDEXING_STATUSES
             ):
                 return record
         return None
@@ -731,19 +908,43 @@ class IndexingJobStore:
         record = self._records.get(job_id)
         if record is None:
             raise IndexingJobNotFound(job_id)
-        if _visible_to_matches(record, visible_to):
+        if self._visible_to_matches_locked(record, visible_to):
             if not _workspace_matches(record, workspace_id):
                 raise IndexingJobNotFound(job_id)
             return record
         # The client sees the indistinct 404; the denial stays
         # operator-visible (Designprinzip 1).
         log.warning(
-            "authz denied: reindex job %s hidden from sub=%s tenant=%s",
+            "authz denied: reindex job %s hidden from user_id=%s tenant=%s",
             job_id,
-            visible_to.principal.sub if visible_to else "",
+            visible_to.principal.user_id if visible_to else "",
             visible_to.principal.tenant_id if visible_to else "",
         )
         raise IndexingJobNotFound(job_id)
+
+    def _visible_to_matches_locked(
+        self,
+        record: IndexingJobRecord,
+        visible_to: "UserContext | None",
+    ) -> bool:
+        if _visible_to_matches(record, visible_to):
+            return True
+        if self._authority is None or visible_to is None:
+            return False
+        principal = visible_to.principal
+        if principal.user_id is None:
+            return False
+        try:
+            with self._authority.registered_resource_access_guard(
+                tenant_id=principal.tenant_id,
+                actor_user_id=principal.user_id,
+                resource_type="knowledge_collection",
+                resource_id=record.collection_id,
+                minimum=SharePermission.VIEW,
+            ):
+                return True
+        except AuthorizationRevoked:
+            return False
 
     def _new_unique_job_id_locked(self) -> str:
         for _ in range(8):
@@ -821,16 +1022,15 @@ def _visible_to_matches(
 ) -> bool:
     """Authorization visibility predicate for one reindex job record.
 
-    Mirrors the run store: ``None`` means no scoping (the legacy
-    anonymous/static principals see every job). A scoped principal sees
-    only jobs it created, matched on (tenant, sub) — sub alone is unique
-    only per issuer. Pre-scoping records (``created_by_sub is None``)
-    stay invisible to scoped principals rather than leaking across users.
+    Mirrors the run store: ``None`` means no scoping (anonymous/static
+    principals see every job). A scoped principal sees only jobs created by
+    its canonical UUID in the same tenant. Ownerless records stay invisible
+    to scoped principals rather than leaking across users.
     """
     if visible_to is None:
         return True
     return (
-        record.created_by_sub is not None
-        and record.created_by_sub == visible_to.principal.sub
+        record.created_by_user_id is not None
+        and record.created_by_user_id == visible_to.principal.user_id
         and record.created_by_tenant_id == visible_to.principal.tenant_id
     )

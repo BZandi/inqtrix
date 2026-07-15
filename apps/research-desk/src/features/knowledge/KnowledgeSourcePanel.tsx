@@ -30,6 +30,7 @@ import {
 } from './citations'
 import { CitationGroupList } from './CitationRow'
 import type { DocumentViewerTarget, KnowledgeDataSource } from './types'
+import { useFileAccessProbe } from './useFileAccessProbe'
 
 /** "Beleg" = the cited excerpt (the retrieved chunk, highlighted); "document" =
  * the full extracted text with span highlight; "source" = the original PDF
@@ -207,7 +208,9 @@ function DocumentReader({
   // the load effect must not depend on a value it mutates, or setting 'loading'
   // re-invalidates the effect mid-flight and the load never resolves (the
   // "Lade Dokument…"-forever bug).
-  const [docRequested, setDocRequested] = useState(!hasExcerpt)
+  const [docRequested, setDocRequested] = useState(
+    !hasExcerpt || Boolean(dataSource.canLoadFileContent),
+  )
   const [activeMatch, setActiveMatch] = useState(0)
   const activeMatchRef = useRef<HTMLElement | null>(null)
 
@@ -220,8 +223,8 @@ function DocumentReader({
     setTab(hasExcerpt ? 'excerpt' : 'document')
     setActiveMatch(0)
     setDocumentState({ kind: 'idle' })
-    setDocRequested(!hasExcerpt)
-  }, [target.documentId, target.chunkIndex, hasExcerpt])
+    setDocRequested(!hasExcerpt || Boolean(dataSource.canLoadFileContent))
+  }, [dataSource.canLoadFileContent, target.documentId, target.chunkIndex, hasExcerpt])
 
   // Load the FULL document once requested (Dokument tab opened, or no excerpt).
   // The Beleg view needs only the in-citation excerpt, so a small citation never
@@ -283,7 +286,13 @@ function DocumentReader({
   const fileId = documentState.kind === 'ready'
     ? stringOrNull(documentState.document.metadata.file_id)
     : null
-  const canShowSource = Boolean(dataSource.loadFileContent)
+  const fileAccess = useFileAccessProbe(dataSource, fileId)
+  const canShowSource = fileAccess === 'allowed'
+  useEffect(() => {
+    if (tab === 'source' && !canShowSource) {
+      setTab(hasExcerpt ? 'excerpt' : 'document')
+    }
+  }, [canShowSource, hasExcerpt, tab])
   const loadFile = useCallback((): Promise<{ blob: Blob; contentType: string }> => {
     if (!fileId || !dataSource.loadFileContent) {
       return Promise.reject(new Error(t.knowledge.viewerError))
@@ -421,7 +430,7 @@ function DocumentReader({
             <p className="px-5 py-5 t-meta text-destructive">{documentState.message}</p>
           )}
           {documentState.kind === 'ready'
-            ? fileId
+            ? fileId && canShowSource
               ? (
                 <OriginalFileTab
                   fileName={title}

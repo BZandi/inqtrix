@@ -42,6 +42,21 @@ and the Markdown report viewer directly in the app shell; reserve deferred
 loading for future heavy, non-primary tools rather than the views exposed in the
 left rail.
 
+## Shared Markdown rendering
+
+Chat, Knowledge Desk, reports, file previews, Agent Canvas, and direct Agent Desk
+answers use the same Markdown renderer. Mermaid diagrams preserve their native
+type scale up to the available reading width, shrink responsively when needed,
+and provide expand, Mermaid-source copy, and high-resolution PNG actions.
+Rendered tables provide exact Markdown-source copy plus PNG and UTF-8 CSV
+actions. The controls share one responsive hover/focus/touch action rail, so
+individual workspaces must not add parallel wrappers or export paths.
+
+All exports are created locally in the browser. Table CSV is serialized from the
+visible cells, while PNG generation is loaded only when requested and captures
+the full rendered width, including horizontally scrollable table columns. No
+Markdown source or rendered content is sent to the server for these actions.
+
 ## Editor workspace
 
 The Editor rail view adds local Markdown documents, folders, live rendered
@@ -153,6 +168,34 @@ The live editor is intentionally WYSIWYG-first. Do not add an inline "show the
 underlying Markdown tokens for the clicked rich text" interaction unless there is
 a dedicated design and implementation pass; Tiptap/ProseMirror does not provide
 that behavior natively. Use the Source mode for raw Markdown editing.
+
+### Live editor collaboration
+
+When an editor document has `content_mode=collaboration`, the React lifecycle
+uses one Y.Doc and the Hocuspocus provider instead of emitting full Markdown
+body changes. Normal StarterKit undo/redo is disabled for that lifecycle; Yjs
+owns collaborative history. A remote update never feeds back through
+`setContent()` or the legacy body autosave. Owner metadata changes continue
+through their separate metadata-revision endpoint.
+
+The right panel becomes an Editor Inspector with **Assistant** and **Changes**
+tabs. Edit/Suggest/View permission, review display, active tab, and active
+overlay are separate states. Only one overlay domain is visible: Assistant
+shows private AI/comment anchors against the final projection, while Changes
+shows tracked-change marks in Simple, All, Final, or Original presentation.
+Other users appear as named text carets; remote selection fills and mouse
+pointers are deliberately hidden.
+
+The UI reports connection state separately from durability. A local update is
+saved only after a `durable_ack` for its hash; reconnecting, revoked,
+incompatible, or failed sessions become read-only and never fall back to a
+Markdown body `PUT`. Source is read-only for collaboration documents. Project
+export writes owned collaboration documents as detached Markdown snapshots,
+and import always creates a new Markdown-mode document ID. Accepted incoming
+shares remain server resources and are not copied into local project folders or
+archives. See [Collaborate on editor documents](../how-to/collaborate-on-editor-documents.md)
+for the user workflow and [Editor collaboration](editor-collaboration.md) for
+deployment.
 
 ## Package managers and lockfiles
 
@@ -295,11 +338,42 @@ as chat messages:
 | `GET /v1/runs/{run_id}/events` | Stream structured run events. |
 | `POST /v1/runs/{run_id}/cancel` | Cancel a queued run or request cancellation. |
 | `GET /v1/runs/{run_id}/result` | Fetch the final report payload (`answer`, `metrics`, `top_sources`, `references`, `top_claims`, `usage`, plus `execution` for Agent Desk runs). |
+| `GET /v1/user/events` | One content-free, user-scoped invalidation SSE channel per tab. |
+| `GET /v1/knowledge/collections` | Authoritative owned-plus-accepted-shared server collections with `access`. |
+| `GET /v1/prompt-templates` / `GET /v1/skills` | Authoritative server template lists with integer revisions and `access`. |
+| `GET /v1/shares/inbox` / `GET /v1/shares/mine` | Sharing lifecycle views; regular resource lists remain the content source. |
 
 When `INQTRIX_SERVER_API_KEY` is enabled, event streaming must use a
 fetch-based SSE reader because browser `EventSource` cannot attach an
 `Authorization` header. The server endpoint accepts Bearer auth; the browser
 API is the limiting piece.
+
+The user invalidation stream uses the same fetch-based SSE parser and one
+`AbortController` per tab. It carries only `ready`, `invalidate`, and `reset`
+signals; it never carries resource content or permission patches. `Last-Event-ID`
+resumes retained events, while every connect/reconnect, browser focus, and
+online transition schedules a debounced authoritative refetch. A `ready.user_id`
+that differs from the current session forces a full document reload before any
+event is processed.
+
+Server lists are replacement views, not additive caches. A successful empty
+prompt, skill, or collection response clears that server slice. A run missing
+from the refreshed visible list is removed, its stream is aborted, and the
+selection is repaired. Share accept/revoke/leave refreshes inbox, mine, counts,
+the open share dialog, and the corresponding resource list together. Revocation
+closes an open resource; an edit-to-view downgrade keeps readable content but
+disables save. Dirty prompt/skill text is never overwritten by a remote
+revision: the UI surfaces a conflict and lets the user copy or discard the
+local buffer.
+
+The knowledge picker is populated from `/v1/knowledge/collections`; local
+vector-index records only preserve browser setup/progress and may map to the
+same server collection id. They never create a synthetic shared collection.
+For `access.mode="shared"`, the UI exposes indexed text and retrieval according
+to `view`/`edit`, but it does not offer download of the uploader's private
+original binary. Before a shared editor ingests a document, the UI explains
+that the extracted content becomes part of the owner's collection even if the
+editor later leaves.
 
 Composer controls must map to the backend request shape instead of remaining
 decorative. The current app emits a local draft using `question`, `stack`, and
@@ -606,9 +680,9 @@ server {
         proxy_set_header Authorization $http_authorization;
         proxy_set_header X-Inqtrix-Workspace-Id $http_x_inqtrix_workspace_id;
 
-        # SSE streaming for /v1/runs/{id}/events. Without these flags
-        # the browser sees events only after the run completes because
-        # nginx buffers the response body.
+        # SSE streaming for run/indexing events and /v1/user/events.
+        # Without these flags the browser sees invalidations/progress
+        # only after nginx flushes its response buffer.
         proxy_buffering off;
         proxy_cache off;
         proxy_set_header Connection "";
@@ -628,7 +702,7 @@ Key behaviours encoded in the snippet:
 
 | Aspect | Reason |
 |---|---|
-| `proxy_buffering off` + `Connection ""` + long `proxy_read_timeout` | Required for the SSE endpoint `/v1/runs/{id}/events`. Without these flags the browser receives all events at once after the run finishes. |
+| `proxy_buffering off` + `Connection ""` + long `proxy_read_timeout` | Required for run/indexing event streams and `/v1/user/events`. Without these flags the browser receives buffered progress or invalidations too late. |
 | `proxy_set_header Authorization $http_authorization` | Forwards the Bearer token used when `INQTRIX_SERVER_API_KEY` is enabled. |
 | `proxy_set_header X-Inqtrix-Workspace-Id` | Forwards the per-browser workspace namespace header so `/v1/runs` hydration scopes to the current project. |
 | Listen port `8080` | nginx runs non-root inside the container; a `Service` can fan a public port 80 in front of it. |
@@ -666,9 +740,30 @@ nginx for hosts where only Python is available (no container runtime,
 no nginx). It is also the easiest way to verify the production build
 locally without container tooling.
 
-The launcher uses `httpx` to stream `/v1/*` and `/health` to the
-configured backend origin while serving `dist/` as a SPA. SSE
-streaming works because the proxy uses `aiter_raw()` without buffering.
+The launcher uses `httpx` to stream `/v1/*`, `/api/*` and `/health` to
+the configured backend origin while serving `dist/` as a SPA. It also uses a
+WebSocket client to relay binary `/collaboration` frames to FastAPI. SSE
+streaming works because the HTTP proxy uses `aiter_raw()` without buffering.
+
+Its behaviour tracks the nginx template, so switching between the two
+does not change what the browser observes:
+
+- Unknown paths outside `/assets/` serve `index.html` (SPA fallback);
+  missing files under `/assets/` stay hard 404s.
+- `index.html` (and every other non-asset path) is served with
+  `Cache-Control: no-cache` so a redeploy is picked up immediately;
+  hashed `/assets/` bundles cache immutably for a year.
+- Proxied requests carry the original `Host` plus `X-Forwarded-For`,
+  `X-Real-IP` and `X-Forwarded-Proto` (an outer TLS terminator's value
+  is preserved), so per-client login rate limiting keeps distinct
+  buckets, and the raw request target is forwarded byte-identically
+  (encoded path segments and repeated query keys survive).
+- `/collaboration` preserves the public Host, Origin, cookies, raw query, binary
+  frames, and upstream close behavior. It never starts or connects directly to
+  the Node service.
+- An unreachable backend answers `502 Bad Gateway` like nginx, with a
+  60-second HTTP connect timeout; an unavailable collaboration gateway closes
+  the socket visibly rather than degrading to polling or autosave.
 
 #### Launcher quickstart
 
@@ -738,7 +833,8 @@ to an existing directory.
   `INQTRIX_SERVER_TLS_*` remains optional and useful only for direct
   ingress.
 - `INQTRIX_SERVER_API_KEY` continues to work transparently because
-  both proxies forward the `Authorization` header verbatim.
+  both proxies forward the `Authorization` header verbatim. It does not grant a
+  collaboration lease; live editor sessions require cookie auth.
 - `RUN_COMPLETED_TTL_SECONDS` and `RUN_EVENT_BUFFER_SIZE` stay backend
   settings — neither path changes their semantics.
 
@@ -772,16 +868,25 @@ tokens must run behind HTTPS/TLS, use an explicit CORS origin allow-list, and
 should add a restrictive Content Security Policy at the hosting/reverse-proxy
 layer to reduce XSS token-exfiltration risk.
 
+Cookie-session modes (`local`, `oidc`, `ldap`) bootstrap a canonical
+`user.id` UUID from `/api/auth/session`. Local/LDAP login and logout complete
+with a full document reload so no request, autosave, or store from the previous
+identity can continue in the next user's tree. A failed logout keeps the
+current session rendered and shows the error; the client does not pretend that
+logout succeeded. Session refresh uses abort and generation guards, so a late
+response for user A cannot overwrite a newer user B session. OIDC callback
+navigation already provides the same document boundary.
+
 Each browser workspace also has a non-secret `workspace_id`. The React app
 creates it on first load, stores it in `localStorage`, writes it into
 `project.md` as `workspace_id`, and sends it with native run and chat requests
 as `X-Inqtrix-Workspace-Id`. Loading a project restores that project's
 workspace id for subsequent requests. The server then filters `/v1/runs` and
 run-specific result, event, and cancel calls by that namespace, so a page reload
-does not hydrate every in-memory run from a shared API server. This is not an
-authorization boundary: a caller with the Bearer token and another workspace id
-can still access that namespace through direct HTTP calls until a real
-per-user/session auth layer is added.
+does not hydrate every run from the API server. This namespace is not an
+authorization boundary. In cookie-session modes, ownership and accepted direct
+shares are checked against the canonical user UUID independently of the header;
+in anonymous/static-key modes only ownerless legacy resources are visible.
 
 The live submit flow is:
 
@@ -851,8 +956,19 @@ persisted context model. Prompt Library entries are ordered before research
 reports, and the visible message remains the user's own text plus compact
 attachment chips.
 
-Prompt Library entries are project-scoped prompt templates, not backend
-resources. Each entry has a required lowercase slug label (`a-z`, digits,
+Prompt Library entries may begin as project-local templates, but in a
+server-persistent authenticated workspace their `/v1/prompt-templates` record
+is authoritative. Hydration replaces the complete server-backed slice,
+including accepted shared templates; a vanished server id means delete or
+revocation and is removed locally. Local-only entries are adopted through one
+create path rather than maintained as a parallel server model. Updates require
+the loaded integer `expected_revision`; a 409 refreshes the current server
+version while preserving the user's dirty draft without advancing its base
+revision. The user must then either keep that draft as a new owned copy or
+discard it for the current server version; a normal retry can never overwrite
+the remote winner.
+
+Each entry has a required lowercase slug label (`a-z`, digits,
 hyphens, max 48 characters), a title, Markdown prompt content, a category, a
 Chat/Editor visibility setting, and an autocomplete setting. The categories are
 Instructions, Functions, and Context Packs. Functions are the only entries used
@@ -872,6 +988,11 @@ into a chip. Remaining exact mentions in the draft are resolved defensively on
 send. Unknown labels block the send with a composer warning instead of being
 silently ignored.
 
+Skills follow the same authoritative list and revision rule through
+`/v1/skills`. Their server-enforced policy is not reconstructed from local
+project data. Prompt and skill `access.mode="shared"` allows save only when
+`permission="edit"`; delete and share management stay owner-only.
+
 Run cancellation is explicit and non-optimistic. The run card exposes a cancel
 action for queued and running native API runs. The button calls
 `POST /v1/runs/{run_id}/cancel` and keeps the existing SSE stream open. While
@@ -885,11 +1006,14 @@ Cancelled runs do not fetch `/result` and appear under the `Cancelled` filter
 with a muted destructive treatment, distinct from technical failures.
 
 This attachment is the React app's runtime project state, not a replacement for
-backend persistence. The native server keeps terminal runs in memory only for
-`RUN_COMPLETED_TTL_SECONDS` (default 300 seconds). After that TTL, a browser
-reload cannot hydrate completed runs from `/v1/runs`; users must save/export the
-project before reload, operators must raise the TTL for longer review windows,
-or a later database-backed run store must own durable history.
+backend persistence. The memory run store keeps terminal runs only for
+`RUN_COMPLETED_TTL_SECONDS` (default 300 seconds). The Postgres run store is the
+durable path and retains terminal runs for
+`RUN_DURABLE_RETENTION_SECONDS` (default 90 days). In both cases `/v1/runs` is
+the authoritative visible view: an owner sees their records and an accepted
+recipient sees shared records annotated with `access`. Project import sends
+`source_run_id`; the server always allocates a fresh public `run_id`, preventing
+a retained share from attaching to a later import that reuses a client id.
 
 Project export persists completed runs as Markdown files under
 `search-history/`. Filenames are compact timestamp-plus-id stems such as
@@ -991,3 +1115,5 @@ Composer mapping:
 
 - [Web server mode](webserver-mode.md)
 - [Run events](../observability/run-events.md)
+- [Editor collaboration](editor-collaboration.md)
+- [Collaborate on editor documents](../how-to/collaborate-on-editor-documents.md)

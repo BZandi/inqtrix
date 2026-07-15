@@ -79,9 +79,9 @@ It comes in two halves you can adopt independently.
 
 - **Research chat:** launch research runs and watch them stream live, then refine the results in a chat that can cite the same reports and files.
 - **Knowledge:** ingest documents into collections and ask cited questions over them (the RAG engine, with a UI).
-- **Editor:** write Markdown, select a passage or give a document-level instruction, and have the AI return revisions as **accept/reject tracked changes**; comment inline; export to Word in one click.
+- **Editor:** write Markdown, select a passage or give a document-level instruction, and have the AI return revisions as **accept/reject tracked changes**; optionally co-edit shared documents live with carets and `edit`/`suggest` review modes; export to Word in one click.
 - **Prompt Library:** reusable prompt templates (instructions, functions, context packs) that you chain together as chips in both chat and editor.
-- **Files &amp; sharing:** one shared pool of attachments referenced as numbered `[N]` chips everywhere, plus an admin panel for users, quotas, and team sharing.
+- **Files &amp; collaboration:** one private attachment pool referenced as numbered `[N]` chips everywhere, plus consent-based sharing for runs, knowledge collections, prompts, skills, and editor documents; editor shares add a constrained `suggest` role alongside `view`/`edit`.
 
 What ties it together is a single mention/chip composer: research reports, files, and prompts all become reusable building blocks you drop into a message or a document. The result is one loop from **search &rarr; query your documents &rarr; chat &rarr; write &rarr; refine &rarr; export** in one workspace instead of five disconnected tools.
 
@@ -120,10 +120,10 @@ Two principles run through all of it. **Provider-neutral:** bring your own LLM a
 - **Knowledge engine (RAG, opt-in).** Cited answers over your own documents with hybrid dense + BM25 retrieval, quote-verified grounding, and five retrieval profiles.
 - **Two API surfaces.** A drop-in OpenAI-compatible `/v1/chat/completions`, plus a native `/v1/runs` API with queueing, live SSE progress, and cancellation.
 - **Research Desk.** Research job cards, live progress streams, parallel runs, and an audit-ready report viewer.
-- **Cited editor.** Write Markdown, then have the AI return revisions as accept/reject tracked changes; inline comments; one-click Export to Word.
+- **Cited collaborative editor.** Write Markdown, have the AI return private revisions as accept/reject tracked changes, and optionally co-edit shared documents live with carets plus direct-edit and suggestion workflows; inline comments; one-click Export to Word.
 - **Prompt Library.** Reusable templates (instructions, functions, context packs) that chain together as chips in both chat and the editor.
-- **Shared files &amp; portable projects.** One attachment pool referenced as `[N]` chips everywhere; the whole workspace exports and re-imports as plain Markdown.
-- **Multi-user platform.** Five auth modes (`none` / `apikey` / `local` / `oidc` / `ldap`), workspaces, per-user quotas, sharing, and an admin panel.
+- **Private files &amp; portable projects.** One owner-bound attachment pool referenced as `[N]` chips everywhere; the whole workspace exports and re-imports as plain Markdown.
+- **Multi-user platform.** Five auth modes (`none` / `apikey` / `local` / `oidc` / `ldap`), canonical UUID users, workspaces, per-user quotas, direct consent-based sharing, and an admin panel.
 - **Baukasten &amp; durable backends.** Swap LLM/search providers and six strategy seams; zero-infra by default, opt-in Postgres / S3 / Qdrant / Valkey workers; every fallback is logged (no silent fallbacks).
 
 </td>
@@ -427,6 +427,11 @@ Update after a `git pull` (rebuild and re-run migrations):
 docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack up -d --build
 ```
 
+Managed PostgreSQL in migration `owner` mode uses the repository's
+`deploy/scripts/compose-owner-upgrade.sh` maintenance wrapper after the pull,
+not the generic command above; see
+[Database migrations](docs/deployment/database-migrations.md).
+
 Destroy everything, including the database and uploaded files (irreversible):
 
 ```bash
@@ -510,7 +515,7 @@ docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack
 ```
 
 > [!NOTE]
-> Inside this Compose stack the API port `5100` is internal only; reach everything through the web origin `:8080`. The published web port is configurable (`INQTRIX_WEB_PORT`) and bound to loopback, so terminate TLS in front for remote exposure.
+> Inside this Compose stack the API port `5100` is internal only; reach everything through the web origin `:8080`. The published web port is configurable (`INQTRIX_WEB_PORT`) and bound to loopback by default. For an explicit trusted-LAN test set `INQTRIX_WEB_BIND_ADDRESS=0.0.0.0`; for broader exposure terminate TLS in front. See the [Stack quickstart](docs/getting-started/stack-quickstart.md#3-open).
 
 **Deeper:** [Deployment quickstart](docs/getting-started/stack-quickstart.md) (5-minute walkthrough) · [Platform components](docs/getting-started/platform-components.md) (which infra you need) · [Runbooks](docs/deployment/runbooks.md) (start/stop/update/backup/restore) · [Security hardening](docs/deployment/security-hardening.md).
 
@@ -632,6 +637,7 @@ Inqtrix runs with **zero infrastructure** by default: in-memory storage, in-memo
 |---|---|---|---|
 | **Nothing** (default) | Research, chat, cited reports, OpenAI-compatible API | persistence, login, sharing | in-memory, zero infra |
 | **Postgres** | Durable runs, login, multi-user, sharing, file uploads, prompt templates | everything is lost on restart | the Compose default |
+| **Collaboration service** | Live editor co-authoring, carets, suggestions, and durable acknowledgements | shared editor documents remain read-only projections | `--profile collaboration` plus Postgres and cookie auth |
 | **Qdrant** | Knowledge / RAG over your documents; hybrid dense + BM25 retrieval | in-memory, dense-only, lost on restart | `--profile knowledge` |
 | **Valkey + worker** | Scaled, queued, restart-surviving runs | in-process queue only | `--profile workers` |
 | **Object store (S3)** | Shared file storage across replicas | local volume only | `--profile s3` |
@@ -640,6 +646,7 @@ Inqtrix runs with **zero infrastructure** by default: in-memory storage, in-memo
 Each component, and the role it plays:
 
 - **Postgres:** durable run rows, identity, knowledge metadata, prompt templates. The Compose deployment defaults to it; the `migrate` service applies the schema once before the API starts.
+- **Collaboration service:** a private, single-replica Node/Hocuspocus coordinator for Yjs synchronization. FastAPI remains the identity and persistence authority, and the sidecar has neither a public port nor database credentials.
 - **Qdrant:** the persistent vector + document store; the only backend with hybrid dense+BM25 retrieval. Without it the knowledge engine uses an in-memory, dense-only store.
 - **Valkey + worker:** dispatches native runs to separate worker processes for horizontal scaling and restart survival. The worker refuses to start without both Postgres and Valkey.
 - **Object store:** storage for uploaded file blobs; a local volume by default, or any S3 endpoint (SeaweedFS is the bundled reference).
@@ -659,9 +666,9 @@ The Research Desk is Inqtrix's React workspace, a purpose-built surface for iter
 - **Research job cards:** each question becomes its own queued `/v1/runs` card. Active jobs stream their current iteration (plan / search / evaluate / answer) live inside the card; new research can start while earlier runs keep going.
 - **Audit-ready report viewer:** completed runs open in a right-side panel with tabs for **Preview** (the report), **Evidence** (the exact reference list), **Agent steps** (the archived protocol), and **Export** (a clean `.md` download).
 - **Chat workspace:** a direct-LLM surface (OpenAI-compatible) with a model picker, KaTeX math, GFM, inline editing, and branch-from-response.
-- **Editor workspace:** local Markdown documents with live WYSIWYG editing, inline comments, import from research reports, an AI assistant that renders edits as accept/reject **tracked changes**, and one-click **Export to Word** (`.docx`).
+- **Editor workspace:** Markdown documents with live WYSIWYG editing, private inline comments, import from research reports, an AI assistant that publishes approved work as suggestions, optional multi-user co-authoring with `view`/`suggest`/`edit` roles, and one-click **Export to Word** (`.docx`).
 - **Knowledge / Wissen workspace:** document collections with cited answers, quote verification, and retrieval profiles; an *ask / find / read* surface with passage highlighting.
-- **File attachments:** a shared library; files attached anywhere are parsed client-side and become auto-numbered `[N]` mention pills shared by chat and editor.
+- **File attachments:** an owner-bound library; files attached anywhere are parsed client-side and become auto-numbered `[N]` mention pills reused by chat and editor. Direct user-to-user file sharing is not supported.
 - **Prompt Library:** project-scoped templates in three categories (Instructions, Functions, Context Packs), referenced in the composer via `@rules:` / `@research:`.
 - **Project import / export:** the whole workspace is one portable project written as plain Markdown.
 
@@ -676,7 +683,7 @@ The Research Desk is Inqtrix's React workspace, a purpose-built surface for iter
 > [!WARNING]
 > Never put a Bearer token or API key in a `VITE_*` variable: Vite embeds those into the browser bundle. Enter Bearer tokens at runtime under Settings → Security.
 
-**Deeper:** [React UI](docs/deployment/react-ui.md) (dev/build/launcher matrix, nginx topology, API boundary) · [Build a UI on Inqtrix](docs/how-to/build-a-ui-on-inqtrix.md).
+**Deeper:** [React UI](docs/deployment/react-ui.md) (dev/build/launcher matrix, nginx topology, API boundary) · [Editor collaboration](docs/architecture/editor-collaboration.md) · [Build a UI on Inqtrix](docs/how-to/build-a-ui-on-inqtrix.md).
 
 <div align="right"><a href="#readme-top"><sub>back to top ↑</sub></a></div>
 
@@ -725,7 +732,7 @@ Going from a quick try to the full self-hosted stack is an `.env` change, not a 
 - **Four secrets:** `INQTRIX_PG_PASSWORD` (also inside `INQTRIX_DATABASE_URL`), `INQTRIX_SESSION_SECRET`, `INQTRIX_PAT_PEPPER`.
 - **One LLM block:** `INQTRIX_LLM_PROVIDER` (`litellm` | `anthropic` | `azure` | `bedrock`) + its credentials + `REASONING_MODEL`.
 - **One search block:** `INQTRIX_SEARCH_PROVIDER` (`perplexity` | `azure_foundry`) + its key + `SEARCH_MODEL`.
-- **Optional toggles:** `INQTRIX_KNOWLEDGE_ENABLED`, `INQTRIX_AUTH_MODE`, `INQTRIX_QUEUE_BACKEND`, each paired with its compose profile.
+- **Optional toggles:** `INQTRIX_KNOWLEDGE_ENABLED`, `INQTRIX_AUTH_MODE`, `INQTRIX_QUEUE_BACKEND`, and `INQTRIX_COLLABORATION_ENABLED`, each paired with its compose profile and documented prerequisites.
 
 Copy-paste blocks for every provider combination: [Provider recipes](docs/getting-started/provider-recipes.md). Every variable, grouped by purpose: [Settings and env](docs/configuration/settings-and-env.md).
 
@@ -735,6 +742,7 @@ Copy-paste blocks for every provider combination: [Provider recipes](docs/gettin
 flowchart LR
     B["Browser"] --> W["Research Desk<br/>React web app"]
     W --> A["FastAPI server<br/>/v1 + services"]
+    A <-->|"private collaboration"| C["Hocuspocus sidecar<br/>single replica"]
     A --> E["Research engine<br/>LangGraph loop"]
     E --> P["Providers<br/>LLM + web search"]
     A -. opt .-> PG[("Postgres")]
@@ -743,7 +751,7 @@ flowchart LR
     A -. opt .-> ID["OIDC / LDAP"]
 ```
 
-The layering, top to bottom: the **Research Desk** (React) talks only HTTP to the **FastAPI server** (`server/routers` → `services` → `core`), which drives the **research engine** (`research/web_research.py` → the LangGraph loop) over swappable **providers**. Postgres, Qdrant, Valkey+worker, and an OIDC/LDAP IdP attach as optional components. The internal classify→plan→search→evaluate→answer algorithm is documented separately in [Graph topology](docs/architecture/graph-topology.md).
+The layering, top to bottom: the **Research Desk** (React) talks only to the **FastAPI server** (`server/routers` → `services` → `core`), which drives the **research engine** (`research/web_research.py` → the LangGraph loop) over swappable **providers**. The optional Hocuspocus sidecar receives only private WebSocket traffic and calls FastAPI for policy and persistence. Postgres, Qdrant, Valkey+worker, and an OIDC/LDAP IdP attach as optional components. The internal classify→plan→search→evaluate→answer algorithm is documented separately in [Graph topology](docs/architecture/graph-topology.md).
 
 ## Documentation map
 

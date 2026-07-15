@@ -9,6 +9,7 @@ sibling of the web provider bundle, wired by the composition root.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -24,6 +25,10 @@ class KnowledgeError(RuntimeError):
 
 class CollectionNotFound(KeyError):
     """Raised when a collection id is unknown to the store."""
+
+
+class CollectionMaintenanceActive(KnowledgeError):
+    """Raised when an active reindex owns a collection's mutation boundary."""
 
 
 class DocumentNotFound(KeyError):
@@ -56,11 +61,8 @@ class KnowledgeCollection:
         document_count: Number of live documents in the collection.
         tenant_id: Tenant scope carried from day one (v1 runs one
             tenant per deployment).
-        created_by_sub: OIDC subject of the creator. ``None`` marks
-            pre-ownership collections (and everything created by the
-            anonymous/static principals) — those stay visible to every
-            caller, the deliberate compatibility rule that keeps
-            existing deployments working unchanged.
+        created_by_user_id: Canonical UUID of the creator. ``None`` is
+            reserved for collections created in anonymous/static modes.
     """
 
     id: str
@@ -70,7 +72,7 @@ class KnowledgeCollection:
     created_at: float
     document_count: int = 0
     tenant_id: str = "default"
-    created_by_sub: str | None = None
+    created_by_user_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -171,14 +173,35 @@ class KnowledgeStore(Protocol):
         name: str,
         embedding_model: str,
         embedding_dim: int,
-        created_by_sub: str | None = None,
+        created_by_user_id: uuid.UUID | None = None,
     ) -> KnowledgeCollection: ...
 
     async def list_collections(self) -> list[KnowledgeCollection]: ...
 
+    @property
+    def supports_safe_reindex(self) -> bool:
+        """Whether background reindex can serialize against mutations."""
+        ...
+
+    @property
+    def supports_collection_sharing(self) -> bool:
+        """Whether collection metadata and share writes have a durable fence.
+
+        A vector-only store cannot make resource ownership, edits, and direct
+        share lifecycle one coherent security boundary. Such deployments must
+        expose collection sharing as unsupported instead of relying on
+        process-local coordination.
+        """
+        ...
+
     async def get_collection(self, collection_id: str) -> KnowledgeCollection: ...
 
-    async def delete_collection(self, collection_id: str) -> None: ...
+    async def delete_collection(
+        self,
+        collection_id: str,
+        *,
+        actor_user_id: uuid.UUID | None = None,
+    ) -> None: ...
 
     async def add_document(
         self,
@@ -191,6 +214,7 @@ class KnowledgeStore(Protocol):
         embeddings: list[list[float]],
         source_chunks: list[str] | None = None,
         page_numbers: list[int | None] | None = None,
+        actor_user_id: uuid.UUID | None = None,
     ) -> KnowledgeDocument: ...
 
     async def list_documents(self, collection_id: str) -> list[KnowledgeDocument]: ...
@@ -227,7 +251,12 @@ class KnowledgeStore(Protocol):
         """
         ...
 
-    async def delete_document(self, document_id: str) -> None: ...
+    async def delete_document(
+        self,
+        document_id: str,
+        *,
+        actor_user_id: uuid.UUID | None = None,
+    ) -> None: ...
 
     async def reembed_document(
         self,
@@ -237,6 +266,7 @@ class KnowledgeStore(Protocol):
         embeddings: list[list[float]],
         source_chunks: list[str] | None = None,
         page_numbers: list[int | None] | None = None,
+        actor_user_id: uuid.UUID | None = None,
     ) -> KnowledgeDocument:
         """Replace a document's chunks/vectors in place, keeping its id.
 

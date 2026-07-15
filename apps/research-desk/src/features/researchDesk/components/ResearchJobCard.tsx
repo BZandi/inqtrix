@@ -46,7 +46,6 @@ type ResearchJobCardProps = {
   onShare?: () => void
   onToggleExpanded: () => void
   shareCount?: number
-  sharedByLabel?: string
 }
 
 export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
@@ -62,13 +61,12 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
     onShare,
     onToggleExpanded,
     shareCount,
-    sharedByLabel,
   }, ref) {
     const { locale, t } = useLocale()
     const StatusIcon = statusIcon[job.status]
     const reduceMotion = useReducedMotion()
     const runningDuration = useRunningDuration(job.status, job.startedAtIso)
-    const isSharedIn = job.access !== undefined
+    const isSharedIn = job.access?.mode === 'shared'
     // An active run is cancellable, not deletable: the server delete is
     // terminal-only (409 while active), so the trash button is hidden for
     // running/queued runs and cancel is the action instead.
@@ -153,8 +151,8 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
           <div className="col-span-2 ml-8 flex items-center gap-1 sm:col-span-1 sm:ml-0">
             <SharedBadge
               count={isSharedIn ? undefined : shareCount}
+              isSharedWithMe={isSharedIn}
               onClick={isSharedIn ? undefined : onShare}
-              sharedByLabel={sharedByLabel}
             />
             <Badge className={statusBadgeClassName[job.status]} variant="outline">
               {t.status[job.status]}

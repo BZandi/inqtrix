@@ -4,7 +4,7 @@ The first slice of the project-persistence tier (M6a): when the platform
 runs with ``INQTRIX_STORAGE_BACKEND=postgres``, a user's chat threads,
 their grouping, and their messages become server-persistent instead of
 living only in the local markdown project. Scoped per ``(tenant_id,
-created_by_sub, workspace_id)`` exactly like ``runs`` / ``files`` /
+created_by_user_id, workspace_id)`` exactly like ``runs`` / ``files`` /
 ``knowledge_collections`` — a user's project is "their data in the
 current workspace", the decided one-project-per-(user, workspace) model.
 No separate ``projects`` table: the workspace is the project container
@@ -50,7 +50,7 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSON, UUID
 
 chat_metadata = MetaData()
 
@@ -59,7 +59,7 @@ chat_thread_groups = Table(
     chat_metadata,
     Column("id", Text, primary_key=True),
     Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
-    Column("created_by_sub", Text, nullable=True),
+    Column("created_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("workspace_id", Text, nullable=True),
     Column("title", Text, nullable=False),
     Column("created_at", Float, nullable=False),
@@ -67,12 +67,12 @@ chat_thread_groups = Table(
     Index(
         "ix_chat_thread_groups_owner_created",
         "tenant_id",
-        "created_by_sub",
+        "created_by_user_id",
         "created_at",
         "id",
     ),
 )
-"""Optional grouping of a user's chat threads. ``created_by_sub`` is the
+"""Optional grouping of a user's chat threads. ``created_by_user_id`` is the
 ownership anchor (``None`` = unscoped/anonymous deployments, the single
 implicit owner). Listed by ``created_at`` (groups are few — no keyset
 page), the id keeps the index unique for the tiebreaker convention."""
@@ -82,7 +82,7 @@ chat_threads = Table(
     chat_metadata,
     Column("id", Text, primary_key=True),
     Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
-    Column("created_by_sub", Text, nullable=True),
+    Column("created_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("workspace_id", Text, nullable=True),
     Column("title", Text, nullable=False, server_default=text("''")),
     Column("preview", Text, nullable=False, server_default=text("''")),
@@ -103,7 +103,7 @@ chat_threads = Table(
     Index(
         "ix_chat_threads_owner_created",
         "tenant_id",
-        "created_by_sub",
+        "created_by_user_id",
         "created_at",
         "id",
     ),

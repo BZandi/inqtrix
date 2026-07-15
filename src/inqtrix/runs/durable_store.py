@@ -20,7 +20,7 @@ worker-loop mechanics:
   by the terminal-event set and a thread label.
 
 What stays per-store is everything schema-bearing: the SQL bodies, the
-run store's share/audit/owner_sub/result surface, and the indexing
+run store's share/audit/owner_user_id/result surface, and the indexing
 store's history-cap / active-collection / progress semantics.
 """
 

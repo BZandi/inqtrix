@@ -66,7 +66,7 @@ export function AddDocsPanel({
   memberIds: Set<string>
   onAdd: (fileIds: string[]) => void
   onClose: () => void
-  onUpload: () => void
+  onUpload?: () => void
   sections: FileLibrarySectionRecord[]
 }) {
   const { t } = useLocale()
@@ -171,14 +171,16 @@ export function AddDocsPanel({
           <span className="t-meta text-muted-foreground">
             {t.vectorIndex.selectedCount.replace('{count}', String(selected.size))}
           </span>
-          <button
-            className="inline-flex items-center gap-1.5 t-meta text-muted-foreground transition-colors hover:text-foreground"
-            onClick={onUpload}
-            type="button"
-          >
-            <Upload className="size-3.5" />
-            {t.vectorIndex.uploadNew}
-          </button>
+          {onUpload ? (
+            <button
+              className="inline-flex items-center gap-1.5 t-meta text-muted-foreground transition-colors hover:text-foreground"
+              onClick={onUpload}
+              type="button"
+            >
+              <Upload className="size-3.5" />
+              {t.vectorIndex.uploadNew}
+            </button>
+          ) : null}
         </div>
         <div className="flex items-center gap-2">
           <Button className="h-8" onClick={onClose} size="sm" type="button" variant="ghost">

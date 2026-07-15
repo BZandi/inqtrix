@@ -17,6 +17,7 @@ Precedence (highest wins):
 from __future__ import annotations
 
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode
@@ -995,14 +996,15 @@ class ServerSettings(BaseSettings):
         alias="INQTRIX_PUBLIC_BASE_URL",
         description=(
             "Externally reachable base URL of this server, e.g. "
-            "``https://inqtrix.example.com``. When set, knowledge "
-            "citations become clickable HTTP links into "
-            "``/v1/sources/...``; when empty (default) citations keep "
-            "the internal ``inqtrix://`` URI scheme — a deliberate, "
-            "visible degradation, never a guessed hostname."
+            "``https://inqtrix.example.com``. It anchors collaboration "
+            "WebSocket origin checks behind a trusted TLS proxy, OIDC "
+            "callback derivation, and clickable knowledge citations. When "
+            "empty (default), citations keep the internal ``inqtrix://`` "
+            "URI scheme and forwarded headers cannot authorize a "
+            "collaboration origin."
         ),
     )
-    """Externally reachable base URL of this server, e.g. ``https://inqtrix.example.com``. When set, knowledge citations become clickable HTTP links into ``/v1/sources/...``; when empty (default) citations keep the internal ``inqtrix://`` URI scheme — a deliberate, visible degradation, never a guessed hostname."""
+    """Externally reachable base URL used for trusted collaboration origins, OIDC callback derivation, and clickable citations; empty keeps internal citation URIs and does not trust forwarded origins."""
 
 
 class StorageSettings(BaseSettings):
@@ -1043,6 +1045,42 @@ class StorageSettings(BaseSettings):
         ),
     )
     """SQLAlchemy async database URL, e.g. ``postgresql+asyncpg://inqtrix:...@127.0.0.1:5432/inqtrix``. Required (and only read) when ``backend`` is ``postgres``; the empty default combined with ``backend=postgres`` fails loudly at startup."""
+    migration_database_url: str = Field(
+        "",
+        alias="INQTRIX_MIGRATION_DATABASE_URL",
+        description=(
+            "Optional direct PostgreSQL URL used only by ``inqtrix-migrate``. "
+            "An empty value preserves the historical fallback to "
+            "``INQTRIX_DATABASE_URL``. Production deployments should inject "
+            "a dedicated migration credential into the one-shot migration "
+            "job and never expose it to API or worker processes."
+        ),
+    )
+    """Optional direct PostgreSQL URL used only by ``inqtrix-migrate``. Empty preserves the historical ``INQTRIX_DATABASE_URL`` fallback; production deployments should inject a dedicated credential only into the one-shot migration job."""
+    migration_rls_mode: Literal["auto", "owner", "bypass"] = Field(
+        "auto",
+        alias="INQTRIX_MIGRATION_RLS_MODE",
+        description=(
+            "RLS authority contract for schema migrations. ``auto`` accepts "
+            "the backwards-compatible superuser/BYPASSRLS path but never "
+            "silently enters owner maintenance. ``bypass`` requires a "
+            "dedicated BYPASSRLS login. ``owner`` uses the transaction-bound "
+            "NO-FORCE maintenance path and requires quiesced services for "
+            "an existing schema."
+        ),
+    )
+    """RLS authority contract for schema migrations: ``auto`` for compatible existing deployments, explicit ``bypass`` for a dedicated BYPASSRLS login, or transaction-bound ``owner`` maintenance for managed PostgreSQL."""
+    migration_services_quiesced: bool = Field(
+        False,
+        alias="INQTRIX_MIGRATION_SERVICES_QUIESCED",
+        description=(
+            "Explicit operator assertion that API, worker and collaboration "
+            "processes are stopped and their database pools drained. Required "
+            "for owner-mode upgrades of an existing schema; a fresh install "
+            "has no running services and does not require it."
+        ),
+    )
+    """Operator assertion that API, worker and collaboration processes are stopped and their pools drained; required for owner-mode upgrades of an existing schema."""
     app_role: str = Field(
         "inqtrix_app",
         alias="INQTRIX_DATABASE_APP_ROLE",
@@ -1058,6 +1096,19 @@ class StorageSettings(BaseSettings):
         ),
     )
     """Postgres role every application transaction switches to via ``SET LOCAL ROLE`` before touching tenant tables. The role is created NOLOGIN/NOSUPERUSER/NOBYPASSRLS by the migrations so row-level security applies even when the connection user is the table owner or a superuser (dev-compose convenience). Empty disables the switch — only sensible when the connection user itself is a restricted role."""
+    runtime_login_policy: Literal["restricted", "bundled_legacy"] = Field(
+        "restricted",
+        alias="INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY",
+        description=(
+            "Security contract for the PostgreSQL session login below the "
+            "transaction-local application role. ``restricted`` requires a "
+            "dedicated unprivileged LOGIN and is the production default. "
+            "``bundled_legacy`` accepts only the historical bundled "
+            "superuser/table-owner login and is injected explicitly by the "
+            "provided bundled Compose/Helm deployments."
+        ),
+    )
+    """Runtime-login security policy: production-safe ``restricted`` by default, or the explicit ``bundled_legacy`` compatibility boundary used only by the provided bundled database stacks."""
     pool_size: int = Field(
         5,
         alias="INQTRIX_DATABASE_POOL_SIZE",
@@ -1149,29 +1200,40 @@ class StorageSettings(BaseSettings):
         ),
     )
     """Root directory of the ``local`` object-store backend, relative paths resolve against the working directory. Created on first write."""
+    s3_auth_mode: Literal["static", "default"] = Field(
+        "static",
+        alias="INQTRIX_S3_AUTH_MODE",
+        description=(
+            "S3 credential source. ``static`` preserves the existing explicit "
+            "access/secret-key contract and optionally accepts an STS session "
+            "token. ``default`` passes no Inqtrix credentials to boto3 so its "
+            "standard provider chain can use workload, container or instance "
+            "identity."
+        ),
+    )
+    """S3 credential source: explicit ``static`` keys or boto3's ``default`` provider chain for workload, container and instance identity."""
     s3_endpoint_url: str = Field(
         "",
         alias="INQTRIX_S3_ENDPOINT_URL",
         description=(
             "Endpoint URL of the S3-compatible service, e.g. "
-            "``http://127.0.0.1:8333`` for the SeaweedFS dev stack. "
-            "Required (and only read) when ``object_store_backend`` "
-            "is ``s3``. Path-style addressing is always used — "
-            "virtual-host buckets do not exist on self-hosted stores."
+            "``http://127.0.0.1:8333`` for the SeaweedFS dev stack. Empty "
+            "delegates endpoint resolution to boto3, which is the normal "
+            "choice for native AWS S3."
         ),
     )
-    """Endpoint URL of the S3-compatible service, e.g. ``http://127.0.0.1:8333`` for the SeaweedFS dev stack. Required (and only read) when ``object_store_backend`` is ``s3``. Path-style addressing is always used."""
+    """Optional endpoint URL of the S3-compatible service. Empty delegates endpoint resolution to boto3 for native AWS S3."""
     s3_bucket: str = Field(
         "inqtrix-files",
         alias="INQTRIX_S3_BUCKET",
         description=(
             "Bucket holding every uploaded blob. Object keys are "
             "namespaced ``tenants/<tenant>/files/<uuid>`` so one "
-            "bucket serves all tenants; the bucket is created on "
-            "startup when missing."
+            "bucket serves all tenants. Creation behavior is controlled by "
+            "``INQTRIX_S3_BUCKET_PROVISIONING``."
         ),
     )
-    """Bucket holding every uploaded blob. Object keys are namespaced ``tenants/<tenant>/files/<uuid>``; the bucket is created on startup when missing."""
+    """Bucket holding every uploaded blob. Object keys are namespaced ``tenants/<tenant>/files/<uuid>``; provisioning behavior is configured separately."""
     s3_access_key: str = Field(
         "",
         alias="INQTRIX_S3_ACCESS_KEY",
@@ -1188,6 +1250,16 @@ class StorageSettings(BaseSettings):
         description="Secret key for the S3-compatible service.",
     )
     """Secret key for the S3-compatible service."""
+    s3_session_token: str = Field(
+        "",
+        alias="INQTRIX_S3_SESSION_TOKEN",
+        description=(
+            "Optional short-lived STS session token paired with the static "
+            "access and secret keys. It is rejected in default credential "
+            "mode so stale explicit credentials cannot shadow workload identity."
+        ),
+    )
+    """Optional STS session token for ``static`` authentication; rejected when boto3's default credential chain is selected."""
     s3_region: str = Field(
         "us-east-1",
         alias="INQTRIX_S3_REGION",
@@ -1198,6 +1270,56 @@ class StorageSettings(BaseSettings):
         ),
     )
     """Region name sent to the S3 client. Self-hosted stores ignore it but boto3 requires a value; the default is the conventional placeholder."""
+    s3_addressing_style: Literal["path", "auto", "virtual"] = Field(
+        "path",
+        alias="INQTRIX_S3_ADDRESSING_STYLE",
+        description=(
+            "Bucket addressing mode passed to botocore. ``path`` preserves "
+            "SeaweedFS/MinIO compatibility, ``auto`` is recommended for native "
+            "AWS S3, and ``virtual`` forces virtual-host bucket names."
+        ),
+    )
+    """Botocore bucket addressing mode. ``path`` is the compatibility default; managed AWS normally uses ``auto``."""
+    s3_bucket_provisioning: Literal["create_if_missing", "existing"] = Field(
+        "create_if_missing",
+        alias="INQTRIX_S3_BUCKET_PROVISIONING",
+        description=(
+            "Bucket lifecycle contract. ``create_if_missing`` preserves the "
+            "bundled object-store behavior and requires CreateBucket when the "
+            "bucket is absent. ``existing`` never creates infrastructure and "
+            "is the production default recommendation for managed S3."
+        ),
+    )
+    """Bucket lifecycle contract: backwards-compatible ``create_if_missing`` or fail-closed ``existing`` for pre-provisioned managed buckets."""
+    s3_ca_bundle: str = Field(
+        "",
+        alias="INQTRIX_S3_CA_BUNDLE",
+        description=(
+            "Optional path to a PEM CA bundle mounted in the API and worker "
+            "containers. The path must be readable when S3 is enabled. TLS "
+            "verification cannot be disabled."
+        ),
+    )
+    """Optional readable PEM CA-bundle path for private S3-compatible endpoints; TLS verification cannot be disabled."""
+    s3_server_side_encryption: Literal["none", "AES256", "aws:kms"] = Field(
+        "none",
+        alias="INQTRIX_S3_SERVER_SIDE_ENCRYPTION",
+        description=(
+            "Optional server-side encryption header for uploads. ``none`` "
+            "relies on the bucket's default policy, ``AES256`` requests SSE-S3, "
+            "and ``aws:kms`` requests SSE-KMS."
+        ),
+    )
+    """Upload encryption header: none, SSE-S3 (``AES256``), or SSE-KMS (``aws:kms``). Bucket-default encryption remains valid with ``none``."""
+    s3_kms_key_id: str = Field(
+        "",
+        alias="INQTRIX_S3_KMS_KEY_ID",
+        description=(
+            "Optional KMS key id or ARN sent only with ``aws:kms`` uploads. "
+            "Empty uses the bucket/account KMS default."
+        ),
+    )
+    """Optional KMS key id or ARN, valid only when ``INQTRIX_S3_SERVER_SIDE_ENCRYPTION=aws:kms``."""
     max_file_bytes: int = Field(
         104_857_600,
         alias="INQTRIX_MAX_FILE_BYTES",
@@ -1210,6 +1332,49 @@ class StorageSettings(BaseSettings):
         ),
     )
     """Upper bound for one uploaded file (default 100 MiB). Enforced while spooling; exceeding it aborts with HTTP 413."""
+
+    @model_validator(mode="after")
+    def _validate_object_store_contract(self) -> "StorageSettings":
+        """Reject incomplete managed-object-store configurations early."""
+        if self.object_store_backend != "s3":
+            return self
+        bucket = self.s3_bucket.strip()
+        region = self.s3_region.strip()
+        endpoint = self.s3_endpoint_url.strip()
+        access_key = self.s3_access_key.strip()
+        secret_key = self.s3_secret_key.strip()
+        session_token = self.s3_session_token.strip()
+        ca_bundle = self.s3_ca_bundle.strip()
+        kms_key = self.s3_kms_key_id.strip()
+        if not bucket:
+            raise ValueError("INQTRIX_S3_BUCKET must not be blank")
+        if not region:
+            raise ValueError("INQTRIX_S3_REGION must not be blank")
+        if self.s3_auth_mode == "static":
+            if not access_key or not secret_key:
+                raise ValueError(
+                    "INQTRIX_S3_AUTH_MODE=static requires "
+                    "INQTRIX_S3_ACCESS_KEY and INQTRIX_S3_SECRET_KEY"
+                )
+        elif access_key or secret_key or session_token:
+            raise ValueError(
+                "INQTRIX_S3_AUTH_MODE=default must not set Inqtrix static "
+                "access, secret, or session-token fields"
+            )
+        if self.s3_server_side_encryption != "aws:kms" and kms_key:
+            raise ValueError(
+                "INQTRIX_S3_KMS_KEY_ID is valid only with "
+                "INQTRIX_S3_SERVER_SIDE_ENCRYPTION=aws:kms"
+            )
+        object.__setattr__(self, "s3_bucket", bucket)
+        object.__setattr__(self, "s3_region", region)
+        object.__setattr__(self, "s3_endpoint_url", endpoint)
+        object.__setattr__(self, "s3_access_key", access_key)
+        object.__setattr__(self, "s3_secret_key", secret_key)
+        object.__setattr__(self, "s3_session_token", session_token)
+        object.__setattr__(self, "s3_ca_bundle", ca_bundle)
+        object.__setattr__(self, "s3_kms_key_id", kms_key)
+        return self
 
 
 class AuthSettings(BaseSettings):
@@ -1706,6 +1871,22 @@ class AuthSettings(BaseSettings):
         description="How long a tripped ``(identifier, ip)`` stays locked (seconds).",
     )
     """How long a tripped (identifier, ip) stays locked, in seconds (default 60)."""
+    trusted_proxy_hops: int = Field(
+        1,
+        alias="INQTRIX_TRUSTED_PROXY_HOPS",
+        ge=0,
+        description=(
+            "Number of trusted reverse proxies between the client and this "
+            "server, used to read the real client IP from the RIGHT of "
+            "``X-Forwarded-For`` for the login throttle key. ``1`` (default) "
+            "fits the bundled single proxy (nginx ``web`` container or "
+            "``scripts/run_research_desk.py``) and is not client-spoofable. "
+            "Set ``0`` when exposing the API server directly with no proxy "
+            "(only the socket peer is trusted); set the exact chain length "
+            "for multiple proxies — too high re-opens spoofing."
+        ),
+    )
+    """Trusted reverse-proxy hop count for resolving the client IP from the right of X-Forwarded-For (login throttle). 1 = one bundled proxy (default); 0 = direct exposure; N = exact chain length."""
 
 
 class KnowledgeSettings(BaseSettings):
@@ -2631,9 +2812,9 @@ class SharingSettings(BaseSettings):
 
     Sharing is otherwise tenant-wide: any authenticated user may be a share
     target, and the share typeahead searches the whole tenant. This knob lets
-    an operator confine collaboration to workspace boundaries without changing
-    the permission chokepoint's read semantics — it is a grant-time (write)
-    restriction only, so flipping it never revokes an existing grant.
+    an operator confine collaboration continuously to workspace boundaries.
+    Grant, accept, every live access, and membership reconciliation enforce the
+    same rule; disabling it does not resurrect shares already revoked.
     """
 
     model_config = _SETTINGS_MODEL_CONFIG
@@ -2644,15 +2825,342 @@ class SharingSettings(BaseSettings):
         description=(
             "When true, a user may only share a resource with people they "
             "share at least one workspace with, and the share typeahead is "
-            "scoped the same way. Default false keeps sharing tenant-wide, "
-            "byte-identical to deployments before this setting existed. Only "
+            "scoped the same way. Accept and every live resource access also "
+            "require a common workspace; losing the last common workspace "
+            "revokes pending and accepted shares. Startup reconciles existing "
+            "shares before readiness. Disabling the setting does not restore "
+            "revoked shares. Default false keeps sharing tenant-wide. Only "
             "meaningful in the cookie-session modes (oidc/local/ldap) that "
             "mount the sharing surface; the single-operator none/apikey modes "
             "never mount it."
         ),
     )
-    """When true, sharing (grant + typeahead) is limited to the grantor's
-    workspace co-members. Default false = tenant-wide, byte-identical."""
+    """Continuously require a shared workspace for direct resource shares.
+
+    Grant, accept, live authorization, and membership reconciliation enforce
+    the boundary. A revoked share is never restored automatically when the
+    setting is later disabled. Default ``False`` keeps sharing tenant-wide.
+    """
+
+
+class CollaborationSettings(BaseSettings):
+    """Optional editor live-collaboration service configuration.
+
+    The browser always uses the same-origin ``/collaboration`` gateway.
+    ``http_url`` and ``ws_url`` are private service-network addresses used
+    only by FastAPI. Enabling the feature is fail-loud: this group validates
+    its complete transport and cryptographic configuration, while the
+    composition root validates the required Postgres and cookie-auth modes.
+    """
+
+    model_config = _SETTINGS_MODEL_CONFIG
+
+    enabled: bool = Field(
+        False,
+        alias="INQTRIX_COLLABORATION_ENABLED",
+        description=(
+            "Enable the optional editor collaboration module. The default is "
+            "false; when true every required URL, service secret, Postgres, "
+            "and cookie-auth prerequisite is validated at startup."
+        ),
+    )
+    """Whether the optional editor collaboration module is enabled. Defaults to ``False`` and never degrades silently when explicitly enabled."""
+    http_url: str = Field(
+        "",
+        alias="INQTRIX_COLLABORATION_HTTP_URL",
+        description=(
+            "Private HTTP base URL of the Node collaboration service, such "
+            "as http://collaboration:1234. Required when enabled and never "
+            "exposed to browsers."
+        ),
+    )
+    """Private HTTP base URL of the Node collaboration service. Required when enabled; never browser-visible."""
+    ws_url: str = Field(
+        "",
+        alias="INQTRIX_COLLABORATION_WS_URL",
+        description=(
+            "Private WebSocket URL used by the FastAPI binary gateway to "
+            "reach Node, such as ws://collaboration:1234. Required when "
+            "enabled; the browser still connects only to /collaboration."
+        ),
+    )
+    """Private Node WebSocket URL reached by the FastAPI gateway. Required when enabled; browsers never receive it."""
+    secret: str = Field(
+        "",
+        alias="INQTRIX_COLLABORATION_SECRET",
+        description=(
+            "Independent bearer secret for FastAPI-to-Node internal calls. "
+            "Must contain at least 32 characters when enabled and must not "
+            "reuse the session secret."
+        ),
+    )
+    """Independent internal bearer secret. At least 32 characters when enabled; sensitive and never logged or returned."""
+    tenant_id: str = Field(
+        "default",
+        alias="INQTRIX_COLLABORATION_TENANT_ID",
+        min_length=1,
+        max_length=160,
+        description=(
+            "Canonical tenant carried by the single-deployment Node service. "
+            "Every private collaboration request must match this value."
+        ),
+    )
+    """Canonical single-deployment collaboration tenant. Default ``default``; private Node requests cannot select another tenant."""
+    allowed_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        alias="INQTRIX_COLLABORATION_ALLOWED_ORIGINS",
+        description=(
+            "Optional comma-separated additional WebSocket Origin allowlist. "
+            "Same-origin is always derived from the request host; entries "
+            "must be absolute http(s) origins without paths."
+        ),
+    )
+    """Additional absolute HTTP(S) origins accepted by the public WebSocket gateway. Same-origin remains implicit."""
+    lease_ttl_seconds: int = Field(
+        60,
+        alias="INQTRIX_COLLABORATION_LEASE_TTL_SECONDS",
+        ge=15,
+        le=300,
+        description="Lifetime of one document-scoped collaboration lease.",
+    )
+    """Document-scoped lease lifetime in seconds. Default ``60`` balances prompt revocation with reconnect churn."""
+    token_refresh_seconds: int = Field(
+        30,
+        alias="INQTRIX_COLLABORATION_TOKEN_REFRESH_SECONDS",
+        ge=5,
+        le=240,
+        description="Client lease-refresh interval; must be below the lease TTL.",
+    )
+    """Client lease-refresh interval in seconds. Default ``30`` and always lower than ``lease_ttl_seconds``."""
+    instance_lease_seconds: int = Field(
+        15,
+        alias="INQTRIX_COLLABORATION_INSTANCE_LEASE_SECONDS",
+        ge=6,
+        le=120,
+        description="Single-writer Node instance fencing lease lifetime.",
+    )
+    """Single-writer Node instance fencing lease lifetime in seconds. Default ``15``."""
+    instance_renew_seconds: int = Field(
+        5,
+        alias="INQTRIX_COLLABORATION_INSTANCE_RENEW_SECONDS",
+        ge=1,
+        le=60,
+        description="Instance-fencing renewal interval; must be below its lease.",
+    )
+    """Instance-fencing renewal interval in seconds. Default ``5`` and always lower than ``instance_lease_seconds``."""
+    provider_flush_ms: int = Field(
+        50,
+        alias="INQTRIX_COLLABORATION_PROVIDER_FLUSH_MS",
+        ge=10,
+        le=1000,
+        description="Maximum browser-side batching delay for local Yjs updates.",
+    )
+    """Maximum browser-side update batching delay in milliseconds. Default ``50``."""
+    snapshot_idle_seconds: int = Field(
+        5,
+        alias="INQTRIX_COLLABORATION_SNAPSHOT_IDLE_SECONDS",
+        ge=1,
+        le=300,
+        description="Idle interval after which Node requests a verified snapshot.",
+    )
+    """Idle snapshot threshold in seconds. Default ``5``."""
+    snapshot_update_count: int = Field(
+        256,
+        alias="INQTRIX_COLLABORATION_SNAPSHOT_UPDATE_COUNT",
+        ge=1,
+        le=100_000,
+        description="Update-tail count that triggers a verified snapshot.",
+    )
+    """Number of durable updates that triggers a verified snapshot. Default ``256``."""
+    snapshot_tail_bytes: int = Field(
+        1_048_576,
+        alias="INQTRIX_COLLABORATION_SNAPSHOT_TAIL_BYTES",
+        ge=65_536,
+        le=100 * 1_048_576,
+        description="Durable update-tail bytes that trigger a verified snapshot.",
+    )
+    """Durable update-tail byte threshold for snapshotting. Default ``1 MiB``."""
+    max_frame_bytes: int = Field(
+        2 * 1_048_576,
+        alias="INQTRIX_COLLABORATION_MAX_FRAME_BYTES",
+        ge=65_536,
+        le=16 * 1_048_576,
+        description="Maximum public or private WebSocket frame size.",
+    )
+    """Maximum WebSocket frame size in bytes. Default ``2 MiB``; oversize frames close with code 1009."""
+    max_queued_frames: int = Field(
+        32,
+        alias="INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES",
+        ge=1,
+        le=256,
+        description=(
+            "Maximum inbound WebSocket frames buffered per physical socket "
+            "before application processing."
+        ),
+    )
+    """Maximum inbound WebSocket queue depth per physical socket. Default ``32``; bounded to ``1`` through ``256``."""
+    max_document_bytes: int = Field(
+        10 * 1_048_576,
+        alias="INQTRIX_COLLABORATION_MAX_DOCUMENT_BYTES",
+        ge=1_048_576,
+        le=100 * 1_048_576,
+        description="Maximum Markdown or Yjs document accepted for conversion.",
+    )
+    """Maximum document size in bytes. Default ``10 MiB``; larger activation requests fail with HTTP 413."""
+    max_sessions_per_user_document: int = Field(
+        5,
+        alias="INQTRIX_COLLABORATION_MAX_SESSIONS_PER_USER_DOCUMENT",
+        ge=1,
+        le=50,
+        description="Concurrent session cap per user and document.",
+    )
+    """Concurrent collaboration-session cap per user and document. Default ``5``."""
+    session_rate_per_minute: int = Field(
+        30,
+        alias="INQTRIX_COLLABORATION_SESSION_RATE_PER_MINUTE",
+        ge=1,
+        le=1000,
+        description="Session-lease issuance limit per user per minute.",
+    )
+    """Session-lease issuance limit per user per minute. Default ``30``."""
+    update_rate_count: int = Field(
+        120,
+        alias="INQTRIX_COLLABORATION_UPDATE_RATE_COUNT",
+        ge=1,
+        le=10_000,
+        description="Update-message limit per connection and rate window.",
+    )
+    """Update-message allowance per connection and rate window. Default ``120``."""
+    update_rate_window_seconds: int = Field(
+        10,
+        alias="INQTRIX_COLLABORATION_UPDATE_RATE_WINDOW_SECONDS",
+        ge=1,
+        le=60,
+        description="Window in seconds for the update-message limit.",
+    )
+    """Window for the per-connection update-message limit. Default ``10`` seconds."""
+    awareness_rate_per_second: int = Field(
+        20,
+        alias="INQTRIX_COLLABORATION_AWARENESS_RATE_PER_SECOND",
+        ge=1,
+        le=200,
+        description="Awareness-message allowance per connection per second.",
+    )
+    """Awareness-message allowance per connection per second. Default ``20``."""
+    update_payload_retention_seconds: int = Field(
+        86_400,
+        alias="INQTRIX_COLLABORATION_UPDATE_PAYLOAD_RETENTION_SECONDS",
+        ge=3_600,
+        description=(
+            "Minimum age of snapshot-covered binary updates before their "
+            "payload may be pruned. Metadata remains independently retained."
+        ),
+    )
+    """Snapshot-covered binary payload retention in seconds. Default ``24 hours``; metadata is retained longer."""
+    activity_retention_seconds: int = Field(
+        90 * 86_400,
+        alias="INQTRIX_COLLABORATION_ACTIVITY_RETENTION_SECONDS",
+        ge=86_400,
+        description="Retention of update attribution and decision metadata.",
+    )
+    """Update attribution and decision metadata retention in seconds. Default ``90 days``."""
+    tombstone_retention_seconds: int = Field(
+        90 * 86_400,
+        alias="INQTRIX_COLLABORATION_TOMBSTONE_RETENTION_SECONDS",
+        ge=86_400,
+        description=(
+            "Delay before physically removing a collaboration document that "
+            "has already been tombstoned and revoked."
+        ),
+    )
+    """Tombstone retention before physical cleanup. Default ``90 days``; version 1 exposes no restore UI."""
+    protocol_version: int = Field(
+        1,
+        alias="INQTRIX_COLLABORATION_PROTOCOL_VERSION",
+        ge=1,
+        description="Binary/stateless collaboration protocol version.",
+    )
+    """Collaboration protocol version. Version ``1`` is the initial wire contract."""
+    schema_version: int = Field(
+        1,
+        alias="INQTRIX_COLLABORATION_SCHEMA_VERSION",
+        ge=1,
+        description="Shared Tiptap/Yjs schema version.",
+    )
+    """Shared editor schema version. Version ``1`` is the initial schema contract."""
+
+    @field_validator("allowed_origins", mode="before")
+    @classmethod
+    def _parse_allowed_origins(cls, value: object) -> object:
+        """Parse the documented comma-separated origin allowlist."""
+        if isinstance(value, str):
+            return [item.strip().rstrip("/") for item in value.split(",") if item.strip()]
+        return value
+
+    @model_validator(mode="after")
+    def _validate_collaboration_contract(self) -> "CollaborationSettings":
+        """Reject incomplete or internally contradictory collaboration settings."""
+        tenant_id = self.tenant_id.strip()
+        if not tenant_id:
+            raise ValueError(
+                "INQTRIX_COLLABORATION_TENANT_ID must not be blank"
+            )
+        object.__setattr__(self, "tenant_id", tenant_id)
+        if self.token_refresh_seconds >= self.lease_ttl_seconds:
+            raise ValueError(
+                "INQTRIX_COLLABORATION_TOKEN_REFRESH_SECONDS must be lower than the lease TTL"
+            )
+        if self.instance_renew_seconds >= self.instance_lease_seconds:
+            raise ValueError(
+                "INQTRIX_COLLABORATION_INSTANCE_RENEW_SECONDS must be lower than the instance lease"
+            )
+        for origin in self.allowed_origins:
+            parsed_origin = urlsplit(origin)
+            if (
+                parsed_origin.scheme not in {"http", "https"}
+                or not parsed_origin.hostname
+                or parsed_origin.username is not None
+                or parsed_origin.password is not None
+                or parsed_origin.path not in {"", "/"}
+                or parsed_origin.query
+                or parsed_origin.fragment
+            ):
+                raise ValueError(
+                    "INQTRIX_COLLABORATION_ALLOWED_ORIGINS entries must be absolute origins without paths"
+                )
+        if not self.enabled:
+            return self
+        parsed_http = urlsplit(self.http_url)
+        if (
+            parsed_http.scheme not in {"http", "https"}
+            or not parsed_http.hostname
+            or parsed_http.username is not None
+            or parsed_http.password is not None
+            or parsed_http.path not in {"", "/"}
+            or parsed_http.query
+            or parsed_http.fragment
+        ):
+            raise ValueError(
+                "INQTRIX_COLLABORATION_HTTP_URL must be an absolute HTTP(S) origin when enabled"
+            )
+        parsed_ws = urlsplit(self.ws_url)
+        if (
+            parsed_ws.scheme not in {"ws", "wss"}
+            or not parsed_ws.hostname
+            or parsed_ws.username is not None
+            or parsed_ws.password is not None
+            or parsed_ws.path != "/collaboration"
+            or parsed_ws.query
+            or parsed_ws.fragment
+        ):
+            raise ValueError(
+                "INQTRIX_COLLABORATION_WS_URL must end in /collaboration when enabled"
+            )
+        if len(self.secret) < 32:
+            raise ValueError(
+                "INQTRIX_COLLABORATION_SECRET must contain at least 32 characters when enabled"
+            )
+        return self
 
 
 class AgentPlatformSettings(BaseSettings):
@@ -3011,6 +3519,14 @@ class Settings(BaseSettings):
         ),
     )
     """Resource-sharing policy (tenant-wide by default)."""
+    collaboration: CollaborationSettings = Field(
+        default_factory=CollaborationSettings,
+        description=(
+            "Optional live-collaboration settings for editor documents. "
+            "Disabled by default and fail-loud when explicitly enabled."
+        ),
+    )
+    """Optional editor live-collaboration settings. Disabled by default; enabled configurations are validated as one strict contract."""
     agent_platform: AgentPlatformSettings = Field(
         default_factory=AgentPlatformSettings,
         description=(

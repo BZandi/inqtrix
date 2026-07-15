@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
+from dataclasses import replace
 import threading
+import uuid
 
 import pytest
 
@@ -26,6 +28,8 @@ from inqtrix.capabilities.contracts import (
     Effect,
 )
 from inqtrix.capabilities.registry import CapabilityRegistry, UnknownCapability
+from inqtrix.auth.identity_memory import MemoryIdentityStore
+from inqtrix.auth.permissions import AuthorizationService, SharePermission
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
 from inqtrix.knowledge.stores.ports import KnowledgeProviderContext
@@ -41,12 +45,20 @@ from tests.test_knowledge_engine import StubEmbeddings
 # ------------------------------------------------------------------ #
 
 
-def make_knowledge_service() -> KnowledgeService:
+def make_knowledge_service(
+    identity: MemoryIdentityStore | None = None,
+) -> KnowledgeService:
+    identity = identity or MemoryIdentityStore()
     return KnowledgeService(
         knowledge=KnowledgeProviderContext(
             embeddings=StubEmbeddings(),
             store=MemoryKnowledgeStore(),
             default_top_k=4,
+        ),
+        authorization=AuthorizationService(
+            members=identity,
+            shares=identity,
+            audit=identity,
         ),
         chunk_max_chars=2_000,
         max_document_chars=100_000,
@@ -99,16 +111,23 @@ class _ProviderTimeoutFallbackSearch(_FallbackSearch):
         }
 
 
-_ANON_PRINCIPAL = Principal(sub="__anonymous__", kind="anonymous")
+_ANON_PRINCIPAL = Principal(user_id=None, kind="anonymous")
 # Unscoped context: visible_to=None means "no membership filtering",
 # exactly what an anonymous/static principal resolves to.
 ANON = CapabilityContext(principal=_ANON_PRINCIPAL)
 
 
+def _user_id(label: str) -> uuid.UUID:
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"capability:{label}")
+
+
 def scoped_context(sub: str) -> CapabilityContext:
     """A scoped (oidc-session) caller with an empty membership set —
     sees only what it owns or was granted (nothing here)."""
-    principal = Principal(sub=sub, kind="oidc_session")
+    principal = Principal(
+        user_id=_user_id(sub),
+        kind="oidc_session",
+    )
     return CapabilityContext(
         principal=principal, visible_to=UserContext(principal=principal)
     )
@@ -231,6 +250,165 @@ def test_knowledge_document_read_unknown_is_capability_error_404():
             )
         )
     assert excinfo.value.http_status == 404
+
+
+def test_knowledge_capabilities_enforce_pinned_run_collection_scope():
+    """Live visibility may grow, but one admitted run never widens its corpus."""
+    identity = MemoryIdentityStore()
+    service = make_knowledge_service(identity)
+    registry = build_capability_registry(knowledge_service=service)
+    recipient = scoped_context("scope-recipient")
+    owner = scoped_context("scope-owner")
+
+    admitted = asyncio.run(
+        service.create_collection(
+            name="Admitted",
+            created_by_user_id=recipient.principal.user_id,
+        )
+    )
+    admitted_document = asyncio.run(
+        service.add_document(
+            collection_id=admitted.id,
+            title="Admitted document",
+            text="Shared scope marker from collection A.",
+            visible_to=recipient.visible_to,
+        )
+    )
+    run_context = CapabilityContext(
+        principal=recipient.principal,
+        visible_to=recipient.visible_to,
+        knowledge_collection_ids=frozenset({admitted.id}),
+    )
+
+    newly_shared = asyncio.run(
+        service.create_collection(
+            name="Shared later",
+            created_by_user_id=owner.principal.user_id,
+        )
+    )
+    newly_shared_document = asyncio.run(
+        service.add_document(
+            collection_id=newly_shared.id,
+            title="Later document",
+            text="Shared scope marker from collection B.",
+            visible_to=owner.visible_to,
+        )
+    )
+    identity.add_share(
+        recipient_user_id=recipient.principal.user_id,
+        resource_type="knowledge_collection",
+        resource_id=newly_shared.id,
+        permission=SharePermission.VIEW,
+        granted_by_user_id=owner.principal.user_id,
+    )
+    assert newly_shared.id in {
+        collection.id
+        for collection in asyncio.run(
+            service.list_collections(visible_to=recipient.visible_to)
+        )
+    }
+
+    unscoped = asyncio.run(
+        registry.invoke(
+            "knowledge.search",
+            {"query": "Shared scope marker"},
+            run_context,
+        )
+    )
+    assert {hit.collection_id for hit in unscoped.hits} == {admitted.id}
+
+    explicit = asyncio.run(
+        registry.invoke(
+            "knowledge.search",
+            {
+                "query": "Shared scope marker",
+                "collection_ids": [admitted.id],
+            },
+            run_context,
+        )
+    )
+    assert {hit.collection_id for hit in explicit.hits} == {admitted.id}
+    assert asyncio.run(
+        registry.invoke(
+            "knowledge.document.read",
+            {"document_id": admitted_document.id},
+            run_context,
+        )
+    ).id == admitted_document.id
+
+    with pytest.raises(CapabilityError) as search_error:
+        asyncio.run(
+            registry.invoke(
+                "knowledge.search",
+                {
+                    "query": "Shared scope marker",
+                    "collection_ids": [newly_shared.id],
+                },
+                run_context,
+            )
+        )
+    assert search_error.value.code == "knowledge.collection_not_found"
+    assert search_error.value.http_status == 404
+
+    with pytest.raises(CapabilityError) as read_error:
+        asyncio.run(
+            registry.invoke(
+                "knowledge.document.read",
+                {"document_id": newly_shared_document.id},
+                run_context,
+            )
+        )
+    assert read_error.value.code == "knowledge.document_not_found"
+    assert read_error.value.http_status == 404
+
+
+def test_knowledge_capability_empty_pinned_scope_never_expands_to_visible_data():
+    service = make_knowledge_service()
+    registry = build_capability_registry(knowledge_service=service)
+    collection = asyncio.run(service.create_collection(name="Visible"))
+    document = asyncio.run(
+        service.add_document(
+            collection_id=collection.id,
+            title="Visible document",
+            text="This must stay outside an explicitly empty run scope.",
+        )
+    )
+    empty_scope = CapabilityContext(
+        principal=_ANON_PRINCIPAL,
+        knowledge_collection_ids=frozenset(),
+    )
+
+    result = asyncio.run(
+        registry.invoke(
+            "knowledge.search",
+            {"query": "explicitly empty run scope"},
+            empty_scope,
+        )
+    )
+    assert result.hits == []
+
+    with pytest.raises(CapabilityError) as search_error:
+        asyncio.run(
+            registry.invoke(
+                "knowledge.search",
+                {
+                    "query": "explicitly empty run scope",
+                    "collection_ids": [collection.id],
+                },
+                empty_scope,
+            )
+        )
+    assert search_error.value.http_status == 404
+
+    with pytest.raises(CapabilityError) as read_error:
+        asyncio.run(
+            registry.invoke(
+                "knowledge.document.read",
+                {"document_id": document.id},
+                empty_scope,
+            )
+        )
+    assert read_error.value.http_status == 404
 
 
 # ------------------------------------------------------------------ #
@@ -372,12 +550,18 @@ def test_knowledge_search_strict_denies_hidden_collection_for_scoped_caller():
     collection, not merely an absent id."""
     service = make_knowledge_service()
     registry = build_capability_registry(knowledge_service=service)
+    owner = scoped_context("owner-1")
     owned = asyncio.run(
-        service.create_collection(name="Privat", created_by_sub="owner-1")
+        service.create_collection(
+            name="Privat", created_by_user_id=_user_id("owner-1")
+        )
     )
     asyncio.run(
         service.add_document(
-            collection_id=owned.id, title="D", text="Geheim."
+            collection_id=owned.id,
+            title="D",
+            text="Geheim.",
+            visible_to=owner.visible_to,
         )
     )
     stranger = scoped_context("stranger-2")
@@ -424,7 +608,7 @@ def test_editor_document_read_capability_bundles_doc_and_comments():
             diff_anchor_updated_at=None,
             created_at=1.0,
             updated_at=1.0,
-            caller_sub=None,
+            caller_user_id=None,
             workspace_id=None,
             visible_to=None,
         )
@@ -436,3 +620,137 @@ def test_editor_document_read_capability_bundles_doc_and_comments():
     assert out.content_markdown == "Erster Absatz."
     assert out.revision == 3
     assert out.comments == []
+
+
+def test_editor_document_read_capability_uses_exact_collaboration_projection():
+    """Agent context consumes the barrier payload, not stored stale Markdown."""
+    from inqtrix.project.editor_memory import MemoryEditorStore
+    from inqtrix.services.collaboration_client import CollaborationProjection
+    from inqtrix.services.editor_persistence_service import (
+        EditorPersistenceService,
+    )
+
+    store = MemoryEditorStore()
+    service = EditorPersistenceService(store=store, durable=False)
+    registry = build_capability_registry(editor_service=service)
+    context = scoped_context("projection-owner")
+    document_id = "ed_collaboration_capability"
+    asyncio.run(
+        service.save_document(
+            id=document_id,
+            title="Live document",
+            content_markdown="# Stored stale projection",
+            folder_id=None,
+            source="blank",
+            source_run_id=None,
+            revision=4,
+            diff_anchor_markdown=None,
+            diff_anchor_updated_at=None,
+            created_at=1.0,
+            updated_at=1.0,
+            caller_user_id=_user_id("projection-owner"),
+            workspace_id=None,
+            visible_to=context.visible_to,
+        )
+    )
+    document = asyncio.run(store.get_document(document_id))
+    store._documents[document_id] = replace(  # type: ignore[attr-defined]
+        document,
+        content_mode="collaboration",
+        collaboration_generation=1,
+        collaboration_schema_version=1,
+        collaboration_schema_hash="0" * 64,
+        persisted_sequence=8,
+        projection_sequence=7,
+    )
+
+    async def project(**kwargs: object) -> CollaborationProjection:
+        assert kwargs["document_id"] == document_id
+        return CollaborationProjection(
+            generation=1,
+            sequence=8,
+            markdown="# Current collaboration body",
+            projection_hash="1" * 64,
+            schema_hash="0" * 64,
+            authoritative_sequence=8,
+        )
+
+    service.bind_collaboration_projector(project)
+
+    output = asyncio.run(
+        registry.invoke(
+            "editor.document.read",
+            {"document_id": document_id},
+            context,
+        )
+    )
+
+    assert output.content_markdown == "# Current collaboration body"
+
+
+def test_editor_document_read_capability_rejects_stale_collaboration_projection():
+    """An unavailable exact projection becomes a visible capability failure."""
+    from inqtrix.project.editor_memory import MemoryEditorStore
+    from inqtrix.services.collaboration_client import CollaborationProjection
+    from inqtrix.services.editor_persistence_service import (
+        EditorPersistenceService,
+    )
+
+    store = MemoryEditorStore()
+    service = EditorPersistenceService(store=store, durable=False)
+    registry = build_capability_registry(editor_service=service)
+    context = scoped_context("projection-owner-failed")
+    document_id = "ed_collaboration_capability_failed"
+    asyncio.run(
+        service.save_document(
+            id=document_id,
+            title="Live document",
+            content_markdown="# Stored stale projection",
+            folder_id=None,
+            source="blank",
+            source_run_id=None,
+            revision=4,
+            diff_anchor_markdown=None,
+            diff_anchor_updated_at=None,
+            created_at=1.0,
+            updated_at=1.0,
+            caller_user_id=_user_id("projection-owner-failed"),
+            workspace_id=None,
+            visible_to=context.visible_to,
+        )
+    )
+    document = asyncio.run(store.get_document(document_id))
+    store._documents[document_id] = replace(  # type: ignore[attr-defined]
+        document,
+        content_mode="collaboration",
+        collaboration_generation=1,
+        collaboration_schema_version=1,
+        collaboration_schema_hash="0" * 64,
+        persisted_sequence=9,
+        projection_sequence=8,
+    )
+
+    async def project(**kwargs: object) -> CollaborationProjection:
+        del kwargs
+        return CollaborationProjection(
+            generation=1,
+            sequence=8,
+            markdown="# Not current",
+            projection_hash="1" * 64,
+            schema_hash="0" * 64,
+            authoritative_sequence=9,
+        )
+
+    service.bind_collaboration_projector(project)
+
+    with pytest.raises(CapabilityError) as exc_info:
+        asyncio.run(
+            registry.invoke(
+                "editor.document.read",
+                {"document_id": document_id},
+                context,
+            )
+        )
+
+    assert exc_info.value.code == "editor.collaboration_projection_unavailable"
+    assert exc_info.value.http_status == 503

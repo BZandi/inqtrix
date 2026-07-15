@@ -9,13 +9,14 @@ three-layer resolution under the operator ceiling).
 from __future__ import annotations
 
 import datetime as _dt
+import uuid
 from dataclasses import dataclass
 from enum import StrEnum
 
-#: Sentinel ``subject_sub`` for the tenant-wide default limit row (the
-#: admin's "Standard für alle"). A real user's ``sub`` never collides
-#: with it because it is not a valid OIDC subject.
-DEFAULT_SUBJECT = "__quota_default__"
+#: Sentinel ``subject_user_id`` for the tenant-wide default limit row (the
+#: admin's "Standard für alle"). ``None`` can never collide with a
+#: canonical user UUID.
+DEFAULT_USER_ID: None = None
 
 #: Sentinel ``period_start`` for stock dimensions (no monthly window —
 #: the level rises on use and falls on release, never rolls over).
@@ -47,10 +48,10 @@ FLOW_DIMENSIONS: tuple[QuotaDimension, ...] = tuple(
 
 @dataclass(frozen=True)
 class QuotaSubject:
-    """The metered subject — one user within one tenant."""
+    """Canonical quota account for one user within one tenant."""
 
     tenant_id: str
-    sub: str
+    user_id: uuid.UUID
 
 
 @dataclass(frozen=True)

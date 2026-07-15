@@ -15,6 +15,7 @@ methods, group allowlist enforced.
 from __future__ import annotations
 
 import json
+import logging
 import time
 import urllib.parse
 from typing import Any
@@ -28,6 +29,10 @@ from joserfc.jwk import KeySet, RSAKey
 from joserfc.jwk import OctKey
 
 from inqtrix.auth.directory import MemoryUserDirectory
+from inqtrix.auth.lifecycle import (
+    MemoryUserLifecycleTransaction,
+    UserLifecycleService,
+)
 from inqtrix.auth.oidc import (
     OidcAuthProvider,
     OidcClient,
@@ -50,6 +55,7 @@ class FakeIdp:
 
     def __init__(self) -> None:
         self.claims_override: dict[str, Any] = {}
+        self.omit_claims: set[str] = set()
         self.signer = RSA_KEY
         self.algorithm = "RS256"
         self.token_status = 200
@@ -69,6 +75,8 @@ class FakeIdp:
             "groups": ["team-a"],
         }
         claims.update(self.claims_override)
+        for claim in self.omit_claims:
+            claims.pop(claim, None)
         header = {"alg": self.algorithm, "kid": "test-key"}
         if self.algorithm == "none":
             import base64
@@ -145,9 +153,10 @@ def make_provider(
         redirect_url=REDIRECT,
         transport=idp.transport(),
     )
+    sessions = MemorySessionStore()
     arguments: dict[str, Any] = dict(
         client=client,
-        sessions=MemorySessionStore(),
+        sessions=sessions,
         flows=MemoryFlowStore(),
         users=users,
         session_secret="test-session-secret",
@@ -155,6 +164,22 @@ def make_provider(
         secure_cookies=False,
     )
     arguments.update(overrides)
+    if "lifecycle" not in arguments:
+        pat_service = arguments.get("pat_service")
+        pat_store = getattr(pat_service, "_store", None)
+        transaction = MemoryUserLifecycleTransaction(
+            users=arguments["users"],
+            sessions=arguments["sessions"],
+            invitations=arguments.get("invitations"),
+            pat_store=pat_store,
+        )
+        arguments["lifecycle"] = UserLifecycleService(
+            users=arguments["users"],
+            sessions=arguments["sessions"],
+            invitations=arguments.get("invitations"),
+            pat_service=pat_service,
+            transaction=transaction,
+        )
     return OidcAuthProvider(**arguments), users
 
 
@@ -167,11 +192,11 @@ def make_app(provider: OidcAuthProvider) -> TestClient:
 
     @app.get("/v1/protected")
     async def protected_get(principal=Depends(principal_dep)):
-        return {"sub": principal.sub, "kind": principal.kind}
+        return {"sub": principal.user_id, "kind": principal.kind}
 
     @app.post("/v1/protected")
     async def protected_post(principal=Depends(principal_dep)):
-        return {"sub": principal.sub}
+        return {"sub": principal.user_id}
 
     return TestClient(app, base_url="http://127.0.0.1:5100")
 
@@ -211,16 +236,18 @@ def test_full_login_roundtrip_establishes_a_session():
 
     info = client.get("/api/auth/session").json()
     assert info["authenticated"] is True
-    assert info["sub"] == "user-1234"
-    assert info["display_name"] == "alice"
+    assert info["user"]["display_name"] == "alice"
     assert info["csrf_token"]
 
     protected = client.get("/v1/protected")
     assert protected.status_code == 200
-    assert protected.json() == {"sub": "user-1234", "kind": "oidc_session"}
+    assert protected.json() == {
+        "sub": info["user"]["id"],
+        "kind": "oidc_session",
+    }
 
     # JIT mirror recorded the (issuer, subject) anchor.
-    assert (ISSUER, "user-1234") in users.users
+    assert ("default", ISSUER, "user-1234") in users.users
 
 
 def test_unsafe_method_requires_the_csrf_header():
@@ -314,6 +341,36 @@ def test_claim_violations_are_rejected(override, fragment):
     assert fragment in callback.json()["error"]["message"]
 
 
+def test_missing_email_verified_claim_is_rejected():
+    idp = FakeIdp()
+    idp.omit_claims.add("email_verified")
+    provider, _users = make_provider(idp)
+    client = make_app(provider)
+
+    callback = run_login(client, idp)
+    assert callback.status_code == 403
+    assert "verifiziert" in callback.json()["error"]["message"]
+
+
+@pytest.mark.parametrize("claim_state", ["missing", "false"])
+def test_explicit_email_verified_skip_accepts_unverified_claim(
+    claim_state, caplog
+):
+    idp = FakeIdp()
+    if claim_state == "missing":
+        idp.omit_claims.add("email_verified")
+    else:
+        idp.claims_override = {"email_verified": False}
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        provider, _users = make_provider(idp, skip_email_verified=True)
+    client = make_app(provider)
+
+    callback = run_login(client, idp)
+
+    assert callback.status_code == 303
+    assert "email_verified-Pruefung ist explizit deaktiviert" in caplog.text
+
+
 def test_replayed_state_is_rejected():
     idp = FakeIdp()
     provider, _users = make_provider(idp)
@@ -393,12 +450,12 @@ def test_admin_role_claim_grants_instance_admin():
     # alone (grant-only, parity with the LDAP admin-group path).
     idp.claims_override = {"sub": "bob", "roles": ["inqtrix-admin"]}
     run_login(client, idp)
-    assert users.users[(ISSUER, "bob")].instance_role == "admin"
+    assert users.users[("default", ISSUER, "bob")].instance_role == "admin"
 
     # A third user without the admin role stays a regular user.
     idp.claims_override = {"sub": "carol", "roles": ["staff"]}
     run_login(client, idp)
-    assert users.users[(ISSUER, "carol")].instance_role == "user"
+    assert users.users[("default", ISSUER, "carol")].instance_role == "user"
 
 
 def test_roles_claim_does_not_fetch_userinfo_when_elevation_unconfigured():

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 
 import pytest
 import pytest_asyncio
@@ -59,7 +60,7 @@ def record(**overrides) -> SkillRecord:
     base = dict(
         id=new_skill_id(),
         tenant_id="default",
-        owner_sub="user-owner",
+        owner_user_id=uuid.uuid4(),
         label="sprechzettel",
         title="Sprechzettel",
         description="Kompakter Sprechzettel.",
@@ -102,10 +103,12 @@ async def test_crud_roundtrip_full_field_set(repository):
     assert [item.id for item in listed] == [created.id]
 
     updated = await repository.update(
-        SkillRecord(**{**created.__dict__, "title": "Neuer Titel"})
+        SkillRecord(**{**created.__dict__, "title": "Neuer Titel"}),
+        expected_revision=created.revision,
     )
     assert updated.title == "Neuer Titel"
     assert updated.updated_at > created.updated_at
+    assert updated.revision == created.revision + 1
     assert updated.clarification_points == created.clarification_points
 
     await repository.delete(created.id, tenant_id="default")
@@ -129,17 +132,18 @@ async def test_matching_precondition_updates_stale_one_conflicts(repository):
     created = await repository.create(record(title="v0"))
     advanced = await repository.update(
         SkillRecord(**{**created.__dict__, "title": "v1"}),
-        expected_updated_at=created.updated_at,
+        expected_revision=created.revision,
     )
     assert advanced.title == "v1"
 
-    with pytest.raises(SkillConflict):
+    with pytest.raises(SkillConflict) as exc_info:
         await repository.update(
             SkillRecord(**{**created.__dict__, "title": "stale"}),
-            expected_updated_at=created.updated_at,
+            expected_revision=created.revision,
         )
+    assert exc_info.value.current_revision == advanced.revision
     with pytest.raises(SkillNotFound):
         await repository.update(
             record(id="sk_missing", title="ghost"),
-            expected_updated_at=created.updated_at,
+            expected_revision=created.revision,
         )

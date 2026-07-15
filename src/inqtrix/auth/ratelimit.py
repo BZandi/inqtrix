@@ -49,8 +49,9 @@ class MemoryLoginRateLimiter:
     """Process-local sliding-window limiter with a lockout.
 
     Memory is bounded two ways so a flood of distinct keys (an attacker can
-    mint them by rotating the identifier or, absent a header-stripping proxy,
-    spoofing ``X-Forwarded-For``) cannot grow the table without limit: every
+    mint them by rotating the identifier, or the source IP when
+    ``trusted_proxy_hops`` is misconfigured too high — see :func:`client_ip`)
+    cannot grow the table without limit: every
     write opportunistically drops keys whose window AND lockout have both
     elapsed, and a hard ``max_keys`` ceiling evicts the least-recently-touched
     entry beyond that. The throttle is a best-effort defence anyway (the
@@ -138,19 +139,50 @@ class MemoryLoginRateLimiter:
             self._entries.pop(key, None)
 
 
-def client_ip(request) -> str:
-    """Best-effort client IP for throttling.
+_UNKNOWN_CLIENT = "?"
 
-    Trusts the left-most ``X-Forwarded-For`` hop when present (the
-    nginx ingress sets it) and falls back to the socket peer. ``X-Forwarded-For``
-    is client-controllable unless the ingress STRIPS/normalises an inbound
-    header (the bundled nginx does) — so deployments must terminate at a proxy
-    that overwrites it. Used only as a throttle key, never for authorization,
-    and the limiter is memory-bounded, so a spoofed/rotated value at worst
-    throttles the spoofer and is evicted; it is no amplification primitive.
+
+def client_ip(request, trusted_proxy_hops: int = 1) -> str:
+    """Best-effort client IP for throttling, honouring a trusted-proxy depth.
+
+    ``X-Forwarded-For`` is a chain each proxy APPENDS its own peer to; the
+    left-most entries are whatever the original client sent and are therefore
+    attacker-controlled. Reading the left-most hop (the historical behaviour)
+    let a client mint a fresh throttle key per request by rotating a spoofed
+    value, defeating the login lockout entirely. Both bundled proxies (the
+    nginx ``web`` container and ``scripts/run_research_desk.py``) APPEND the
+    real peer on the right and strip nothing, so the trustworthy value is the
+    hop our own infrastructure wrote, counted from the right.
+
+    Args:
+        request: The incoming Starlette/FastAPI request.
+        trusted_proxy_hops: Number of reverse proxies between the client and
+            this server that append to ``X-Forwarded-For``. ``1`` (default)
+            fits the single bundled proxy: the right-most hop is the real
+            client and is not client-spoofable. ``0`` means the server is
+            exposed directly with no trusted proxy — every forwarded header
+            is ignored and only the socket peer is used. ``n`` trusts the
+            right-most ``n`` hops as infrastructure and reads the client from
+            ``chain[-n]``. Set it to EXACTLY the number of proxies in front:
+            a value larger than the real chain lets a client backfill the
+            gap and spoof again.
+
+    Returns:
+        The resolved client IP string, or ``"?"`` when no address is
+        available. Used only as a throttle key, never for authorization, and
+        the limiter is memory-bounded, so even a spoofed value at worst
+        throttles the spoofer and is evicted; it is no amplification
+        primitive.
     """
+    peer = getattr(request, "client", None)
+    peer_host = peer.host if peer is not None else None
+    if trusted_proxy_hops < 1:
+        return peer_host or _UNKNOWN_CLIENT
     forwarded = request.headers.get("X-Forwarded-For", "")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    client = getattr(request, "client", None)
-    return client.host if client is not None else "?"
+    hops = [h.strip() for h in forwarded.split(",") if h.strip()]
+    if len(hops) >= trusted_proxy_hops:
+        return hops[-trusted_proxy_hops]
+    # Chain shorter than the declared trusted depth (header missing, or fewer
+    # real proxies than configured): fail safe to the socket peer rather than
+    # trust a possibly client-supplied value.
+    return peer_host or _UNKNOWN_CLIENT

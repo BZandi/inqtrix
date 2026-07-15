@@ -57,14 +57,34 @@ export function documentRecordFromServer(
   document: ServerEditorDocument,
 ): EditorDocumentRecord {
   return {
+    access: document.access ?? { mode: 'owner', permission: 'edit' },
     contentMarkdown: document.content_markdown ?? '',
+    contentMode: document.content_mode ?? 'markdown',
     createdAt: isoFromUnixSeconds(document.created_at),
     folderId: document.folder_id,
     id: document.id,
+    metadataRevision: document.metadata_revision ?? 1,
     revision: document.revision,
     source: normalizeSource(document.source),
     title: document.title,
     updatedAt: isoFromUnixSeconds(document.updated_at),
+    ...(document.collaboration
+      ? {
+          collaboration: {
+            generation: document.collaboration.generation,
+            persistedSequence: document.collaboration.persisted_sequence,
+            projectionSequence: document.collaboration.projection_sequence,
+            schemaVersion: document.collaboration.schema_version,
+            ...(document.collaboration.projection_updated_at != null
+              ? {
+                  projectionUpdatedAt: isoFromUnixSeconds(
+                    document.collaboration.projection_updated_at,
+                  ),
+                }
+              : {}),
+          },
+        }
+      : {}),
     ...(document.source_run_id ? { sourceRunId: document.source_run_id } : {}),
     ...(document.diff_anchor_markdown
       ? { diffAnchorMarkdown: document.diff_anchor_markdown }
@@ -73,6 +93,11 @@ export function documentRecordFromServer(
       ? { diffAnchorUpdatedAt: isoFromUnixSeconds(document.diff_anchor_updated_at) }
       : {}),
   }
+}
+
+/** Local-only documents predate the content mode field and remain markdown. */
+export function isCollaborationDocument(record: EditorDocumentRecord): boolean {
+  return record.contentMode === 'collaboration'
 }
 
 export function folderRecordFromServer(folder: ServerEditorFolder): EditorFolderRecord {

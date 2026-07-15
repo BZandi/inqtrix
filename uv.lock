@@ -1067,6 +1067,7 @@ dependencies = [
     { name = "rich" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -1144,6 +1145,7 @@ requires-dist = [
     { name = "valkey", marker = "extra == 'dev'", specifier = ">=6.1,<7.0" },
     { name = "valkey", marker = "extra == 'queue-valkey'", specifier = ">=6.1,<7.0" },
     { name = "vcrpy", marker = "extra == 'dev'", specifier = ">=8.1" },
+    { name = "websockets", specifier = ">=15,<16" },
 ]
 provides-extras = ["agent", "dev", "knowledge-qdrant", "metrics", "queue-valkey"]
 

@@ -22,7 +22,7 @@ describe('accountPreferencesSync', () => {
     const server: ServerAccountPreferences = {
       contrast_mode: 'high', locale: 'de', theme: 'dark', theme_preset: 'sage',
       user_bubble_tone: 'mint',
-      agent_memory_enabled: true,
+      enable_agent_memory: true,
       updated_at: 1_700_000_000,
     }
     const prefs = preferencesFromServer(server, fallback)
@@ -42,7 +42,7 @@ describe('accountPreferencesSync', () => {
       theme: 'dark',
       theme_preset: 'sage',
       user_bubble_tone: 'mint',
-      agent_memory_enabled: true,
+      enable_agent_memory: true,
       updated_at: 42,
     })
   })
@@ -70,7 +70,7 @@ describe('accountPreferencesSync', () => {
     expect(prefs.userBubbleTone).toBe('sky')
   })
 
-  it('keeps the local opt-in when an old server row omits agent_memory_enabled', () => {
+  it('keeps the local opt-in when an old server row omits enable_agent_memory', () => {
     // Legacy row / old server: an absent boolean must not silently enable
     // memory — it resolves to the local (privacy default OFF) value.
     const prefs = preferencesFromServer(

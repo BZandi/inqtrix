@@ -327,6 +327,8 @@ export type InqtrixCapabilities = {
 }
 
 export type KnowledgeCollectionInfo = {
+  /** Authoritative caller relationship for this server collection. */
+  access: ResearchRunAccess
   created_at: number
   document_count: number
   embedding_dim: number
@@ -466,15 +468,8 @@ export type ResearchRunSnapshot = {
   }
 }
 
-/**
- * Additive shared-in annotation on a run summary. Owned runs omit the
- * key entirely (historical wire shape); shared-in runs carry the
- * grant level so the UI can hide cancel/delete for view-only access.
- */
-export type ResearchRunAccess = {
-  permission: 'edit' | 'view'
-  via: 'share'
-}
+/** Canonical caller relationship emitted by every resource list. */
+export type ResearchRunAccess = ResourceAccess
 
 export type ResearchRunSummary = {
   run_id: string
@@ -493,7 +488,10 @@ export type ResearchRunSummary = {
   error: InqtrixError | null
   events_url: string
   result_url: string
-  access?: ResearchRunAccess
+  access: ResearchRunAccess
+  /** Emitted only as `true` while a cancel of a still-running run is
+   * pending (the status stays `running` until the worker stops). */
+  cancel_requested?: boolean
   /** Run tree/session extras — emitted only when non-default (agent runs). */
   kind?: 'standard' | 'agent' | 'agent_child'
   parent_run_id?: string
@@ -631,3 +629,4 @@ export type InqtrixError = {
   status?: string
   type: string
 }
+import type { ResourceAccess } from '@/features/sharing/types'

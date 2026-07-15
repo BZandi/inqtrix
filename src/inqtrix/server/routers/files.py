@@ -7,6 +7,9 @@ object store itself is never exposed to clients.
 
 from __future__ import annotations
 
+import logging
+import threading
+import time
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
 import re
@@ -31,13 +34,39 @@ from inqtrix.services.request_parsing import (
     workspace_id_from_request,
 )
 from inqtrix.storage.object_store import ObjectStoreError
+from inqtrix.urls import sanitize_log_message
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
+_OBJECT_STORE_WARNING_INTERVAL_SECONDS = 60.0
+_object_store_warning_lock = threading.Lock()
+_object_store_last_warning: dict[str, float] = {}
+log = logging.getLogger("inqtrix")
 
 _DISPOSITION_SAFE = re.compile(r"[^A-Za-z0-9._ ()\[\]-]")
+
+
+def _object_store_unavailable(operation: str, exc: Exception) -> JSONResponse:
+    """Return the stable public 503 and rate-limit sanitized diagnostics."""
+    now = time.monotonic()
+    with _object_store_warning_lock:
+        last = _object_store_last_warning.get(operation, 0.0)
+        should_log = now - last >= _OBJECT_STORE_WARNING_INTERVAL_SECONDS
+        if should_log:
+            _object_store_last_warning[operation] = now
+    if should_log:
+        log.warning(
+            "Object-store %s failed: %s",
+            operation,
+            sanitize_log_message(exc),
+        )
+    return error_response(
+        503,
+        "Object Store voruebergehend nicht verfuegbar",
+        "object_store_unavailable",
+    )
 
 
 def _content_disposition(file_name: str) -> str:
@@ -85,15 +114,18 @@ def build_router(container: "AppContainer") -> APIRouter:
     user_context_dep = container.user_context_dependency
     quota_service = container.quota_service
 
-    def _owner_subject(record: FileRecord) -> QuotaSubject | None:
+    def _owner_quota_subject(record: FileRecord) -> QuotaSubject | None:
         """The metered owner of a file's stored bytes, or ``None``.
 
-        Stock occupancy belongs to the uploader (``owner_sub``); legacy
+        Stock occupancy belongs to the uploader (``owner_user_id``); legacy
         unscoped uploads carry no subject and are not metered.
         """
-        if not record.owner_sub:
+        if not record.owner_user_id:
             return None
-        return QuotaSubject(tenant_id=record.tenant_id, sub=record.owner_sub)
+        return QuotaSubject(
+            tenant_id=record.tenant_id,
+            user_id=record.owner_user_id,
+        )
 
     router = APIRouter()
 
@@ -156,16 +188,12 @@ def build_router(container: "AppContainer") -> APIRouter:
                 ),
                 "invalid_request_error",
             )
-        except ObjectStoreError:
-            return error_response(
-                502,
-                "Datei konnte nicht gespeichert werden (Object Store)",
-                "server_error",
-            )
+        except ObjectStoreError as exc:
+            return _object_store_unavailable("upload", exc)
         # Book the exact stored size against the owner (the uploader).
         await quota_record_for_subject(
             quota_service,
-            _owner_subject(record),
+            _owner_quota_subject(record),
             QuotaDimension.STORED_BYTES,
             record.size_bytes,
         )
@@ -216,12 +244,8 @@ def build_router(container: "AppContainer") -> APIRouter:
             )
         except FileNotFound:
             return error_response(404, "Datei nicht gefunden", "not_found")
-        except ObjectStoreError:
-            return error_response(
-                502,
-                "Dateiinhalt nicht abrufbar (Object Store)",
-                "server_error",
-            )
+        except ObjectStoreError as exc:
+            return _object_store_unavailable("download", exc)
         return StreamingResponse(
             chunks,
             media_type=record.content_type,
@@ -255,12 +279,8 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(501, str(exc), "not_implemented")
         except FileNotFound:
             return error_response(404, "Datei nicht gefunden", "not_found")
-        except ObjectStoreError:
-            return error_response(
-                502,
-                "Dateiinhalt nicht abrufbar (Object Store)",
-                "server_error",
-            )
+        except ObjectStoreError as exc:
+            return _object_store_unavailable("text extraction", exc)
         except FileTextExtractionError as exc:
             return error_response(422, str(exc), "unprocessable_entity")
         return {
@@ -284,9 +304,11 @@ def build_router(container: "AppContainer") -> APIRouter:
             record = await service.delete(file_id, principal=principal)
         except FileNotFound:
             return error_response(404, "Datei nicht gefunden", "not_found")
+        except ObjectStoreError as exc:
+            return _object_store_unavailable("delete", exc)
         await quota_record_for_subject(
             quota_service,
-            _owner_subject(record),
+            _owner_quota_subject(record),
             QuotaDimension.STORED_BYTES,
             -record.size_bytes,
         )

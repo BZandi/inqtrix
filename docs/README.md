@@ -12,9 +12,13 @@ Start here when you know what you want to do but not which page owns it. The roo
 | Run the first live research question | [First research run](getting-started/first-research-run.md) |
 | Run the full stack with one command (Docker) | [Stack quickstart](getting-started/stack-quickstart.md) |
 | Deploy on Kubernetes or OpenShift (Helm chart) | [Kubernetes and OpenShift](deployment/kubernetes.md) |
+| Upgrade a bundled or managed PostgreSQL database safely | [Database migrations](deployment/database-migrations.md) |
+| Configure AWS S3, workload identity, or an S3-compatible store | [Object storage](deployment/object-storage.md) |
 | Decide which way to run it | [Deployment modes](deployment/deployment-modes.md) |
 | Decide which infrastructure I need (Postgres, S3, Qdrant, workers, OIDC) | [Platform components](getting-started/platform-components.md) |
 | Operate the stack (start/stop/update/backup) | [Runbooks](deployment/runbooks.md) |
+| Enable and operate live editor collaboration | [Deploy editor collaboration](deployment/editor-collaboration.md) |
+| Share and review a live editor document | [Collaborate on editor documents](how-to/collaborate-on-editor-documents.md) |
 | Get a cited answer from my own documents | [First knowledge answer](getting-started/first-knowledge-answer.md), [Knowledge engine](knowledge/overview.md), [Retrieval profiles](configuration/knowledge-profiles.md) |
 | Choose or connect an authentication mode | [Auth modes](deployment/auth-modes.md) |
 | Create or manage users (owner setup, roles, disabling, PATs) | [Create and manage users](how-to/create-and-manage-users.md) |
@@ -31,6 +35,7 @@ Start here when you know what you want to do but not which page owns it. The roo
 | Understand the LangGraph loop and evidence flow | [Architecture overview](architecture/overview.md), [Graph topology](architecture/graph-topology.md), [Nodes](architecture/nodes.md), [Evidence pipeline](architecture/evidence-pipeline.md) |
 | Understand the knowledge/RAG retrieval pipeline (hybrid, RRF, gate loop) | [Knowledge retrieval](architecture/knowledge-retrieval.md) |
 | Understand the workspace agent (plans, approvals, child runs, memo canvas) | [Agent platform](architecture/agent-platform.md) |
+| Understand the live editor data and trust model | [Editor collaboration](architecture/editor-collaboration.md) |
 | Debug a bad or expensive run | [Debugging runs](observability/debugging-runs.md), [Logging](observability/logging.md), [Forensic cookbook](observability/forensic-cookbook.md), [Troubleshooting](reference/troubleshooting.md) |
 | Scrape metrics / wire readiness probes | [Metrics](observability/metrics.md) |
 | Learn why a run stopped | [Stop criteria](scoring-and-stopping/stop-criteria.md), [Score ledger](scoring-and-stopping/score-ledger.md), [Confidence](scoring-and-stopping/confidence.md), [Aspect coverage](scoring-and-stopping/aspect-coverage.md) |
@@ -42,7 +47,7 @@ Start here when you know what you want to do but not which page owns it. The roo
 
 **First-time user:** [Installation](getting-started/installation.md) -> [First research run](getting-started/first-research-run.md) -> [First knowledge answer](getting-started/first-knowledge-answer.md).
 
-**Operator (self-hosting the product):** [Stack quickstart](getting-started/stack-quickstart.md) -> [Provider recipes](getting-started/provider-recipes.md) -> [Platform components](getting-started/platform-components.md) -> [Create and manage users](how-to/create-and-manage-users.md) -> [Runbooks](deployment/runbooks.md) -> [Deploy to production](how-to/deploy-to-production.md).
+**Operator (self-hosting the product):** [Stack quickstart](getting-started/stack-quickstart.md) -> [Provider recipes](getting-started/provider-recipes.md) -> [Platform components](getting-started/platform-components.md) -> [Database migrations](deployment/database-migrations.md) / [Object storage](deployment/object-storage.md) -> [Create and manage users](how-to/create-and-manage-users.md) -> [Runbooks](deployment/runbooks.md) -> optional [Editor collaboration](deployment/editor-collaboration.md) -> [Deploy to production](how-to/deploy-to-production.md).
 
 **Application integrator:** [Library mode](deployment/library-mode.md) -> [Build a UI on Inqtrix](how-to/build-a-ui-on-inqtrix.md) -> [Custom auth provider](how-to/writing-a-custom-auth-provider.md) / [storage backend](how-to/writing-a-custom-storage.md) -> [Result schema](architecture/result-schema.md).
 
@@ -55,12 +60,12 @@ Start here when you know what you want to do but not which page owns it. The roo
 | Folder | Use it for |
 |--------|------------|
 | `getting-started/` | Install, first run, full stack, first knowledge answer, high-level overview. |
-| `how-to/` | End-to-end task guides: create/manage users, connect to existing LDAP, custom auth/storage, deploy to production, build a UI. |
-| `deployment/` | Library mode, HTTP mode, auth modes, React UI, Azure deployment, security layers. |
+| `how-to/` | End-to-end task guides: create/manage users, collaborate on editor documents, connect to existing LDAP, custom auth/storage, deploy to production, build a UI. |
+| `deployment/` | Library mode, HTTP mode, auth modes, React UI, optional editor collaboration, Azure deployment, security layers. |
 | `knowledge/` | Knowledge engine: collections, ingestion, answer path, Wissen workspace, evaluation tiers. |
 | `providers/` | Built-in provider pages and custom-provider guidance. |
 | `configuration/` | `AgentConfig`, env vars, report profiles, retrieval profiles, [configuration cookbook](configuration/configuration-cookbook.md). |
-| `architecture/` | Graph topology, nodes, state, evidence pipeline, knowledge retrieval, public API, result schema, strategies. |
+| `architecture/` | Graph topology, nodes, state, evidence pipeline, knowledge retrieval, editor collaboration, public API, result schema, strategies. |
 | `scoring-and-stopping/` | Claim quality, aspect coverage, confidence, falsification, source tiering, stop criteria. |
 | `observability/` | Logs, progress events, iteration logs, timeouts, debugging workflows. |
 | `development/` | Contribution rules, docs maintenance, tests, parity tooling, releases. |

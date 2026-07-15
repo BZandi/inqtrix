@@ -62,6 +62,7 @@ from inqtrix.providers.base import (
     _SDK_RATE_LIMIT_MAX_RETRIES,
     _bounded_timeout,
     _check_deadline,
+    _check_provider_cancel,
     _check_provider_operation_deadline,
     _operation_deadline,
     is_model_capacity_error,
@@ -534,6 +535,7 @@ class AnthropicLLM(
 
         attempt = 1
         while True:
+            _check_provider_cancel(label="Anthropic-Aufruf")
             _check_provider_operation_deadline(
                 operation_deadline,
                 deadline,

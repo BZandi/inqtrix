@@ -49,12 +49,14 @@ export function ProfileAvatar({
   // Demo shows the seeded workspace owner as a signed-in identity.
   const effectiveSession: AuthSessionState = isDemo
     ? {
-        displayName: DEMO_OWNER.displayName,
-        email: DEMO_OWNER.email,
         projectNamespace: null,
-        role: 'admin',
         status: 'authenticated',
-        sub: DEMO_OWNER.subject,
+        user: {
+          displayName: DEMO_OWNER.displayName,
+          email: DEMO_OWNER.email,
+          id: DEMO_OWNER.userId,
+          role: 'admin',
+        },
       }
     : session
 
@@ -91,17 +93,17 @@ export function ProfileAvatar({
               variant="ghost"
             >
               <InitialsAvatar
-                displayName={effectiveSession.displayName}
-                email={effectiveSession.email}
+                displayName={effectiveSession.user?.displayName ?? null}
+                email={effectiveSession.user?.email ?? null}
               />
             </Button>
           </DropdownMenuTrigger>
         </TooltipTrigger>
         <TooltipContent side="right">
           <div className="flex flex-col gap-0.5">
-            <span>{effectiveSession.displayName ?? t.profile.signedInAs}</span>
-            {effectiveSession.email ? (
-              <span className="text-muted-foreground">{effectiveSession.email}</span>
+            <span>{effectiveSession.user?.displayName ?? t.profile.signedInAs}</span>
+            {effectiveSession.user?.email ? (
+              <span className="text-muted-foreground">{effectiveSession.user.email}</span>
             ) : null}
           </div>
         </TooltipContent>
@@ -109,10 +111,10 @@ export function ProfileAvatar({
       <DropdownMenuContent align="start" side="right">
         <div className="px-2 py-1.5">
           <p className="t-list text-foreground">
-            {effectiveSession.displayName ?? t.profile.signedInAs}
+            {effectiveSession.user?.displayName ?? t.profile.signedInAs}
           </p>
-          {effectiveSession.email ? (
-            <p className="t-meta text-muted-foreground">{effectiveSession.email}</p>
+          {effectiveSession.user?.email ? (
+            <p className="t-meta text-muted-foreground">{effectiveSession.user.email}</p>
           ) : null}
         </div>
         <DropdownMenuSeparator />

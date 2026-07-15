@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Request
 
-from inqtrix.auth.permissions import SharePermission
+from inqtrix.auth.permissions import AccessMode, ResourceAccess
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.knowledge.stores.ports import (
+    CollectionMaintenanceActive,
     CollectionNotFound,
     DocumentNotFound,
     EmbeddingDimensionMismatch,
@@ -34,16 +35,13 @@ from inqtrix.pagination import (
 )
 from inqtrix.providers.embeddings import EmbeddingProviderError
 from inqtrix.quota.models import QuotaDimension, estimate_tokens
-from inqtrix.runs.shared import access_annotation
 from inqtrix.server.routers import (
-    build_shared_grants_dependency,
     quota_admission,
     quota_record,
 )
 from inqtrix.services.knowledge_service import (
     ChunkNotFound,
     KnowledgeValidationError,
-    collection_access,
 )
 from inqtrix.services.request_parsing import error_response
 
@@ -93,6 +91,15 @@ endpoint instead. Requests above it are rejected, not silently
 clamped."""
 
 
+def _collection_maintenance_response() -> JSONResponse:
+    """Visible conflict while a collection is exclusively reindexed."""
+    return error_response(
+        409,
+        "Die Sammlung wird gerade neu indiziert. Bitte spaeter erneut versuchen.",
+        "collection_maintenance",
+    )
+
+
 def _candidate_payload(candidate: RetrievalCandidate, *, rank: int) -> dict[str, Any]:
     """One search hit.
 
@@ -137,11 +144,6 @@ def build_router(container: "AppContainer") -> APIRouter:
     user_context_dep = container.user_context_dependency
     file_service = container.file_service
     quota_service = container.quota_service
-    share_service = container.share_service
-    workspace_admin = container.workspace_admin
-    shared_collections_dep = build_shared_grants_dependency(
-        share_service, principal_dep, resource_type="knowledge_collection"
-    )
 
     @router.post("/v1/knowledge/collections", status_code=201)
     async def create_collection(
@@ -166,8 +168,8 @@ def build_router(container: "AppContainer") -> APIRouter:
                 # Scoped principals own what they create; the
                 # anonymous/static principals keep minting legacy
                 # (visible-to-all) collections.
-                created_by_sub=(
-                    principal.sub
+                created_by_user_id=(
+                    principal.user_id
                     if principal.kind in ("oidc_session", "pat")
                     else None
                 ),
@@ -177,24 +179,25 @@ def build_router(container: "AppContainer") -> APIRouter:
         except EmbeddingProviderError as exc:
             log.warning("Collection-Anlage scheiterte am Embedding-Backend: %s", exc)
             return error_response(502, str(exc), "server_error")
-        return _collection_payload(collection)
+        access = ResourceAccess(
+            AccessMode.OWNER
+            if principal.kind in ("oidc_session", "pat")
+            else AccessMode.UNSCOPED
+        )
+        return _collection_payload(collection, access=access.as_dict())
 
     @router.get("/v1/knowledge/collections")
     async def list_collections(
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_collections_dep),
     ):
         """The caller's visible collections, newest first."""
         payloads = []
-        for collection in await service.list_collections(
-            visible_to=visible_to, also_visible=also_visible
+        for collection, access in await service.list_collections_with_access(
+            visible_to=visible_to
         ):
-            shared = collection_access(collection, visible_to, also_visible)
             payloads.append(
-                _collection_payload(
-                    collection, access=access_annotation(shared)
-                )
+                _collection_payload(collection, access=access.as_dict())
             )
         return {"object": "list", "data": payloads}
 
@@ -203,33 +206,17 @@ def build_router(container: "AppContainer") -> APIRouter:
         collection_id: str,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_collections_dep),
     ):
         """Delete a collection with all its documents (owner-only)."""
         try:
             await service.delete_collection(
                 collection_id,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
         except CollectionNotFound:
             return error_response(404, "Collection nicht gefunden", "not_found")
-        if workspace_admin is not None and share_service is not None:
-            # A deleted collection must not leave grants dangling —
-            # the recipients' shared-with-me would otherwise keep
-            # naming a resource that no longer exists.
-            revoked = await workspace_admin.revoke_shares_for_resource(
-                tenant_id=principal.tenant_id,
-                resource_type="knowledge_collection",
-                resource_id=collection_id,
-                revoked_by_sub=principal.sub,
-            )
-            if revoked:
-                log.info(
-                    "Collection %s geloescht; %d Freigaben entzogen",
-                    collection_id,
-                    revoked,
-                )
+        except CollectionMaintenanceActive:
+            return _collection_maintenance_response()
 
     @router.post(
         "/v1/knowledge/collections/{collection_id}/documents", status_code=201
@@ -239,7 +226,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_collections_dep),
     ):
         """Ingest one document (chunk + embed) synchronously."""
         try:
@@ -279,7 +265,6 @@ def build_router(container: "AppContainer") -> APIRouter:
                     metadata=metadata,
                     principal=principal,
                     visible_to=visible_to,
-                    also_visible=also_visible,
                 )
             else:
                 # Text path: the caller reuses already-extracted text (e.g. the
@@ -295,7 +280,6 @@ def build_router(container: "AppContainer") -> APIRouter:
                     text=str(body.get("text", "")),
                     metadata=metadata,
                     visible_to=visible_to,
-                    also_visible=also_visible,
                     page_texts=page_texts,
                 )
         except FileNotFound:
@@ -306,6 +290,8 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(400, str(exc), "invalid_request_error")
         except CollectionNotFound:
             return error_response(404, "Collection nicht gefunden", "not_found")
+        except CollectionMaintenanceActive:
+            return _collection_maintenance_response()
         except EmbeddingDimensionMismatch as exc:
             log.warning("Embedding-Dimension-Konflikt bei Ingestion: %s", exc)
             return error_response(409, str(exc), "embedding_dimension_mismatch")
@@ -331,7 +317,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         metadata: dict[str, Any] | None,
         principal: Principal,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ):
         """Fetch a registered file (access-checked), parse, ingest.
 
@@ -357,7 +342,6 @@ def build_router(container: "AppContainer") -> APIRouter:
             metadata=document_metadata,
             title=title,
             visible_to=visible_to,
-            also_visible=also_visible,
         )
 
     async def _page_texts_for_metadata(
@@ -390,7 +374,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_collections_dep),
     ):
         """List a collection's documents, newest first (keyset-paginated).
 
@@ -409,7 +392,6 @@ def build_router(container: "AppContainer") -> APIRouter:
                 limit=limit,
                 after=after,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
         except CollectionNotFound:
             return error_response(404, "Collection nicht gefunden", "not_found")
@@ -423,24 +405,23 @@ def build_router(container: "AppContainer") -> APIRouter:
         document_id: str,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_collections_dep),
     ):
         """Delete one document and its chunks (edit via parent)."""
         try:
             await service.delete_document(
                 document_id,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
         except DocumentNotFound:
             return error_response(404, "Dokument nicht gefunden", "not_found")
+        except CollectionMaintenanceActive:
+            return _collection_maintenance_response()
 
     @router.get("/v1/knowledge/documents/{document_id}/text")
     async def document_text(
         document_id: str,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_collections_dep),
     ):
         """Full extracted text of one document (the reader's source).
 
@@ -454,7 +435,6 @@ def build_router(container: "AppContainer") -> APIRouter:
             document = await service.get_document(
                 document_id,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
         except DocumentNotFound:
             return error_response(404, "Dokument nicht gefunden", "not_found")
@@ -469,7 +449,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_collections_dep),
     ):
         """One chunk plus optional neighbour context (the evidence view).
 
@@ -500,7 +479,6 @@ def build_router(container: "AppContainer") -> APIRouter:
                 chunk_index,
                 context=context,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
         except DocumentNotFound:
             return error_response(404, "Dokument nicht gefunden", "not_found")
@@ -524,7 +502,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_collections_dep),
     ):
         """Synchronous retrieval search for debugging and evaluation."""
         try:
@@ -561,7 +538,6 @@ def build_router(container: "AppContainer") -> APIRouter:
                 collection_ids=collection_ids,
                 top_k=raw_top_k,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
         except KnowledgeValidationError as exc:
             return error_response(400, str(exc), "invalid_request_error")

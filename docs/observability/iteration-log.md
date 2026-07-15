@@ -61,6 +61,7 @@ The markers below are the canonical hook points for operators. Each marker is bo
 | `evidence_record_count` / `report_eligible_evidence_count` | Counts of EvidenceRecords and (subset) report-eligible records after search. |
 | `evidence_depth_gap` | Diagnostic showing whether report evidence is too single-source-heavy for plateau stopping. |
 | `algorithm_failure_count` / `blocking_algorithm_failure_count` | Number of visible core-path failures recorded so far, and how many of them block final-report synthesis. |
+| `cancel_abandoned_work` | Run cancellation interrupted a fan-out (search or claim extraction): `abandoned` queued calls were cancelled before starting, `in_flight` running calls were awaited (they stop at the provider cancel probe), out of `total`. Also emitted as a warning progress message. |
 
 ### Evaluate
 

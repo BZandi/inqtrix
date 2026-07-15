@@ -4,7 +4,7 @@ The second slice of the project-persistence tier, mirroring the chat
 schema (``chat_orm.py``): when the platform runs with a Postgres backend,
 a user's editor documents, their folders, and their comments become
 server-persistent instead of living only in the local markdown project.
-Scoped per ``(tenant_id, created_by_sub, workspace_id)`` exactly like
+Scoped per ``(tenant_id, created_by_user_id, workspace_id)`` exactly like
 chat / runs / files / knowledge — a user's project is "their data in the
 current workspace" (the one-project-per-(user, workspace) model). No
 separate ``projects`` table.
@@ -32,6 +32,8 @@ domains to the frontend unions so an out-of-domain write fails loudly.
 from __future__ import annotations
 
 from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
     Column,
     Float,
     ForeignKey,
@@ -42,7 +44,7 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSON, UUID
 
 editor_metadata = MetaData()
 
@@ -51,7 +53,7 @@ editor_folders = Table(
     editor_metadata,
     Column("id", Text, primary_key=True),
     Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
-    Column("created_by_sub", Text, nullable=True),
+    Column("created_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("workspace_id", Text, nullable=True),
     Column("title", Text, nullable=False),
     Column("created_at", Float, nullable=False),
@@ -59,13 +61,13 @@ editor_folders = Table(
     Index(
         "ix_editor_folders_owner_created",
         "tenant_id",
-        "created_by_sub",
+        "created_by_user_id",
         "created_at",
         "id",
     ),
 )
 """Optional grouping of a user's editor documents (the document tree).
-``created_by_sub`` is the ownership anchor (``None`` = unscoped/anonymous
+``created_by_user_id`` is the ownership anchor (``None`` = unscoped/anonymous
 deployments). Deleting a folder orphans its documents to ungrouped
 (``ON DELETE SET NULL`` on ``editor_documents.folder_id``)."""
 
@@ -74,7 +76,7 @@ editor_documents = Table(
     editor_metadata,
     Column("id", Text, primary_key=True),
     Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
-    Column("created_by_sub", Text, nullable=True),
+    Column("created_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("workspace_id", Text, nullable=True),
     Column("title", Text, nullable=False, server_default=text("''")),
     # The heavy body. Excluded from the list endpoint (metadata only) and
@@ -89,16 +91,68 @@ editor_documents = Table(
     Column("source", Text, nullable=False, server_default=text("'blank'")),
     Column("source_run_id", Text, nullable=True),
     Column("revision", Integer, nullable=False, server_default=text("1")),
+    Column(
+        "content_mode",
+        Text,
+        nullable=False,
+        server_default=text("'markdown'"),
+    ),
+    Column(
+        "metadata_revision",
+        BigInteger,
+        nullable=False,
+        server_default=text("1"),
+    ),
+    Column(
+        "collaboration_generation",
+        BigInteger,
+        nullable=False,
+        server_default=text("0"),
+    ),
+    Column("collaboration_schema_version", Integer, nullable=True),
+    Column("collaboration_schema_hash", Text, nullable=True),
+    Column(
+        "persisted_sequence",
+        BigInteger,
+        nullable=False,
+        server_default=text("0"),
+    ),
+    Column(
+        "projection_sequence",
+        BigInteger,
+        nullable=False,
+        server_default=text("0"),
+    ),
+    Column("projection_updated_at", Float, nullable=True),
+    Column("deleted_at", Float, nullable=True),
     Column("diff_anchor_markdown", Text, nullable=True),
     Column("diff_anchor_updated_at", Float, nullable=True),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
+    CheckConstraint(
+        "content_mode IN ('markdown', 'collaboration')",
+        name="ck_editor_documents_content_mode",
+    ),
+    CheckConstraint(
+        "projection_sequence <= persisted_sequence",
+        name="ck_editor_documents_projection_sequence",
+    ),
+    CheckConstraint(
+        "(content_mode = 'markdown' AND collaboration_generation = 0 "
+        "AND persisted_sequence = 0 AND projection_sequence = 0 "
+        "AND collaboration_schema_version IS NULL "
+        "AND collaboration_schema_hash IS NULL) OR "
+        "(content_mode = 'collaboration' AND collaboration_generation >= 1 "
+        "AND collaboration_schema_version IS NOT NULL "
+        "AND collaboration_schema_hash IS NOT NULL)",
+        name="ck_editor_documents_collaboration_state",
+    ),
     # Keyset-pagination index for the owner-scoped document list (newest
     # first) with the id tiebreaker; sort is by the stable created_at.
     Index(
         "ix_editor_documents_owner_created",
         "tenant_id",
-        "created_by_sub",
+        "created_by_user_id",
         "created_at",
         "id",
     ),
@@ -123,6 +177,7 @@ editor_comments = Table(
         primary_key=True,
     ),
     Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
+    Column("created_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("comment_markdown", Text, nullable=False, server_default=text("''")),
     # The positional anchor (block id, char range, surrounding quotes),
     # stored verbatim so a round-trip reconstructs the exact anchor.

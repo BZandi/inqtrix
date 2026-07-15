@@ -4,16 +4,15 @@ Separate ``MetaData`` on purpose (immutable-snapshot rule): the table
 arrives with revision 0006. Timestamps are unix-seconds doubles,
 mirroring the in-memory records exactly.
 
-``owner_sub`` is nullable text, NOT a foreign key into the ``users``
-mirror — ``NULL`` marks open templates created by the
-anonymous/static principals (visible to everyone, the same legacy
-rule knowledge collections use), and template validity never depends
-on the mirror row's lifecycle.
+``owner_user_id`` is the canonical UUID. The destructive v0.2 migration adds
+the physical cross-metadata foreign key with ``ON DELETE RESTRICT``; ``NULL``
+remains reserved for ownerless records in unscoped deployments.
 """
 
 from __future__ import annotations
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Column,
@@ -24,7 +23,7 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 prompt_template_metadata = MetaData()
 
@@ -35,7 +34,7 @@ prompt_templates = Table(
     Column(
         "tenant_id", Text, nullable=False, server_default=text("'default'")
     ),
-    Column("owner_sub", Text, nullable=True),
+    Column("owner_user_id", UUID(as_uuid=True), nullable=True),
     Column("title", Text, nullable=False),
     Column("label", Text, nullable=False),
     Column("category", Text, nullable=True),
@@ -49,10 +48,13 @@ prompt_templates = Table(
     ),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
+    Column(
+        "revision", BigInteger, nullable=False, server_default=text("1")
+    ),
     CheckConstraint(
         "category IS NULL OR category IN "
         "('instruction', 'function', 'context')",
         name="ck_prompt_templates_category",
     ),
-    Index("ix_prompt_templates_owner", "tenant_id", "owner_sub"),
+    Index("ix_prompt_templates_owner", "tenant_id", "owner_user_id"),
 )

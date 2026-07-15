@@ -5,10 +5,13 @@
 #
 # Always pass --env-file: it feeds the ${...} interpolation below (postgres
 # password, ports, the required-var guards). Compose does NOT auto-load a file
-# named .env.stack. Separately, the api/migrate/worker services read the env
-# file via `env_file:` so the app process sees every INQTRIX_* variable; that
-# path follows ${INQTRIX_ENV_FILE} and defaults to deploy/.env.stack. Both
-# mechanisms must point at the same file (see "a different file" below).
+# named .env.stack. Separately, the api/worker services read the env file via
+# `env_file:` so the app process sees every INQTRIX_* variable; that path
+# follows ${INQTRIX_ENV_FILE} and defaults to deploy/.env.stack. The migration
+# job intentionally does NOT load that shared runtime file. Compose passes only
+# its interpolated INQTRIX_DATABASE_URL as the backwards-compatible fallback;
+# an optional migration-only file can override it with
+# INQTRIX_MIGRATION_DATABASE_URL via INQTRIX_MIGRATION_ENV_FILE.
 #
 # Default stack (no profile): postgres + migrate (one-shot) + api + web.
 # The browser hits ONE origin (http://localhost:8080); nginx in the `web`
@@ -20,6 +23,8 @@
 #   workers   -> valkey + a worker process (durable run scaling)
 #   s3        -> seaweedfs (S3 object store instead of the local volume)
 #   oidc      -> dex (enterprise SSO; the default is local auth)
+#   collaboration -> private single-replica editor collaboration service
+#                    (also set INQTRIX_COLLABORATION_ENABLED=true + a secret)
 #
 # Config lives in deploy/.env.stack (copy from deploy/.env.stack.example).
 # To use a different file per setup, both mechanisms above must read it: add a
@@ -87,6 +92,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+        # `required: false` (here and on every other postgres dependency)
+        # keeps the default stack byte-identical while the bundled service
+        # runs, but lets compose.external-db.yaml deactivate it: a skipped
+        # optional dependency only warns instead of failing the deployment.
+        required: false
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 6432 || exit 1"]
       interval: 5s
@@ -96,24 +106,33 @@ services:
 
   migrate:
     # One-shot schema migration. Runs the packaged Alembic migrations to head
-    # (the same inqtrix-migrate console script operators use) and exits 0.
-    # The api waits for this to complete, so migrations are an explicit,
-    # visible step — never a hidden startup hook. Re-run on update via
-    # `docker compose -f ... up migrate`.
+    # and exits 0. Compose starts it automatically and the api/worker wait for
+    # successful completion; an operator does not normally invoke it by hand.
+    # The packaged command remains available only for break-glass recovery.
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.api
     command: ["inqtrix-migrate"]
     env_file:
-      - ../../${INQTRIX_ENV_FILE:-deploy/.env.stack}
+      # /dev/null keeps bundled installs compatible with the runtime-DSN
+      # fallback. Once an operator supplies INQTRIX_MIGRATION_ENV_FILE, a typo
+      # is fatal instead of silently ignoring the dedicated credential.
+      - path: ${INQTRIX_MIGRATION_ENV_FILE:-/dev/null}
+        required: true
     environment:
-      # Always DIRECT to Postgres, independent of the app URL: with the
-      # pgbouncer profile the operator points INQTRIX_DATABASE_URL at the
-      # pooler, but Alembic DDL must not run through transaction pooling.
-      INQTRIX_DATABASE_URL: postgresql+asyncpg://${INQTRIX_PG_USER:-inqtrix}:${INQTRIX_PG_PASSWORD:?set INQTRIX_PG_PASSWORD in deploy/.env.stack}@postgres:5432/${INQTRIX_PG_DB:-inqtrix}
+      # The runtime DSN from Compose interpolation is the compatibility
+      # fallback for BOTH bundled and managed PostgreSQL. Never substitute a
+      # hard-coded bundled host here: API/worker could otherwise start against
+      # an unmigrated managed schema. Managed deployments and every PgBouncer
+      # runtime must override this through the migration-only env file with a
+      # direct INQTRIX_MIGRATION_DATABASE_URL.
+      INQTRIX_DATABASE_URL: ${INQTRIX_DATABASE_URL:?set INQTRIX_DATABASE_URL in the Compose --env-file}
+      INQTRIX_MIGRATION_RLS_MODE: ${INQTRIX_MIGRATION_RLS_MODE:-auto}
+      INQTRIX_MIGRATION_SERVICES_QUIESCED: ${INQTRIX_MIGRATION_SERVICES_QUIESCED:-false}
     depends_on:
       postgres:
         condition: service_healthy
+        required: false
     restart: "no"
 
   api:
@@ -129,11 +148,25 @@ services:
       INQTRIX_SERVER_PORT: "5100"
       INQTRIX_OBJECT_STORE_BACKEND: ${INQTRIX_OBJECT_STORE_BACKEND:-local}
       INQTRIX_OBJECT_STORE_PATH: /var/lib/inqtrix/objects
+      INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY: ${INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY:-bundled_legacy}
+      # env_file is operator-controlled. Never let a mistakenly reused
+      # migration-only env expose its privileged DSN to the runtime process.
+      INQTRIX_MIGRATION_DATABASE_URL: ""
+      # Private service-network addresses. They are inert while
+      # INQTRIX_COLLABORATION_ENABLED remains false, preserving the default
+      # stack while making the collaboration profile deterministic.
+      INQTRIX_COLLABORATION_HTTP_URL: http://collaboration:1234
+      INQTRIX_COLLABORATION_WS_URL: ws://collaboration:1234/collaboration
     volumes:
       - objectstore:/var/lib/inqtrix/objects
+      - type: bind
+        source: ${INQTRIX_S3_CA_BUNDLE_HOST:-/dev/null}
+        target: /etc/inqtrix/object-store/ca.pem
+        read_only: true
     depends_on:
       postgres:
         condition: service_healthy
+        required: false
       migrate:
         condition: service_completed_successfully
     healthcheck:
@@ -141,7 +174,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5100/health').status==200 else 1)\"",
+          "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5100/readyz').status==200 else 1)\"",
         ]
       interval: 5s
       timeout: 3s
@@ -151,22 +184,93 @@ services:
 
   web:
     # nginx serving the built React bundle + reverse-proxying the API. The
-    # single host ingress, bound to loopback by default (put a TLS reverse
-    # proxy in front for remote access — see docs/how-to/deploy-to-production.md).
+    # single host ingress. It stays bound to loopback by default; set
+    # INQTRIX_WEB_BIND_ADDRESS=0.0.0.0 for an explicit LAN test or put a TLS
+    # reverse proxy in front for production remote access (see
+    # docs/how-to/deploy-to-production.md).
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.web
+    environment:
+      # This is the trusted scheme nginx sends to FastAPI; it never consumes an
+      # incoming X-Forwarded-Proto. Keep the HTTP default for loopback. A TLS
+      # proxy deployment must set this to https alongside an exact
+      # INQTRIX_PUBLIC_BASE_URL in the shared stack environment.
+      INQTRIX_EXTERNAL_SCHEME: ${INQTRIX_EXTERNAL_SCHEME:-http}
     depends_on:
       api:
         condition: service_healthy
     ports:
-      - "127.0.0.1:${INQTRIX_WEB_PORT:-8080}:8080"
+      - "${INQTRIX_WEB_BIND_ADDRESS:-127.0.0.1}:${INQTRIX_WEB_PORT:-8080}:8080"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/ >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 5
       start_period: 10s
+    restart: unless-stopped
+
+  collaboration:
+    # Optional single-writer editor collaboration service. FastAPI remains the
+    # only browser-facing WebSocket gateway; this container has no host port.
+    # It receives a deliberately narrow environment rather than env_file, so
+    # database, auth-session, provider, and object-store credentials never
+    # enter the Node process. The service validates the secret and API URL at
+    # startup and fails loudly when the profile is enabled incompletely.
+    profiles: ["collaboration"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.collaboration
+    user: "1001:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      INQTRIX_API_INTERNAL_URL: http://api:5100
+      INQTRIX_COLLABORATION_AWARENESS_RATE_PER_SECOND: ${INQTRIX_COLLABORATION_AWARENESS_RATE_PER_SECOND:-20}
+      INQTRIX_COLLABORATION_BIND_ADDRESS: "0.0.0.0"
+      INQTRIX_COLLABORATION_HTTP_TIMEOUT_MS: ${INQTRIX_COLLABORATION_HTTP_TIMEOUT_MS:-5000}
+      INQTRIX_COLLABORATION_INSTANCE_LEASE_SECONDS: ${INQTRIX_COLLABORATION_INSTANCE_LEASE_SECONDS:-15}
+      INQTRIX_COLLABORATION_INSTANCE_RENEW_SECONDS: ${INQTRIX_COLLABORATION_INSTANCE_RENEW_SECONDS:-5}
+      INQTRIX_COLLABORATION_MAINTENANCE_INTERVAL_SECONDS: ${INQTRIX_COLLABORATION_MAINTENANCE_INTERVAL_SECONDS:-60}
+      INQTRIX_COLLABORATION_MAX_DOCUMENT_BYTES: ${INQTRIX_COLLABORATION_MAX_DOCUMENT_BYTES:-10485760}
+      INQTRIX_COLLABORATION_MAX_FRAME_BYTES: ${INQTRIX_COLLABORATION_MAX_FRAME_BYTES:-2097152}
+      INQTRIX_COLLABORATION_MAX_QUEUED_BYTES: ${INQTRIX_COLLABORATION_MAX_QUEUED_BYTES:-8388608}
+      INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES: ${INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES:-32}
+      INQTRIX_COLLABORATION_MAX_SESSIONS_PER_USER_DOCUMENT: ${INQTRIX_COLLABORATION_MAX_SESSIONS_PER_USER_DOCUMENT:-5}
+      INQTRIX_COLLABORATION_POLICY_POLL_MS: ${INQTRIX_COLLABORATION_POLICY_POLL_MS:-2000}
+      INQTRIX_COLLABORATION_POLICY_REVALIDATION_TIMEOUT_MS: ${INQTRIX_COLLABORATION_POLICY_REVALIDATION_TIMEOUT_MS:-7500}
+      INQTRIX_COLLABORATION_PORT: "1234"
+      INQTRIX_COLLABORATION_RECONCILE_MAX_HASHES: ${INQTRIX_COLLABORATION_RECONCILE_MAX_HASHES:-256}
+      INQTRIX_COLLABORATION_RECONCILE_RATE_COUNT: ${INQTRIX_COLLABORATION_RECONCILE_RATE_COUNT:-10}
+      INQTRIX_COLLABORATION_RECONCILE_RATE_WINDOW_SECONDS: ${INQTRIX_COLLABORATION_RECONCILE_RATE_WINDOW_SECONDS:-10}
+      INQTRIX_COLLABORATION_SECRET: ${INQTRIX_COLLABORATION_SECRET:-}
+      INQTRIX_COLLABORATION_SNAPSHOT_IDLE_SECONDS: ${INQTRIX_COLLABORATION_SNAPSHOT_IDLE_SECONDS:-5}
+      INQTRIX_COLLABORATION_SNAPSHOT_RETRY_BASE_MS: ${INQTRIX_COLLABORATION_SNAPSHOT_RETRY_BASE_MS:-1000}
+      INQTRIX_COLLABORATION_SNAPSHOT_RETRY_MAX_MS: ${INQTRIX_COLLABORATION_SNAPSHOT_RETRY_MAX_MS:-30000}
+      INQTRIX_COLLABORATION_SNAPSHOT_TAIL_BYTES: ${INQTRIX_COLLABORATION_SNAPSHOT_TAIL_BYTES:-1048576}
+      INQTRIX_COLLABORATION_SNAPSHOT_UPDATE_COUNT: ${INQTRIX_COLLABORATION_SNAPSHOT_UPDATE_COUNT:-256}
+      INQTRIX_COLLABORATION_SOCKET_BACKPRESSURE_BYTES: ${INQTRIX_COLLABORATION_SOCKET_BACKPRESSURE_BYTES:-4194304}
+      INQTRIX_COLLABORATION_TENANT_ID: ${INQTRIX_COLLABORATION_TENANT_ID:-default}
+      INQTRIX_COLLABORATION_UPDATE_RATE_COUNT: ${INQTRIX_COLLABORATION_UPDATE_RATE_COUNT:-120}
+      INQTRIX_COLLABORATION_UPDATE_RATE_WINDOW_SECONDS: ${INQTRIX_COLLABORATION_UPDATE_RATE_WINDOW_SECONDS:-10}
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:1234/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
     restart: unless-stopped
 
   worker:
@@ -183,11 +287,25 @@ services:
     environment:
       INQTRIX_OBJECT_STORE_BACKEND: ${INQTRIX_OBJECT_STORE_BACKEND:-local}
       INQTRIX_OBJECT_STORE_PATH: /var/lib/inqtrix/objects
+      INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY: ${INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY:-bundled_legacy}
+      INQTRIX_MIGRATION_DATABASE_URL: ""
+      # Same private collaboration addresses as the api service: the worker
+      # loads the SAME shared env file, so with
+      # INQTRIX_COLLABORATION_ENABLED=true its settings validation requires
+      # coherent URLs too (without these the worker crash-loops and queued
+      # runs are never claimed). Inert while the flag stays false.
+      INQTRIX_COLLABORATION_HTTP_URL: http://collaboration:1234
+      INQTRIX_COLLABORATION_WS_URL: ws://collaboration:1234/collaboration
     volumes:
       - objectstore:/var/lib/inqtrix/objects
+      - type: bind
+        source: ${INQTRIX_S3_CA_BUNDLE_HOST:-/dev/null}
+        target: /etc/inqtrix/object-store/ca.pem
+        read_only: true
     depends_on:
       postgres:
         condition: service_healthy
+        required: false
       migrate:
         condition: service_completed_successfully
       valkey:

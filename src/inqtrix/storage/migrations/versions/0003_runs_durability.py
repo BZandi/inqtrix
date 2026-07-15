@@ -15,10 +15,9 @@ lives only in that application enum.
 
 from __future__ import annotations
 
+import sqlalchemy as sa
 from alembic import op
-
-from inqtrix.server.runs import RunStatus
-from inqtrix.storage.runs_orm import runs_metadata
+from sqlalchemy.dialects import postgresql
 
 revision = "0003_runs_durability"
 down_revision = "0002_content_files"
@@ -27,12 +26,95 @@ depends_on = None
 
 APP_ROLE = "inqtrix_app"
 
-_STATUS_VALUES = ", ".join(f"'{status.value}'" for status in RunStatus)
+_STATUS_VALUES = (
+    "'queued', 'running', 'completed', 'failed', 'cancelled', 'expired'"
+)
+
+
+# Frozen revision-0003 schema. Later revisions add the agent-tree columns and
+# indexes before 0045 replaces ``created_by_sub`` with a canonical user UUID.
+_runs_metadata = sa.MetaData()
+
+_runs = sa.Table(
+    "runs",
+    _runs_metadata,
+    sa.Column("run_id", sa.Text, primary_key=True),
+    sa.Column(
+        "tenant_id", sa.Text, nullable=False, server_default=sa.text("'default'")
+    ),
+    sa.Column(
+        "status", sa.Text, nullable=False, server_default=sa.text("'queued'")
+    ),
+    sa.Column(
+        "mode", sa.Text, nullable=False, server_default=sa.text("'research'")
+    ),
+    sa.Column("question", sa.Text, nullable=False),
+    sa.Column(
+        "stack_name", sa.Text, nullable=False, server_default=sa.text("'default'")
+    ),
+    sa.Column("workspace_id", sa.Text, nullable=True),
+    sa.Column("created_by_sub", sa.Text, nullable=True),
+    sa.Column("created_by_tenant_id", sa.Text, nullable=True),
+    sa.Column(
+        "agent_overrides",
+        postgresql.JSON,
+        nullable=False,
+        server_default=sa.text("'{}'"),
+    ),
+    sa.Column("request_payload", postgresql.JSON, nullable=True),
+    sa.Column(
+        "snapshot",
+        postgresql.JSON,
+        nullable=False,
+        server_default=sa.text("'{}'"),
+    ),
+    sa.Column("result", postgresql.JSON, nullable=True),
+    sa.Column("error", postgresql.JSON, nullable=True),
+    sa.Column(
+        "cancel_requested",
+        sa.Boolean,
+        nullable=False,
+        server_default=sa.text("false"),
+    ),
+    sa.Column("claimed_by", sa.Text, nullable=True),
+    sa.Column("attempt", sa.Integer, nullable=False, server_default=sa.text("0")),
+    sa.Column(
+        "event_seq", sa.Integer, nullable=False, server_default=sa.text("0")
+    ),
+    sa.Column("created_at", sa.Float, nullable=False),
+    sa.Column("started_at", sa.Float, nullable=True),
+    sa.Column("finished_at", sa.Float, nullable=True),
+    sa.Index("ix_runs_tenant_created", "tenant_id", "created_at"),
+    sa.Index("ix_runs_tenant_status", "tenant_id", "status"),
+)
+
+_run_events = sa.Table(
+    "run_events",
+    _runs_metadata,
+    sa.Column(
+        "run_id",
+        sa.Text,
+        sa.ForeignKey("runs.run_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    sa.Column("sequence", sa.Integer, primary_key=True),
+    sa.Column(
+        "tenant_id", sa.Text, nullable=False, server_default=sa.text("'default'")
+    ),
+    sa.Column("type", sa.Text, nullable=False),
+    sa.Column("created_at", sa.Float, nullable=False),
+    sa.Column(
+        "data",
+        postgresql.JSON,
+        nullable=False,
+        server_default=sa.text("'{}'"),
+    ),
+)
 
 
 def upgrade() -> None:
     bind = op.get_bind()
-    runs_metadata.create_all(bind=bind)
+    _runs_metadata.create_all(bind=bind)
 
     op.execute(
         "ALTER TABLE runs ADD CONSTRAINT ck_runs_status "
@@ -56,4 +138,4 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
-    runs_metadata.drop_all(bind=bind)
+    _runs_metadata.drop_all(bind=bind)

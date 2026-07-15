@@ -69,6 +69,7 @@ import { QuotaAdminPanel } from '@/features/quota/QuotaAdminPanel'
 import { useQuotaAdmin } from '@/features/quota/useQuotaAdmin'
 import { DEMO_OWNER } from '@/features/sharing/demoShares'
 import { SharingPanel } from '@/features/sharing/SharingPanel'
+import type { InboxShare } from '@/features/sharing/types'
 import type { SharingInboxHandle } from '@/features/sharing/useSharingInbox'
 import {
   SettingsRow,
@@ -98,15 +99,18 @@ type SettingsWorkspaceProps = {
   apiKey: string
   /** Active auth mode resolved by the desk (demo forces `none`). */
   authMode?: AuthMode
-  /** Cookie-session facts; `role`/`sub` drive the instance-admin surface. */
+  /** Cookie-session facts; canonical `user.id`/`role` drive account surfaces. */
   authSession?: {
     status: string
-    displayName: string | null
-    email: string | null
-    role?: string | null
-    sub?: string | null
+    user: {
+      displayName: string | null
+      email: string | null
+      id: string
+      role: string
+    } | null
   }
   isDemoMode: boolean
+  logoutError?: string | null
   /** Whether the server offers personal access tokens (auth-config
    * discovery). `false` hides the access-tokens panel; `undefined`
    * degrades open (treated as available). */
@@ -118,11 +122,13 @@ type SettingsWorkspaceProps = {
   onStackChange: (stack: string) => void
   /** Navigate to a shared resource's home view from the sharing panel
    * (run -> research, collection -> database, template -> prompt library). */
-  onOpenSharedResource?: (resourceType: string) => void
+  onOpenSharedResource?: (share: InboxShare) => void
   /** Shared sharing-inbox state (resolved once in the desk so the nav badge
    * and the panel agree). `null` hides the sharing section — sharing is off
    * (none/apikey, no capability, or not authenticated). */
   sharing?: SharingInboxHandle | null
+  /** Global authoritative-resource revision used by an open share dialog. */
+  sharingRefreshToken: number
   /** One-shot deep link: when set, the workspace focuses this
    * section on mount/changes (the avatar menu's settings entry). */
   requestedSection?: 'security' | null
@@ -179,6 +185,7 @@ export default function SettingsWorkspace({
   authMode = 'none',
   authSession,
   isDemoMode,
+  logoutError = null,
   patAvailable,
   onApiKeyChange,
   onDemoModeChange,
@@ -190,6 +197,7 @@ export default function SettingsWorkspace({
   requestedSection = null,
   selectedStack,
   sharing = null,
+  sharingRefreshToken,
   stackDiscoveryStatus,
   stackOptions,
 }: SettingsWorkspaceProps) {
@@ -206,7 +214,7 @@ export default function SettingsWorkspace({
   const { t } = useLocale()
   // Instance administration is gated on the instance role (default-closed,
   // [[roleAccess]]) or demo — the single platform-admin axis.
-  const instanceAdmin = isAdminRole(authSession?.role) || isDemoMode
+  const instanceAdmin = isAdminRole(authSession?.user?.role) || isDemoMode
   // Quota administration is instance-admin power (tenant-wide); resolved once
   // here so the nav gate and the panel share one hook instance.
   const quotaAdmin = useQuotaAdmin({ instanceAdmin })
@@ -217,8 +225,8 @@ export default function SettingsWorkspace({
     isDemoMode
     || (authSession?.status === 'authenticated' && patAvailable !== false)
   // The self row in demo is the seeded owner (the real session is anonymous
-  // in demo); otherwise the live session subject.
-  const sessionSub = isDemoMode ? DEMO_OWNER.subject : authSession?.sub ?? null
+  // in demo); otherwise the canonical live-session user id.
+  const sessionUserId = isDemoMode ? DEMO_OWNER.userId : authSession?.user?.id ?? null
   const adminSystemRuntime = useAdminSystemRuntime({
     demo: isDemoMode,
     enabled: instanceAdmin,
@@ -491,6 +499,7 @@ export default function SettingsWorkspace({
         contrastMode={contrastMode}
         hasMultiStackSelection={hasMultiStackSelection}
         isDemoMode={isDemoMode}
+        logoutError={logoutError}
         legal={legal}
         modeOptions={modeOptions}
         onApiKeyChange={onApiKeyChange}
@@ -502,8 +511,9 @@ export default function SettingsWorkspace({
         projectSourceUrl={projectSourceUrl}
         quotaAdmin={quotaAdmin}
         selectedStack={selectedStack}
-        sessionSub={sessionSub}
+        sessionUserId={sessionUserId}
         sharing={sharing}
+        sharingRefreshToken={sharingRefreshToken}
         onOpenSharedResource={onOpenSharedResource}
         setContrastMode={setContrastMode}
         setPreset={setPreset}
@@ -579,7 +589,7 @@ function SettingsSidebar({
             >
               <span className="flex min-w-0 items-center gap-2">
                 <ActiveIcon className="icon-sm shrink-0" />
-                <span className="t-list truncate">{activeItem?.label ?? t.settings.sectionsLabel}</span>
+                <span className="truncate">{activeItem?.label ?? t.settings.sectionsLabel}</span>
               </span>
               <ChevronDown className="icon-sm shrink-0 text-muted-foreground" />
             </Button>
@@ -748,6 +758,7 @@ function SettingsPanel({
   contrastMode,
   hasMultiStackSelection,
   isDemoMode,
+  logoutError,
   legal,
   modeOptions,
   onApiKeyChange,
@@ -759,12 +770,13 @@ function SettingsPanel({
   projectSourceUrl,
   quotaAdmin,
   selectedStack,
-  sessionSub,
+  sessionUserId,
   setContrastMode,
   setPreset,
   setTheme,
   setUserBubbleTone,
   sharing,
+  sharingRefreshToken,
   onOpenSharedResource,
   stackDiscoveryStatus,
   stackModeLabel,
@@ -786,16 +798,19 @@ function SettingsPanel({
   authMode?: AuthMode
   authSession?: {
     status: string
-    displayName: string | null
-    email: string | null
-    role?: string | null
-    sub?: string | null
+    user: {
+      displayName: string | null
+      email: string | null
+      id: string
+      role: string
+    } | null
   }
   onSsoLogin?: () => void
   onSsoLogout?: () => void
   contrastMode: 'high' | 'standard'
   hasMultiStackSelection: boolean
   isDemoMode: boolean
+  logoutError: string | null
   legal: InqtrixHealth['legal'] | undefined
   modeOptions: Array<{
     icon: LucideIcon
@@ -817,13 +832,14 @@ function SettingsPanel({
   projectSourceUrl: string
   quotaAdmin: ReturnType<typeof useQuotaAdmin>
   selectedStack: string
-  sessionSub: string | null
+  sessionUserId: string | null
   setContrastMode: (mode: 'high' | 'standard') => void
   setPreset: (preset: ThemePreset) => void
   setTheme: (theme: ThemeMode) => void
   setUserBubbleTone: (tone: UserBubbleTone) => void
   sharing: SharingInboxHandle | null
-  onOpenSharedResource?: (resourceType: string) => void
+  sharingRefreshToken: number
+  onOpenSharedResource?: (share: InboxShare) => void
   stackDiscoveryStatus: StackDiscoveryStatus
   stackModeLabel: string
   stackOptions: string[]
@@ -857,6 +873,7 @@ function SettingsPanel({
             apiKey={apiKey}
             authMode={authMode}
             authSession={authSession}
+            logoutError={logoutError}
             onApiKeyChange={onApiKeyChange}
             onSsoLogin={onSsoLogin}
             onSsoLogout={onSsoLogout}
@@ -896,7 +913,7 @@ function SettingsPanel({
           <UsersPanel
             admin={adminUsers}
             mode={authMode ?? 'none'}
-            sessionSub={sessionSub}
+            sessionUserId={sessionUserId}
           />
         ) : activeItem.id === 'admin-workspaces' ? (
           <AdminWorkspacesPanel
@@ -919,10 +936,11 @@ function SettingsPanel({
           <SharingPanel
             demo={isDemoMode}
             onOpen={onOpenSharedResource ?? (() => {})}
-            ownerEmail={isDemoMode ? DEMO_OWNER.email : authSession?.email ?? null}
+            ownerEmail={isDemoMode ? DEMO_OWNER.email : authSession?.user?.email ?? null}
             ownerName={
-              isDemoMode ? DEMO_OWNER.displayName : authSession?.displayName ?? null
+              isDemoMode ? DEMO_OWNER.displayName : authSession?.user?.displayName ?? null
             }
+            refreshToken={sharingRefreshToken}
             sharing={sharing}
           />
         ) : (
@@ -1353,6 +1371,7 @@ function SecurityPanel({
   apiKey,
   authMode = 'none',
   authSession,
+  logoutError,
   onApiKeyChange,
   onSsoLogin,
   onSsoLogout,
@@ -1360,7 +1379,11 @@ function SecurityPanel({
   apiHealth: InqtrixHealth | null
   apiKey: string
   authMode?: AuthMode
-  authSession?: { status: string; displayName: string | null; email: string | null }
+  authSession?: {
+    status: string
+    user: { displayName: string | null; email: string | null } | null
+  }
+  logoutError?: string | null
   onApiKeyChange: (apiKey: string) => void
   onSsoLogin?: () => void
   onSsoLogout?: () => void
@@ -1379,14 +1402,14 @@ function SecurityPanel({
           <SettingsRow
             description={
               signedIn
-                ? authSession?.email ?? t.settings.ssoSignedInDescription
+                ? authSession?.user?.email ?? t.settings.ssoSignedInDescription
                 : t.settings.ssoSignedOutDescription
             }
             title={
               signedIn
                 ? t.settings.ssoSignedInAs.replace(
                     '{name}',
-                    authSession?.displayName ?? authSession?.email ?? '?',
+                    authSession?.user?.displayName ?? authSession?.user?.email ?? '?',
                   )
                 : t.settings.ssoTitle
             }
@@ -1401,6 +1424,11 @@ function SecurityPanel({
               </Button>
             )}
           </SettingsRow>
+          {logoutError ? (
+            <p className="mt-2 t-meta text-destructive">
+              {t.settings.ssoLogoutFailed}: {logoutError}
+            </p>
+          ) : null}
         </SettingsSection>
         {/* Only local accounts have a password Inqtrix owns; ldap/oidc
             passwords live upstream. */}

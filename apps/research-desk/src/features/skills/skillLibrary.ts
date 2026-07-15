@@ -1,3 +1,5 @@
+import type { ResourceAccess } from '@/features/sharing/types'
+
 /**
  * Skill library domain logic (plan M3 `3.4`/`3.6`): the wire types of
  * `/v1/skills` and the pure helpers behind the editor — placeholder
@@ -7,10 +9,7 @@
  * coupled to the `{{name}}` slots in the instructions.
  */
 
-export type SkillAccess = {
-  via: 'share'
-  permission: 'view' | 'edit' | 'manage'
-}
+export type SkillAccess = ResourceAccess
 
 /** One clarification point as stored/served (sanitized ids server-side). */
 export type SkillPointInfo = {
@@ -39,15 +38,16 @@ export type SkillInfo = {
   model_tier: '' | 'high' | 'mid' | 'fast'
   effort: string
   include_in_autocomplete: boolean
+  revision: number
   created_at: number
   updated_at: number
-  access?: SkillAccess
+  access: SkillAccess
 }
 
 /** The writable fields (create/update body). */
 export type SkillPayload = Omit<
   SkillInfo,
-  'id' | 'created_at' | 'updated_at' | 'access'
+  'id' | 'created_at' | 'updated_at' | 'revision' | 'access'
 >
 
 /** Kernel tool names a skill may allow — the author-facing vocabulary
@@ -178,10 +178,10 @@ export function payloadFromSkill(skill: SkillInfo): SkillPayload {
 /** Owner or edit-grant may save; view-grant and unknown stay read-only. */
 export function canEditSkill(skill: SkillInfo | null): boolean {
   if (!skill) return true
-  return !skill.access || skill.access.permission !== 'view'
+  return skill.access.mode !== 'shared' || skill.access.permission !== 'view'
 }
 
 /** Deletion stays owner-only (shares never delete). */
 export function canDeleteSkill(skill: SkillInfo | null): boolean {
-  return skill != null && !skill.access
+  return skill != null && skill.access.mode !== 'shared'
 }

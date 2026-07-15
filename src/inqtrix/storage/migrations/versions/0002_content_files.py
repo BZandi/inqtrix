@@ -14,7 +14,40 @@ from __future__ import annotations
 
 from alembic import op
 
-from inqtrix.storage.content_orm import content_metadata
+# Frozen schema snapshot from the deployed revision. Historical migrations
+# must never import the live ORM because later authority changes would alter
+# the schema produced by a fresh traversal.
+from sqlalchemy import (
+    BigInteger,
+    Column,
+    Float,
+    Index,
+    MetaData,
+    Table,
+    Text,
+    text,
+)
+
+content_metadata = MetaData()
+
+files = Table(
+    "files",
+    content_metadata,
+    Column("id", Text, primary_key=True),
+    Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
+    Column("owner_sub", Text, nullable=False),
+    Column("workspace_id", Text, nullable=True),
+    Column("file_name", Text, nullable=False),
+    Column("content_type", Text, nullable=False),
+    Column("size_bytes", BigInteger, nullable=False),
+    Column("sha256", Text, nullable=False),
+    Column("object_key", Text, nullable=False, unique=True),
+    Column("created_at", Float, nullable=False),
+    Index("ix_files_tenant_owner", "tenant_id", "owner_sub"),
+    Index("ix_files_tenant_created", "tenant_id", "created_at"),
+)
+"""Uploaded-file metadata; the bytes live in the object store under
+``object_key``. Row-level security is layered on by migration 0002."""
 
 revision = "0002_content_files"
 down_revision = "0001_identity_schema"

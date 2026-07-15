@@ -37,20 +37,19 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar
 
-from inqtrix.auth.principal import (
-    ANONYMOUS_PRINCIPAL,
-    STATIC_PRINCIPAL,
-    Principal,
-)
+from inqtrix.auth.principal import Principal
 from inqtrix.core.results import RunRequest
+from inqtrix.execution_authority import AuthorizationRevoked
 from inqtrix.execution_failures import terminate_native_run
 from inqtrix.quota.models import QuotaSubject
 from inqtrix.server.runs import RunHandle
 from inqtrix.services.run_service import execute_run_request
+from inqtrix.sync_bridge import run_coro_sync
 
 if TYPE_CHECKING:
     from inqtrix.core.algorithms import AlgorithmRegistry
@@ -59,6 +58,10 @@ if TYPE_CHECKING:
     from inqtrix.runs.valkey_queue import QueuedJob, ValkeyRunQueue
     from inqtrix.services.agent_context import AgentContextResolver
     from inqtrix.services.quota_service import QuotaService
+    from inqtrix.services.execution_dependency_authority import (
+        ExecutionDependencyAuthorizer,
+    )
+    from inqtrix.auth.directory import UserDirectory
 
 log = logging.getLogger("inqtrix")
 
@@ -71,6 +74,10 @@ _ERROR_BACKOFF_SECONDS = 5.0
 
 TJob = TypeVar("TJob")
 TClaimed = TypeVar("TClaimed")
+
+
+class WorkerClaimGuardError(RuntimeError):
+    """Raised when the deployment contract forbids further queue claims."""
 
 
 @dataclass
@@ -116,6 +123,7 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         max_attempts: int,
         heartbeat_seconds: float,
         claim_idle_seconds: float,
+        claim_guard: Callable[[], None] | None = None,
         thread_prefix: str = "inqtrix-job",
     ) -> None:
         self._store = store
@@ -124,6 +132,7 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         self._max_attempts = max_attempts
         self._heartbeat_seconds = heartbeat_seconds
         self._claim_idle_seconds = claim_idle_seconds
+        self._claim_guard = claim_guard
         self._executor = ThreadPoolExecutor(
             max_workers=concurrency, thread_name_prefix=thread_prefix
         )
@@ -211,6 +220,7 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
     def run_forever(self) -> None:
         """Main loop; returns after :meth:`request_stop`."""
         self._queue.ensure_group()
+        self._verify_claim_contract(immediate=True)
         # Own-PEL drain only finds entries when the consumer name is
         # stable across restarts (container hostname without the pid);
         # with the default boot-unique name, crash recovery runs via
@@ -230,6 +240,8 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         while not self._stop.is_set():
             try:
                 self._tick()
+            except WorkerClaimGuardError:
+                raise
             except Exception:  # noqa: BLE001 — survive transient outages
                 log.warning(
                     "Worker %s: Claim-Schleife stolpert ueber einen "
@@ -242,6 +254,7 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
 
     def _tick(self) -> None:
         """One claim-loop iteration (reclaim, reconcile, claim new)."""
+        self._verify_claim_contract()
         now = time.monotonic()
         with self._lock:
             has_capacity = len(self._active) < self._concurrency
@@ -275,6 +288,25 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
             return
         for job in self._queue.claim_new(block_ms=_CLAIM_BLOCK_MS):
             self._start(job, takeover=job.delivery_count > 1)
+
+    def _verify_claim_contract(self, *, immediate: bool = False) -> None:
+        """Fail closed before pending, reclaim, reconcile, or new claims.
+
+        The periodic call keeps idle loops inexpensive. The production guard
+        additionally exposes ``verify_now`` so a queue read that blocked near
+        the polling interval cannot cross the durable PostgreSQL claim boundary
+        using a stale successful result. Plain callable guards remain supported
+        for tests and embedders.
+        """
+        guard = self._claim_guard
+        if guard is None:
+            return
+        if immediate:
+            verify_now = getattr(guard, "verify_now", None)
+            if callable(verify_now):
+                verify_now()
+                return
+        guard()
 
     def _reconcile(self) -> None:
         """Re-enqueue queued rows whose dispatch message got lost.
@@ -310,6 +342,27 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
             }
 
     def _start(self, job: TJob, *, takeover: bool) -> None:
+        if self._stop.is_set():
+            log.info(
+                "Worker %s: Dispatch fuer Job %s nach Shutdown-Grenze "
+                "nicht uebernommen — Stream-Eintrag bleibt fuer Redelivery.",
+                self._store.worker_id,
+                self._entity_id(job),
+            )
+            return
+        # Queue reads can block for the full contract polling interval. Recheck
+        # at the durable claim boundary and leave the stream item unacknowledged
+        # when an upgrade made this worker stale in the meantime.
+        self._verify_claim_contract(immediate=True)
+        if self._stop.is_set():
+            log.info(
+                "Worker %s: Dispatch fuer Job %s waehrend der "
+                "Claim-Pruefung gestoppt — Stream-Eintrag bleibt fuer "
+                "Redelivery.",
+                self._store.worker_id,
+                self._entity_id(job),
+            )
+            return
         entity_id = self._entity_id(job)
         while True:
             with self._lock:
@@ -386,6 +439,14 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
             # A successor won the lock between the two reads. Keep the first
             # one and acknowledge this redundant message.
             self._queue.ack(job.message_id)
+            return
+        if self._stop.is_set():
+            log.info(
+                "Worker %s: Dispatch fuer Job %s vor der Datenbankmutation "
+                "gestoppt — Stream-Eintrag bleibt fuer Redelivery.",
+                self._store.worker_id,
+                entity_id,
+            )
             return
         if job.delivery_count > self._max_attempts:
             self._store.fail(
@@ -464,6 +525,29 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         """Claim and submit a pre-registered successor placeholder."""
         job = placeholder.job
         try:
+            if self._stop.is_set():
+                with self._lock:
+                    if self._active.get(entity_id) is placeholder:
+                        self._active.pop(entity_id, None)
+                log.info(
+                    "Worker %s: Folge-Dispatch fuer Job %s waehrend "
+                    "Shutdown nicht uebernommen — Redelivery uebernimmt.",
+                    self._store.worker_id,
+                    entity_id,
+                )
+                return
+            self._verify_claim_contract(immediate=True)
+            if self._stop.is_set():
+                with self._lock:
+                    if self._active.get(entity_id) is placeholder:
+                        self._active.pop(entity_id, None)
+                log.info(
+                    "Worker %s: Folge-Dispatch fuer Job %s waehrend der "
+                    "Claim-Pruefung gestoppt — Redelivery uebernimmt.",
+                    self._store.worker_id,
+                    entity_id,
+                )
+                return
             if job.delivery_count > self._max_attempts:
                 self._store.fail(
                     entity_id,
@@ -603,6 +687,7 @@ class FencedRunHandle(RunHandle):
 
     def emit(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
         """Emit one event, fenced to this claim attempt."""
+        self.check_execution_authority()
         self._store.emit(
             self.run_id,
             event_type,
@@ -684,6 +769,9 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
         heartbeat_seconds: float,
         claim_idle_seconds: float,
         quota_service: "QuotaService | None" = None,
+        user_lookup: "UserDirectory | None" = None,
+        dependency_authorizer: "ExecutionDependencyAuthorizer | None" = None,
+        claim_guard: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(
             store=store,
@@ -692,15 +780,18 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
             max_attempts=max_attempts,
             heartbeat_seconds=heartbeat_seconds,
             claim_idle_seconds=claim_idle_seconds,
+            claim_guard=claim_guard,
             thread_prefix="inqtrix-job",
         )
         self._resolver = resolver
         self._registry = registry
         self._runtime = runtime
         # Metering for runs that execute off the API process. The worker
-        # has no live principal, so token recording uses the subject
-        # reconstructed from the claimed run row (see _execute).
+        # has no live principal, so token recording uses the canonical user
+        # UUID reconstructed from the claimed run row (see _execute).
         self._quota_service = quota_service
+        self._user_lookup = user_lookup
+        self._dependency_authorizer = dependency_authorizer
 
     def _entity_id(self, job: "QueuedJob") -> str:
         return job.run_id
@@ -770,7 +861,7 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                         str(item) for item in (body.get("skill_ids") or [])
                     ),
                     skill_revisions={
-                        str(key): float(value)
+                        str(key): int(value)
                         for key, value in (
                             body.get("skill_revisions") or {}
                         ).items()
@@ -785,42 +876,73 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                         body.get("execution_directive", "") or ""
                     ),
                 )
-                # Reconstruct the metered subject from the persisted run
-                # attribution — the worker has no live principal, but the
-                # run's token spend must still count toward the
-                # submitter's monthly quota (the in-process path meters
-                # via the principal; this is the worker's equivalent).
+                # Reconstruct quota attribution from the persisted effective
+                # actor UUID — the worker has no live principal, but the run's
+                # token spend must still count toward that user's monthly
+                # quota (the in-process path meters via the principal).
+                actor_user_id = (
+                    uuid.UUID(str(claimed.execution_actor_user_id))
+                    if claimed.execution_actor_user_id is not None
+                    else None
+                )
+                if actor_user_id is None and claimed.created_by_user_id is not None:
+                    raise AuthorizationRevoked(
+                        "run segment has no explicit effective actor"
+                    )
                 quota_subject = None
                 if (
                     self._quota_service is not None
-                    and claimed.created_by_sub
+                    and actor_user_id is not None
                     and claimed.created_by_tenant_id
                 ):
                     quota_subject = QuotaSubject(
                         tenant_id=claimed.created_by_tenant_id,
-                        sub=claimed.created_by_sub,
+                        user_id=actor_user_id,
                     )
-                # Reconstruct the OWNER principal from the persisted run
-                # attribution: the workspace agent scopes its tool calls
-                # and attributes child runs through it (the quota subject
-                # alone cannot carry visibility). None only for legacy
-                # rows without a recorded creator.
+                # The segment actor, never the owner by implication, scopes
+                # tools, knowledge, child runs, quota, and audit.
                 principal = None
                 if (
-                    claimed.created_by_sub
+                    actor_user_id is not None
                     and claimed.created_by_tenant_id
-                    and claimed.created_by_sub
-                    not in (ANONYMOUS_PRINCIPAL.sub, STATIC_PRINCIPAL.sub)
                 ):
-                    # The sentinel subs of the none/apikey modes stay
-                    # principal-less: their historical unscoped view must
-                    # not turn into a membership-scoped one queue-side.
                     principal = Principal(
-                        sub=claimed.created_by_sub,
+                        user_id=actor_user_id,
                         kind="oidc_session",
                         tenant_id=claimed.created_by_tenant_id,
                         role="member",
+                        scopes=frozenset(claimed.execution_scopes),
                     )
+
+                def _check_authority() -> None:
+                    if principal is not None:
+                        if self._user_lookup is None:
+                            raise AuthorizationRevoked(
+                                "worker has no live user lookup"
+                            )
+                        user = run_coro_sync(
+                            self._user_lookup.find_by_user_id(
+                                tenant_id=principal.tenant_id,
+                                user_id=principal.user_id,
+                            )
+                        )
+                        if user is None or user.disabled_at is not None:
+                            raise AuthorizationRevoked(
+                                "effective actor is missing or disabled"
+                            )
+                    check_run = getattr(
+                        self._store, "check_execution_authority", None
+                    )
+                    if callable(check_run):
+                        check_run(job.run_id)
+                    if self._dependency_authorizer is not None:
+                        self._dependency_authorizer.check(
+                            run_request,
+                            principal,
+                        )
+
+                handle.bind_authority_check(_check_authority)
+                _check_authority()
                 requested_token_budget = int(
                     body.get("token_budget", 0) or 0
                 ) or None
@@ -865,6 +987,9 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                     quota_subject=quota_subject,
                     token_budget=requested_token_budget,
                     workspace_id=claimed.workspace_id,
+                    authority_check=(
+                        _check_authority if principal is not None else None
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001 — terminal-write then ack
                 log.exception("Worker-Run %s fehlgeschlagen", job.run_id)

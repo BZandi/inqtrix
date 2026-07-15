@@ -379,8 +379,9 @@ class OidcAuthProvider(AuthProvider):
         allowed_domains: Non-empty set gates logins on the email domain.
         provider_name: Display name for the SSO login button (surfaced by
             the auth-config endpoint; empty falls back to a generic label).
-        skip_email_verified: Accept tokens without
-            ``email_verified=true`` (Entra ID omits the claim).
+        skip_email_verified: Deprecated compatibility argument. Identity
+            admission always requires the literal claim value ``true``;
+            passing this flag logs a warning and does not weaken admission.
         userinfo_fallback: Fetch userinfo when mapped claims are
             missing from the id_token.
         secure_cookies: ``False`` drops the ``Secure`` flag and the
@@ -422,6 +423,7 @@ class OidcAuthProvider(AuthProvider):
         pat_service: "PatService | None" = None,
         registration_gate: "RegistrationGate | None" = None,
         invitations: "InvitationRepository | None" = None,
+        lifecycle: "UserLifecycleService | None" = None,
     ) -> None:
         if not session_secret:
             raise ValueError(
@@ -435,6 +437,11 @@ class OidcAuthProvider(AuthProvider):
         self.pat_service = pat_service
         self.registration_gate = registration_gate
         self.invitations = invitations
+        if lifecycle is None and users is not None:
+            raise RuntimeError(
+                "Scoped OIDC/local/LDAP auth requires an atomic user lifecycle"
+            )
+        self.lifecycle = lifecycle
         self.session_secret = session_secret
         self.session_max_age_seconds = session_max_age_seconds
         self.claim_mapping = ClaimMappingConfig(
@@ -451,6 +458,11 @@ class OidcAuthProvider(AuthProvider):
         )
         self.provider_name = provider_name
         self.skip_email_verified = skip_email_verified
+        if skip_email_verified:
+            log.warning(
+                "OIDC email_verified-Pruefung ist explizit deaktiviert; "
+                "fehlende oder false Claims werden akzeptiert."
+            )
         self.userinfo_fallback = userinfo_fallback
         self.secure_cookies = secure_cookies
         if not secure_cookies:
@@ -559,7 +571,7 @@ class OidcAuthProvider(AuthProvider):
                     )
                     raise HTTPException(status_code=403, detail=_CSRF_INVALID)
             return Principal(
-                sub=session.sub,
+                user_id=session.user_id,
                 kind="oidc_session",
                 tenant_id="default",
                 display_name=session.display_name,
@@ -576,6 +588,13 @@ class OidcAuthProvider(AuthProvider):
         session = await self.sessions.get(session_id)
         if session is None:
             raise HTTPException(status_code=401, detail=_UNAUTHENTICATED)
+        if self.users is not None:
+            user = await self.users.find_by_user_id(
+                tenant_id="default", user_id=session.user_id
+            )
+            if user is None or user.disabled_at is not None:
+                await self.sessions.delete(session_id)
+                raise HTTPException(status_code=401, detail=_UNAUTHENTICATED)
         return session
 
     async def session_payload(self, request: Request) -> dict[str, Any]:
@@ -595,10 +614,8 @@ class OidcAuthProvider(AuthProvider):
         # back to its browser-local id.
         project_namespace: str | None = None
         if self.users is not None:
-            mirrored = await self.users.find_user(
-                tenant_id="default",
-                issuer=session.issuer,
-                subject=session.sub,
+            mirrored = await self.users.find_by_user_id(
+                tenant_id="default", user_id=session.user_id
             )
             if mirrored is not None:
                 # A still-live session whose user was disabled mid-session
@@ -614,16 +631,17 @@ class OidcAuthProvider(AuthProvider):
                     if candidate:
                         project_namespace = await self.users.resolve_default_workspace(
                             tenant_id="default",
-                            issuer=session.issuer,
-                            subject=session.sub,
+                            user_id=session.user_id,
                             candidate=candidate,
                         )
         return {
             "authenticated": True,
-            "sub": session.sub,
-            "email": session.email,
-            "display_name": session.display_name,
-            "role": role,
+            "user": {
+                "id": str(session.user_id),
+                "email": session.email,
+                "display_name": session.display_name,
+                "role": role,
+            },
             "project_namespace": project_namespace,
             "csrf_token": make_csrf_token(
                 self.session_secret, session.id, session.csrf_random
@@ -650,13 +668,13 @@ class OidcAuthProvider(AuthProvider):
         subject = str(claims.get("sub", "")).strip()
         if not subject:
             raise OidcExchangeError("id_token enthaelt kein Subject (sub).")
-        if not self.skip_email_verified:
-            verified = claims.get("email_verified")
-            if verified is not None and verified is not True:
-                raise OidcExchangeError(
-                    "E-Mail-Adresse ist beim Identity-Provider nicht "
-                    "verifiziert."
-                )
+        if (
+            claims.get("email_verified") is not True
+            and not self.skip_email_verified
+        ):
+            raise OidcExchangeError(
+                "E-Mail-Adresse ist beim Identity-Provider nicht verifiziert."
+            )
         email_value = claim_path(claims, cfg.email_claim)
         email = str(email_value) if email_value else None
         username = claim_path(claims, cfg.username_claim)

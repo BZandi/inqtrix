@@ -183,7 +183,7 @@ def _create_skill(client, **overrides) -> str:
         client.container.skill_service.create(
             {**SKILL_PAYLOAD, **overrides},
             tenant_id="default",
-            owner_sub=None,
+            owner_user_id=None,
         )
     )
     return record.id
@@ -349,8 +349,8 @@ def test_dynamic_skill_revision_drift_fails_closed_on_resume():
         run_id = _submit(client)
         wait_status(client, run_id, {"waiting_for_input"})
 
-        current = asyncio.run(
-            client.container.skill_service.get_admitted(
+        current, _access = asyncio.run(
+            client.container.skill_service.get_visible(
                 skill_id, tenant_id="default"
             )
         )
@@ -359,7 +359,7 @@ def test_dynamic_skill_revision_drift_fails_closed_on_resume():
                 skill_id,
                 {**SKILL_PAYLOAD, "allowed_tools": ["web_instant"]},
                 tenant_id="default",
-                expected_updated_at=current.updated_at,
+                expected_revision=current.revision,
             )
         )
         row = client.get(

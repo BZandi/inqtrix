@@ -20,6 +20,7 @@ import {
   type HighlightRange,
 } from './highlight'
 import type { DocumentViewerTarget, KnowledgeDataSource } from './types'
+import { useFileAccessProbe } from './useFileAccessProbe'
 
 type ViewerTab = 'extracted' | 'original'
 
@@ -100,7 +101,11 @@ export function DocumentViewer({
   const fileId = documentState.kind === 'ready'
     ? stringOrNull(documentState.document.metadata.file_id)
     : null
-  const canShowOriginal = Boolean(fileId && dataSource.loadFileContent)
+  const fileAccess = useFileAccessProbe(dataSource, fileId)
+  const canShowOriginal = fileAccess === 'allowed'
+  useEffect(() => {
+    if (tab === 'original' && !canShowOriginal) setTab('extracted')
+  }, [canShowOriginal, tab])
 
   const loadFile = useCallback((): Promise<{ blob: Blob; contentType: string }> => {
     if (!fileId || !dataSource.loadFileContent) {
@@ -178,32 +183,29 @@ export function DocumentViewer({
             </div>
           )}
 
-          <div className="grid h-7 shrink-0 grid-cols-2 rounded-md bg-surface p-0.5">
-            {(['extracted', 'original'] as const).map((tabKey) => {
-              const isActive = tab === tabKey
-              const isDisabled = tabKey === 'original' && !canShowOriginal
-              return (
-                <button
-                  aria-pressed={isActive}
-                  className={cn(
-                    'inline-flex items-center justify-center rounded px-2 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40',
-                    isActive
-                      ? 'bg-background text-foreground shadow-[0_1px_2px_var(--shadow-hairline)]'
-                      : 'text-muted-foreground hover:text-foreground',
-                  )}
-                  disabled={isDisabled}
-                  key={tabKey}
-                  onClick={() => switchTab(tabKey)}
-                  title={isDisabled
-                    ? (dataSource.loadFileContent ? t.knowledge.viewerNoOriginal : t.knowledge.viewerOriginalUnavailable)
-                    : undefined}
-                  type="button"
-                >
-                  {tabKey === 'extracted' ? t.knowledge.viewerExtracted : t.knowledge.viewerOriginal}
-                </button>
-              )
-            })}
-          </div>
+          {canShowOriginal ? (
+            <div className="grid h-7 shrink-0 grid-cols-2 rounded-md bg-surface p-0.5">
+              {(['extracted', 'original'] as const).map((tabKey) => {
+                const isActive = tab === tabKey
+                return (
+                  <button
+                    aria-pressed={isActive}
+                    className={cn(
+                      'inline-flex items-center justify-center rounded px-2 text-xs font-medium transition-colors',
+                      isActive
+                        ? 'bg-background text-foreground shadow-[0_1px_2px_var(--shadow-hairline)]'
+                        : 'text-muted-foreground hover:text-foreground',
+                    )}
+                    key={tabKey}
+                    onClick={() => switchTab(tabKey)}
+                    type="button"
+                  >
+                    {tabKey === 'extracted' ? t.knowledge.viewerExtracted : t.knowledge.viewerOriginal}
+                  </button>
+                )
+              })}
+            </div>
+          ) : null}
 
           <Tooltip>
             <TooltipTrigger asChild>

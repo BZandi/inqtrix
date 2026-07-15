@@ -1,0 +1,191 @@
+export type CollaborationSocketEvent =
+  | { kind: 'close'; code: number; order: number; socketId: number }
+  | { kind: 'durable_ack'; order: number; sequence: number; socketId: number }
+  | { kind: 'open'; order: number; socketId: number }
+  | { kind: 'protocol_error'; order: number; socketId: number }
+
+export type CollaborationSocketObserverState = {
+  events: CollaborationSocketEvent[]
+  pendingFrameDecodes: number
+}
+
+export function collaborationSocketWindow(
+  events: CollaborationSocketEvent[],
+  socketId: number,
+  afterOrder: number,
+  closeCode: number,
+): {
+  close: Extract<CollaborationSocketEvent, { kind: 'close' }>
+  durableAcks: Array<Extract<CollaborationSocketEvent, { kind: 'durable_ack' }>>
+  protocolErrors: Array<Extract<CollaborationSocketEvent, { kind: 'protocol_error' }>>
+} | null {
+  const close = events.find((event): event is Extract<
+    CollaborationSocketEvent,
+    { kind: 'close' }
+  > => (
+    event.kind === 'close'
+    && event.socketId === socketId
+    && event.order > afterOrder
+    && event.code === closeCode
+  ))
+  if (!close) return null
+  return {
+    close,
+    durableAcks: events.filter((event): event is Extract<
+      CollaborationSocketEvent,
+      { kind: 'durable_ack' }
+    > => (
+      event.kind === 'durable_ack'
+      && event.socketId === socketId
+      && event.order > afterOrder
+      && event.order < close.order
+    )),
+    protocolErrors: events.filter((event): event is Extract<
+      CollaborationSocketEvent,
+      { kind: 'protocol_error' }
+    > => (
+      event.kind === 'protocol_error'
+      && event.socketId === socketId
+      && event.order > afterOrder
+      && event.order < close.order
+    )),
+  }
+}
+
+/** Install a content-free observer for real browser collaboration frames. */
+export function installCollaborationWebSocketObserver(): void {
+  type ObserverEvent =
+    | { kind: 'close'; code: number; order: number; socketId: number }
+    | { kind: 'durable_ack'; order: number; sequence: number; socketId: number }
+    | { kind: 'open'; order: number; socketId: number }
+    | { kind: 'protocol_error'; order: number; socketId: number }
+  type ObserverState = {
+    events: ObserverEvent[]
+    pendingFrameDecodes: number
+  }
+  type ObserverWindow = Window & typeof globalThis & {
+    __inqtrixCollaborationSocketObserver?: ObserverState
+  }
+
+  const observerWindow = window as ObserverWindow
+  if (observerWindow.__inqtrixCollaborationSocketObserver) return
+
+  const state: ObserverState = { events: [], pendingFrameDecodes: 0 }
+  const NativeWebSocket = window.WebSocket
+  let nextOrder = 1
+  let nextSocketId = 1
+
+  class Decoder {
+    private readonly bytes: Uint8Array
+    private offset = 0
+
+    constructor(bytes: Uint8Array) {
+      this.bytes = bytes
+    }
+
+    get remaining(): number {
+      return this.bytes.length - this.offset
+    }
+
+    readVarUint(): number {
+      let multiplier = 1
+      let value = 0
+      while (this.offset < this.bytes.length) {
+        const byte = this.bytes[this.offset++]!
+        value += (byte & 0x7f) * multiplier
+        if ((byte & 0x80) === 0) return value
+        multiplier *= 128
+        if (!Number.isSafeInteger(value) || multiplier > 2 ** 49) break
+      }
+      throw new Error('invalid varuint')
+    }
+
+    readBytes(): Uint8Array {
+      const length = this.readVarUint()
+      const end = this.offset + length
+      if (end > this.bytes.length) throw new Error('truncated bytes')
+      const value = this.bytes.subarray(this.offset, end)
+      this.offset = end
+      return value
+    }
+
+    readString(): string {
+      return new TextDecoder().decode(this.readBytes())
+    }
+  }
+
+  const observeFrame = (data: ArrayBuffer, socketId: number, order: number): void => {
+    try {
+      const bytes = new Uint8Array(data)
+      if (bytes.length === 1) return
+      const decoder = new Decoder(bytes)
+      decoder.readString()
+      if (decoder.readVarUint() !== 5) return
+      const payload = JSON.parse(decoder.readString()) as unknown
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        throw new Error('invalid stateless payload')
+      }
+      const message = payload as {
+        hash?: unknown
+        sequence?: unknown
+        type?: unknown
+      }
+      if (decoder.remaining !== 0) throw new Error('trailing stateless bytes')
+      if (message.type !== 'durable_ack') return
+      if (
+        typeof message.hash !== 'string'
+        || !/^[a-f0-9]{64}$/.test(message.hash)
+        || !Number.isSafeInteger(message.sequence)
+        || Number(message.sequence) <= 0
+      ) throw new Error('invalid durable acknowledgement')
+      state.events.push({
+        kind: 'durable_ack',
+        order,
+        sequence: Number(message.sequence),
+        socketId,
+      })
+    } catch {
+      state.events.push({ kind: 'protocol_error', order, socketId })
+    }
+  }
+
+  class ObservedWebSocket extends NativeWebSocket {
+    constructor(url: string | URL, protocols?: string | string[]) {
+      if (protocols === undefined) super(url)
+      else super(url, protocols)
+
+      let collaborationSocket = false
+      try {
+        collaborationSocket = new URL(String(url), window.location.href).pathname === '/collaboration'
+      } catch {
+        return
+      }
+      if (!collaborationSocket) return
+
+      const socketId = nextSocketId++
+      this.addEventListener('open', () => {
+        state.events.push({ kind: 'open', order: nextOrder++, socketId })
+      })
+      this.addEventListener('message', (event) => {
+        const order = nextOrder++
+        if (event.data instanceof ArrayBuffer) {
+          observeFrame(event.data, socketId, order)
+          return
+        }
+        if (!(event.data instanceof Blob)) return
+        state.pendingFrameDecodes += 1
+        void event.data.arrayBuffer()
+          .then((buffer) => observeFrame(buffer, socketId, order))
+          .finally(() => {
+            state.pendingFrameDecodes -= 1
+          })
+      })
+      this.addEventListener('close', (event) => {
+        state.events.push({ kind: 'close', code: event.code, order: nextOrder++, socketId })
+      })
+    }
+  }
+
+  observerWindow.WebSocket = ObservedWebSocket
+  observerWindow.__inqtrixCollaborationSocketObserver = state
+}

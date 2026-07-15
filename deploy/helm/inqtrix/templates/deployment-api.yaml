@@ -5,7 +5,12 @@ metadata:
   labels:
     {{- include "inqtrix.labels" (dict "root" . "component" "api") | nindent 4 }}
 spec:
-  {{- if not .Values.api.autoscaling.enabled }}
+  {{- if and .Values.api.autoscaling.enabled .Values.migrations.enabled .Release.IsUpgrade (eq .Values.migrations.rlsMode "owner") .Values.migrations.ownerMaintenanceConfirmed }}
+  # The pre-upgrade maintenance hook deliberately sets scale=0, which pauses
+  # an HPA until a positive desired replica count is written. This one owner-
+  # upgrade render reactivates it after the migration hooks have succeeded.
+  replicas: {{ max 1 (int .Values.api.autoscaling.minReplicas) }}
+  {{- else if not .Values.api.autoscaling.enabled }}
   replicas: {{ .Values.api.replicaCount }}
   {{- end }}
   selector:
@@ -27,7 +32,8 @@ spec:
       labels:
         {{- include "inqtrix.labels" (dict "root" . "component" "api") | nindent 8 }}
     spec:
-      serviceAccountName: {{ include "inqtrix.serviceAccountName" . }}
+      serviceAccountName: {{ include "inqtrix.workloadServiceAccountName" (dict "root" . "component" "api") }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.api.automountServiceAccountToken }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -43,6 +49,18 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.service.apiPort }}
+          env:
+            # Defense in depth for user-managed Secrets consumed via envFrom:
+            # the privileged migration DSN is never visible to runtime pods.
+            - name: INQTRIX_MIGRATION_DATABASE_URL
+              value: ""
+          {{- if .Values.collaboration.enabled }}
+            - name: INQTRIX_COLLABORATION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "inqtrix.collaborationSecretName" . }}
+                  key: {{ .Values.collaboration.secret.key }}
+          {{- end }}
           {{- include "inqtrix.envFrom" . | nindent 10 }}
           startupProbe:
             httpGet:

@@ -1,17 +1,23 @@
-import { Check, Copy } from '@/components/icons'
+import { Check, Copy, Download, ExternalLink, FileDown, RefreshCw } from '@/components/icons'
 import {
+  Children,
+  cloneElement,
+  createContext,
   isValidElement,
   memo,
+  useCallback,
+  useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
   type ComponentPropsWithoutRef,
+  type ReactElement,
   type ReactNode,
 } from 'react'
-import Markdown, { MarkdownHooks, type Components } from 'react-markdown'
+import Markdown, { type Components } from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
-import rehypePrettyCode, { type Options as RehypePrettyCodeOptions } from 'rehype-pretty-code'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import type { Highlighter, ThemedToken } from 'shiki'
@@ -21,15 +27,31 @@ import type { PluggableList } from 'unified'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
+import {
+  MarkdownBlockFrame,
+  useMarkdownBlockAction,
+  type MarkdownBlockAction,
+} from '@/components/markdown/MarkdownBlockFrame'
 import { MermaidFigure } from '@/components/markdown/MermaidFigure'
+import {
+  copyMarkdownBlockText,
+  downloadMarkdownBlockPng,
+  downloadMarkdownTableCsv,
+  MARKDOWN_BLOCK_FILE_NAMES,
+  markdownSourceFromPosition,
+  type MarkdownSourcePosition,
+} from '@/components/markdown/markdownBlockExport'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import { useTheme } from '@/theme/ThemeProvider'
 import {
-  extractMarkdownCodeBlocks,
   plainCodeLanguageFromClassName,
   rawCodeLanguageFromClassName,
 } from './markdownLanguage'
+import { BoundedLruCache, MARKDOWN_RENDER_CACHE_CAPACITY } from './boundedLruCache'
+import { classifyMarkdownImageSource } from './markdownImagePolicy'
+import { useMarkdownCacheEntry } from './useMarkdownCacheEntry'
+import { useProgressiveMarkdownWork } from './useProgressiveMarkdownWork'
 
 export type MarkdownRendererVariant = 'chat' | 'report'
 
@@ -38,6 +60,21 @@ type MarkdownRendererProps = {
   markdown: string
   variant: MarkdownRendererVariant
 }
+
+type MarkdownImageLoadState = {
+  approved: boolean
+  attempt: number
+  failed: boolean
+}
+
+type MarkdownImageStateContextValue = {
+  approve: (source: string) => void
+  fail: (source: string) => void
+  states: ReadonlyMap<string, MarkdownImageLoadState>
+}
+
+const MarkdownImageStateContext = createContext<MarkdownImageStateContextValue | null>(null)
+const MarkdownSourceContext = createContext<string | null>(null)
 
 type StreamingMarkdownPendingKind = 'code' | 'math' | null
 
@@ -71,9 +108,10 @@ type MarkdownCodeTheme = 'github-dark' | 'github-light'
 type MarkdownHighlightedLine = Array<Pick<ThemedToken, 'color' | 'content' | 'fontStyle'>>
 
 let markdownHighlighterPromise: Promise<Highlighter> | null = null
-const markdownTokenCache = new Map<string, MarkdownHighlightedLine[]>()
+const markdownTokenCache = new BoundedLruCache<string, MarkdownHighlightedLine[]>(
+  MARKDOWN_RENDER_CACHE_CAPACITY,
+)
 const markdownTokenPending = new Set<string>()
-const markdownTokenListeners = new Map<string, Set<() => void>>()
 
 function getMarkdownHighlighter(options: MarkdownHighlighterOptions): Promise<Highlighter> {
   markdownHighlighterPromise ??= createMarkdownHighlighter(options)
@@ -81,45 +119,8 @@ function getMarkdownHighlighter(options: MarkdownHighlighterOptions): Promise<Hi
   return markdownHighlighterPromise
 }
 
-export function preloadMarkdownCodeHighlights(
-  markdowns: readonly string[],
-  resolvedTheme: 'light' | 'dark',
-): Promise<void> {
-  const theme = markdownCodeTheme(resolvedTheme)
-  const jobs = markdowns.flatMap((markdown) =>
-    extractMarkdownCodeBlocks(markdown).map((block) =>
-      ensureMarkdownCodeHighlight({
-        code: block.code,
-        language: block.language,
-        theme,
-      }),
-    ),
-  )
-  return Promise.allSettled(jobs).then(() => undefined)
-}
-
-const PRETTY_CODE_OPTIONS: RehypePrettyCodeOptions = {
-  bypassInlineCode: true,
-  defaultLang: {
-    block: 'plaintext',
-    inline: 'plaintext',
-  },
-  getHighlighter: async (options) => {
-    return getMarkdownHighlighter(options)
-  },
-  keepBackground: false,
-  theme: {
-    dark: 'github-dark',
-    light: 'github-light',
-  },
-}
-
 const MARKDOWN_REMARK_PLUGINS: PluggableList = [remarkGfm, remarkMath]
-const MARKDOWN_FALLBACK_REHYPE_PLUGINS: PluggableList = [rehypeKatex]
-const MARKDOWN_REHYPE_PLUGINS: PluggableList = [
-  rehypeKatex,
-  [rehypePrettyCode, PRETTY_CODE_OPTIONS],
-]
+const MARKDOWN_REHYPE_PLUGINS: PluggableList = [rehypeKatex]
 
 const MARKDOWN_COMPONENTS_BY_VARIANT: Record<MarkdownRendererVariant, Components> = {
   chat: {
@@ -190,6 +191,7 @@ const MARKDOWN_COMPONENTS_BY_VARIANT: Record<MarkdownRendererVariant, Components
         {...props}
       />
     ),
+    img: MarkdownImage,
     li: ({ className, ...props }) => (
       <li className={cn('break-words pl-1 leading-[1.45]', className)} {...props} />
     ),
@@ -199,16 +201,11 @@ const MARKDOWN_COMPONENTS_BY_VARIANT: Record<MarkdownRendererVariant, Components
     p: ({ className, ...props }) => (
       <p className={cn('my-2 break-words leading-[1.42] [overflow-wrap:anywhere] first:mt-0 last:mb-0', className)} {...props} />
     ),
-    pre: (props) => <PrettyCodePre {...props} variant="chat" />,
-    span: MarkdownSpan,
+    pre: (props) => <MarkdownCodePre {...props} variant="chat" />,
     strong: ({ className, ...props }) => (
       <strong className={cn('font-semibold text-foreground', className)} {...props} />
     ),
-    table: ({ className, ...props }) => (
-      <div className="my-3 max-w-full overflow-x-auto rounded-md border border-border bg-background [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <table className={cn('w-full min-w-[32rem] border-collapse text-left text-xs leading-[1.4]', className)} {...props} />
-      </div>
-    ),
+    table: (props) => <MarkdownTable {...props} variant="chat" />,
     tbody: ({ className, ...props }) => (
       <tbody className={cn('divide-y divide-border', className)} {...props} />
     ),
@@ -281,6 +278,7 @@ const MARKDOWN_COMPONENTS_BY_VARIANT: Record<MarkdownRendererVariant, Components
     h6: ({ className, ...props }) => (
       <h6 className={cn('mt-4 break-words text-xs font-semibold text-muted-foreground', className)} {...props} />
     ),
+    img: MarkdownImage,
     hr: ({ className, ...props }) => (
       <hr className={cn('my-8 border-border', className)} {...props} />
     ),
@@ -293,16 +291,11 @@ const MARKDOWN_COMPONENTS_BY_VARIANT: Record<MarkdownRendererVariant, Components
     p: ({ className, ...props }) => (
       <p className={cn('my-4 break-words text-sm leading-7 text-foreground [overflow-wrap:anywhere]', className)} {...props} />
     ),
-    pre: (props) => <PrettyCodePre {...props} variant="report" />,
-    span: MarkdownSpan,
+    pre: (props) => <MarkdownCodePre {...props} variant="report" />,
     strong: ({ className, ...props }) => (
       <strong className={cn('font-semibold text-foreground', className)} {...props} />
     ),
-    table: ({ className, ...props }) => (
-      <div className="my-5 max-w-full overflow-x-auto rounded-lg border border-border [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <table className={cn('w-full min-w-[560px] border-collapse text-left text-sm', className)} {...props} />
-      </div>
-    ),
+    table: (props) => <MarkdownTable {...props} variant="report" />,
     tbody: ({ className, ...props }) => (
       <tbody className={cn('divide-y divide-border', className)} {...props} />
     ),
@@ -336,42 +329,67 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
   variant,
 }: MarkdownRendererProps) {
   const { t } = useLocale()
+  const [imageStates, setImageStates] = useState<Map<string, MarkdownImageLoadState>>(
+    () => new Map(),
+  )
+  const approveImage = useCallback((source: string) => {
+    setImageStates((current) => {
+      const previous = current.get(source)
+      const next = new Map(current)
+      next.set(source, {
+        approved: true,
+        attempt: (previous?.attempt ?? 0) + 1,
+        failed: false,
+      })
+      return next
+    })
+  }, [])
+  const failImage = useCallback((source: string) => {
+    setImageStates((current) => {
+      const previous = current.get(source)
+      if (previous?.failed) return current
+      const next = new Map(current)
+      next.set(source, {
+        approved: previous?.approved ?? false,
+        attempt: previous?.attempt ?? 0,
+        failed: true,
+      })
+      return next
+    })
+  }, [])
+  const imageStateContext = useMemo<MarkdownImageStateContextValue>(() => ({
+    approve: approveImage,
+    fail: failImage,
+    states: imageStates,
+  }), [approveImage, failImage, imageStates])
   const normalizedMarkdown = normalizeLatex(markdown)
   const streamParts = isStreaming
     ? splitStreamingMarkdown(normalizedMarkdown)
     : { pendingKind: null, pendingText: '', stableMarkdown: normalizedMarkdown }
 
   return (
-    <ErrorBoundary
-      title={t.markdownError.title}
-      retryLabel={t.markdownError.retry}
-    >
-      {streamParts.stableMarkdown && variant === 'chat' && (
-        <SynchronousMarkdown markdown={streamParts.stableMarkdown} variant={variant} />
-      )}
-      {streamParts.stableMarkdown && variant !== 'chat' && (
-        <MarkdownHooks
-          components={MARKDOWN_COMPONENTS_BY_VARIANT[variant]}
-          fallback={<SynchronousMarkdown markdown={streamParts.stableMarkdown} variant={variant} />}
-          rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
-          remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-          skipHtml
-        >
-          {streamParts.stableMarkdown}
-        </MarkdownHooks>
-      )}
-      {streamParts.pendingText && (
-        <StreamingMarkdownTail
-          kind={streamParts.pendingKind}
-          text={streamParts.pendingText}
-          variant={variant}
-        />
-      )}
-    </ErrorBoundary>
+    <MarkdownImageStateContext.Provider value={imageStateContext}>
+      <ErrorBoundary
+        title={t.markdownError.title}
+        retryLabel={t.markdownError.retry}
+      >
+        {streamParts.stableMarkdown && (
+          <SynchronousMarkdown markdown={streamParts.stableMarkdown} variant={variant} />
+        )}
+        {streamParts.pendingText && (
+          <StreamingMarkdownTail
+            kind={streamParts.pendingKind}
+            text={streamParts.pendingText}
+            variant={variant}
+          />
+        )}
+      </ErrorBoundary>
+    </MarkdownImageStateContext.Provider>
   )
 })
 
 function MarkdownLink({
+  children,
   className,
   href,
   node,
@@ -382,6 +400,32 @@ function MarkdownLink({
   variant: MarkdownRendererVariant
 }) {
   void node
+
+  const childNodes = Children.toArray(children)
+  if (childNodes.some(isMarkdownImageElement)) {
+    return (
+      <>
+        {childNodes.map((child, index) => (
+          isMarkdownImageElement(child)
+            ? cloneElement(child, {
+              key: `linked-image-${index}`,
+              linkedAnchor: { ...props, className, href, variant },
+            })
+            : (
+              <MarkdownLink
+                {...props}
+                className={className}
+                href={href}
+                key={`linked-content-${index}`}
+                variant={variant}
+              >
+                {child}
+              </MarkdownLink>
+            )
+        ))}
+      </>
+    )
+  }
 
   const anchor = (
     <a
@@ -394,7 +438,9 @@ function MarkdownLink({
       href={href}
       rel={props.rel ?? 'noreferrer'}
       target={props.target ?? '_blank'}
-    />
+    >
+      {children}
+    </a>
   )
 
   if (variant !== 'report' || !href) {
@@ -421,32 +467,209 @@ function MarkdownLink({
   )
 }
 
-function MarkdownSpan({
-  node,
-  style,
-  ...props
-}: ComponentPropsWithoutRef<'span'> & {
+type MarkdownImageProps = ComponentPropsWithoutRef<'img'> & {
+  linkedAnchor?: ComponentPropsWithoutRef<'a'> & {
+    variant: MarkdownRendererVariant
+  }
   node?: unknown
-}) {
-  const { resolvedTheme } = useTheme()
+}
+
+function isMarkdownImageElement(node: ReactNode): node is ReactElement<MarkdownImageProps> {
+  return isValidElement<MarkdownImageProps>(node) && node.type === MarkdownImage
+}
+
+function MarkdownImage({
+  alt,
+  className,
+  linkedAnchor,
+  node,
+  src,
+  ...props
+}: MarkdownImageProps) {
+  const { t } = useLocale()
+  const imageStateContext = useContext(MarkdownImageStateContext)
   void node
 
-  const tokenColor = shikiTokenColor(style, resolvedTheme)
-  return (
-    <span
+  if (!imageStateContext) {
+    throw new Error('MarkdownImage must render inside MarkdownRenderer.')
+  }
+
+  const policy = classifyMarkdownImageSource(src, window.location.href)
+  const label = alt?.trim() || t.markdown.imageFallbackAlt
+  if (policy.kind === 'invalid') {
+    return <span className="text-muted-foreground">{label}</span>
+  }
+
+  const sourceState = imageStateContext.states.get(policy.src)
+  const failed = sourceState?.failed ?? false
+  const approved = policy.kind === 'direct' || sourceState?.approved === true
+  if (!approved || failed) {
+    const message = failed
+      ? t.markdown.externalImageError
+      : t.markdown.externalImageBlocked.replace('{host}', policy.kind === 'external' ? policy.host : '')
+    return (
+      <span className="my-3 flex max-w-full flex-wrap items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-xs text-muted-foreground">
+        <span className="min-w-0 flex-1 break-words">
+          <span className="block font-medium text-foreground">{label}</span>
+          <span className="block break-all">{message}</span>
+        </span>
+        <Button
+          onClick={() => {
+            imageStateContext.approve(policy.src)
+          }}
+          size="sm"
+          type="button"
+          variant="outline"
+        >
+          {failed ? <RefreshCw className="size-3.5" /> : <ExternalLink className="size-3.5" />}
+          {failed ? t.markdown.externalImageRetry : t.markdown.externalImageLoad}
+        </Button>
+      </span>
+    )
+  }
+
+  const image = (
+    <img
       {...props}
-      style={tokenColor ? { ...style, color: tokenColor } : style}
+      alt={alt ?? ''}
+      className={cn('my-3 h-auto max-w-full rounded-md border border-border', className)}
+      decoding="async"
+      key={`${policy.src}-${sourceState?.attempt ?? 0}`}
+      loading="lazy"
+      onError={() => imageStateContext.fail(policy.src)}
+      referrerPolicy="no-referrer"
+      src={policy.src}
     />
+  )
+
+  return linkedAnchor ? <MarkdownLink {...linkedAnchor}>{image}</MarkdownLink> : image
+}
+
+type MarkdownTableProps = ComponentPropsWithoutRef<'table'> & {
+  node?: {
+    position?: MarkdownSourcePosition
+  }
+  variant: MarkdownRendererVariant
+}
+
+function MarkdownTable({
+  className,
+  node,
+  variant,
+  ...props
+}: MarkdownTableProps) {
+  const { t } = useLocale()
+  const source = useContext(MarkdownSourceContext)
+  const sourceMarkdown = source === null
+    ? null
+    : markdownSourceFromPosition(source, node?.position)
+  const sourceWarningRef = useRef(false)
+  const exportRef = useRef<HTMLDivElement | null>(null)
+  const tableRef = useRef<HTMLTableElement | null>(null)
+  const copyAction = useMarkdownBlockAction()
+  const pngAction = useMarkdownBlockAction()
+  const csvAction = useMarkdownBlockAction()
+
+  useEffect(() => {
+    if (sourceMarkdown !== null || sourceWarningRef.current) return
+    sourceWarningRef.current = true
+    console.warn('Inqtrix Markdown table source offsets are unavailable; source copy is disabled.')
+  }, [sourceMarkdown])
+
+  const actions: MarkdownBlockAction[] = [
+    {
+      disabled: sourceMarkdown === null,
+      icon: Copy,
+      id: 'copy-markdown',
+      labels: {
+        error: t.markdown.actionFailed,
+        idle: sourceMarkdown === null
+          ? t.markdown.tableSourceUnavailable
+          : t.markdown.tableCopyMarkdown,
+        pending: t.markdown.actionWorking,
+        success: t.markdown.tableCopiedMarkdown,
+      },
+      onClick: () => {
+        if (sourceMarkdown === null) return
+        void copyAction.run(
+          () => copyMarkdownBlockText(sourceMarkdown),
+          'Inqtrix Markdown table source copy failed.',
+        )
+      },
+      status: copyAction.status,
+    },
+    {
+      icon: Download,
+      id: 'save-png',
+      labels: {
+        error: t.markdown.actionFailed,
+        idle: t.markdown.tableSavePng,
+        pending: t.markdown.actionWorking,
+        success: t.markdown.pngSaved,
+      },
+      onClick: () => {
+        void pngAction.run(async () => {
+          if (!exportRef.current) {
+            throw new Error('Rendered Markdown table is unavailable.')
+          }
+          await downloadMarkdownBlockPng(exportRef.current, MARKDOWN_BLOCK_FILE_NAMES.tablePng)
+        }, 'Inqtrix Markdown table PNG export failed.')
+      },
+      status: pngAction.status,
+    },
+    {
+      icon: FileDown,
+      id: 'save-csv',
+      labels: {
+        error: t.markdown.actionFailed,
+        idle: t.markdown.tableSaveCsv,
+        pending: t.markdown.actionWorking,
+        success: t.markdown.csvSaved,
+      },
+      onClick: () => {
+        void csvAction.run(() => {
+          if (!tableRef.current) {
+            throw new Error('Rendered Markdown table is unavailable.')
+          }
+          downloadMarkdownTableCsv(tableRef.current)
+        }, 'Inqtrix Markdown table CSV export failed.')
+      },
+      status: csvAction.status,
+    },
+  ]
+
+  return (
+    <MarkdownBlockFrame actions={actions} className="inqtrix-markdown-table my-4">
+      <div
+        className={cn(
+          'max-w-full overflow-x-auto border border-border [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
+          variant === 'report' ? 'rounded-lg' : 'rounded-md bg-background',
+        )}
+        ref={exportRef}
+      >
+        <table
+          className={cn(
+            'w-full border-collapse text-left',
+            variant === 'report'
+              ? 'min-w-[560px] text-sm'
+              : 'min-w-[32rem] text-xs leading-[1.4]',
+            className,
+          )}
+          {...props}
+          ref={tableRef}
+        />
+      </div>
+    </MarkdownBlockFrame>
   )
 }
 
 function InlineCode({ children, className, ...props }: ComponentPropsWithoutRef<'code'>) {
-  const isPrettyCodeBlock = 'data-theme' in props || 'data-language' in props
-  const isPlainCodeBlock = plainCodeLanguageFromClassName(className) !== null
+  const isCodeBlock = 'data-language' in props
+    || plainCodeLanguageFromClassName(className) !== null
   return (
     <code
       className={cn(
-        isPrettyCodeBlock || isPlainCodeBlock
+        isCodeBlock
           ? 'font-mono'
           : 'rounded bg-muted px-1 py-0.5 font-mono text-[0.85em] text-foreground',
         className,
@@ -458,7 +681,7 @@ function InlineCode({ children, className, ...props }: ComponentPropsWithoutRef<
   )
 }
 
-function PrettyCodePre({
+function MarkdownCodePre({
   children,
   className,
   node,
@@ -560,29 +783,33 @@ function HighlightedCode({
   const theme = markdownCodeTheme(resolvedTheme)
   const normalizedLanguage = shikiCodeLanguage(language)
   const cacheKey = markdownCodeCacheKey(code, normalizedLanguage, theme)
-  const [, setHighlightVersion] = useState(0)
+  const codeRef = useRef<HTMLElement | null>(null)
+  const lines = useMarkdownCacheEntry({
+    cache: markdownTokenCache,
+    cacheKey,
+  })
 
-  useEffect(() => {
-    if (markdownTokenCache.has(cacheKey)) return undefined
-
-    const unsubscribe = subscribeMarkdownCodeHighlight(cacheKey, () => {
-      setHighlightVersion((version) => version + 1)
-    })
+  const runHighlight = useCallback(() => {
     void ensureMarkdownCodeHighlight({
       code,
       language: normalizedLanguage,
       theme,
     })
-    return unsubscribe
   }, [cacheKey, code, normalizedLanguage, theme])
 
-  const lines = markdownTokenCache.get(cacheKey)
+  useProgressiveMarkdownWork({
+    isReady: lines !== undefined,
+    run: runHighlight,
+    targetRef: codeRef,
+    workKey: cacheKey,
+  })
+
   if (!lines) {
-    return <code className={`language-${normalizedLanguage}`}>{code}</code>
+    return <code className={`language-${normalizedLanguage}`} ref={codeRef}>{code}</code>
   }
 
   return (
-    <code className={`language-${normalizedLanguage}`}>
+    <code className={`language-${normalizedLanguage}`} ref={codeRef}>
       {lines.map((line, lineIndex) => (
         <span data-line="" key={lineIndex}>
           {line.map((token, tokenIndex) => (
@@ -605,14 +832,16 @@ function SynchronousMarkdown({
   variant: MarkdownRendererVariant
 }) {
   return (
-    <Markdown
-      components={MARKDOWN_COMPONENTS_BY_VARIANT[variant]}
-      rehypePlugins={MARKDOWN_FALLBACK_REHYPE_PLUGINS}
-      remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-      skipHtml
-    >
-      {markdown}
-    </Markdown>
+    <MarkdownSourceContext.Provider value={markdown}>
+      <Markdown
+        components={MARKDOWN_COMPONENTS_BY_VARIANT[variant]}
+        rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+        remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+        skipHtml
+      >
+        {markdown}
+      </Markdown>
+    </MarkdownSourceContext.Provider>
   )
 }
 
@@ -798,23 +1027,6 @@ function markdownCodeCacheKey(code: string, language: string, theme: MarkdownCod
   return `${theme}\u0000${language}\u0000${code}`
 }
 
-function subscribeMarkdownCodeHighlight(cacheKey: string, listener: () => void) {
-  const listeners = markdownTokenListeners.get(cacheKey) ?? new Set<() => void>()
-  listeners.add(listener)
-  markdownTokenListeners.set(cacheKey, listeners)
-
-  return () => {
-    listeners.delete(listener)
-    if (listeners.size === 0) markdownTokenListeners.delete(cacheKey)
-  }
-}
-
-function notifyMarkdownCodeHighlight(cacheKey: string) {
-  const listeners = markdownTokenListeners.get(cacheKey)
-  if (!listeners) return
-  for (const listener of listeners) listener()
-}
-
 async function ensureMarkdownCodeHighlight({
   code,
   language,
@@ -857,7 +1069,6 @@ async function ensureMarkdownCodeHighlight({
     console.warn('Inqtrix markdown code highlight failed.', error)
   } finally {
     markdownTokenPending.delete(cacheKey)
-    notifyMarkdownCodeHighlight(cacheKey)
   }
 }
 
@@ -910,21 +1121,6 @@ function rawCodeLanguageFromReactNode(node: ReactNode): string | null {
 
 function propToString(value: unknown) {
   return typeof value === 'string' && value.trim() ? value : null
-}
-
-function shikiTokenColor(
-  style: CSSProperties | undefined,
-  resolvedTheme: 'light' | 'dark',
-) {
-  if (!style) return null
-
-  const styleProperties = style as CSSProperties & Record<string, unknown>
-  const light = propToString(styleProperties['--shiki-light'])
-  const dark = propToString(styleProperties['--shiki-dark'])
-
-  return resolvedTheme === 'dark'
-    ? dark ?? light
-    : light ?? dark
 }
 
 function textFromReactNode(node: ReactNode): string {

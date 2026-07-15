@@ -52,7 +52,7 @@ _DOCUMENT_TEXT_LIMIT = 20_000
 """Character cap per read document — the model sees the truncation
 marker, never a silently shortened text."""
 
-SKILL_LOADED_MARKER = "[skill_geladen:{skill_id}@{updated_at}]"
+SKILL_LOADED_MARKER = "[skill_geladen:{skill_id}@{revision}]"
 """Machine-readable first line of a successful ``load_skill`` result.
 The algorithm reconstructs activated skills from these markers in the
 checkpointed transcript at segment start — a restriction acquired
@@ -932,7 +932,7 @@ def build_kernel_tools() -> list[Any]:
             {"skill_id": record.id, "label": record.label},
         )
         marker = SKILL_LOADED_MARKER.format(
-            skill_id=record.id, updated_at=record.updated_at
+            skill_id=record.id, revision=record.revision
         )
         from inqtrix.agents.skills_runtime import build_skills_block
 

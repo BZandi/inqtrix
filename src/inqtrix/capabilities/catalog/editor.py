@@ -10,6 +10,7 @@ and the run attribution from the injected context.
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,15 +28,15 @@ from inqtrix.project.editor_patch_ports import (
 )
 from inqtrix.project.editor_ports import DocumentNotFound
 from inqtrix.services.editor_patch_service import EditorPatchValidationError
+from inqtrix.services.editor_persistence_service import (
+    CollaborationProjectionUnavailable,
+)
 
 if TYPE_CHECKING:
     from inqtrix.services.editor_patch_service import EditorPatchService
     from inqtrix.services.editor_persistence_service import (
         EditorPersistenceService,
     )
-
-_EDITOR_GRANT = "editor_document"
-
 
 class DocumentContextInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -70,13 +71,18 @@ def build_editor_capabilities(
             document, comments = await service.get_document_context(
                 payload.document_id,
                 visible_to=context.visible_to,
-                also_visible=context.grants_for(_EDITOR_GRANT),
             )
         except DocumentNotFound as exc:
             raise CapabilityError(
                 "editor.document_not_found",
                 "Dokument nicht gefunden.",
                 http_status=404,
+            ) from exc
+        except CollaborationProjectionUnavailable as exc:
+            raise CapabilityError(
+                "editor.collaboration_projection_unavailable",
+                "Der aktuelle Kollaborationsstand konnte nicht gespeichert werden.",
+                http_status=503,
             ) from exc
         return DocumentContextOutput(
             id=document.id,
@@ -152,11 +158,11 @@ class PatchApplyOutput(BaseModel):
     applied_edit_ids: list[str]
 
 
-def _capability_sub(context: CapabilityContext) -> str | None:
-    """The attributable caller sub (the routers' ``_caller_sub`` rule)."""
+def _capability_user_id(context: CapabilityContext) -> uuid.UUID | None:
+    """Return the canonical caller ID used by scoped persistence surfaces."""
     principal = context.principal
     if principal is not None and principal.kind in ("oidc_session", "pat"):
-        return principal.sub
+        return principal.user_id
     return None
 
 
@@ -181,9 +187,8 @@ def build_editor_patch_capabilities(
                 edits=[edit.model_dump() for edit in payload.edits],
                 summary=payload.summary,
                 warnings=[],
-                created_by_sub=_capability_sub(context),
+                created_by_user_id=_capability_user_id(context),
                 visible_to=context.visible_to,
-                also_visible=context.grants_for(_EDITOR_GRANT),
                 principal=context.principal,
             )
         except DocumentNotFound as exc:
@@ -214,7 +219,6 @@ def build_editor_patch_capabilities(
                 payload.patch_id,
                 expected_revision=payload.expected_revision,
                 visible_to=context.visible_to,
-                also_visible=context.grants_for(_EDITOR_GRANT),
                 principal=context.principal,
             )
         except PatchNotFound as exc:

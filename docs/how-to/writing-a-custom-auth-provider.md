@@ -22,12 +22,10 @@ from fastapi import Request
 
 
 class HeaderAuthProvider(AuthProvider):
-    """Trust a reverse proxy that injects a verified user header."""
+    """Trust a reverse-proxy gate for an unscoped deployment."""
 
     @property
     def mode(self) -> AuthMode:
-        # Reuse an existing mode label; a brand-new kind has a large blast
-        # radius (see ADR-AUTH-3). "apikey" reads as "a gated single surface".
         return "apikey"
 
     def resolve_principal(self, request: Request) -> Principal:
@@ -35,7 +33,11 @@ class HeaderAuthProvider(AuthProvider):
         if not subject:
             from fastapi import HTTPException
             raise HTTPException(status_code=401, detail="missing user header")
-        return Principal(sub=subject, kind="static", tenant_id="default")
+        return Principal(
+            user_id=None,
+            kind="static",
+            tenant_id="default",
+        )
 ```
 
 `resolve_principal` is the synchronous path. If your check is async (a network
@@ -43,12 +45,16 @@ call, a DB lookup), override `build_principal_dependency()` to return an async
 FastAPI dependency instead — that is exactly what `OidcAuthProvider` does for
 cookie-session lookups.
 
-The `Principal` carries `sub`, `kind`
+The `Principal` carries the canonical local `user_id`, `kind`
 (`anonymous`/`static`/`oidc_session`/`pat`), `tenant_id`, and optional
 `display_name`/`email`/`session_id`. The `kind` names the **transport**, not the
 identity provider (ADR-AUTH-3): scoped surfaces (workspaces, sharing, PAT
-ownership) key on `kind == "oidc_session"`, so a cookie-session-style provider
-should reuse that kind rather than inventing a new one.
+ownership) require `kind == "oidc_session"` or `"pat"` plus a non-null
+`user_id`. External issuer/subject values stay inside the authentication
+adapter and its directory binding.
+
+`anonymous` and `static` principals always use `user_id=None`. They preserve
+the unscoped single-user deployment modes and cannot participate in sharing.
 
 ## Reuse the session machinery (recommended for cookie logins)
 
@@ -62,8 +68,11 @@ Read those for the pattern:
 - [`src/inqtrix/auth/local.py`](../../src/inqtrix/auth/local.py)
 - [`src/inqtrix/auth/ldap.py`](../../src/inqtrix/auth/ldap.py)
 
-For a stateless/header provider, implementing `AuthProvider` directly (as above)
-is enough; you do not need sessions.
+For an unscoped stateless/header gate, implementing `AuthProvider` directly (as
+above) is enough. A per-user header provider must instead reuse the session
+machinery or provide the equivalent canonical-user lookup, active-user check,
+CSRF protection, and lifecycle stores; merely returning a UUID is not a safe
+substitute.
 
 ## Inject it
 
@@ -88,6 +97,9 @@ further wiring. Run it with any ASGI server pointed at this `app`, e.g.
   you also extend every scoped surface — large blast radius, ADR-AUTH-3).
 - Failures raise `HTTPException(401/403)` — never return a partial/anonymous
   principal silently (Designprinzip 1: No Silent Fallbacks).
+- For scoped authentication, resolve every external identity to one active
+  canonical `users.id` UUID on every request. Never expose or authorize by the
+  external subject.
 - The provider reads its configuration from constructor arguments, not the
   environment (Constructor-First); an `examples/` script or your own composition
   root translates env to constructor args.

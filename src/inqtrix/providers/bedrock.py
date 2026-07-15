@@ -63,6 +63,7 @@ from inqtrix.providers.base import (
     _RetryNoticeMixin,
     _THINKING_MIN_MAX_TOKENS,
     _check_deadline,
+    _check_provider_cancel,
     _check_provider_operation_deadline,
     _operation_deadline,
     is_model_capacity_error,
@@ -555,6 +556,7 @@ class BedrockLLM(
                 raise
 
         for attempt in range(_MAX_BEDROCK_ATTEMPTS):
+            _check_provider_cancel(label="Bedrock-Aufruf")
             _check_provider_operation_deadline(
                 operation_deadline,
                 deadline,

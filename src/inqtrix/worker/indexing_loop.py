@@ -17,9 +17,13 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import TYPE_CHECKING, Any
+import uuid
+from typing import TYPE_CHECKING, Any, Callable
 
 from inqtrix.quota.models import QuotaSubject
+from inqtrix.auth.principal import Principal
+from inqtrix.execution_authority import AuthorizationRevoked
+from inqtrix.execution_failures import classify_execution_failure
 from inqtrix.server.indexing import IndexingJobHandle
 from inqtrix.services.indexing_service import execute_reindex_job
 from inqtrix.urls import sanitize_error
@@ -33,6 +37,9 @@ if TYPE_CHECKING:
     from inqtrix.runs.indexing_queue import QueuedIndexingJob, ValkeyIndexingQueue
     from inqtrix.services.knowledge_service import KnowledgeService
     from inqtrix.services.quota_service import QuotaService
+    from inqtrix.services.execution_dependency_authority import (
+        CollectionEditAuthorizer,
+    )
 
 log = logging.getLogger("inqtrix")
 
@@ -118,7 +125,7 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
         claim_idle_seconds: Reclaim threshold for entries whose owner
             stopped heartbeating.
         quota_service: Optional usage meter for incremental
-            embedding-token accounting (keyed by the persisted subject).
+            embedding-token accounting (keyed by the persisted user UUID).
     """
 
     def __init__(
@@ -132,6 +139,8 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
         heartbeat_seconds: float,
         claim_idle_seconds: float,
         quota_service: "QuotaService | None" = None,
+        authority: "CollectionEditAuthorizer | None" = None,
+        claim_guard: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(
             store=store,
@@ -140,10 +149,12 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
             max_attempts=max_attempts,
             heartbeat_seconds=heartbeat_seconds,
             claim_idle_seconds=claim_idle_seconds,
+            claim_guard=claim_guard,
             thread_prefix="inqtrix-reindex",
         )
         self._knowledge_service = knowledge_service
         self._quota_service = quota_service
+        self._authority = authority
 
     def _entity_id(self, job: "QueuedIndexingJob") -> str:
         return job.job_id
@@ -165,26 +176,52 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
         claimed: "ClaimedIndexingJob",
         cancel_event: threading.Event,
     ) -> None:
+        if claimed.cancel_requested:
+            cancel_event.set()
         handle = FencedIndexingJobHandle(
             self._store, job.job_id, cancel_event, claimed.attempt
         )
         old_message_acked = False
         try:
             try:
-                # Reconstruct the metered subject from the persisted job
-                # attribution — the worker has no live principal, but the
+                # Reconstruct quota attribution from the persisted canonical
+                # user UUID — the worker has no live principal, but the
                 # embedding-token spend must still count toward the
                 # submitter's monthly quota.
-                quota_subject = None
-                if (
-                    self._quota_service is not None
-                    and claimed.created_by_sub
-                    and claimed.created_by_tenant_id
-                ):
-                    quota_subject = QuotaSubject(
-                        tenant_id=claimed.created_by_tenant_id,
-                        sub=claimed.created_by_sub,
+                quota_subject: QuotaSubject | None = None
+                principal: Principal | None = None
+                actor_user_id: uuid.UUID | None = None
+                has_user = claimed.created_by_user_id is not None
+                has_tenant = claimed.created_by_tenant_id is not None
+                if has_user != has_tenant:
+                    raise AuthorizationRevoked(
+                        "reindex job has incomplete requester attribution"
                     )
+                if has_user:
+                    if not claimed.created_by_tenant_id:
+                        raise AuthorizationRevoked(
+                            "reindex job has incomplete requester attribution"
+                        )
+                    actor_user_id = uuid.UUID(str(claimed.created_by_user_id))
+                    principal = Principal(
+                        user_id=actor_user_id,
+                        kind="oidc_session",
+                        tenant_id=claimed.created_by_tenant_id,
+                        role="member",
+                    )
+                    if self._quota_service is not None:
+                        quota_subject = QuotaSubject(
+                            tenant_id=claimed.created_by_tenant_id,
+                            user_id=actor_user_id,
+                        )
+
+                def _check_authority() -> None:
+                    if self._authority is not None:
+                        self._authority.check(
+                            claimed.collection_id,
+                            principal,
+                        )
+
                 execute_reindex_job(
                     handle,
                     knowledge_service=self._knowledge_service,
@@ -192,10 +229,15 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
                     embedding_model=claimed.embedding_model,
                     quota_service=self._quota_service,
                     quota_subject=quota_subject,
+                    authority_check=_check_authority,
+                    actor_user_id=actor_user_id,
                 )
             except Exception as exc:  # noqa: BLE001 — terminal-write then ack
                 log.exception("Worker-Reindex %s fehlgeschlagen", job.job_id)
-                handle.fail(sanitize_error(exc))
+                handle.fail(
+                    sanitize_error(exc),
+                    error_type=classify_execution_failure(exc),
+                )
             if handle.terminal_landed:
                 # Terminal state is committed; only now may the stream
                 # forget the job.

@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Callable, ContextManager, Iterator
 
 from inqtrix.constants import REASONING_TIMEOUT
 from inqtrix.exceptions import (
+    AgentCancelled,
     AgentProviderTimeout,
     AgentStructuredOutputError,
     AgentTimeout,
@@ -170,6 +171,92 @@ def _check_provider_operation_deadline(
     if outer_deadline is not None and outer_deadline <= operation_deadline:
         _check_deadline(outer_deadline)
     raise AgentProviderTimeout(f"{label} hat das Operationszeitlimit erreicht.")
+
+
+# =========================================================
+# Run-cancellation probe (thread-local, optional)
+# =========================================================
+# How often a backoff sleep re-checks the bound cancel probe. A module
+# constant rather than a setting: it bounds internal wake-up granularity,
+# not any operator-tunable behaviour.
+_CANCEL_PROBE_POLL_SECONDS: float = 0.5
+
+_cancel_probe_state = threading.local()
+
+
+@contextmanager
+def provider_cancel_scope(
+    probe: Callable[[], bool] | None,
+) -> Iterator[None]:
+    """Bind one run-cancellation probe for provider calls on this thread.
+
+    Providers consult the probe before every retry attempt and while
+    sleeping between attempts, so a cancelled run stops within
+    ``_CANCEL_PROBE_POLL_SECONDS`` of the request instead of serving the
+    full retry ladder. The binding is thread-local (mirrors
+    :meth:`_RetryNoticeMixin.observe_retries`), which keeps provider
+    signatures unchanged and makes fan-out worker threads bind their own
+    scope.
+
+    Args:
+        probe: Zero-argument callable returning ``True`` once the run has
+            been cancelled (typically ``threading.Event.is_set``). ``None``
+            binds nothing and preserves the historical behaviour exactly
+            (library mode, editor calls, custom adapters).
+    """
+    if probe is None:
+        yield
+        return
+    previous = getattr(_cancel_probe_state, "probe", None)
+    _cancel_probe_state.probe = probe
+    try:
+        yield
+    finally:
+        if previous is not None:
+            _cancel_probe_state.probe = previous
+        else:
+            try:
+                delattr(_cancel_probe_state, "probe")
+            except AttributeError:
+                pass
+
+
+def _provider_cancel_requested() -> bool:
+    """Return whether the bound cancel probe reports cancellation.
+
+    Never raises: a failing probe is logged and treated as "not
+    cancelled" so a diagnostics problem cannot abort a healthy run.
+    """
+    probe = getattr(_cancel_probe_state, "probe", None)
+    if probe is None:
+        return False
+    try:
+        return bool(probe())
+    except Exception:
+        log.exception("Provider cancel probe failed")
+        return False
+
+
+def _check_provider_cancel(*, label: str = "Provider-Aufruf") -> None:
+    """Raise :class:`AgentCancelled` when the bound probe reports cancel.
+
+    Args:
+        label: Operation label used in the log line and exception message
+            so the abandoned call is identifiable in run diagnostics.
+
+    Raises:
+        AgentCancelled: When a probe is bound and reports cancellation.
+            The graph unwinds this into the run's ``cancelled`` terminal
+            state; no retry ladder or backoff sleep is served first.
+    """
+    if not _provider_cancel_requested():
+        return
+    log.warning(
+        "%s abandoned after run cancellation was requested.", label
+    )
+    raise AgentCancelled(
+        f"{label} nach Abbruch-Anforderung abgebrochen."
+    )
 
 
 class _NonFatalNoticeMixin:
@@ -527,14 +614,28 @@ def _retry_delay_seconds(
 def _sleep_before_retry(
     delay: float, deadline: float | None = None
 ) -> None:
-    """Sleep for *delay* seconds, clamped to the remaining deadline."""
+    """Sleep for *delay* seconds, clamped to the remaining deadline.
+
+    The sleep is sliced into ``_CANCEL_PROBE_POLL_SECONDS`` intervals so a
+    cancellation bound via :func:`provider_cancel_scope` interrupts the
+    backoff promptly instead of serving the full delay. Without a bound
+    probe the timing behaviour is identical to one uninterrupted sleep.
+    """
     if delay <= 0:
         return
+    _check_provider_cancel()
     if deadline is not None:
         _check_deadline(deadline)
         delay = min(delay, max(0.0, deadline - time.monotonic()))
-    if delay > 0:
-        time.sleep(delay)
+    if delay <= 0:
+        return
+    wake_at = time.monotonic() + delay
+    while True:
+        remaining = wake_at - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(_CANCEL_PROBE_POLL_SECONDS, remaining))
+        _check_provider_cancel()
 
 
 def _sdk_error_status_code(exc: BaseException) -> int | None:
@@ -617,6 +718,7 @@ def _call_openai_chat_completion_with_retries(
     )
     attempt = 1
     while True:
+        _check_provider_cancel(label=timeout_label)
         if deadline is not None:
             _check_provider_operation_deadline(
                 deadline,

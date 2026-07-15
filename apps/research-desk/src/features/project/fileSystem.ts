@@ -8,7 +8,7 @@ import {
   parseResearchRun,
   type ProjectFile,
 } from './markdown'
-import { DEFAULT_KNOWLEDGE_SESSION_ID, DEFAULT_KNOWLEDGE_SESSION_TITLE } from './knowledgeSessionDefaults'
+import { createBootstrapKnowledgeSession } from './knowledgeSessionDefaults'
 import type {
   EmbedModelId,
   FileAssetRecord,
@@ -23,7 +23,10 @@ import type {
   VectorIndexStatus,
 } from './types'
 import { DEFAULT_EMBED_MODEL_ID, EMBED_MODELS, PROJECT_SCHEMA_VERSION, VECTOR_INDEX_HISTORY_LIMIT } from './types'
-import { createDefaultFileLibrarySections, FILE_SECTION_TEMP_ID } from '@/features/files/sections'
+import {
+  createDefaultFileLibrarySections,
+  temporaryFileSectionId,
+} from '@/features/files/sections'
 import {
   getOrCreateBrowserWorkspaceId,
   isWorkspaceId,
@@ -401,12 +404,9 @@ function buildProjectStateFromFiles({
   const fileLibrary = resolveFileLibraryFromManifest(manifest, fileAssets)
   const { vectorIndexOrder, vectorIndexes } = resolveVectorIndexesFromManifest(manifest, fileLibrary.fileAssets)
   const knowledgeSessionCreatedAt = stringOrNow((project as Record<string, unknown>).updatedAt)
-  const defaultKnowledgeSession = {
-    createdAt: knowledgeSessionCreatedAt,
-    id: DEFAULT_KNOWLEDGE_SESSION_ID,
-    title: DEFAULT_KNOWLEDGE_SESSION_TITLE,
-    updatedAt: knowledgeSessionCreatedAt,
-  }
+  const defaultKnowledgeSession = createBootstrapKnowledgeSession(
+    knowledgeSessionCreatedAt,
+  )
 
   return {
     chatRuleOrder,
@@ -939,8 +939,7 @@ function resolveFileLibraryFromManifest(
     const fallbackTemp = createDefaultFileLibrarySections(now).find((section) => section.kind === 'temporary')
     if (fallbackTemp) sections[fallbackTemp.id] = fallbackTemp
   }
-  const tempSectionId = Object.values(sections).find((section) => section.kind === 'temporary')?.id
-    ?? FILE_SECTION_TEMP_ID
+  const tempSectionId = temporaryFileSectionId(Object.values(sections))
   const sectionOrder = orderFromManifest(manifest.file_section_order, sections)
 
   const fileGroups: Record<string, FileGroupRecord> = {}

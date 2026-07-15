@@ -48,6 +48,10 @@ dependencies = [
     # Direct HTTP for the rerank API adapter (already a transitive
     # dependency of the openai SDK; declared for honesty).
     "httpx>=0.28,<1.0",
+    # Binary WebSocket relay from the public FastAPI gateway to the private
+    # collaboration service. Declared directly because application code uses
+    # the client API rather than relying on uvicorn's optional transitive extra.
+    "websockets>=15,<16",
     # JOSE primitives for the OIDC BFF (id_token validation with an
     # explicit algorithm allowlist, JWKS key sets). Same maintainer as
     # Authlib but without the framework client's SessionMiddleware

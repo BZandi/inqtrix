@@ -20,6 +20,7 @@ from tests.contract._app import (
 )
 
 RUN_SUMMARY_KEYS = {
+    "access",
     "run_id",
     "status",
     "queue_position",
@@ -61,6 +62,7 @@ def test_create_run_returns_202_with_full_summary(monkeypatch):
         assert summary["stack"] == "default"
         assert summary["mode"] == "research"
         assert summary["workspace_id"] is None
+        assert summary["access"] == {"mode": "unscoped"}
         assert summary["events_url"] == f"/v1/runs/{summary['run_id']}/events"
         assert summary["result_url"] == f"/v1/runs/{summary['run_id']}/result"
 
@@ -143,6 +145,57 @@ def test_delete_removes_a_terminal_run_durably(monkeypatch):
         again = client.delete(f"/v1/runs/{run_id}")
         assert again.status_code == 404
         assert again.json() == NOT_FOUND_ENVELOPE
+
+
+def test_import_allocates_server_id_and_is_idempotent_while_row_exists() -> None:
+    payload = {
+        "source_run_id": "local-report-1",
+        "question": "Importierte Frage",
+        "status": "completed",
+        "result": {"answer": "Importierte Antwort"},
+    }
+    with make_contract_client() as client:
+        first = client.post("/v1/runs/import", json=payload)
+        second = client.post("/v1/runs/import", json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["run_id"] != payload["source_run_id"]
+    assert second.json()["run_id"] == first.json()["run_id"]
+
+
+def test_import_after_delete_never_reuses_the_stale_public_run_id() -> None:
+    payload = {
+        "source_run_id": "local-report-reimport",
+        "question": "Importierte Frage",
+        "status": "completed",
+        "result": {"answer": "Importierte Antwort"},
+    }
+    with make_contract_client() as client:
+        first = client.post("/v1/runs/import", json=payload)
+        first_run_id = first.json()["run_id"]
+        assert client.delete(f"/v1/runs/{first_run_id}").status_code == 204
+
+        reimported = client.post("/v1/runs/import", json=payload)
+
+    assert reimported.status_code == 200
+    assert reimported.json()["run_id"] != first_run_id
+
+
+def test_import_rejects_legacy_client_controlled_run_id() -> None:
+    with make_contract_client() as client:
+        response = client.post(
+            "/v1/runs/import",
+            json={
+                "run_id": "client-controlled",
+                "question": "Importierte Frage",
+                "result": {"answer": "Importierte Antwort"},
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert "source_run_id" in response.json()["error"]["message"]
 
 
 def test_delete_of_an_active_run_returns_409(monkeypatch):
@@ -339,6 +392,14 @@ def test_child_events_and_polling_enforce_inherited_workspace() -> None:
     """Child direct URLs retain the parent's workspace security boundary."""
     headers_a = {"X-Inqtrix-Workspace-Id": "workspace-a"}
     headers_b = {"X-Inqtrix-Workspace-Id": "workspace-b"}
+    parent_started = threading.Event()
+    parent_release = threading.Event()
+
+    def run_parent(handle) -> None:
+        parent_started.set()
+        assert parent_release.wait(timeout=5)
+        handle.complete({"answer": "parent", "metrics": {}})
+
     with make_contract_client() as client:
         store = client.app.state.container.run_store
         parent = store.submit(
@@ -346,22 +407,24 @@ def test_child_events_and_polling_enforce_inherited_workspace() -> None:
             stack_name="default",
             workspace_id="workspace-a",
             kind="agent",
-            work=lambda handle: handle.complete(
-                {"answer": "parent", "metrics": {}}
-            ),
+            work=run_parent,
         )
-        child = store.submit(
-            question="Child",
-            stack_name="default",
-            workspace_id="workspace-a",
-            kind="agent_child",
-            parent_run_id=parent["run_id"],
-            root_run_id=parent["run_id"],
-            request_payload={"body": {"parent_task_id": "task-a"}},
-            work=lambda handle: handle.complete(
-                {"answer": "child", "metrics": {}}
-            ),
-        )
+        assert parent_started.wait(timeout=2)
+        try:
+            child = store.submit(
+                question="Child",
+                stack_name="default",
+                workspace_id="workspace-a",
+                kind="agent_child",
+                parent_run_id=parent["run_id"],
+                root_run_id=parent["run_id"],
+                request_payload={"body": {"parent_task_id": "task-a"}},
+                work=lambda handle: handle.complete(
+                    {"answer": "child", "metrics": {}}
+                ),
+            )
+        finally:
+            parent_release.set()
         wait_for_run_status(client, child["run_id"], "completed")
 
         polling = client.get(

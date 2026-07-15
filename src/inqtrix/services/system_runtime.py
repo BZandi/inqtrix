@@ -238,7 +238,7 @@ def _blob_storage_label(object_store: str) -> str:
 
 
 async def _probe_object_store(container: "AppContainer") -> bool:
-    service = container.file_service
+    service = getattr(container, "file_service", None)
     if service is None:
         return False
 
@@ -286,21 +286,23 @@ async def readiness_payload(
 
     Readiness differs from ``/health`` (liveness, provider-only): a pod
     whose DATABASE or QUEUE is unreachable cannot serve requests and
-    must leave the load-balancer rotation (503). A down VECTOR store
-    only degrades the knowledge feature — research/chat/files still
-    work and knowledge routes fail loudly per-request — so it reports
-    ``degraded`` but stays ready (200). Every probe is read-only and
-    bounded (:data:`_RUNTIME_PROBE_TIMEOUT_SECONDS`), well below usual
-    kubelet probe timeouts; the memory backends are trivially ready so
-    the zero-infrastructure default stays green.
+    must leave the load-balancer rotation (503). A down VECTOR or object
+    store degrades only its feature family, so the pod reports
+    ``degraded`` but stays ready (200); capability discovery then disables
+    the affected routes instead of turning a transient S3 outage into a
+    whole-instance outage. Every probe is read-only and bounded
+    (:data:`_RUNTIME_PROBE_TIMEOUT_SECONDS`), well below usual kubelet probe
+    timeouts; memory backends stay zero-infrastructure.
     """
-    database_ok, queue_ok, vector_ok = await asyncio.gather(
+    database_ok, queue_ok, vector_ok, object_store_ok = await asyncio.gather(
         _probe_database(container),
         _probe_queue(container),
         _probe_vector_store_ready(container),
+        _probe_object_store_ready(container),
     )
     ready = database_ok and queue_ok
-    status = "ready" if ready and vector_ok else (
+    optional_backends_ok = vector_ok and object_store_ok
+    status = "ready" if ready and optional_backends_ok else (
         "degraded" if ready else "not_ready"
     )
     checks = {
@@ -312,6 +314,10 @@ async def readiness_payload(
         ),
         "vector_store": _check_label(
             vector_ok, skipped=container.knowledge_service is None
+        ),
+        "object_store": _check_label(
+            object_store_ok,
+            skipped=getattr(container, "file_service", None) is None,
         ),
     }
     return (200 if ready else 503), {"status": status, "checks": checks}
@@ -338,13 +344,23 @@ async def _probe_database(container: "AppContainer") -> bool:
         return False
 
     async def probe() -> bool:
-        from sqlalchemy import text
+        from inqtrix.storage.runtime_contract import (
+            verify_database_runtime_contract,
+        )
 
-        async with session_factory() as session:
-            await session.execute(text("SELECT 1"))
+        await verify_database_runtime_contract(
+            session_factory,
+            app_role=settings.storage.app_role,
+            login_policy=settings.storage.runtime_login_policy,
+        )
         return True
 
     return await _bounded_probe("database", probe)
+
+
+async def database_runtime_contract_ready(container: "AppContainer") -> bool:
+    """Return the hard database-contract state used by HTTP startup gates."""
+    return await _probe_database(container)
 
 
 async def _probe_vector_store_ready(container: "AppContainer") -> bool:
@@ -354,6 +370,13 @@ async def _probe_vector_store_ready(container: "AppContainer") -> bool:
     if container.knowledge_service is None:
         return True
     return await _probe_vector_store(container)
+
+
+async def _probe_object_store_ready(container: "AppContainer") -> bool:
+    """Treat a disabled file service as an intentionally skipped dependency."""
+    if getattr(container, "file_service", None) is None:
+        return True
+    return await _probe_object_store(container)
 
 
 async def _bounded_probe(
@@ -367,10 +390,27 @@ async def _bounded_probe(
                 timeout=_RUNTIME_PROBE_TIMEOUT_SECONDS,
             )
         )
-    except Exception as exc:  # noqa: BLE001 - status payload degrades visibly.
+    except TimeoutError:
+        # ``str(TimeoutError())`` is empty on Python >= 3.11, so name the
+        # bound explicitly; the probed backend logs its own detailed cause
+        # when it fails BEFORE this bound (e.g. the rate-limited
+        # "S3 availability probe failed for bucket ..." warning).
         log.warning(
-            "Runtime availability probe failed for %s: %s",
+            "Runtime availability probe failed for %s: timed out after "
+            "%.1fs; the probed backend logs its own detailed probe warning "
+            "when it fails before this bound.",
             name,
+            _RUNTIME_PROBE_TIMEOUT_SECONDS,
+        )
+        return False
+    except Exception as exc:  # noqa: BLE001 - status payload degrades visibly.
+        # Name the exception type: it rescues diagnostics for exception
+        # classes whose ``str`` form is empty. ``name`` is a static label
+        # and the message is sanitized — no endpoint/bucket/secret leaks.
+        log.warning(
+            "Runtime availability probe failed for %s: %s: %s",
+            name,
+            type(exc).__name__,
             sanitize_log_message(exc),
         )
         return False

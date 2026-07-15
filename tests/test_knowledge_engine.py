@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from inqtrix.auth.identity_memory import MemoryIdentityStore
+from inqtrix.auth.permissions import AuthorizationService
 from inqtrix.embedding_cards import (
     EMBEDDING_CARDS,
     build_embedding_catalog,
@@ -70,8 +72,14 @@ def make_knowledge_context(**kwargs) -> KnowledgeProviderContext:
 
 
 def make_service(context: KnowledgeProviderContext | None = None) -> KnowledgeService:
+    identity = MemoryIdentityStore()
     return KnowledgeService(
         knowledge=context or make_knowledge_context(),
+        authorization=AuthorizationService(
+            members=identity,
+            shares=identity,
+            audit=identity,
+        ),
         chunk_max_chars=2_000,
         max_document_chars=100_000,
     )
@@ -134,16 +142,17 @@ async def test_collection_lifecycle_and_document_count():
         metadata={},
         chunks=["Inhalt"],
         embeddings=[[1.0] * 8],
+        actor_user_id=None,
     )
     assert (await store.get_collection(collection.id)).document_count == 1
 
     documents = await store.list_documents(collection.id)
     assert [doc.title for doc in documents] == ["Rahmenvertrag"]
 
-    await store.delete_document(documents[0].id)
+    await store.delete_document(documents[0].id, actor_user_id=None)
     assert (await store.get_collection(collection.id)).document_count == 0
 
-    await store.delete_collection(collection.id)
+    await store.delete_collection(collection.id, actor_user_id=None)
     with pytest.raises(CollectionNotFound):
         await store.get_collection(collection.id)
 
@@ -162,6 +171,7 @@ async def test_dimension_mismatch_is_rejected_loudly():
             metadata={},
             chunks=["x"],
             embeddings=[[1.0] * 4],
+            actor_user_id=None,
         )
 
 
@@ -179,6 +189,7 @@ async def test_chunk_embedding_count_mismatch_is_rejected():
             metadata={},
             chunks=["a", "b"],
             embeddings=[[1.0] * 8],
+            actor_user_id=None,
         )
 
 
@@ -239,6 +250,7 @@ async def test_reembed_preserves_chunk_ids_and_citation_key():
     await service.reembed_document(
         document=document,
         embedding_model=collection.embedding_model,
+        actor_user_id=None,
     )
 
     after = await store.get_chunks(document.id)
@@ -275,7 +287,7 @@ async def test_get_chunks_orders_by_index_and_404s():
 async def test_delete_unknown_document_raises():
     store = MemoryKnowledgeStore()
     with pytest.raises(DocumentNotFound):
-        await store.delete_document("kd_unknown")
+        await store.delete_document("kd_unknown", actor_user_id=None)
 
 
 @pytest.mark.asyncio
@@ -323,8 +335,14 @@ async def test_service_rejects_empty_fields():
 
 @pytest.mark.asyncio
 async def test_service_enforces_document_size_guard():
+    identity = MemoryIdentityStore()
     service = KnowledgeService(
         knowledge=make_knowledge_context(),
+        authorization=AuthorizationService(
+            members=identity,
+            shares=identity,
+            audit=identity,
+        ),
         chunk_max_chars=2_000,
         max_document_chars=100,
     )

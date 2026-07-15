@@ -50,7 +50,42 @@ app.kubernetes.io/part-of: inqtrix
 {{- if .Values.serviceAccount.create -}}
 {{- default (include "inqtrix.fullname" .) .Values.serviceAccount.name -}}
 {{- else -}}
-{{- default "default" .Values.serviceAccount.name -}}
+{{- if not .Values.serviceAccount.name -}}
+{{- fail "serviceAccount.create=false requires an explicit serviceAccount.name; set name=default only when using the namespace default account is intentional" -}}
+{{- end -}}
+{{- .Values.serviceAccount.name -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+ServiceAccount for an API or worker workload. A component-specific name may
+reference an externally managed ServiceAccount even when create=false. When a
+component account is created without an explicit name, use a stable suffix so
+cloud identity never leaks onto the shared web/collaboration account.
+Takes { "root": $, "component": "api"|"worker" }.
+*/}}
+{{- define "inqtrix.workloadServiceAccountName" -}}
+{{- $root := .root -}}
+{{- $component := .component -}}
+{{- $workload := index $root.Values.serviceAccount $component -}}
+{{- if $workload.name -}}
+{{- $workload.name -}}
+{{- else if $workload.create -}}
+{{- printf "%s-%s" (include "inqtrix.fullname" $root) $component | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- include "inqtrix.serviceAccountName" $root -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Chart-controlled, unannotated accounts for workloads that must never inherit
+API/worker cloud identity. Takes { "root": $, "component": string }.
+*/}}
+{{- define "inqtrix.internalServiceAccountName" -}}
+{{- if .root.Values.serviceAccount.create -}}
+{{- printf "%s-%s" (include "inqtrix.fullname" .root) .component | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- include "inqtrix.serviceAccountName" .root -}}
 {{- end -}}
 {{- end -}}
 
@@ -75,6 +110,15 @@ Image references: [registry/]repository:tag, tag defaulting to the appVersion.
 {{- end -}}
 {{- end -}}
 
+{{- define "inqtrix.image.collaboration" -}}
+{{- $tag := default .Chart.AppVersion .Values.image.collaboration.tag -}}
+{{- if .Values.image.registry -}}
+{{- printf "%s/%s:%s" .Values.image.registry .Values.image.collaboration.repository $tag -}}
+{{- else -}}
+{{- printf "%s:%s" .Values.image.collaboration.repository $tag -}}
+{{- end -}}
+{{- end -}}
+
 {{/*
 Name of the Secret carrying the INQTRIX_* secret env: the user-supplied
 existingSecret, otherwise the chart-managed Secret (named after the release).
@@ -84,6 +128,19 @@ existingSecret, otherwise the chart-managed Secret (named after the release).
 {{- .Values.secret.existingSecret -}}
 {{- else -}}
 {{- include "inqtrix.fullname" . -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Secret carrying the FastAPI-to-Node collaboration bearer. A dedicated Secret
+is optional; otherwise reuse the app Secret but inject only this one key into
+the Node container.
+*/}}
+{{- define "inqtrix.collaborationSecretName" -}}
+{{- if .Values.collaboration.secret.existingSecret -}}
+{{- .Values.collaboration.secret.existingSecret -}}
+{{- else -}}
+{{- include "inqtrix.secretName" . -}}
 {{- end -}}
 {{- end -}}
 
@@ -218,6 +275,14 @@ co-location or the S3 object-store backend.
 {{- else }}
   emptyDir: {}
 {{- end }}
+{{- if .Values.s3.caBundle.existingConfigMap }}
+- name: object-store-ca
+  configMap:
+    name: {{ .Values.s3.caBundle.existingConfigMap }}
+    items:
+      - key: {{ .Values.s3.caBundle.key }}
+        path: ca.crt
+{{- end }}
 {{- end -}}
 
 {{- define "inqtrix.appWritableVolumeMounts" -}}
@@ -229,6 +294,12 @@ co-location or the S3 object-store backend.
   mountPath: /app/logs
 - name: objectstore
   mountPath: {{ .Values.config.INQTRIX_OBJECT_STORE_PATH | default "/var/lib/inqtrix/objects" }}
+{{- if .Values.s3.caBundle.existingConfigMap }}
+- name: object-store-ca
+  mountPath: {{ .Values.s3.caBundle.mountPath }}
+  subPath: ca.crt
+  readOnly: true
+{{- end }}
 {{- end -}}
 
 {{/*

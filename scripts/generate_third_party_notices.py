@@ -20,6 +20,8 @@ SURFACE_ORDER = {
     "python-dev": 1,
     "react-prod": 2,
     "react-dev": 3,
+    "node-prod": 4,
+    "node-dev": 5,
 }
 
 PYTHON_LICENSE_OVERRIDES: dict[str, tuple[str, str]] = {
@@ -37,7 +39,7 @@ PYTHON_LICENSE_OVERRIDES: dict[str, tuple[str, str]] = {
     ),
 }
 
-# React packages that ship a LICENSE file but omit the `license` field from
+# JavaScript packages that ship a LICENSE file but omit the `license` field from
 # package.json, so the pnpm metadata carries no SPDX id and the automatic
 # resolver would fail closed. Keyed by canonical npm name; mirrors
 # PYTHON_LICENSE_OVERRIDES. Verify the bundled LICENSE upstream before adding
@@ -296,23 +298,36 @@ def _license_from_react_package(package: Mapping[str, Any]) -> str:
     if isinstance(raw, list) and raw:
         return " / ".join(sorted(str(item) for item in raw if str(item).strip()))
     raise NoticeGenerationError(
-        f"Missing license metadata for React package {package.get('name')!r}; "
+        f"Missing license metadata for JavaScript package {package.get('name')!r}; "
         "verify the upstream license before adding an override."
     )
 
 
+def _manifest_dependency_names(manifest: Mapping[str, Any], field: str) -> set[str]:
+    raw = manifest.get(field) or {}
+    if not isinstance(raw, Mapping):
+        raise NoticeGenerationError(f"package.json field {field!r} must be an object.")
+    return {canonical_name(str(name)) for name in raw}
+
+
 def collect_react_entries(repo_root: Path) -> list[NoticeEntry]:
-    """Collect React notices from app manifests and installed pnpm metadata."""
+    """Collect browser and Node workspace notices from installed pnpm metadata."""
     root_manifest_path = repo_root / "package.json"
     app_manifest_path = repo_root / "apps" / "research-desk" / "package.json"
+    server_manifest_path = repo_root / "apps" / "collaboration-server" / "package.json"
+    schema_manifest_path = repo_root / "packages" / "editor-schema" / "package.json"
     lock_path = repo_root / "pnpm-lock.yaml"
     store_root = repo_root / "node_modules" / ".pnpm"
     if not root_manifest_path.exists():
         raise NoticeGenerationError("Root package.json not found.")
     if not app_manifest_path.exists():
         raise NoticeGenerationError("React app package.json not found.")
+    if not server_manifest_path.exists():
+        raise NoticeGenerationError("Collaboration server package.json not found.")
+    if not schema_manifest_path.exists():
+        raise NoticeGenerationError("Editor schema package.json not found.")
     if not lock_path.exists():
-        raise NoticeGenerationError("pnpm-lock.yaml not found; cannot build React notices.")
+        raise NoticeGenerationError("pnpm-lock.yaml not found; cannot build JavaScript notices.")
     if not store_root.exists():
         raise NoticeGenerationError(
             "node_modules/.pnpm not found. Run `pnpm install` before generating notices."
@@ -323,18 +338,25 @@ def collect_react_entries(repo_root: Path) -> list[NoticeEntry]:
     if not package_manager.startswith("pnpm@"):
         raise NoticeGenerationError(
             "Root package.json does not pin pnpm as packageManager; "
-            "refusing to use pnpm metadata as the React notice source."
+            "refusing to use pnpm metadata as the JavaScript notice source."
         )
 
     app_manifest = _read_json(app_manifest_path)
-    prod_roots = {
-        canonical_name(str(name))
-        for name in (app_manifest.get("dependencies") or {})
-    }
-    dev_roots = {
-        canonical_name(str(name))
-        for name in (app_manifest.get("devDependencies") or {})
-    }
+    server_manifest = _read_json(server_manifest_path)
+    schema_manifest = _read_json(schema_manifest_path)
+    schema_prod_roots = _manifest_dependency_names(schema_manifest, "dependencies")
+    react_prod_roots = (
+        _manifest_dependency_names(app_manifest, "dependencies") | schema_prod_roots
+    )
+    react_dev_roots = _manifest_dependency_names(app_manifest, "devDependencies")
+    node_prod_roots = (
+        _manifest_dependency_names(server_manifest, "dependencies") | schema_prod_roots
+    )
+    node_dev_roots = (
+        _manifest_dependency_names(root_manifest, "devDependencies")
+        | _manifest_dependency_names(server_manifest, "devDependencies")
+        | _manifest_dependency_names(schema_manifest, "devDependencies")
+    )
 
     packages_by_key: dict[str, dict[str, Any]] = {}
     keys_by_name: dict[str, set[str]] = {}
@@ -348,10 +370,12 @@ def collect_react_entries(repo_root: Path) -> list[NoticeEntry]:
         packages_by_key.setdefault(key, package)
         keys_by_name.setdefault(canonical_name(name), set()).add(key)
 
-    prod = _react_closure(prod_roots, packages_by_key, keys_by_name)
-    dev = _react_closure(dev_roots, packages_by_key, keys_by_name)
+    react_prod = _react_closure(react_prod_roots, packages_by_key, keys_by_name)
+    node_prod = _react_closure(node_prod_roots, packages_by_key, keys_by_name)
+    react_dev = _react_closure(react_dev_roots, packages_by_key, keys_by_name)
+    node_dev = _react_closure(node_dev_roots, packages_by_key, keys_by_name)
     entries: list[NoticeEntry] = []
-    for key in sorted(prod | dev):
+    for key in sorted(react_prod | node_prod | react_dev | node_dev):
         package = packages_by_key[key]
         name = str(package["name"])
         override = REACT_LICENSE_OVERRIDES.get(canonical_name(name))
@@ -360,13 +384,25 @@ def collect_react_entries(repo_root: Path) -> list[NoticeEntry]:
         else:
             license_id = _license_from_react_package(package)
             source = "pnpm package metadata"
+        if key in react_prod:
+            ecosystem = "react"
+            dependency_surface = "react-prod"
+        elif key in node_prod:
+            ecosystem = "node"
+            dependency_surface = "node-prod"
+        elif key in react_dev:
+            ecosystem = "react"
+            dependency_surface = "react-dev"
+        else:
+            ecosystem = "node"
+            dependency_surface = "node-dev"
         entries.append(
             NoticeEntry(
-                ecosystem="react",
+                ecosystem=ecosystem,
                 name=name,
                 version=str(package["version"]),
                 license=license_id,
-                dependency_surface="react-prod" if key in prod else "react-dev",
+                dependency_surface=dependency_surface,
                 metadata_source=source,
             )
         )
@@ -400,9 +436,14 @@ def build_json_document(entries: list[NoticeEntry]) -> str:
         "generated_by": "scripts/generate_third_party_notices.py",
         "sources": {
             "python_lock": "uv.lock",
-            "react_lock": "pnpm-lock.yaml",
-            "react_note": "package-lock.json is intentionally ignored because packageManager pins pnpm.",
-            "react_package": "apps/research-desk/package.json",
+            "javascript_lock": "pnpm-lock.yaml",
+            "javascript_note": "package-lock.json is intentionally ignored because packageManager pins pnpm.",
+            "javascript_packages": [
+                "package.json",
+                "apps/research-desk/package.json",
+                "apps/collaboration-server/package.json",
+                "packages/editor-schema/package.json",
+            ],
         },
         "packages": [asdict(entry) for entry in entries],
     }
@@ -444,7 +485,8 @@ def build_markdown_document(entries: list[NoticeEntry]) -> str:
         "Do not edit it manually.",
         "",
         "The inventory is provided for license-notice transparency only and is not legal advice.",
-        "React package data is based on `pnpm-lock.yaml` and installed pnpm metadata;",
+        "JavaScript package data is based on every shipping workspace manifest,",
+        "`pnpm-lock.yaml`, and installed pnpm metadata;",
         "`package-lock.json` is intentionally ignored because the root `packageManager` pins pnpm.",
         "",
         "## Summary",
@@ -456,8 +498,8 @@ def build_markdown_document(entries: list[NoticeEntry]) -> str:
         lines.append(f"| {surface} | {summary[surface]} |")
     lines.extend(["", "## Python Dependencies", ""])
     lines.extend(_markdown_table([entry for entry in entries if entry.ecosystem == "python"]))
-    lines.extend(["", "## React Dependencies", ""])
-    lines.extend(_markdown_table([entry for entry in entries if entry.ecosystem == "react"]))
+    lines.extend(["", "## JavaScript Dependencies", ""])
+    lines.extend(_markdown_table([entry for entry in entries if entry.ecosystem != "python"]))
     lines.append("")
     return "\n".join(lines)
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
 from dataclasses import replace
 
 from inqtrix.project.editor_patch_ports import (
@@ -67,6 +68,9 @@ class MemoryEditorPatchStore:
         *,
         applied_revision: int,
         applied_edit_ids: list[str],
+        decision_sequence: int | None = None,
+        decided_by_user_id: uuid.UUID | None = None,
+        command_id: uuid.UUID | None = None,
     ) -> EditorPatchRecord:
         with self._lock:
             patch = self._require_pending_locked(patch_id)
@@ -75,18 +79,32 @@ class MemoryEditorPatchStore:
                 status="accepted",
                 applied_revision=applied_revision,
                 applied_edit_ids=tuple(applied_edit_ids),
+                decision_sequence=decision_sequence,
+                decided_by_user_id=decided_by_user_id,
+                command_id=command_id,
                 decided_at=time.time(),
             )
             self._patches[patch_id] = decided
             return decided
 
-    async def mark_rejected(self, patch_id: str, *, note: str) -> EditorPatchRecord:
+    async def mark_rejected(
+        self,
+        patch_id: str,
+        *,
+        note: str,
+        decision_sequence: int | None = None,
+        decided_by_user_id: uuid.UUID | None = None,
+        command_id: uuid.UUID | None = None,
+    ) -> EditorPatchRecord:
         with self._lock:
             patch = self._require_pending_locked(patch_id)
             decided = replace(
                 patch,
                 status="rejected",
                 note=note,
+                decision_sequence=decision_sequence,
+                decided_by_user_id=decided_by_user_id,
+                command_id=command_id,
                 decided_at=time.time(),
             )
             self._patches[patch_id] = decided

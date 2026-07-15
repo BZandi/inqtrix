@@ -18,7 +18,8 @@ spec:
       labels:
         {{- include "inqtrix.labels" (dict "root" . "component" "worker") | nindent 8 }}
     spec:
-      serviceAccountName: {{ include "inqtrix.serviceAccountName" . }}
+      serviceAccountName: {{ include "inqtrix.workloadServiceAccountName" (dict "root" . "component" "worker") }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.worker.automountServiceAccountToken }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -32,6 +33,9 @@ spec:
           command: ["inqtrix-worker"]
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            - name: INQTRIX_MIGRATION_DATABASE_URL
+              value: ""
           {{- include "inqtrix.envFrom" . | nindent 10 }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}

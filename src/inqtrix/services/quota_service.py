@@ -3,7 +3,7 @@
 Constructor-first, injected into the cost-incurring surfaces by the
 container (only when quotas are enabled and the auth mode is oidc, so
 none/apikey/demo deployments never construct it). Authorization stays
-in the PermissionService; this service answers a different question —
+in the AuthorizationService; this service answers a different question —
 how much, not who.
 
 Two checks, two records:
@@ -26,10 +26,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import TYPE_CHECKING, Sequence
 
 from inqtrix.quota.models import (
-    DEFAULT_SUBJECT,
+    DEFAULT_USER_ID,
     STOCK_PERIOD,
     DimensionUsage,
     QuotaDimension,
@@ -84,17 +85,21 @@ class QuotaService:
         # Injectable clock keeps the month-window tests deterministic.
         self._clock = clock
 
-    # -- subject resolution ---------------------------------------------- #
+    # -- quota-account resolution ---------------------------------------- #
 
     def subject_for(self, principal: "Principal | None") -> QuotaSubject | None:
-        """The metered subject, or ``None`` when *principal* is exempt.
+        """The canonical quota account, or ``None`` when exempt.
 
         Anonymous/static principals (and a missing principal) are never
         metered — the single bypass site for the whole service.
         """
         if principal is None or principal.kind in _UNSCOPED_KINDS:
             return None
-        return QuotaSubject(tenant_id=principal.tenant_id, sub=principal.sub)
+        if principal.user_id is None:
+            return None
+        return QuotaSubject(
+            tenant_id=principal.tenant_id, user_id=principal.user_id
+        )
 
     def _now(self) -> float:
         import time
@@ -111,13 +116,13 @@ class QuotaService:
     def _resolve_limit(
         self,
         dimension: QuotaDimension,
-        limits: dict[str, dict[QuotaDimension, int]],
-        sub: str,
+        limits: dict[uuid.UUID | None, dict[QuotaDimension, int]],
+        user_id: uuid.UUID,
     ) -> int | None:
         env_default, env_ceiling = self._env(dimension)
         return effective_limit(
-            override=limits.get(sub, {}).get(dimension),
-            tenant_default=limits.get(DEFAULT_SUBJECT, {}).get(dimension),
+            override=limits.get(user_id, {}).get(dimension),
+            tenant_default=limits.get(DEFAULT_USER_ID, {}).get(dimension),
             env_default=env_default,
             env_ceiling=env_ceiling,
         )
@@ -139,27 +144,27 @@ class QuotaService:
         now = self._now()
         usage = await self._store.read_usage(
             tenant_id=subject.tenant_id,
-            subject_subs=[subject.sub],
+            subject_user_ids=[subject.user_id],
             dimensions=[dimension],
             now=now,
         )
         limits = await self._store.get_limits(
             tenant_id=subject.tenant_id,
-            subject_subs=[subject.sub, DEFAULT_SUBJECT],
+            subject_user_ids=[subject.user_id, DEFAULT_USER_ID],
             dimensions=[dimension],
         )
-        used = usage[subject.sub][dimension]
-        limit = self._resolve_limit(dimension, limits, subject.sub)
+        used = usage[subject.user_id][dimension]
+        limit = self._resolve_limit(dimension, limits, subject.user_id)
         if limit is not None and used + amount > limit:
             # No Silent Fallbacks (Designprinzip 1): every block is
             # visible in the log, at parity with the per-run token-budget
-            # abort. The subject is an OIDC id -> sanitized.
+            # abort. The canonical user UUID remains sanitized for log parity.
             log.warning(
-                "Quota-Block: dimension=%s used=%d limit=%d subject=%s",
+                "Quota-Block: dimension=%s used=%d limit=%d user_id=%s",
                 dimension.value,
                 used,
                 limit,
-                sanitize_log_message(subject.sub),
+                sanitize_log_message(str(subject.user_id)),
             )
             raise QuotaExceeded(
                 dimension=dimension,
@@ -214,7 +219,7 @@ class QuotaService:
         try:
             await self._store.add_usage(
                 tenant_id=subject.tenant_id,
-                subject_sub=subject.sub,
+                subject_user_id=subject.user_id,
                 dimension=dimension,
                 period_start=_active_period(dimension, self._now()),
                 amount=amount,
@@ -222,10 +227,10 @@ class QuotaService:
         except Exception as exc:  # noqa: BLE001 — recording is non-fatal
             log.warning(
                 "Quota-Buchung fehlgeschlagen (Verbrauch nicht gezaehlt): "
-                "dimension=%s amount=%d subject=%s error=%s",
+                "dimension=%s amount=%d user_id=%s error=%s",
                 dimension.value,
                 amount,
-                sanitize_log_message(subject.sub),
+                sanitize_log_message(str(subject.user_id)),
                 sanitize_log_message(exc),
             )
 
@@ -261,20 +266,20 @@ class QuotaService:
         now = self._now()
         usage = await self._store.read_usage(
             tenant_id=subject.tenant_id,
-            subject_subs=[subject.sub],
+            subject_user_ids=[subject.user_id],
             dimensions=dims,
             now=now,
         )
         limits = await self._store.get_limits(
             tenant_id=subject.tenant_id,
-            subject_subs=[subject.sub, DEFAULT_SUBJECT],
+            subject_user_ids=[subject.user_id, DEFAULT_USER_ID],
             dimensions=dims,
         )
         return [
             DimensionUsage(
                 dimension=dimension,
-                used=usage[subject.sub][dimension],
-                limit=self._resolve_limit(dimension, limits, subject.sub),
+                used=usage[subject.user_id][dimension],
+                limit=self._resolve_limit(dimension, limits, subject.user_id),
                 period_start=_active_period(dimension, now),
             )
             for dimension in dims
@@ -288,13 +293,13 @@ class QuotaService:
         One snapshot the admin panel renders directly: the operator
         ceilings (read-only bounds) and env defaults per dimension, the
         admin-set tenant default ("for all"), and one row per metered
-        subject (those with usage or an override; users on the plain
-        default need no row). Each subject row carries, per dimension,
+        user (those with usage or an override; users on the plain default
+        need no row). Each user row carries, per dimension,
         the current usage, the raw per-user override (``None`` = none),
-        and the resolved effective limit. One subject enumeration plus
-        two batched reads (usage + limits) regardless of subject count.
+        and the resolved effective limit. One user enumeration plus two
+        batched reads (usage + limits) regardless of user count.
 
-        The caller (the admin router) enriches subjects with display
+        The caller (the admin router) enriches users with display
         name/email; this service stays identity-agnostic.
         """
         dims = list(QuotaDimension)
@@ -303,7 +308,7 @@ class QuotaService:
         usage = (
             await self._store.read_usage(
                 tenant_id=tenant_id,
-                subject_subs=subs,
+                subject_user_ids=subs,
                 dimensions=dims,
                 now=now,
             )
@@ -312,10 +317,10 @@ class QuotaService:
         )
         limits = await self._store.get_limits(
             tenant_id=tenant_id,
-            subject_subs=[*subs, DEFAULT_SUBJECT],
+            subject_user_ids=[*subs, DEFAULT_USER_ID],
             dimensions=dims,
         )
-        default_raw = limits.get(DEFAULT_SUBJECT, {})
+        default_raw = limits.get(DEFAULT_USER_ID, {})
         env = {d: self._env(d) for d in dims}
         return {
             "dimensions": [d.value for d in dims],
@@ -327,7 +332,7 @@ class QuotaService:
             },
             "subjects": [
                 {
-                    "sub": sub,
+                    "user_id": sub,
                     "dimensions": {
                         d.value: {
                             "used": usage.get(sub, {}).get(d, 0),
@@ -351,33 +356,33 @@ class QuotaService:
         self,
         *,
         tenant_id: str,
-        subject_sub: str,
+        subject_user_id: uuid.UUID | None,
         dimension: QuotaDimension,
         value: int,
-        set_by_sub: str,
+        set_by_user_id: uuid.UUID,
     ) -> None:
         """Upsert one limit (a per-user override, or the tenant default
-        when *subject_sub* is ``DEFAULT_SUBJECT``). ``0`` is an explicit
+        when *subject_user_id* is ``DEFAULT_USER_ID``). ``0`` is an explicit
         unlimited; the operator ceiling still clamps at read time."""
         await self._store.set_limit(
             tenant_id=tenant_id,
-            subject_sub=subject_sub,
+            subject_user_id=subject_user_id,
             dimension=dimension,
             value=value,
-            set_by_sub=set_by_sub,
+            set_by_user_id=set_by_user_id,
         )
 
     async def clear_limit_for(
         self,
         *,
         tenant_id: str,
-        subject_sub: str,
+        subject_user_id: uuid.UUID | None,
         dimension: QuotaDimension,
     ) -> None:
         """Drop one limit row so it falls back to the next layer."""
         await self._store.clear_limit(
             tenant_id=tenant_id,
-            subject_sub=subject_sub,
+            subject_user_id=subject_user_id,
             dimension=dimension,
         )
 
@@ -385,17 +390,17 @@ class QuotaService:
         self,
         *,
         tenant_id: str,
-        subject_sub: str,
+        subject_user_id: uuid.UUID,
         dimension: QuotaDimension,
     ) -> None:
-        """Zero one subject's CURRENT-window flow usage (admin reset).
+        """Zero one user's CURRENT-window flow usage (admin reset).
 
         Raises ``ValueError`` for a stock dimension (the store enforces
         it): stock is freed by deletion, never reset.
         """
         await self._store.reset_usage(
             tenant_id=tenant_id,
-            subject_sub=subject_sub,
+            subject_user_id=subject_user_id,
             dimension=dimension,
             now=self._now(),
         )

@@ -156,12 +156,12 @@ Configures the FastAPI surface started by `python -m inqtrix`: the upstream LLM 
 | `INQTRIX_METRICS_ENABLED` | `false` | Mount the Prometheus `/metrics` endpoint (run-queue gauges, admission rejections by reason, per-route request latency; bounded cardinality, no run-id/subject/session labels). Needs the image built with the `metrics` extra (the stack image bakes it in); the flag alone otherwise logs a WARNING and stays off. Bearer-gated with the API key when one is set, else keep it cluster-internal. See [Metrics](../observability/metrics.md). |
 | `INQTRIX_SERVER_CORS_ORIGINS` | *(empty)* | Comma-list of allowed origins; installs `CORSMiddleware` with credentials. `*` is accepted but WARNs (browsers reject wildcard with credentials). |
 | `INQTRIX_ENABLE_OPENAPI` | `false` | Serve `/openapi.json`, `/docs`, `/redoc`. Documentation routes only; never changes API behaviour. |
-| `INQTRIX_PUBLIC_BASE_URL` | *(empty)* | Externally reachable base URL. Set: knowledge citations become clickable `/v1/sources/...` links. Empty: citations keep the internal `inqtrix://` scheme — a visible degradation, never a guessed hostname. |
+| `INQTRIX_PUBLIC_BASE_URL` | *(empty)* | Externally reachable base URL. It anchors collaboration same-origin checks behind TLS proxies, OIDC callback derivation, and clickable `/v1/sources/...` citations. Empty keeps internal `inqtrix://` citations and forwarded headers cannot authorize a collaboration origin. Helm derives it from an enabled Ingress (or an explicit-host Route); explicit config wins. |
 | `INQTRIX_MAX_TOTAL_INPUT_TOKENS` | `500000` | Approximate-token DoS cap on `question` + `messages[]` (estimated `len(text) // 4`). |
 
 Further tuning: `RUN_COMPLETED_TTL_SECONDS` (300 — how long finished native runs stay queryable in memory), `RUN_EVENT_BUFFER_SIZE` (200 — replay buffer for late SSE subscribers), `MAX_MESSAGES_HISTORY` (20), `INQTRIX_MAX_MESSAGE_COUNT` (200 — HTTP 413 above), `PERPLEXITY_BASE_URL`, `INQTRIX_SERVER_TLS_KEYFILE` / `INQTRIX_SERVER_TLS_CERTFILE` (both or neither; partial setup raises `RuntimeError`). See [Security hardening](../deployment/security-hardening.md).
 
-**Interactions.** `INQTRIX_SERVER_API_KEY` is the inference input for `INQTRIX_AUTH_MODE=infer`. `INQTRIX_PUBLIC_BASE_URL` feeds two other blocks: knowledge citation links and the derived OIDC callback URL. `LITELLM_BASE_URL`/`LITELLM_API_KEY` are reused as the default embedding endpoint by the Knowledge block.
+**Interactions.** `INQTRIX_SERVER_API_KEY` is the inference input for `INQTRIX_AUTH_MODE=infer`. `INQTRIX_PUBLIC_BASE_URL` feeds knowledge citation links, the derived OIDC callback URL, and the trusted external collaboration origin. `LITELLM_BASE_URL`/`LITELLM_API_KEY` are reused as the default embedding endpoint by the Knowledge block.
 
 **When this block is OFF.** In pure library mode the whole group is ignored. With everything at defaults the server runs open (no auth gate, no CORS headers, no TLS, no OpenAPI schema) against a placeholder gateway that fails on the first LLM call.
 
@@ -186,6 +186,7 @@ Selects how every HTTP request resolves to a `Principal`. Five modes exist: `non
 | `INQTRIX_LDAP_URL` | *(empty)* | `ldap` bind target, e.g. `ldaps://ldap.example.com:636`. With `INQTRIX_LDAP_BIND_DN` / `INQTRIX_LDAP_BIND_PASSWORD` and `INQTRIX_LDAP_USER_SEARCH_BASE` it forms the search-then-bind core (all required for `ldap`). Attribute and TLS knobs are in the LDAP further-tuning note below; the admin-group knob is `INQTRIX_LDAP_ADMIN_GROUP_DN` (next rows). |
 | `INQTRIX_OIDC_ADMIN_ROLES` / `INQTRIX_OIDC_ADMIN_GROUPS` | *(empty)* | Comma-separated role/group claim values that grant instance-admin on `oidc` login (grant-only — a non-match never demotes). The `ldap` analogue is `INQTRIX_LDAP_ADMIN_GROUP_DN`. |
 | `INQTRIX_LOGIN_RATE_LIMIT_ENABLED` | `true` | Login brute-force throttle for `local`/`ldap`, keyed per identifier + client IP (sliding window + lockout). Tune with `INQTRIX_LOGIN_RATE_LIMIT_MAX_ATTEMPTS` (10), `INQTRIX_LOGIN_RATE_LIMIT_WINDOW_SECONDS` (300), `INQTRIX_LOGIN_RATE_LIMIT_LOCKOUT_SECONDS` (60). |
+| `INQTRIX_TRUSTED_PROXY_HOPS` | `1` | Trusted reverse-proxy count for resolving the throttle client IP from the **right** of `X-Forwarded-For`. `1` fits the single bundled proxy (nginx `web` container or `scripts/run_research_desk.py`) and is not client-spoofable. Set the exact chain length for multiple proxies (too high re-opens spoofing); set `0` for a directly-exposed API server (socket peer only). |
 
 Further tuning (IdP exchangeability): `INQTRIX_OIDC_SCOPES` (`openid profile email`; add `groups` for Okta/Dex), `INQTRIX_OIDC_USERNAME_CLAIM` (`preferred_username`, dot paths descend into nested claims), `INQTRIX_OIDC_EMAIL_CLAIM` (`email`), `INQTRIX_OIDC_GROUPS_CLAIM` (`groups`), `INQTRIX_OIDC_ROLES_CLAIM` (`roles`; the claim used for admin elevation, dot paths supported), `INQTRIX_OIDC_ALLOWED_DOMAINS` (*(empty)*; comma-separated email-domain allowlist orthogonal to the group allowlist — a login without a listed email domain gets a visible 403, and a login without any email is rejected fail-closed), `INQTRIX_OIDC_CLAIM_SEPARATORS` (`" ,"`; characters a string-valued group/role claim is split on, a JSON array is used as-is), `INQTRIX_OIDC_GROUPS_STRIP_PATH_PREFIX` (`false`; strip a single leading `/` from Keycloak full-path groups), `INQTRIX_OIDC_PROVIDER_NAME` (*(empty)*; SSO login-button label surfaced by the auth-config endpoint), `INQTRIX_OIDC_SKIP_EMAIL_VERIFIED` (`false`; required for Entra ID), `INQTRIX_OIDC_DISCOVERY_URL`, `INQTRIX_OIDC_USERINFO_FALLBACK` (`true`), `INQTRIX_OIDC_CA_CERT`, `INQTRIX_OIDC_INSECURE_DEV_COOKIES` (`false`; loopback-HTTP dev only, WARNs at startup).
 
@@ -201,16 +202,31 @@ Selects persistence for the platform layer (identity, file registry, run records
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `INQTRIX_STORAGE_BACKEND` | `memory` | `memory` (no external services, pytest default) or `postgres`. There is deliberately no SQLite option — the schema relies on Postgres row-level security. |
-| `INQTRIX_DATABASE_URL` | *(empty)* | Async SQLAlchemy URL, e.g. `postgresql+asyncpg://inqtrix:...@127.0.0.1:5432/inqtrix`. Required for `postgres`; empty + `postgres` fails loudly at startup. The database must be migrated (`inqtrix-migrate`). |
-| `INQTRIX_DATABASE_APP_ROLE` | `inqtrix_app` | Role switched to via `SET LOCAL ROLE` per transaction so row-level security applies even for owner/superuser connections. Empty disables the switch. |
+| `INQTRIX_STORAGE_BACKEND` | `memory` | `memory` (no external services, pytest default) or `postgres`. There is deliberately no SQLite option — the schema relies on PostgreSQL 15+ row-level security and constraint features. |
+| `INQTRIX_DATABASE_URL` | *(empty)* | Runtime async SQLAlchemy URL, e.g. `postgresql+asyncpg://inqtrix:...@127.0.0.1:5432/inqtrix`. Required for `postgres`; empty + `postgres` fails loudly at startup. API/worker use this restricted path, never the migration-only credential. |
+| `INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY` | `restricted` | `restricted` requires the session login itself to be `LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION`, have no database/schema `CREATE`, not own or inherit any RLS-owner/BYPASS role, and only `SET ROLE` to the strict app role. `bundled_legacy` is limited to the chart/Compose bundled owner login and still requires the effective app role to be strict. Never use `bundled_legacy` to waive a managed-database role error. |
+| `INQTRIX_MIGRATION_DATABASE_URL` | *(empty)* | Optional direct PostgreSQL URL read only by `inqtrix-migrate`. Empty falls back to `INQTRIX_DATABASE_URL` for bundled/backwards-compatible installations. Production should inject a dedicated migration credential only into the one-shot job. |
+| `INQTRIX_MIGRATION_RLS_MODE` | `auto` | `auto`, `owner`, or `bypass`. `auto` accepts only the legacy superuser/BYPASS path; `bypass` requires a dedicated `NOSUPERUSER BYPASSRLS` login; `owner` uses transaction-bound `NO FORCE ROW LEVEL SECURITY` and table ownership/DDL rights. It never sets a wildcard tenant or disables RLS. |
+| `INQTRIX_MIGRATION_SERVICES_QUIESCED` | `false` | Explicit assertion that API, worker and Collaboration are stopped and pools drained. Required for owner-mode upgrades of an existing schema. |
+| `INQTRIX_DATABASE_APP_ROLE` | `inqtrix_app` | Restricted role switched to via `SET LOCAL ROLE` per transaction. A custom role must expose the same table-level DML/function/sequence contract; empty disables the switch and therefore requires the login itself to satisfy it. The canonical `inqtrix_app` grants remain migration-managed. |
 | `INQTRIX_OBJECT_STORE_BACKEND` | `local` | `local` writes content-addressed blobs below `INQTRIX_OBJECT_STORE_PATH`; `s3` targets any S3-compatible endpoint (SeaweedFS in the dev compose stack) and requires the `INQTRIX_S3_*` fields. File metadata always lives in the file registry, never in the blob store. |
-| `INQTRIX_S3_ENDPOINT_URL` | *(empty)* | S3 endpoint, e.g. `http://127.0.0.1:8333` for SeaweedFS. Required for `s3`; path-style addressing is always used. |
+| `INQTRIX_S3_AUTH_MODE` | `static` | `static` requires explicit access/secret keys and accepts an optional STS token. `default` passes no Inqtrix credentials to boto3, enabling workload/container/instance identity; any Inqtrix static credential in that mode is rejected. |
+| `INQTRIX_S3_ENDPOINT_URL` | *(empty)* | Optional S3-compatible endpoint, e.g. `http://127.0.0.1:8333` for SeaweedFS. Empty delegates native AWS endpoint resolution to boto3. |
+| `INQTRIX_S3_BUCKET` | `inqtrix-files` | Non-empty bucket holding keys below `tenants/<tenant>/files/<uuid>`. Provisioning is controlled separately. |
+| `INQTRIX_S3_ACCESS_KEY` | *(empty)* | Required with `AUTH_MODE=static`; forbidden with `default`. |
+| `INQTRIX_S3_SECRET_KEY` | *(empty)* | Required with `AUTH_MODE=static`; forbidden with `default`. |
+| `INQTRIX_S3_SESSION_TOKEN` | *(empty)* | Optional temporary STS token with static credentials; forbidden with `default`. |
+| `INQTRIX_S3_REGION` | `us-east-1` | Non-empty SDK region. Set the real bucket region for native AWS. |
+| `INQTRIX_S3_ADDRESSING_STYLE` | `path` | `path`, `auto`, or `virtual`. `path` preserves SeaweedFS/MinIO compatibility; `auto` is recommended for native AWS. |
+| `INQTRIX_S3_BUCKET_PROVISIONING` | `create_if_missing` | `create_if_missing` preserves bundled behavior and may call `CreateBucket` after a 404. `existing` never creates infrastructure and is recommended for managed storage. |
+| `INQTRIX_S3_CA_BUNDLE` | *(empty)* | Optional readable PEM CA-file path for private endpoints. There is no TLS-disable setting. |
+| `INQTRIX_S3_SERVER_SIDE_ENCRYPTION` | `none` | `none`, `AES256`, or `aws:kms`; adds only upload encryption arguments and never an ACL. |
+| `INQTRIX_S3_KMS_KEY_ID` | *(empty)* | Optional key id/ARN, accepted only with `SERVER_SIDE_ENCRYPTION=aws:kms`. |
 | `INQTRIX_MAX_FILE_BYTES` | `104857600` | Per-upload cap (100 MiB), enforced while spooling; HTTP 413 above. |
 
-Further tuning: `INQTRIX_OBJECT_STORE_PATH` (`data/object-store`), `INQTRIX_S3_BUCKET` (`inqtrix-files`, created on startup; keys are namespaced `tenants/<tenant>/files/<uuid>`), `INQTRIX_S3_ACCESS_KEY`, `INQTRIX_S3_SECRET_KEY`, `INQTRIX_S3_REGION` (`us-east-1`).
+Further tuning: `INQTRIX_OBJECT_STORE_PATH` (`data/object-store`) and `INQTRIX_REPLICA_COUNT` (`1`; the local backend is rejected above one declared replica).
 
-**Interactions.** `INQTRIX_QUEUE_BACKEND=valkey` requires `INQTRIX_STORAGE_BACKEND=postgres` (enforced loudly in `build_container` — the run row is the source of truth for distributed execution). The dev compose stack at `deploy/compose/compose.dev.yaml` provides postgres and SeaweedFS.
+**Interactions.** Runtime database readiness requires the packaged Alembic head, explicit `SELECT`-only access to the active schema's `alembic_version`, the complete expected tenant-table inventory with enabled and forced RLS, canonical policies and exact least-privilege table grants, explicit tenant-policy function execution, `USAGE`-only identity sequences, a working tenant GUC, `row_security=on`, active RLS and a writable transaction. The `NOSUPERUSER NOBYPASSRLS` effective role needs schema `USAGE` but no database/schema `CREATE` and may neither own, inherit nor assume ownership/BYPASS of a managed dependency. The restricted session login and every role it can actually assume are audited for the same forbidden DDL, grant and mutation capabilities; PostgreSQL 16+ `SET FALSE` memberships are not treated as assumable, while immediately inherited owner authority is still rejected. PUBLIC table/column ACLs, canonical app-role column ACLs, table `TRUNCATE`, `REFERENCES`, `TRIGGER`, `MAINTAIN`, grant options and non-append-only `audit_log` rights are rejected. Explicit named reporting/backup roles that runtime identities cannot use remain operator policy. Catalog checks use the active PostgreSQL schema, followed by a policy-function call and harmless protected-table query. Schema revision 0049 and later require PostgreSQL 15+. A mismatch returns `not_ready`, gates business routes and prevents workers from claiming jobs. `INQTRIX_QUEUE_BACKEND=valkey` requires `INQTRIX_STORAGE_BACKEND=postgres` (the run row is the source of truth for distributed execution). Compose-only `INQTRIX_MIGRATION_ENV_FILE` selects an optional separate migration env file; API/worker never load it. See [Database migrations](../deployment/database-migrations.md) and [Object storage](../deployment/object-storage.md).
 
 **When this block is OFF.** With `memory`, identity facts, the file registry, and native run records live in process memory and vanish on restart; finished runs only outlive completion by `RUN_COMPLETED_TTL_SECONDS`. Uploaded blobs still hit the local disk path, but their registry entries do not survive a restart.
 
@@ -260,7 +276,7 @@ Further tuning: `INQTRIX_RERANK_CANDIDATE_DEPTH` (40 — pool retrieved before r
 
 Background reindex (re-embed) tuning: `INQTRIX_REINDEX_MAX_CONCURRENT` (6 — how many DIFFERENT collections re-embed at once; a single collection is always serialized, one active reindex per collection; concurrent reindexes add up on the embedding endpoint and compete with live query-embedding, so lower it if bulk reindex starves interactive search — in worker mode the real parallelism is `INQTRIX_WORKER_CONCURRENCY` and this governs admission only), `INQTRIX_REINDEX_QUEUE_MAX_SIZE` (50 — waiting reindex jobs; full → 429), `INQTRIX_REINDEX_COMPLETED_TTL_SECONDS` (3600 — terminal-record retention, in both the in-memory and the durable Postgres store), `INQTRIX_REINDEX_HISTORY_LIMIT` (10 — terminal records kept per collection for the inline run history), `INQTRIX_REINDEX_EVENT_BUFFER_SIZE` (200 — recent events retained per job for late SSE subscribers, in-memory tier).
 
-**Interactions.** The embedding endpoint defaults to the Server block's LiteLLM gateway, so a standard proxy deployment needs no extra embedding configuration. `INQTRIX_RERANKER_PROVIDER=llm` runs through the deployment's own LLM provider (fast tier) — no rerank API contract needed, but roughly an order of magnitude costlier and slower than a cross-encoder, hard-capped at 20 candidates per query with a visible log line. `INQTRIX_PUBLIC_BASE_URL` (Server) turns knowledge citations into clickable `/v1/sources/...` links. The dev compose stack provides Qdrant.
+**Interactions.** The embedding endpoint defaults to the Server block's LiteLLM gateway, so a standard proxy deployment needs no extra embedding configuration. `INQTRIX_RERANKER_PROVIDER=llm` runs through the deployment's own LLM provider (fast tier) — no rerank API contract needed, but roughly an order of magnitude costlier and slower than a cross-encoder, hard-capped at 20 candidates per query with a visible log line. `INQTRIX_PUBLIC_BASE_URL` (Server) turns knowledge citations into clickable `/v1/sources/...` links. The dev compose stack provides Qdrant. Combining an `http://` `INQTRIX_QDRANT_URL` with `INQTRIX_QDRANT_API_KEY` makes qdrant-client emit its insecure-connection `UserWarning` at startup — by design, because the key crosses the wire unencrypted. In-cluster plain HTTP constrained by a NetworkPolicy is an accepted posture (the warning is informational); for TLS set `INQTRIX_QDRANT_URL=https://…`. There is no Qdrant-specific CA-bundle setting, so a private-CA certificate must be trusted by the container's system trust store.
 
 **When this block is OFF.** No knowledge or sources routes are registered, no embedding provider is constructed, and requests naming `mode=knowledge` get the standard mode-validation 400. The `/v1/capabilities` manifest reports the absence, so the research-desk UI hides the knowledge workspace instead of rendering dead controls.
 
@@ -291,9 +307,81 @@ Resource-sharing policy for the cookie-session multi-user modes (`oidc`/`local`/
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `INQTRIX_SHARING_RESTRICT_TO_WORKSPACE_MEMBERS` | `false` | When `true`, a user may only share a resource with people they share at least one workspace with, and the share typeahead is scoped the same way. A grant-time (write) restriction only — turning it on never revokes an existing grant. Default `false` keeps sharing tenant-wide, byte-identical to deployments before this setting existed. Only meaningful in the cookie-session modes that mount the sharing surface; the single-operator `none`/`apikey` modes never mount it. |
+| `INQTRIX_SHARING_RESTRICT_TO_WORKSPACE_MEMBERS` | `false` | When `true`, grant, accept, typeahead, and every live resource access require owner and recipient to share at least one workspace. Losing the last common workspace revokes pending and accepted shares in both directions; startup reconciles existing shares before readiness. Turning the setting off stops future workspace checks but never restores a revoked share. Default `false` keeps sharing tenant-wide. Only meaningful in cookie-session modes; `none`/`apikey` never mount sharing. |
 
 **When this block is OFF.** Default `false` = tenant-wide sharing, identical to before this setting existed.
+
+## Editor collaboration (`CollaborationSettings`)
+
+Configures the optional PostgreSQL-backed live editor. The browser always uses
+the same-origin `/collaboration` path; the HTTP and WebSocket URLs below are
+private FastAPI-to-Node addresses. The complete topology and operating
+procedure are in [Deploy editor collaboration](../deployment/editor-collaboration.md).
+
+| Variable | Default | Effect |
+|---|---|---|
+| `INQTRIX_COLLABORATION_ENABLED` | `false` | Registers the public collaboration API, WebSocket gateway, PostgreSQL store, and private Node client. `true` fails startup when any required storage, auth, URL, or secret prerequisite is missing. |
+| `INQTRIX_COLLABORATION_HTTP_URL` | *(empty)* | Private Node HTTP origin, for example `http://collaboration:1234`. Required when enabled and never returned to browsers. |
+| `INQTRIX_COLLABORATION_WS_URL` | *(empty)* | Private Node WebSocket URL ending in `/collaboration`, for example `ws://collaboration:1234/collaboration`. Required when enabled. |
+| `INQTRIX_COLLABORATION_SECRET` | *(empty)* | Bearer/HMAC secret shared only by FastAPI and Node. Required when enabled, at least 32 characters, and must differ from `INQTRIX_SESSION_SECRET`. |
+| `INQTRIX_COLLABORATION_TENANT_ID` | `default` | Canonical tenant for the single-deployment Node service. FastAPI rejects every private state, update, command, snapshot, and maintenance request naming a different tenant. Configure the same value on API and Node. |
+| `INQTRIX_COLLABORATION_ALLOWED_ORIGINS` | *(empty)* | Comma-separated additional absolute `http(s)` origins accepted by the WebSocket gateway. Same-origin remains implicit; entries may not contain paths, credentials, queries, or fragments. |
+| `INQTRIX_COLLABORATION_LEASE_TTL_SECONDS` | `60` | Lifetime of a document-scoped browser lease. Range 15-300 seconds. |
+| `INQTRIX_COLLABORATION_TOKEN_REFRESH_SECONDS` | `30` | Browser lease-refresh interval returned by the session API and honored by the collaboration controller. It must be lower than the lease TTL. |
+| `INQTRIX_COLLABORATION_INSTANCE_LEASE_SECONDS` | `15` | Lifetime of the single-writer Node fencing lease. Range 5-300 seconds. |
+| `INQTRIX_COLLABORATION_INSTANCE_RENEW_SECONDS` | `5` | Fencing-lease renewal interval; must be lower than the instance lease. Range 1-60 seconds. |
+| `INQTRIX_COLLABORATION_PROVIDER_FLUSH_MS` | `50` | Browser update-batching interval returned by the session API and honored by the collaboration controller. Range 10-1000 ms. |
+| `INQTRIX_COLLABORATION_SNAPSHOT_IDLE_SECONDS` | `5` | Idle interval after which Node stores a verified snapshot. Range 1-300 seconds. |
+| `INQTRIX_COLLABORATION_SNAPSHOT_UPDATE_COUNT` | `256` | Durable tail update count that triggers a snapshot. |
+| `INQTRIX_COLLABORATION_SNAPSHOT_TAIL_BYTES` | `1048576` | Durable update-tail byte size that triggers a snapshot (1 MiB by default). |
+| `INQTRIX_COLLABORATION_MAX_FRAME_BYTES` | `2097152` | Maximum public/private binary WebSocket frame (2 MiB). Uvicorn and the bundled launcher enforce it before ASGI materializes a frame; relay checks remain as defense in depth and close oversize messages with code `1009`. |
+| `INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES` | `32` | Maximum inbound frame queue per physical WebSocket. Uvicorn, the bundled launcher, Python upstream clients, and Node share this validated 1-256 frame bound. |
+| `INQTRIX_COLLABORATION_MAX_DOCUMENT_BYTES` | `10485760` | Maximum Markdown/Yjs document accepted for conversion or projection (10 MiB); larger requests fail with HTTP 413. |
+| `INQTRIX_COLLABORATION_MAX_SESSIONS_PER_USER_DOCUMENT` | `5` | Concurrent lease/session cap for one user and document. |
+| `INQTRIX_COLLABORATION_SESSION_RATE_PER_MINUTE` | `30` | Session issuance/rotation limit per user per minute. |
+| `INQTRIX_COLLABORATION_UPDATE_RATE_COUNT` | `120` | Update-frame allowance per connection in the configured rate window. |
+| `INQTRIX_COLLABORATION_UPDATE_RATE_WINDOW_SECONDS` | `10` | Window for `INQTRIX_COLLABORATION_UPDATE_RATE_COUNT`. |
+| `INQTRIX_COLLABORATION_AWARENESS_RATE_PER_SECOND` | `20` | Awareness-frame allowance per connection per second. |
+| `INQTRIX_COLLABORATION_UPDATE_PAYLOAD_RETENTION_SECONDS` | `86400` | Minimum age before snapshot-covered binary update payloads may be pruned (24 hours). Attribution metadata is retained separately. |
+| `INQTRIX_COLLABORATION_ACTIVITY_RETENTION_SECONDS` | `7776000` | Retention for update attribution and decision metadata (90 days). |
+| `INQTRIX_COLLABORATION_TOMBSTONE_RETENTION_SECONDS` | `7776000` | Delay before physical cleanup of a tombstoned collaboration document (90 days). Version 1 has no restore UI. |
+| `INQTRIX_COLLABORATION_PROTOCOL_VERSION` | `1` | Expected stateless/binary protocol version. A client mismatch becomes read-only and reports an update-required state. |
+| `INQTRIX_COLLABORATION_SCHEMA_VERSION` | `1` | Expected shared editor schema version. Browser, Node, and stored document must match. |
+
+The Node process reads a small additional process-level surface. Give it only
+these values and the shared collaboration limits above; do not pass the API's
+database, session, provider, or object-store credentials into Node.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `INQTRIX_API_INTERNAL_URL` | *(required)* | Private FastAPI origin used for lease introspection, durable persistence, policy events, and compaction. |
+| `INQTRIX_COLLABORATION_BIND_ADDRESS` | `0.0.0.0` | Node bind address inside its private service network. This is not a browser URL. |
+| `INQTRIX_COLLABORATION_PORT` | `1234` | Node HTTP and WebSocket listen port. Bundled deployments expose it only through a private service. |
+| `INQTRIX_COLLABORATION_HTTP_TIMEOUT_MS` | `5000` | Timeout for one Node-to-FastAPI internal HTTP request. Range 100-30000 ms. |
+| `INQTRIX_COLLABORATION_MAX_QUEUED_BYTES` | `8388608` | Maximum aggregate inbound bytes reserved across one physical socket before Hocuspocus processing (8 MiB by default). Exceeding the budget closes with code `4429` before another frame copy is enqueued. |
+| `INQTRIX_COLLABORATION_SOCKET_BACKPRESSURE_BYTES` | `4194304` | Maximum WebSocket `bufferedAmount` accepted before another inbound frame is processed (4 MiB by default). Exceeding it closes with code `4429`. |
+| `INQTRIX_COLLABORATION_POLICY_POLL_MS` | `2000` | Interval for polling existing `user_events` revocations. Range 250-60000 ms. |
+| `INQTRIX_COLLABORATION_POLICY_REVALIDATION_TIMEOUT_MS` | `7500` | Maximum time an affected connection may remain pending during policy revalidation before Node closes it. Range 1000-60000 ms. |
+| `INQTRIX_COLLABORATION_MAINTENANCE_INTERVAL_SECONDS` | `60` | Interval for fenced global compaction and retention maintenance. Range 5-86400 seconds; it runs independently of document snapshot activity. |
+| `INQTRIX_COLLABORATION_RECONCILE_MAX_HASHES` | `256` | Maximum number of pending update hashes accepted in one durability-reconciliation message. Range 1-1000. |
+| `INQTRIX_COLLABORATION_RECONCILE_RATE_COUNT` | `10` | Durability-reconciliation request allowance per authenticated connection. Exceeding it closes the WebSocket with code `4429`. Range 1-1000. |
+| `INQTRIX_COLLABORATION_RECONCILE_RATE_WINDOW_SECONDS` | `10` | Window for `INQTRIX_COLLABORATION_RECONCILE_RATE_COUNT`. Range 1-60 seconds. |
+| `INQTRIX_COLLABORATION_SNAPSHOT_RETRY_BASE_MS` | `1000` | Initial delay for autonomous retry of a failed eligible snapshot. Range 100-60000 ms. |
+| `INQTRIX_COLLABORATION_SNAPSHOT_RETRY_MAX_MS` | `30000` | Cap for snapshot retry exponential backoff. Range 100-300000 ms and must be at least the base delay. |
+| `INQTRIX_COLLABORATION_TENANT_ID` | `default` | Canonical tenant sent on every private persistence call and checked against lease introspection. Version 1 runs one tenant per deployment, matching the current `Principal` model. |
+
+**Interactions.** Collaboration requires `INQTRIX_STORAGE_BACKEND=postgres`
+and a cookie-session `INQTRIX_AUTH_MODE` (`local`, `ldap`, or `oidc`). Anonymous,
+static-key, and PAT principals cannot obtain a document lease. The feature uses
+the existing PostgreSQL database and `user_events`; it does not require
+SQLite, Redis/Valkey, a second database, or a Node data volume. Version 1 is
+fixed to one Node replica.
+
+**When this block is OFF.** The public collaboration routes and WebSocket
+gateway are absent. Legacy Markdown documents behave unchanged. Existing
+collaboration documents retain their binary state in PostgreSQL and are
+limited to their last stored Markdown projection in read-only form; no legacy
+body autosave is substituted.
 
 ## Agent platform (`AgentPlatformSettings`)
 
@@ -331,7 +419,7 @@ Requires the `agent` dependency extra; deployments should also set
 
 Long-term memory requires a real per-user principal (`oidc_session` or
 PAT). It stays disabled for anonymous and legacy static-key principals to
-avoid shared anonymous memory. Memory endpoints derive `(tenant_id, sub)`
+avoid shared anonymous memory. Memory endpoints derive `(tenant_id, user_id)`
 from auth and reject owner fields in the request body or query string.
 
 ## Process-level variables (outside `Settings`)
@@ -374,10 +462,18 @@ Optional external services for integration tests (each empty value skips its sui
 | `INQTRIX_TEST_S3_ENDPOINT` | *(empty)* | S3-compatible endpoint enabling the object-store S3 tests. |
 | `INQTRIX_TEST_S3_ACCESS_KEY` | `inqtrix-dev-access` | Access key for the test S3 endpoint. |
 | `INQTRIX_TEST_S3_SECRET_KEY` | `inqtrix-dev-secret` | Secret key for the test S3 endpoint. |
+| `INQTRIX_TEST_S3_MANAGED_BUCKET` | *(empty)* | Existing bucket enabling the opt-in managed-S3 smoke test through the SDK default credential chain. The test never creates or deletes the bucket. |
+| `INQTRIX_TEST_S3_MANAGED_ENDPOINT_URL` | *(empty)* | Optional S3-compatible endpoint for the managed-S3 smoke; empty uses native AWS endpoint resolution. |
+| `INQTRIX_TEST_S3_MANAGED_REGION` | `us-east-1` | Region for the opt-in managed-S3 smoke. |
 
 Evaluation harness (`tests/eval/`): `INQTRIX_EVAL_GOLDEN_SET` (`base`), `INQTRIX_EVAL_KNOWLEDGE_PROFILE` (`standard`), `INQTRIX_EVAL_VECTOR_BACKEND` (`memory`), `INQTRIX_EVAL_QDRANT_URL` (`http://127.0.0.1:6333`), `INQTRIX_EVAL_QDRANT_API_KEY` (*(empty)*), `INQTRIX_EVAL_SPARSE` (`bm25_german`), `INQTRIX_EVAL_RERANKER` (`none`), `INQTRIX_EVAL_CONTEXTUALIZE` (`off`), `INQTRIX_EVAL_EMBEDDING_PROVIDER` (`openai_compatible`), `INQTRIX_EVAL_EMBEDDING_MODEL` (`text-embedding-3-small`), `INQTRIX_EVAL_EMBEDDING_BASE_URL` (*(empty)*), `INQTRIX_EVAL_EMBEDDING_API_KEY` (*(empty)*), `INQTRIX_EVAL_AZURE_ENDPOINT` (*(empty)*), `INQTRIX_EVAL_AZURE_API_KEY` (*(empty)*). These mirror the corresponding runtime knobs but isolate an eval run from any deployment configuration.
 
 Research Desk launcher (`scripts/run_research_desk.py`, dev convenience): `INQTRIX_DIST_DIR` (*(empty)*; override the built React `dist/` location), `INQTRIX_BACKEND_URL` (`http://localhost:5100`; backend origin the launcher proxies to), `RESEARCH_DESK_HOST` (`127.0.0.1`), `RESEARCH_DESK_PORT` (`8080`).
+
+Compose-only web ingress: `INQTRIX_WEB_BIND_ADDRESS` (`127.0.0.1`; set
+`0.0.0.0` only for an explicit trusted-LAN test) and `INQTRIX_WEB_PORT`
+(`8080`). These values publish only the nginx `web` service; internal API and
+data-service ports remain private.
 
 Search debug script (`scripts/debug_search_dataflow.py`): `INQTRIX_PERPLEXITY_INSTRUCTIONS` (*(unset)*), `INQTRIX_PERPLEXITY_MODEL` (*(unset)*), `INQTRIX_PERPLEXITY_PRESET` (`fast-search`). Script-local overrides for ad-hoc Perplexity dataflow debugging; the runtime equivalents are `INQTRIX_SEARCH_INSTRUCTIONS` / `SEARCH_MODEL` / `INQTRIX_SEARCH_PRESET` in the Providers block.
 

@@ -18,6 +18,11 @@ from inqtrix.runtime_logging import sanitize_event_payload
 SNAPSHOT_EVENT = "inqtrix.run.snapshot"
 CHILD_PROGRESS_EVENT = "inqtrix.agent.child.progress"
 
+# String form of the terminal lifecycle statuses. Single source of truth:
+# ``inqtrix.server.runs.TERMINAL_RUN_STATUSES`` derives its enum set from
+# this value set (this module must stay import-free of the server layer).
+TERMINAL_RUN_STATUS_VALUES = frozenset({"completed", "failed", "cancelled"})
+
 _CHILD_SNAPSHOT_KEYS = frozenset(
     {
         "current_node",
@@ -88,6 +93,9 @@ class RunRecordView(Protocol):
     finished_at: float | None
     snapshot: dict[str, Any]
     error: dict[str, Any] | None
+    # ``cancel_requested`` is an OPTIONAL additive attribute read via
+    # ``getattr`` with a False default, so record views that predate the
+    # field keep summarizing unchanged.
 
 
 def status_value(status: Any) -> str:
@@ -95,32 +103,33 @@ def status_value(status: Any) -> str:
     return getattr(status, "value", status)
 
 
-def access_annotation(shared: Any) -> dict[str, Any] | None:
-    """The shared-in ``access`` payload for *shared* (a SharePermission).
-
-    Defined once so both store backends emit the identical wire shape;
-    ``None`` (an owned run) keeps the summary key absent entirely.
-    """
-    if shared is None:
-        return None
-    return {"via": "share", "permission": shared.value}
+def access_annotation(
+    shared: Any,
+    *,
+    owner_user_id: Any,
+) -> dict[str, Any]:
+    """Canonical public access object for one visible run."""
+    if shared is not None:
+        return {"mode": "shared", "permission": shared.value}
+    if owner_user_id is None:
+        return {"mode": "unscoped"}
+    return {"mode": "owner"}
 
 
 def access_permits_edit(access: Mapping[str, Any] | None) -> bool:
     """Whether a run summary's ``access`` annotation permits mutation.
 
     The consumer twin of :func:`access_annotation` — produce and consume of
-    the ``access`` wire shape live in one file so they cannot drift. ``None``
-    is an OWNED run (full access). A shared-in annotation permits mutation iff
-    its grant is edit-or-higher, parsed back through the ORDERED
-    :class:`~inqtrix.auth.permissions.SharePermission` so ``manage`` (the
-    highest grant, e.g. a workspace owner's) passes too — matching the
-    store-level cancel gate (``server/runs.py`` / ``runs/postgres_store.py``),
-    never a raw ``== "edit"`` string compare. An unknown permission string is
-    treated as no access.
+    the ``access`` wire shape live in one file so they cannot drift. Missing or
+    unknown annotations fail closed. A shared annotation permits mutation only
+    with the sole mutable direct-share permission, ``edit``.
     """
     if access is None:
+        return False
+    if access.get("mode") in {"owner", "unscoped"}:
         return True
+    if access.get("mode") != "shared":
+        return False
     try:
         return SharePermission(access.get("permission")).at_least(
             SharePermission.EDIT
@@ -137,20 +146,26 @@ def build_run_summary(
 ) -> dict[str, Any]:
     """Public run summary — the 16-key wire shape of ``/v1/runs``.
 
-    *access* is the ADDITIVE shared-in annotation
-    (``{"via": "share", "permission": "view"}``); owned runs omit the
-    key entirely so the historical wire shape stays byte-identical.
+    *access* is the required canonical ``unscoped|owner|shared`` annotation.
 
     Agent-tree keys (``kind``, ``parent_run_id``, ``root_run_id``,
     ``session_id``) follow the same rule: emitted ONLY when non-default,
     so a standard run's summary stays byte-identical to the historical
     shape. Read via ``getattr`` with defaults so record views that
     predate the fields keep summarizing.
+
+    ``cancel_requested`` follows the same additive rule: emitted only as
+    ``True`` and only while the run is still non-terminal, letting
+    clients render a "cancelling" state (and gate delete flows) without
+    a new status enum value.
     """
     elapsed = None
     if record.started_at is not None:
         end = record.finished_at or time.time()
         elapsed = round(max(0.0, end - record.started_at), 2)
+    cancel_requested = bool(getattr(record, "cancel_requested", False)) and (
+        status_value(record.status) not in TERMINAL_RUN_STATUS_VALUES
+    )
     agent_tree: dict[str, Any] = {}
     kind = getattr(record, "kind", "standard") or "standard"
     if kind != "standard":
@@ -180,6 +195,7 @@ def build_run_summary(
         "events_url": f"/v1/runs/{record.run_id}/events",
         "result_url": f"/v1/runs/{record.run_id}/result",
         **agent_tree,
+        **({"cancel_requested": True} if cancel_requested else {}),
         **({"access": access} if access is not None else {}),
     }
 

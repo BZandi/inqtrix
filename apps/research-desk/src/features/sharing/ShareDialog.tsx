@@ -9,6 +9,8 @@ import { searchDemoUsers } from './demoShares'
 import {
   personLabel,
   selectableSearchResults,
+  sharePermissionLabel,
+  sharePermissionsForResource,
   toggleSelectedUser,
 } from './shareModel'
 import type { SharePermissionValue, UserSearchResult } from './types'
@@ -24,6 +26,7 @@ type ShareDialogProps = {
   onClose: () => void
   ownerEmail: string | null
   ownerName: string | null
+  refreshToken: number
   resourceId: string
   resourceTitle: string
   resourceType: string
@@ -41,18 +44,35 @@ export function ShareDialog({
   onClose,
   ownerEmail,
   ownerName,
+  refreshToken,
   resourceId,
   resourceTitle,
   resourceType,
 }: ShareDialogProps) {
-  const { t } = useLocale()
-  const { grant, revoke, state } = useShares(resourceType, resourceId, demo)
+  const { locale, t } = useLocale()
+  const { grant, reload, revoke, state, updatePermission } = useShares(
+    resourceType,
+    resourceId,
+    demo,
+    refreshToken,
+  )
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<readonly UserSearchResult[]>([])
+  const [searchError, setSearchError] = useState(false)
   const [searchPending, setSearchPending] = useState(false)
   const [selected, setSelected] = useState<readonly UserSearchResult[]>([])
   const [permission, setPermission] = useState<SharePermissionValue>('view')
-  const [submitState, setSubmitState] = useState<'error-grant' | 'error-revoke' | 'idle' | 'submitting'>('idle')
+  const [submitState, setSubmitState] = useState<'error-grant' | 'error-revoke' | 'error-update' | 'idle' | 'submitting'>('idle')
+  const [updatingShareId, setUpdatingShareId] = useState<string | null>(null)
+  const permissionOptions = sharePermissionsForResource(resourceType)
+  const permissionLabels = {
+    edit: t.sharing.permissionEdit,
+    view: t.sharing.permissionView,
+  }
+
+  useEffect(() => {
+    if (!permissionOptions.includes(permission)) setPermission('view')
+  }, [permission, permissionOptions])
 
   const trimmedQuery = query.trim()
   // Generation guard (same pattern as useShares): a slow response for
@@ -62,9 +82,11 @@ export function ShareDialog({
     const generation = ++searchGenerationRef.current
     if (trimmedQuery.length < MIN_QUERY_LENGTH) {
       setResults([])
+      setSearchError(false)
       setSearchPending(false)
       return undefined
     }
+    setSearchError(false)
     setSearchPending(true)
     const lookup = demo
       ? (value: string) => Promise.resolve(searchDemoUsers(value))
@@ -74,29 +96,31 @@ export function ShareDialog({
         .then((found) => {
           if (searchGenerationRef.current !== generation) return
           setResults(found)
+          setSearchError(false)
           setSearchPending(false)
         })
         .catch(() => {
           if (searchGenerationRef.current !== generation) return
           setResults([])
+          setSearchError(true)
           setSearchPending(false)
         })
     }, SEARCH_DEBOUNCE_MS)
     return () => window.clearTimeout(timeout)
   }, [demo, trimmedQuery])
 
-  const existingSubjects = useMemo(() => {
-    const subjects = new Set(state.records.map((record) => record.subject_id))
-    for (const user of selected) subjects.add(user.subject)
-    return subjects
+  const existingUserIds = useMemo(() => {
+    const userIds = new Set(state.records.map((record) => record.recipient_user_id))
+    for (const user of selected) userIds.add(user.id)
+    return userIds
   }, [selected, state.records])
-  const visibleResults = selectableSearchResults(results, existingSubjects)
+  const visibleResults = selectableSearchResults(results, existingUserIds)
 
   const submitGrant = async () => {
     if (selected.length === 0 || submitState === 'submitting') return
     setSubmitState('submitting')
     try {
-      await grant(selected.map((user) => ({ permission, subjectId: user.subject })))
+      await grant(selected.map((user) => ({ permission, userId: user.id })))
       setSelected([])
       setQuery('')
       setResults([])
@@ -114,6 +138,24 @@ export function ShareDialog({
       onChanged?.()
     } catch {
       setSubmitState('error-revoke')
+    }
+  }
+
+  const submitPermissionUpdate = async (
+    shareId: string,
+    nextPermission: SharePermissionValue,
+    expectedRevision: number,
+  ) => {
+    setUpdatingShareId(shareId)
+    try {
+      await updatePermission(shareId, nextPermission, expectedRevision)
+      setSubmitState('idle')
+      onChanged?.()
+    } catch {
+      await reload()
+      setSubmitState('error-update')
+    } finally {
+      setUpdatingShareId(null)
     }
   }
 
@@ -168,13 +210,20 @@ export function ShareDialog({
           {trimmedQuery.length >= MIN_QUERY_LENGTH && (
             <div className="overflow-hidden rounded-md border border-border">
               {visibleResults.length === 0 ? (
-                <p className="px-3 py-2 t-meta text-muted-foreground">
-                  {searchPending ? '…' : t.sharing.searchEmpty}
+                <p className={cn(
+                  'px-3 py-2 t-meta',
+                  searchError ? 'text-destructive' : 'text-muted-foreground',
+                )}>
+                  {searchPending
+                    ? '…'
+                    : searchError
+                      ? t.sharing.searchFailed
+                      : t.sharing.searchEmpty}
                 </p>
               ) : (
                 <ul className="max-h-44 overflow-y-auto">
                   {visibleResults.map((user) => (
-                    <li key={user.subject}>
+                    <li key={user.id}>
                       <button
                         className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-accent"
                         onMouseDown={(event) => {
@@ -182,6 +231,7 @@ export function ShareDialog({
                           setSelected((current) => toggleSelectedUser(current, user))
                           setQuery('')
                           setResults([])
+                          setSearchError(false)
                         }}
                         type="button"
                       >
@@ -192,7 +242,7 @@ export function ShareDialog({
                         />
                         <span className="min-w-0 flex-1">
                           <span className="block truncate t-list text-foreground">
-                            {personLabel(user.display_name, user.email, user.subject)}
+                          {personLabel(user.display_name, user.email, user.id)}
                           </span>
                           {user.email && (
                             <span className="block truncate t-meta-sm text-muted-foreground">
@@ -214,7 +264,7 @@ export function ShareDialog({
                 {selected.map((user) => (
                   <span
                     className="inline-flex h-6 items-center gap-1.5 rounded-full bg-brand-subtle pl-1 pr-1.5 text-brand"
-                    key={user.subject}
+                    key={user.id}
                   >
                     <InitialsAvatar
                       displayName={user.display_name}
@@ -222,7 +272,7 @@ export function ShareDialog({
                       size="sm"
                     />
                     <span className="max-w-40 truncate t-meta-sm font-medium">
-                      {personLabel(user.display_name, user.email, user.subject)}
+                      {personLabel(user.display_name, user.email, user.id)}
                     </span>
                     <button
                       aria-label={t.sharing.removeSelected}
@@ -241,8 +291,9 @@ export function ShareDialog({
                   className="flex h-7 items-center gap-0.5 rounded-md bg-surface p-0.5"
                   role="group"
                 >
-                  {(['view', 'edit'] as const).map((value) => (
+                  {permissionOptions.map((value) => (
                     <button
+                      aria-pressed={permission === value}
                       className={cn(
                         'h-6 rounded px-2 text-xs font-medium transition-colors',
                         permission === value
@@ -253,7 +304,7 @@ export function ShareDialog({
                       onClick={() => setPermission(value)}
                       type="button"
                     >
-                      {value === 'view' ? t.sharing.permissionView : t.sharing.permissionEdit}
+                      {sharePermissionLabel(value, locale, permissionLabels)}
                     </button>
                   ))}
                 </div>
@@ -276,10 +327,13 @@ export function ShareDialog({
           {submitState === 'error-revoke' && (
             <p className="t-meta text-destructive">{t.sharing.revokeFailed}</p>
           )}
+          {submitState === 'error-update' && (
+            <p className="t-meta text-destructive">{t.sharing.updateFailed}</p>
+          )}
 
           <div>
             <h3 className="t-caption text-muted-foreground">
-              {t.sharing.peopleWithAccess}
+              {t.sharing.peopleAndInvites}
             </h3>
             <ul className="mt-1.5 space-y-0.5">
               <li className="flex items-center gap-2 rounded-md px-1.5 py-1.5">
@@ -319,7 +373,7 @@ export function ShareDialog({
                     />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate t-list text-foreground">
-                        {personLabel(record.display_name, record.email, record.subject_id)}
+                        {personLabel(record.display_name, record.email, record.recipient_user_id)}
                       </span>
                       {record.email && (
                         <span className="block truncate t-meta-sm text-muted-foreground">
@@ -327,11 +381,37 @@ export function ShareDialog({
                         </span>
                       )}
                     </span>
-                    <span className="shrink-0 t-meta text-muted-foreground">
-                      {record.permission === 'edit'
-                        ? t.sharing.permissionEdit
-                        : t.sharing.permissionView}
-                    </span>
+                    {record.accepted_at === null ? (
+                      <span className="shrink-0 rounded-md border border-warning/25 bg-warning-subtle px-1.5 py-0.5 t-meta-sm font-medium text-warning">
+                        {t.sharing.pending}
+                      </span>
+                    ) : null}
+                    <div
+                      aria-label={t.sharing.permissionLabel}
+                      className="flex h-7 shrink-0 items-center gap-0.5 rounded-md bg-surface p-0.5"
+                      role="group"
+                    >
+                      {permissionOptions.map((value) => (
+                        <button
+                          aria-pressed={record.permission === value}
+                          className={cn(
+                            'h-6 rounded px-2 text-xs font-medium transition-colors',
+                            record.permission === value
+                              ? 'bg-background text-foreground shadow-sm'
+                              : 'text-muted-foreground hover:text-foreground',
+                          )}
+                          disabled={updatingShareId === record.id}
+                          key={value}
+                          onClick={() => {
+                            if (record.permission === value) return
+                            void submitPermissionUpdate(record.id, value, record.revision)
+                          }}
+                          type="button"
+                        >
+                          {sharePermissionLabel(value, locale, permissionLabels)}
+                        </button>
+                      ))}
+                    </div>
                     <button
                       aria-label={t.sharing.revoke}
                       className="grid size-6 shrink-0 place-items-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"

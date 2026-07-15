@@ -6,7 +6,6 @@ import {
   startIndexingJob,
   streamIndexingJobEvents,
 } from '@/api/inqtrixClient'
-import type { VectorIndexRecord } from '@/features/project/types'
 import {
   isTerminalIndexingStatus,
   type IndexingJobEvent,
@@ -18,26 +17,31 @@ import {
  * Drives the server-backed reindex lifecycle, mirroring
  * {@link useResearchRunApi}: start a job, stream its progress via SSE,
  * cancel it, and re-attach to in-flight jobs on mount (so a reindex
- * survives closing and reopening the app). Events are keyed by job id;
- * the summary carries the client `index_id`, which we map back so the
- * reducer updates the right index. Progress is throttled so a large
- * re-embed never floods the store.
+ * survives closing and reopening the app). Events are keyed by job id and
+ * resolved through the authoritative parent `collection_id`; callers may map
+ * that collection onto local presentation state. Progress is throttled so a
+ * large re-embed never floods the store.
  */
 type IndexingCallbacks = {
-  onCancelled: (indexId: string) => void
-  onComplete: (indexId: string) => void
+  onCancelled: (collectionId: string) => void
+  onComplete: (collectionId: string) => void
   /** A single document finished embedding (server document id) — flips just
    * that file's row live, so a re-embed no longer flips all files together. */
-  onDocumentCompleted: (indexId: string, documentId: string) => void
-  onError: (indexId: string, message: string) => void
+  onDocumentCompleted: (collectionId: string, documentId: string) => void
+  onError: (collectionId: string, message: string) => void
   onProgress: (
-    indexId: string,
+    collectionId: string,
     completedDocuments: number,
     totalDocuments: number,
     currentDocumentTitle?: string,
   ) => void
-  onQueued: (indexId: string, queuePosition: number | null) => void
-  onStart: (indexId: string, jobId: string, totalDocuments: number) => void
+  onQueued: (collectionId: string, queuePosition: number | null) => void
+  onStart: (
+    collectionId: string,
+    jobId: string,
+    totalDocuments: number,
+    status: 'cancelling' | 'queued' | 'running',
+  ) => void
 }
 
 type UseIndexingJobApiOptions = IndexingCallbacks & {
@@ -45,6 +49,9 @@ type UseIndexingJobApiOptions = IndexingCallbacks & {
   enabled: boolean
   /** Cookie-session auth flip re-runs resume hydration (no remount). */
   sessionAuthed?: boolean
+  /** User invalidation generation: re-list jobs started by another authorized
+   * editor without adding a second polling or per-resource stream. */
+  refreshToken?: number
   workspaceId: string
 }
 
@@ -60,11 +67,12 @@ export function useIndexingJobApi({
   onProgress,
   onQueued,
   onStart,
+  refreshToken = 0,
   sessionAuthed,
   workspaceId,
 }: UseIndexingJobApiOptions) {
   const streamsRef = useRef(new Map<string, AbortController>())
-  const jobIndexRef = useRef(new Map<string, string>())
+  const jobCollectionRef = useRef(new Map<string, string>())
   const lastProgressRef = useRef(new Map<string, number>())
   const callbacksRef = useRef<IndexingCallbacks>({
     onCancelled,
@@ -89,12 +97,12 @@ export function useIndexingJobApi({
   }, [onCancelled, onComplete, onDocumentCompleted, onError, onProgress, onQueued, onStart])
 
   const handleEvent = useCallback((event: IndexingJobEvent) => {
-    const indexId = jobIndexRef.current.get(event.job_id)
-    if (!indexId) return
+    const collectionId = jobCollectionRef.current.get(event.job_id)
+    if (!collectionId) return
     const snapshot = (event.data?.snapshot ?? {}) as IndexingJobSnapshot
     const emitProgress = () =>
       callbacksRef.current.onProgress(
-        indexId,
+        collectionId,
         snapshot.completed_documents ?? 0,
         snapshot.total_documents ?? 0,
         snapshot.current_document_title,
@@ -113,18 +121,18 @@ export function useIndexingJobApi({
       // tick may have been dropped by the throttle, and the history entry
       // reads the live counts when it is recorded.
       emitProgress()
-      callbacksRef.current.onComplete(indexId)
+      callbacksRef.current.onComplete(collectionId)
     } else if (event.type === 'inqtrix.index.failed') {
       emitProgress()
       const error = (event.data?.error ?? {}) as { message?: string }
-      callbacksRef.current.onError(indexId, error.message ?? 'Indizierung fehlgeschlagen.')
+      callbacksRef.current.onError(collectionId, error.message ?? 'Indizierung fehlgeschlagen.')
     } else if (event.type === 'inqtrix.index.cancelled') {
       emitProgress()
-      callbacksRef.current.onCancelled(indexId)
+      callbacksRef.current.onCancelled(collectionId)
     } else if (event.type === 'inqtrix.index.queued') {
       const position = event.data?.queue_position
       callbacksRef.current.onQueued(
-        indexId,
+        collectionId,
         typeof position === 'number' ? position : null,
       )
     } else if (event.type === 'inqtrix.index.document_completed') {
@@ -132,32 +140,31 @@ export function useIndexingJobApi({
       // no counts, so it never touches the progress bar.
       const documentId = event.data?.document_id
       if (typeof documentId === 'string') {
-        callbacksRef.current.onDocumentCompleted(indexId, documentId)
+        callbacksRef.current.onDocumentCompleted(collectionId, documentId)
       }
     }
   }, [])
 
   const startStream = useCallback((summary: IndexingJobSummary) => {
-    if (!summary.index_id) return
-    jobIndexRef.current.set(summary.job_id, summary.index_id)
+    jobCollectionRef.current.set(summary.job_id, summary.collection_id)
     if (streamsRef.current.has(summary.job_id)) return
     if (isTerminalIndexingStatus(summary.status)) {
       // Terminal already (resume of a finished job): reflect the outcome.
       if (summary.status === 'completed') {
-        callbacksRef.current.onComplete(summary.index_id)
+        callbacksRef.current.onComplete(summary.collection_id)
       } else if (summary.status === 'failed') {
         callbacksRef.current.onError(
-          summary.index_id,
+          summary.collection_id,
           summary.error?.message ?? 'Indizierung fehlgeschlagen.',
         )
       } else if (summary.status === 'cancelled') {
-        callbacksRef.current.onCancelled(summary.index_id)
+        callbacksRef.current.onCancelled(summary.collection_id)
       }
       return
     }
     const controller = new AbortController()
     streamsRef.current.set(summary.job_id, controller)
-    const indexId = summary.index_id
+    const collectionId = summary.collection_id
     void streamIndexingJobEvents(summary.events_url, {
       apiKey,
       signal: controller.signal,
@@ -166,7 +173,7 @@ export function useIndexingJobApi({
     })
       .catch((error) => {
         if (controller.signal.aborted) return
-        callbacksRef.current.onError(indexId, messageFromError(error))
+        callbacksRef.current.onError(collectionId, messageFromError(error))
       })
       .finally(() => {
         streamsRef.current.delete(summary.job_id)
@@ -174,16 +181,18 @@ export function useIndexingJobApi({
       })
   }, [apiKey, handleEvent, workspaceId])
 
-  const startReindex = useCallback(async (index: VectorIndexRecord) => {
-    if (!index.serverCollectionId) {
-      throw new Error('Dieser Index ist (noch) nicht mit einer Server-Sammlung verbunden.')
-    }
+  const startReindex = useCallback(async (collectionId: string) => {
     const summary = await startIndexingJob(
-      index.serverCollectionId,
-      { indexId: index.id },
+      collectionId,
+      {},
       { apiKey, workspaceId },
     )
-    callbacksRef.current.onStart(index.id, summary.job_id, summary.total_documents)
+    callbacksRef.current.onStart(
+      collectionId,
+      summary.job_id,
+      summary.total_documents,
+      activeStatus(summary.status),
+    )
     startStream(summary)
     return summary
   }, [apiKey, startStream, workspaceId])
@@ -199,7 +208,7 @@ export function useIndexingJobApi({
     if (!enabled) {
       for (const controller of streamsRef.current.values()) controller.abort()
       streamsRef.current.clear()
-      jobIndexRef.current.clear()
+      jobCollectionRef.current.clear()
       lastProgressRef.current.clear()
       return undefined
     }
@@ -212,12 +221,12 @@ export function useIndexingJobApi({
         const jobs = await listIndexingJobs({ apiKey, workspaceId })
         if (ignore) return
         for (const summary of jobs) {
-          if (!summary.index_id) continue
           if (!isTerminalIndexingStatus(summary.status)) {
             callbacksRef.current.onStart(
-              summary.index_id,
+              summary.collection_id,
               summary.job_id,
               summary.total_documents,
+              activeStatus(summary.status),
             )
           }
           startStream(summary)
@@ -236,7 +245,7 @@ export function useIndexingJobApi({
     return () => {
       ignore = true
     }
-  }, [apiKey, enabled, sessionAuthed, startStream, workspaceId])
+  }, [apiKey, enabled, refreshToken, sessionAuthed, startStream, workspaceId])
 
   useEffect(() => {
     return () => {
@@ -250,4 +259,10 @@ export function useIndexingJobApi({
 
 function messageFromError(error: unknown) {
   return error instanceof Error ? error.message : 'Inqtrix request failed.'
+}
+
+function activeStatus(status: IndexingJobSummary['status']): 'cancelling' | 'queued' | 'running' {
+  if (status === 'cancelling') return 'cancelling'
+  if (status === 'queued') return 'queued'
+  return 'running'
 }

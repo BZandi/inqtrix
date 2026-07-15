@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -34,7 +35,7 @@ from starlette.requests import Request
 
 from inqtrix.auth.directory import MirroredUser
 from inqtrix.auth.identity_memory import MemoryIdentityStore
-from inqtrix.auth.permissions import PermissionService, WorkspaceRole
+from inqtrix.auth.permissions import AuthorizationService, WorkspaceRole
 from inqtrix.auth.principal import ANONYMOUS_PRINCIPAL, Principal
 from inqtrix.providers.base import ProviderContext
 from inqtrix.quota.models import QuotaDimension, QuotaSubject
@@ -59,6 +60,9 @@ ADMIN_SUB = "user-1234"
 OTHER_SUB = "subject-b"
 """A second metered subject the admin administers (never a session)."""
 
+ADMIN_USER_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
+OTHER_USER_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
+
 
 # --------------------------------------------------------------------------- #
 # Unit: the shared instance-admin guard (every branch, no HTTP)
@@ -77,8 +81,10 @@ class _StubUsers:
     def __init__(self, mirror) -> None:
         self._mirror = mirror
 
-    async def find_user(self, *, tenant_id, issuer, subject):
-        return self._mirror
+    async def find_by_user_id(self, *, tenant_id, user_id):
+        if self._mirror is not None and self._mirror.user_id == user_id:
+            return self._mirror
+        return None
 
 
 class _StubProvider:
@@ -97,13 +103,13 @@ class _StubProvider:
 
 
 class _StubSession:
-    def __init__(self, sub: str, issuer: str) -> None:
-        self.sub = sub
-        self.issuer = issuer
+    def __init__(self, user_id: uuid.UUID) -> None:
+        self.user_id = user_id
 
 
 def _mirror(role: str = "admin", *, disabled: bool = False) -> MirroredUser:
     return MirroredUser(
+        user_id=ADMIN_USER_ID,
         issuer=ISSUER,
         subject=ADMIN_SUB,
         email="a@example.com",
@@ -124,21 +130,21 @@ def _resolve(provider) -> tuple:
 
 def test_guard_admits_an_instance_admin():
     provider = _StubProvider(
-        Principal(sub=ADMIN_SUB, kind="oidc_session", session_id="sid"),
-        session=_StubSession(ADMIN_SUB, ISSUER),
+        Principal(user_id=ADMIN_USER_ID, kind="oidc_session", session_id="sid"),
+        session=_StubSession(ADMIN_USER_ID),
         mirror=_mirror("admin"),
     )
     resolved, error = _resolve(provider)
     assert error is None
     principal, _session, mirror = resolved
-    assert principal.sub == ADMIN_SUB
+    assert principal.user_id == ADMIN_USER_ID
     assert mirror.instance_role == "admin"
 
 
 def test_guard_rejects_pat_principal():
     """A personal access token can never administer (leaked-token safety)."""
     provider = _StubProvider(
-        Principal(sub="t", kind="pat", pat_id="p1"),
+        Principal(user_id=ADMIN_USER_ID, kind="pat", pat_id="p1"),
         mirror=_mirror("admin"),
     )
     resolved, error = _resolve(provider)
@@ -155,7 +161,7 @@ def test_guard_rejects_anonymous_principal():
 
 def test_guard_rejects_session_without_session_id():
     provider = _StubProvider(
-        Principal(sub=ADMIN_SUB, kind="oidc_session", session_id=None),
+        Principal(user_id=ADMIN_USER_ID, kind="oidc_session", session_id=None),
         mirror=_mirror("admin"),
     )
     _resolved, error = _resolve(provider)
@@ -164,7 +170,7 @@ def test_guard_rejects_session_without_session_id():
 
 def test_guard_rejects_expired_session_with_401():
     provider = _StubProvider(
-        Principal(sub=ADMIN_SUB, kind="oidc_session", session_id="sid"),
+        Principal(user_id=ADMIN_USER_ID, kind="oidc_session", session_id="sid"),
         session=None,  # sessions.get -> None: the session is gone
         mirror=_mirror("admin"),
     )
@@ -174,8 +180,8 @@ def test_guard_rejects_expired_session_with_401():
 
 def test_guard_rejects_unmirrored_user():
     provider = _StubProvider(
-        Principal(sub=ADMIN_SUB, kind="oidc_session", session_id="sid"),
-        session=_StubSession(ADMIN_SUB, ISSUER),
+        Principal(user_id=ADMIN_USER_ID, kind="oidc_session", session_id="sid"),
+        session=_StubSession(ADMIN_USER_ID),
         mirror=None,
     )
     _resolved, error = _resolve(provider)
@@ -184,8 +190,8 @@ def test_guard_rejects_unmirrored_user():
 
 def test_guard_rejects_non_admin_role():
     provider = _StubProvider(
-        Principal(sub=ADMIN_SUB, kind="oidc_session", session_id="sid"),
-        session=_StubSession(ADMIN_SUB, ISSUER),
+        Principal(user_id=ADMIN_USER_ID, kind="oidc_session", session_id="sid"),
+        session=_StubSession(ADMIN_USER_ID),
         mirror=_mirror("user"),
     )
     _resolved, error = _resolve(provider)
@@ -194,8 +200,8 @@ def test_guard_rejects_non_admin_role():
 
 def test_guard_rejects_disabled_admin():
     provider = _StubProvider(
-        Principal(sub=ADMIN_SUB, kind="oidc_session", session_id="sid"),
-        session=_StubSession(ADMIN_SUB, ISSUER),
+        Principal(user_id=ADMIN_USER_ID, kind="oidc_session", session_id="sid"),
+        session=_StubSession(ADMIN_USER_ID),
         mirror=_mirror("admin", disabled=True),
     )
     _resolved, error = _resolve(provider)
@@ -207,11 +213,11 @@ def test_guard_logs_authenticated_non_admin_denial(caplog):
 
     The pre-auth branches stay quiet; only an authenticated session that is not
     an active admin produces the loud ``authz``-style warning, restoring the
-    visibility the old workspace-OWNER quota gate had via ``PermissionService._deny``.
+    visibility the old workspace-OWNER quota gate had via ``AuthorizationService._deny``.
     """
     provider = _StubProvider(
-        Principal(sub=ADMIN_SUB, kind="oidc_session", session_id="sid"),
-        session=_StubSession(ADMIN_SUB, ISSUER),
+        Principal(user_id=ADMIN_USER_ID, kind="oidc_session", session_id="sid"),
+        session=_StubSession(ADMIN_USER_ID),
         mirror=_mirror("user"),
     )
     logger = logging.getLogger("inqtrix")
@@ -254,8 +260,8 @@ def make_world(quota: QuotaSettings):
         ),
         semaphore_factory=lambda: asyncio.Semaphore(1),
         auth_provider=provider,
-        permissions=PermissionService(
-            members=identity, groups=identity, shares=identity, audit=identity
+        permissions=AuthorizationService(
+            members=identity, shares=identity, audit=identity
         ),
         workspace_admin=identity,
     )
@@ -273,10 +279,20 @@ def login(client, idp) -> str:
     return client.get("/api/auth/session").json()["csrf_token"]
 
 
+def user_id_for(users, subject: str = ADMIN_SUB) -> uuid.UUID:
+    mirrored = asyncio.run(
+        users.find_user(
+            tenant_id="default", issuer=ISSUER, subject=subject
+        )
+    )
+    assert mirrored is not None
+    return mirrored.user_id
+
+
 def promote(users, subject: str = ADMIN_SUB) -> None:
     asyncio.run(
         users.set_instance_role(
-            tenant_id="default", issuer=ISSUER, subject=subject, role="admin"
+            tenant_id="default", user_id=user_id_for(users, subject), role="admin"
         )
     )
 
@@ -291,22 +307,24 @@ def demote(users, subject: str = ADMIN_SUB) -> None:
     """
     asyncio.run(
         users.set_instance_role(
-            tenant_id="default", issuer=ISSUER, subject=subject, role="user"
+            tenant_id="default", user_id=user_id_for(users, subject), role="user"
         )
     )
 
 
-def seed_usage(container, sub: str, dimension: QuotaDimension, amount: int) -> None:
+def seed_usage(
+    container, user_id: uuid.UUID, dimension: QuotaDimension, amount: int
+) -> None:
     asyncio.run(
         container.quota_service.record_for_subject(
-            QuotaSubject("default", sub), dimension, amount
+            QuotaSubject("default", user_id), dimension, amount
         )
     )
 
 
-def usage_limit(container, sub: str, dimension: QuotaDimension):
+def usage_limit(container, user_id: uuid.UUID, dimension: QuotaDimension):
     rows = asyncio.run(
-        container.quota_service.usage_for(QuotaSubject("default", sub))
+        container.quota_service.usage_for(QuotaSubject("default", user_id))
     )
     return next(r for r in rows if r.dimension == dimension).limit
 
@@ -339,7 +357,7 @@ def test_non_admin_user_is_denied(tmp_path):
         assert client.get("/v1/admin/quota").status_code == 404
         put = client.put(
             "/v1/admin/quota/limits",
-            json={"subject_id": OTHER_SUB, "dimension": "runs", "value": 1},
+            json={"user_id": str(OTHER_USER_ID), "dimension": "runs", "value": 1},
             headers={"X-CSRF-Token": csrf},
         )
         assert put.status_code == 404
@@ -356,12 +374,16 @@ def test_workspace_owner_without_admin_role_is_denied(tmp_path):
         # Make the logged-in user a workspace OWNER directly.
         workspace_id, _ = asyncio.run(
             identity.create_workspace(
-                tenant_id="default", name="Team", created_by_sub=ADMIN_SUB
+                tenant_id="default",
+                name="Team",
+                created_by_user_id=user_id_for(users),
             )
         )
         role = asyncio.run(
             identity.role_in_workspace(
-                tenant_id="default", sub=ADMIN_SUB, workspace_id=workspace_id
+                tenant_id="default",
+                user_id=user_id_for(users),
+                workspace_id=workspace_id,
             )
         )
         assert role == WorkspaceRole.OWNER  # genuinely an OWNER...
@@ -391,8 +413,7 @@ def test_demoted_admin_loses_access(tmp_path):
         asyncio.run(
             users.set_instance_role(
                 tenant_id="default",
-                issuer=ISSUER,
-                subject=ADMIN_SUB,
+                user_id=user_id_for(users),
                 role="user",
             )
         )
@@ -410,12 +431,11 @@ def test_disabled_admin_loses_access(tmp_path):
         asyncio.run(
             users.set_disabled(
                 tenant_id="default",
-                issuer=ISSUER,
-                subject=ADMIN_SUB,
+                user_id=user_id_for(users),
                 disabled_at=time.time(),
             )
         )
-        assert client.get("/v1/admin/quota").status_code == 404
+        assert client.get("/v1/admin/quota").status_code == 401
 
 
 def test_admin_set_and_clear_override(tmp_path):
@@ -427,30 +447,33 @@ def test_admin_set_and_clear_override(tmp_path):
         promote(users)
         put = client.put(
             "/v1/admin/quota/limits",
-            json={"subject_id": OTHER_SUB, "dimension": "runs", "value": 3},
+            json={"user_id": str(OTHER_USER_ID), "dimension": "runs", "value": 3},
             headers={"X-CSRF-Token": csrf},
         )
         assert put.status_code == 200
-        assert usage_limit(container, OTHER_SUB, QuotaDimension.RUNS) == 3
+        assert usage_limit(container, OTHER_USER_ID, QuotaDimension.RUNS) == 3
 
         last = identity.audit_entries[-1]
         assert last.action == "quota.override"
-        assert last.resource_id == f"{OTHER_SUB}:runs"
-        assert last.actor_sub == ADMIN_SUB
+        assert last.resource_id == f"{OTHER_USER_ID}:runs"
+        assert last.actor_user_id == user_id_for(users)
         assert last.detail == {"value": "3"}
 
         overview = client.get("/v1/admin/quota").json()
-        subj = next(s for s in overview["subjects"] if s["sub"] == OTHER_SUB)
+        subj = next(
+            s for s in overview["subjects"]
+            if s["user_id"] == str(OTHER_USER_ID)
+        )
         assert subj["dimensions"]["runs"]["override"] == 3
 
         cleared = client.delete(
             "/v1/admin/quota/limits",
-            params={"subject_id": OTHER_SUB, "dimension": "runs"},
+            params={"user_id": str(OTHER_USER_ID), "dimension": "runs"},
             headers={"X-CSRF-Token": csrf},
         )
         assert cleared.status_code == 204
         assert identity.audit_entries[-1].action == "quota.override_cleared"
-        assert usage_limit(container, OTHER_SUB, QuotaDimension.RUNS) is None
+        assert usage_limit(container, OTHER_USER_ID, QuotaDimension.RUNS) is None
 
 
 def test_admin_default_for_all_and_ceiling_clamp(tmp_path):
@@ -463,7 +486,7 @@ def test_admin_default_for_all_and_ceiling_clamp(tmp_path):
         put = client.put(
             "/v1/admin/quota/limits",
             json={
-                "subject_id": "__quota_default__",
+                "user_id": "default",
                 "dimension": "runs",
                 "value": 50,
             },
@@ -471,18 +494,18 @@ def test_admin_default_for_all_and_ceiling_clamp(tmp_path):
         )
         assert put.status_code == 200
         # The effective limit is clamped to the operator ceiling (10)...
-        assert usage_limit(container, OTHER_SUB, QuotaDimension.RUNS) == 10
+        assert usage_limit(container, OTHER_USER_ID, QuotaDimension.RUNS) == 10
         # ...while the raw tenant default (pre-clamp) is surfaced.
         overview = client.get("/v1/admin/quota").json()
         assert overview["tenant_default"]["runs"] == 50
 
         cleared = client.delete(
             "/v1/admin/quota/limits",
-            params={"subject_id": "__quota_default__", "dimension": "runs"},
+            params={"user_id": "default", "dimension": "runs"},
             headers={"X-CSRF-Token": csrf},
         )
         assert cleared.status_code == 204
-        assert usage_limit(container, OTHER_SUB, QuotaDimension.RUNS) == 10
+        assert usage_limit(container, OTHER_USER_ID, QuotaDimension.RUNS) == 10
 
 
 def test_admin_reset_zeroes_flow_usage(tmp_path):
@@ -492,10 +515,10 @@ def test_admin_reset_zeroes_flow_usage(tmp_path):
     with client:
         csrf = login(client, idp)
         promote(users)
-        seed_usage(container, OTHER_SUB, QuotaDimension.RUNS, 1)
+        seed_usage(container, OTHER_USER_ID, QuotaDimension.RUNS, 1)
         reset = client.post(
             "/v1/admin/quota/reset",
-            json={"subject_id": OTHER_SUB, "dimension": "runs"},
+            json={"user_id": str(OTHER_USER_ID), "dimension": "runs"},
             headers={"X-CSRF-Token": csrf},
         )
         assert reset.status_code == 200
@@ -503,7 +526,7 @@ def test_admin_reset_zeroes_flow_usage(tmp_path):
             r.used
             for r in asyncio.run(
                 container.quota_service.usage_for(
-                    QuotaSubject("default", OTHER_SUB)
+                    QuotaSubject("default", OTHER_USER_ID)
                 )
             )
             if r.dimension == QuotaDimension.RUNS
@@ -511,7 +534,7 @@ def test_admin_reset_zeroes_flow_usage(tmp_path):
         assert used == 0
         last = identity.audit_entries[-1]
         assert last.action == "quota.reset"
-        assert last.resource_id == f"{OTHER_SUB}:runs"
+        assert last.resource_id == f"{OTHER_USER_ID}:runs"
 
 
 def test_admin_reset_rejects_stock_dimension(tmp_path):
@@ -523,7 +546,7 @@ def test_admin_reset_rejects_stock_dimension(tmp_path):
         promote(users)
         resp = client.post(
             "/v1/admin/quota/reset",
-            json={"subject_id": OTHER_SUB, "dimension": "stored_bytes"},
+            json={"user_id": str(OTHER_USER_ID), "dimension": "stored_bytes"},
             headers={"X-CSRF-Token": csrf},
         )
         assert resp.status_code == 400
@@ -538,7 +561,7 @@ def test_admin_invalid_dimension_is_400(tmp_path):
         promote(users)
         resp = client.put(
             "/v1/admin/quota/limits",
-            json={"subject_id": OTHER_SUB, "dimension": "bogus", "value": 1},
+            json={"user_id": str(OTHER_USER_ID), "dimension": "bogus", "value": 1},
             headers={"X-CSRF-Token": csrf},
         )
         assert resp.status_code == 400
@@ -560,12 +583,16 @@ def test_admin_overview_enriches_metered_subject(tmp_path):
                 email="b@example.com",
                 email_verified=True,
                 display_name="Bea B",
+                canonical_user_id=OTHER_USER_ID,
             )
         )
-        seed_usage(container, OTHER_SUB, QuotaDimension.RUNS, 1)
+        seed_usage(container, OTHER_USER_ID, QuotaDimension.RUNS, 1)
         overview = client.get("/v1/admin/quota").json()
         assert "stored_bytes" in overview["stock_dimensions"]
-        subj = next(s for s in overview["subjects"] if s["sub"] == OTHER_SUB)
+        subj = next(
+            s for s in overview["subjects"]
+            if s["user_id"] == str(OTHER_USER_ID)
+        )
         assert subj["display_name"] == "Bea B"
         assert subj["email"] == "b@example.com"
         assert subj["dimensions"]["runs"]["used"] == 1
@@ -581,9 +608,12 @@ def test_admin_overview_subject_without_profile(tmp_path):
         login(client, idp)
         promote(users)
         # OTHER_SUB is metered but carries no mirror profile -> None fallback.
-        seed_usage(container, OTHER_SUB, QuotaDimension.RUNS, 1)
+        seed_usage(container, OTHER_USER_ID, QuotaDimension.RUNS, 1)
         overview = client.get("/v1/admin/quota").json()
-        subj = next(s for s in overview["subjects"] if s["sub"] == OTHER_SUB)
+        subj = next(
+            s for s in overview["subjects"]
+            if s["user_id"] == str(OTHER_USER_ID)
+        )
         assert subj["display_name"] is None
         assert subj["email"] is None
 
@@ -599,6 +629,6 @@ def test_admin_mutations_require_csrf(tmp_path):
         # No X-CSRF-Token header on a state-changing PUT.
         resp = client.put(
             "/v1/admin/quota/limits",
-            json={"subject_id": OTHER_SUB, "dimension": "runs", "value": 1},
+            json={"user_id": str(OTHER_USER_ID), "dimension": "runs", "value": 1},
         )
         assert resp.status_code == 403

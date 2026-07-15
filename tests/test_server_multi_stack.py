@@ -17,7 +17,13 @@ from inqtrix.server.stacks import (
     _validate_stacks,
     create_multi_stack_app,
 )
-from inqtrix.settings import AgentSettings, ModelSettings, ServerSettings, Settings
+from inqtrix.settings import (
+    AgentSettings,
+    ModelSettings,
+    ServerSettings,
+    Settings,
+    SharingSettings,
+)
 
 
 # ------------------------------------------------------------------ #
@@ -117,6 +123,32 @@ def test_discovery_endpoint_lists_all_stacks_with_ready_flag():
         assert s["ready"] is True
         assert s["llm"] == "_StubLLM"
         assert s["search"] == "_StubSearch"
+
+
+def test_restricted_sharing_reconciles_in_multi_stack_lifespan():
+    settings = Settings(
+        models=ModelSettings(),
+        agent=AgentSettings(),
+        server=ServerSettings(),
+        sharing=SharingSettings(restrict_to_workspace_members=True),
+    )
+    app = create_multi_stack_app(
+        settings=settings,
+        stacks={"default": _bundle("default")},
+        default_stack="default",
+    )
+    calls: list[str] = []
+
+    async def reconcile(*, tenant_id: str) -> int:
+        calls.append(tenant_id)
+        return 0
+
+    app.state.container.workspace_admin.reconcile_workspace_shares = reconcile
+
+    with TestClient(app):
+        pass
+
+    assert calls == ["default"]
 
 
 def test_discovery_payload_includes_per_stack_models_block():

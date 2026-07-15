@@ -302,6 +302,8 @@ class LdapAuthProvider(OidcAuthProvider):
         pat_service: "PatService | None" = None,
         registration_gate: "RegistrationGate | None" = None,
         login_rate_limiter: "LoginRateLimiter | None" = None,
+        trusted_proxy_hops: int = 1,
+        lifecycle: "UserLifecycleService | None" = None,
     ) -> None:
         super().__init__(
             client=None,
@@ -314,10 +316,12 @@ class LdapAuthProvider(OidcAuthProvider):
             pats=pats,
             pat_service=pat_service,
             registration_gate=registration_gate,
+            lifecycle=lifecycle,
         )
         self.ldap_client = ldap_client
         self.first_login_owner = first_login_owner
         self.login_rate_limiter = login_rate_limiter
+        self.trusted_proxy_hops = trusted_proxy_hops
 
     @property
     def mode(self) -> "AuthMode":

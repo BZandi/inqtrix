@@ -4,6 +4,7 @@ import {
   type ImportResearchRunPayload,
 } from '@/api/inqtrixClient'
 import type { ResearchRunRecord } from '@/features/project/types'
+import type { ResearchRunSummary } from './types'
 import { unixSecondsFromIso } from '@/lib/time'
 
 type UseResearchRunImportOptions = {
@@ -13,6 +14,8 @@ type UseResearchRunImportOptions = {
   enabled: boolean
   researchRuns: Record<string, ResearchRunRecord>
   researchRunOrder: readonly string[]
+  /** Adopt the server-allocated run id without losing the imported report. */
+  onImported: (sourceRunId: string, summary: ResearchRunSummary) => void
   /** The per-user namespace the report is stored under (effectiveWorkspaceId). */
   workspaceId: string
 }
@@ -24,7 +27,9 @@ type UseResearchRunImportOptions = {
  * lists runs from the server, which never held it). Mirroring the chat/editor/
  * prompt import-up, this pushes each fully-formed completed report to
  * ``POST /v1/runs/import`` so it survives reload and follows the user; the
- * server upsert is idempotent on the report's run_id for the caller.
+ * server import is idempotent on the report's ``source_run_id`` while that
+ * imported run exists; the returned server-generated ``run_id`` becomes the
+ * canonical client identity.
  *
  * Push-only (no delete loop): runs are server-owned execution artifacts, not a
  * diffed project collection. ``pushedRef`` avoids re-pushing within a session;
@@ -38,6 +43,7 @@ export function useResearchRunImport({
   enabled,
   researchRuns,
   researchRunOrder,
+  onImported,
   workspaceId,
 }: UseResearchRunImportOptions): { error: string | null } {
   const [error, setError] = useState<string | null>(null)
@@ -50,25 +56,29 @@ export function useResearchRunImport({
       .map((id) => researchRuns[id])
       .filter(
         (run): run is ResearchRunRecord =>
-          isImportableReport(run) && !pushedRef.current.has(run.runId),
+          isImportableReport(run)
+          && !pushedRef.current.has(`${workspaceId}:${run.runId}`),
       )
     for (const run of pending) {
-      pushedRef.current.add(run.runId)
+      const pushKey = `${workspaceId}:${run.runId}`
+      pushedRef.current.add(pushKey)
       importResearchRun(importPayloadFromRun(run), { apiKey, workspaceId })
-        .then(() => {
-          if (!cancelled) setError(null)
+        .then((summary) => {
+          if (cancelled) return
+          onImported(run.runId, summary)
+          setError(null)
         })
         .catch((cause) => {
           if (cancelled) return
           // Let it retry on the next run, and surface it (No Silent Fallbacks).
-          pushedRef.current.delete(run.runId)
+          pushedRef.current.delete(pushKey)
           setError(cause instanceof Error ? cause.message : String(cause))
         })
     }
     return () => {
       cancelled = true
     }
-  }, [apiKey, enabled, researchRuns, researchRunOrder, workspaceId])
+  }, [apiKey, enabled, onImported, researchRuns, researchRunOrder, workspaceId])
 
   return { error }
 }
@@ -87,11 +97,11 @@ function isImportableReport(
   )
 }
 
-function importPayloadFromRun(
+export function importPayloadFromRun(
   run: ResearchRunRecord,
 ): ImportResearchRunPayload {
   return {
-    run_id: run.runId,
+    source_run_id: run.runId,
     question: run.summary.title,
     stack: run.stack,
     mode: run.mode,

@@ -1,0 +1,242 @@
+import { Tiptap } from '@hocuspocus/transformer'
+import type { JSONContent } from '@tiptap/core'
+import { getSchema } from '@tiptap/core'
+import * as Y from 'yjs'
+import { EDITOR_YJS_FRAGMENT } from './constants.js'
+import { createEditorSchemaExtensions } from './extensions.js'
+import { assertYjsCompatibleSuggestionStructure } from './suggestions.js'
+
+function createTransformer(): Tiptap {
+  return new Tiptap().extensions(createEditorSchemaExtensions({ enableUndoRedo: false }))
+}
+
+export function editorJsonToYDoc(content: JSONContent): Y.Doc {
+  const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
+  const document = schema.nodeFromJSON(content)
+  assertYjsCompatibleSuggestionStructure(document)
+  document.check()
+  return createTransformer().toYdoc(content, EDITOR_YJS_FRAGMENT)
+}
+
+export function editorYDocToJson(document: Y.Doc): JSONContent {
+  assertCanonicalEditorYDocRoots(document)
+  const content = createTransformer().fromYdoc(document, EDITOR_YJS_FRAGMENT) as JSONContent
+  const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
+  const editorDocument = schema.nodeFromJSON(content)
+  editorDocument.check()
+  return editorDocument.toJSON()
+}
+
+function assertCanonicalEditorYDocRoots(document: Y.Doc): void {
+  const rootNames = [...document.share.keys()]
+  if (rootNames.length !== 1 || rootNames[0] !== EDITOR_YJS_FRAGMENT) {
+    throw new Error(
+      `Yjs document must contain only the ${EDITOR_YJS_FRAGMENT} shared root`,
+    )
+  }
+  let contentRoot: Y.XmlFragment
+  // Yjs updates omit top-level constructors, so a received XmlFragment starts
+  // as AbstractType. Keyed root data must still be rejected after materializing it.
+  try {
+    contentRoot = document.getXmlFragment(EDITOR_YJS_FRAGMENT)
+  } catch {
+    throw new Error(`Yjs shared root ${EDITOR_YJS_FRAGMENT} must be an XmlFragment`)
+  }
+  if (!(document.share.get(EDITOR_YJS_FRAGMENT) instanceof Y.XmlFragment)) {
+    throw new Error(`Yjs shared root ${EDITOR_YJS_FRAGMENT} could not be materialized`)
+  }
+  if (
+    hasKeyedXmlFragmentState(contentRoot)
+    || contentRoot.toArray().some((child) => !(child instanceof Y.XmlElement))
+  ) {
+    throw new Error(`Yjs shared root ${EDITOR_YJS_FRAGMENT} has a non-canonical structure`)
+  }
+}
+
+function hasKeyedXmlFragmentState(fragment: Y.XmlFragment): boolean {
+  // Yjs has no public XmlFragment API for keyed state. Keep this version-pinned
+  // compatibility read isolated; raw client updates are validated without it.
+  const keyedState: unknown = Reflect.get(fragment, '_map')
+  return keyedState instanceof Map && keyedState.size > 0
+}
+
+export function validateEditorYDoc(document: Y.Doc): JSONContent {
+  assertCausallyCompleteYDoc(document)
+  const content = editorYDocToJson(document)
+  const sourceStructure = canonicalYjsStructure(document)
+  const canonical = editorJsonToYDoc(content)
+  try {
+    const canonicalJson = editorYDocToJson(canonical)
+    if (
+      JSON.stringify(content) !== JSON.stringify(canonicalJson)
+      || sourceStructure !== canonicalYjsStructure(canonical)
+    ) {
+      throw new Error('Yjs document is not canonical for the Inqtrix editor schema')
+    }
+    return content
+  } finally {
+    canonical.destroy()
+  }
+}
+
+/**
+ * Requires a complete, unambiguous, canonical Yjs V1 update encoding.
+ *
+ * Merging with an empty update forces Yjs to decode and re-encode a single
+ * payload instead of taking mergeUpdates' one-input identity fast path.
+ */
+export function validateCanonicalYjsV1Update(update: Uint8Array): Uint8Array {
+  let canonical: Uint8Array
+  try {
+    canonical = Y.mergeUpdates([EMPTY_YJS_V1_UPDATE, update])
+  } catch {
+    throw new Error('Client update is not a valid canonical Yjs V1 update')
+  }
+  if (!sameYjsBytes(update, canonical)) {
+    throw new Error('Client update is not a fully consumed canonical Yjs V1 update')
+  }
+  return update
+}
+
+/**
+ * Validates the raw operation vocabulary accepted from suggestion clients.
+ *
+ * This is intentionally reject-only: the returned bytes are the exact bytes
+ * that were inspected and may cross the persistence and broadcast boundary.
+ */
+export function validateSuggestionYjsUpdate(update: Uint8Array): Uint8Array {
+  let decoded: ReturnType<typeof Y.decodeUpdate>
+  try {
+    decoded = Y.decodeUpdate(update)
+  } catch {
+    throw new Error('Suggestion update is not a valid Yjs V1 update')
+  }
+
+  const inserted = new Map<number, Array<{ from: number; to: number }>>()
+  for (const struct of decoded.structs) {
+    if (!(struct instanceof Y.Item)) {
+      throw new Error('Suggestion update contains a non-canonical Yjs struct')
+    }
+    const ranges = inserted.get(struct.id.client) ?? []
+    ranges.push({ from: struct.id.clock, to: struct.id.clock + struct.length })
+    inserted.set(struct.id.client, ranges)
+
+    if (
+      (typeof struct.parent === 'string' && struct.parent !== EDITOR_YJS_FRAGMENT)
+      || struct.parentSub !== null
+    ) {
+      throw new Error('Suggestion update contains a non-canonical Yjs parent')
+    }
+    if (struct.content instanceof Y.ContentString) continue
+    if (
+      struct.content instanceof Y.ContentFormat
+      && EDITOR_YJS_FORMAT_NAMES.has(struct.content.key)
+    ) continue
+    if (
+      struct.content instanceof Y.ContentType
+      && struct.content.type instanceof Y.XmlText
+    ) continue
+    throw new Error('Suggestion update contains non-canonical Yjs content')
+  }
+
+  for (const [client, ranges] of decoded.ds.clients) {
+    const insertedRanges = inserted.get(client)
+    if (!insertedRanges) continue
+    for (const deleted of ranges) {
+      const deletedTo = deleted.clock + deleted.len
+      if (insertedRanges.some((range) => (
+        range.from < deletedTo && deleted.clock < range.to
+      ))) {
+        throw new Error('Suggestion update contains transient Yjs history')
+      }
+    }
+  }
+  return update
+}
+
+/**
+ * Proves that a materialized document has no unresolved struct or delete-set
+ * dependencies using only Yjs' encoded update and state-vector APIs.
+ */
+export function assertCausallyCompleteYDoc(document: Y.Doc): void {
+  const stateVector = Y.decodeStateVector(Y.encodeStateVector(document))
+  const encoded = Y.decodeUpdate(Y.encodeStateAsUpdate(document))
+  for (const struct of encoded.structs) {
+    const integratedClock = stateVector.get(struct.id.client) ?? 0
+    if (struct.id.clock + struct.length > integratedClock) {
+      throw new Error('Yjs document contains unresolved struct dependencies')
+    }
+  }
+  for (const [client, ranges] of encoded.ds.clients) {
+    const integratedClock = stateVector.get(client) ?? 0
+    if (ranges.some((range) => range.clock + range.len > integratedClock)) {
+      throw new Error('Yjs document contains unresolved delete dependencies')
+    }
+  }
+}
+
+const EDITOR_YJS_FORMAT_NAMES = new Set(
+  Object.keys(getSchema(createEditorSchemaExtensions({ enableUndoRedo: false })).marks),
+)
+
+const EMPTY_YJS_V1_UPDATE = (() => {
+  const document = new Y.Doc()
+  try {
+    return Y.encodeStateAsUpdate(document)
+  } finally {
+    document.destroy()
+  }
+})()
+
+function sameYjsBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return (
+    left.byteLength === right.byteLength
+    && left.every((value, index) => value === right[index])
+  )
+}
+
+function canonicalYjsStructure(document: Y.Doc): string {
+  const root = document.getXmlFragment(EDITOR_YJS_FRAGMENT)
+  return stableYjsJson(root.toArray().map(canonicalYjsNode))
+}
+
+function canonicalYjsNode(node: unknown): unknown {
+  if (node instanceof Y.XmlElement) {
+    return {
+      attributes: node.getAttributes(),
+      children: node.toArray().map(canonicalYjsNode),
+      name: node.nodeName,
+      type: 'element',
+    }
+  }
+  if (node instanceof Y.XmlText) {
+    return {
+      attributes: node.getAttributes(),
+      delta: node.toDelta(),
+      type: 'text',
+    }
+  }
+  throw new Error('Yjs document contains a non-canonical XML child')
+}
+
+function stableYjsJson(value: unknown): string {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+    return JSON.stringify(value)
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new Error('Yjs document contains a non-finite value')
+    return JSON.stringify(value)
+  }
+  if (Array.isArray(value)) return `[${value.map(stableYjsJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    const prototype = Object.getPrototypeOf(value)
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error('Yjs document contains a non-canonical attribute value')
+    }
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableYjsJson(item)}`)
+      .join(',')}}`
+  }
+  throw new Error('Yjs document contains a non-canonical attribute value')
+}

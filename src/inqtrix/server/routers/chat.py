@@ -22,7 +22,6 @@ from inqtrix.core.results import RunRequest
 from inqtrix.knowledge.stores.ports import CollectionNotFound
 from inqtrix.quota.models import QuotaDimension, consumed_tokens
 from inqtrix.server.routers import (
-    build_shared_grants_dependency,
     quota_admission,
     quota_record,
     stack_error_response,
@@ -48,17 +47,10 @@ def build_router(container: "AppContainer") -> APIRouter:
     knowledge_service = container.knowledge_service
     quota_service = container.quota_service
     user_context_dep = container.user_context_dependency
-    shared_collections_dep = build_shared_grants_dependency(
-        container.share_service,
-        container.principal_dependency,
-        resource_type="knowledge_collection",
-    )
-
     async def _pin_ask_scope(
         resolved_filters: dict,
         mode: str,
         visible_to: "UserContext | None",
-        collection_grants,
     ) -> JSONResponse | None:
         """Admission gate for asks against knowledge collections.
 
@@ -86,7 +78,6 @@ def build_router(container: "AppContainer") -> APIRouter:
                 await knowledge_service.resolve_ask_scope(
                     requested,
                     visible_to=visible_to,
-                    also_visible=collection_grants,
                 )
             )
         except CollectionNotFound:
@@ -104,7 +95,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(container.principal_dependency),
         visible_to: UserContext | None = Depends(user_context_dep),
-        collection_grants=Depends(shared_collections_dep),
     ):
         try:
             body = await req.json()
@@ -130,7 +120,6 @@ def build_router(container: "AppContainer") -> APIRouter:
             resolved.knowledge_filters,
             resolved.mode,
             visible_to,
-            collection_grants,
         )
         if denied is not None:
             return denied

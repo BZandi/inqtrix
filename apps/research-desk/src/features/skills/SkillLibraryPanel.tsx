@@ -57,9 +57,9 @@ import type { SkillsApiHandle } from './useSkillsApi'
  */
 
 type Draft = {
+  baseRevision: number
   payload: SkillPayload
   selectedId: string | null
-  expectedUpdatedAt: number
   dirty: boolean
   error: string
 }
@@ -68,7 +68,7 @@ function emptyDraft(): Draft {
   return {
     payload: emptySkillPayload(),
     selectedId: null,
-    expectedUpdatedAt: 0,
+    baseRevision: 0,
     dirty: false,
     error: '',
   }
@@ -76,11 +76,17 @@ function emptyDraft(): Draft {
 
 export function SkillLibraryPanel({
   api,
+  onShare,
+  onRequestedSkillHandled,
   reduceMotion = false,
+  requestedSkillId = null,
   textImprovement = null,
 }: {
   api: SkillsApiHandle
+  onShare?: (skill: SkillInfo) => void
+  onRequestedSkillHandled?: () => void
   reduceMotion?: boolean
+  requestedSkillId?: string | null
   /** TextImprove wiring for the instructions field; null hides it. */
   textImprovement?: Omit<TextImprovementApiOptions, 'locale'> | null
 }) {
@@ -103,7 +109,19 @@ export function SkillLibraryPanel({
     () => api.skills.find((skill) => skill.id === draft.selectedId) ?? null,
     [api.skills, draft.selectedId],
   )
-  const editable = canEditSkill(selected)
+  const sourceUnavailable = draft.selectedId !== null && selected === null
+  const remoteConflict = Boolean(
+    draft.dirty
+    && draft.selectedId
+    && selected
+    && selected.revision !== draft.baseRevision,
+  )
+  const permissionDowngraded = Boolean(
+    draft.dirty && selected && !canEditSkill(selected),
+  )
+  const editable = draft.selectedId === null
+    ? true
+    : selected !== null && canEditSkill(selected) && !remoteConflict
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase()
     if (!needle) return api.skills
@@ -132,34 +150,36 @@ export function SkillLibraryPanel({
     points,
   )
 
-  // Conflict recovery (twin of the rules editor): a failed save left a
-  // visible error and the hook re-hydrated the winning server version —
-  // rebase the precondition so the user's NEXT deliberate save wins
-  // instead of hitting the same 409 forever. Never rebases silently
-  // (only while an error is shown).
-  useEffect(() => {
-    if (!selected || !draft.error) return
-    if (selected.updated_at > draft.expectedUpdatedAt) {
-      setDraft((current) => ({
-        ...current,
-        expectedUpdatedAt: selected.updated_at,
-      }))
-    }
-  }, [draft.error, draft.expectedUpdatedAt, selected])
-
   const load = (skill: SkillInfo | null) => {
     setDraft(
       skill
         ? {
           payload: payloadFromSkill(skill),
           selectedId: skill.id,
-          expectedUpdatedAt: skill.updated_at,
+          baseRevision: skill.revision,
           dirty: false,
           error: '',
         }
         : emptyDraft(),
     )
   }
+
+  useEffect(() => {
+    if (!draft.selectedId || draft.dirty) return
+    if (!selected) {
+      load(null)
+      return
+    }
+    if (selected.revision !== draft.baseRevision) load(selected)
+  }, [draft.baseRevision, draft.dirty, draft.selectedId, selected])
+
+  useEffect(() => {
+    if (!requestedSkillId) return
+    const requested = api.skills.find((skill) => skill.id === requestedSkillId)
+    if (!requested) return
+    load(requested)
+    onRequestedSkillHandled?.()
+  }, [api.skills, requestedSkillId])
 
   const patch = (changes: Partial<SkillPayload>) => {
     setDraft((current) => ({
@@ -182,7 +202,7 @@ export function SkillLibraryPanel({
         point.question.trim() || point.name),
     }
     const saved = draft.selectedId
-      ? await api.update(draft.selectedId, payload, draft.expectedUpdatedAt)
+      ? await api.update(draft.selectedId, payload, draft.baseRevision)
       : await api.create(payload)
     if (saved) {
       load(saved)
@@ -195,6 +215,22 @@ export function SkillLibraryPanel({
     if (!draft.selectedId) return
     if (await api.remove(draft.selectedId)) load(null)
   }
+
+  const keepAsCopy = () => {
+    setDraft((current) => ({
+      ...current,
+      baseRevision: 0,
+      dirty: true,
+      error: '',
+      payload: {
+        ...current.payload,
+        label: `${current.payload.label.replace(/-copy$/, '')}-copy`,
+      },
+      selectedId: null,
+    }))
+  }
+
+  const discardRemoteConflict = () => load(selected)
 
   const importFile = async (file: File) => {
     const record = await api.importMarkdown(await file.text())
@@ -334,7 +370,7 @@ export function SkillLibraryPanel({
                 >
                   <span className="flex items-center gap-2">
                     <span className="t-label truncate text-foreground">/{skill.label}</span>
-                    {skill.access && (
+                    {skill.access.mode === 'shared' && (
                       <Badge variant="outline">
                         <Users className="mr-1 size-3" />
                         {s.sharedIn}
@@ -373,6 +409,11 @@ export function SkillLibraryPanel({
                 <Download className="size-4" />
               </Button>
             )}
+            {selected && canDeleteSkill(selected) && onShare && (
+              <Button aria-label={t.sharing.share} onClick={() => onShare?.(selected)} size="icon" type="button" variant="ghost">
+                <Users className="size-4" />
+              </Button>
+            )}
             {selected && canDeleteSkill(selected) && (
               <Button aria-label={s.delete} onClick={() => void remove()} size="icon" type="button" variant="ghost">
                 <Trash2 className="size-4" />
@@ -388,6 +429,32 @@ export function SkillLibraryPanel({
           <div className="mx-auto w-full max-w-3xl space-y-4 p-4">
             {draft.error && (
               <p className="rounded-md bg-warning-subtle px-2.5 py-2 t-meta text-warning">{draft.error}</p>
+            )}
+            {(sourceUnavailable || remoteConflict || permissionDowngraded) && (
+              <div className="rounded-md border border-warning/25 bg-warning-subtle px-3 py-2.5">
+                <p className="t-label text-warning">
+                  {sourceUnavailable
+                    ? s.sourceUnavailable
+                    : permissionDowngraded
+                      ? s.permissionDowngraded
+                      : s.remoteConflict}
+                </p>
+                <p className="mt-1 t-meta text-muted-foreground">
+                  {sourceUnavailable
+                    ? s.sourceUnavailableHint
+                    : permissionDowngraded
+                      ? s.permissionDowngradedHint
+                      : s.remoteConflictHint}
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <Button onClick={keepAsCopy} size="sm" type="button" variant="outline">
+                    {s.keepAsCopy}
+                  </Button>
+                  <Button onClick={discardRemoteConflict} size="sm" type="button" variant="ghost">
+                    {s.discardDraft}
+                  </Button>
+                </div>
+              </div>
             )}
             <div className="grid gap-3 sm:grid-cols-2">
               <Field label={s.fieldLabel}>

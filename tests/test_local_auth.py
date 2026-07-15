@@ -40,11 +40,11 @@ def make_client() -> TestClient:
 
     @app.get("/v1/protected")
     async def protected_get(principal=Depends(principal_dep)):
-        return {"sub": principal.sub, "kind": principal.kind}
+        return {"sub": principal.user_id, "kind": principal.kind}
 
     @app.post("/v1/protected")
     async def protected_post(principal=Depends(principal_dep)):
-        return {"sub": principal.sub}
+        return {"sub": principal.user_id}
 
     return TestClient(app, base_url="http://127.0.0.1:5100")
 
@@ -94,7 +94,7 @@ def test_owner_setup_logs_in_and_protected_route_resolves():
     _create_owner(client)
     info = client.get("/api/auth/session").json()
     assert info["authenticated"] is True
-    assert info["email"] == OWNER_EMAIL
+    assert info["user"]["email"] == OWNER_EMAIL
     assert info["csrf_token"]
 
     protected = client.get("/v1/protected")

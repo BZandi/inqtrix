@@ -1,0 +1,40 @@
+# External-database override: run the stack against a managed/external
+# PostgreSQL 15+ instead of the bundled container. Any PostgreSQL 15+
+# works, including pgvector-enabled images (e.g. pgvector 0.5.1 on
+# Postgres 15) — Inqtrix uses PostgreSQL relationally only, the vector
+# extension simply stays unused (vectors live in Qdrant).
+#
+# Usage (add this file AFTER the base stack file):
+#   docker compose -f deploy/compose/compose.stack.yaml \
+#     -f deploy/compose/compose.external-db.yaml \
+#     --env-file deploy/.env.stack up -d --build
+#
+# Required in deploy/.env.stack (see the "External PostgreSQL" block there):
+#   INQTRIX_DATABASE_URL   -> the external DSN with a dedicated unprivileged
+#                             runtime login
+#   INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY=restricted
+#   INQTRIX_MIGRATION_ENV_FILE=../.env.migrate  (privileged migration DSN,
+#                             copy deploy/.env.migrate.example)
+#   INQTRIX_MIGRATION_RLS_MODE=bypass or owner
+#                             (docs/deployment/database-migrations.md)
+#
+# Notes:
+# - Keep INQTRIX_PG_PASSWORD set to any placeholder: the base file
+#   interpolates it at parse time even though the bundled service no longer
+#   starts; its value is unused with this override.
+# - Do NOT combine with `--profile pgbouncer`: the bundled pooler is
+#   hard-wired to the bundled database (DB_HOST: postgres). Front an
+#   external database with your own pooler and point INQTRIX_DATABASE_URL
+#   at it instead.
+# - The one-shot `migrate` service keeps running — it migrates the EXTERNAL
+#   database — and api/worker keep waiting for its successful completion.
+#   The base file marks every `depends_on: postgres` entry `required: false`,
+#   so deactivating the service here is safe.
+name: inqtrix
+
+services:
+  postgres:
+    # Assigning an inactive profile prevents the bundled database from
+    # starting; the base file defines the service without profiles, so this
+    # override is the single switch.
+    profiles: ["bundled-db-disabled"]

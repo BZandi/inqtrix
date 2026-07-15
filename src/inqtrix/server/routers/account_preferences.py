@@ -1,11 +1,11 @@
 """Account-preferences endpoints (M6c project tier).
 
 The singleton per-user settings surface: ``GET`` / ``PUT
-/v1/account/preferences``. Unlike the project tiers, the row is keyed on the
-authenticated principal's subject directly — ``principal.sub`` is always
-present (``__anonymous__`` / ``__static__`` / the OIDC or PAT subject), so a
-caller always addresses exactly their own row. GET returns 404 when the user
-has never saved (the frontend then keeps its own default theme/locale).
+/v1/account/preferences``. The row is keyed by the authenticated principal's
+canonical ``users.id`` UUID, so a scoped caller can address only their own row.
+Anonymous and static-key principals have no user row and receive 404. GET also
+returns 404 when the user has never saved preferences (the frontend then keeps
+its own default theme/locale).
 """
 
 from __future__ import annotations
@@ -43,13 +43,17 @@ def build_router(container: "AppContainer") -> APIRouter:
 
     @router.get("/v1/account/preferences")
     async def get_preferences(principal: Principal = Depends(principal_dep)):
-        prefs = await service.get_preferences(sub=principal.sub)
+        if principal.user_id is None:
+            return error_response(404, "Nicht gefunden", "not_found")
+        prefs = await service.get_preferences(user_id=principal.user_id)
         if prefs is None:
             return error_response(404, "Keine Praeferenzen gespeichert", "not_found")
         return _payload(prefs)
 
     @router.put("/v1/account/preferences")
     async def save_preferences(req: Request, principal: Principal = Depends(principal_dep)):
+        if principal.user_id is None:
+            return error_response(404, "Nicht gefunden", "not_found")
         body = await _json_object(req)
         if not isinstance(body, dict):
             return error_response(400, "Ungueltiger Body", "invalid_request_error")
@@ -57,7 +61,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(400, "updated_at ist erforderlich", "invalid_request_error")
         try:
             prefs = await service.save_preferences(
-                sub=principal.sub,
+                user_id=principal.user_id,
                 contrast_mode=str(body.get("contrast_mode", "standard")),
                 locale=str(body.get("locale", "en")),
                 theme=str(body.get("theme", "system")),

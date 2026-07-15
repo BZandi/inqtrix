@@ -7,13 +7,12 @@ The only place that combines the three collaborators:
 * bytes go to / come from the
   :class:`~inqtrix.storage.object_store.ObjectStore`,
 * access decisions go through the
-  :class:`~inqtrix.auth.permissions.PermissionService`.
+  :class:`~inqtrix.auth.permissions.AuthorizationService`.
 
-Access rules (uniform with run visibility): legacy unscoped principals
-keep full access; scoped principals own what they uploaded; non-owners
-need a share grant resolved by the permission service. Denied access
-is indistinguishable from absence, but every denial is logged and
-audited by the permission layer.
+Files are never shareable. Legacy unscoped principals may access only
+ownerless legacy rows; scoped principals may access only their own files.
+Denied access remains indistinguishable from absence and is audited by the
+authorization service.
 
 Uploads stream through a spool file with running SHA-256 and size
 accounting — the limit is enforced without ever holding the file in
@@ -35,7 +34,7 @@ from pathlib import Path
 from typing import AsyncIterator, Iterator
 
 from inqtrix.auth.permissions import (
-    PermissionService,
+    AuthorizationService,
     ResourceNotFound,
     SharePermission,
 )
@@ -47,7 +46,7 @@ from inqtrix.storage.object_store import ObjectStore
 log = logging.getLogger("inqtrix")
 
 FILE_RESOURCE_TYPE = "file"
-"""``resource_shares.resource_type`` value for uploaded files."""
+"""Authorization label; it is deliberately not a shareable resource type."""
 
 
 @dataclass(frozen=True)
@@ -105,7 +104,7 @@ class FileService:
         *,
         registry: FileRegistry,
         object_store: ObjectStore,
-        permissions: PermissionService,
+        permissions: AuthorizationService,
         max_file_bytes: int,
         document_parser: DocumentParser | None = None,
     ) -> None:
@@ -114,6 +113,7 @@ class FileService:
         self._permissions = permissions
         self._max_file_bytes = max_file_bytes
         self._document_parser = document_parser
+        self._object_store_probe_task: asyncio.Task[bool] | None = None
 
     async def object_store_available(self) -> bool:
         """Return whether the configured blob store is reachable now.
@@ -123,7 +123,24 @@ class FileService:
         operator-facing capability/status surfaces; upload/download paths
         still fail loudly on their own operations.
         """
-        return await asyncio.to_thread(self._object_store.is_available)
+        loop = asyncio.get_running_loop()
+        task = self._object_store_probe_task
+        if task is not None and task.get_loop() is not loop:
+            if not task.done():
+                raise RuntimeError(
+                    "object-store probe is still active on another event loop"
+                )
+            task = None
+        if task is None or task.done():
+            task = loop.create_task(
+                asyncio.to_thread(self._object_store.is_available)
+            )
+            self._object_store_probe_task = task
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done() and self._object_store_probe_task is task:
+                self._object_store_probe_task = None
 
     async def upload(
         self,
@@ -159,7 +176,7 @@ class FileService:
             record = FileRecord(
                 id=file_id,
                 tenant_id=principal.tenant_id,
-                owner_sub=principal.sub,
+                owner_user_id=principal.user_id,
                 workspace_id=workspace_id,
                 file_name=file_name,
                 content_type=content_type or "application/octet-stream",
@@ -287,20 +304,23 @@ class FileService:
         sharing UI; creator-only listing is the deliberately
         conservative first cut (mirrors run visibility).
         """
-        owner_sub = principal.sub if user_context_is_scoped else None
-        return await self._registry.list(
+        owner_user_id = principal.user_id if user_context_is_scoped else None
+        records = await self._registry.list(
             tenant_id=principal.tenant_id,
-            owner_sub=owner_sub,
+            owner_user_id=owner_user_id,
             workspace_id=workspace_id,
         )
+        if user_context_is_scoped:
+            return records
+        return [record for record in records if record.owner_user_id is None]
 
     async def delete(self, file_id: str, *, principal: Principal) -> FileRecord:
         """Delete metadata and blob after the manage-access check.
 
-        The registry row is removed first (authorization anchor), the
-        blob second; a blob-store failure after the row is gone leaves
-        an orphaned blob, which is logged loudly instead of resurrecting
-        the record.
+        The blob is removed first and the registry row second. Object-store
+        deletion is idempotent, so a later registry failure can be retried
+        safely while the authorization/quota anchor remains. A blob-store
+        failure leaves both metadata and quota untouched and surfaces as 503.
 
         Returns:
             The deleted :class:`FileRecord` — its owner/size let the
@@ -310,20 +330,9 @@ class FileService:
         record = await self._registry.get(
             file_id, tenant_id=principal.tenant_id
         )
-        await self._require(principal, record, SharePermission.MANAGE)
+        await self._require(principal, record, SharePermission.EDIT)
+        await asyncio.to_thread(self._object_store.delete, record.object_key)
         await self._registry.delete(file_id, tenant_id=principal.tenant_id)
-        try:
-            await asyncio.to_thread(
-                self._object_store.delete, record.object_key
-            )
-        except Exception as exc:
-            log.warning(
-                "orphaned blob after registry delete: file=%s key=%s "
-                "error=%s",
-                record.id,
-                record.object_key,
-                exc,
-            )
         return record
 
     async def _require(
@@ -332,22 +341,13 @@ class FileService:
         record: FileRecord,
         permission: SharePermission,
     ) -> None:
-        """Owner shortcut, then the permission chokepoint.
-
-        The owner check needs no repository round-trip; everyone else
-        goes through ``PermissionService.require`` so denials are
-        audited centrally. ``ResourceNotFound`` is translated to
-        :class:`FileNotFound` so the router has one absence signal.
-        """
-        if (
-            principal.sub == record.owner_sub
-            and principal.tenant_id == record.tenant_id
-        ):
-            return
+        """Require owner/unscoped legacy access; direct file shares do not exist."""
         try:
             await self._permissions.require(
                 principal,
                 permission,
+                owner_user_id=record.owner_user_id,
+                resource_tenant_id=record.tenant_id,
                 resource_type=FILE_RESOURCE_TYPE,
                 resource_id=record.id,
             )

@@ -1,7 +1,7 @@
 """Postgres-backed vector-index-record store (M6c durable project tier).
 
 Records persist relationally with two owned child collections (members +
-history), scoped per ``(tenant_id, created_by_sub, workspace_id)`` with RLS
+history), scoped per ``(tenant_id, created_by_user_id, workspace_id)`` with RLS
 and the inherited tenant-session lifecycle (:class:`BaseSessionStore`).
 
 The record and its children travel together (the serialized
@@ -14,6 +14,7 @@ avoid an N+1.
 
 from __future__ import annotations
 
+import uuid
 from collections import defaultdict
 
 from sqlalchemy import delete, select, tuple_
@@ -30,6 +31,8 @@ from inqtrix.project.vector_index_ports import (
     VectorIndexNotFound,
     VectorIndexRecord,
 )
+from inqtrix.project.scoped_upsert import ResourceScope, delete_scoped_postgres
+from inqtrix.project.scoped_upsert import scoped_postgres_upsert
 from inqtrix.storage.vector_index_orm import (
     vector_index_history,
     vector_index_members,
@@ -54,34 +57,35 @@ class PostgresVectorIndexStore(BaseSessionStore):
     async def upsert_index(
         self, *, id, title, handle, model, dims, status, server_collection_id,
         server_collection_model, last_error, members, history, created_at,
-        updated_at, created_by_sub, workspace_id,
+        updated_at, created_by_user_id: uuid.UUID | None, workspace_id,
     ) -> VectorIndexRecord:
-        record_stmt = pg_insert(vector_index_records).values(
-            id=id, tenant_id=_DEFAULT_TENANT, created_by_sub=created_by_sub,
+        values = dict(
+            id=id, tenant_id=_DEFAULT_TENANT, created_by_user_id=created_by_user_id,
             workspace_id=workspace_id, title=title, handle=handle, model=model,
             dims=dims, status=status, server_collection_id=server_collection_id,
             server_collection_model=server_collection_model,
             last_error=last_error, created_at=created_at, updated_at=updated_at,
         )
-        record_stmt = record_stmt.on_conflict_do_update(
-            index_elements=[vector_index_records.c.id],
-            set_={col: getattr(record_stmt.excluded, col) for col in _MUTABLE},
+        record_stmt = scoped_postgres_upsert(
+            pg_insert(vector_index_records), vector_index_records, values, _MUTABLE
         ).returning(vector_index_records)
         members = tuple(members)
         history = tuple(history)
         async with self._session() as session:
-            row = (await session.execute(record_stmt)).one()
+            row = (await session.execute(record_stmt)).first()
+            if row is None:
+                raise VectorIndexNotFound(id)
             await self._replace_children(session, id, members, history)
         return self._record_from_row(row, members, history)
 
     async def list_indexes_page(
-        self, *, created_by_sub, workspace_id, limit, after
+        self, *, created_by_user_id: uuid.UUID | None, workspace_id, limit, after
     ) -> tuple[list[VectorIndexRecord], str | None]:
         query = select(vector_index_records).where(
             vector_index_records.c.tenant_id == _DEFAULT_TENANT
         )
-        if created_by_sub is not None:
-            query = query.where(vector_index_records.c.created_by_sub == created_by_sub)
+        if created_by_user_id is not None:
+            query = query.where(vector_index_records.c.created_by_user_id == created_by_user_id)
         if workspace_id is not None:
             query = query.where(vector_index_records.c.workspace_id == workspace_id)
         if after is not None:
@@ -125,12 +129,15 @@ class PostgresVectorIndexStore(BaseSessionStore):
             row, members_by_index.get(index_id, ()), history_by_index.get(index_id, ())
         )
 
-    async def delete_index(self, index_id: str) -> None:
+    async def delete_index(
+        self, index_id: str, *, scope: ResourceScope
+    ) -> None:
         async with self._session() as session:
-            await session.execute(delete(vector_index_records).where(
-                vector_index_records.c.tenant_id == _DEFAULT_TENANT,
-                vector_index_records.c.id == index_id,
-            ))
+            await delete_scoped_postgres(
+                session, table=vector_index_records, resource_id=index_id,
+                tenant_id=_DEFAULT_TENANT, scope=scope,
+                not_found=VectorIndexNotFound,
+            )
 
     # -- children --------------------------------------------------------- #
 
@@ -203,6 +210,6 @@ class PostgresVectorIndexStore(BaseSessionStore):
             last_error=row.last_error,
             members=tuple(members), history=tuple(history),
             created_at=row.created_at, updated_at=row.updated_at,
-            tenant_id=row.tenant_id, created_by_sub=row.created_by_sub,
+            tenant_id=row.tenant_id, created_by_user_id=row.created_by_user_id,
             workspace_id=row.workspace_id,
         )

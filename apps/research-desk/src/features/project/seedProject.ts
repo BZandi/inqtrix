@@ -3,7 +3,7 @@ import { seedKnowledgeThreadItem } from '@/features/knowledge/demo'
 import { DEMO_SHARED_IN_RUN_ID, resetDemoShares } from '@/features/sharing/demoShares'
 import { parseChatRule, parseChatThread, parseResearchRun } from './markdown'
 import { EMPTY_CANVAS_STATE } from '@/features/canvas/types'
-import { DEFAULT_KNOWLEDGE_SESSION_ID, DEFAULT_KNOWLEDGE_SESSION_TITLE } from './knowledgeSessionDefaults'
+import { createBootstrapKnowledgeSession } from './knowledgeSessionDefaults'
 import { DEFAULT_PANEL_LAYOUT } from './panelLayout'
 import type {
   EditorCommentThreadRecord,
@@ -77,7 +77,7 @@ function parsedDemoRuns(): ResearchRunRecord[] {
     .map((markdown) => parseResearchRun(markdown))
     .map((run) =>
       run.runId === DEMO_SHARED_IN_RUN_ID
-        ? { ...run, access: { permission: 'view' as const, via: 'share' as const } }
+        ? { ...run, access: { mode: 'shared' as const, permission: 'view' as const } }
         : run,
     )
     .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt))
@@ -146,11 +146,7 @@ function createKnowledgeSessionGroup(
 export function createEmptyProjectState(): ProjectState {
   const now = new Date().toISOString()
   const defaultSections = createDefaultFileLibrarySections(now)
-  const defaultKnowledgeSession = createKnowledgeSession(
-    DEFAULT_KNOWLEDGE_SESSION_ID,
-    DEFAULT_KNOWLEDGE_SESSION_TITLE,
-    now,
-  )
+  const defaultKnowledgeSession = createBootstrapKnowledgeSession(now)
 
   return {
     chatRuleOrder: [],
@@ -443,7 +439,7 @@ function seedChatRules(): ChatRuleRecord[] {
 
 function seedFileLibrarySections(): FileLibrarySectionRecord[] {
   // Keep the canonical temporary section (chat/editor uploads target it via
-  // FILE_SECTION_TEMP_ID); it stays empty in the demo and the rail hides it
+  // section with `kind: 'temporary'`); it stays empty in the demo and the rail hides it
   // until it has documents. The three custom collections mirror the database
   // design screenshots.
   const temporary = createDefaultFileLibrarySections(seedCreatedAt).filter((section) => section.kind === 'temporary')

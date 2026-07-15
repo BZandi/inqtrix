@@ -11,13 +11,19 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+import uuid
+from dataclasses import replace
 from typing import Callable
 
 import pytest
 
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
-from inqtrix.knowledge.stores.ports import DocumentNotFound, KnowledgeProviderContext
+from inqtrix.knowledge.stores.ports import (
+    CollectionMaintenanceActive,
+    DocumentNotFound,
+    KnowledgeProviderContext,
+)
 from inqtrix.quota.models import QuotaDimension, QuotaSubject
 from inqtrix.server.indexing import (
     IndexingJobConflict,
@@ -35,7 +41,15 @@ from inqtrix.services.indexing_service import (
 from inqtrix.services.knowledge_service import KnowledgeService
 from inqtrix.settings import KnowledgeSettings
 
-from tests.test_knowledge_engine import StubEmbeddings, make_knowledge_context
+from tests.test_knowledge_engine import (
+    StubEmbeddings,
+    make_knowledge_context,
+    make_service,
+)
+
+
+OWNER_USER_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
+STRANGER_USER_ID = uuid.UUID("33333333-3333-4333-8333-333333333333")
 
 
 def _wait_until(predicate: Callable[[], bool], *, timeout: float = 2.0) -> None:
@@ -226,6 +240,34 @@ def test_cancel_running_job_is_observed_by_worker() -> None:
     _wait_until(lambda: store.get(summary["job_id"])["status"] == "cancelled")
 
 
+def test_cancelling_job_reserves_collection_until_worker_exits() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking(handle: IndexingJobHandle) -> None:
+        handle.begin(1)
+        started.set()
+        release.wait(timeout=2)
+        handle.complete()
+
+    store = _store(max_concurrent=1)
+    summary = _submit(store, collection_id="kcA", work=blocking)
+    _wait_until(started.is_set)
+
+    cancelling = store.cancel(summary["job_id"])
+    assert cancelling["status"] == "cancelling"
+    assert store.has_active_job("kcA") is True
+    with pytest.raises(CollectionMaintenanceActive):
+        store.run_collection_mutation("kcA", lambda: None)
+    with pytest.raises(IndexingJobConflict):
+        _submit(store, collection_id="kcA")
+
+    release.set()
+    _wait_until(lambda: store.get(summary["job_id"])["status"] == "cancelled")
+    assert store.has_active_job("kcA") is False
+    assert store.run_collection_mutation("kcA", lambda: "landed") == "landed"
+
+
 # ------------------------------------------------------------------ #
 # Store: visibility / retention / events
 # ------------------------------------------------------------------ #
@@ -233,12 +275,16 @@ def test_cancel_running_job_is_observed_by_worker() -> None:
 
 def test_visibility_scopes_jobs_to_creator() -> None:
     store = _store()
-    owner = UserContext(principal=Principal(sub="owner", kind="oidc_session"))
-    stranger = UserContext(principal=Principal(sub="stranger", kind="oidc_session"))
+    owner = UserContext(
+        principal=Principal(user_id=OWNER_USER_ID, kind="oidc_session")
+    )
+    stranger = UserContext(
+        principal=Principal(user_id=STRANGER_USER_ID, kind="oidc_session")
+    )
     summary = _submit(
         store,
         collection_id="kc1",
-        created_by_sub="owner",
+        created_by_user_id=OWNER_USER_ID,
         created_by_tenant_id="default",
     )
     _wait_until(lambda: store.get(summary["job_id"])["status"] == "completed")
@@ -296,18 +342,35 @@ def test_format_sse_event_renders_frame() -> None:
 # ------------------------------------------------------------------ #
 
 
-def _service_with_docs(*texts: str) -> tuple[KnowledgeService, StubEmbeddings, object]:
+def _service_with_docs(
+    *texts: str,
+    owner_user_id: uuid.UUID | None = None,
+) -> tuple[KnowledgeService, StubEmbeddings, object]:
     embeddings = StubEmbeddings()
     context = make_knowledge_context(embeddings=embeddings)
-    service = KnowledgeService(
-        knowledge=context, chunk_max_chars=2_000, max_document_chars=100_000
+    service = make_service(context)
+    visible_to = (
+        UserContext(
+            principal=Principal(
+                user_id=owner_user_id,
+                kind="oidc_session",
+            )
+        )
+        if owner_user_id is not None
+        else None
     )
 
     async def _seed():
-        collection = await service.create_collection(name="C")
+        collection = await service.create_collection(
+            name="C",
+            created_by_user_id=owner_user_id,
+        )
         for index, text in enumerate(texts):
             await service.add_document(
-                collection_id=collection.id, title=f"Doc {index}", text=text
+                collection_id=collection.id,
+                title=f"Doc {index}",
+                text=text,
+                visible_to=visible_to,
             )
         return collection
 
@@ -328,6 +391,144 @@ def test_reindex_reembeds_every_document() -> None:
     assert final["percent"] == 100
     # Both documents were embedded a second time by the reindex.
     assert embeddings.document_calls == calls_before + 2
+
+
+def test_reindex_reloads_each_document_before_embedding(monkeypatch) -> None:
+    service, _embeddings, collection = _service_with_docs("canonical text")
+    store = service.knowledge.store
+    canonical = asyncio.run(store.list_documents(collection.id))[0]
+
+    async def stale_enumeration(_collection_id: str):
+        return [replace(canonical, title="stale title", text="stale text")]
+
+    observed: list[tuple[str, str]] = []
+
+    async def capture_reembed(
+        *,
+        document,
+        embedding_model,
+        authority_check=None,
+        actor_user_id=None,
+    ):
+        if authority_check is not None:
+            authority_check()
+        observed.append((document.title, document.text))
+
+    monkeypatch.setattr(store, "list_documents", stale_enumeration)
+    monkeypatch.setattr(service, "reembed_document", capture_reembed)
+
+    indexing_store = _store()
+    indexing = IndexingService(
+        knowledge_service=service, job_store=indexing_store
+    )
+    summary = indexing.submit(collection=collection)
+    _wait_until(
+        lambda: indexing_store.get(summary["job_id"])["status"] == "completed"
+    )
+    assert observed == [(canonical.title, canonical.text)]
+
+
+def test_reindex_forwards_live_authority_and_canonical_actor(monkeypatch) -> None:
+    service, _embeddings, collection = _service_with_docs(
+        "canonical text",
+        owner_user_id=OWNER_USER_ID,
+    )
+    principal = Principal(user_id=OWNER_USER_ID, kind="oidc_session")
+    observed_actors: list[uuid.UUID | None] = []
+
+    class RecordingAuthority:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def check(self, collection_id: str, checked: Principal | None) -> None:
+            assert collection_id == collection.id
+            assert checked == principal
+            self.calls += 1
+
+    authority = RecordingAuthority()
+
+    async def capture_reembed(
+        *,
+        document,
+        embedding_model,
+        authority_check=None,
+        actor_user_id=None,
+    ):
+        assert document.collection_id == collection.id
+        assert embedding_model == collection.embedding_model
+        assert authority_check is not None
+        authority_check()
+        observed_actors.append(actor_user_id)
+
+    monkeypatch.setattr(service, "reembed_document", capture_reembed)
+    job_store = _store()
+    indexing = IndexingService(
+        knowledge_service=service,
+        job_store=job_store,
+        authority=authority,
+    )
+
+    summary = indexing.submit(collection=collection, principal=principal)
+    _wait_until(
+        lambda: job_store.get(summary["job_id"])["status"] == "completed"
+    )
+
+    assert observed_actors == [OWNER_USER_ID]
+    assert authority.calls >= 4
+
+
+def test_reindex_blocks_collection_mutations_until_terminal(monkeypatch) -> None:
+    service, _embeddings, collection = _service_with_docs("alpha")
+    document = asyncio.run(
+        service.knowledge.store.list_documents(collection.id)
+    )[0]
+    started = threading.Event()
+    release = threading.Event()
+    real_reembed = service.reembed_document
+
+    async def blocking_reembed(
+        *,
+        document,
+        embedding_model,
+        authority_check=None,
+        actor_user_id=None,
+    ):
+        started.set()
+        await asyncio.to_thread(release.wait, 2)
+        return await real_reembed(
+            document=document,
+            embedding_model=embedding_model,
+            authority_check=authority_check,
+            actor_user_id=actor_user_id,
+        )
+
+    monkeypatch.setattr(service, "reembed_document", blocking_reembed)
+    job_store = _store()
+    indexing = IndexingService(knowledge_service=service, job_store=job_store)
+    summary = indexing.submit(collection=collection)
+    _wait_until(started.is_set)
+
+    with pytest.raises(CollectionMaintenanceActive):
+        asyncio.run(
+            service.add_document(
+                collection_id=collection.id,
+                title="blocked",
+                text="blocked",
+            )
+        )
+    with pytest.raises(CollectionMaintenanceActive):
+        asyncio.run(service.delete_document(document.id))
+    with pytest.raises(CollectionMaintenanceActive):
+        asyncio.run(service.delete_collection(collection.id))
+
+    cancelled = job_store.cancel(summary["job_id"])
+    assert cancelled["status"] == "cancelling"
+    with pytest.raises(CollectionMaintenanceActive):
+        asyncio.run(service.delete_document(document.id))
+
+    release.set()
+    _wait_until(lambda: job_store.get(summary["job_id"])["status"] == "cancelled")
+    asyncio.run(service.delete_document(document.id))
 
 
 def test_reindex_emits_one_document_completed_event_per_document() -> None:
@@ -362,10 +563,21 @@ def test_reindex_emits_no_document_completed_for_a_vanished_document(monkeypatch
     # surviving document flips its file row.
     real_reembed = service.reembed_document
 
-    async def vanishing_reembed(*, document, embedding_model):
+    async def vanishing_reembed(
+        *,
+        document,
+        embedding_model,
+        authority_check=None,
+        actor_user_id=None,
+    ):
         if document.title == "Doc 0":
             raise DocumentNotFound(document.id)
-        return await real_reembed(document=document, embedding_model=embedding_model)
+        return await real_reembed(
+            document=document,
+            embedding_model=embedding_model,
+            authority_check=authority_check,
+            actor_user_id=actor_user_id,
+        )
 
     monkeypatch.setattr(service, "reembed_document", vanishing_reembed)
     indexing = IndexingService(knowledge_service=service, job_store=store)
@@ -380,15 +592,23 @@ def test_reindex_emits_no_document_completed_for_a_vanished_document(monkeypatch
 
 
 def test_reindex_records_embedding_quota_per_document() -> None:
-    service, _embeddings, collection = _service_with_docs("alpha beta", "gamma delta")
-    principal = Principal(sub="user-1", kind="oidc_session")
+    service, _embeddings, collection = _service_with_docs(
+        "alpha beta",
+        "gamma delta",
+        owner_user_id=OWNER_USER_ID,
+    )
+    principal = Principal(user_id=OWNER_USER_ID, kind="oidc_session")
 
     class FakeQuota:
         def __init__(self) -> None:
             self.records: list[tuple] = []
 
         def subject_for(self, who):
-            return QuotaSubject(tenant_id="default", sub="user-1") if who else None
+            return (
+                QuotaSubject(tenant_id="default", user_id=OWNER_USER_ID)
+                if who
+                else None
+            )
 
         def record_blocking(self, subject, dimension, amount) -> None:
             self.records.append((subject, dimension, amount))
@@ -460,10 +680,25 @@ def test_submit_raises_when_store_lacks_reembed() -> None:
     context = KnowledgeProviderContext(
         embeddings=StubEmbeddings(), store=NoReembedStore()
     )
-    service = KnowledgeService(
-        knowledge=context, chunk_max_chars=2_000, max_document_chars=100_000
-    )
+    service = make_service(context)
     collection = asyncio.run(service.create_collection(name="C"))
     indexing = IndexingService(knowledge_service=service, job_store=_store())
     with pytest.raises(ReindexUnsupported):
+        indexing.submit(collection=collection)
+
+
+def test_submit_raises_when_store_cannot_serialize_reindex() -> None:
+    class UnsafeStore(MemoryKnowledgeStore):
+        @property
+        def supports_safe_reindex(self) -> bool:
+            return False
+
+    context = KnowledgeProviderContext(
+        embeddings=StubEmbeddings(), store=UnsafeStore()
+    )
+    service = make_service(context)
+    collection = asyncio.run(service.create_collection(name="C"))
+    indexing = IndexingService(knowledge_service=service, job_store=_store())
+
+    with pytest.raises(ReindexUnsupported, match="cannot safely serialize"):
         indexing.submit(collection=collection)

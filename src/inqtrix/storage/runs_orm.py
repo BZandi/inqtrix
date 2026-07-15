@@ -44,7 +44,7 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSON, UUID
 
 runs_metadata = MetaData()
 
@@ -73,8 +73,16 @@ runs = Table(
     Column("question", Text, nullable=False),
     Column("stack_name", Text, nullable=False, server_default=text("'default'")),
     Column("workspace_id", Text, nullable=True),
-    Column("created_by_sub", Text, nullable=True),
+    Column("created_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("created_by_tenant_id", Text, nullable=True),
+    Column("source_run_id", Text, nullable=True),
+    Column("execution_actor_user_id", UUID(as_uuid=True), nullable=True),
+    Column(
+        "execution_scopes",
+        JSON,
+        nullable=False,
+        server_default=text("'[]'"),
+    ),
     Column("agent_overrides", JSON, nullable=False, server_default=text("'{}'")),
     Column("request_payload", JSON, nullable=True),
     Column("snapshot", JSON, nullable=False, server_default=text("'{}'")),
@@ -101,13 +109,32 @@ runs = Table(
     # Child listing + session grouping for agent trees (0029).
     Index("ix_runs_tenant_parent", "tenant_id", "parent_run_id"),
     Index("ix_runs_tenant_session", "tenant_id", "session_id"),
-    # Per-user in-flight cap COUNT (created_by_sub + active status) on every
-    # submit; the tenant-leading indexes don't narrow by subject on a
+    Index(
+        "uq_runs_import_owner_source",
+        "tenant_id",
+        "created_by_user_id",
+        "source_run_id",
+        unique=True,
+        postgresql_where=text(
+            "created_by_user_id IS NOT NULL AND source_run_id IS NOT NULL"
+        ),
+    ),
+    Index(
+        "uq_runs_import_unscoped_source",
+        "tenant_id",
+        "source_run_id",
+        unique=True,
+        postgresql_where=text(
+            "created_by_user_id IS NULL AND source_run_id IS NOT NULL"
+        ),
+    ),
+    # Per-user in-flight cap COUNT (created_by_user_id + active status) on every
+    # submit; the tenant-leading indexes don't narrow by user on a
     # single-tenant deployment. Partial over the two active statuses so it
     # indexes only the tiny live set (0037).
     Index(
-        "ix_runs_sub_active",
-        "created_by_sub",
+        "ix_runs_user_id_active",
+        "created_by_user_id",
         "status",
         postgresql_where=text("status IN ('queued', 'running')"),
     ),

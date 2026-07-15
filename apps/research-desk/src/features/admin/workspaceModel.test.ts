@@ -3,18 +3,18 @@ import { describe, expect, it } from 'vitest'
 import type { AdminUser, WorkspaceMember } from '@/api/inqtrixClient'
 import { candidateUsers, wouldOrphanLastOwner } from './workspaceModel'
 
-function member(sub: string, role: WorkspaceMember['role']): WorkspaceMember {
-  return { display_name: sub, email: `${sub}@example.com`, role, sub }
+function member(userId: string, role: WorkspaceMember['role']): WorkspaceMember {
+  return { display_name: userId, email: `${userId}@example.com`, role, user_id: userId }
 }
 
-function user(subject: string, displayName: string | null): AdminUser {
+function user(id: string, displayName: string | null): AdminUser {
   return {
     disabled: false,
     display_name: displayName,
-    email: `${subject}@example.com`,
+    email: `${id}@example.com`,
     instance_role: 'user',
     last_login_at: null,
-    subject,
+    id,
   }
 }
 
@@ -49,7 +49,7 @@ describe('candidateUsers (add-member pool)', () => {
 
   it('excludes existing members and sorts by display name', () => {
     const result = candidateUsers(users, new Set(['u-bob']))
-    expect(result.map((entry) => entry.subject)).toEqual([
+    expect(result.map((entry) => entry.id)).toEqual([
       'u-alice',
       'u-charlie',
     ])
@@ -58,20 +58,20 @@ describe('candidateUsers (add-member pool)', () => {
   it('excludes disabled users (the server assign endpoint 404s on them)', () => {
     const disabled = { ...user('u-dora', 'Dora'), disabled: true }
     const result = candidateUsers([...users, disabled], new Set())
-    expect(result.some((entry) => entry.subject === 'u-dora')).toBe(false)
+    expect(result.some((entry) => entry.id === 'u-dora')).toBe(false)
   })
 
-  it('falls back to email then subject when the name is missing', () => {
+  it('falls back to email then id when the name is missing', () => {
     const result = candidateUsers([user('u-zoe', null)], new Set())
     expect(result).toHaveLength(1)
   })
 
-  it('filters by a case-insensitive query over name/email/subject', () => {
+  it('filters by a case-insensitive query over name/email/id', () => {
     const byName = candidateUsers(users, new Set(), 'ALI')
-    expect(byName.map((entry) => entry.subject)).toEqual(['u-alice'])
+    expect(byName.map((entry) => entry.id)).toEqual(['u-alice'])
     // Email match (u-bob@example.com) even when the name does not match.
     const byEmail = candidateUsers(users, new Set(), 'u-bob@')
-    expect(byEmail.map((entry) => entry.subject)).toEqual(['u-bob'])
+    expect(byEmail.map((entry) => entry.id)).toEqual(['u-bob'])
     // An empty query returns the full (member/disabled-filtered) list.
     expect(candidateUsers(users, new Set(), '  ')).toHaveLength(3)
   })

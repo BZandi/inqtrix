@@ -123,6 +123,7 @@ from inqtrix.exceptions import (
     AgentPolicyDenied,
     AgentTokenBudgetExceeded,
 )
+from inqtrix.execution_authority import pinned_knowledge_collection_ids
 from inqtrix.execution_failures import (
     RETRYABLE_AGENT_TASK_ORCHESTRATION_CODES,
     classify_execution_failure,
@@ -658,6 +659,13 @@ class _RunDeps:
                     context.principal
                 )
             )
+        self.knowledge_collection_ids = pinned_knowledge_collection_ids(
+            request.knowledge_filters,
+            scoped_principal=bool(
+                context.principal is not None
+                and context.principal.user_id is not None
+            ),
+        )
         # Long-term agent memory is opt-in per user (privacy default OFF),
         # resolved ONCE per segment like visible_to. The read runs on the
         # account-preferences NullPool store (loop-agnostic), safe from this
@@ -695,18 +703,15 @@ class _RunDeps:
                 )
             for skill_id in request.skill_ids:
                 try:
-                    # No re-derived visibility here: the runs router
-                    # admitted these ids WITH the caller's share grants,
-                    # which the worker cannot resolve — the admission is
-                    # the gate, the segment executes what was admitted.
-                    record = _run_async(
-                        algorithm._skills.get_admitted(
+                    record, _access = _run_async(
+                        algorithm._skills.get_visible(
                             skill_id,
                             tenant_id=(
                                 context.principal.tenant_id
                                 if context.principal is not None
                                 else "default"
                             ),
+                            visible_to=self.visible_to,
                         )
                     )
                 except Exception as exc:  # noqa: BLE001 — loud, never partial
@@ -717,7 +722,7 @@ class _RunDeps:
                 expected_revision = request.skill_revisions.get(skill_id)
                 if (
                     expected_revision is None
-                    or record.updated_at != expected_revision
+                    or record.revision != expected_revision
                 ):
                     raise RuntimeError(
                         f"Angehaengter Skill {skill_id} hat sich seit der "
@@ -794,25 +799,23 @@ class _RunDeps:
         return bool(token is not None and token.is_set())
 
     def collection_scope(self) -> list[str]:
-        """The collection ids this run may retrieve from (cached).
+        """The admitted collection ids this run may retrieve from.
 
-        Explicitly requested ids win (validated below); otherwise every
-        collection VISIBLE to the owner. An empty scope means honest
-        empty retrievals — never a silent fall-open to all users' data.
+        A concrete persisted list, including an empty list, is immutable for
+        the run. Only deliberately unscoped anonymous/static execution keeps
+        the historical live-all view. Current visibility is still checked so
+        a revoke fails closed instead of silently shrinking the corpus.
         """
         if self._collection_scope is not None:
             return self._collection_scope
         if self.source_policy.knowledge != "available":
             self._collection_scope = []
             return self._collection_scope
-        requested = [
-            str(item)
-            for item in (
-                self.request.knowledge_filters.get("collection_ids") or []
+        if self.knowledge_collection_ids is not None:
+            requested = sorted(self.knowledge_collection_ids)
+            self._collection_scope = (
+                self.assert_collections(requested) if requested else []
             )
-        ]
-        if requested:
-            self._collection_scope = self.assert_collections(requested)
             return self._collection_scope
         if self.knowledge is None:
             self._collection_scope = []
@@ -829,7 +832,17 @@ class _RunDeps:
         return self._collection_scope
 
     def assert_collections(self, collection_ids: list[str]) -> list[str]:
-        """Fail LOUDLY on any collection the owner cannot see (E5)."""
+        """Require both run admission and current actor visibility."""
+        from inqtrix.knowledge.stores.ports import CollectionNotFound
+
+        requested = set(collection_ids)
+        if (
+            self.knowledge_collection_ids is not None
+            and not requested.issubset(self.knowledge_collection_ids)
+        ):
+            raise CollectionNotFound(
+                "Collection is outside the admitted run scope."
+            )
         if self.knowledge is None:
             raise RuntimeError(
                 "Collection-Zugriff ohne Wissens-Dienst nicht pruefbar."
@@ -3479,15 +3492,21 @@ def _node_patch(state: AgentPhaseState) -> AgentPhaseState:
         state["failure"] = "editor_patches_unavailable"
         return state
     from inqtrix.project.editor_ports import DocumentNotFound
+    from inqtrix.services.editor_persistence_service import (
+        CollaborationProjectionUnavailable,
+    )
 
     try:
         document = _run_async(
-            deps.editor_docs.get_document(
+            deps.editor_docs.get_document_for_ai(
                 document_id, visible_to=deps.visible_to
             )
         )
     except DocumentNotFound:
         state["failure"] = "patch_document_not_found"
+        return state
+    except CollaborationProjectionUnavailable:
+        state["failure"] = "collaboration_projection_unavailable"
         return state
 
     from inqtrix.agents.patch_phase import (
@@ -3536,10 +3555,10 @@ def _node_patch(state: AgentPhaseState) -> AgentPhaseState:
             edits=[edit.to_payload() for edit in result.edits],
             summary=result.assistant_message,
             warnings=list(result.warnings),
-            created_by_sub=getattr(principal, "sub", "") or "",
+            created_by_user_id=getattr(principal, "user_id", None),
             visible_to=deps.visible_to,
-            # Attributes the proposal in the audit trail as an agent write
-            # (actor_type='agent', E6); the owner stays the actor_sub.
+            # Attributes the proposal in the audit trail as an agent write;
+            # actor_user_id remains the segment's effective actor.
             principal=principal,
         )
     )
@@ -4197,6 +4216,7 @@ def _child_task_outcome(
         deps.run_service.run_store,
         child_id,
         attempt,
+        visible_to=getattr(deps, "visible_to", None),
     )
 
 
@@ -4586,17 +4606,20 @@ def _task_collection_scope(
 def _collection_catalog(
     deps: "_RunDeps",
 ) -> list[CollectionCatalogEntry] | None:
-    """Caller-visible collection catalog for the planner.
+    """Currently visible metadata inside the immutable run boundary.
 
     ``None`` (no knowledge service wired) tells the planner path to skip
     catalog handling entirely; an EMPTY list is a real answer ("this
-    caller sees no collections") and makes every explicit reference a
-    validation error rather than a mid-run retrieval failure.
+    run admitted no collections") and makes every explicit reference a
+    validation error. Newly visible collections never enter a running plan.
     """
     if deps.source_policy.knowledge != "available":
         return []
     if deps.knowledge is None:
         return None
+    admitted = set(deps.collection_scope())
+    if not admitted:
+        return []
     collections = _run_async(
         deps.knowledge.list_collections(visible_to=deps.visible_to)
     )
@@ -4608,6 +4631,7 @@ def _collection_catalog(
             document_count=int(getattr(item, "document_count", 0) or 0),
         )
         for item in collections
+        if str(item.id) in admitted
     ]
 
 
@@ -4671,6 +4695,8 @@ def _capability_context(
         visible_to=deps.visible_to,
         workspace_id=deps.context.workspace_id,
         run_id=deps.context.run_id,
+        knowledge_collection_ids=deps.knowledge_collection_ids,
+        authority_check=getattr(deps.context, "authority_check", None),
         on_provider_retry=on_provider_retry,
     )
 

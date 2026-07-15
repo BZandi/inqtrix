@@ -60,7 +60,10 @@ import type {
   ChatThreadGroupRecord,
   ChatThreadRecord,
 } from '@/features/project/types'
-import { syncCollection } from '@/features/project/syncCollection'
+import {
+  deleteTolerant404,
+  syncCollection,
+} from '@/features/project/syncCollection'
 import {
   useProjectSyncLifecycle,
   type SyncLifecycleToken,
@@ -220,7 +223,7 @@ export function useChatHistoryApi({
       known = await ensureMessageBaseline(thread.id)
     }
     for (const id of messageIdsToDelete(known, thread.messages)) {
-      await deleteChatMessage(thread.id, id, options)
+      await deleteTolerant404(() => deleteChatMessage(thread.id, id, options))
     }
     if (thread.messages.length > 0) {
       await appendChatMessages(
@@ -270,7 +273,9 @@ export function useChatHistoryApi({
         changed: threadNeedsSync,
         pushOne: pushThread,
         deleteOne: async (id) => {
-          await deleteChatThread(id, optionsRef.current)
+          await deleteTolerant404(
+            () => deleteChatThread(id, optionsRef.current),
+          )
           loadedThreadsRef.current.delete(id)
         },
       })
@@ -280,7 +285,9 @@ export function useChatHistoryApi({
         fingerprintOf: (group) => group.updatedAt,
         changed: (previous, current) => previous !== current,
         pushOne: pushGroup,
-        deleteOne: (id) => deleteChatThreadGroup(id, optionsRef.current),
+        deleteOne: (id) => deleteTolerant404(
+          () => deleteChatThreadGroup(id, optionsRef.current),
+        ),
       })
       setError(null)
     } catch (caught) {

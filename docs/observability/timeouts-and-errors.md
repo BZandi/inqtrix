@@ -32,7 +32,7 @@ All four are configurable via environment variables (see [Settings and env](../c
 | `AgentTimeout` | `RuntimeError` | `time.monotonic() > deadline` at a node boundary or inside a provider | Graceful: `answer` is called with accumulated context even when downstream nodes have not completed. |
 | `AgentProviderTimeout` | `AgentTimeout` | One logical provider operation exhausts its own timeout before the outer run deadline | Visible provider-operation failure; retry metadata records the operation, configured/effective budget, and attempt. |
 | `AgentRateLimited` | `RuntimeError` | HTTP 429 remains after the shared three-attempt budget, or the provider reports a hard daily/token cap | Visible terminal provider failure. Partial token counts are preserved on the result. |
-| `AgentCancelled` | `RuntimeError` | `_cancel_event` set (via disconnect watcher) | Abort at next node boundary and return a cancelled result state. |
+| `AgentCancelled` | `RuntimeError` | `_cancel_event` set (explicit cancel or disconnect watcher) | Abort at the next cancellation checkpoint (node entry, provider retry attempt, backoff sleep, fan-out coordination, answer section) and return a cancelled result state. Residual latency: the remainder of one in-flight provider HTTP attempt. |
 | `AnthropicAPIError`, `AzureOpenAIAPIError`, `AzureFoundryWebSearchAPIError`, `BedrockAPIError`, `PerplexityAPIError` | `RuntimeError` | Per-provider HTTP error (400s, 500s, schema mismatches) | Graceful degradation per node (see below). |
 
 Each provider raises its own dedicated error type. All of them are exported from the top-level package so library consumers can catch them by type.

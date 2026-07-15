@@ -10,6 +10,7 @@ OWNER-only management surface hides denials behind 404.
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 import pytest
 from fastapi import FastAPI
@@ -17,7 +18,11 @@ from fastapi.testclient import TestClient
 
 from inqtrix.auth.identity_memory import MemoryIdentityStore
 from inqtrix.auth.invitations import MemoryInvitationStore, RegistrationGate
-from inqtrix.auth.permissions import PermissionService
+from inqtrix.auth.lifecycle import (
+    MemoryUserLifecycleTransaction,
+    UserLifecycleService,
+)
+from inqtrix.auth.permissions import AuthorizationService
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server.container import build_container
 from inqtrix.server.routers.auth import build_auth_router
@@ -42,6 +47,17 @@ def make_world(registration="invite"):
         registration=registration,
         audit=identity,
     )
+    provider.lifecycle = UserLifecycleService(
+        users=users,
+        sessions=provider.sessions,
+        invitations=invitations,
+        pat_service=provider.pat_service,
+        transaction=MemoryUserLifecycleTransaction(
+            users=users,
+            sessions=provider.sessions,
+            invitations=invitations,
+        ),
+    )
     container = build_container(
         providers=ProviderContext(llm=KnowledgeStubLLM(), search=StubSearch()),
         strategies=None,
@@ -51,9 +67,8 @@ def make_world(registration="invite"):
         ),
         semaphore_factory=lambda: asyncio.Semaphore(1),
         auth_provider=provider,
-        permissions=PermissionService(
+        permissions=AuthorizationService(
             members=identity,
-            groups=identity,
             shares=identity,
             audit=identity,
         ),
@@ -99,15 +114,18 @@ def test_invited_login_passes_and_lands_the_membership():
             workspace_id="ws-1",
             email="alice@example.com",
             role=WorkspaceRole.EDITOR,
-            invited_by_sub="owner-0",
+            invited_by_user_id=uuid.uuid5(
+                uuid.NAMESPACE_URL, "inqtrix-test:owner"
+            ),
             expires_at=_time.time() + 3600,
         )
     )
     response, _csrf = login(client, idp)
     assert response.status_code == 303
+    user_id = uuid.UUID(client.get("/api/auth/session").json()["user"]["id"])
     role = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
         identity.role_in_workspace(
-            tenant_id="default", sub="user-1234", workspace_id="ws-1"
+            tenant_id="default", user_id=user_id, workspace_id="ws-1"
         )
     )
     assert role is WorkspaceRole.EDITOR
@@ -129,9 +147,10 @@ def test_create_workspace_requires_instance_admin():
     client, idp, _identity, _invitations, users = make_world(registration="open")
     _response, csrf = login(client, idp)
     # The first login auto-promotes the owner; demote to a real non-admin.
+    user_id = uuid.UUID(client.get("/api/auth/session").json()["user"]["id"])
     asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
         users.set_instance_role(
-            tenant_id="default", issuer=ISSUER, subject="user-1234", role="user"
+            tenant_id="default", user_id=user_id, role="user"
         )
     )
     denied = client.post(

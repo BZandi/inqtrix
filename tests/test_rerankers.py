@@ -8,11 +8,13 @@ from typing import Any
 import httpx
 import pytest
 
+from inqtrix.knowledge.retrieval import retrieve
 from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
 from inqtrix.knowledge.stores.ports import (
     KnowledgeProviderContext,
     RetrievalCandidate,
 )
+from inqtrix.providers.base import _RetryNoticeMixin
 from inqtrix.providers.rerankers import CohereRerank, RerankerError, RerankResult
 from inqtrix.services.knowledge_service import KnowledgeService
 
@@ -109,6 +111,34 @@ def test_cohere_rerank_retries_on_429_then_succeeds():
 
     assert attempts["count"] == 2
     assert results[0].index == 0
+
+
+def test_cohere_rerank_retry_records_notice():
+    """Retries are diagnosable, not log-only (No Silent Fallbacks)."""
+    attempts = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return httpx.Response(429, headers={"retry-after": "0"})
+        return httpx.Response(
+            200, json={"results": [{"index": 0, "relevance_score": 0.5}]}
+        )
+
+    reranker = make_cohere(httpx.MockTransport(handler))
+    try:
+        reranker.rerank("q", ["a"], top_n=1)
+    finally:
+        reranker._restore()
+
+    notices = reranker.consume_retry_notices()
+    assert len(notices) == 1
+    assert notices[0]["provider"] == "CohereRerank"
+    assert notices[0]["operation"] == "rerank"
+    assert notices[0]["attempt"] == 1
+    assert notices[0]["max_attempts"] == 3
+    assert notices[0]["status_code"] == 429
+    assert reranker.consume_retry_notices() == []
 
 
 def test_cohere_rerank_never_exceeds_three_total_attempts():
@@ -215,6 +245,53 @@ async def test_rerank_stage_reorders_and_caps_results():
     assert reranker.calls[0]["top_n"] == 2
     assert len(reranker.calls[0]["documents"]) == 3
     assert hits[0].score == pytest.approx(1.0)
+
+
+class NotifyingReranker(_RetryNoticeMixin, FakeReranker):
+    """Fake that reports one retry through the shared mixin seam."""
+
+    def rerank(self, query, documents, *, top_n, model=None):
+        self._append_retry_notice({
+            "provider": "FakeRerank",
+            "model": "fake-rerank",
+            "operation": "rerank",
+            "attempt": 1,
+            "max_attempts": 3,
+        })
+        return super().rerank(query, documents, top_n=top_n, model=model)
+
+
+@pytest.mark.asyncio
+async def test_retrieve_forwards_rerank_retry_notices():
+    """The pipeline forwards rerank retries to the caller's observer."""
+    reranker = NotifyingReranker()
+    context = KnowledgeProviderContext(
+        embeddings=StubEmbeddings(),
+        store=MemoryKnowledgeStore(),
+        default_top_k=4,
+        reranker=reranker,
+        rerank_candidate_depth=10,
+    )
+    service = KnowledgeService(
+        knowledge=context, chunk_max_chars=2_000, max_document_chars=100_000
+    )
+    collection_id = await seed_documents(service)
+    observed: list[dict[str, Any]] = []
+
+    candidates = await retrieve(
+        context,
+        query="Haftung",
+        collection_ids=[collection_id],
+        top_k=2,
+        on_provider_retry=observed.append,
+    )
+
+    assert len(candidates) == 2
+    assert len(observed) == 1
+    assert observed[0]["provider"] == "FakeRerank"
+    # The mixin marks callback-delivered notices, proving the observer was
+    # invoked live on the rerank worker thread (not merely stored).
+    assert observed[0]["progress_emitted"] is True
 
 
 @pytest.mark.asyncio

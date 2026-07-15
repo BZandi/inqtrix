@@ -19,6 +19,7 @@ export function EditorDocumentChangesSection({
   onRejectGroup,
   onRejectSuggestion,
   onSelectSuggestion,
+  publishDisabledReason = null,
   suggestions,
 }: {
   labels: EditorDocumentChangesLabels
@@ -27,6 +28,7 @@ export function EditorDocumentChangesSection({
   onRejectGroup: (groupId: string) => void
   onRejectSuggestion: (suggestionId: string) => void
   onSelectSuggestion: (suggestionId: string) => void
+  publishDisabledReason?: string | null
   suggestions: EditorSuggestionRecord[]
 }) {
   if (suggestions.length === 0) return null
@@ -45,9 +47,10 @@ export function EditorDocumentChangesSection({
             <div className="mb-2 flex items-center justify-end gap-1.5">
               <Button
                 className="h-7"
-                disabled={pendingCount === 0}
+                disabled={pendingCount === 0 || Boolean(publishDisabledReason)}
                 onClick={() => onRejectGroup(group.groupId)}
                 size="sm"
+                title={publishDisabledReason ?? undefined}
                 type="button"
                 variant="ghost"
               >
@@ -56,9 +59,10 @@ export function EditorDocumentChangesSection({
               </Button>
               <Button
                 className="h-7 bg-brand text-brand-foreground hover:bg-brand/90 hover:text-brand-foreground"
-                disabled={pendingCount === 0}
+                disabled={pendingCount === 0 || Boolean(publishDisabledReason)}
                 onClick={() => onAcceptGroup(group.groupId)}
                 size="sm"
+                title={publishDisabledReason ?? undefined}
                 type="button"
               >
                 <Check className="size-3.5" />
@@ -74,6 +78,7 @@ export function EditorDocumentChangesSection({
                   onAccept={onAcceptSuggestion}
                   onReject={onRejectSuggestion}
                   onSelect={onSelectSuggestion}
+                  publishDisabledReason={publishDisabledReason}
                   suggestion={suggestion}
                 />
               ))}
@@ -91,6 +96,7 @@ function DocumentChangeCard({
   onAccept,
   onReject,
   onSelect,
+  publishDisabledReason,
   suggestion,
 }: {
   index: number
@@ -98,6 +104,7 @@ function DocumentChangeCard({
   onAccept: (suggestion: EditorSuggestionRecord) => void
   onReject: (suggestionId: string) => void
   onSelect: (suggestionId: string) => void
+  publishDisabledReason: string | null
   suggestion: EditorSuggestionRecord
 }) {
   const anchorText = markdownToPlainTextForEditor(suggestion.anchorText || suggestion.originalText)
@@ -138,15 +145,24 @@ function DocumentChangeCard({
         <p className="t-meta-sm mt-1 text-warning">{suggestion.warnings[0]}</p>
       ) : null}
       <div className="mt-2 flex items-center justify-end gap-1.5">
-        <Button className="h-7" onClick={() => onReject(suggestion.id)} size="sm" type="button" variant="ghost">
+        <Button
+          className="h-7"
+          disabled={Boolean(publishDisabledReason)}
+          onClick={() => onReject(suggestion.id)}
+          size="sm"
+          title={publishDisabledReason ?? undefined}
+          type="button"
+          variant="ghost"
+        >
           <X className="size-3.5" />
           {labels.reject}
         </Button>
         <Button
           className="h-7 bg-brand text-brand-foreground hover:bg-brand/90 hover:text-brand-foreground"
-          disabled={isStale}
+          disabled={isStale || Boolean(publishDisabledReason)}
           onClick={() => onAccept(suggestion)}
           size="sm"
+          title={publishDisabledReason ?? undefined}
           type="button"
         >
           <Check className="size-3.5" />

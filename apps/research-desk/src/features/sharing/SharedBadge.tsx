@@ -5,30 +5,27 @@ import { useLocale } from '@/i18n/LocaleProvider'
 /**
  * Quiet sharing indicator — muted, never a status colour (sharing is
  * identity, not state). Owner variant carries the recipient count and
- * opens the dialog; recipient variant names the grantor.
+ * opens the dialog; recipient state comes directly from the resource DTO.
  */
 export function SharedBadge({
   count,
+  isSharedWithMe = false,
   onClick,
-  sharedByLabel,
 }: {
   count?: number
+  isSharedWithMe?: boolean
   onClick?: () => void
-  sharedByLabel?: string
 }) {
   const { t } = useLocale()
-  const isRecipient = sharedByLabel !== undefined
-  if (!isRecipient && (count === undefined || count === 0)) return null
-  const tooltip = isRecipient
-    ? sharedByLabel
-      ? t.sharing.sharedBy.replace('{name}', sharedByLabel)
-      : t.sharing.sharedBadge
+  if (!isSharedWithMe && (count === undefined || count === 0)) return null
+  const tooltip = isSharedWithMe
+    ? t.sharing.sharedBadge
     : t.sharing.sharedCount.replace('{count}', String(count))
 
   const body = (
     <span className="inline-flex items-center gap-1 text-muted-foreground">
       <Users className="size-3" />
-      {!isRecipient && (
+      {!isSharedWithMe && (
         <span className="t-hint tabular-nums">{count}</span>
       )}
     </span>

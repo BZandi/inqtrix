@@ -7,14 +7,14 @@ cap on stored bytes. It is the enforcement half of the two-level rule:
 admin UI sets a tenant default and per-user overrides within it, and
 :func:`effective_limit` resolves the three layers into one number.
 
-Subject is ``(tenant_id, sub)`` — the only always-available, race-free
-key (request workspace ids are the non-authoritative ui_namespace).
+The subject is the canonical ``(tenant_id, user_id)`` pair (request
+workspace ids are the non-authoritative ui_namespace).
 Quotas bind only in oidc mode; the anonymous/static principals bypass
 entirely, so existing deployments stay byte-identical.
 """
 
 from inqtrix.quota.models import (
-    DEFAULT_SUBJECT,
+    DEFAULT_USER_ID,
     STOCK_PERIOD,
     DimensionUsage,
     QuotaDimension,
@@ -29,7 +29,7 @@ from inqtrix.quota.models import (
 from inqtrix.quota.ports import QuotaStore
 
 __all__ = [
-    "DEFAULT_SUBJECT",
+    "DEFAULT_USER_ID",
     "STOCK_PERIOD",
     "DimensionUsage",
     "QuotaDimension",

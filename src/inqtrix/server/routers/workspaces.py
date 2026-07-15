@@ -10,7 +10,7 @@ tenant-wide power.
 
 Invitation management (create/list/revoke) therefore stays on the
 collaboration axis, requiring the workspace OWNER role via
-``PermissionService.resolve_workspace``; denials hide behind 404 (the
+``AuthorizationService.resolve_workspace``; denials hide behind 404 (the
 permission layer's not-403 convention; membership is not disclosed).
 
 Mounted only when a cookie-session provider carries an invitation
@@ -52,7 +52,7 @@ def _invitation_payload(invitation) -> dict:
         "workspace_id": invitation.workspace_id,
         "email": invitation.email,
         "role": invitation.role.value,
-        "invited_by_sub": invitation.invited_by_sub,
+        "invited_by_user_id": str(invitation.invited_by_user_id),
         "created_at": invitation.created_at,
         "expires_at": invitation.expires_at,
         "accepted_at": invitation.accepted_at,
@@ -89,7 +89,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         sharing within the workspace) and carries no tenant-wide power, so
         creating a workspace can no longer be a privilege-escalation vector.
         """
-        resolved, error = await require_instance_admin(provider, request)
+        resolved, error = await require_instance_admin(
+            provider, request, principal_dep
+        )
         if error is not None:
             return error
         principal, _session, _mirror = resolved
@@ -120,7 +122,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         if error is not None:
             return error
         rows = await workspace_admin.list_workspaces_for(
-            tenant_id=principal.tenant_id, sub=principal.sub
+            tenant_id=principal.tenant_id, user_id=principal.user_id
         )
         return {
             "object": "list",
@@ -194,7 +196,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 workspace_id=workspace_id,
                 email=email,
                 role=role,
-                invited_by_sub=principal.sub,
+                invited_by_user_id=principal.user_id,
                 expires_at=time.time() + expires_in_days * 86_400.0,
             )
         except DuplicateOpenInvitation:

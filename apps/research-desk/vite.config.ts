@@ -12,10 +12,6 @@ export default defineConfig({
   resolve: {
     alias: [
       {
-        find: /^shiki$/,
-        replacement: path.resolve(__dirname, './src/lib/rehypePrettyCodeShikiShim.ts'),
-      },
-      {
         find: '@',
         replacement: path.resolve(__dirname, './src'),
       },
@@ -24,6 +20,10 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      '/collaboration': {
+        target: apiProxyTarget,
+        ws: true,
+      },
       '/health': apiProxyTarget,
       '/v1': apiProxyTarget,
       '/api': apiProxyTarget,

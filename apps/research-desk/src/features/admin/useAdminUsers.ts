@@ -121,36 +121,36 @@ export function useAdminUsers({
   )
 
   const setRole = useCallback(
-    (subject: string, role: 'admin' | 'user') => {
+    (userId: string, role: 'admin' | 'user') => {
       if (demo) {
         setState((current) => ({
           ...current,
           users: current.users.map((user) =>
-            user.subject === subject ? { ...user, instance_role: role } : user,
+            user.id === userId ? { ...user, instance_role: role } : user,
           ),
         }))
         return Promise.resolve()
       }
       return runMutation(async () => {
-        await setAdminUserRole(subject, role)
+        await setAdminUserRole(userId, role)
       })
     },
     [demo, runMutation],
   )
 
   const setDisabled = useCallback(
-    (subject: string, disabled: boolean) => {
+    (userId: string, disabled: boolean) => {
       if (demo) {
         setState((current) => ({
           ...current,
           users: current.users.map((user) =>
-            user.subject === subject ? { ...user, disabled } : user,
+            user.id === userId ? { ...user, disabled } : user,
           ),
         }))
         return Promise.resolve()
       }
       return runMutation(async () => {
-        await setAdminUserDisabled(subject, disabled)
+        await setAdminUserDisabled(userId, disabled)
       })
     },
     [demo, runMutation],
@@ -175,7 +175,7 @@ export function useAdminUsers({
           users: [
             ...current.users,
             {
-              subject: `demo-${input.email}`,
+              id: crypto.randomUUID(),
               email: input.email,
               display_name: input.displayName || input.email,
               instance_role: input.instanceRole ?? 'user',
@@ -199,9 +199,9 @@ export function useAdminUsers({
    * revealed value is the password the admin typed).
    */
   const resetPassword = useCallback(
-    async (subject: string, password: string) => {
+    async (userId: string, password: string) => {
       if (demo) return
-      await resetUserPassword(subject, password)
+      await resetUserPassword(userId, password)
     },
     [demo],
   )

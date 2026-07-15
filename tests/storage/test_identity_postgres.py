@@ -1,50 +1,62 @@
-"""Postgres integration tests: migrations, RLS bypass matrix, repos.
+"""Postgres integration tests for canonical identity and direct sharing.
 
-Gated on ``INQTRIX_TEST_DATABASE_URL`` (a *disposable* database — the
-session fixture downgrades/upgrades the schema). The default offline
-suite never touches these. Start the dev stack and create the test
-database as described in ``docs/development/local-infrastructure.md``.
+The module is gated on ``INQTRIX_TEST_DATABASE_URL``. The configured database
+must be disposable, but the v0.2 migration chain itself is intentionally
+irreversible: the session fixture upgrades to head and verifies that a request
+to cross the hard-cut boundary is rejected instead of destroying data.
 
-The RLS assertions deliberately run under ``SET LOCAL ROLE
-inqtrix_app``: the compose connection user is a superuser, and
-superusers bypass row-level security entirely — testing without the
-role switch would be false-green.
+RLS assertions run under ``SET LOCAL ROLE inqtrix_app``. The cleanup connection
+must be a superuser or carry ``BYPASSRLS`` because it removes rows across every
+tenant between tests.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
+import time
 import uuid
+from collections.abc import AsyncIterator, Iterator
+from contextlib import AbstractAsyncContextManager
+from importlib import import_module
+from typing import Any
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, insert, select, text, update
+from sqlalchemy import Table, func, insert, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from inqtrix.auth.identity_memory import MemoryIdentityStore
+from inqtrix.auth.lifecycle import AdminAuthorizationError
 from inqtrix.auth.permissions import (
-    PermissionService,
+    AuthorizationService,
+    LastWorkspaceOwnerError,
     ResourceNotFound,
     SharePermission,
-    SubjectRef,
     WorkspaceNotFound,
     WorkspaceRole,
 )
 from inqtrix.auth.principal import Principal
+from inqtrix.auth.shares import ShareConflict, ShareRecord
 from inqtrix.storage.db import build_engine, build_session_factory, tenant_session
 from inqtrix.storage.identity_orm import (
     audit_log,
-    group_members,
-    groups,
     identity_metadata,
     invitations,
     resource_shares,
+    tenant_security_state,
     users,
     workspace_members,
     workspaces,
 )
 from inqtrix.storage.identity_postgres import PostgresIdentityBackend
-from inqtrix.storage.migrate import downgrade_migrations, run_migrations
+from inqtrix.storage.knowledge_orm import knowledge_collections
+from inqtrix.storage.migrate import run_migrations
+from inqtrix.storage.user_event_orm import user_events
+from inqtrix.storage.user_lifecycle_postgres import (
+    PostgresUserLifecycleTransaction,
+)
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
@@ -54,40 +66,42 @@ pytestmark = pytest.mark.skipif(
 )
 
 APP_ROLE = "inqtrix_app"
+TENANT_ID = "default"
+SessionFactory = async_sessionmaker[AsyncSession]
 
 
 @pytest.fixture(scope="session", autouse=True)
-def migrated_schema():
-    """Migration round-trip: upgrade -> downgrade -> upgrade.
-
-    Doubles as the migration regression test — a revision that cannot
-    downgrade cleanly fails the whole gated suite immediately.
-    """
+def migrated_schema() -> Iterator[None]:
+    """Upgrade to head and pin the irreversible v0.2 boundary."""
     if not TEST_DATABASE_URL:
         yield
         return
     run_migrations(TEST_DATABASE_URL)
-    downgrade_migrations(TEST_DATABASE_URL, revision="base")
-    run_migrations(TEST_DATABASE_URL)
+    for revision in (
+        "0045_canonical_user_ids",
+        "0046_execution_authority",
+        "0047_resource_sync_and_reindex",
+    ):
+        migration = import_module(
+            f"inqtrix.storage.migrations.versions.{revision}"
+        )
+        with pytest.raises(RuntimeError, match="irreversible"):
+            migration.downgrade()
     yield
 
 
 @pytest_asyncio.fixture()
-async def engine():
+async def engine() -> AsyncIterator[AsyncEngine]:
     engine = build_engine(TEST_DATABASE_URL)
     yield engine
     await engine.dispose()
 
 
 @pytest_asyncio.fixture()
-async def session_factory(engine):
+async def session_factory(engine: AsyncEngine) -> SessionFactory:
     factory = build_session_factory(engine)
     async with factory() as session:
         async with session.begin():
-            # FORCE RLS binds even the table owner, so the GUC-less
-            # cleanup below only works for a superuser/BYPASSRLS
-            # connection user (the compose default). Fail fast with a
-            # clear message instead of a confusing 28000 mid-suite.
             bypasses = (
                 await session.execute(
                     text(
@@ -99,95 +113,296 @@ async def session_factory(engine):
             if not bypasses:
                 pytest.fail(
                     "INQTRIX_TEST_DATABASE_URL must connect as a "
-                    "superuser/BYPASSRLS user: the per-test cleanup "
-                    "wipes rows across tenants, which FORCE row-level "
-                    "security forbids for ordinary owners."
+                    "superuser/BYPASSRLS user for cross-tenant cleanup"
                 )
-            # Per-test cleanup across all tenants (FK-safe order).
             for table in (
+                user_events,
+                audit_log,
                 resource_shares,
-                group_members,
-                groups,
                 invitations,
                 workspace_members,
+                knowledge_collections,
                 workspaces,
                 users,
-                audit_log,
+                tenant_security_state,
             ):
                 await session.execute(table.delete())
     return factory
 
 
-def scoped(factory, tenant_id: str = "default"):
+def scoped(
+    factory: SessionFactory,
+    tenant_id: str = TENANT_ID,
+) -> AbstractAsyncContextManager[AsyncSession]:
+    """Open one app-role transaction bound to *tenant_id*."""
     return tenant_session(factory, tenant_id=tenant_id, app_role=APP_ROLE)
 
 
-async def create_workspace(factory, *, tenant_id: str = "default") -> str:
-    async with scoped(factory, tenant_id) as session:
-        row = await session.execute(
-            insert(workspaces)
-            .values(tenant_id=tenant_id, name="W", created_by_sub="owner")
-            .returning(workspaces.c.id)
+def backend(
+    factory: SessionFactory,
+    *,
+    restrict_to_workspace_members: bool = False,
+) -> PostgresIdentityBackend:
+    """Build the identity repository under test."""
+    return PostgresIdentityBackend(
+        session_factory=factory,
+        app_role=APP_ROLE,
+        restrict_to_workspace_members=restrict_to_workspace_members,
+    )
+
+
+async def _insert_user(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    label: str,
+    user_id: uuid.UUID | None = None,
+) -> uuid.UUID:
+    """Insert one active canonical user in an existing transaction."""
+    canonical_id = user_id or uuid.uuid4()
+    unique_label = f"{label}-{canonical_id.hex}"
+    await session.execute(
+        insert(users).values(
+            id=canonical_id,
+            tenant_id=tenant_id,
+            issuer="https://idp.example",
+            subject=unique_label,
+            email=f"{unique_label}@example.com",
         )
-        return str(row.scalar_one())
+    )
+    return canonical_id
 
 
-async def insert_minimal_row(session, table, tenant_id: str) -> dict:
-    """Insert one valid row into *table*, creating FK parents inline.
+async def create_user(
+    factory: SessionFactory,
+    *,
+    label: str,
+    tenant_id: str = TENANT_ID,
+) -> uuid.UUID:
+    """Persist one active canonical user and return its UUID."""
+    async with scoped(factory, tenant_id) as session:
+        return await _insert_user(
+            session,
+            tenant_id=tenant_id,
+            label=label,
+        )
 
-    Returns the value dict so WITH-CHECK tests can replay it with a
-    foreign tenant_id. Parents always belong to *tenant_id* — foreign
-    keys deliberately bypass RLS, so the policy under test is the one
-    on *table* itself.
-    """
-    values: dict = {"tenant_id": tenant_id}
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revocation", ["demote", "disable"])
+async def test_inflight_admin_command_revalidates_actor_after_security_lock(
+    session_factory: SessionFactory,
+    engine: AsyncEngine,
+    revocation: str,
+) -> None:
+    """A demoted/disabled actor cannot commit an already-admitted command."""
+    async with scoped(session_factory) as session:
+        actor_user_id = await _insert_user(
+            session, tenant_id=TENANT_ID, label="actor"
+        )
+        peer_admin_id = await _insert_user(
+            session, tenant_id=TENANT_ID, label="peer-admin"
+        )
+        target_user_id = await _insert_user(
+            session, tenant_id=TENANT_ID, label="target"
+        )
+        await session.execute(
+            update(users)
+            .where(users.c.id.in_((actor_user_id, peer_admin_id)))
+            .values(instance_role="admin")
+        )
+
+    entered_transaction = asyncio.Event()
+    release_transaction = asyncio.Event()
+
+    class BarrierSession(AsyncSession):
+        async def execute(self, statement, *args, **kwargs):
+            table = getattr(statement, "table", None)
+            if (
+                not entered_transaction.is_set()
+                and table is tenant_security_state
+            ):
+                entered_transaction.set()
+                await release_transaction.wait()
+            return await super().execute(statement, *args, **kwargs)
+
+    barrier_factory = async_sessionmaker(
+        engine,
+        expire_on_commit=False,
+        class_=BarrierSession,
+    )
+    lifecycle = PostgresUserLifecycleTransaction(
+        session_factory=barrier_factory,
+        app_role=APP_ROLE,
+    )
+    command = asyncio.create_task(
+        lifecycle.set_role(
+            tenant_id=TENANT_ID,
+            user_id=target_user_id,
+            role="admin",
+            actor_user_id=actor_user_id,
+        )
+    )
+    await asyncio.wait_for(entered_transaction.wait(), timeout=5)
+
+    async with scoped(session_factory) as session:
+        values = (
+            {"instance_role": "user"}
+            if revocation == "demote"
+            else {"disabled_at": func.now()}
+        )
+        await session.execute(
+            update(users).where(users.c.id == actor_user_id).values(**values)
+        )
+    release_transaction.set()
+
+    with pytest.raises(AdminAuthorizationError):
+        await command
+    async with scoped(session_factory) as session:
+        target_role = await session.scalar(
+            select(users.c.instance_role).where(users.c.id == target_user_id)
+        )
+    assert target_role == "user"
+
+
+async def create_collection(
+    factory: SessionFactory,
+    *,
+    owner_user_id: uuid.UUID,
+    collection_id: str,
+    tenant_id: str = TENANT_ID,
+) -> str:
+    """Insert the minimal real shareable resource used by identity tests."""
+    async with scoped(factory, tenant_id) as session:
+        await session.execute(
+            insert(knowledge_collections).values(
+                id=collection_id,
+                tenant_id=tenant_id,
+                name=collection_id,
+                embedding_model="test-embedding",
+                embedding_dim=3,
+                created_by_user_id=owner_user_id,
+                created_at=time.time(),
+            )
+        )
+    return collection_id
+
+
+def oidc(user_id: uuid.UUID, *, tenant_id: str = TENANT_ID) -> Principal:
+    """Build one scoped principal with a canonical UUID."""
+    return Principal(
+        user_id=user_id,
+        kind="oidc_session",
+        tenant_id=tenant_id,
+        role="member",
+    )
+
+
+async def insert_minimal_row(
+    session: AsyncSession,
+    table: Table,
+    tenant_id: str,
+) -> dict[str, object]:
+    """Insert one valid canonical row and return values for an RLS replay."""
+    values: dict[str, object] = {"tenant_id": tenant_id}
     if table is users:
-        values.update(issuer="https://idp.example", subject="alice",
-                      email="alice@example.com")
+        marker = uuid.uuid4().hex
+        values.update(
+            issuer="https://idp.example",
+            subject=f"user-{marker}",
+            email=f"user-{marker}@example.com",
+        )
+    elif table is tenant_security_state:
+        pass
     elif table is workspaces:
-        values.update(name="W", created_by_sub="owner")
-    elif table is groups:
-        values.update(name="legal")
+        owner_user_id = await _insert_user(
+            session,
+            tenant_id=tenant_id,
+            label="workspace-owner",
+        )
+        values.update(name="Workspace", created_by_user_id=owner_user_id)
     elif table is workspace_members:
+        owner_user_id = await _insert_user(
+            session,
+            tenant_id=tenant_id,
+            label="member-owner",
+        )
+        member_user_id = await _insert_user(
+            session,
+            tenant_id=tenant_id,
+            label="member",
+        )
         workspace_id = (
             await session.execute(
                 insert(workspaces)
-                .values(tenant_id=tenant_id, name="W", created_by_sub="o")
-                .returning(workspaces.c.id)
-            )
-        ).scalar_one()
-        values.update(workspace_id=workspace_id, sub="alice", role="viewer")
-    elif table is group_members:
-        group_id = (
-            await session.execute(
-                insert(groups)
-                .values(tenant_id=tenant_id, name="g")
-                .returning(groups.c.id)
-            )
-        ).scalar_one()
-        values.update(group_id=group_id, sub="alice")
-    elif table is invitations:
-        workspace_id = (
-            await session.execute(
-                insert(workspaces)
-                .values(tenant_id=tenant_id, name="W", created_by_sub="o")
+                .values(
+                    tenant_id=tenant_id,
+                    name="Workspace",
+                    created_by_user_id=owner_user_id,
+                )
                 .returning(workspaces.c.id)
             )
         ).scalar_one()
         values.update(
-            workspace_id=workspace_id, email="invitee@example.com",
-            role="viewer", invited_by_sub="owner",
+            workspace_id=workspace_id,
+            user_id=member_user_id,
+            role=WorkspaceRole.VIEWER.value,
+        )
+    elif table is invitations:
+        owner_user_id = await _insert_user(
+            session,
+            tenant_id=tenant_id,
+            label="inviter",
+        )
+        workspace_id = (
+            await session.execute(
+                insert(workspaces)
+                .values(
+                    tenant_id=tenant_id,
+                    name="Workspace",
+                    created_by_user_id=owner_user_id,
+                )
+                .returning(workspaces.c.id)
+            )
+        ).scalar_one()
+        values.update(
+            workspace_id=workspace_id,
+            email="invitee@example.com",
+            role=WorkspaceRole.VIEWER.value,
+            invited_by_user_id=owner_user_id,
             expires_at=text("now() + interval '1 day'"),
         )
     elif table is resource_shares:
+        owner_user_id = await _insert_user(
+            session,
+            tenant_id=tenant_id,
+            label="share-owner",
+        )
+        recipient_user_id = await _insert_user(
+            session,
+            tenant_id=tenant_id,
+            label="share-recipient",
+        )
         values.update(
-            subject_type="user", subject_id="alice",
-            resource_type="report", resource_id="r1",
-            permission="view", granted_by_sub="owner",
+            recipient_user_id=recipient_user_id,
+            resource_type="knowledge_collection",
+            resource_id="kc_rls",
+            permission=SharePermission.VIEW.value,
+            granted_by_user_id=owner_user_id,
         )
     elif table is audit_log:
-        values.update(actor_sub="alice", action="authz.denied",
-                      resource_type="report", resource_id="r1", detail={})
+        actor_user_id = await _insert_user(
+            session,
+            tenant_id=tenant_id,
+            label="audit-actor",
+        )
+        values.update(
+            actor_user_id=actor_user_id,
+            action="authz.denied",
+            resource_type="knowledge_collection",
+            resource_id="kc_rls",
+            detail={},
+        )
     else:
         raise AssertionError(f"no row factory for table {table.name}")
     await session.execute(insert(table).values(**values))
@@ -196,24 +411,21 @@ async def insert_minimal_row(session, table, tenant_id: str) -> dict:
 
 TENANT_TABLES = (
     users,
+    tenant_security_state,
     workspaces,
     workspace_members,
-    groups,
-    group_members,
     invitations,
     resource_shares,
     audit_log,
 )
 
 
-# ------------------------------------------------------------------ #
-# RLS bypass matrix (every tenant table)
-# ------------------------------------------------------------------ #
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("table", TENANT_TABLES, ids=lambda t: t.name)
-async def test_cross_tenant_select_returns_zero_rows(session_factory, table):
+@pytest.mark.parametrize("table", TENANT_TABLES, ids=lambda table: table.name)
+async def test_cross_tenant_select_returns_zero_rows(
+    session_factory: SessionFactory,
+    table: Table,
+) -> None:
     async with scoped(session_factory, "tenant-a") as session:
         await insert_minimal_row(session, table, "tenant-a")
 
@@ -222,23 +434,20 @@ async def test_cross_tenant_select_returns_zero_rows(session_factory, table):
     async with scoped(session_factory, "tenant-b") as session:
         foreign = (await session.execute(select(table.c.tenant_id))).all()
 
-    assert len(own) >= 1
+    assert own
     assert foreign == []
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("table", TENANT_TABLES, ids=lambda t: t.name)
+@pytest.mark.parametrize("table", TENANT_TABLES, ids=lambda table: table.name)
 async def test_cross_tenant_insert_violates_with_check_everywhere(
-    session_factory, table
-):
+    session_factory: SessionFactory,
+    table: Table,
+) -> None:
     with pytest.raises(DBAPIError, match="row-level security"):
         async with scoped(session_factory, "tenant-a") as session:
             values = await insert_minimal_row(session, table, "tenant-a")
             if table is not audit_log:
-                # Clear the tenant-a row so unique indexes cannot fire
-                # before the policy does. audit_log is exempt: the app
-                # role has no DELETE grant there, and the table carries
-                # no unique index anyway.
                 await session.execute(table.delete())
             await session.execute(
                 insert(table).values(**{**values, "tenant_id": "tenant-b"})
@@ -246,10 +455,20 @@ async def test_cross_tenant_insert_violates_with_check_everywhere(
 
 
 @pytest.mark.asyncio
-async def test_cross_tenant_delete_silently_affects_zero_rows(session_factory):
-    """The FOR ALL policy's USING clause makes a foreign DELETE a no-op
-    — pinned because 'deletes nothing' is the intended fail-safe."""
-    await create_workspace(session_factory, tenant_id="tenant-a")
+async def test_cross_tenant_delete_silently_affects_zero_rows(
+    session_factory: SessionFactory,
+) -> None:
+    owner_user_id = await create_user(
+        session_factory,
+        label="owner",
+        tenant_id="tenant-a",
+    )
+    identity = backend(session_factory)
+    await identity.create_workspace(
+        tenant_id="tenant-a",
+        name="Workspace",
+        created_by_user_id=owner_user_id,
+    )
 
     async with scoped(session_factory, "tenant-b") as session:
         result = await session.execute(workspaces.delete())
@@ -261,9 +480,9 @@ async def test_cross_tenant_delete_silently_affects_zero_rows(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_rls_catalog_covers_every_metadata_table(session_factory):
-    """Catalog parity guard: a table added to the metadata but missed
-    in the migration's RLS loop must fail here, not ship unprotected."""
+async def test_rls_catalog_covers_current_identity_metadata(
+    session_factory: SessionFactory,
+) -> None:
     async with session_factory() as session:
         rows = (
             await session.execute(
@@ -271,35 +490,27 @@ async def test_rls_catalog_covers_every_metadata_table(session_factory):
                     "SELECT c.relname, c.relrowsecurity, "
                     "c.relforcerowsecurity, "
                     "EXISTS (SELECT 1 FROM pg_policies p "
-                    "        WHERE p.tablename = c.relname) AS has_policy "
+                    "WHERE p.schemaname = 'public' "
+                    "AND p.tablename = c.relname) AS has_policy "
                     "FROM pg_class c "
                     "WHERE c.relnamespace = 'public'::regnamespace "
                     "AND c.relkind = 'r'"
                 )
             )
         ).all()
-    from inqtrix.storage.auth_orm import auth_metadata
-    from inqtrix.storage.content_orm import content_metadata
-    from inqtrix.storage.runs_orm import runs_metadata
-
     catalog = {name: (rls, forced, policy) for name, rls, forced, policy in rows}
-    platform_tables = (
-        list(identity_metadata.tables)
-        + list(content_metadata.tables)
-        + list(runs_metadata.tables)
-        + list(auth_metadata.tables)
-    )
-    for table_name in platform_tables:
+    for table_name in identity_metadata.tables:
         assert table_name in catalog, f"{table_name} missing in database"
         rls, forced, policy = catalog[table_name]
         assert rls and forced and policy, (
-            f"{table_name}: ENABLE={rls} FORCE={forced} policy={policy} — "
-            "every identity table must carry forced RLS with a policy"
+            f"{table_name}: ENABLE={rls} FORCE={forced} policy={policy}"
         )
 
 
 @pytest.mark.asyncio
-async def test_query_without_tenant_context_fails_loudly(session_factory):
+async def test_query_without_tenant_context_fails_loudly(
+    session_factory: SessionFactory,
+) -> None:
     async with session_factory() as session:
         async with session.begin():
             await session.execute(text(f'SET LOCAL ROLE "{APP_ROLE}"'))
@@ -308,9 +519,9 @@ async def test_query_without_tenant_context_fails_loudly(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_empty_tenant_guc_fails_loudly_not_silently(session_factory):
-    """The empty-string GUC state (after a reverted transaction-local
-    value) must raise in the helper, never silently match nothing."""
+async def test_empty_tenant_guc_fails_loudly(
+    session_factory: SessionFactory,
+) -> None:
     async with session_factory() as session:
         async with session.begin():
             await session.execute(text(f'SET LOCAL ROLE "{APP_ROLE}"'))
@@ -322,35 +533,45 @@ async def test_empty_tenant_guc_fails_loudly_not_silently(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_cross_tenant_insert_violates_with_check(session_factory):
+async def test_cross_tenant_insert_violates_with_check(
+    session_factory: SessionFactory,
+) -> None:
+    owner_user_id = await create_user(
+        session_factory,
+        label="owner",
+        tenant_id="tenant-a",
+    )
     with pytest.raises(DBAPIError, match="row-level security"):
         async with scoped(session_factory, "tenant-a") as session:
             await session.execute(
                 insert(workspaces).values(
-                    tenant_id="tenant-b", name="X", created_by_sub="evil"
+                    tenant_id="tenant-b",
+                    name="Foreign",
+                    created_by_user_id=owner_user_id,
                 )
             )
 
 
 @pytest.mark.asyncio
-async def test_audit_log_is_insert_only_for_the_app_role(session_factory):
+async def test_audit_log_is_insert_only_for_the_app_role(
+    session_factory: SessionFactory,
+) -> None:
+    actor_user_id = await create_user(session_factory, label="actor")
     async with scoped(session_factory) as session:
         await session.execute(
             insert(audit_log).values(
-                tenant_id="default",
-                actor_sub="alice",
+                tenant_id=TENANT_ID,
+                actor_user_id=actor_user_id,
                 action="authz.denied",
-                resource_type="report",
-                resource_id="r1",
+                resource_type="knowledge_collection",
+                resource_id="kc_audit",
                 detail={},
             )
         )
 
     with pytest.raises(DBAPIError, match="permission denied"):
         async with scoped(session_factory) as session:
-            await session.execute(
-                update(audit_log).values(action="tampered")
-            )
+            await session.execute(update(audit_log).values(action="tampered"))
 
     with pytest.raises(DBAPIError, match="permission denied"):
         async with scoped(session_factory) as session:
@@ -358,18 +579,24 @@ async def test_audit_log_is_insert_only_for_the_app_role(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_duplicate_active_share_is_rejected_but_regrant_works(
-    session_factory,
-):
-    grant = dict(
-        tenant_id="default",
-        subject_type="user",
-        subject_id="alice",
-        resource_type="report",
-        resource_id="r1",
-        permission="view",
-        granted_by_sub="owner",
+async def test_duplicate_active_direct_share_is_rejected(
+    session_factory: SessionFactory,
+) -> None:
+    owner_user_id = await create_user(session_factory, label="owner")
+    recipient_user_id = await create_user(session_factory, label="recipient")
+    await create_collection(
+        session_factory,
+        owner_user_id=owner_user_id,
+        collection_id="kc_unique",
     )
+    grant = {
+        "tenant_id": TENANT_ID,
+        "recipient_user_id": recipient_user_id,
+        "resource_type": "knowledge_collection",
+        "resource_id": "kc_unique",
+        "permission": SharePermission.VIEW.value,
+        "granted_by_user_id": owner_user_id,
+    }
     async with scoped(session_factory) as session:
         await session.execute(insert(resource_shares).values(**grant))
 
@@ -377,758 +604,1007 @@ async def test_duplicate_active_share_is_rejected_but_regrant_works(
         async with scoped(session_factory) as session:
             await session.execute(insert(resource_shares).values(**grant))
 
-    # Revoke-then-regrant: the partial unique index only covers active rows.
     async with scoped(session_factory) as session:
         await session.execute(
             update(resource_shares)
             .where(resource_shares.c.revoked_at.is_(None))
-            .values(revoked_at=text("now()"), revoked_by_sub="owner")
-        )
-    async with scoped(session_factory) as session:
-        await session.execute(
-            insert(resource_shares).values(**{**grant, "permission": "edit"})
-        )
-
-
-# ------------------------------------------------------------------ #
-# Repository parity with the memory backend
-# ------------------------------------------------------------------ #
-
-
-def oidc(sub: str) -> Principal:
-    return Principal(sub=sub, kind="oidc_session", role="member")
-
-
-async def arrange_identity_facts(factory) -> str:
-    """One workspace with alice as editor, a group share lifting r1."""
-    workspace_id = await create_workspace(factory)
-    async with scoped(factory) as session:
-        await session.execute(
-            insert(workspace_members).values(
-                tenant_id="default",
-                workspace_id=workspace_id,
-                sub="alice",
-                role="editor",
-            )
-        )
-        group_id = (
-            await session.execute(
-                insert(groups)
-                .values(tenant_id="default", name="legal")
-                .returning(groups.c.id)
-            )
-        ).scalar_one()
-        await session.execute(
-            insert(group_members).values(
-                tenant_id="default", group_id=group_id, sub="alice"
+            .values(
+                revoked_at=func.now(),
+                revoked_by_user_id=owner_user_id,
             )
         )
         await session.execute(
             insert(resource_shares).values(
-                tenant_id="default",
-                subject_type="group",
-                subject_id=str(group_id),
-                resource_type="report",
-                resource_id="r1",
-                permission="manage",
-                granted_by_sub="owner",
-                # Accepted: these grants stand for active access, and the
-                # consent gate (``accepted_at IS NOT NULL``) excludes pending
-                # rows from ``permission_for``.
-                accepted_at=text("now()"),
+                **{**grant, "permission": SharePermission.EDIT.value}
             )
         )
-        # Competing lower-ranked direct grant on the same resource: the
-        # union must pick the group's manage, pinning the max-rank fold
-        # against the live SQL row filtering.
-        await session.execute(
-            insert(resource_shares).values(
-                tenant_id="default",
-                subject_type="user",
-                subject_id="alice",
-                resource_type="report",
-                resource_id="r1",
-                permission="view",
-                granted_by_sub="owner",
-                accepted_at=text("now()"),
-            )
-        )
-    return workspace_id
+
+
+async def arrange_identity_facts(
+    factory: SessionFactory,
+) -> tuple[
+    PostgresIdentityBackend,
+    str,
+    str,
+    uuid.UUID,
+    uuid.UUID,
+    uuid.UUID,
+]:
+    """Create canonical users, one workspace, and one accepted direct share."""
+    owner_user_id = await create_user(factory, label="owner")
+    recipient_user_id = await create_user(factory, label="recipient")
+    outsider_user_id = await create_user(factory, label="outsider")
+    identity = backend(factory)
+    workspace_id, _name = await identity.create_workspace(
+        tenant_id=TENANT_ID,
+        name="Team",
+        created_by_user_id=owner_user_id,
+    )
+    assert await identity.assign_member(
+        tenant_id=TENANT_ID,
+        workspace_id=workspace_id,
+        user_id=recipient_user_id,
+        role=WorkspaceRole.EDITOR,
+    )
+    resource_id = await create_collection(
+        factory,
+        owner_user_id=owner_user_id,
+        collection_id="kc_access",
+    )
+    (share,) = await identity.create_shares(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id=resource_id,
+        owner_user_id=owner_user_id,
+        granted_by_user_id=owner_user_id,
+        invitees=((recipient_user_id, SharePermission.EDIT),),
+    )
+    accepted = await identity.accept_share_by_id(
+        tenant_id=TENANT_ID,
+        share_id=share.id,
+        recipient_user_id=recipient_user_id,
+        owner_user_id=owner_user_id,
+    )
+    assert accepted is not None and accepted.accepted_at is not None
+    return (
+        identity,
+        workspace_id,
+        resource_id,
+        owner_user_id,
+        recipient_user_id,
+        outsider_user_id,
+    )
 
 
 @pytest.mark.asyncio
-async def test_postgres_backend_matches_memory_semantics(session_factory):
-    workspace_id = await arrange_identity_facts(session_factory)
-    backend = PostgresIdentityBackend(
-        session_factory=session_factory, app_role=APP_ROLE
-    )
-    service = PermissionService(
-        members=backend, groups=backend, shares=backend, audit=backend
+async def test_postgres_backend_uses_uuid_membership_and_direct_shares(
+    session_factory: SessionFactory,
+) -> None:
+    (
+        identity,
+        workspace_id,
+        resource_id,
+        owner_user_id,
+        recipient_user_id,
+        outsider_user_id,
+    ) = await arrange_identity_facts(session_factory)
+    service = AuthorizationService(
+        members=identity,
+        shares=identity,
+        audit=identity,
     )
 
-    context = await service.resolve_user_context(oidc("alice"))
+    context = await service.resolve_user_context(oidc(recipient_user_id))
     assert context is not None
     assert context.workspace_ids == (workspace_id,)
-    assert len(context.groups) == 1
-
     assert (
-        await backend.role_in_workspace(
-            tenant_id="default", sub="alice", workspace_id=workspace_id
+        await identity.role_in_workspace(
+            tenant_id=TENANT_ID,
+            user_id=recipient_user_id,
+            workspace_id=workspace_id,
         )
         is WorkspaceRole.EDITOR
     )
-
-    # Group share lifts r1 to manage; the editor role caps r2 at edit.
     assert await service.can(
-        oidc("alice"), SharePermission.MANAGE,
-        resource_type="report", resource_id="r1", workspace_id=workspace_id,
+        oidc(recipient_user_id),
+        SharePermission.EDIT,
+        owner_user_id=owner_user_id,
+        resource_tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id=resource_id,
     )
     assert not await service.can(
-        oidc("alice"), SharePermission.MANAGE,
-        resource_type="report", resource_id="r2", workspace_id=workspace_id,
+        oidc(outsider_user_id),
+        SharePermission.VIEW,
+        owner_user_id=owner_user_id,
+        resource_tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id=resource_id,
     )
-
-    # Foreign sub: workspace hidden, identical to nonexistence.
     with pytest.raises(WorkspaceNotFound):
-        await service.resolve_workspace(oidc("mallory"), workspace_id)
-    with pytest.raises(WorkspaceNotFound):
-        await service.resolve_workspace(oidc("mallory"), "ws-missing")
+        await service.resolve_workspace(oidc(outsider_user_id), workspace_id)
 
 
 @pytest.mark.asyncio
-async def test_audit_sink_appends_denials(session_factory):
-    backend = PostgresIdentityBackend(
-        session_factory=session_factory, app_role=APP_ROLE
-    )
-    service = PermissionService(
-        members=backend, groups=backend, shares=backend, audit=backend
+async def test_audit_sink_appends_uuid_denials(
+    session_factory: SessionFactory,
+) -> None:
+    owner_user_id = await create_user(session_factory, label="owner")
+    denied_user_id = await create_user(session_factory, label="denied")
+    identity = backend(session_factory)
+    service = AuthorizationService(
+        members=identity,
+        shares=identity,
+        audit=identity,
     )
 
     with pytest.raises(ResourceNotFound):
         await service.require(
-            oidc("mallory"), SharePermission.VIEW,
-            resource_type="report", resource_id="r9",
+            oidc(denied_user_id),
+            SharePermission.VIEW,
+            owner_user_id=owner_user_id,
+            resource_tenant_id=TENANT_ID,
+            resource_type="knowledge_collection",
+            resource_id="kc_hidden",
         )
 
     async with scoped(session_factory) as session:
         rows = (
             await session.execute(
-                select(audit_log.c.action, audit_log.c.actor_sub)
+                select(audit_log.c.action, audit_log.c.actor_user_id)
             )
         ).all()
-    assert ("authz.denied", "mallory") in rows
+    assert ("authz.denied", denied_user_id) in rows
 
 
 @pytest.mark.asyncio
-async def test_memory_and_postgres_agree_on_a_scenario(session_factory):
-    """Same arrangement, same answers — port parity guard."""
-    workspace_id = await arrange_identity_facts(session_factory)
-    backend = PostgresIdentityBackend(
-        session_factory=session_factory, app_role=APP_ROLE
-    )
-
+async def test_memory_and_postgres_agree_on_direct_share_access(
+    session_factory: SessionFactory,
+) -> None:
+    (
+        identity,
+        workspace_id,
+        resource_id,
+        owner_user_id,
+        recipient_user_id,
+        _outsider_user_id,
+    ) = await arrange_identity_facts(session_factory)
     memory = MemoryIdentityStore()
     memory.add_workspace(workspace_id)
-    memory.add_member(workspace_id, "alice", WorkspaceRole.EDITOR)
-    group_ids = await backend.group_ids_for(tenant_id="default", sub="alice")
-    memory.add_group(group_ids[0], ["alice"])
-    memory.add_share(
-        subject_type="group", subject_id=group_ids[0],
-        resource_type="report", resource_id="r1",
-        permission=SharePermission.MANAGE,
+    memory.add_member(
+        workspace_id,
+        recipient_user_id,
+        WorkspaceRole.EDITOR,
     )
     memory.add_share(
-        subject_type="user", subject_id="alice",
-        resource_type="report", resource_id="r1",
-        permission=SharePermission.VIEW,
+        recipient_user_id=recipient_user_id,
+        resource_type="knowledge_collection",
+        resource_id=resource_id,
+        permission=SharePermission.EDIT,
+        granted_by_user_id=owner_user_id,
     )
 
-    for store in (memory, backend):
-        service = PermissionService(
-            members=store, groups=store, shares=store,
+    for store in (memory, identity):
+        service = AuthorizationService(
+            members=store,
+            shares=store,
             audit=MemoryIdentityStore(),
         )
         assert await service.can(
-            oidc("alice"), SharePermission.MANAGE,
-            resource_type="report", resource_id="r1",
-        ), type(store).__name__
-        assert not await service.can(
-            oidc("alice"), SharePermission.VIEW,
-            resource_type="report", resource_id="r-unshared",
+            oidc(recipient_user_id),
+            SharePermission.EDIT,
+            owner_user_id=owner_user_id,
+            resource_tenant_id=TENANT_ID,
+            resource_type="knowledge_collection",
+            resource_id=resource_id,
         ), type(store).__name__
 
 
 @pytest.mark.asyncio
-async def test_revoke_shares_for_resource_clears_every_grant(session_factory):
-    """Deletion cleanup: every active share on a resource flips at once."""
-    backend = PostgresIdentityBackend(
-        session_factory=session_factory, app_role=APP_ROLE
+async def test_revoke_shares_for_resource_clears_every_direct_grant(
+    session_factory: SessionFactory,
+) -> None:
+    owner_user_id = await create_user(session_factory, label="owner")
+    alice_user_id = await create_user(session_factory, label="alice")
+    bob_user_id = await create_user(session_factory, label="bob")
+    identity = backend(session_factory)
+    await create_collection(
+        session_factory,
+        owner_user_id=owner_user_id,
+        collection_id="kc_doomed",
     )
-    for subject in ("alice", "bob"):
-        await backend.create_share(
-            tenant_id="default",
-            subject_type="user",
-            subject_id=subject,
-            resource_type="knowledge_collection",
-            resource_id="kc_doomed",
-            permission=SharePermission.VIEW,
-            granted_by_sub="owner",
-        )
-    survivor = await backend.create_share(
-        tenant_id="default",
-        subject_type="user",
-        subject_id="alice",
-        resource_type="knowledge_collection",
-        resource_id="kc_other",
-        permission=SharePermission.VIEW,
-        granted_by_sub="owner",
+    await create_collection(
+        session_factory,
+        owner_user_id=owner_user_id,
+        collection_id="kc_survivor",
     )
-
-    revoked = await backend.revoke_shares_for_resource(
-        tenant_id="default",
+    doomed = await identity.create_shares(
+        tenant_id=TENANT_ID,
         resource_type="knowledge_collection",
         resource_id="kc_doomed",
-        revoked_by_sub="owner",
+        owner_user_id=owner_user_id,
+        granted_by_user_id=owner_user_id,
+        invitees=(
+            (alice_user_id, SharePermission.VIEW),
+            (bob_user_id, SharePermission.EDIT),
+        ),
     )
-    assert revoked == 2
+    assert len(doomed) == 2
+    (survivor,) = await identity.create_shares(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id="kc_survivor",
+        owner_user_id=owner_user_id,
+        granted_by_user_id=owner_user_id,
+        invitees=((alice_user_id, SharePermission.VIEW),),
+    )
+
     assert (
-        await backend.list_shares_for_resource(
-            tenant_id="default",
+        await identity.revoke_shares_for_resource(
+            tenant_id=TENANT_ID,
             resource_type="knowledge_collection",
             resource_id="kc_doomed",
+            revoked_by_user_id=owner_user_id,
         )
-        == ()
+        == 2
     )
-    # The unrelated resource keeps its grant.
-    remaining = await backend.list_shares_for_resource(
-        tenant_id="default",
+    assert await identity.list_shares_for_resource(
+        tenant_id=TENANT_ID,
         resource_type="knowledge_collection",
-        resource_id="kc_other",
+        resource_id="kc_doomed",
+    ) == ()
+    remaining = await identity.list_shares_for_resource(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id="kc_survivor",
     )
     assert [record.id for record in remaining] == [survivor.id]
-    # Idempotent: a second sweep finds nothing.
-    assert (
-        await backend.revoke_shares_for_resource(
-            tenant_id="default",
-            resource_type="knowledge_collection",
-            resource_id="kc_doomed",
-            revoked_by_sub="owner",
-        )
-        == 0
-    )
 
 
 @pytest.mark.asyncio
-async def test_consent_gates_access_on_postgres(session_factory):
-    """A minted share is pending and grants nothing until the recipient
-    accepts; only the recipient may accept, double-accept is a no-op.
-
-    PG-specific: the ``accepted_at IS NOT NULL`` filter in ``permission_for``
-    and the guarded ``accept_share_by_id`` UPDATE run only against live SQL.
-    """
-    backend = PostgresIdentityBackend(
-        session_factory=session_factory, app_role=APP_ROLE
+async def test_consent_gates_direct_share_access(
+    session_factory: SessionFactory,
+) -> None:
+    owner_user_id = await create_user(session_factory, label="owner")
+    recipient_user_id = await create_user(session_factory, label="recipient")
+    wrong_user_id = await create_user(session_factory, label="wrong")
+    await create_collection(
+        session_factory,
+        owner_user_id=owner_user_id,
+        collection_id="kc_consent",
     )
-    service = PermissionService(
-        members=backend, groups=backend, shares=backend, audit=backend
+    identity = backend(session_factory)
+    service = AuthorizationService(
+        members=identity,
+        shares=identity,
+        audit=identity,
     )
-    share = await backend.create_share(
-        tenant_id="default",
-        subject_type="user",
-        subject_id="alice",
-        resource_type="report",
-        resource_id="r1",
-        permission=SharePermission.VIEW,
-        granted_by_sub="owner",
+    (share,) = await identity.create_shares(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id="kc_consent",
+        owner_user_id=owner_user_id,
+        granted_by_user_id=owner_user_id,
+        invitees=((recipient_user_id, SharePermission.VIEW),),
     )
     assert share.accepted_at is None
 
-    async def alice_can_view() -> bool:
+    async def can_view() -> bool:
         return await service.can(
-            oidc("alice"),
+            oidc(recipient_user_id),
             SharePermission.VIEW,
-            resource_type="report",
-            resource_id="r1",
+            owner_user_id=owner_user_id,
+            resource_tenant_id=TENANT_ID,
+            resource_type="knowledge_collection",
+            resource_id="kc_consent",
         )
 
-    assert not await alice_can_view()
-    # The wrong recipient cannot accept; the share stays pending.
+    assert not await can_view()
     assert (
-        await backend.accept_share_by_id(
-            tenant_id="default", share_id=share.id, subject_sub="mallory"
+        await identity.accept_share_by_id(
+            tenant_id=TENANT_ID,
+            share_id=share.id,
+            recipient_user_id=wrong_user_id,
+            owner_user_id=owner_user_id,
         )
         is None
     )
-    assert not await alice_can_view()
-
-    accepted = await backend.accept_share_by_id(
-        tenant_id="default", share_id=share.id, subject_sub="alice"
+    accepted = await identity.accept_share_by_id(
+        tenant_id=TENANT_ID,
+        share_id=share.id,
+        recipient_user_id=recipient_user_id,
+        owner_user_id=owner_user_id,
     )
     assert accepted is not None and accepted.accepted_at is not None
-    # Double-accept is a benign no-op (already accepted).
-    assert (
-        await backend.accept_share_by_id(
-            tenant_id="default", share_id=share.id, subject_sub="alice"
-        )
-        is None
+    accepted_again = await identity.accept_share_by_id(
+        tenant_id=TENANT_ID,
+        share_id=share.id,
+        recipient_user_id=recipient_user_id,
+        owner_user_id=owner_user_id,
     )
-    assert await alice_can_view()
+    assert accepted_again == accepted
+    assert await can_view()
 
 
 @pytest.mark.asyncio
-async def test_regrant_preserves_acceptance_on_postgres(session_factory):
-    """A permission change on an accepted share keeps access live (the
-    re-grant carries ``accepted_at`` forward) — a PG-only RETURNING path."""
-    backend = PostgresIdentityBackend(
-        session_factory=session_factory, app_role=APP_ROLE
+async def test_permission_cas_preserves_acceptance(
+    session_factory: SessionFactory,
+) -> None:
+    owner_user_id = await create_user(session_factory, label="owner")
+    recipient_user_id = await create_user(session_factory, label="recipient")
+    await create_collection(
+        session_factory,
+        owner_user_id=owner_user_id,
+        collection_id="kc_cas",
     )
-    service = PermissionService(
-        members=backend, groups=backend, shares=backend, audit=backend
+    identity = backend(session_factory)
+    (share,) = await identity.create_shares(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id="kc_cas",
+        owner_user_id=owner_user_id,
+        granted_by_user_id=owner_user_id,
+        invitees=((recipient_user_id, SharePermission.VIEW),),
     )
-    share = await backend.create_share(
-        tenant_id="default",
-        subject_type="user",
-        subject_id="alice",
-        resource_type="report",
-        resource_id="r1",
-        permission=SharePermission.VIEW,
-        granted_by_sub="owner",
+    accepted = await identity.accept_share_by_id(
+        tenant_id=TENANT_ID,
+        share_id=share.id,
+        recipient_user_id=recipient_user_id,
+        owner_user_id=owner_user_id,
     )
-    await backend.accept_share_by_id(
-        tenant_id="default", share_id=share.id, subject_sub="alice"
-    )
-    regranted = await backend.create_share(
-        tenant_id="default",
-        subject_type="user",
-        subject_id="alice",
-        resource_type="report",
-        resource_id="r1",
+    assert accepted is not None
+
+    updated = await identity.update_share_permission(
+        tenant_id=TENANT_ID,
+        share_id=share.id,
         permission=SharePermission.EDIT,
-        granted_by_sub="owner",
+        expected_revision=share.revision,
+        actor_user_id=owner_user_id,
     )
-    assert regranted.accepted_at is not None
-    assert await service.can(
-        oidc("alice"),
-        SharePermission.EDIT,
-        resource_type="report",
-        resource_id="r1",
-    )
+    assert updated is not None
+    assert updated.permission is SharePermission.EDIT
+    assert updated.revision == share.revision + 1
+    assert updated.accepted_at == accepted.accepted_at
 
-
-@pytest.mark.asyncio
-async def test_inbox_and_outgoing_repos_on_postgres(session_factory):
-    """inbox_for_subjects spans kinds and keeps pending+accepted; outgoing
-    returns the grantor's active shares; both exclude revoked rows.
-
-    PG-specific: these are new SELECTs whose WHERE filters (revoked_at IS NULL,
-    the subject-tuple IN, granted_by_sub) only run against live SQL.
-    """
-    backend = PostgresIdentityBackend(
-        session_factory=session_factory, app_role=APP_ROLE
-    )
-    alice = [SubjectRef(subject_type="user", subject_id="alice")]
-    pending = await backend.create_share(
-        tenant_id="default", subject_type="user", subject_id="alice",
-        resource_type="run", resource_id="run-1",
-        permission=SharePermission.VIEW, granted_by_sub="owner",
-    )
-    accepted = await backend.create_share(
-        tenant_id="default", subject_type="user", subject_id="alice",
-        resource_type="knowledge_collection", resource_id="kc-1",
-        permission=SharePermission.EDIT, granted_by_sub="owner",
-    )
-    await backend.create_share(
-        tenant_id="default", subject_type="user", subject_id="bob",
-        resource_type="run", resource_id="run-1",
-        permission=SharePermission.VIEW, granted_by_sub="owner",
-    )
-    await backend.accept_share_by_id(
-        tenant_id="default", share_id=accepted.id, subject_sub="alice"
-    )
-
-    inbox = await backend.inbox_for_subjects(
-        tenant_id="default", subjects=alice
-    )
-    by_res = {record.resource_id: record for record in inbox}
-    assert set(by_res) == {"run-1", "kc-1"}
-    assert by_res["run-1"].accepted_at is None
-    assert by_res["kc-1"].accepted_at is not None
-
-    outgoing = await backend.outgoing_shares_for_grantor(
-        tenant_id="default", grantor_sub="owner"
-    )
-    assert len(outgoing) == 3  # alice x2 + bob x1
-
-    # Revoking alice's pending run share drops it from both listings.
-    await backend.revoke_share_by_id(
-        tenant_id="default", share_id=pending.id, revoked_by_sub="alice"
-    )
-    inbox_after = await backend.inbox_for_subjects(
-        tenant_id="default", subjects=alice
-    )
-    assert {record.resource_id for record in inbox_after} == {"kc-1"}
-    outgoing_after = await backend.outgoing_shares_for_grantor(
-        tenant_id="default", grantor_sub="owner"
-    )
-    assert len(outgoing_after) == 2
-
-
-@pytest.mark.asyncio
-async def test_migration_backfill_activates_existing_shares(session_factory):
-    """The 0028 backfill keeps PRE-existing active shares accessible on upgrade
-    and must NOT touch revoked ones.
-
-    The migration round-trip runs against an empty DB, so the backfill UPDATE
-    itself never hits a row there — this exercises it against data: an
-    active-but-unaccepted row (an old grant) becomes accepted and grants
-    access, while a revoked row stays untouched (pinning the
-    ``revoked_at IS NULL`` half of the WHERE clause).
-    """
-    backend = PostgresIdentityBackend(
-        session_factory=session_factory, app_role=APP_ROLE
-    )
-    service = PermissionService(
-        members=backend, groups=backend, shares=backend, audit=backend
-    )
-    # accepted_at NULL = a share minted before 0028 (or a v1 pending grant).
-    alice_share = await backend.create_share(
-        tenant_id="default", subject_type="user", subject_id="alice",
-        resource_type="report", resource_id="r1",
-        permission=SharePermission.VIEW, granted_by_sub="owner",
-    )
-    assert alice_share.accepted_at is None
-    bob_share = await backend.create_share(
-        tenant_id="default", subject_type="user", subject_id="bob",
-        resource_type="report", resource_id="r1",
-        permission=SharePermission.VIEW, granted_by_sub="owner",
-    )
-    await backend.revoke_share_by_id(
-        tenant_id="default", share_id=bob_share.id, revoked_by_sub="owner"
-    )
-
-    async def can_view(sub: str) -> bool:
-        return await service.can(
-            oidc(sub),
-            SharePermission.VIEW,
-            resource_type="report",
-            resource_id="r1",
+    with pytest.raises(ShareConflict) as stale:
+        await identity.update_share_permission(
+            tenant_id=TENANT_ID,
+            share_id=share.id,
+            permission=SharePermission.VIEW,
+            expected_revision=share.revision,
+            actor_user_id=owner_user_id,
         )
+    assert stale.value.current_revision == updated.revision
 
-    # Before the backfill the active row is pending -> no access.
-    assert not await can_view("alice")
 
-    # The migration 0028 backfill, verbatim.
+@pytest.mark.asyncio
+async def test_inbox_and_outgoing_direct_share_repositories(
+    session_factory: SessionFactory,
+) -> None:
+    owner_user_id = await create_user(session_factory, label="owner")
+    alice_user_id = await create_user(session_factory, label="alice")
+    bob_user_id = await create_user(session_factory, label="bob")
+    identity = backend(session_factory)
+    for collection_id in ("kc_inbox_a", "kc_inbox_b"):
+        await create_collection(
+            session_factory,
+            owner_user_id=owner_user_id,
+            collection_id=collection_id,
+        )
+    first_batch = await identity.create_shares(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id="kc_inbox_a",
+        owner_user_id=owner_user_id,
+        granted_by_user_id=owner_user_id,
+        invitees=(
+            (alice_user_id, SharePermission.VIEW),
+            (bob_user_id, SharePermission.VIEW),
+        ),
+    )
+    (accepted_share,) = await identity.create_shares(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id="kc_inbox_b",
+        owner_user_id=owner_user_id,
+        granted_by_user_id=owner_user_id,
+        invitees=((alice_user_id, SharePermission.EDIT),),
+    )
+    await identity.accept_share_by_id(
+        tenant_id=TENANT_ID,
+        share_id=accepted_share.id,
+        recipient_user_id=alice_user_id,
+        owner_user_id=owner_user_id,
+    )
+
+    inbox = await identity.inbox_for_recipient(
+        tenant_id=TENANT_ID,
+        recipient_user_id=alice_user_id,
+    )
+    assert {record.resource_id for record in inbox} == {
+        "kc_inbox_a",
+        "kc_inbox_b",
+    }
+    assert len(
+        await identity.list_active_shares(tenant_id=TENANT_ID)
+    ) == 3
+
+    alice_pending = next(
+        record
+        for record in first_batch
+        if record.recipient_user_id == alice_user_id
+    )
+    await identity.revoke_share_by_id(
+        tenant_id=TENANT_ID,
+        share_id=alice_pending.id,
+        revoked_by_user_id=alice_user_id,
+        owner_user_id=owner_user_id,
+    )
+    inbox_after = await identity.inbox_for_recipient(
+        tenant_id=TENANT_ID,
+        recipient_user_id=alice_user_id,
+    )
+    assert {record.resource_id for record in inbox_after} == {"kc_inbox_b"}
+
+
+@pytest.mark.asyncio
+async def test_disabled_actor_cannot_revoke_direct_share(
+    session_factory: SessionFactory,
+) -> None:
+    """The final revoke transaction locks and rechecks the current actor."""
+    owner_user_id = await create_user(session_factory, label="owner")
+    recipient_user_id = await create_user(session_factory, label="recipient")
+    identity = backend(session_factory)
+    await create_collection(
+        session_factory,
+        owner_user_id=owner_user_id,
+        collection_id="kc_disabled_revoke",
+    )
+    (share,) = await identity.create_shares(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id="kc_disabled_revoke",
+        owner_user_id=owner_user_id,
+        granted_by_user_id=owner_user_id,
+        invitees=((recipient_user_id, SharePermission.VIEW),),
+    )
     async with scoped(session_factory) as session:
         await session.execute(
-            text(
-                "UPDATE resource_shares SET accepted_at = created_at "
-                "WHERE accepted_at IS NULL AND revoked_at IS NULL"
-            )
+            update(users)
+            .where(users.c.id == owner_user_id)
+            .values(disabled_at=func.now())
         )
 
-    # The pre-existing active share is now accepted and grants access...
-    assert await can_view("alice")
-    # ...and the revoked row was left untouched (WHERE respected revoked_at).
-    async with scoped(session_factory) as session:
-        bob_accepted_at = (
-            await session.execute(
-                select(resource_shares.c.accepted_at).where(
-                    resource_shares.c.tenant_id == "default",
-                    resource_shares.c.subject_id == "bob",
-                    resource_shares.c.resource_type == "report",
-                    resource_shares.c.resource_id == "r1",
-                )
-            )
-        ).scalar_one()
-    assert bob_accepted_at is None
-    assert not await can_view("bob")
+    revoked = await identity.revoke_share_by_id(
+        tenant_id=TENANT_ID,
+        share_id=share.id,
+        revoked_by_user_id=owner_user_id,
+        owner_user_id=owner_user_id,
+    )
+
+    assert revoked is None
+    retained = await identity.get_share(
+        tenant_id=TENANT_ID, share_id=share.id
+    )
+    assert retained is not None
+    assert retained.revoked_at is None
 
 
-async def _exercise_membership_admin(store) -> None:
-    """One create/assign-upsert/rename/remove/delete-cascade sequence the
-    MembershipAdminRepository port must satisfy identically on every backend.
-
-    Run over BOTH memory and Postgres (below) so a divergence in any answer —
-    sort order, None-vs-empty, member_count, upsert, cascade, bool returns —
-    fails the parity guard rather than only the relevant backend's test.
-    """
+async def _exercise_membership_admin(
+    store: Any,
+    *,
+    owner_user_id: uuid.UUID,
+    member_user_id: uuid.UUID,
+) -> None:
+    """Run one UUID membership-admin contract against either backend."""
     workspace_id, _name = await store.create_workspace(
-        tenant_id="default", name="Team", created_by_sub="owner"
+        tenant_id=TENANT_ID,
+        name="Team",
+        created_by_user_id=owner_user_id,
     )
-    # The creator is the sole OWNER member at first.
-    assert await store.list_all_workspaces(tenant_id="default") == (
-        (workspace_id, "Team", "owner", 1),
+    assert await store.list_all_workspaces(tenant_id=TENANT_ID) == (
+        (workspace_id, "Team", owner_user_id, 1),
     )
-
-    # assign_member upserts: add a member, then change the role in place.
     assert await store.assign_member(
-        tenant_id="default",
+        tenant_id=TENANT_ID,
         workspace_id=workspace_id,
-        sub="alice",
+        user_id=member_user_id,
         role=WorkspaceRole.EDITOR,
     )
-    assert await store.list_members(
-        tenant_id="default", workspace_id=workspace_id
-    ) == (("alice", WorkspaceRole.EDITOR), ("owner", WorkspaceRole.OWNER))
-    assert await store.assign_member(
-        tenant_id="default",
+    assert dict(
+        await store.list_members(
+            tenant_id=TENANT_ID,
+            workspace_id=workspace_id,
+        )
+    ) == {
+        owner_user_id: WorkspaceRole.OWNER,
+        member_user_id: WorkspaceRole.EDITOR,
+    }
+    assert await store.set_existing_member_role(
+        tenant_id=TENANT_ID,
         workspace_id=workspace_id,
-        sub="alice",
+        user_id=member_user_id,
         role=WorkspaceRole.VIEWER,
     )
-    members = dict(
+    missing_member_id = uuid.uuid4()
+    assert not await store.set_existing_member_role(
+        tenant_id=TENANT_ID,
+        workspace_id=workspace_id,
+        user_id=missing_member_id,
+        role=WorkspaceRole.EDITOR,
+    )
+    assert missing_member_id not in dict(
         await store.list_members(
-            tenant_id="default", workspace_id=workspace_id
+            tenant_id=TENANT_ID,
+            workspace_id=workspace_id,
         )
     )
-    assert members["alice"] is WorkspaceRole.VIEWER
-    assert await store.list_all_workspaces(tenant_id="default") == (
-        (workspace_id, "Team", "owner", 2),
-    )
-
     assert await store.rename_workspace(
-        tenant_id="default", workspace_id=workspace_id, name="Renamed"
+        tenant_id=TENANT_ID,
+        workspace_id=workspace_id,
+        name="Renamed",
     )
-    assert (await store.list_all_workspaces(tenant_id="default"))[0][1] == (
+    assert (await store.list_all_workspaces(tenant_id=TENANT_ID))[0][1] == (
         "Renamed"
     )
-
     assert await store.remove_member(
-        tenant_id="default", workspace_id=workspace_id, sub="alice"
+        tenant_id=TENANT_ID,
+        workspace_id=workspace_id,
+        user_id=member_user_id,
     )
     assert not await store.remove_member(
-        tenant_id="default", workspace_id=workspace_id, sub="alice"
+        tenant_id=TENANT_ID,
+        workspace_id=workspace_id,
+        user_id=member_user_id,
     )
-
-    # Absent / malformed ids never raise — None (list) / False (mutations).
-    assert (
-        await store.list_members(
-            tenant_id="default", workspace_id="not-a-uuid"
-        )
-        is None
-    )
-    assert (
-        await store.list_members(
-            tenant_id="default", workspace_id=str(uuid.uuid4())
-        )
-        is None
-    )
+    assert await store.list_members(
+        tenant_id=TENANT_ID,
+        workspace_id="not-a-uuid",
+    ) is None
     assert not await store.assign_member(
-        tenant_id="default",
+        tenant_id=TENANT_ID,
         workspace_id=str(uuid.uuid4()),
-        sub="x",
+        user_id=uuid.uuid4(),
         role=WorkspaceRole.VIEWER,
     )
-    assert not await store.rename_workspace(
-        tenant_id="default", workspace_id="not-a-uuid", name="X"
-    )
-
-    # delete cascades the remaining membership; second delete is False.
     assert await store.delete_workspace(
-        tenant_id="default", workspace_id=workspace_id
+        tenant_id=TENANT_ID,
+        workspace_id=workspace_id,
+        actor_user_id=owner_user_id,
     )
     assert not await store.delete_workspace(
-        tenant_id="default", workspace_id=workspace_id
+        tenant_id=TENANT_ID,
+        workspace_id=workspace_id,
+        actor_user_id=owner_user_id,
     )
-    assert await store.list_all_workspaces(tenant_id="default") == ()
 
 
 @pytest.mark.asyncio
-async def test_membership_admin_repository_parity(session_factory):
-    """Memory and Postgres satisfy ONE shared MembershipAdminRepository spec.
-
-    Same arrangement, same answers — the port parity guard (mirrors
-    ``test_memory_and_postgres_agree_on_a_scenario``). A fresh store per
-    backend keeps the two runs independent.
-    """
-    backend = PostgresIdentityBackend(
-        session_factory=session_factory, app_role=APP_ROLE
-    )
-    for store in (MemoryIdentityStore(), backend):
-        await _exercise_membership_admin(store)
+async def test_membership_admin_repository_uuid_parity(
+    session_factory: SessionFactory,
+) -> None:
+    owner_user_id = await create_user(session_factory, label="owner")
+    member_user_id = await create_user(session_factory, label="member")
+    stores = (MemoryIdentityStore(), backend(session_factory))
+    for store in stores:
+        await _exercise_membership_admin(
+            store,
+            owner_user_id=owner_user_id,
+            member_user_id=member_user_id,
+        )
 
 
 @pytest.mark.asyncio
-async def test_create_share_is_idempotent_under_concurrent_grants(
-    session_factory,
-):
-    """1.6: two concurrent grants of the same tuple collapse to one row.
-
-    Before, the loser hit the active partial-unique index and raised a
-    bare IntegrityError (HTTP 500). Now the ON CONFLICT DO UPDATE
-    re-points the existing active row instead — both callers succeed and
-    exactly ONE active row remains (last-writer-wins on permission), with
-    no exception.
-    """
-    import asyncio
-
-    backend = PostgresIdentityBackend(
-        session_factory=session_factory, app_role=APP_ROLE
+async def test_last_workspace_owner_cannot_be_removed_or_downgraded(
+    session_factory: SessionFactory,
+) -> None:
+    owner_user_id = await create_user(session_factory, label="owner")
+    identity = backend(session_factory)
+    workspace_id, _name = await identity.create_workspace(
+        tenant_id=TENANT_ID,
+        name="Protected",
+        created_by_user_id=owner_user_id,
     )
 
-    def grant(permission: SharePermission):
-        return backend.create_share(
-            tenant_id="default",
-            subject_type="user",
-            subject_id="bob",
-            resource_type="report",
-            resource_id="rc",
-            permission=permission,
-            granted_by_sub="owner",
+    with pytest.raises(LastWorkspaceOwnerError):
+        await identity.assign_member(
+            tenant_id=TENANT_ID,
+            workspace_id=workspace_id,
+            user_id=owner_user_id,
+            role=WorkspaceRole.EDITOR,
+        )
+    with pytest.raises(LastWorkspaceOwnerError):
+        await identity.remove_member(
+            tenant_id=TENANT_ID,
+            workspace_id=workspace_id,
+            user_id=owner_user_id,
+            actor_user_id=owner_user_id,
         )
 
-    # Run the concurrency a few rounds on FRESH tuples to reliably hit
-    # the first-grant INSERT-INSERT race (no prior active row to serialise
-    # the two soft-revokes). Every round must stay exception-free and
-    # leave exactly one active row.
-    for round_index in range(8):
-        resource_id = f"rc-{round_index}"
 
-        async def grant_res(permission: SharePermission):
-            return await backend.create_share(
-                tenant_id="default",
-                subject_type="user",
-                subject_id="bob",
-                resource_type="report",
-                resource_id=resource_id,
-                permission=permission,
-                granted_by_sub="owner",
-            )
+@pytest.mark.asyncio
+async def test_concurrent_direct_grants_leave_one_explicit_winner(
+    session_factory: SessionFactory,
+) -> None:
+    owner_user_id = await create_user(session_factory, label="owner")
+    recipient_user_id = await create_user(session_factory, label="recipient")
+    identity = backend(session_factory)
+    await create_collection(
+        session_factory,
+        owner_user_id=owner_user_id,
+        collection_id="kc_race",
+    )
 
-        results = await asyncio.gather(
-            grant_res(SharePermission.VIEW),
-            grant_res(SharePermission.EDIT),
-            return_exceptions=True,
+    async def grant(
+        permission: SharePermission,
+    ) -> tuple[ShareRecord, ...]:
+        return await identity.create_shares(
+            tenant_id=TENANT_ID,
+            resource_type="knowledge_collection",
+            resource_id="kc_race",
+            owner_user_id=owner_user_id,
+            granted_by_user_id=owner_user_id,
+            invitees=((recipient_user_id, permission),),
         )
-        for result in results:
-            assert not isinstance(result, Exception), result
 
-        # Each returned id must be a row that was actually PERSISTED, not a
-        # minted phantom. The race resolves two legitimate ways: the two
-        # INSERTs conflict and DO UPDATE the one surviving row (both racers
-        # return that id), or one commits first and the other soft-revokes it
-        # then inserts a fresh active row (the ids differ, last-writer-wins).
-        # Either way both ids come from RETURNING on a real statement. Before
-        # the fix the loser echoed a freshly-minted uuid that never hit a row,
-        # so a later accept_share on it would 404.
-        async with scoped(session_factory) as session:
-            for result in results:
-                exists = (
-                    await session.execute(
-                        select(func.count())
-                        .select_from(resource_shares)
-                        .where(resource_shares.c.id == uuid.UUID(result.id))
-                    )
-                ).scalar_one()
-                assert exists == 1, (
-                    f"round {round_index}: returned id {result.id} was never "
-                    "persisted (phantom minted uuid)"
-                )
+    results = await asyncio.gather(
+        grant(SharePermission.VIEW),
+        grant(SharePermission.EDIT),
+        return_exceptions=True,
+    )
+    successes = [result for result in results if not isinstance(result, Exception)]
+    conflicts = [result for result in results if isinstance(result, ShareConflict)]
+    assert len(successes) == 1
+    assert len(conflicts) == 1
+    active = await identity.list_shares_for_resource(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id="kc_race",
+    )
+    assert len(active) == 1
 
-        async with scoped(session_factory) as session:
-            active = (
-                await session.execute(
-                    select(func.count())
-                    .select_from(resource_shares)
-                    .where(
-                        resource_shares.c.resource_id == resource_id,
-                        resource_shares.c.revoked_at.is_(None),
-                    )
-                )
-            ).scalar_one()
-        assert active == 1, f"round {round_index}: {active} active rows"
 
-    # Sequential re-grant still works and stays single-active (the
-    # historical soft-revoke path).
-    await grant(SharePermission.MANAGE)
+async def arrange_shared_workspace(
+    factory: SessionFactory,
+    *,
+    workspace_count: int = 1,
+) -> tuple[PostgresIdentityBackend, uuid.UUID, uuid.UUID, list[str]]:
+    """Create two users who share *workspace_count* workspaces."""
+    owner_user_id = await create_user(factory, label="owner")
+    recipient_user_id = await create_user(factory, label="recipient")
+    identity = backend(factory, restrict_to_workspace_members=True)
+    workspace_ids: list[str] = []
+    for index in range(workspace_count):
+        workspace_id, _name = await identity.create_workspace(
+            tenant_id=TENANT_ID,
+            name=f"Shared {index}",
+            created_by_user_id=owner_user_id,
+        )
+        assert await identity.assign_member(
+            tenant_id=TENANT_ID,
+            workspace_id=workspace_id,
+            user_id=recipient_user_id,
+            role=WorkspaceRole.VIEWER,
+        )
+        workspace_ids.append(workspace_id)
+    return identity, owner_user_id, recipient_user_id, workspace_ids
+
+
+@pytest.mark.asyncio
+async def test_last_shared_workspace_revokes_pending_and_accepted_atomically(
+    session_factory: SessionFactory,
+) -> None:
+    (
+        identity,
+        owner_user_id,
+        recipient_user_id,
+        workspace_ids,
+    ) = await arrange_shared_workspace(session_factory)
+    for collection_id in ("kc_pending", "kc_accepted"):
+        await create_collection(
+            session_factory,
+            owner_user_id=owner_user_id,
+            collection_id=collection_id,
+        )
+    (pending,) = await identity.create_shares(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id="kc_pending",
+        owner_user_id=owner_user_id,
+        granted_by_user_id=owner_user_id,
+        invitees=((recipient_user_id, SharePermission.VIEW),),
+        restrict_to_members=True,
+    )
+    (accepted,) = await identity.create_shares(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id="kc_accepted",
+        owner_user_id=owner_user_id,
+        granted_by_user_id=owner_user_id,
+        invitees=((recipient_user_id, SharePermission.EDIT),),
+        restrict_to_members=True,
+    )
+    assert (
+        await identity.accept_share_by_id(
+            tenant_id=TENANT_ID,
+            share_id=accepted.id,
+            recipient_user_id=recipient_user_id,
+            owner_user_id=owner_user_id,
+            restrict_to_members=True,
+        )
+    ) is not None
+
+    assert await identity.remove_member(
+        tenant_id=TENANT_ID,
+        workspace_id=workspace_ids[0],
+        user_id=recipient_user_id,
+        actor_user_id=owner_user_id,
+    )
+
     async with scoped(session_factory) as session:
-        active = (
+        membership_count = await session.scalar(
+            select(func.count())
+            .select_from(workspace_members)
+            .where(workspace_members.c.user_id == recipient_user_id)
+        )
+        share_rows = (
             await session.execute(
-                select(func.count())
-                .select_from(resource_shares)
-                .where(
-                    resource_shares.c.resource_id == "rc",
-                    resource_shares.c.revoked_at.is_(None),
+                select(
+                    resource_shares.c.id,
+                    resource_shares.c.revoked_at,
+                    resource_shares.c.revoked_by_user_id,
+                ).where(
+                    resource_shares.c.id.in_(
+                        [uuid.UUID(pending.id), uuid.UUID(accepted.id)]
+                    )
                 )
             )
-        ).scalar_one()
-    assert active == 1
+        ).all()
+        revoke_audits = await session.scalar(
+            select(func.count())
+            .select_from(audit_log)
+            .where(audit_log.c.action == "share.workspace_boundary_revoked")
+        )
+    assert membership_count == 0
+    assert len(share_rows) == 2
+    assert all(row.revoked_at is not None for row in share_rows)
+    assert all(row.revoked_by_user_id == owner_user_id for row in share_rows)
+    assert revoke_audits == 2
 
 
 @pytest.mark.asyncio
-async def test_concurrent_regrant_preserves_acceptance(session_factory):
-    """P2: a concurrent re-grant of an ALREADY-ACCEPTED share keeps access.
-
-    Root cause: the ON CONFLICT DO UPDATE wrote the acceptance captured from
-    THIS transaction's own soft-revoke. Under a concurrent re-grant, one
-    grant's soft-revoke can match zero rows (the racer already revoked the
-    active row) and capture ``None``, then win the conflict on the racer's
-    fresh active row and overwrite its live ``accepted_at`` with ``None`` — a
-    silent access revocation, since the consent gate treats a pending
-    (``accepted_at IS NULL``) share as granting nothing. The COALESCE of the
-    EXISTING row's acceptance makes it survive every interleaving. A few
-    rounds raise the odds of hitting the losing interleaving; the invariant
-    (surviving active row stays accepted) must hold on every one.
-    """
-    import asyncio
-
-    backend = PostgresIdentityBackend(
-        session_factory=session_factory, app_role=APP_ROLE
+async def test_second_shared_workspace_preserves_direct_share(
+    session_factory: SessionFactory,
+) -> None:
+    (
+        identity,
+        owner_user_id,
+        recipient_user_id,
+        workspace_ids,
+    ) = await arrange_shared_workspace(session_factory, workspace_count=2)
+    await create_collection(
+        session_factory,
+        owner_user_id=owner_user_id,
+        collection_id="kc_retained",
+    )
+    (share,) = await identity.create_shares(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id="kc_retained",
+        owner_user_id=owner_user_id,
+        granted_by_user_id=owner_user_id,
+        invitees=((recipient_user_id, SharePermission.VIEW),),
+        restrict_to_members=True,
     )
 
-    for round_index in range(8):
-        resource_id = f"rc-accepted-{round_index}"
+    assert await identity.remove_member(
+        tenant_id=TENANT_ID,
+        workspace_id=workspace_ids[0],
+        user_id=recipient_user_id,
+        actor_user_id=owner_user_id,
+    )
+    retained = await identity.get_share(
+        tenant_id=TENANT_ID,
+        share_id=share.id,
+    )
+    assert retained is not None
+    assert retained.revoked_at is None
+    assert await identity.workspace_ids_for(
+        tenant_id=TENANT_ID,
+        user_id=recipient_user_id,
+    ) == (workspace_ids[1],)
 
-        granted = await backend.create_share(
-            tenant_id="default",
-            subject_type="user",
-            subject_id="bob",
-            resource_type="report",
-            resource_id=resource_id,
-            permission=SharePermission.VIEW,
-            granted_by_sub="owner",
-        )
-        accepted = await backend.accept_share_by_id(
-            tenant_id="default", share_id=granted.id, subject_sub="bob"
-        )
-        assert accepted is not None and accepted.accepted_at is not None
 
-        async def regrant(permission: SharePermission):
-            return await backend.create_share(
-                tenant_id="default",
-                subject_type="user",
-                subject_id="bob",
-                resource_type="report",
-                resource_id=resource_id,
-                permission=permission,
-                granted_by_sub="owner",
+@pytest.mark.asyncio
+async def test_targeted_reconcile_does_not_lock_unrelated_share_resources(
+    session_factory: SessionFactory,
+) -> None:
+    """A member change must not wait on an unrelated resource mutation."""
+    affected_user_id = await create_user(session_factory, label="affected")
+    other_owner_id = await create_user(session_factory, label="other-owner")
+    other_recipient_id = await create_user(
+        session_factory, label="other-recipient"
+    )
+    unrelated_owner_id = await create_user(
+        session_factory, label="unrelated-owner"
+    )
+    unrelated_recipient_id = await create_user(
+        session_factory, label="unrelated-recipient"
+    )
+    identity = backend(session_factory, restrict_to_workspace_members=True)
+    for collection_id, owner_user_id in (
+        ("kc_00_unrelated_locked", unrelated_owner_id),
+        ("kc_10_owned_by_affected", affected_user_id),
+        ("kc_20_recipient_affected", other_owner_id),
+    ):
+        await create_collection(
+            session_factory,
+            owner_user_id=owner_user_id,
+            collection_id=collection_id,
+        )
+    (unrelated,) = await identity.create_shares(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id="kc_00_unrelated_locked",
+        owner_user_id=unrelated_owner_id,
+        granted_by_user_id=unrelated_owner_id,
+        invitees=((unrelated_recipient_id, SharePermission.VIEW),),
+    )
+    (owned_by_affected,) = await identity.create_shares(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id="kc_10_owned_by_affected",
+        owner_user_id=affected_user_id,
+        granted_by_user_id=affected_user_id,
+        invitees=((other_recipient_id, SharePermission.VIEW),),
+    )
+    (shared_to_affected,) = await identity.create_shares(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id="kc_20_recipient_affected",
+        owner_user_id=other_owner_id,
+        granted_by_user_id=other_owner_id,
+        invitees=((affected_user_id, SharePermission.VIEW),),
+    )
+
+    async with scoped(session_factory) as blocker:
+        await blocker.execute(
+            select(knowledge_collections.c.id)
+            .where(knowledge_collections.c.id == "kc_00_unrelated_locked")
+            .with_for_update()
+        )
+        async with scoped(session_factory) as reconciliation:
+            await reconciliation.execute(
+                text("SET LOCAL lock_timeout = '250ms'")
+            )
+            revoked = await identity._reconcile_workspace_shares(
+                reconciliation,
+                tenant_id=TENANT_ID,
+                actor_user_id=affected_user_id,
+                affected_user_ids={affected_user_id},
             )
 
-        results = await asyncio.gather(
-            regrant(SharePermission.EDIT),
-            regrant(SharePermission.MANAGE),
-            return_exceptions=True,
-        )
-        for result in results:
-            assert not isinstance(result, Exception), result
-            # The RETURNED record must mirror the persisted acceptance too
-            # (accepted_at now comes from RETURNING, not the captured value),
-            # so a re-grant of an accepted share never reports itself pending.
-            assert result.accepted_at is not None, (
-                f"round {round_index}: returned record dropped accepted_at"
-            )
+    assert revoked == 2
+    assert await identity.get_share(
+        tenant_id=TENANT_ID, share_id=owned_by_affected.id
+    ) is None
+    assert await identity.get_share(
+        tenant_id=TENANT_ID, share_id=shared_to_affected.id
+    ) is None
+    assert await identity.get_share(
+        tenant_id=TENANT_ID, share_id=unrelated.id
+    ) is not None
 
-        async with scoped(session_factory) as session:
-            rows = (
-                await session.execute(
-                    select(resource_shares.c.accepted_at).where(
-                        resource_shares.c.resource_id == resource_id,
-                        resource_shares.c.revoked_at.is_(None),
-                    )
+
+@pytest.mark.asyncio
+async def test_workspace_delete_reconciles_direct_shares(
+    session_factory: SessionFactory,
+) -> None:
+    (
+        identity,
+        owner_user_id,
+        recipient_user_id,
+        workspace_ids,
+    ) = await arrange_shared_workspace(session_factory)
+    await create_collection(
+        session_factory,
+        owner_user_id=owner_user_id,
+        collection_id="kc_workspace_delete",
+    )
+    (share,) = await identity.create_shares(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id="kc_workspace_delete",
+        owner_user_id=owner_user_id,
+        granted_by_user_id=owner_user_id,
+        invitees=((recipient_user_id, SharePermission.EDIT),),
+        restrict_to_members=True,
+    )
+
+    assert await identity.delete_workspace(
+        tenant_id=TENANT_ID,
+        workspace_id=workspace_ids[0],
+        actor_user_id=owner_user_id,
+    )
+    assert await identity.list_members(
+        tenant_id=TENANT_ID,
+        workspace_id=workspace_ids[0],
+    ) is None
+    assert await identity.get_share(
+        tenant_id=TENANT_ID,
+        share_id=share.id,
+    ) is None
+
+    async with scoped(session_factory) as session:
+        revoked = (
+            await session.execute(
+                select(
+                    resource_shares.c.revoked_at,
+                    resource_shares.c.revoked_by_user_id,
+                ).where(resource_shares.c.id == uuid.UUID(share.id))
+            )
+        ).one()
+    assert revoked.revoked_at is not None
+    assert revoked.revoked_by_user_id == owner_user_id
+
+
+@pytest.mark.asyncio
+async def test_startup_reconcile_revokes_boundary_invalid_and_orphaned_shares(
+    session_factory: SessionFactory,
+) -> None:
+    owner_user_id = await create_user(session_factory, label="owner")
+    recipient_user_id = await create_user(session_factory, label="recipient")
+    identity = backend(session_factory, restrict_to_workspace_members=True)
+    await create_collection(
+        session_factory,
+        owner_user_id=owner_user_id,
+        collection_id="kc_no_common_workspace",
+    )
+    (boundary_invalid,) = await identity.create_shares(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id="kc_no_common_workspace",
+        owner_user_id=owner_user_id,
+        granted_by_user_id=owner_user_id,
+        invitees=((recipient_user_id, SharePermission.VIEW),),
+    )
+    orphaned_id = uuid.uuid4()
+    async with scoped(session_factory) as session:
+        await session.execute(
+            insert(resource_shares).values(
+                id=orphaned_id,
+                tenant_id=TENANT_ID,
+                recipient_user_id=recipient_user_id,
+                resource_type="knowledge_collection",
+                resource_id="kc_missing",
+                permission=SharePermission.EDIT.value,
+                granted_by_user_id=owner_user_id,
+                accepted_at=func.now(),
+            )
+        )
+
+    revoked = await identity.reconcile_workspace_shares(tenant_id=TENANT_ID)
+    assert revoked == 2
+    assert await identity.get_share(
+        tenant_id=TENANT_ID,
+        share_id=boundary_invalid.id,
+    ) is None
+    assert await identity.get_share(
+        tenant_id=TENANT_ID,
+        share_id=str(orphaned_id),
+    ) is None
+    async with scoped(session_factory) as session:
+        rows = (
+            await session.execute(
+                select(resource_shares.c.resource_id).where(
+                    resource_shares.c.id.in_(
+                        [uuid.UUID(boundary_invalid.id), orphaned_id]
+                    ),
+                    resource_shares.c.revoked_at.isnot(None),
                 )
-            ).all()
-        assert len(rows) == 1, f"round {round_index}: {len(rows)} active rows"
-        assert rows[0].accepted_at is not None, (
-            f"round {round_index}: accepted_at was silently reset to NULL "
-            "under a concurrent re-grant (access revoked)"
-        )
+            )
+        ).all()
+    assert {row.resource_id for row in rows} == {
+        "kc_no_common_workspace",
+        "kc_missing",
+    }

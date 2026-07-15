@@ -16,8 +16,10 @@ export type SortMode = 'recent' | 'name' | 'size' | 'pages'
 
 export type ViewMode = 'list' | 'grid'
 
-/** Active workspace selection: all documents, one collection, or one index. */
+/** Active workspace selection. Server collections are distinct from local
+ * file-library folders and local pre-build index setup records. */
 export type ActiveTarget =
   | { kind: 'all' }
   | { kind: 'collection'; sectionId: string }
   | { kind: 'index'; indexId: string }
+  | { kind: 'server-collection'; collectionId: string }

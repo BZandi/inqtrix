@@ -9,6 +9,7 @@ repositories.
 
 from __future__ import annotations
 
+import uuid
 from contextlib import AbstractAsyncContextManager
 
 from sqlalchemy import Row, delete, insert, select
@@ -23,7 +24,7 @@ def _record_from_row(row: Row) -> FileRecord:
     return FileRecord(
         id=row.id,
         tenant_id=row.tenant_id,
-        owner_sub=row.owner_sub,
+        owner_user_id=row.owner_user_id,
         workspace_id=row.workspace_id,
         file_name=row.file_name,
         content_type=row.content_type,
@@ -68,7 +69,7 @@ class PostgresFileRegistry:
                 insert(files).values(
                     id=record.id,
                     tenant_id=record.tenant_id,
-                    owner_sub=record.owner_sub,
+                    owner_user_id=record.owner_user_id,
                     workspace_id=record.workspace_id,
                     file_name=record.file_name,
                     content_type=record.content_type,
@@ -98,13 +99,13 @@ class PostgresFileRegistry:
         self,
         *,
         tenant_id: str,
-        owner_sub: str | None,
+        owner_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> list[FileRecord]:
         """Newest-first listing with tenant/owner/namespace facets."""
         statement = select(files).where(files.c.tenant_id == tenant_id)
-        if owner_sub is not None:
-            statement = statement.where(files.c.owner_sub == owner_sub)
+        if owner_user_id is not None:
+            statement = statement.where(files.c.owner_user_id == owner_user_id)
         if workspace_id is not None:
             statement = statement.where(files.c.workspace_id == workspace_id)
         statement = statement.order_by(files.c.created_at.desc())

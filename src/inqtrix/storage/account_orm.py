@@ -2,10 +2,10 @@
 
 The account tier of the project-persistence work — and the one piece that is
 NOT project data: a user's UI preferences (theme, locale, contrast, bubble tone)
-follow the USER, not the (user, workspace) project. So this is a singleton row per
-``(tenant_id, sub)``, keyed on the principal's subject directly (always
-non-null: ``__anonymous__`` / ``__static__`` / the OIDC or PAT subject), with
-no workspace dimension and no keyset list — there is exactly one row per user.
+follow the USER, not the (user, workspace) project. So this is a singleton row
+per ``(tenant_id, user_id)``, keyed on the canonical local user UUID. Unscoped
+anonymous/static deployments do not create account rows. There is no workspace
+dimension and no keyset list — there is exactly one row per scoped user.
 It is deliberately excluded from the project import/sync (which is
 per-(user, workspace)).
 
@@ -31,17 +31,16 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.dialects.postgresql import UUID
 
 account_metadata = MetaData()
 
 account_preferences = Table(
     "account_preferences",
     account_metadata,
-    # COMPOSITE primary key (tenant_id, sub): one preferences row per user.
-    # ``sub`` is the principal subject, never a URL/body value, so a caller can
-    # only ever address their own row — per-user isolation is structural.
+    # Composite primary key: one preferences row per canonical local user.
     Column("tenant_id", Text, primary_key=True, server_default=text("'default'")),
-    Column("sub", Text, primary_key=True),
+    Column("user_id", UUID(as_uuid=True), primary_key=True),
     Column("contrast_mode", Text, nullable=False, server_default=text("'standard'")),
     Column("locale", Text, nullable=False, server_default=text("'en'")),
     Column("theme", Text, nullable=False, server_default=text("'system'")),

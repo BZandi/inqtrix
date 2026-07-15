@@ -1,17 +1,16 @@
-"""WP-C-E: knowledge-collection ownership, sharing, and admission.
+"""Knowledge-collection ownership, direct sharing, and admission.
 
-The visibility matrix over the full oidc container with the memory
-knowledge store: owners see and manage their collections, strangers
-get byte-identical 404s, legacy collections (``created_by_sub None``)
-stay open to everyone, view grants admit reads but not writes, edit
-grants admit document writes but never collection deletion, deleting
-a collection revokes its shares, and the ask paths (chat + native
-runs) deny submissions naming an invisible collection.
+The visibility matrix uses canonical user UUIDs through the full OIDC
+container. Owners manage their collections, strangers receive indistinct
+404s, ownerless legacy rows remain available only to unscoped principals,
+accepted view/edit shares grant their documented capabilities, collection
+deletion revokes its shares, and ask paths deny invisible collections.
 """
 
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 import pytest
 from fastapi import FastAPI
@@ -19,9 +18,13 @@ from fastapi.testclient import TestClient
 
 from inqtrix.auth.directory import MemoryUserDirectory
 from inqtrix.auth.identity_memory import MemoryIdentityStore
-from inqtrix.auth.permissions import PermissionService
+from inqtrix.auth.permissions import AuthorizationService, SharePermission
 from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
-from inqtrix.knowledge.stores.ports import KnowledgeProviderContext
+from inqtrix.knowledge.stores.ports import (
+    CollectionNotFound,
+    DocumentNotFound,
+    KnowledgeProviderContext,
+)
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server.container import build_container
 from inqtrix.server.routers import chat, knowledge, runs, sources
@@ -30,26 +33,45 @@ from inqtrix.settings import ServerSettings, Settings, StorageSettings
 
 from tests.contract._app import StubSearch
 from tests.test_knowledge_routes import KnowledgeStubLLM, StubEmbeddings
-from tests.test_runs_sharing import OWNER, RECIPIENT, SUB_HEADER, OidcHeaderProvider
+from tests.test_runs_sharing import (
+    OWNER,
+    RECIPIENT,
+    OidcHeaderProvider,
+    user_headers,
+)
 
 
-def make_world() -> tuple[TestClient, MemoryKnowledgeStore]:
+class UnsafeCollectionSharingStore(MemoryKnowledgeStore):
+    """Vector-only deployment double without an atomic metadata boundary."""
+
+    @property
+    def supports_collection_sharing(self) -> bool:
+        return False
+
+
+def make_world(
+    store: MemoryKnowledgeStore | None = None,
+) -> tuple[TestClient, MemoryKnowledgeStore]:
     identity = MemoryIdentityStore()
     users = MemoryUserDirectory()
 
     async def mirror() -> None:
-        for sub, name in ((OWNER, "Olga Owner"), (RECIPIENT, "Rita Recipient")):
+        for user_id, subject, name in (
+            (OWNER, "user-owner", "Olga Owner"),
+            (RECIPIENT, "user-recipient", "Rita Recipient"),
+        ):
             await users.record_login(
                 tenant_id="default",
                 issuer="http://idp.example",
-                subject=sub,
-                email=f"{sub}@example.com",
+                subject=subject,
+                email=f"{subject}@example.com",
                 email_verified=True,
                 display_name=name,
+                canonical_user_id=user_id,
             )
 
     asyncio.run(mirror())
-    store = MemoryKnowledgeStore()
+    store = store or MemoryKnowledgeStore()
     container = build_container(
         providers=ProviderContext(llm=KnowledgeStubLLM(), search=StubSearch()),
         strategies=None,
@@ -59,8 +81,10 @@ def make_world() -> tuple[TestClient, MemoryKnowledgeStore]:
         ),
         semaphore_factory=lambda: asyncio.Semaphore(1),
         auth_provider=OidcHeaderProvider(users),
-        permissions=PermissionService(
-            members=identity, groups=identity, shares=identity, audit=identity
+        permissions=AuthorizationService(
+            members=identity,
+            shares=identity,
+            audit=identity,
         ),
         workspace_admin=identity,
         knowledge=KnowledgeProviderContext(
@@ -70,7 +94,10 @@ def make_world() -> tuple[TestClient, MemoryKnowledgeStore]:
         ),
     )
     assert container.share_service is not None
-    assert "knowledge_collection" in container.share_service.resource_types
+    if store.supports_collection_sharing:
+        assert "knowledge_collection" in container.share_service.resource_types
+    else:
+        assert "knowledge_collection" not in container.share_service.resource_types
     app = FastAPI()
     app.include_router(knowledge.build_router(container))
     app.include_router(sources.build_router(container))
@@ -85,11 +112,17 @@ def world():
     return make_world()
 
 
-def as_user(sub: str) -> dict[str, str]:
-    return {SUB_HEADER: sub}
+def as_user(user_id: uuid.UUID) -> dict[str, str]:
+    """Return the canonical identity header for one scoped request."""
+    return user_headers(user_id)
 
 
-def create_collection(client: TestClient, *, sub: str, name: str = "Meine Sammlung") -> str:
+def create_collection(
+    client: TestClient,
+    *,
+    sub: uuid.UUID,
+    name: str = "Meine Sammlung",
+) -> str:
     response = client.post(
         "/v1/knowledge/collections", json={"name": name}, headers=as_user(sub)
     )
@@ -97,7 +130,12 @@ def create_collection(client: TestClient, *, sub: str, name: str = "Meine Sammlu
     return response.json()["id"]
 
 
-def add_document(client: TestClient, collection_id: str, *, sub: str):
+def add_document(
+    client: TestClient,
+    collection_id: str,
+    *,
+    sub: uuid.UUID,
+):
     return client.post(
         f"/v1/knowledge/collections/{collection_id}/documents",
         json={"title": "Notiz", "text": "Die Frist betraegt 24 Stunden."},
@@ -111,21 +149,30 @@ def grant(client: TestClient, collection_id: str, *, permission: str = "view"):
         json={
             "resource_type": "knowledge_collection",
             "resource_id": collection_id,
-            "invitees": [{"subject_id": RECIPIENT, "permission": permission}],
+            "invitees": [
+                {"user_id": str(RECIPIENT), "permission": permission}
+            ],
         },
         headers=as_user(OWNER),
     )
-    # These tests assert post-acceptance access, so the recipient consents
-    # here. A re-grant carries consent forward (already-accepted -> 404), so
-    # both outcomes are valid; the pending/consent flow itself is pinned in
-    # tests/test_runs_sharing.py and tests/test_shares.py.
-    if response.status_code == 201:
-        share_id = response.json()["data"][0]["id"]
-        accepted = client.post(
-            f"/v1/shares/{share_id}/accept", headers=as_user(RECIPIENT)
-        )
-        assert accepted.status_code in (200, 404)
+    if response.status_code != 201:
+        return response
+    share_id = response.json()["data"][0]["id"]
+    accepted = client.post(
+        f"/v1/shares/{share_id}/accept", headers=as_user(RECIPIENT)
+    )
+    assert accepted.status_code == 200
     return response
+
+
+def test_vector_only_collection_sharing_returns_501() -> None:
+    client, _store = make_world(UnsafeCollectionSharingStore())
+    collection_id = create_collection(client, sub=OWNER)
+
+    response = grant(client, collection_id)
+
+    assert response.status_code == 501
+    assert response.json()["error"]["type"] == "unsupported"
 
 
 def test_owner_sees_collection_stranger_does_not(world):
@@ -137,7 +184,7 @@ def test_owner_sees_collection_stranger_does_not(world):
         "/v1/knowledge/collections", headers=as_user(OWNER)
     ).json()["data"]
     assert [item["id"] for item in owner_listed] == [collection_id]
-    assert "access" not in owner_listed[0]
+    assert owner_listed[0]["access"] == {"mode": "owner"}
 
     stranger_listed = client.get(
         "/v1/knowledge/collections", headers=as_user(RECIPIENT)
@@ -223,7 +270,9 @@ def test_source_view_admits_accepted_share_not_pending(world):
         json={
             "resource_type": "knowledge_collection",
             "resource_id": collection_id,
-            "invitees": [{"subject_id": RECIPIENT, "permission": "view"}],
+            "invitees": [
+                {"user_id": str(RECIPIENT), "permission": "view"}
+            ],
         },
         headers=as_user(OWNER),
     )
@@ -247,23 +296,29 @@ def test_source_view_admits_accepted_share_not_pending(world):
     assert "Frist" in admitted.json()["text"]
 
 
-def test_legacy_collections_stay_open_to_everyone(world):
+def test_ownerless_collections_are_unscoped_only(world):
     client, store = world
     legacy = asyncio.run(
         store.create_collection(
             name="Bestand", embedding_model="stub-embed-8", embedding_dim=8
         )
     )
-    assert legacy.created_by_sub is None
+    assert legacy.created_by_user_id is None
 
-    for sub in (OWNER, RECIPIENT):
+    for user_id in (OWNER, RECIPIENT):
         listed = client.get(
-            "/v1/knowledge/collections", headers=as_user(sub)
+            "/v1/knowledge/collections", headers=as_user(user_id)
         ).json()["data"]
-        assert [item["id"] for item in listed] == [legacy.id]
-        assert "access" not in listed[0]
-    # Legacy means full access: writes included.
-    assert add_document(client, legacy.id, sub=RECIPIENT).status_code == 201
+        assert listed == []
+        assert add_document(client, legacy.id, sub=user_id).status_code == 404
+
+    unscoped = client.get("/v1/knowledge/collections").json()["data"]
+    assert [item["id"] for item in unscoped] == [legacy.id]
+    assert unscoped[0]["access"] == {"mode": "unscoped"}
+    assert client.post(
+        f"/v1/knowledge/collections/{legacy.id}/documents",
+        json={"title": "Notiz", "text": "Unscoped legacy write."},
+    ).status_code == 201
 
 
 def test_view_grant_admits_reads_not_writes(world):
@@ -276,7 +331,7 @@ def test_view_grant_admits_reads_not_writes(world):
         "/v1/knowledge/collections", headers=as_user(RECIPIENT)
     ).json()["data"]
     assert [item["id"] for item in listed] == [collection_id]
-    assert listed[0]["access"] == {"via": "share", "permission": "view"}
+    assert listed[0]["access"] == {"mode": "shared", "permission": "view"}
 
     docs = client.get(
         f"/v1/knowledge/collections/{collection_id}/documents",
@@ -328,27 +383,110 @@ def test_edit_grant_admits_document_writes_not_deletion(world):
     )
 
 
-def test_search_filters_to_visible_collections(world):
-    client, store = world
-    owned = create_collection(client, sub=OWNER)
-    add_document(client, owned, sub=OWNER)
-    legacy = asyncio.run(
+def test_memory_store_revocation_fences_all_collection_writes() -> None:
+    """A stale service check cannot write after the direct share is revoked."""
+    identity = MemoryIdentityStore()
+    store = MemoryKnowledgeStore()
+    store.bind_authorization(
+        resource_access_guard=identity.resource_access_guard_sync
+    )
+    collection = asyncio.run(
         store.create_collection(
-            name="Bestand", embedding_model="stub-embed-8", embedding_dim=8
+            name="Shared",
+            embedding_model="stub-embed-8",
+            embedding_dim=8,
+            created_by_user_id=OWNER,
         )
     )
+    document = asyncio.run(
+        store.add_document(
+            collection_id=collection.id,
+            title="Original",
+            text="Original text",
+            metadata={},
+            chunks=["Original text"],
+            embeddings=[[0.0] * 8],
+            actor_user_id=OWNER,
+        )
+    )
+    identity.add_share(
+        recipient_user_id=RECIPIENT,
+        resource_type="knowledge_collection",
+        resource_id=collection.id,
+        permission=SharePermission.EDIT,
+        granted_by_user_id=OWNER,
+    )
+    assert identity.permission_for_sync(
+        tenant_id="default",
+        resource_type="knowledge_collection",
+        resource_id=collection.id,
+        recipient_user_id=RECIPIENT,
+    ) is SharePermission.EDIT
 
-    # Explicitly asking for owned + legacy: the invisible owned id is
-    # filtered, legacy results come back.
+    identity.revoke_share(
+        recipient_user_id=RECIPIENT,
+        resource_type="knowledge_collection",
+        resource_id=collection.id,
+    )
+
+    with pytest.raises(CollectionNotFound):
+        asyncio.run(
+            store.add_document(
+                collection_id=collection.id,
+                title="Too late",
+                text="Stale write",
+                metadata={},
+                chunks=["Stale write"],
+                embeddings=[[0.0] * 8],
+                actor_user_id=RECIPIENT,
+            )
+        )
+    with pytest.raises(DocumentNotFound):
+        asyncio.run(
+            store.reembed_document(
+                document_id=document.id,
+                chunks=["Changed"],
+                embeddings=[[1.0] * 8],
+                actor_user_id=RECIPIENT,
+            )
+        )
+    with pytest.raises(DocumentNotFound):
+        asyncio.run(
+            store.delete_document(
+                document.id,
+                actor_user_id=RECIPIENT,
+            )
+        )
+
+    remaining = asyncio.run(store.list_documents(collection.id))
+    assert [item.id for item in remaining] == [document.id]
+    assert remaining[0].text == "Original text"
+
+
+def test_search_filters_to_visible_collections(world):
+    client, _store = world
+    owned = create_collection(client, sub=OWNER)
+    add_document(client, owned, sub=OWNER)
+    recipient_owned = create_collection(
+        client, sub=RECIPIENT, name="Eigene Sammlung"
+    )
+    add_document(client, recipient_owned, sub=RECIPIENT)
+
+    # Explicitly asking for owned + inaccessible: the invisible owner id is
+    # filtered and the recipient's own results come back.
     mixed = client.post(
         "/v1/knowledge/search",
-        json={"query": "Frist", "collection_ids": [owned, legacy.id]},
+        json={
+            "query": "Frist",
+            "collection_ids": [owned, recipient_owned],
+        },
         headers=as_user(RECIPIENT),
     )
     assert mixed.status_code == 200
     mixed_body = mixed.json()
     assert all(
-        hit["collection_id"] == legacy.id for hit in mixed_body["data"]
+        hit["collection_id"] == recipient_owned
+        for hit in mixed_body["data"]
     )
     # The silent filter is no longer silent: the dropped id surfaces as
     # a warning so an agent planning against the results sees it (E5).
@@ -367,15 +505,16 @@ def test_search_filters_to_visible_collections(world):
     )
     assert denied.status_code == 404
 
-    # An unscoped search ranges over the visible set only.
-    unscoped = client.post(
+    # A scoped search without ids ranges over the current visible set only.
+    visible = client.post(
         "/v1/knowledge/search",
         json={"query": "Frist"},
         headers=as_user(RECIPIENT),
     )
-    assert unscoped.status_code == 200
+    assert visible.status_code == 200
     assert all(
-        hit["collection_id"] == legacy.id for hit in unscoped.json()["data"]
+        hit["collection_id"] == recipient_owned
+        for hit in visible.json()["data"]
     )
 
 
@@ -384,22 +523,22 @@ def test_collection_deletion_revokes_its_shares(world):
     collection_id = create_collection(client, sub=OWNER)
     assert grant(client, collection_id).status_code == 201
     before = client.get(
-        "/v1/shares/shared-with-me",
-        params={"resource_type": "knowledge_collection"},
+        "/v1/shares/inbox",
         headers=as_user(RECIPIENT),
     ).json()["data"]
-    assert [item["resource_id"] for item in before] == [collection_id]
+    assert [item["resource_id"] for item in before["accepted"]] == [
+        collection_id
+    ]
 
     deleted = client.delete(
         f"/v1/knowledge/collections/{collection_id}", headers=as_user(OWNER)
     )
     assert deleted.status_code == 204
     after = client.get(
-        "/v1/shares/shared-with-me",
-        params={"resource_type": "knowledge_collection"},
+        "/v1/shares/inbox",
         headers=as_user(RECIPIENT),
     ).json()["data"]
-    assert after == []
+    assert after == {"pending": [], "accepted": []}
 
 
 def test_run_submission_denies_invisible_collections(world):
@@ -455,6 +594,5 @@ def test_legacy_collections_are_not_shareable(world):
             name="Bestand", embedding_model="stub-embed-8", embedding_dim=8
         )
     )
-    # No owner means no grant authority — and none is needed, the
-    # collection is visible to everyone already.
+    # No owner means no scoped grant authority.
     assert grant(client, legacy.id).status_code == 404

@@ -14,8 +14,11 @@ directly.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
+
+from inqtrix.project.scoped_upsert import ResourceScope
 
 
 class ThreadNotFound(KeyError):
@@ -36,7 +39,7 @@ class ChatThreadGroup:
         created_at: Unix timestamp of creation.
         updated_at: Unix timestamp of the last metadata change.
         tenant_id: Tenant scope (v1 runs one tenant per deployment).
-        created_by_sub: Ownership anchor. ``None`` = unscoped/anonymous
+        created_by_user_id: Ownership anchor. ``None`` = unscoped/anonymous
             deployments (the single implicit owner) — the established
             compatibility rule.
         workspace_id: Workspace the group's project lives in (``None``
@@ -48,7 +51,7 @@ class ChatThreadGroup:
     created_at: float
     updated_at: float
     tenant_id: str = "default"
-    created_by_sub: str | None = None
+    created_by_user_id: uuid.UUID | None = None
     workspace_id: str | None = None
 
 
@@ -68,7 +71,7 @@ class ChatThread:
         updated_at: Unix timestamp of the last activity (display sort on
             the client; never the keyset key because it mutates).
         tenant_id: Tenant scope.
-        created_by_sub: Ownership anchor (see :class:`ChatThreadGroup`).
+        created_by_user_id: Ownership anchor (see :class:`ChatThreadGroup`).
         workspace_id: Workspace the thread's project lives in.
     """
 
@@ -80,7 +83,7 @@ class ChatThread:
     created_at: float
     updated_at: float
     tenant_id: str = "default"
-    created_by_sub: str | None = None
+    created_by_user_id: uuid.UUID | None = None
     workspace_id: str | None = None
 
 
@@ -113,7 +116,7 @@ class ChatStore(Protocol):
     """Persistence port for chat threads, their groups, and messages.
 
     Scoping note: ``list_threads_page`` / ``list_groups`` take the
-    resolved ``created_by_sub`` and ``workspace_id`` and filter in the
+    resolved ``created_by_user_id`` and ``workspace_id`` and filter in the
     query so the DB ``LIMIT`` is never under-filled (the keyset-page
     correctness rule). ``get_thread`` returns the row unscoped — the
     service applies the owner/share access check on top (the
@@ -130,7 +133,7 @@ class ChatStore(Protocol):
         group_id: str | None,
         created_at: float,
         updated_at: float,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> ChatThread:
         """Create or idempotently update a thread by id (autosave upsert).
@@ -144,14 +147,14 @@ class ChatStore(Protocol):
     async def list_threads_page(
         self,
         *,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
         limit: int,
         after: tuple[float, str] | None,
     ) -> tuple[list[ChatThread], str | None]:
         """One keyset page of the caller's threads (newest first).
 
-        ``created_by_sub`` ``None`` (unscoped caller) lists every thread
+        ``created_by_user_id`` ``None`` (unscoped caller) lists every thread
         in the tenant; a set value scopes to that owner. ``workspace_id``
         further partitions to one project when provided. Ordering is
         ``(created_at, id)`` descending; returns the page and the
@@ -162,21 +165,38 @@ class ChatStore(Protocol):
         """One thread (unscoped fetch) or :class:`ThreadNotFound`."""
         ...
 
-    async def delete_thread(self, thread_id: str) -> None:
+    async def delete_thread(
+        self, thread_id: str, *, scope: ResourceScope
+    ) -> None:
         """Delete a thread and its messages (cascade)."""
         ...
 
     async def append_messages(
-        self, messages: list[ChatMessage]
+        self,
+        messages: list[ChatMessage],
+        *,
+        expected_created_by_user_id: uuid.UUID | None,
+        expected_workspace_id: str | None,
     ) -> list[ChatMessage]:
         """Idempotently upsert messages by id (append/regenerate-safe).
 
         An existing message id overwrites only role/content/metadata,
         never ``created_at`` (the conversation order stays stable).
-        Returns the stored messages."""
+        The expected parent scope is revalidated and locked in the same
+        transaction as the child write, preventing a deleted thread id from
+        being recreated under another owner between service authorization and
+        persistence. Returns the stored messages.
+        """
         ...
 
-    async def delete_message(self, thread_id: str, message_id: str) -> None:
+    async def delete_message(
+        self,
+        thread_id: str,
+        message_id: str,
+        *,
+        expected_created_by_user_id: uuid.UUID | None,
+        expected_workspace_id: str | None,
+    ) -> None:
         """Delete one message from a thread (idempotent).
 
         Scoped on the composite ``(thread_id, id)`` so a re-used id in
@@ -184,6 +204,8 @@ class ChatStore(Protocol):
         the autosave diff may re-issue a delete after a coalesced burst or
         a multi-device race, and a missing-row error would wedge the
         retry loop (the same idempotency rule the upsert append honours).
+        The parent thread scope is locked and checked transactionally before
+        the delete.
         """
         ...
 
@@ -209,7 +231,7 @@ class ChatStore(Protocol):
         title: str,
         created_at: float,
         updated_at: float,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> ChatThreadGroup:
         """Create or idempotently update a thread group by id."""
@@ -218,14 +240,16 @@ class ChatStore(Protocol):
     async def list_groups(
         self,
         *,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> list[ChatThreadGroup]:
         """All of the caller's thread groups, newest first (groups are
         few — no keyset page)."""
         ...
 
-    async def delete_group(self, group_id: str) -> None:
+    async def delete_group(
+        self, group_id: str, *, scope: ResourceScope
+    ) -> None:
         """Delete a group; its threads orphan to ungrouped (SET NULL)."""
         ...
 

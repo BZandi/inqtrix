@@ -23,6 +23,7 @@ from __future__ import annotations
 import secrets
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -37,9 +38,11 @@ class AuthSession:
 
     Attributes:
         id: Opaque random identifier; the only value the cookie holds.
-        sub: IdP subject — the identity anchor together with *issuer*.
-        issuer: Issuer the subject belongs to (subjects are only
-            unique per issuer).
+        user_id: Canonical local ``users.id`` UUID and the only
+            authorization identity carried by the session.
+        issuer: Issuer of the external login binding.
+        subject: External provider subject retained only for profile refresh
+            and diagnostics; it is never an authorization key.
         email: Email claim at login time (profile data, not identity).
         display_name: Resolved display username.
         groups: Group claims at login time.
@@ -51,8 +54,9 @@ class AuthSession:
     """
 
     id: str
-    sub: str
+    user_id: uuid.UUID
     issuer: str
+    subject: str
     email: str | None
     display_name: str | None
     groups: tuple[str, ...]
@@ -95,7 +99,7 @@ class SessionStore(Protocol):
         """Remove a session; missing ids are a no-op (idempotent logout)."""
         ...
 
-    async def delete_for_owner(self, *, issuer: str, sub: str) -> int:
+    async def delete_for_user(self, *, user_id: uuid.UUID) -> int:
         """Purge every session of one identity (the disable/cut-off path).
 
         Returns the number of sessions removed. Used when an admin
@@ -128,7 +132,7 @@ class MemorySessionStore:
 
     def __init__(self) -> None:
         self._sessions: dict[str, AuthSession] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     async def create(self, session: AuthSession) -> None:
         with self._lock:
@@ -149,12 +153,12 @@ class MemorySessionStore:
         with self._lock:
             self._sessions.pop(session_id, None)
 
-    async def delete_for_owner(self, *, issuer: str, sub: str) -> int:
+    async def delete_for_user(self, *, user_id: uuid.UUID) -> int:
         with self._lock:
             doomed = [
                 session_id
                 for session_id, session in self._sessions.items()
-                if session.sub == sub and session.issuer == issuer
+                if session.user_id == user_id
             ]
             for session_id in doomed:
                 del self._sessions[session_id]

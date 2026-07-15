@@ -32,7 +32,7 @@ import {
   cellFraction,
   filterAdminSubjects,
   parseStorageGb,
-  QUOTA_DEFAULT_SUBJECT,
+  QUOTA_DEFAULT_USER_ID,
   quotaPeriodReset,
   quotaPeriodStart,
   sortAdminSubjects,
@@ -236,12 +236,12 @@ export function QuotaAdminPanel({
                     demo={state.demo}
                     dimLabel={dimLabel}
                     dims={dims}
-                    expanded={expanded === subject.sub}
+                    expanded={expanded === subject.user_id}
                     gridStyle={gridStyle}
-                    key={subject.sub}
+                    key={subject.user_id}
                     onToggle={() =>
                       setExpanded((current) =>
-                        current === subject.sub ? null : subject.sub,
+                        current === subject.user_id ? null : subject.user_id,
                       )
                     }
                     snapshot={snapshot}
@@ -372,9 +372,9 @@ function DefaultLimitRow({
               compact
               disabled={demo}
               format={limitFieldFormatters[dim]}
-              onClear={() => void admin.clearLimit(QUOTA_DEFAULT_SUBJECT, dim)}
+              onClear={() => void admin.clearLimit(QUOTA_DEFAULT_USER_ID, dim)}
               onCommit={(value) =>
-                void admin.setLimit(QUOTA_DEFAULT_SUBJECT, dim, value)
+                void admin.setLimit(QUOTA_DEFAULT_USER_ID, dim, value)
               }
               parse={storage ? storageDraftAction : limitDraftAction}
               placeholder={
@@ -456,7 +456,7 @@ function MemberRow({
           />
           <div className="min-w-0">
             <span className="block truncate t-list text-foreground">
-              {personLabel(subject.display_name, subject.email, subject.sub)}
+              {personLabel(subject.display_name, subject.email, subject.user_id)}
             </span>
             {subject.email ? (
               <p className="truncate t-meta-sm text-muted-foreground">
@@ -506,8 +506,8 @@ function MemberRow({
           envDefaults={snapshot.env_defaults}
           flowDims={flowDims}
           onClose={onToggle}
-          onResetUsage={() => void admin.resetUsage(subject.sub, flowDims)}
-          onSave={(changes) => void admin.applyOverrides(subject.sub, changes)}
+          onResetUsage={() => void admin.resetUsage(subject.user_id, flowDims)}
+          onSave={(changes) => void admin.applyOverrides(subject.user_id, changes)}
           subject={subject}
           tenantDefault={snapshot.tenant_default}
         />
@@ -678,7 +678,7 @@ function InlineEditor({
       <div className="flex items-center justify-between gap-2">
         <p className="t-label text-foreground">
           {t.quotaAdmin.editTitle(
-            personLabel(subject.display_name, subject.email, subject.sub),
+            personLabel(subject.display_name, subject.email, subject.user_id),
           )}
         </p>
         {!demo && flowDims.length > 0 ? (
@@ -704,7 +704,7 @@ function InlineEditor({
             <div className="grid gap-1" key={dim}>
               <label
                 className="t-meta-sm text-muted-foreground"
-                htmlFor={`limit-${subject.sub}-${dim}`}
+                htmlFor={`limit-${subject.user_id}-${dim}`}
               >
                 {dimLabel[dim]}
                 {storage ? ` ${t.quotaAdmin.storageUnit}` : ''}
@@ -712,7 +712,7 @@ function InlineEditor({
               <input
                 className="h-8 w-full rounded-md border border-border bg-background px-2.5 text-sm tabular-nums text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
                 disabled={demo}
-                id={`limit-${subject.sub}-${dim}`}
+                id={`limit-${subject.user_id}-${dim}`}
                 inputMode="numeric"
                 onChange={(event) =>
                   setDrafts((current) => ({
@@ -896,7 +896,7 @@ function AddOverride({
 }: {
   dimLabel: Record<string, string>
   dims: QuotaDimensionKey[]
-  onPick: (subjectId: string, dimension: string, value: number) => void
+  onPick: (userId: string, dimension: string, value: number) => void
 }) {
   const { t } = useLocale()
   const [query, setQuery] = useState('')
@@ -931,7 +931,7 @@ function AddOverride({
     return (
       <div className="flex flex-wrap items-center gap-2">
         <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-subtle px-2 py-0.5 t-meta-sm text-brand">
-          {personLabel(picked.display_name, picked.email, picked.subject)}
+          {personLabel(picked.display_name, picked.email, picked.id)}
           <button
             aria-label={t.quotaAdmin.removePerson}
             onClick={() => setPicked(null)}
@@ -981,7 +981,7 @@ function AddOverride({
           disabled={parsedValue == null}
           onClick={() => {
             if (parsedValue == null) return
-            onPick(picked.subject, dimension, parsedValue)
+            onPick(picked.id, dimension, parsedValue)
             setPicked(null)
             setValue('')
             setQuery('')
@@ -1012,7 +1012,7 @@ function AddOverride({
       {results.length > 0 ? (
         <ul className="mt-1.5 max-h-44 overflow-y-auto rounded-md border border-border">
           {results.map((user) => (
-            <li key={user.subject}>
+            <li key={user.id}>
               <button
                 className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-accent"
                 onMouseDown={(event) => {
@@ -1028,7 +1028,7 @@ function AddOverride({
                   size="sm"
                 />
                 <span className="min-w-0 flex-1 truncate t-list text-foreground">
-                  {personLabel(user.display_name, user.email, user.subject)}
+                  {personLabel(user.display_name, user.email, user.id)}
                 </span>
               </button>
             </li>

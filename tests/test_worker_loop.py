@@ -25,7 +25,12 @@ from inqtrix.runs.postgres_store import ClaimedRun
 from inqtrix.runs.valkey_queue import QueuedJob
 from inqtrix.server.container import build_container
 from inqtrix.settings import Settings
-from inqtrix.worker.loop import FencedRunHandle, WorkerLoop
+from inqtrix.worker.loop import (
+    FencedRunHandle,
+    WorkerClaimGuardError,
+    WorkerLoop,
+)
+from inqtrix.worker.__main__ import _DatabaseClaimGuard
 
 from tests.contract._app import StubLLM, StubSearch, minimal_agent_result
 
@@ -107,7 +112,7 @@ class StubQueue:
         self.calls.append(("heartbeat", tuple(message_ids)))
 
 
-def make_loop(store, queue, monkeypatch) -> WorkerLoop:
+def make_loop(store, queue, monkeypatch, *, claim_guard=None) -> WorkerLoop:
     def fake_graph(question, **kwargs):
         return minimal_agent_result()
 
@@ -130,7 +135,268 @@ def make_loop(store, queue, monkeypatch) -> WorkerLoop:
         max_attempts=3,
         heartbeat_seconds=15,
         claim_idle_seconds=90,
+        claim_guard=claim_guard,
     )
+
+
+def test_claim_guard_fails_before_pending_or_new_queue_claims(monkeypatch):
+    store = StubStore(claim_result=None)
+
+    class GuardedQueue(StubQueue):
+        def ensure_group(self):
+            self.calls.append(("ensure_group",))
+
+        def claim_pending(self):
+            raise AssertionError("pending claims must remain closed")
+
+    queue = GuardedQueue()
+
+    def reject_claims() -> None:
+        raise WorkerClaimGuardError("database schema changed")
+
+    loop = make_loop(store, queue, monkeypatch, claim_guard=reject_claims)
+
+    with pytest.raises(WorkerClaimGuardError, match="schema changed"):
+        loop.run_forever()
+
+    assert queue.calls == [("ensure_group",)]
+    assert store.calls == []
+
+
+def test_database_claim_guard_coalesces_and_latches_failures(monkeypatch):
+    calls: list[str] = []
+
+    async def fail_contract(database_url, *, app_role, login_policy):
+        calls.append(database_url)
+        raise RuntimeError("unsafe database role")
+
+    monkeypatch.setattr(
+        "inqtrix.storage.runtime_contract.verify_database_url_runtime_contract",
+        fail_contract,
+    )
+    guard = _DatabaseClaimGuard(
+        database_url="postgresql+asyncpg://runtime.invalid/inqtrix",
+        app_role="inqtrix_app",
+        login_policy="restricted",
+        interval_seconds=60,
+    )
+
+    with pytest.raises(WorkerClaimGuardError, match="unsafe database role"):
+        guard()
+    with pytest.raises(WorkerClaimGuardError, match="unsafe database role"):
+        guard()
+
+    assert calls == ["postgresql+asyncpg://runtime.invalid/inqtrix"]
+
+
+def test_database_claim_guard_immediate_probe_bypasses_success_cache(
+    monkeypatch,
+):
+    calls: list[str] = []
+
+    async def pass_contract(database_url, *, app_role, login_policy):
+        del app_role, login_policy
+        calls.append(database_url)
+
+    monkeypatch.setattr(
+        "inqtrix.storage.runtime_contract.verify_database_url_runtime_contract",
+        pass_contract,
+    )
+    guard = _DatabaseClaimGuard(
+        database_url="postgresql+asyncpg://runtime.invalid/inqtrix",
+        app_role="inqtrix_app",
+        login_policy="restricted",
+        interval_seconds=60,
+    )
+
+    guard()
+    guard()
+    guard.verify_now()
+
+    assert calls == [
+        "postgresql+asyncpg://runtime.invalid/inqtrix",
+        "postgresql+asyncpg://runtime.invalid/inqtrix",
+    ]
+
+
+def test_queue_claim_is_rechecked_after_blocking_read(monkeypatch):
+    store = StubStore(claim_result=claimed())
+
+    class GuardedQueue(StubQueue):
+        def claim_new(self, *, block_ms):
+            assert block_ms > 0
+            return [job()]
+
+    class Guard:
+        def __init__(self) -> None:
+            self.periodic_calls = 0
+            self.immediate_calls = 0
+
+        def __call__(self) -> None:
+            self.periodic_calls += 1
+
+        def verify_now(self) -> None:
+            self.immediate_calls += 1
+            raise WorkerClaimGuardError("schema changed while queue blocked")
+
+    guard = Guard()
+    loop = make_loop(store, GuardedQueue(), monkeypatch, claim_guard=guard)
+    loop._last_reclaim = float("inf")
+    loop._last_reconcile = float("inf")
+
+    with pytest.raises(WorkerClaimGuardError, match="while queue blocked"):
+        loop._tick()
+
+    assert guard.periodic_calls == 1
+    assert guard.immediate_calls == 1
+    assert store.calls == []
+
+
+def test_stop_during_contract_probe_never_mutates_or_claims(monkeypatch):
+    store = StubStore(claim_result=claimed())
+    queue = StubQueue()
+
+    class Guard:
+        loop: WorkerLoop | None = None
+
+        def __call__(self) -> None:
+            return None
+
+        def verify_now(self) -> None:
+            assert self.loop is not None
+            self.loop.request_stop()
+
+    guard = Guard()
+    loop = make_loop(store, queue, monkeypatch, claim_guard=guard)
+    guard.loop = loop
+
+    loop._start(job(delivery_count=99), takeover=False)
+
+    assert store.calls == []
+    assert queue.calls == []
+
+
+def test_blocking_queue_return_after_stop_never_claims(monkeypatch):
+    store = StubStore(claim_result=claimed())
+
+    class StoppingQueue(StubQueue):
+        loop: WorkerLoop | None = None
+
+        def claim_new(self, *, block_ms):
+            assert block_ms > 0
+            assert self.loop is not None
+            self.loop.request_stop()
+            return [job()]
+
+    queue = StoppingQueue()
+    loop = make_loop(store, queue, monkeypatch)
+    queue.loop = loop
+    loop._last_reclaim = float("inf")
+    loop._last_reconcile = float("inf")
+
+    loop._tick()
+
+    assert store.calls == []
+    assert queue.calls == []
+
+
+def test_held_successor_rechecks_contract_before_database_claim(monkeypatch):
+    store = StubStore(claim_result=claimed())
+    queue = StubQueue()
+
+    class Guard:
+        def __call__(self) -> None:
+            return None
+
+        def verify_now(self) -> None:
+            raise WorkerClaimGuardError("worker revision is stale")
+
+    loop = make_loop(store, queue, monkeypatch, claim_guard=Guard())
+    from inqtrix.worker.loop import _ActiveJob
+
+    old = job()
+    successor = successor_job()
+    with loop._lock:
+        loop._active[old.run_id] = _ActiveJob(
+            job=old,
+            cancel_event=threading.Event(),
+            successor=successor,
+        )
+
+    loop._finish_active(old, allow_successor=True)
+
+    assert "claim" not in store.names()
+    assert queue.calls == []
+    with loop._lock:
+        assert old.run_id not in loop._active
+
+
+def test_held_successor_is_left_for_redelivery_during_shutdown(monkeypatch):
+    store = StubStore(claim_result=claimed())
+    queue = StubQueue()
+    loop = make_loop(store, queue, monkeypatch)
+    from inqtrix.worker.loop import _ActiveJob
+
+    old = job()
+    successor = successor_job()
+    with loop._lock:
+        loop._active[old.run_id] = _ActiveJob(
+            job=old,
+            cancel_event=threading.Event(),
+            successor=successor,
+        )
+    loop.request_stop()
+
+    loop._finish_active(old, allow_successor=True)
+
+    assert "claim" not in store.names()
+    assert queue.calls == []
+    with loop._lock:
+        assert old.run_id not in loop._active
+
+
+def test_stop_during_successor_contract_probe_never_mutates_or_claims(
+    monkeypatch,
+) -> None:
+    store = StubStore(claim_result=claimed())
+    queue = StubQueue()
+
+    class Guard:
+        loop: WorkerLoop | None = None
+
+        def __call__(self) -> None:
+            return None
+
+        def verify_now(self) -> None:
+            assert self.loop is not None
+            self.loop.request_stop()
+
+    guard = Guard()
+    loop = make_loop(store, queue, monkeypatch, claim_guard=guard)
+    guard.loop = loop
+    from inqtrix.worker.loop import _ActiveJob
+
+    old = job()
+    successor = successor_job()
+    successor = QueuedJob(
+        message_id=successor.message_id,
+        run_id=successor.run_id,
+        tenant_id=successor.tenant_id,
+        delivery_count=99,
+    )
+    with loop._lock:
+        loop._active[old.run_id] = _ActiveJob(
+            job=old,
+            cancel_event=threading.Event(),
+            successor=successor,
+        )
+
+    loop._finish_active(old, allow_successor=True)
+
+    assert store.calls == []
+    assert queue.calls == []
+    with loop._lock:
+        assert old.run_id not in loop._active
 
 
 def job(delivery_count: int = 1) -> QueuedJob:

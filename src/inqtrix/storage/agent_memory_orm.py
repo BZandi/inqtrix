@@ -13,6 +13,7 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.dialects.postgresql import UUID
 
 from inqtrix.agents.memory_ports import (
     MEMORY_CANDIDATE_STATUSES,
@@ -32,7 +33,7 @@ agent_memory_candidates = Table(
     "agent_memory_candidates",
     agent_memory_metadata,
     Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
-    Column("sub", Text, nullable=False),
+    Column("user_id", UUID(as_uuid=True), nullable=False),
     Column("candidate_id", Text, nullable=False),
     Column("scope", Text, nullable=False),
     Column("category", Text, nullable=False),
@@ -45,7 +46,7 @@ agent_memory_candidates = Table(
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
     PrimaryKeyConstraint(
-        "tenant_id", "sub", "candidate_id", name="pk_agent_memory_candidates"
+        "tenant_id", "user_id", "candidate_id", name="pk_agent_memory_candidates"
     ),
     CheckConstraint(
         f"scope IN ({_values(MEMORY_SCOPES)})",
@@ -62,7 +63,7 @@ agent_memory_candidates = Table(
     Index(
         "ix_agent_memory_candidates_owner_status",
         "tenant_id",
-        "sub",
+        "user_id",
         "status",
         "created_at",
     ),
@@ -74,7 +75,7 @@ agent_feedback = Table(
     "agent_feedback",
     agent_memory_metadata,
     Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
-    Column("sub", Text, nullable=False),
+    Column("user_id", UUID(as_uuid=True), nullable=False),
     Column("feedback_id", Text, nullable=False),
     Column("run_id", Text, nullable=False),
     Column("memory_id", Text, nullable=False, server_default=text("''")),
@@ -82,7 +83,7 @@ agent_feedback = Table(
     Column("reason", Text, nullable=False, server_default=text("''")),
     Column("created_at", Float, nullable=False),
     PrimaryKeyConstraint(
-        "tenant_id", "sub", "feedback_id", name="pk_agent_feedback"
+        "tenant_id", "user_id", "feedback_id", name="pk_agent_feedback"
     ),
     CheckConstraint(
         f"feedback IN ({_values(MEMORY_FEEDBACK_VALUES)})",
@@ -91,13 +92,13 @@ agent_feedback = Table(
     Index(
         "ix_agent_feedback_owner_created",
         "tenant_id",
-        "sub",
+        "user_id",
         "created_at",
     ),
     Index(
         "ix_agent_feedback_owner_run",
         "tenant_id",
-        "sub",
+        "user_id",
         "run_id",
         "created_at",
     ),

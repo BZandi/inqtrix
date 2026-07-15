@@ -48,6 +48,7 @@ from inqtrix.agents.skills_runtime import (
     strictest_requires_plan,
 )
 from inqtrix.agents.web_execution_policy import derive_web_research_policy
+from inqtrix.execution_authority import pinned_knowledge_collection_ids
 from inqtrix.model_routing import (
     describe_resolution,
     describe_unresolved_resolution,
@@ -244,6 +245,7 @@ class KernelAgentAlgorithm:
             run_id,
             llm,
             context,
+            request,
             pin_tier=pin_tier,
             pin_effort=pin_effort,
             depth=depth,
@@ -1330,6 +1332,7 @@ class KernelAgentAlgorithm:
         run_id: str,
         llm: Any,
         context: "RunContext",
+        request: "RunRequest",
         *,
         pin_tier: str = "",
         pin_effort: str = "",
@@ -1381,7 +1384,7 @@ class KernelAgentAlgorithm:
             timeout=float(getattr(settings, "reasoning_timeout", REASONING_TIMEOUT)),
             event_sink=context.event_sink,
             capability_registry=self._capabilities,
-            capability_context=self._capability_context(context),
+            capability_context=self._capability_context(context, request),
             cancel_token=context.cancel_token,
             token_budget=int(context.token_budget or 0),
         )
@@ -1409,14 +1412,18 @@ class KernelAgentAlgorithm:
         records: list[Any] = []
         for skill_id in request.skill_ids:
             try:
-                record = run_coro(
-                    self._skill_service.get_admitted(
+                visible_to = getattr(
+                    self._capability_context(context, request), "visible_to", None
+                )
+                record, _access = run_coro(
+                    self._skill_service.get_visible(
                         skill_id,
                         tenant_id=(
                             context.principal.tenant_id
                             if context.principal is not None
                             else "default"
                         ),
+                        visible_to=visible_to,
                     )
                 )
             except Exception as exc:  # noqa: BLE001 — loud, never partial
@@ -1427,7 +1434,7 @@ class KernelAgentAlgorithm:
             expected_revision = request.skill_revisions.get(skill_id)
             if (
                 expected_revision is None
-                or record.updated_at != expected_revision
+                or record.revision != expected_revision
             ):
                 raise RuntimeError(
                     f"Angehaengter Skill {skill_id} hat sich seit der "
@@ -1481,13 +1488,16 @@ class KernelAgentAlgorithm:
                     "nicht sicher reaktiviert werden."
                 )
             try:
-                record = run_coro(
-                    self._skill_service.get_admitted(
+                record, _access = run_coro(
+                    self._skill_service.get_visible(
                         skill_id,
                         tenant_id=(
                             deps.principal.tenant_id
                             if deps.principal is not None
                             else "default"
+                        ),
+                        visible_to=getattr(
+                            deps.capability_context, "visible_to", None
                         ),
                     )
                 )
@@ -1501,12 +1511,12 @@ class KernelAgentAlgorithm:
                     f"Geladener Skill {skill_id} kann beim Resume nicht "
                     "sicher reaktiviert werden."
                 )
-            if str(record.updated_at) != admitted_revision:
+            if str(record.revision) != admitted_revision:
                 log.warning(
                     "Geladener Skill %s wechselte Revision (%s -> %s).",
                     skill_id,
                     admitted_revision,
-                    record.updated_at,
+                    record.revision,
                 )
                 raise RuntimeError(
                     f"Geladener Skill {skill_id} hat sich seit der "
@@ -1577,8 +1587,10 @@ class KernelAgentAlgorithm:
                 )
         return "\n\n".join(parts)
 
-    def _capability_context(self, context: "RunContext") -> Any:
-        """Per-segment tool identity (E5: the OWNER's visibility).
+    def _capability_context(
+        self, context: "RunContext", request: "RunRequest"
+    ) -> Any:
+        """Per-segment tool identity and server-pinned knowledge boundary.
 
         Resolved once per segment like the workspace `_RunDeps`;
         ``visible_to=None`` stays the historical see-everything view of
@@ -1591,11 +1603,20 @@ class KernelAgentAlgorithm:
             visible_to = run_coro(
                 self._permissions.resolve_user_context(context.principal)
             )
+        knowledge_collection_ids = pinned_knowledge_collection_ids(
+            request.knowledge_filters,
+            scoped_principal=bool(
+                context.principal is not None
+                and context.principal.user_id is not None
+            ),
+        )
         return CapabilityContext(
             principal=context.principal,
             visible_to=visible_to,
             workspace_id=context.workspace_id,
             run_id=context.run_id,
+            knowledge_collection_ids=knowledge_collection_ids,
+            authority_check=context.authority_check,
             on_provider_retry=(
                 lambda notice: context.event_sink(
                     "inqtrix.agent.activity",

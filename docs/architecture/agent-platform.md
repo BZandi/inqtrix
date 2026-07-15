@@ -121,6 +121,25 @@ apply happens solely through `POST /v1/editor/patches/{id}:apply`.
   that precede an interrupt are idempotent (deterministic ids per
   `(run_id, kind, round)`), because interrupted nodes re-execute from
   their start on resume.
+* **Effective actor and resume authority**: a run keeps its original owner,
+  but every executable segment has an explicit `execution_actor_user_id` and
+  scope ceiling. Approve, edit, or resume atomically records the deciding
+  editor as the effective actor together with the control decision, run
+  revision, and next status. The worker resolves that canonical user live and
+  uses the same actor for quotas, audit, child runs, skills, knowledge, and
+  tools. It never reconstructs or falls back to the owner's authority. A
+  shared editor can therefore continue the run only with resources that editor
+  may currently use.
+* **Pinned dependencies and revocation safepoints**: an unscoped "all visible
+  collections" request is normalized to concrete collection ids before
+  execution, and every attached skill is pinned by id plus integer revision.
+  The worker re-checks the actor, run edit authority, collection visibility,
+  and skill revision before and after provider/search calls and at tool,
+  knowledge, skill, child-run, segment, and final-publication boundaries. If
+  access disappears, the run ends with `authorization_revoked`; it does not
+  continue with a silently smaller evidence set. A remote call already in
+  flight cannot be recalled, but its return value is discarded after the
+  post-call check and is not persisted or emitted.
 * **Children wait (A1)**: `web_research` tasks are SUBMITTED as child
   runs and awaited through the same interrupt machinery — the execute
   node submits one batch per wave (width `max_parallel_children`), then
@@ -200,9 +219,10 @@ apply happens solely through `POST /v1/editor/patches/{id}:apply`.
   delegates to the existing child-run cancellation path when applicable, and
   suppresses retry/result commit for an in-flight instant operation without
   claiming that its synchronous network request was hard-killed.
-* **Scoping**: every internal tool call is pinned to the run owner's
-  visible collections (explicit plan ids are asserted, missing scope
-  defaults to ALL visible collections). Limitation: with collections on
+* **Scoping**: every internal tool call is pinned to the current effective
+  actor's live resource rights. Explicit collection ids are asserted; an
+  omitted scope is normalized to that actor's visible collections rather than
+  being rediscovered under the owner later. Limitation: with collections on
   DIFFERENT embedding models, an un-pinned retrieval fails loudly per
   task ("query one model scope at a time") — pin `collection_ids` in
   the plan for mixed-model deployments.
@@ -254,13 +274,13 @@ apply happens solely through `POST /v1/editor/patches/{id}:apply`.
   Accepted long-term memories live behind `AgentMemoryProvider` (first
   provider: self-hosted Mem0) and the Inqtrix `AgentMemoryService`.
   Anonymous/static principals cannot use it; namespaces are derived
-  server-side from `(tenant_id, principal.sub)`, and client owner fields
+  server-side from `(tenant_id, principal.user_id)`, and client owner fields
   are rejected. The default learning mode is candidate-only: finalize
   can stage `MemoryCandidate` rows, but users accept/edit/reject them in
   Settings. Memory is never evidence and must not be cited.
 * **Patch (M7)**: document-targeted assignments validate the target at
   INTAKE (an invisible or mistyped document fails in seconds, before any
-  research spend); the patch phase re-loads it with the owner's
+  research spend); the patch phase re-loads it with the effective actor's
   visibility, proposes edits via the shared instruct pipeline (memo as
   reference material, the editor-assistant timeout window), persists ONE
   `editor_patches` row (the artifact row carries only `{patch_id}`, rule
@@ -373,6 +393,11 @@ resume under their own algorithm.
   checkpoint-stable interrupt id; decisions map onto the HITL resume
   contract (approve/reject fan out over the batch, edit replaces the
   args of exactly one action, tool never swappable).
+  Edited arguments are validated against the selected tool's real Pydantic
+  input model; unknown fields and type errors are rejected. Tool name and
+  stored action id are immutable. Identity, tenant, run, workspace, and
+  authorization context are never editable model arguments — the server
+  injects them and rechecks the target resource at execution.
 * **Tools.** All wrappers over the wave-1 capability registry or
   platform services, identity injected via `CapabilityContext` (never a
   model-controlled argument, E5). Denials and outages return as VISIBLE
@@ -392,6 +417,11 @@ resume under their own algorithm.
   The update stream emits `tool.started/finished` (redacted previews),
   `todo.updated`, deterministic `narration` (content-hash ids), and
   `phase.changed` for timeline compatibility.
+  Run SSE independently re-resolves the credential and current run access
+  immediately before each data frame. Revoking a viewer closes only that
+  viewer's stream; revoking or downgrading the effective actor also terminates
+  execution at the next safepoint. Reconnect after revoke cannot replay older
+  frames to the former recipient.
 * **Rollout.** `INQTRIX_AGENT_KERNEL_ENABLED` (default off) gates
   registration together with the checkpointer rule, deepagents
   availability, and `supports_tool_calls()` on the default provider
@@ -477,7 +507,8 @@ entity (`content/skills.py::SkillRecord`, table `skill_templates`,
 migration 0041 with the usual RLS recipe) bundles instructions,
 clarification points, a deliverable hint, a plan requirement, a tool
 whitelist, and the invocation rule under one `/label`. CRUD lives at
-`/v1/skills` (optimistic 409 concurrency, sharing through
+`/v1/skills` (mandatory integer `expected_revision`, 409 on a stale write,
+sharing through
 `resource_type="skill_template"` with consent); SKILL.md round-trips
 through `content/skill_markdown.py` (agentskills.io-compatible, policy
 fields under the `x-inqtrix` frontmatter key), exposed as
@@ -496,13 +527,12 @@ the single policy gate.
 * **Admission.** The composer submits `skill_ids` (slash menu) plus
   `tool_directives` (hard planner/kernel hints from the closed
   `AGENT_TOOL_DIRECTIVES` whitelist — unknown ids are a loud 400).
-  The runs router admits skills through visibility + share grants
-  (indistinct 404, `skills_max_attached` cap); the worker segment
-  re-loads admitted ids WITHOUT a visibility re-check
-  (`get_admitted`) because share grants are not resolvable in the
-  worker — the router is the gate. The router also pins each skill's
-  `updated_at` revision into the internal run payload; both engines fail
-  closed if policy or instructions changed before a later segment.
+  The runs router admits skills through live owner-or-accepted-direct-share
+  visibility (indistinct 404, `skills_max_attached` cap) and pins each skill's
+  integer `revision` into the stored run request. Every worker segment resolves
+  the effective actor and re-checks both current visibility and the exact
+  pinned revision. Both engines fail closed with `authorization_revoked` if
+  access, policy, or instructions changed before a later segment.
 * **`requires_plan` matrix.** `always` forces the plan gate in every
   mode (including Auto — the only way a skill can force review);
   `never` frees only the mission-weight default; `auto` follows the

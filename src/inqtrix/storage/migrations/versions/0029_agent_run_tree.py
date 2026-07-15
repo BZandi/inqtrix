@@ -10,24 +10,24 @@ two new parked statuses (``waiting_for_approval``/``waiting_for_input``).
 All columns are additive with defaults, so historical rows and callers
 stay byte-identical.
 
-The ``ck_runs_status`` CHECK from migration 0003 is rebuilt from the
-LIVE ``RunStatus`` enum (0003's own precedent): fresh installs already
-get the widened set via 0003, existing databases get it here. The drop
-is idempotent for that reason.
+The ``ck_runs_status`` CHECK from migration 0003 is rebuilt from the status
+vocabulary deployed with this revision. The literal snapshot keeps later
+application-enum changes from rewriting migration history.
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-from inqtrix.server.runs import RunStatus
-
 revision = "0029_agent_run_tree"
 down_revision = "0028_shares_acceptance"
 branch_labels = None
 depends_on = None
 
-_STATUS_VALUES = ", ".join(f"'{status.value}'" for status in RunStatus)
+_STATUS_VALUES = (
+    "'queued', 'running', 'waiting_for_approval', 'waiting_for_input', "
+    "'waiting_for_children', 'completed', 'failed', 'cancelled', 'expired'"
+)
 
 
 def upgrade() -> None:

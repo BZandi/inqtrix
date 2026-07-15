@@ -16,6 +16,7 @@ import {
 } from './clarificationAnswers'
 import type { AgentClarificationAnswerRequest } from './types'
 import {
+  canEditAgentRun,
   isActiveAgentRun,
   type AgentApprovalRecord,
   type AgentClarificationRecord,
@@ -44,6 +45,7 @@ export function ComposerGateTray({
   const { t } = useLocale()
   const reduceMotion = Boolean(useReducedMotion())
   const gate = run ? pendingGate(run) : null
+  const canEdit = canEditAgentRun(run)
   return (
     <AnimatePresence initial={false}>
       {run && gate && (
@@ -64,6 +66,7 @@ export function ComposerGateTray({
           >
             {gate.kind === 'clarification' && (
               <ClarificationGate
+                canEdit={canEdit}
                 clarification={gate.clarification}
                 onAnswer={(answer) =>
                   actions.answerClarification(
@@ -75,23 +78,25 @@ export function ComposerGateTray({
               />
             )}
             {gate.kind === 'plan' && (
-              <PlanGate actions={actions} run={run} t={t} />
+              <PlanGate actions={actions} canEdit={canEdit} run={run} t={t} />
             )}
             {gate.kind === 'discovery' && (
               <DiscoveryGate
                 approval={gate.approval}
                 actions={actions}
+                canEdit={canEdit}
                 run={run}
                 t={t}
               />
             )}
             {gate.kind === 'patch' && (
-              <PatchGate actions={actions} run={run} t={t} />
+              <PatchGate actions={actions} canEdit={canEdit} run={run} t={t} />
             )}
             {gate.kind === 'tool' && (
               <ToolGate
                 approval={gate.approval}
                 actions={actions}
+                canEdit={canEdit}
                 run={run}
                 t={t}
               />
@@ -126,23 +131,26 @@ export function pendingGate(run: AgentRunRecord): PendingGate | null {
 }
 
 function ClarificationGate({
+  canEdit,
   clarification,
   onAnswer,
   t,
 }: {
+  canEdit: boolean
   clarification: AgentClarificationRecord
   onAnswer: (answer: AgentClarificationAnswerRequest) => Promise<unknown>
   t: TranslationDictionary
 }) {
   const [submitting, setSubmitting] = useState(false)
   const choose = (optionId: string) => {
-    if (submitting) return
+    if (!canEdit || submitting) return
     setSubmitting(true)
     void onAnswer({ option_id: optionId }).finally(() => setSubmitting(false))
   }
   if (clarification.questions.length > 0) {
     return (
       <StructuredClarificationForm
+        canEdit={canEdit}
         clarification={clarification}
         onAnswer={onAnswer}
         t={t}
@@ -160,7 +168,7 @@ function ClarificationGate({
           {clarification.options.map((option) => (
             <Button
               className="h-6 rounded-full border-border bg-background px-2.5 text-xs"
-              disabled={submitting}
+              disabled={!canEdit || submitting}
               key={option.id}
               onClick={() => choose(option.id)}
               size="sm"
@@ -170,12 +178,14 @@ function ClarificationGate({
               {option.label}
             </Button>
           ))}
-          <span className="t-hint text-muted-foreground">
-            {t.agent.tray.freeTextHint}
-          </span>
+          {canEdit && (
+            <span className="t-hint text-muted-foreground">
+              {t.agent.tray.freeTextHint}
+            </span>
+          )}
         </div>
       )}
-      {clarification.options.length === 0 && (
+      {canEdit && clarification.options.length === 0 && (
         <p className="mt-1 t-hint text-muted-foreground">
           {t.agent.tray.freeTextHint}
         </p>
@@ -196,10 +206,12 @@ function ClarificationGate({
  * "Sonstiges" free text, ONE submit for the whole round (the server
  * rejects partial answers — the round parks the run exactly once). */
 function StructuredClarificationForm({
+  canEdit,
   clarification,
   onAnswer,
   t,
 }: {
+  canEdit: boolean
   clarification: AgentClarificationRecord
   onAnswer: (answer: AgentClarificationAnswerRequest) => Promise<unknown>
   t: TranslationDictionary
@@ -210,7 +222,7 @@ function StructuredClarificationForm({
   const questions = clarification.questions
   const complete = isRoundComplete(questions, draft)
   const submit = () => {
-    if (submitting || !complete) return
+    if (!canEdit || submitting || !complete) return
     setSubmitting(true)
     void onAnswer({
       answers: answersRequestFromDraft(questions, draft),
@@ -238,7 +250,7 @@ function StructuredClarificationForm({
                 {question.options.map((option) => (
                   <Chip
                     active={Boolean(entry?.optionIds.includes(option.id))}
-                    disabled={submitting}
+                    disabled={!canEdit || submitting}
                     key={option.id}
                     onClick={() =>
                       setDraft((prev) => toggleOption(prev, question, option.id))}
@@ -250,7 +262,7 @@ function StructuredClarificationForm({
                 {question.options.length > 0 && (
                   <Chip
                     active={showOther}
-                    disabled={submitting}
+                    disabled={!canEdit || submitting}
                     onClick={() =>
                       setOtherOpen((prev) => ({
                         ...prev,
@@ -264,7 +276,7 @@ function StructuredClarificationForm({
               {showOther && (
                 <Input
                   className="mt-1.5 h-8 max-w-md"
-                  disabled={submitting}
+                  disabled={!canEdit || submitting}
                   onChange={(event) =>
                     setDraft((prev) =>
                       setFreeText(prev, question.id, event.target.value))}
@@ -284,16 +296,18 @@ function StructuredClarificationForm({
       </div>
       <div className="mt-2.5 flex items-center gap-2">
         <Button
-          disabled={submitting || !complete}
+          disabled={!canEdit || submitting || !complete}
           onClick={submit}
           size="sm"
           type="button"
         >
           {t.agent.tray.clarifySubmit}
         </Button>
-        <span className="t-hint text-muted-foreground">
-          {t.agent.tray.freeTextHint}
-        </span>
+        {canEdit && (
+          <span className="t-hint text-muted-foreground">
+            {t.agent.tray.freeTextHint}
+          </span>
+        )}
       </div>
       {clarification.defaultAssumption && (
         <p className="mt-1.5 t-hint text-muted-foreground">
@@ -309,10 +323,12 @@ function StructuredClarificationForm({
 
 function PlanGate({
   actions,
+  canEdit,
   run,
   t,
 }: {
   actions: AgentTimelineActions
+  canEdit: boolean
   run: AgentRunRecord
   t: TranslationDictionary
 }) {
@@ -328,6 +344,7 @@ function PlanGate({
     run,
   })
   const decide = (decision: 'approve' | 'reject') => {
+    if (!canEdit) return
     void planApproval.decide(decision)
   }
   const submitting = planApproval.submitting
@@ -420,7 +437,7 @@ function PlanGate({
         </Button>
         <Button
           className="h-7 px-2.5 text-xs"
-          disabled={submitting}
+          disabled={!canEdit || submitting}
           onClick={() => decide('approve')}
           size="sm"
           type="button"
@@ -430,7 +447,7 @@ function PlanGate({
         </Button>
         <Button
           className="h-7 px-2.5 text-xs text-muted-foreground hover:text-destructive"
-          disabled={submitting}
+          disabled={!canEdit || submitting}
           onClick={() => decide('reject')}
           size="sm"
           type="button"
@@ -438,9 +455,11 @@ function PlanGate({
         >
           {t.agent.timeline.reject}
         </Button>
-        <span className="t-hint text-muted-foreground">
-          {t.agent.tray.editHint}
-        </span>
+        {canEdit && (
+          <span className="t-hint text-muted-foreground">
+            {t.agent.tray.editHint}
+          </span>
+        )}
       </div>
     </div>
   )
@@ -449,11 +468,13 @@ function PlanGate({
 function DiscoveryGate({
   actions,
   approval,
+  canEdit,
   run,
   t,
 }: {
   actions: AgentTimelineActions
   approval: AgentApprovalRecord
+  canEdit: boolean
   run: AgentRunRecord
   t: TranslationDictionary
 }) {
@@ -462,7 +483,7 @@ function DiscoveryGate({
     ? (approval.payload.probes as Record<string, unknown>[])
     : []
   const decide = (decision: 'approve' | 'reject') => {
-    if (submitting) return
+    if (!canEdit || submitting) return
     setSubmitting(true)
     void actions
       .decideApproval(run.runId, approval.approvalId, { decision })
@@ -482,7 +503,7 @@ function DiscoveryGate({
       <div className="mt-2 flex items-center gap-1.5">
         <Button
           className="h-7 bg-brand px-2.5 text-xs text-brand-foreground hover:bg-brand/90"
-          disabled={submitting}
+          disabled={!canEdit || submitting}
           onClick={() => decide('approve')}
           size="sm"
           type="button"
@@ -491,7 +512,7 @@ function DiscoveryGate({
         </Button>
         <Button
           className="h-7 px-2.5 text-xs"
-          disabled={submitting}
+          disabled={!canEdit || submitting}
           onClick={() => decide('reject')}
           size="sm"
           type="button"
@@ -511,11 +532,13 @@ function DiscoveryGate({
 function ToolGate({
   actions,
   approval,
+  canEdit,
   run,
   t,
 }: {
   actions: AgentTimelineActions
   approval: AgentApprovalRecord
+  canEdit: boolean
   run: AgentRunRecord
   t: TranslationDictionary
 }) {
@@ -524,7 +547,7 @@ function ToolGate({
     ? (approval.payload.actions as Record<string, unknown>[])
     : []
   const decide = (decision: 'approve' | 'reject') => {
-    if (submitting) return
+    if (!canEdit || submitting) return
     setSubmitting(true)
     void actions
       .decideApproval(run.runId, approval.approvalId, { decision })
@@ -561,7 +584,7 @@ function ToolGate({
       <div className="mt-2 flex items-center gap-1.5">
         <Button
           className="h-7 bg-brand px-2.5 text-xs text-brand-foreground hover:bg-brand/90"
-          disabled={submitting}
+          disabled={!canEdit || submitting}
           onClick={() => decide('approve')}
           size="sm"
           type="button"
@@ -570,7 +593,7 @@ function ToolGate({
         </Button>
         <Button
           className="h-7 px-2.5 text-xs"
-          disabled={submitting}
+          disabled={!canEdit || submitting}
           onClick={() => decide('reject')}
           size="sm"
           type="button"
@@ -605,10 +628,12 @@ function DiscoveryProbeRow({
 
 function PatchGate({
   actions,
+  canEdit,
   run,
   t,
 }: {
   actions: AgentTimelineActions
+  canEdit: boolean
   run: AgentRunRecord
   t: TranslationDictionary
 }) {
@@ -653,7 +678,7 @@ function PatchGate({
         </Button>
         <Button
           className="h-7 px-2.5 text-xs"
-          disabled={review.submitting}
+          disabled={!canEdit || review.submitting}
           onClick={() => void review.approveAndApply()}
           size="sm"
           type="button"
@@ -663,7 +688,7 @@ function PatchGate({
         </Button>
         <Button
           className="h-7 px-2.5 text-xs text-muted-foreground hover:text-destructive"
-          disabled={review.submitting}
+          disabled={!canEdit || review.submitting}
           onClick={() => void review.reject()}
           size="sm"
           type="button"

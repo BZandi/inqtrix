@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 
 import pytest
 import pytest_asyncio
@@ -64,7 +65,7 @@ def record(**overrides) -> PromptTemplateRecord:
     base = dict(
         id=new_template_id(),
         tenant_id="default",
-        owner_sub="user-owner",
+        owner_user_id=uuid.uuid4(),
         title="Executive Briefing",
         label="briefing",
         category="instruction",
@@ -93,11 +94,13 @@ async def test_crud_roundtrip(repository):
                 **created.__dict__,
                 "title": "Neuer Titel",
             }
-        )
+        ),
+        expected_revision=created.revision,
     )
     assert updated.title == "Neuer Titel"
     # The repository stamps the LWW anchor itself.
     assert updated.updated_at > created.updated_at
+    assert updated.revision == created.revision + 1
 
     await repository.delete(created.id, tenant_id="default")
     with pytest.raises(PromptTemplateNotFound):
@@ -117,9 +120,9 @@ async def test_absence_and_foreign_tenant_raise_alike(repository):
 
 @pytest.mark.asyncio
 async def test_ownerless_record_roundtrips(repository):
-    created = await repository.create(record(owner_sub=None))
+    created = await repository.create(record(owner_user_id=None))
     fetched = await repository.get(created.id, tenant_id="default")
-    assert fetched.owner_sub is None
+    assert fetched.owner_user_id is None
 
 
 @pytest.mark.asyncio
@@ -128,32 +131,28 @@ async def test_matching_precondition_updates_stale_one_conflicts(repository):
     404-vs-409 distinction."""
     created = await repository.create(record(title="v0"))
 
-    # Matching precondition: the write lands and advances updated_at.
+    # Matching revision: the write lands and advances both fields.
     fresh = await repository.update(
         replace(created, title="v1"),
-        expected_updated_at=created.updated_at,
+        expected_revision=created.revision,
     )
     assert fresh.title == "v1"
     assert fresh.updated_at > created.updated_at
 
-    # Stale precondition (the original anchor): conflict, no overwrite.
-    with pytest.raises(PromptTemplateConflict):
+    # Stale revision: conflict, no overwrite.
+    with pytest.raises(PromptTemplateConflict) as exc_info:
         await repository.update(
             replace(created, title="v2"),
-            expected_updated_at=created.updated_at,
+            expected_revision=created.revision,
         )
+    assert exc_info.value.current_revision == fresh.revision
     assert (
         await repository.get(created.id, tenant_id="default")
     ).title == "v1"
-
-    # No precondition: unconditional overwrite still works (legacy LWW).
-    forced = await repository.update(replace(fresh, title="v3"))
-    assert forced.title == "v3"
-
 
 @pytest.mark.asyncio
 async def test_precondition_on_missing_row_is_not_found_not_conflict(repository):
     """A precondition against a vanished row is 404, never a phantom 409."""
     ghost = record(id="pt_ghost")
     with pytest.raises(PromptTemplateNotFound):
-        await repository.update(ghost, expected_updated_at=123.0)
+        await repository.update(ghost, expected_revision=1)

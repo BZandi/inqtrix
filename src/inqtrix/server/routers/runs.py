@@ -17,7 +17,11 @@ from typing import TYPE_CHECKING, Mapping
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from inqtrix.auth.principal import Principal, UserContext
+from inqtrix.auth.principal import (
+    Principal,
+    UserContext,
+    resolve_live_principal,
+)
 from inqtrix.core.constants import (
     AGENT_EXECUTION_DIRECTIVES,
     AGENT_MODE_IDS,
@@ -32,7 +36,6 @@ from inqtrix.project.agent_sessions_ports import AgentSessionNotFound
 from inqtrix.quota.models import QuotaDimension
 from inqtrix.server.metrics import record_admission_rejected
 from inqtrix.server.routers import (
-    build_shared_grants_dependency,
     quota_admission,
     quota_record,
     stack_error_response,
@@ -137,25 +140,14 @@ def build_router(container: "AppContainer") -> APIRouter:
     user_context_dep = container.user_context_dependency
     share_service = container.share_service
     workspace_admin = container.workspace_admin
-    shared_runs_dep = build_shared_grants_dependency(
-        share_service, principal_dep, resource_type="run"
-    )
     knowledge_service = container.knowledge_service
     skill_service = container.skill_service
-    shared_collections_dep = build_shared_grants_dependency(
-        share_service, principal_dep, resource_type="knowledge_collection"
-    )
-    shared_skills_dep = build_shared_grants_dependency(
-        share_service, principal_dep, resource_type="skill_template"
-    )
 
     @router.post("/v1/runs")
     async def create_run(
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        collection_grants=Depends(shared_collections_dep),
-        skill_grants=Depends(shared_skills_dep),
     ):
         """Create a queued native research run for browser UI clients."""
         try:
@@ -192,6 +184,8 @@ def build_router(container: "AppContainer") -> APIRouter:
         except StackResolutionError as exc:
             return stack_error_response(exc)
 
+        is_agent = resolved.mode in AGENT_MODE_IDS
+
         if execution_directive:
             # Both enforced routes are conversational and intentionally
             # normal-depth. Explicit model/tier/effort overrides remain on
@@ -207,20 +201,13 @@ def build_router(container: "AppContainer") -> APIRouter:
                 },
             )
 
-        # Admission gate for knowledge asks. An explicit collection set is
-        # asserted strictly for EVERY mode (one invisible id denies the
-        # whole submission — a silent narrowing would change the answer's
-        # meaning without a trace). An omitted/empty/null filter is PINNED
-        # to the caller-visible collections, but ONLY for mode=knowledge:
-        # that algorithm consumes the filter without scoping of its own,
-        # so an unscoped ask would otherwise reach every tenant
-        # collection. Agent runs resolve their scope themselves at
-        # execution time (fresh visibility, unscoped-by-design filters) —
-        # pinning them would freeze a submit-time snapshot AND fail the
-        # harness's grant-less re-assert on shared-in ids. The pinned ids
-        # ride the run's knowledge_filters into the (possibly
-        # out-of-process) worker. visible_to=None (auth off) keeps the
-        # historical see-everything view untouched.
+        # Pin every knowledge-capable run to a concrete collection set at
+        # submission. Explicit ids are strict (one invisible id denies the
+        # whole request); an omitted set becomes every collection visible to
+        # this actor. The ids ride the durable request/checkpoint and are
+        # re-authorized at execution safepoints. A resumed segment can
+        # therefore fail closed on lost access but can never silently gain a
+        # newly visible source or continue with a reduced corpus.
         requested_collections = resolved.knowledge_filters.get(
             "collection_ids"
         )
@@ -231,14 +218,13 @@ def build_router(container: "AppContainer") -> APIRouter:
         if (
             knowledge_service is not None
             and visible_to is not None
-            and (explicit_scope or resolved.mode == "knowledge")
+            and (explicit_scope or resolved.mode == "knowledge" or is_agent)
         ):
             try:
                 resolved.knowledge_filters["collection_ids"] = (
                     await knowledge_service.resolve_ask_scope(
                         requested_collections,
                         visible_to=visible_to,
-                        also_visible=collection_grants,
                     )
                 )
             except CollectionNotFound:
@@ -303,7 +289,6 @@ def build_router(container: "AppContainer") -> APIRouter:
                 "response_form muss auto, chat oder canvas sein.",
                 "invalid_request_error",
             )
-        is_agent = resolved.mode in AGENT_MODE_IDS
         if session_id is not None and not is_agent:
             return error_response(
                 400,
@@ -362,7 +347,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         # here, never prompted.
         raw_skill_ids = body.get("skill_ids")
         skill_ids: list[str] = []
-        skill_revisions: dict[str, float] = {}
+        skill_revisions: dict[str, int] = {}
         if raw_skill_ids is not None:
             if not is_agent:
                 return error_response(
@@ -401,9 +386,8 @@ def build_router(container: "AppContainer") -> APIRouter:
                         skill_id,
                         tenant_id=principal.tenant_id,
                         visible_to=visible_to,
-                        also_visible=skill_grants,
                     )
-                    skill_revisions[skill_id] = record.updated_at
+                    skill_revisions[skill_id] = record.revision
                 except SkillNotFound:
                     return error_response(
                         404,
@@ -435,8 +419,8 @@ def build_router(container: "AppContainer") -> APIRouter:
                 await container.agent_sessions_service.claim_session(
                     session_id,
                     title=question[:120],
-                    caller_sub=(
-                        principal.sub
+                    caller_user_id=(
+                        principal.user_id
                         if principal.kind in ("oidc_session", "pat")
                         else None
                     ),
@@ -531,12 +515,17 @@ def build_router(container: "AppContainer") -> APIRouter:
         A report in a project file is a terminal-run snapshot with no
         server-side execution; importing stores it durably under the caller so
         it survives reload + follows the user across devices (the runs analogue
-        of the chat/editor/prompt import-up). Idempotent on the report's
-        ``run_id`` for the caller; never executes the agent (no quota cost).
+        of the chat/editor/prompt import-up). ``source_run_id`` is idempotent
+        only inside the caller's scope; the server always allocates the public
+        ``run_id``. The import never executes the agent (no quota cost).
         """
         try:
             body = await req.json()
         except Exception:
+            return error_response(
+                400, "Ungueltiger JSON-Body", "invalid_request_error"
+            )
+        if not isinstance(body, dict):
             return error_response(
                 400, "Ungueltiger JSON-Body", "invalid_request_error"
             )
@@ -545,10 +534,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
 
-        run_id = body.get("run_id")
-        if not isinstance(run_id, str) or not run_id:
+        source_run_id = body.get("source_run_id")
+        if not isinstance(source_run_id, str) or not source_run_id.strip():
             return error_response(
-                400, "run_id ist erforderlich.", "invalid_request_error"
+                400, "source_run_id ist erforderlich.", "invalid_request_error"
             )
 
         def _epoch(value: object) -> float | None:
@@ -557,7 +546,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         try:
             summary = await asyncio.to_thread(
                 run_store.import_completed_run,
-                run_id=run_id,
+                source_run_id=source_run_id,
                 question=str(body.get("question") or ""),
                 stack_name=str(body.get("stack") or "default"),
                 result=body.get("result") if isinstance(body.get("result"), dict) else {},
@@ -574,7 +563,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 else None,
                 created_at=_epoch(body.get("created_at")),
                 workspace_id=workspace_id,
-                created_by_sub=principal.sub,
+                created_by_user_id=principal.user_id,
                 created_by_tenant_id=principal.tenant_id,
             )
         except ValueError as exc:
@@ -586,7 +575,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_runs_dep),
     ):
         """List native runs, newest first, keyset-paginated.
 
@@ -610,7 +598,6 @@ def build_router(container: "AppContainer") -> APIRouter:
             after=after,
             workspace_id=workspace_id,
             visible_to=visible_to,
-            also_visible=also_visible,
         )
         return list_envelope(summaries, next_cursor)
 
@@ -620,7 +607,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_runs_dep),
     ):
         """Return the current public summary for one native run."""
         try:
@@ -629,7 +615,6 @@ def build_router(container: "AppContainer") -> APIRouter:
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
@@ -642,7 +627,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_runs_dep),
     ):
         """Return the final report payload for a completed native run."""
         try:
@@ -651,7 +635,6 @@ def build_router(container: "AppContainer") -> APIRouter:
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
@@ -669,7 +652,6 @@ def build_router(container: "AppContainer") -> APIRouter:
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
         except RunNotFound:
             return error_response(404, "Run-Ergebnis nicht gefunden", "not_found")
@@ -680,7 +662,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_runs_dep),
     ):
         """Request cancellation for a queued or running native run."""
         try:
@@ -690,7 +671,6 @@ def build_router(container: "AppContainer") -> APIRouter:
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
             # Waiting/queued runs become terminal synchronously and will not
             # re-enter the algorithm to close their plan rows. Running runs
@@ -720,7 +700,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         gate is creator identity (stronger than cancel, which a shared-in
         editor may call); only terminal runs delete (an active run is
         cancelled first). Deleting also revokes any shares so a recipient's
-        shared-with-me stops naming a run that no longer exists.
+        regular resource list stops naming a run that no longer exists.
         """
         try:
             workspace_id = workspace_id_from_request(req)
@@ -731,7 +711,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 run_store.delete,
                 run_id,
                 workspace_id=workspace_id,
-                requester_sub=principal.sub,
+                requester_user_id=principal.user_id,
             )
         except RunNotFound:
             return error_response(404, "Run nicht gefunden", "not_found")
@@ -741,12 +721,16 @@ def build_router(container: "AppContainer") -> APIRouter:
                 "Run ist noch aktiv; bitte zuerst abbrechen.",
                 "run_active",
             )
-        if workspace_admin is not None and share_service is not None:
+        if (
+            workspace_admin is not None
+            and share_service is not None
+            and not getattr(run_store, "atomic_resource_effects", False)
+        ):
             revoked = await workspace_admin.revoke_shares_for_resource(
                 tenant_id=principal.tenant_id,
                 resource_type="run",
                 resource_id=run_id,
-                revoked_by_sub=principal.sub,
+                revoked_by_user_id=principal.user_id,
             )
             if revoked:
                 log.info(
@@ -759,7 +743,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_runs_dep),
     ):
         """List an agent run's direct child runs, newest first.
 
@@ -776,7 +759,6 @@ def build_router(container: "AppContainer") -> APIRouter:
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
@@ -791,7 +773,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         req: Request,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_runs_dep),
     ):
         """Stream buffered and live native run events as SSE.
 
@@ -817,12 +798,38 @@ def build_router(container: "AppContainer") -> APIRouter:
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
         except RunNotFound:
             return error_response(404, "Run nicht gefunden", "not_found")
+
+        async def _authorized_frame() -> bool:
+            try:
+                current = await resolve_live_principal(principal_dep, req)
+                if (
+                    current.user_id != principal.user_id
+                    or current.kind != principal.kind
+                    or current.tenant_id != principal.tenant_id
+                    or current.session_id != principal.session_id
+                    or current.pat_id != principal.pat_id
+                    or current.scopes != principal.scopes
+                ):
+                    return False
+                live_visible_to = (
+                    await container.permission_service.resolve_user_context(
+                        current
+                    )
+                )
+                await asyncio.to_thread(
+                    run_store.get,
+                    run_id,
+                    workspace_id=workspace_id,
+                    visible_to=live_visible_to,
+                )
+            except (HTTPException, RunNotFound):
+                return False
+            return True
 
         # Polling fallback (plan M1 T2): ``?format=json`` returns the
         # SAME replay buffer as an immediate JSON page instead of a
@@ -830,6 +837,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         # pipeline, one auth path; ``terminal`` tells the poller to stop.
         if req.query_params.get("format") == "json":
             try:
+                if not await _authorized_frame():
+                    return error_response(
+                        404, "Run nicht gefunden", "not_found"
+                    )
                 events = list(replay_after(subscription.replay, after))
                 terminal = bool(
                     subscription.replay
@@ -843,6 +854,8 @@ def build_router(container: "AppContainer") -> APIRouter:
         async def _event_generator():
             try:
                 for event in replay_after(subscription.replay, after):
+                    if not await _authorized_frame():
+                        return
                     yield format_sse_event(event)
                 # Terminal detection must use the UNFILTERED replay: a
                 # reconnect with ``after`` at/past the terminal event
@@ -865,12 +878,16 @@ def build_router(container: "AppContainer") -> APIRouter:
                         )
                     except Empty:
                         if loop.time() >= next_heartbeat:
+                            if not await _authorized_frame():
+                                return
                             # SSE comments keep proxy/client readers active
                             # without creating a second event vocabulary or
                             # consuming sequence numbers.
                             yield ": keepalive\n\n"
                             next_heartbeat = loop.time() + 5.0
                         continue
+                    if not await _authorized_frame():
+                        return
                     yield format_sse_event(event)
                     next_heartbeat = loop.time() + 5.0
                     if event.get("type") in TERMINAL_EVENTS:

@@ -16,10 +16,13 @@ import type {
   KnowledgeThreadItemRecord,
 } from '@/features/project/types'
 import {
-  DEFAULT_KNOWLEDGE_SESSION_ID,
   DEFAULT_KNOWLEDGE_SESSION_TITLE,
+  legacyKnowledgeSessionIdReplacements,
 } from '@/features/project/knowledgeSessionDefaults'
-import { syncCollection } from '@/features/project/syncCollection'
+import {
+  deleteTolerant404,
+  syncCollection,
+} from '@/features/project/syncCollection'
 import {
   useProjectSyncLifecycle,
   type SyncLifecycleToken,
@@ -68,7 +71,7 @@ function isPristineBootstrapSession(
   session: KnowledgeSessionRecord,
   items: readonly KnowledgeThreadItemRecord[],
 ): boolean {
-  return session.id === DEFAULT_KNOWLEDGE_SESSION_ID
+  return session.isBootstrapPlaceholder === true
     && session.title === DEFAULT_KNOWLEDGE_SESSION_TITLE
     && items.length === 0
 }
@@ -178,6 +181,14 @@ export function useKnowledgeSessionsApi({
         if (token.cancelled) return
         const converted = serverSessions.map(sessionRecordFromServer)
         const records = converted.map(({ record }) => record)
+        const serverIds = new Set(records.map((record) => record.id))
+        const replacements = legacyKnowledgeSessionIdReplacements(
+          sessionsRef.current,
+          serverIds,
+        )
+        if (Object.keys(replacements).length > 0) {
+          dispatch({ replacements, type: 'rekeyKnowledgeSessionIds' })
+        }
         const memberships = Object.fromEntries(
           converted.map(({ groupId, record }) => [record.id, groupId]),
         )
@@ -188,7 +199,7 @@ export function useKnowledgeSessionsApi({
             type: 'upsertServerKnowledgeSessions',
           })
         }
-        serverKnownRef.current = new Set(records.map((record) => record.id))
+        serverKnownRef.current = serverIds
         for (const record of records) {
           syncedRef.current.set(
             record.id,
@@ -371,7 +382,9 @@ export function useKnowledgeSessionsApi({
         fingerprintOf: (group) => group.updatedAt,
         changed: (previous, current) => previous !== current,
         pushOne: pushGroup,
-        deleteOne: (id) => deleteKnowledgeSessionGroup(id, optionsRef.current),
+        deleteOne: (id) => deleteTolerant404(
+          () => deleteKnowledgeSessionGroup(id, optionsRef.current),
+        ),
       })
 
       const currentSessions = sessionsRef.current
@@ -395,7 +408,9 @@ export function useKnowledgeSessionsApi({
       }
       for (const sessionId of [...syncedRef.current.keys()]) {
         if (!(sessionId in currentSessions)) {
-          await deleteKnowledgeSession(sessionId, optionsRef.current)
+          await deleteTolerant404(
+            () => deleteKnowledgeSession(sessionId, optionsRef.current),
+          )
           syncedRef.current.delete(sessionId)
           serverKnownRef.current.delete(sessionId)
           loadedRef.current.delete(sessionId)

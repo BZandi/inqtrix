@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from inqtrix.auth.identity_memory import MemoryIdentityStore
-from inqtrix.auth.permissions import PermissionService
+from inqtrix.auth.permissions import AuthorizationService
 from inqtrix.knowledge.parsing import MarkItDownParser
 from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
 from inqtrix.knowledge.stores.ports import KnowledgeProviderContext
@@ -61,8 +61,8 @@ def make_client(tmp_path: Path, *, parser="default") -> TestClient:
         ),
         semaphore_factory=lambda: asyncio.Semaphore(1),
         auth_provider=HeaderSubAuthProvider(),
-        permissions=PermissionService(
-            members=identity, groups=identity, shares=identity, audit=identity
+        permissions=AuthorizationService(
+            members=identity, shares=identity, audit=identity
         ),
         knowledge=knowledge_context,
     )

@@ -92,7 +92,14 @@ export function AgentSessionRail({
   }
 
   const commitEdit = () => {
-    if (editingSessionId && titleDraft.trim()) {
+    const editingSession = editingSessionId
+      ? sessions[editingSessionId]
+      : undefined
+    if (
+      editingSessionId
+      && editingSession?.persistable !== false
+      && titleDraft.trim()
+    ) {
       onRenameSession(editingSessionId, titleDraft.trim())
     }
     setEditingSessionId(null)
@@ -112,6 +119,7 @@ export function AgentSessionRail({
       && !gate
     const isPinned = pinnedSessionIds.includes(session.id)
     const editing = editingSessionId === session.id
+    const mutable = session.persistable !== false
     const timeLabel = displayRelativeAge(
       agentSessionHistoryTimeIso(session, runs),
       locale,
@@ -124,12 +132,12 @@ export function AgentSessionRail({
             label: isPinned ? t.agent.sessions.unpin : t.agent.sessions.pin,
             onSelect: () => onTogglePinnedSession(session.id),
           },
-          {
+          ...(mutable ? [{
             destructive: true,
             icon: <Trash2 className="icon-sm" />,
             label: t.agent.sessions.delete,
             onSelect: () => onDeleteSession(session.id),
-          },
+          }] : []),
         ]}
         active={selectedSessionId === session.id}
         indicator={
@@ -145,11 +153,11 @@ export function AgentSessionRail({
         key={session.id}
         nested={nested}
         onSelect={() => onSelectSession(session.id)}
-        onStartRename={() => {
+        onStartRename={mutable ? () => {
           setEditingSessionId(session.id)
           setTitleDraft(session.title)
-        }}
-        renameEditor={editing ? (
+        } : undefined}
+        renameEditor={mutable && editing ? (
           <ExplorerHistoryTitleInput
             autoFocus
             label={t.agent.sessions.rename}
@@ -159,7 +167,7 @@ export function AgentSessionRail({
             value={titleDraft}
           />
         ) : undefined}
-        renameLabel={t.agent.sessions.rename}
+        renameLabel={mutable ? t.agent.sessions.rename : undefined}
         timeLabel={timeLabel}
         title={session.title}
       />

@@ -20,12 +20,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Awaitable, Callable, Mapping
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from inqtrix.auth.permissions import SharePermission
     from inqtrix.auth.principal import Principal, UserContext
 
 
@@ -61,13 +60,14 @@ class CapabilityContext:
         visible_to: The server-resolved membership context for data
             scoping (``None`` for unscoped anonymous/static principals,
             exactly as the services expect).
-        grants: Shared-in grants keyed by ``resource_type`` (e.g.
-            ``{"knowledge_collection": {id: SharePermission}}``); a
-            capability forwards the relevant kind to its service.
         workspace_id: The client UI namespace, passthrough only — never
             an authorization input.
         run_id: The parent agent run id for event/audit attribution
             (``None`` outside an agent run).
+        knowledge_collection_ids: Immutable collection boundary pinned by
+            the server when the run was admitted. ``None`` means that no run
+            boundary applies (for example a direct MCP invocation); an empty
+            set is an explicit boundary that permits no collection access.
         on_provider_retry: Optional platform observer for one visible provider
             retry. Capability handlers enrich the notice with operation input;
             they never invent retry policy themselves.
@@ -75,26 +75,19 @@ class CapabilityContext:
 
     principal: "Principal | None"
     visible_to: "UserContext | None" = None
-    grants: Mapping[str, Mapping[str, "SharePermission"]] = field(
-        default_factory=dict
-    )
     workspace_id: str | None = None
     run_id: str | None = None
+    knowledge_collection_ids: frozenset[str] | None = None
+    authority_check: Callable[[], None] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     on_provider_retry: Callable[[dict[str, object]], None] | None = field(
         default=None,
         repr=False,
         compare=False,
     )
-
-    def grants_for(self, resource_type: str) -> "Mapping[str, SharePermission] | None":
-        """The caller's shared-in grants of one resource type, or ``None``.
-
-        ``None`` (no grants of that kind) keeps every service's
-        historical ``also_visible`` behaviour byte-identical.
-        """
-        found = self.grants.get(resource_type)
-        return found or None
-
 
 @dataclass(frozen=True)
 class CapabilityDefinition:

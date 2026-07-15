@@ -2,7 +2,6 @@ import type {
   InboxShare,
   OutgoingShare,
   ShareInvitee,
-  SharedWithMeEntry,
   ShareRecordInfo,
   SharingInbox,
   UserSearchResult,
@@ -12,7 +11,7 @@ import type {
 export const DEMO_OWNER = {
   displayName: 'Olga Owner',
   email: 'olga@example.com',
-  subject: 'user-olga',
+  userId: '00000000-0000-4000-8000-000000000001',
 }
 
 /** The owned run that carries seeded shares + a badge in the demo. */
@@ -25,10 +24,10 @@ const DEMO_TS = 1_767_225_600
 
 /** People the share-dialog typeahead resolves in demo (no backend). */
 const demoPeople: UserSearchResult[] = [
-  { display_name: 'Rita Recipient', email: 'rita@example.com', subject: 'user-rita' },
-  { display_name: 'Stefan Schulz', email: 'stefan@example.com', subject: 'user-stefan' },
-  { display_name: 'Bianca Brandt', email: 'bianca@example.com', subject: 'user-bianca' },
-  { display_name: 'Carlos Mendez', email: 'carlos@example.com', subject: 'user-carlos' },
+  { display_name: 'Rita Recipient', email: 'rita@example.com', id: '00000000-0000-4000-8000-000000000002' },
+  { display_name: 'Stefan Schulz', email: 'stefan@example.com', id: '00000000-0000-4000-8000-000000000003' },
+  { display_name: 'Bianca Brandt', email: 'bianca@example.com', id: '00000000-0000-4000-8000-000000000004' },
+  { display_name: 'Carlos Mendez', email: 'carlos@example.com', id: '00000000-0000-4000-8000-000000000005' },
 ]
 
 export function searchDemoUsers(query: string): UserSearchResult[] {
@@ -38,7 +37,7 @@ export function searchDemoUsers(query: string): UserSearchResult[] {
     (user) =>
       (user.display_name ?? '').toLowerCase().includes(q) ||
       (user.email ?? '').toLowerCase().includes(q) ||
-      user.subject.toLowerCase().includes(q),
+      user.id.toLowerCase().includes(q),
   )
 }
 
@@ -56,19 +55,21 @@ function makeRecord(
   resourceId: string,
   person: UserSearchResult,
   permission: ShareInvitee['permission'],
+  acceptedAt: number | null = null,
 ): ShareRecordInfo {
   counter += 1
   return {
+    accepted_at: acceptedAt,
     created_at: DEMO_TS,
     display_name: person.display_name,
     email: person.email,
-    granted_by_sub: DEMO_OWNER.subject,
+    granted_by_user_id: DEMO_OWNER.userId,
     id: `demo-share-${counter}`,
     permission,
+    recipient_user_id: person.id,
     resource_id: resourceId,
     resource_type: resourceType,
-    subject_id: person.subject,
-    subject_type: 'user',
+    revision: 1,
   }
 }
 
@@ -76,7 +77,7 @@ function ensureSeeded() {
   if (seeded) return
   seeded = true
   store.set(storeKey('run', DEMO_SHARED_RUN_ID), [
-    makeRecord('run', DEMO_SHARED_RUN_ID, demoPeople[0], 'view'),
+    makeRecord('run', DEMO_SHARED_RUN_ID, demoPeople[0], 'view', DEMO_TS),
     makeRecord('run', DEMO_SHARED_RUN_ID, demoPeople[1], 'edit'),
   ])
 }
@@ -101,7 +102,7 @@ function seedInbox(): DemoInbox {
         accepted_at: null,
         created_at: DEMO_TS,
         granted_by_display_name: 'Bianca Brandt',
-        granted_by_sub: 'user-bianca',
+        granted_by_user_id: '00000000-0000-4000-8000-000000000004',
         id: 'demo-inbox-1',
         permission: 'view',
         resource_id: 'run_demo_incoming_competitive',
@@ -112,7 +113,7 @@ function seedInbox(): DemoInbox {
         accepted_at: null,
         created_at: DEMO_TS,
         granted_by_display_name: 'Stefan Schulz',
-        granted_by_sub: 'user-stefan',
+        granted_by_user_id: '00000000-0000-4000-8000-000000000003',
         id: 'demo-inbox-2',
         permission: 'edit',
         resource_id: 'kc_demo_incoming_market',
@@ -125,7 +126,7 @@ function seedInbox(): DemoInbox {
         accepted_at: DEMO_TS,
         created_at: DEMO_TS,
         granted_by_display_name: 'Bianca Brandt',
-        granted_by_sub: 'user-bianca',
+        granted_by_user_id: '00000000-0000-4000-8000-000000000004',
         id: 'demo-inbox-3',
         permission: 'view',
         resource_id: DEMO_SHARED_IN_RUN_ID,
@@ -222,16 +223,18 @@ export function grantDemoShares(
 ) {
   ensureSeeded()
   const key = storeKey(resourceType, resourceId)
-  const people = new Map(demoPeople.map((person) => [person.subject, person]))
+  const people = new Map(demoPeople.map((person) => [person.id, person]))
   const next = [...(store.get(key) ?? [])]
   for (const invitee of invitees) {
-    const person = people.get(invitee.subjectId) ?? {
+    const person = people.get(invitee.userId) ?? {
       display_name: null,
       email: null,
-      subject: invitee.subjectId,
+      id: invitee.userId,
     }
     const record = makeRecord(resourceType, resourceId, person, invitee.permission)
-    const index = next.findIndex((entry) => entry.subject_id === invitee.subjectId)
+    const index = next.findIndex(
+      (entry) => entry.recipient_user_id === invitee.userId,
+    )
     if (index >= 0) next[index] = record
     else next.push(record)
   }
@@ -245,27 +248,27 @@ export function revokeDemoShare(shareId: string) {
   }
 }
 
-export function demoOutgoingShareCounts(
-  resourceType: string,
-  resourceIds: readonly string[],
-): Record<string, number> {
-  ensureSeeded()
-  const counts: Record<string, number> = {}
-  for (const id of resourceIds) {
-    const count = (store.get(storeKey(resourceType, id)) ?? []).length
-    if (count > 0) counts[id] = count
+export function updateDemoShare(
+  shareId: string,
+  permission: ShareRecordInfo['permission'],
+  expectedRevision: number,
+): ShareRecordInfo {
+  for (const [key, records] of store) {
+    const index = records.findIndex((record) => record.id === shareId)
+    if (index < 0) continue
+    const record = records[index]
+    if (record.revision !== expectedRevision) {
+      throw new Error('Die Freigabe wurde zwischenzeitlich geändert.')
+    }
+    const updated = {
+      ...record,
+      permission,
+      revision: record.revision + 1,
+    }
+    const next = [...records]
+    next[index] = updated
+    store.set(key, next)
+    return updated
   }
-  return counts
+  throw new Error('Freigabe nicht gefunden.')
 }
-
-/** Resources shared INTO the demo workspace (the "Mit mir geteilt" group). */
-export const demoSharedWithMe: SharedWithMeEntry[] = [
-  {
-    created_at: DEMO_TS,
-    granted_by_display_name: 'Bianca Brandt',
-    granted_by_sub: 'user-bianca',
-    permission: 'view',
-    resource_id: DEMO_SHARED_IN_RUN_ID,
-    resource_type: 'run',
-  },
-]

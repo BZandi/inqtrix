@@ -9,6 +9,7 @@ through the service, and the service derives the provider namespace.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -63,7 +64,7 @@ class AgentMemoryCandidate:
 
     candidate_id: str
     tenant_id: str
-    sub: str
+    user_id: uuid.UUID
     scope: str
     category: str
     content: str
@@ -82,7 +83,7 @@ class AgentFeedbackRecord:
 
     feedback_id: str
     tenant_id: str
-    sub: str
+    user_id: uuid.UUID
     run_id: str
     feedback: str
     reason: str = ""
@@ -154,12 +155,12 @@ class AgentMemoryCandidateStore(Protocol):
         """Persist a proposed memory candidate."""
 
     async def list_candidates(
-        self, *, tenant_id: str, sub: str, status: str | None = None
+        self, *, tenant_id: str, user_id: uuid.UUID, status: str | None = None
     ) -> list[AgentMemoryCandidate]:
         """List candidates for the caller subject."""
 
     async def get_candidate(
-        self, *, tenant_id: str, sub: str, candidate_id: str
+        self, *, tenant_id: str, user_id: uuid.UUID, candidate_id: str
     ) -> AgentMemoryCandidate:
         """Get one candidate for the caller subject."""
 
@@ -167,7 +168,7 @@ class AgentMemoryCandidateStore(Protocol):
         self,
         *,
         tenant_id: str,
-        sub: str,
+        user_id: uuid.UUID,
         candidate_id: str,
         status: str,
         content: str | None = None,
@@ -189,7 +190,7 @@ class AgentFeedbackStore(Protocol):
         self,
         *,
         tenant_id: str,
-        sub: str,
+        user_id: uuid.UUID,
         run_id: str | None = None,
         limit: int = 100,
     ) -> list[AgentFeedbackRecord]:

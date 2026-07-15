@@ -28,6 +28,7 @@ import secrets
 import signal
 import socket
 import threading
+import time
 
 from inqtrix.logging_config import configure_logging
 from inqtrix.providers import create_providers
@@ -39,12 +40,77 @@ from inqtrix.strategies import (
     create_default_strategies,
     resolve_claim_extract_model,
 )
+from inqtrix.sync_bridge import run_coro_sync
 from inqtrix.worker.indexing_loop import IndexingWorkerLoop
-from inqtrix.worker.loop import BaseWorkerLoop, WorkerLoop
+from inqtrix.worker.loop import (
+    BaseWorkerLoop,
+    WorkerClaimGuardError,
+    WorkerLoop,
+)
 
 log = logging.getLogger("inqtrix")
 
 _DRAIN_SECONDS = 90.0
+_DATABASE_CONTRACT_INTERVAL_SECONDS = 5.0
+
+
+class _DatabaseClaimGuard:
+    """Coalesce and latch the periodic PostgreSQL claim-safety probe.
+
+    Both run and indexing loops share one instance. The lock prevents two
+    concurrent probes, while a latched failure ensures the worker never
+    resumes claims after observing an unsafe role or schema revision.
+    """
+
+    def __init__(
+        self,
+        *,
+        database_url: str,
+        app_role: str,
+        login_policy: str,
+        interval_seconds: float = _DATABASE_CONTRACT_INTERVAL_SECONDS,
+    ) -> None:
+        self._database_url = database_url
+        self._app_role = app_role
+        self._login_policy = login_policy
+        self._interval_seconds = interval_seconds
+        self._lock = threading.Lock()
+        self._next_check = 0.0
+        self._failure: str | None = None
+
+    def __call__(self) -> None:
+        """Verify when due, or fail immediately after any prior violation."""
+        self._verify(force=False)
+
+    def verify_now(self) -> None:
+        """Verify immediately before a durable queue item may be claimed."""
+        self._verify(force=True)
+
+    def _verify(self, *, force: bool) -> None:
+        """Run the shared latched probe, optionally bypassing coalescing."""
+        from inqtrix.storage.runtime_contract import (
+            verify_database_url_runtime_contract,
+        )
+        from inqtrix.urls import sanitize_log_message
+
+        with self._lock:
+            if self._failure is not None:
+                raise WorkerClaimGuardError(self._failure)
+            now = time.monotonic()
+            if not force and now < self._next_check:
+                return
+            try:
+                run_coro_sync(
+                    verify_database_url_runtime_contract(
+                        self._database_url,
+                        app_role=self._app_role,
+                        login_policy=self._login_policy,
+                    )
+                )
+            except Exception as exc:
+                self._failure = sanitize_log_message(exc)
+                raise WorkerClaimGuardError(self._failure) from None
+            self._next_check = now + self._interval_seconds
 
 
 def main() -> None:
@@ -70,6 +136,25 @@ def main() -> None:
             "INQTRIX_STORAGE_BACKEND=postgres verlangt eine gesetzte "
             "INQTRIX_DATABASE_URL."
         )
+
+    database_claim_guard = _DatabaseClaimGuard(
+        database_url=settings.storage.database_url,
+        app_role=settings.storage.app_role,
+        login_policy=settings.storage.runtime_login_policy,
+    )
+    try:
+        database_claim_guard()
+    except Exception as exc:
+        from inqtrix.urls import sanitize_log_message
+
+        log.error(
+            "Worker database runtime contract failed before queue claims: %s",
+            sanitize_log_message(exc),
+        )
+        raise RuntimeError(
+            "Worker database runtime contract failed; the orchestrated "
+            "migration job must reach schema head before workers start."
+        ) from None
 
     worker_id = (
         f"{socket.gethostname()}-{os.getpid()}-{secrets.token_hex(4)}"
@@ -118,6 +203,9 @@ def main() -> None:
         # the API store; held inertly here — re-checking a per-user cap on
         # an already-admitted run would be the wrong layer.
         max_concurrent_per_user=settings.server.run_max_concurrent_per_user,
+        restrict_to_workspace_members=(
+            settings.sharing.restrict_to_workspace_members
+        ),
     )
     # The reindex consumer runs in the SAME process when knowledge is
     # enabled: its store claims rows itself (queue=None worker-claim
@@ -146,6 +234,9 @@ def main() -> None:
             ),
             history_limit=settings.knowledge.reindex_history_limit,
             worker_id=worker_id,
+            restrict_to_workspace_members=(
+                settings.sharing.restrict_to_workspace_members
+            ),
         )
         index_queue = ValkeyIndexingQueue(
             url=settings.queue.valkey_url, consumer=worker_id
@@ -177,11 +268,31 @@ def main() -> None:
         # shared platform engine loop-agnostic here (the API stays pooled).
         platform_persistence_null_pool=True,
     )
+    from inqtrix.storage.auth_postgres import PostgresUserDirectory
+    from inqtrix.storage.db import build_session_factory
+
+    user_lookup = PostgresUserDirectory(
+        session_factory=build_session_factory(
+            build_engine(settings.storage.database_url, null_pool=True)
+        ),
+        app_role=settings.storage.app_role,
+    )
+    indexing_authority = None
+    if container.knowledge_service is not None:
+        from inqtrix.services.execution_dependency_authority import (
+            CollectionEditAuthorizer,
+        )
+
+        indexing_authority = CollectionEditAuthorizer(
+            authorization=container.permission_service,
+            knowledge_service=container.knowledge_service,
+            user_lookup=user_lookup,
+        )
 
     # The worker has no auth provider, so the container's quota service
     # (gated on oidc) is never built here. Build it directly when quotas
-    # are enabled: the worker meters by the subject persisted on the job
-    # row, not by a live principal, so the auth-mode gate does not apply.
+    # are enabled: the worker meters by the canonical user UUID persisted on
+    # the job row, not by a live principal, so the auth-mode gate does not apply.
     # It records via the loop-agnostic NullPool store on the executor
     # thread (record_blocking) — never admits (admission stays in the API).
     quota_service = None
@@ -209,6 +320,9 @@ def main() -> None:
             heartbeat_seconds=settings.queue.worker_heartbeat_seconds,
             claim_idle_seconds=settings.queue.worker_claim_idle_seconds,
             quota_service=quota_service,
+            user_lookup=user_lookup,
+            dependency_authorizer=container.run_service.dependency_authorizer,
+            claim_guard=database_claim_guard,
         )
     ]
     if (
@@ -226,6 +340,8 @@ def main() -> None:
                 heartbeat_seconds=settings.queue.worker_heartbeat_seconds,
                 claim_idle_seconds=settings.queue.worker_claim_idle_seconds,
                 quota_service=quota_service,
+                authority=indexing_authority,
+                claim_guard=database_claim_guard,
             )
         )
     else:
@@ -238,6 +354,8 @@ def main() -> None:
         )
 
     stop_event = threading.Event()
+    loop_failure: list[BaseException] = []
+    failure_lock = threading.Lock()
 
     def _request_stop(signum: int, _frame: object) -> None:
         log.info("Worker %s: Signal %d empfangen.", worker_id, signum)
@@ -247,6 +365,22 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, _request_stop)
     signal.signal(signal.SIGINT, _request_stop)
+
+    def _run_claim_loop(active_loop: BaseWorkerLoop) -> None:
+        try:
+            active_loop.run_forever()
+        except BaseException as exc:
+            from inqtrix.urls import sanitize_log_message
+
+            with failure_lock:
+                loop_failure.append(exc)
+            log.error(
+                "Worker database/claim contract failed; stopping all claims: %s",
+                sanitize_log_message(exc),
+            )
+            for loop_to_stop in loops:
+                loop_to_stop.request_stop()
+            stop_event.set()
 
     log.info(
         "Inqtrix worker starting | worker_id=%s | loops=%d | concurrency=%d "
@@ -273,7 +407,8 @@ def main() -> None:
     )
     threads = [
         threading.Thread(
-            target=active_loop.run_forever,
+            target=_run_claim_loop,
+            args=(active_loop,),
             name=f"inqtrix-claim-{index}",
             daemon=True,
         )
@@ -295,6 +430,13 @@ def main() -> None:
     )
     if quota_service is not None:
         asyncio.run(quota_service.aclose())
+    if loop_failure and not drained:
+        os._exit(1)
+    if loop_failure:
+        raise RuntimeError(
+            "Worker claim contract failed; in-flight jobs were drained and "
+            "the process must be restarted after deployment repair."
+        ) from None
     if not drained:
         # Executor threads are non-daemon and would block interpreter
         # exit for up to the full job duration; the orchestrator's

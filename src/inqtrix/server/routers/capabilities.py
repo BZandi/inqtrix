@@ -103,6 +103,11 @@ def build_router(container: "AppContainer") -> APIRouter:
         kernel_available = "agent_kernel" in container.registry.ids()
         web_source_available = "web.search.instant" in capability_ids
         knowledge_source_available = "knowledge.search" in capability_ids
+        collaboration_service = container.editor_collaboration_service
+        collaboration_available = bool(
+            collaboration_service is not None
+            and await collaboration_service.service_available()
+        )
         payload = {
             "algorithms": registry.manifest(),
             "features": {
@@ -143,6 +148,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                     container.chat_history_service is not None
                     and container.chat_history_service.durable
                 ),
+                "collaboration": collaboration_available,
                 # Wave-1 agent capability tools are registered — the same
                 # curated registry the (later) deepagents and MCP adapters
                 # consume. On when at least one capability is wired.
@@ -161,6 +167,14 @@ def build_router(container: "AppContainer") -> APIRouter:
                 # checkpointer AND native tool calling) — frontends
                 # feature-detect mode=agent_kernel through this flag.
                 "agent_kernel": "agent_kernel" in container.registry.ids(),
+            },
+            "collaboration": {
+                "configured": collaboration_service is not None,
+                "service_available": collaboration_available,
+                "transport_path": "/collaboration",
+                "protocol_version": settings.collaboration.protocol_version,
+                "schema_version": settings.collaboration.schema_version,
+                "mode": "single_replica",
             },
             # Workspace-agent limits + vocabulary (M5): the desk reads
             # these instead of hardcoding, decision E16/E8.

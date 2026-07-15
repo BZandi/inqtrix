@@ -8,6 +8,7 @@ with defaults, and malformed files fail loudly.
 from __future__ import annotations
 
 import time
+import uuid
 
 import pytest
 
@@ -25,7 +26,7 @@ def _record() -> SkillRecord:
     return SkillRecord(
         id=new_skill_id(),
         tenant_id="default",
-        owner_sub="user-owner",
+        owner_user_id=uuid.uuid4(),
         label="sprechzettel",
         title="Sprechzettel",
         description="Kompakter Sprechzettel fuer Termine.",

@@ -18,7 +18,7 @@ one workspace) and never confers tenant-wide administrative power.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from fastapi import Request
 from starlette.responses import JSONResponse
@@ -41,7 +41,9 @@ AdminResolution = tuple[
 
 
 async def require_instance_admin(
-    provider: "OidcAuthProvider", request: Request
+    provider: "OidcAuthProvider",
+    request: Request,
+    principal_dependency: Callable[..., "Principal"] | None = None,
 ) -> AdminResolution:
     """Resolve a session principal and require instance admin.
 
@@ -50,6 +52,10 @@ async def require_instance_admin(
             local and ldap subclass the oidc provider). It must expose
             ``users``, ``sessions``, and ``build_principal_dependency()``.
         request: The incoming request to authenticate.
+        principal_dependency: Bound application dependency. Production routers
+            pass the principal-generation guard so stale browser tabs cannot
+            cross the instance-admin boundary. The provider fallback preserves
+            the direct helper contract for non-HTTP callers.
 
     Returns:
         ``((principal, session, mirror), None)`` for an authenticated
@@ -60,7 +66,9 @@ async def require_instance_admin(
     """
     users = getattr(provider, "users", None)
     sessions = getattr(provider, "sessions", None)
-    principal_dep = provider.build_principal_dependency()
+    principal_dep = (
+        principal_dependency or provider.build_principal_dependency()
+    )
     principal = await principal_dep(request)
     if principal.kind != "oidc_session" or not principal.session_id:
         return None, error_response(404, "Nicht gefunden", "not_found")
@@ -68,8 +76,8 @@ async def require_instance_admin(
     if session is None:
         return None, error_response(401, "Sitzung abgelaufen", "unauthorized")
     mirror = (
-        await users.find_user(
-            tenant_id=TENANT, issuer=session.issuer, subject=session.sub
+        await users.find_by_user_id(
+            tenant_id=TENANT, user_id=session.user_id
         )
         if users is not None
         else None
@@ -82,15 +90,15 @@ async def require_instance_admin(
         # An authenticated session that is not an active instance admin is an
         # authorization denial — make it operator-visible (Designprinzip 1),
         # restoring the visibility the old workspace-OWNER quota gate had via
-        # PermissionService._deny. The body stays 404 (not-403, no membership
+        # AuthorizationService._deny. The body stays 404 (not-403, no membership
         # oracle). A disabled admin loses the surface too: the disable cascade
         # purges sessions, but this closes the race where a request loaded its
         # session a hair before the purge landed. The pre-auth branches above
         # (no session / expired) are deliberately not logged: they are
         # high-volume authentication outcomes, not authorization denials.
         log.warning(
-            "instance-admin denied: sub=%s kind=%s reason=%s",
-            principal.sub,
+            "instance-admin denied: user_id=%s kind=%s reason=%s",
+            principal.user_id,
             principal.kind,
             "disabled"
             if mirror is not None and mirror.disabled_at is not None

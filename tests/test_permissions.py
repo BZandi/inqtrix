@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import logging
+import uuid
 
 import pytest
 
 from inqtrix.auth.identity_memory import MemoryIdentityStore
 from inqtrix.auth.permissions import (
-    PermissionService,
+    AuthorizationService,
     ResourceNotFound,
     SharePermission,
-    SubjectRef,
     WorkspaceNotFound,
     WorkspaceRole,
+    share_permissions_for_resource,
+    share_permissions_satisfying,
 )
 from inqtrix.auth.principal import ANONYMOUS_PRINCIPAL, STATIC_PRINCIPAL, Principal
 
@@ -23,20 +25,24 @@ SCOPED_KINDS = ("oidc_session", "pat")
 OIDC session (pins the exclusion set against an inclusion refactor)."""
 
 
+def user_id(name: str) -> uuid.UUID:
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"inqtrix-test:{name}")
+
+
 def oidc_principal(
-    sub: str, *, tenant_id: str = "default", kind: str = "oidc_session"
+    name: str, *, tenant_id: str = "default", kind: str = "oidc_session"
 ) -> Principal:
-    return Principal(sub=sub, kind=kind, tenant_id=tenant_id, role="member")
+    return Principal(
+        user_id=user_id(name), kind=kind, tenant_id=tenant_id, role="member"
+    )
 
 
 def make_service(store: MemoryIdentityStore | None = None) -> tuple[
-    PermissionService, MemoryIdentityStore
+    AuthorizationService, MemoryIdentityStore
 ]:
     identity = store or MemoryIdentityStore()
     return (
-        PermissionService(
-            members=identity, groups=identity, shares=identity, audit=identity
-        ),
+        AuthorizationService(members=identity, shares=identity, audit=identity),
         identity,
     )
 
@@ -54,9 +60,42 @@ def test_workspace_role_ordering_is_total_and_ascending():
 
 
 def test_share_permission_ordering_is_total_and_ascending():
-    assert SharePermission.MANAGE.at_least(SharePermission.VIEW)
-    assert SharePermission.EDIT.at_least(SharePermission.COMMENT)
+    assert SharePermission.EDIT.at_least(SharePermission.VIEW)
+    assert SharePermission.EDIT.at_least(SharePermission.SUGGEST)
+    assert SharePermission.SUGGEST.at_least(SharePermission.VIEW)
     assert not SharePermission.VIEW.at_least(SharePermission.EDIT)
+    assert not SharePermission.SUGGEST.at_least(SharePermission.EDIT)
+    assert not SharePermission.VIEW.at_least(SharePermission.SUGGEST)
+    assert SharePermission.VIEW.at_least(SharePermission.VIEW)
+
+
+def test_share_permission_policy_is_resource_specific() -> None:
+    assert share_permissions_for_resource("run") == (
+        SharePermission.VIEW,
+        SharePermission.EDIT,
+    )
+    assert share_permissions_for_resource("editor_document") == (
+        SharePermission.VIEW,
+        SharePermission.SUGGEST,
+        SharePermission.EDIT,
+    )
+    assert share_permissions_for_resource("file") == ()
+    assert share_permissions_satisfying(
+        "editor_document", SharePermission.VIEW
+    ) == (
+        SharePermission.VIEW,
+        SharePermission.SUGGEST,
+        SharePermission.EDIT,
+    )
+    assert share_permissions_satisfying(
+        "editor_document", SharePermission.SUGGEST
+    ) == (SharePermission.SUGGEST, SharePermission.EDIT)
+    assert share_permissions_satisfying(
+        "editor_document", SharePermission.EDIT
+    ) == (SharePermission.EDIT,)
+    assert share_permissions_satisfying(
+        "run", SharePermission.SUGGEST
+    ) == ()
 
 
 # ------------------------------------------------------------------ #
@@ -69,10 +108,24 @@ def test_share_permission_ordering_is_total_and_ascending():
 async def test_legacy_principals_resolve_to_no_scoping(principal):
     service, _ = make_service()
     assert await service.resolve_user_context(principal) is None
-    # Workspace checks and resource checks pass unconditionally.
+    # Workspace checks stay unscoped, but only ownerless legacy resources
+    # are visible. Owned multi-user data never becomes tenant-public.
     assert await service.resolve_workspace(principal, "ws_any") == "ws_any"
     assert await service.can(
-        principal, SharePermission.MANAGE, resource_type="report", resource_id="r1"
+        principal,
+        SharePermission.EDIT,
+        owner_user_id=None,
+        resource_tenant_id="default",
+        resource_type="prompt_template",
+        resource_id="r1",
+    )
+    assert not await service.can(
+        principal,
+        SharePermission.VIEW,
+        owner_user_id=user_id("owner"),
+        resource_tenant_id="default",
+        resource_type="prompt_template",
+        resource_id="r2",
     )
 
 
@@ -81,8 +134,7 @@ async def test_legacy_principals_resolve_to_no_scoping(principal):
 async def test_scoped_principal_resolves_memberships_server_side(kind):
     service, store = make_service()
     store.add_workspace("ws_a")
-    store.add_member("ws_a", "alice", WorkspaceRole.EDITOR)
-    store.add_group("g_legal", ["alice"])
+    store.add_member("ws_a", user_id("alice"), WorkspaceRole.EDITOR)
 
     context = await service.resolve_user_context(
         oidc_principal("alice", kind=kind)
@@ -90,7 +142,6 @@ async def test_scoped_principal_resolves_memberships_server_side(kind):
 
     assert context is not None
     assert context.workspace_ids == ("ws_a",)
-    assert context.groups == ("g_legal",)
 
 
 # ------------------------------------------------------------------ #
@@ -103,7 +154,7 @@ async def test_scoped_principal_resolves_memberships_server_side(kind):
 async def test_non_member_and_unknown_workspace_raise_identically(kind):
     service, store = make_service()
     store.add_workspace("ws_b")
-    store.add_member("ws_b", "bob", WorkspaceRole.OWNER)
+    store.add_member("ws_b", user_id("bob"), WorkspaceRole.OWNER)
     alice = oidc_principal("alice", kind=kind)
 
     with pytest.raises(WorkspaceNotFound):
@@ -116,7 +167,7 @@ async def test_non_member_and_unknown_workspace_raise_identically(kind):
 async def test_min_role_below_threshold_hides_the_workspace():
     service, store = make_service()
     store.add_workspace("ws_a")
-    store.add_member("ws_a", "alice", WorkspaceRole.VIEWER)
+    store.add_member("ws_a", user_id("alice"), WorkspaceRole.VIEWER)
     alice = oidc_principal("alice")
 
     assert await service.resolve_workspace(alice, "ws_a") == "ws_a"
@@ -130,7 +181,7 @@ async def test_min_role_below_threshold_hides_the_workspace():
 async def test_tenant_mismatch_hides_the_workspace():
     service, store = make_service()
     store.add_workspace("ws_a", tenant_id="tenant-x")
-    store.add_member("ws_a", "alice", WorkspaceRole.OWNER)
+    store.add_member("ws_a", user_id("alice"), WorkspaceRole.OWNER)
 
     with pytest.raises(WorkspaceNotFound):
         await service.resolve_workspace(
@@ -139,64 +190,141 @@ async def test_tenant_mismatch_hides_the_workspace():
 
 
 # ------------------------------------------------------------------ #
-# Grant union: workspace role vs direct share vs group share
+# Resource authority: owner or accepted direct share only
 # ------------------------------------------------------------------ #
 
 
 @pytest.mark.asyncio
-async def test_can_unions_role_share_and_group_grants_by_max_rank():
+async def test_workspace_role_never_implies_resource_access():
     service, store = make_service()
     store.add_workspace("ws_a")
-    store.add_member("ws_a", "alice", WorkspaceRole.VIEWER)
-    store.add_group("g_legal", ["alice"])
+    store.add_member("ws_a", user_id("alice"), WorkspaceRole.VIEWER)
     store.add_share(
-        subject_type="group",
-        subject_id="g_legal",
-        resource_type="report",
+        recipient_user_id=user_id("alice"),
+        resource_type="prompt_template",
         resource_id="r1",
         permission=SharePermission.EDIT,
+        granted_by_user_id=user_id("owner"),
     )
     alice = oidc_principal("alice")
 
-    # Workspace role alone: viewer -> view yes, edit no.
-    assert await service.can(
-        alice, SharePermission.VIEW,
-        resource_type="report", resource_id="r2", workspace_id="ws_a",
-    )
+    # Workspace membership is an administrative namespace, not a resource
+    # grant. Only ownership or the direct share below authorizes access.
     assert not await service.can(
-        alice, SharePermission.EDIT,
-        resource_type="report", resource_id="r2", workspace_id="ws_a",
+        alice,
+        SharePermission.VIEW,
+        owner_user_id=user_id("owner"),
+        resource_tenant_id="default",
+        resource_type="prompt_template",
+        resource_id="r2",
     )
-    # Group share lifts r1 to edit even though the role only views.
     assert await service.can(
-        alice, SharePermission.EDIT,
-        resource_type="report", resource_id="r1", workspace_id="ws_a",
-    )
-    # Nothing grants manage.
-    assert not await service.can(
-        alice, SharePermission.MANAGE,
-        resource_type="report", resource_id="r1", workspace_id="ws_a",
+        alice,
+        SharePermission.EDIT,
+        owner_user_id=user_id("owner"),
+        resource_tenant_id="default",
+        resource_type="prompt_template",
+        resource_id="r1",
     )
 
 
 @pytest.mark.asyncio
-async def test_direct_share_wins_when_higher_than_group_share():
+@pytest.mark.parametrize(
+    ("granted", "minimum", "allowed"),
+    [
+        (SharePermission.VIEW, SharePermission.VIEW, True),
+        (SharePermission.VIEW, SharePermission.SUGGEST, False),
+        (SharePermission.VIEW, SharePermission.EDIT, False),
+        (SharePermission.SUGGEST, SharePermission.VIEW, True),
+        (SharePermission.SUGGEST, SharePermission.SUGGEST, True),
+        (SharePermission.SUGGEST, SharePermission.EDIT, False),
+        (SharePermission.EDIT, SharePermission.VIEW, True),
+        (SharePermission.EDIT, SharePermission.SUGGEST, True),
+        (SharePermission.EDIT, SharePermission.EDIT, True),
+    ],
+)
+async def test_editor_document_share_access_follows_permission_order(
+    granted: SharePermission,
+    minimum: SharePermission,
+    allowed: bool,
+) -> None:
     service, store = make_service()
-    store.add_group("g", ["alice"])
     store.add_share(
-        subject_type="group", subject_id="g",
-        resource_type="file", resource_id="f1",
-        permission=SharePermission.VIEW,
-    )
-    store.add_share(
-        subject_type="user", subject_id="alice",
-        resource_type="file", resource_id="f1",
-        permission=SharePermission.MANAGE,
+        recipient_user_id=user_id("alice"),
+        resource_type="editor_document",
+        resource_id="ed_1",
+        permission=granted,
+        granted_by_user_id=user_id("owner"),
     )
 
+    assert (
+        await service.can(
+            oidc_principal("alice"),
+            minimum,
+            owner_user_id=user_id("owner"),
+            resource_tenant_id="default",
+            resource_type="editor_document",
+            resource_id="ed_1",
+        )
+        is allowed
+    )
+
+
+@pytest.mark.asyncio
+async def test_suggest_grant_on_legacy_resource_fails_closed() -> None:
+    service, store = make_service()
+    store.add_share(
+        recipient_user_id=user_id("alice"),
+        resource_type="run",
+        resource_id="run_1",
+        permission=SharePermission.SUGGEST,
+        granted_by_user_id=user_id("owner"),
+    )
+
+    assert not await service.can(
+        oidc_principal("alice"),
+        SharePermission.VIEW,
+        owner_user_id=user_id("owner"),
+        resource_tenant_id="default",
+        resource_type="run",
+        resource_id="run_1",
+    )
+
+
+def test_memory_share_lookup_rejects_permission_unsupported_by_resource() -> None:
+    store = MemoryIdentityStore()
+    alice_id = user_id("alice")
+    store.add_share(
+        recipient_user_id=alice_id,
+        resource_type="run",
+        resource_id="run_1",
+        permission=SharePermission.SUGGEST,
+        granted_by_user_id=user_id("owner"),
+    )
+
+    assert (
+        store.permission_for_sync(
+            tenant_id="default",
+            resource_type="run",
+            resource_id="run_1",
+            recipient_user_id=alice_id,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_shareable_resource_owner_access_is_unchanged() -> None:
+    service, _store = make_service()
+    alice = oidc_principal("alice")
+
     assert await service.can(
-        oidc_principal("alice"), SharePermission.MANAGE,
-        resource_type="file", resource_id="f1",
+        alice,
+        SharePermission.EDIT,
+        owner_user_id=alice.user_id,
+        resource_tenant_id="default",
+        resource_type="file",
+        resource_id="file_1",
     )
 
 
@@ -204,21 +332,32 @@ async def test_direct_share_wins_when_higher_than_group_share():
 async def test_revoked_share_stops_granting():
     service, store = make_service()
     store.add_share(
-        subject_type="user", subject_id="alice",
-        resource_type="file", resource_id="f1",
+        recipient_user_id=user_id("alice"),
+        resource_type="prompt_template", resource_id="p1",
         permission=SharePermission.EDIT,
+        granted_by_user_id=user_id("owner"),
     )
     alice = oidc_principal("alice")
     assert await service.can(
-        alice, SharePermission.EDIT, resource_type="file", resource_id="f1"
+        alice,
+        SharePermission.EDIT,
+        owner_user_id=user_id("owner"),
+        resource_tenant_id="default",
+        resource_type="prompt_template",
+        resource_id="p1",
     )
 
     store.revoke_share(
-        subject_type="user", subject_id="alice",
-        resource_type="file", resource_id="f1",
+        recipient_user_id=user_id("alice"),
+        resource_type="prompt_template", resource_id="p1",
     )
     assert not await service.can(
-        alice, SharePermission.EDIT, resource_type="file", resource_id="f1"
+        alice,
+        SharePermission.EDIT,
+        owner_user_id=user_id("owner"),
+        resource_tenant_id="default",
+        resource_type="prompt_template",
+        resource_id="p1",
     )
 
 
@@ -236,14 +375,16 @@ async def test_require_denial_raises_not_found_and_is_audited(caplog):
         with pytest.raises(ResourceNotFound):
             await service.require(
                 alice, SharePermission.VIEW,
-                resource_type="report", resource_id="r1",
+                owner_user_id=user_id("owner"),
+                resource_tenant_id="default",
+                resource_type="prompt_template", resource_id="r1",
             )
 
     assert any("authz denied" in message for message in caplog.messages)
     assert len(store.audit_entries) == 1
     entry = store.audit_entries[0]
     assert entry.action == "authz.denied"
-    assert entry.actor_sub == "alice"
+    assert entry.actor_user_id == user_id("alice")
     assert entry.resource_id == "r1"
     assert entry.detail == {"permission": "view"}
 
@@ -252,14 +393,17 @@ async def test_require_denial_raises_not_found_and_is_audited(caplog):
 async def test_require_passes_silently_when_granted():
     service, store = make_service()
     store.add_share(
-        subject_type="user", subject_id="alice",
-        resource_type="report", resource_id="r1",
+        recipient_user_id=user_id("alice"),
+        resource_type="prompt_template", resource_id="r1",
         permission=SharePermission.VIEW,
+        granted_by_user_id=user_id("owner"),
     )
 
     await service.require(
         oidc_principal("alice"), SharePermission.VIEW,
-        resource_type="report", resource_id="r1",
+        owner_user_id=user_id("owner"),
+        resource_tenant_id="default",
+        resource_type="prompt_template", resource_id="r1",
     )
     assert store.audit_entries == []
 
@@ -268,16 +412,19 @@ async def test_require_passes_silently_when_granted():
 async def test_shares_are_tenant_scoped():
     service, store = make_service()
     store.add_share(
-        subject_type="user", subject_id="alice",
-        resource_type="file", resource_id="f1",
-        permission=SharePermission.MANAGE,
+        recipient_user_id=user_id("alice"),
+        resource_type="skill_template", resource_id="s1",
+        permission=SharePermission.EDIT,
+        granted_by_user_id=user_id("owner"),
         tenant_id="tenant-x",
     )
 
     assert not await service.can(
         oidc_principal("alice", tenant_id="default"),
         SharePermission.VIEW,
-        resource_type="file", resource_id="f1",
+        owner_user_id=user_id("owner"),
+        resource_tenant_id="tenant-x",
+        resource_type="skill_template", resource_id="s1",
     )
 
 
@@ -319,35 +466,36 @@ def test_storage_settings_survive_serialization_round_trip():
 def test_add_member_to_unknown_workspace_fails_loudly():
     store = MemoryIdentityStore()
     with pytest.raises(KeyError, match="unknown workspace"):
-        store.add_member("ws_missing", "alice", WorkspaceRole.OWNER)
+        store.add_member("ws_missing", user_id("alice"), WorkspaceRole.OWNER)
 
 
 @pytest.mark.asyncio
-async def test_permission_for_with_no_subjects_is_none():
+async def test_permission_for_unknown_recipient_is_none():
     store = MemoryIdentityStore()
     assert (
         await store.permission_for(
             tenant_id="default",
-            resource_type="file",
-            resource_id="f1",
-            subjects=[],
+            resource_type="prompt_template",
+            resource_id="p1",
+            recipient_user_id=user_id("alice"),
         )
         is None
     )
 
 
 @pytest.mark.asyncio
-async def test_subject_ref_shape_matches_share_lookup():
+async def test_direct_user_id_shape_matches_share_lookup():
     store = MemoryIdentityStore()
     store.add_share(
-        subject_type="user", subject_id="alice",
-        resource_type="file", resource_id="f1",
-        permission=SharePermission.COMMENT,
+        recipient_user_id=user_id("alice"),
+        resource_type="prompt_template", resource_id="p1",
+        permission=SharePermission.VIEW,
+        granted_by_user_id=user_id("owner"),
     )
     grant = await store.permission_for(
         tenant_id="default",
-        resource_type="file",
-        resource_id="f1",
-        subjects=[SubjectRef(subject_type="user", subject_id="alice")],
+        resource_type="prompt_template",
+        resource_id="p1",
+        recipient_user_id=user_id("alice"),
     )
-    assert grant is SharePermission.COMMENT
+    assert grant is SharePermission.VIEW

@@ -8,23 +8,33 @@ short-lived event buffers for browser UIs.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import logging
 import threading
 import time
+import uuid
 from collections import deque
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from enum import StrEnum
 from queue import Queue
-from typing import TYPE_CHECKING, Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable
 
+from inqtrix.auth.memory_authority import (
+    MemoryAuthorityCoordinator,
+    MemoryResourceSnapshot,
+)
 from inqtrix.auth.permissions import SharePermission
+from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.exceptions import RunNotFound
+from inqtrix.execution_authority import AuthorizationRevoked
 from inqtrix.execution_failures import terminate_native_run
 from inqtrix.pagination import keyset_page
 from inqtrix.runs.ports import RunStoreMetrics
 from inqtrix.runs.shared import (
     CHILD_PROGRESS_EVENT,
+    TERMINAL_RUN_STATUS_VALUES,
     access_annotation,
     build_child_progress_payload,
     build_run_summary,
@@ -34,8 +44,6 @@ from inqtrix.runs.shared import (
 )
 from inqtrix.runtime_logging import new_run_id
 
-if TYPE_CHECKING:
-    from inqtrix.auth.principal import UserContext
 from inqtrix.settings import ServerSettings
 from inqtrix.text import iter_word_chunks
 from inqtrix.urls import sanitize_error
@@ -71,8 +79,10 @@ class RunStatus(StrEnum):
     EXPIRED = "expired"
 
 
+# Enum twin of the shared string set (shared.py may not import this layer);
+# deriving it here keeps the two representations from drifting.
 TERMINAL_RUN_STATUSES = frozenset(
-    {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}
+    RunStatus(value) for value in TERMINAL_RUN_STATUS_VALUES
 )
 
 WAITING_RUN_STATUSES = frozenset(
@@ -89,7 +99,7 @@ class RunQueueFull(RuntimeError):
 
 
 class RunPerUserLimit(RunQueueFull):
-    """Raised when the submitting subject hit its in-flight run cap.
+    """Raised when the submitting user hit their in-flight run cap.
 
     Subclass of :class:`RunQueueFull` so every existing 429 path keeps
     working; the router distinguishes it to tell the caller THEIR cap
@@ -126,15 +136,32 @@ class RunRecord:
     workspace_id: str | None
     created_at: float
     work: RunWork | None = field(repr=False)
-    created_by_sub: str | None = None
-    """Verified subject that submitted the run (authorization fact,
-    server-resolved from the principal — unlike ``workspace_id``,
-    which is the client-supplied UI namespace). ``None`` only for
-    records created before the field existed."""
+    created_by_user_id: uuid.UUID | None = None
+    """Canonical user UUID that owns the run.
+
+    The value is server-resolved from the principal, unlike ``workspace_id``,
+    which is the client-supplied UI namespace. ``None`` identifies an
+    ownerless run in an unscoped deployment.
+    """
     created_by_tenant_id: str | None = None
-    """Tenant of the submitting principal. Carried alongside the sub
-    because OIDC subjects are only unique per issuer/tenant — a sub
-    collision across tenants must never grant visibility."""
+    """Tenant of the submitting principal."""
+    execution_actor_user_id: uuid.UUID | None = None
+    """User whose current authority governs the next execution segment."""
+    execution_scopes: frozenset[str] = frozenset()
+    """Scope ceiling captured from the request that started the segment."""
+    request_payload: dict[str, Any] = field(default_factory=dict, repr=False)
+    """Persisted execution input used to restore immutable dependencies.
+
+    This mirrors the durable run row without exposing the payload through the
+    public run summary. Keeping the same source in both backends prevents
+    control-plane validation from deriving a second dependency scope.
+    """
+    source_run_id: str | None = None
+    """Client-local identity of an imported report.
+
+    It is an idempotency key inside the importing owner's scope, never the
+    public server run id. Native runs leave it ``None``.
+    """
     agent_overrides: dict[str, Any] = field(default_factory=dict)
     mode: str = "research"
     kind: str = "standard"
@@ -180,6 +207,17 @@ class RunRecord:
     events: deque[dict[str, Any]] = field(default_factory=deque, repr=False)
     subscribers: list[Queue] = field(default_factory=list, repr=False)
 
+    @property
+    def cancel_requested(self) -> bool:
+        """Whether a cancel is pending on a still-executing run.
+
+        Only RUNNING can carry a pending cancel: queued and waiting runs
+        cancel synchronously to a terminal state, and terminal runs must
+        not re-expose the flag. Mirrors the Postgres store's persisted
+        ``cancel_requested`` column so both backends summarize alike.
+        """
+        return self.status is RunStatus.RUNNING and self.cancel_event.is_set()
+
 
 @dataclass(frozen=True)
 class RunSubscription:
@@ -202,6 +240,7 @@ class RunHandle:
         self._store = store
         self.run_id = run_id
         self.cancel_event = cancel_event
+        self._external_authority_check: Callable[[], None] | None = None
         self.parked = False
         """This execution parked its run via :meth:`wait` — the worker
         loop reads it to skip the auto-complete safety net and to
@@ -209,7 +248,25 @@ class RunHandle:
 
     def emit(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
         """Emit one structured event for this run."""
+        self.check_execution_authority()
         self._store.emit(self.run_id, event_type, payload or {})
+
+    def effective_principal(
+        self, fallback: Principal | None
+    ) -> Principal | None:
+        """Return the actor persisted for this execution segment."""
+        return self._store.execution_principal(self.run_id, fallback=fallback)
+
+    def check_execution_authority(self) -> None:
+        """Fail when the segment actor no longer has edit authority."""
+        if self._external_authority_check is not None:
+            self._external_authority_check()
+            return
+        self._store.check_execution_authority(self.run_id)
+
+    def bind_authority_check(self, check: Callable[[], None]) -> None:
+        """Bind the worker's actor-status plus resource check."""
+        self._external_authority_check = check
 
     def emit_answer(self, answer: str) -> None:
         """Emit final answer text as word-aligned output delta events."""
@@ -295,6 +352,78 @@ class RunStore:
         self._pending: deque[str] = deque()
         self._running_count = 0
         self._lock = threading.RLock()
+        self._share_lookup: Callable[..., SharePermission | None] | None = None
+        self._share_workspace_check: Callable[..., bool] | None = None
+        self._resource_access_guard: Callable[..., Any] | None = None
+        self._restrict_share_workspaces = False
+        self._authority: MemoryAuthorityCoordinator | None = None
+
+    @property
+    def atomic_resource_effects(self) -> bool:
+        """Whether deletion handles share revocation and effects atomically."""
+        return self._authority is not None
+
+    def bind_authority_coordinator(
+        self, coordinator: MemoryAuthorityCoordinator
+    ) -> None:
+        """Join run records and direct-share state under one authority lock."""
+        self._authority = coordinator
+        self._lock = coordinator.lock
+        self._resource_access_guard = coordinator.resource_access_guard
+        coordinator.register_resource("run", self._resource_snapshot)
+
+    def _resource_snapshot(
+        self, tenant_id: str, resource_id: str
+    ) -> MemoryResourceSnapshot:
+        record = self._records.get(resource_id)
+        return MemoryResourceSnapshot(
+            exists=record is not None
+            and (record.created_by_tenant_id or "default") == tenant_id,
+            owner_user_id=(
+                record.created_by_user_id if record is not None else None
+            ),
+        )
+
+    def _append_run_effect_locked(
+        self,
+        record: RunRecord,
+        *,
+        action: str,
+        actor_user_id: uuid.UUID | None = None,
+    ) -> None:
+        if self._authority is None:
+            return
+        actor = (
+            actor_user_id
+            if actor_user_id is not None
+            else (
+                record.execution_actor_user_id
+                if record.execution_actor_user_id is not None
+                else record.created_by_user_id
+            )
+        )
+        self._authority.append_registered_resource_effects(
+            tenant_id=record.created_by_tenant_id or "default",
+            actor_user_id=actor,
+            action=action,
+            resource_type="run",
+            resource_id=record.run_id,
+            scope="runs",
+        )
+
+    def bind_authorization(
+        self,
+        *,
+        share_lookup: Callable[..., SharePermission | None],
+        share_workspace_check: Callable[..., bool],
+        resource_access_guard: Callable[..., Any],
+        restrict_to_workspace_members: bool,
+    ) -> None:
+        """Bind live direct-share reads after the composition root is ready."""
+        self._share_lookup = share_lookup
+        self._share_workspace_check = share_workspace_check
+        self._resource_access_guard = resource_access_guard
+        self._restrict_share_workspaces = restrict_to_workspace_members
 
     @classmethod
     def from_settings(cls, settings: ServerSettings) -> "RunStore":
@@ -316,8 +445,9 @@ class RunStore:
         agent_overrides: dict[str, Any] | None = None,
         mode: str = "research",
         workspace_id: str | None = None,
-        created_by_sub: str | None = None,
+        created_by_user_id: uuid.UUID | None = None,
         created_by_tenant_id: str | None = None,
+        execution_scopes: frozenset[str] = frozenset(),
         request_payload: dict[str, Any] | None = None,
         kind: str = "standard",
         parent_run_id: str | None = None,
@@ -329,9 +459,10 @@ class RunStore:
 
         Args:
             request_payload: Re-execution payload persisted by durable
-                backends so worker processes can rebuild the run from
-                the row alone. Deliberately ignored here — in-memory
-                execution keeps the work closure in-process.
+                backends so worker processes can rebuild the run from the row
+                alone. The memory backend retains the same detached payload
+                for control-plane dependency validation while execution keeps
+                the work closure in-process.
             kind: Run role in an agent tree (``standard`` default keeps
                 every historical caller byte-identical).
             parent_run_id: Spawning agent run for ``agent_child`` rows.
@@ -344,11 +475,13 @@ class RunStore:
         Raises:
             RunQueueFull: When the waiting queue is already full.
         """
+        stored_request_payload = deepcopy(request_payload or {})
         request_body = (
-            (request_payload or {}).get("body")
-            if isinstance(request_payload, dict)
+            stored_request_payload.get("body")
+            if isinstance(stored_request_payload, dict)
             else {}
         )
+        execution_actor_user_id = created_by_user_id
         parent_task_id = (
             str(request_body.get("parent_task_id") or "")
             if isinstance(request_body, dict)
@@ -359,8 +492,7 @@ class RunStore:
             if isinstance(request_body, dict)
             else 0
         )
-        del request_payload
-        with self._lock:
+        with self._lock, ExitStack() as authority_stack:
             self._cleanup_locked()
             if kind == "agent_child":
                 if not parent_run_id:
@@ -372,6 +504,13 @@ class RunStore:
                 root = self._records.get(canonical_root_id)
                 if root is None:
                     raise RunParentInactive("agent child root is missing")
+                if execution_actor_user_id != root.execution_actor_user_id:
+                    raise AuthorizationRevoked(
+                        "agent child admission lost root execution authority"
+                    )
+                authority_stack.enter_context(
+                    self._execution_authority_context_locked(root)
+                )
                 if origin_key:
                     existing = next(
                         (
@@ -399,6 +538,18 @@ class RunStore:
                     )
                 # The parent row, not a caller-provided value, owns lineage.
                 root_run_id = canonical_root_id
+                created_by_user_id = root.created_by_user_id
+                created_by_tenant_id = root.created_by_tenant_id
+                execution_actor_user_id = root.execution_actor_user_id
+                execution_scopes = root.execution_scopes
+                workspace_id = root.workspace_id
+            elif self._authority is not None:
+                authority_stack.enter_context(
+                    self._authority.creation_guard(
+                        tenant_id=created_by_tenant_id or "default",
+                        actor_user_id=created_by_user_id,
+                    )
+                )
             if kind == "agent" and parent_run_id is None and session_id:
                 active_statuses = {
                     RunStatus.QUEUED,
@@ -417,12 +568,13 @@ class RunStore:
                 raise RunQueueFull("native run queue is full")
             if (
                 self._max_concurrent_per_user is not None
-                and created_by_sub is not None
+                and execution_actor_user_id is not None
             ):
                 # Fairness bound UNDER the global cap: a recount over the
                 # (TTL-bounded) records, leak-free by construction and
                 # EXACT here (the whole submit holds self._lock, so two
-                # submits by one sub serialise — unlike the Postgres path,
+                # submits by one canonical actor serialize — unlike the
+                # Postgres path,
                 # which is an approximate bound under READ COMMITTED).
                 #
                 # What is COUNTED: QUEUED+RUNNING standard runs and agent
@@ -434,14 +586,13 @@ class RunStore:
                 # So one agent tree costs the user its children, not the
                 # orchestrator on top.
                 #
-                # Scope is created_by_sub only (not tenant): run storage
-                # is single-tenant today; the (sub, tenant) identity pair
-                # matters only for the reserved multi-tenant OIDC path,
-                # tracked for when it lands.
+                # Scope is the effective actor UUID only: run storage is
+                # single-tenant today; the row tenant remains the RLS boundary.
                 in_flight = sum(
                     1
                     for record in self._records.values()
-                    if record.created_by_sub == created_by_sub
+                    if record.execution_actor_user_id
+                    == execution_actor_user_id
                     and record.kind != "agent"
                     and record.status
                     in (RunStatus.QUEUED, RunStatus.RUNNING)
@@ -458,8 +609,11 @@ class RunStore:
                 stack_name=stack_name,
                 workspace_id=workspace_id,
                 created_at=time.time(),
-                created_by_sub=created_by_sub,
+                created_by_user_id=created_by_user_id,
                 created_by_tenant_id=created_by_tenant_id,
+                execution_actor_user_id=execution_actor_user_id,
+                execution_scopes=frozenset(execution_scopes),
+                request_payload=stored_request_payload,
                 work=work,
                 agent_overrides=dict(agent_overrides or {}),
                 mode=mode,
@@ -482,13 +636,14 @@ class RunStore:
                     "queue_position": self._queue_position_locked(run_id),
                 },
             )
+            self._append_run_effect_locked(record, action="run.created")
             self._dispatch_locked()
             return self._summary_locked(record)
 
     def import_completed_run(
         self,
         *,
-        run_id: str,
+        source_run_id: str,
         question: str,
         stack_name: str,
         result: dict[str, Any],
@@ -499,19 +654,17 @@ class RunStore:
         error: dict[str, Any] | None = None,
         created_at: float | None = None,
         workspace_id: str | None = None,
-        created_by_sub: str | None = None,
+        created_by_user_id: uuid.UUID | None = None,
         created_by_tenant_id: str | None = None,
     ) -> dict[str, Any]:
         """Persist an ALREADY-TERMINAL run carried in from a project file.
 
         Unlike :meth:`submit` (which queues a fresh run for execution), this
         stores a completed report snapshot directly so a loaded project's
-        reports survive a reload + follow the user, scoped to the caller. The
-        client-supplied ``run_id`` is kept when free so the local and server
-        records stay aligned (no remap); a re-import of the caller's OWN run is
-        an idempotent no-op (snapshots are immutable). If the id is already held
-        by ANOTHER principal, a fresh id is allocated rather than overwriting or
-        leaking that row (No Silent Fallbacks).
+        reports survive a reload + follow the user, scoped to the caller.
+        ``source_run_id`` is only an owner-scoped idempotency key. Every new
+        imported row receives a fresh server-generated ``run_id`` so retention
+        can never free a client id that later resurrects a stale run share.
 
         ``created_at`` keeps the report's ORIGINAL date for display + ordering,
         but ``finished_at`` is set to the import time so the durable-retention
@@ -528,31 +681,43 @@ class RunStore:
             raise ValueError(
                 f"import_completed_run requires a terminal status, got {status!r}"
             )
+        source_run_id = source_run_id.strip()
+        if not source_run_id:
+            raise ValueError("source_run_id must not be empty")
+        if len(source_run_id) > 255:
+            raise ValueError("source_run_id must not exceed 255 characters")
         now = time.time()
-        with self._lock:
+        creation_authority = (
+            self._authority.creation_guard(
+                tenant_id=created_by_tenant_id or "default",
+                actor_user_id=created_by_user_id,
+            )
+            if self._authority is not None
+            else nullcontext()
+        )
+        with self._lock, creation_authority:
             self._cleanup_locked()
-            existing = self._records.get(run_id)
-            if existing is not None and not (
-                existing.created_by_sub == created_by_sub
-                and existing.created_by_tenant_id == created_by_tenant_id
-            ):
-                log.warning(
-                    "Imported run id %s already owned by another principal; "
-                    "allocating a new id.",
-                    run_id,
-                )
-                run_id = self._new_unique_run_id_locked()
-                existing = None
+            existing = next(
+                (
+                    record
+                    for record in self._records.values()
+                    if record.source_run_id == source_run_id
+                    and record.created_by_user_id == created_by_user_id
+                ),
+                None,
+            )
             if existing is not None:
                 return self._summary_locked(existing)
+            run_id = self._new_unique_run_id_locked()
             record = RunRecord(
                 run_id=run_id,
                 question=question[:500],
                 stack_name=stack_name,
                 workspace_id=workspace_id,
                 created_at=created_at if created_at is not None else now,
-                created_by_sub=created_by_sub,
+                created_by_user_id=created_by_user_id,
                 created_by_tenant_id=created_by_tenant_id,
+                source_run_id=source_run_id,
                 work=None,
                 agent_overrides=dict(agent_overrides or {}),
                 mode=mode,
@@ -570,13 +735,27 @@ class RunStore:
             )
             record.error = dict(error) if error else None
             self._records[run_id] = record
+            self._append_run_effect_locked(record, action="run.imported")
             return self._summary_locked(record)
 
-    def owner_sub(self, run_id: str) -> str | None:
+    def owner_user_id(self, run_id: str) -> uuid.UUID | None:
         """The run's creator regardless of visibility (share layer)."""
         with self._lock:
             record = self._records.get(run_id)
-            return record.created_by_sub if record is not None else None
+            return record.created_by_user_id if record is not None else None
+
+    def execution_request_body(self, run_id: str) -> dict[str, Any]:
+        """Return a detached copy of the run's persisted request body."""
+        with self._lock:
+            record = self._records.get(run_id)
+            if record is None:
+                raise RunNotFound(run_id)
+            body = record.request_payload.get("body")
+            if body is None:
+                return {}
+            if not isinstance(body, dict):
+                raise RuntimeError("Persisted run request body is invalid.")
+            return deepcopy(body)
 
     def title(self, run_id: str) -> str | None:
         """The run's question as a share-surface title, regardless of
@@ -592,7 +771,6 @@ class RunStore:
         *,
         workspace_id: str | None = None,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ) -> dict[str, Any]:
         """Return a public summary for *run_id*."""
         with self._lock:
@@ -601,7 +779,6 @@ class RunStore:
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
             return self._summary_locked(record, shared=shared)
 
@@ -610,7 +787,6 @@ class RunStore:
         *,
         workspace_id: str | None = None,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ) -> list[dict[str, Any]]:
         """Return public summaries for all in-memory runs.
 
@@ -633,11 +809,7 @@ class RunStore:
                 ) and _visible_to_matches(record, visible_to):
                     summaries.append(self._summary_locked(record))
                     continue
-                shared = (
-                    also_visible.get(record.run_id)
-                    if also_visible is not None
-                    else None
-                )
+                shared = self._shared_permission_locked(record, visible_to)
                 if shared is not None:
                     summaries.append(
                         self._summary_locked(record, shared=shared)
@@ -668,12 +840,12 @@ class RunStore:
 
     def session_owners(
         self, session_id: str
-    ) -> set[tuple[str | None, str | None]]:
+    ) -> set[tuple[str | None, uuid.UUID | None]]:
         """Return every recorded owner identity for ``session_id``."""
         with self._lock:
             self._cleanup_locked()
             return {
-                (record.created_by_tenant_id, record.created_by_sub)
+                (record.created_by_tenant_id, record.created_by_user_id)
                 for record in self._records.values()
                 if record.session_id == session_id
             }
@@ -685,7 +857,6 @@ class RunStore:
         after: tuple[float, str] | None = None,
         workspace_id: str | None = None,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """One keyset page of visible runs + the next cursor (wire parity).
 
@@ -705,11 +876,7 @@ class RunStore:
                 ) and _visible_to_matches(record, visible_to):
                     visible.append((record, None))
                     continue
-                shared = (
-                    also_visible.get(record.run_id)
-                    if also_visible is not None
-                    else None
-                )
+                shared = self._shared_permission_locked(record, visible_to)
                 if shared is not None:
                     visible.append((record, shared))
             visible.sort(
@@ -744,7 +911,6 @@ class RunStore:
         *,
         workspace_id: str | None = None,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ) -> dict[str, Any]:
         """Return the stored result payload for a completed run."""
         with self._lock:
@@ -753,7 +919,6 @@ class RunStore:
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
             if record.result is None:
                 raise RunNotFound(run_id)
@@ -769,7 +934,6 @@ class RunStore:
         *,
         workspace_id: str | None = None,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ) -> dict[str, Any]:
         """Request cancellation for a queued or running run.
 
@@ -781,7 +945,6 @@ class RunStore:
             run_id,
             workspace_id=workspace_id,
             visible_to=visible_to,
-            also_visible=also_visible,
         )
         return summary
 
@@ -791,7 +954,6 @@ class RunStore:
         *,
         workspace_id: str | None = None,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ) -> tuple[dict[str, Any], tuple[str, ...]]:
         """Cancel one run tree and return ids touched under the store lock."""
         with self._lock:
@@ -800,33 +962,98 @@ class RunStore:
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
-            if shared is not None and not shared.at_least(
-                SharePermission.EDIT
-            ):
+            if shared is not None and not shared.at_least(SharePermission.EDIT):
                 raise RunNotFound(run_id)
-            summary = self._cancel_record_locked(record)
-            # Walk the actual parent links so nested Kernel -> Mission ->
-            # Research trees are cancelled as one unit. The store lock also
-            # serializes child admission against this traversal.
-            frontier = [run_id]
-            seen = {run_id}
-            affected = [run_id]
-            while frontier:
-                parent_id = frontier.pop()
-                children = [
-                    child
-                    for child in self._records.values()
-                    if child.parent_run_id == parent_id
-                    and child.run_id not in seen
-                ]
-                for child in children:
-                    seen.add(child.run_id)
-                    affected.append(child.run_id)
-                    frontier.append(child.run_id)
-                    self._cancel_record_locked(child)
-            return summary, tuple(affected)
+            try:
+                authority = (
+                    self._caller_control_authority_context_locked(
+                        record, visible_to
+                    )
+                    if visible_to is not None
+                    else self._execution_authority_context_locked(record)
+                )
+                with authority:
+                    result = self._cancel_tree_locked(record)
+                    self._append_run_effect_locked(
+                        record,
+                        action="run.cancel_requested",
+                        actor_user_id=(
+                            visible_to.principal.user_id
+                            if visible_to is not None
+                            else record.execution_actor_user_id
+                        ),
+                    )
+                    return result
+            except AuthorizationRevoked as exc:
+                raise RunNotFound(run_id) from exc
+
+    def authorized_control_write(
+        self,
+        run_id: str,
+        *,
+        workspace_id: str | None = None,
+        visible_to: "UserContext | None" = None,
+        control_write: Any,
+    ) -> Any:
+        """Apply one control-table write under the caller's live run grant.
+
+        The run lock and the bound identity guard remain held while the
+        callback updates the memory control store. Its ``cancel_child``
+        helper is deliberately limited to a direct child of ``run_id`` and
+        uses the already-authorized root; child runs inherit the root share
+        and never require a second, nonexistent share row.
+        """
+        with self._lock:
+            self._cleanup_locked()
+            record = self._records.get(run_id)
+            if record is None or not _workspace_matches(record, workspace_id):
+                raise RunNotFound(run_id)
+            try:
+                authority = self._caller_control_authority_context_locked(
+                    record, visible_to
+                )
+                with authority:
+
+                    def _cancel_child(child_run_id: str) -> str:
+                        child = self._records.get(child_run_id)
+                        if child is None or child.parent_run_id != run_id:
+                            raise RunNotFound(child_run_id)
+                        child_root = self._execution_root_locked(child)
+                        parent_root = self._execution_root_locked(record)
+                        if child_root.run_id != parent_root.run_id:
+                            raise RunNotFound(child_run_id)
+                        summary, _affected = self._cancel_tree_locked(child)
+                        return str(summary["status"])
+
+                    return control_write(None, _cancel_child)
+            except AuthorizationRevoked as exc:
+                raise RunNotFound(run_id) from exc
+
+    def _cancel_tree_locked(
+        self, record: RunRecord
+    ) -> tuple[dict[str, Any], tuple[str, ...]]:
+        """Cancel ``record`` and descendants while the store lock is held."""
+        summary = self._cancel_record_locked(record)
+        # Walk the actual parent links so nested Kernel -> Mission ->
+        # Research trees are cancelled as one unit. The store lock also
+        # serializes child admission against this traversal.
+        frontier = [record.run_id]
+        seen = {record.run_id}
+        affected = [record.run_id]
+        while frontier:
+            parent_id = frontier.pop()
+            children = [
+                child
+                for child in self._records.values()
+                if child.parent_run_id == parent_id and child.run_id not in seen
+            ]
+            for child in children:
+                seen.add(child.run_id)
+                affected.append(child.run_id)
+                frontier.append(child.run_id)
+                self._cancel_record_locked(child)
+        return summary, tuple(affected)
 
     def _cancel_record_locked(self, record: RunRecord) -> dict[str, Any]:
         """Cancel one record in place (queued/waiting/running semantics)."""
@@ -868,7 +1095,7 @@ class RunStore:
         run_id: str,
         *,
         workspace_id: str | None = None,
-        requester_sub: str | None = None,
+        requester_user_id: uuid.UUID | None = None,
     ) -> None:
         """Permanently remove one terminal run (owner-only).
 
@@ -887,24 +1114,51 @@ class RunStore:
                 raise RunNotFound(run_id)
             if (
                 (
-                    record.created_by_sub is not None
-                    and record.created_by_sub != requester_sub
+                    record.created_by_user_id is not None
+                    and record.created_by_user_id != requester_user_id
                 )
                 or not _workspace_matches(record, workspace_id)
             ):
                 # Owner-only for runs that HAVE a recorded creator; a legacy
-                # pre-scoping run (created_by_sub is None) has no owner signal
+                # pre-scoping run (created_by_user_id is None) has no owner signal
                 # but its workspace, so the namespace match alone gates it —
                 # otherwise such a run would be undeletable by anyone.
                 log.warning(
-                    "authz denied: run %s delete refused for sub=%s",
+                    "authz denied: run %s delete refused for user_id=%s",
                     run_id,
-                    requester_sub or "",
+                    requester_user_id or "",
                 )
                 raise RunNotFound(run_id)
             if record.status not in TERMINAL_RUN_STATUSES:
                 raise RunActive(run_id)
-            del self._records[run_id]
+            try:
+                authority = (
+                    self._authority.resource_access_guard(
+                        tenant_id=record.created_by_tenant_id or "default",
+                        owner_user_id=record.created_by_user_id,
+                        actor_user_id=requester_user_id,
+                        resource_type="run",
+                        resource_id=run_id,
+                        minimum=SharePermission.EDIT,
+                        owner_only=True,
+                    )
+                    if self._authority is not None
+                    else nullcontext()
+                )
+                with authority:
+                    if self._authority is not None:
+                        self._authority.revoke_deleted_resource(
+                            tenant_id=record.created_by_tenant_id or "default",
+                            actor_user_id=requester_user_id,
+                            owner_user_id=record.created_by_user_id,
+                            action="run.deleted",
+                            resource_type="run",
+                            resource_id=run_id,
+                            scope="runs",
+                        )
+                    del self._records[run_id]
+            except AuthorizationRevoked as exc:
+                raise RunNotFound(run_id) from exc
 
     def subscribe(
         self,
@@ -912,7 +1166,6 @@ class RunStore:
         *,
         workspace_id: str | None = None,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ) -> RunSubscription:
         """Subscribe to a run's event stream, replaying buffered events."""
         with self._lock:
@@ -921,7 +1174,6 @@ class RunStore:
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
             queue: Queue = Queue()
             record.subscribers.append(queue)
@@ -965,7 +1217,7 @@ class RunStore:
                 has no claim/reclaim to fence).
         """
         with self._lock:
-            record, _shared = self._record_locked(run_id)
+            record = self._raw_record_locked(run_id)
             if record.status in TERMINAL_RUN_STATUSES:
                 log.warning(
                     "Event %s fuer Run %s verworfen: der Lauf ist bereits "
@@ -976,7 +1228,8 @@ class RunStore:
                     record.status.value,
                 )
                 return
-            self._emit_locked(record, event_type, payload or {})
+            with self._execution_authority_context_locked(record):
+                self._emit_locked(record, event_type, payload or {})
 
     def complete(
         self,
@@ -993,24 +1246,29 @@ class RunStore:
                 ignored (see :meth:`mark_waiting`).
         """
         with self._lock:
-            record, _shared = self._record_locked(run_id)
+            record = self._raw_record_locked(run_id)
             if record.status in TERMINAL_RUN_STATUSES:
                 return
-            if snapshot:
-                record.snapshot = dict(snapshot)
-            record.result = dict(result)
-            self._mark_terminal_locked(record, RunStatus.COMPLETED)
-            metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
-            self._emit_locked(
-                record,
-                "inqtrix.run.completed",
-                {
-                    "status": "completed",
-                    "metrics": metrics,
-                    "result_url": f"/v1/runs/{run_id}/result",
-                    "snapshot": record.snapshot,
-                },
-            )
+            with self._execution_authority_context_locked(record):
+                if snapshot:
+                    record.snapshot = dict(snapshot)
+                record.result = dict(result)
+                self._mark_terminal_locked(record, RunStatus.COMPLETED)
+                metrics = (
+                    result.get("metrics")
+                    if isinstance(result.get("metrics"), dict)
+                    else {}
+                )
+                self._emit_locked(
+                    record,
+                    "inqtrix.run.completed",
+                    {
+                        "status": "completed",
+                        "metrics": metrics,
+                        "result_url": f"/v1/runs/{run_id}/result",
+                        "snapshot": record.snapshot,
+                    },
+                )
 
     def fail(
         self,
@@ -1027,19 +1285,21 @@ class RunStore:
                 ignored (see :meth:`mark_waiting`).
         """
         with self._lock:
-            record, _shared = self._record_locked(run_id)
+            record = self._raw_record_locked(run_id)
             if record.status in TERMINAL_RUN_STATUSES:
                 return
-            record.error = {
-                "message": sanitize_error(message),
-                "type": error_type,
-            }
-            self._mark_terminal_locked(record, RunStatus.FAILED)
-            self._emit_locked(
-                record,
-                "inqtrix.run.failed",
-                {"status": "failed", "error": record.error, "snapshot": record.snapshot},
-            )
+            if error_type == AuthorizationRevoked.code:
+                self._fail_record_locked(record, message, error_type)
+                return
+            try:
+                with self._execution_authority_context_locked(record):
+                    self._fail_record_locked(record, message, error_type)
+            except AuthorizationRevoked:
+                self._fail_record_locked(
+                    record,
+                    "Execution authority was revoked",
+                    AuthorizationRevoked.code,
+                )
 
     def mark_cancelled(
         self, run_id: str, *, reason: str, fence_attempt: int | None = None
@@ -1051,7 +1311,7 @@ class RunStore:
                 ignored (see :meth:`mark_waiting`).
         """
         with self._lock:
-            record, _shared = self._record_locked(run_id)
+            record = self._raw_record_locked(run_id)
             if record.status in TERMINAL_RUN_STATUSES:
                 return
             self._mark_terminal_locked(record, RunStatus.CANCELLED)
@@ -1060,6 +1320,29 @@ class RunStore:
                 "inqtrix.run.cancelled",
                 {"status": "cancelled", "reason": reason, "snapshot": record.snapshot},
             )
+
+    def _fail_record_locked(
+        self,
+        record: RunRecord,
+        message: str,
+        error_type: str,
+    ) -> None:
+        """Apply one trusted failed terminal transition under the run lock."""
+        record.result = None
+        record.error = {
+            "message": sanitize_error(message),
+            "type": error_type,
+        }
+        self._mark_terminal_locked(record, RunStatus.FAILED)
+        self._emit_locked(
+            record,
+            "inqtrix.run.failed",
+            {
+                "status": "failed",
+                "error": record.error,
+                "snapshot": record.snapshot,
+            },
+        )
 
     def mark_waiting(
         self,
@@ -1091,7 +1374,7 @@ class RunStore:
         if waiting not in WAITING_RUN_STATUSES:
             raise ValueError(f"not a waiting status: {status!r}")
         with self._lock:
-            record, _shared = self._record_locked(run_id)
+            record = self._raw_record_locked(run_id)
             if record.status is not RunStatus.RUNNING:
                 raise RunActive(
                     f"run {run_id} cannot wait from status {record.status.value}"
@@ -1112,23 +1395,31 @@ class RunStore:
                     },
                 )
                 return
-            record.status = waiting
-            record.waiting_since = time.time()
-            record.park_in_flight = True
-            self._emit_locked(
-                record,
-                "inqtrix.run.waiting",
-                {"status": waiting.value, "snapshot": record.snapshot},
-            )
-            if waiting is RunStatus.WAITING_FOR_CHILDREN:
-                # Lost-wakeup self-heal: the last child may have gone
-                # terminal BEFORE this park landed — its wake probe then
-                # found the parent still RUNNING and no-oped. Re-probe
-                # now; park_in_flight is set, so a hit defers the
-                # re-dispatch to the unwinding worker.
-                self._wake_parent_if_children_done_locked(run_id)
+            with self._execution_authority_context_locked(record):
+                record.status = waiting
+                record.waiting_since = time.time()
+                record.park_in_flight = True
+                self._emit_locked(
+                    record,
+                    "inqtrix.run.waiting",
+                    {"status": waiting.value, "snapshot": record.snapshot},
+                )
+                if waiting is RunStatus.WAITING_FOR_CHILDREN:
+                    # Lost-wakeup self-heal: the last child may have gone
+                    # terminal BEFORE this park landed — its wake probe then
+                    # found the parent still RUNNING and no-oped. Re-probe
+                    # now; park_in_flight is set, so a hit defers the
+                    # re-dispatch to the unwinding worker.
+                    self._wake_parent_if_children_done_locked(run_id)
 
-    def resume_run(self, run_id: str) -> dict[str, Any]:
+    def resume_run(
+        self,
+        run_id: str,
+        *,
+        actor_user_id: uuid.UUID | None = None,
+        execution_scopes: frozenset[str] = frozenset(),
+        control_write: Any = None,
+    ) -> dict[str, Any]:
         """Move a waiting run back to QUEUED and dispatch it.
 
         The decision endpoints (approval/clarification) call this after
@@ -1141,36 +1432,173 @@ class RunStore:
             RunActive: The run is not in a waiting status.
         """
         with self._lock:
-            record, _shared = self._record_locked(run_id)
-            if record.status not in WAITING_RUN_STATUSES:
-                raise RunActive(
-                    f"run {run_id} is not waiting (status {status_value(record.status)})"
+            record = self._records.get(run_id)
+            if record is None:
+                raise RunNotFound(run_id)
+            caller: UserContext | None = None
+            if actor_user_id is not None:
+                actor = Principal(
+                    user_id=actor_user_id,
+                    kind="oidc_session",
+                    tenant_id=record.created_by_tenant_id or "default",
+                    role="member",
+                    scopes=execution_scopes,
                 )
-            if record.work is None:
-                # In-memory closures never survive a process restart; a
-                # waiting record without work is unresumable and failing
-                # loudly beats a silent hang.
-                raise RunActive(f"run {run_id} has no retained work to resume")
-            record.status = RunStatus.QUEUED
-            record.waiting_since = None
-            if record.park_in_flight:
-                # The parking worker has not unwound yet: dispatching
-                # now would run the same closure on two threads. The
-                # unwind performs the deferred re-dispatch.
-                record.resume_requested = True
-            else:
-                self._pending.append(run_id)
-            self._emit_locked(
-                record,
-                "inqtrix.run.queued",
-                {
-                    "status": "queued",
-                    "queue_position": self._queue_position_locked(run_id),
-                    "resumed": True,
-                },
+                caller = UserContext(actor)
+            try:
+                authority = (
+                    self._caller_control_authority_context_locked(record, caller)
+                    if caller is not None
+                    else self._execution_authority_context_locked(record)
+                )
+                with authority:
+                    if record.status not in WAITING_RUN_STATUSES:
+                        raise RunActive(
+                            f"run {run_id} is not waiting "
+                            f"(status {status_value(record.status)})"
+                        )
+                    if record.work is None:
+                        # In-memory closures never survive a process restart;
+                        # fail before the composed decision writer can mutate.
+                        raise RunActive(
+                            f"run {run_id} has no retained work to resume"
+                        )
+                    if control_write is not None:
+                        # Memory lockstep for Postgres' resume transaction:
+                        # the callback updates the control store while every
+                        # reader, share mutation and user disable is excluded
+                        # by the same coordinator lock.
+                        control_write(None)
+                    if actor_user_id is not None:
+                        record.execution_actor_user_id = actor_user_id
+                        record.execution_scopes = frozenset(execution_scopes)
+                    record.status = RunStatus.QUEUED
+                    record.waiting_since = None
+                    if record.park_in_flight:
+                        # The parking worker has not unwound yet: dispatching
+                        # now would run the same closure on two threads. The
+                        # unwind performs the deferred re-dispatch.
+                        record.resume_requested = True
+                    else:
+                        self._pending.append(run_id)
+                    self._emit_locked(
+                        record,
+                        "inqtrix.run.queued",
+                        {
+                            "status": "queued",
+                            "queue_position": self._queue_position_locked(run_id),
+                            "resumed": True,
+                        },
+                    )
+                    self._dispatch_locked()
+                    return self._summary_locked(record)
+            except AuthorizationRevoked as exc:
+                raise RunNotFound(run_id) from exc
+
+    @contextmanager
+    def execution_control_guard(self, run_id: str):
+        """Hold the effective actor's live run authority through one write."""
+        with self._lock:
+            record = self._records.get(run_id)
+            if record is None:
+                raise AuthorizationRevoked("run is missing")
+            with self._execution_authority_context_locked(record):
+                yield
+
+    def execution_principal(
+        self,
+        run_id: str,
+        *,
+        fallback: Principal | None = None,
+    ) -> Principal | None:
+        """Reconstruct the actor governing the current segment."""
+        with self._lock:
+            record = self._records.get(run_id)
+            if record is None:
+                raise RunNotFound(run_id)
+            root = self._execution_root_locked(record)
+            if root.execution_actor_user_id is None:
+                return fallback
+            return Principal(
+                user_id=root.execution_actor_user_id,
+                kind="oidc_session",
+                tenant_id=root.created_by_tenant_id or "default",
+                role="member",
+                scopes=root.execution_scopes,
             )
-            self._dispatch_locked()
-            return self._summary_locked(record)
+
+    def _execution_root_locked(self, record: RunRecord) -> RunRecord:
+        """Return and validate the canonical root for one locked record."""
+        root_id = record.root_run_id or record.run_id
+        root = self._records.get(root_id)
+        if root is None:
+            raise AuthorizationRevoked("run root is missing")
+        if (
+            record.execution_actor_user_id != root.execution_actor_user_id
+            or record.created_by_user_id != root.created_by_user_id
+            or record.created_by_tenant_id != root.created_by_tenant_id
+        ):
+            raise AuthorizationRevoked(
+                "run lineage has inconsistent execution authority"
+            )
+        return root
+
+    def _execution_authority_context_locked(self, record: RunRecord):
+        """Hold live root authorization across one in-memory mutation."""
+        root = self._execution_root_locked(record)
+        actor_user_id = root.execution_actor_user_id
+        owner_user_id = root.created_by_user_id
+        if self._resource_access_guard is None:
+            if actor_user_id == owner_user_id:
+                return nullcontext()
+            raise AuthorizationRevoked(
+                "in-memory run store has no transactional share guard"
+            )
+        return self._resource_access_guard(
+            tenant_id=root.created_by_tenant_id or "default",
+            owner_user_id=owner_user_id,
+            actor_user_id=actor_user_id,
+            resource_type="run",
+            resource_id=root.run_id,
+            minimum=SharePermission.EDIT,
+        )
+
+    def _caller_control_authority_context_locked(
+        self,
+        record: RunRecord,
+        visible_to: "UserContext | None",
+    ) -> Any:
+        """Hold a caller's live edit grant across one control mutation."""
+        root = self._execution_root_locked(record)
+        principal = visible_to.principal if visible_to is not None else None
+        actor_user_id = principal.user_id if principal is not None else None
+        owner_user_id = root.created_by_user_id
+        tenant_id = root.created_by_tenant_id or "default"
+        if principal is not None and principal.tenant_id != tenant_id:
+            raise AuthorizationRevoked("control caller belongs to another tenant")
+        if self._resource_access_guard is None:
+            if actor_user_id == owner_user_id:
+                return nullcontext()
+            raise AuthorizationRevoked(
+                "in-memory run store has no transactional share guard"
+            )
+        return self._resource_access_guard(
+            tenant_id=tenant_id,
+            owner_user_id=owner_user_id,
+            actor_user_id=actor_user_id,
+            resource_type="run",
+            resource_id=root.run_id,
+            minimum=SharePermission.EDIT,
+        )
+
+    def check_execution_authority(self, run_id: str) -> None:
+        """Assert live edit authority for the persisted effective actor."""
+        with self._lock:
+            record = self._records.get(run_id)
+            if record is None:
+                raise AuthorizationRevoked("run is missing")
+            with self._execution_authority_context_locked(record):
+                return
 
     def children(self, run_id: str) -> list[dict[str, Any]]:
         """Summaries of this run's direct children, newest first.
@@ -1209,12 +1637,25 @@ class RunStore:
                     # case: a resume may have flipped the run back to
                     # QUEUED before this line — completing it here
                     # would destroy the interrupt.
-                    self._mark_terminal_locked(record, RunStatus.COMPLETED)
-                    self._emit_locked(
-                        record,
-                        "inqtrix.run.completed",
-                        {"status": "completed", "snapshot": record.snapshot},
-                    )
+                    try:
+                        with self._execution_authority_context_locked(record):
+                            self._mark_terminal_locked(
+                                record, RunStatus.COMPLETED
+                            )
+                            self._emit_locked(
+                                record,
+                                "inqtrix.run.completed",
+                                {
+                                    "status": "completed",
+                                    "snapshot": record.snapshot,
+                                },
+                            )
+                    except AuthorizationRevoked:
+                        self._fail_record_locked(
+                            record,
+                            "Execution authority was revoked",
+                            AuthorizationRevoked.code,
+                        )
         except Exception as exc:  # noqa: BLE001 - run workers must terminate cleanly
             crashed = True
             log.exception("Native run %s failed", run_id)
@@ -1317,6 +1758,17 @@ class RunStore:
             and not record.subscribers
         ]
         for run_id in expired:
+            record = self._records[run_id]
+            if self._authority is not None:
+                self._authority.revoke_deleted_resource(
+                    tenant_id=record.created_by_tenant_id or "default",
+                    actor_user_id=record.created_by_user_id,
+                    owner_user_id=record.created_by_user_id,
+                    action="run.retention_deleted",
+                    resource_type="run",
+                    resource_id=run_id,
+                    scope="runs",
+                )
             del self._records[run_id]
 
     def _record_locked(
@@ -1325,7 +1777,6 @@ class RunStore:
         *,
         workspace_id: str | None = None,
         visible_to: "UserContext | None" = None,
-        also_visible: "Mapping[str, SharePermission] | None" = None,
     ) -> tuple[RunRecord, "SharePermission | None"]:
         """The record plus the share grant that admitted it (if any).
 
@@ -1337,13 +1788,11 @@ class RunStore:
         record = self._records.get(run_id)
         if record is None:
             raise RunNotFound(run_id)
-        shared = (
-            also_visible.get(run_id) if also_visible is not None else None
-        )
         if _visible_to_matches(record, visible_to):
             if not _workspace_matches(record, workspace_id):
                 raise RunNotFound(run_id)
             return record, None
+        shared = self._shared_permission_locked(record, visible_to)
         if shared is not None:
             return record, shared
         # The client sees the indistinct 404; the denial itself must
@@ -1351,12 +1800,50 @@ class RunStore:
         # the audit log arrives with the durable run port — this
         # store is sync/threaded, the audit sink is async.
         log.warning(
-            "authz denied: run %s hidden from sub=%s tenant=%s",
+            "authz denied: run %s hidden from user_id=%s tenant=%s",
             run_id,
-            visible_to.principal.sub if visible_to else "",
+            visible_to.principal.user_id if visible_to else "",
             visible_to.principal.tenant_id if visible_to else "",
         )
         raise RunNotFound(run_id)
+
+    def _raw_record_locked(self, run_id: str) -> RunRecord:
+        """Return a record for store-internal lifecycle writes."""
+        record = self._records.get(run_id)
+        if record is None:
+            raise RunNotFound(run_id)
+        return record
+
+    def _shared_permission_locked(
+        self,
+        record: RunRecord,
+        visible_to: "UserContext | None",
+    ) -> SharePermission | None:
+        """Read the accepted direct share at the decision point."""
+        if (
+            visible_to is None
+            or self._share_lookup is None
+            or visible_to.principal.user_id is None
+            or record.created_by_user_id is None
+        ):
+            return None
+        principal = visible_to.principal
+        shared = self._share_lookup(
+            tenant_id=principal.tenant_id,
+            resource_type="run",
+            resource_id=record.run_id,
+            recipient_user_id=principal.user_id,
+        )
+        if shared is None:
+            return None
+        if self._restrict_share_workspaces:
+            if self._share_workspace_check is None or not self._share_workspace_check(
+                tenant_id=principal.tenant_id,
+                user_id_a=record.created_by_user_id,
+                user_id_b=principal.user_id,
+            ):
+                return None
+        return shared
 
     def _new_unique_run_id_locked(self) -> str:
         for _ in range(8):
@@ -1434,7 +1921,9 @@ class RunStore:
         return build_run_summary(
             record,
             queue_position=self._queue_position_locked(record.run_id),
-            access=access_annotation(shared),
+            access=access_annotation(
+                shared, owner_user_id=record.created_by_user_id
+            ),
         )
 
     def _emit_locked(
@@ -1535,22 +2024,17 @@ def _workspace_matches(record: RunRecord, workspace_id: str | None) -> bool:
 def _visible_to_matches(record: RunRecord, visible_to: "UserContext | None") -> bool:
     """Authorization visibility predicate for one run record.
 
-    ``None`` means "no scoping" — the legacy anonymous/static
-    principals see every run, preserving single-tenant behaviour
-    bit-for-bit (the :class:`~inqtrix.auth.permissions.PermissionService`
-    yields ``None`` exactly for those). A scoped principal only sees
-    runs it created, matched on (tenant, sub) — sub alone is only
-    unique per issuer, so a cross-tenant sub collision must not grant
-    visibility. Pre-scoping records (``created_by_sub is None``) stay
-    invisible to scoped principals rather than leaking across users.
-    Workspace-shared run visibility arrives with the content/sharing
-    layer — creator-only is the deliberately conservative v1 rule.
+    ``None`` is an anonymous/static principal and may see only ownerless rows.
+    A scoped principal sees runs owned by its canonical UUID in the same
+    tenant. Ownerless records stay invisible to scoped principals rather than
+    leaking across users. Shared access is resolved by the authorization
+    layer, not by broadening this owner predicate.
     """
     if visible_to is None:
-        return True
+        return record.created_by_user_id is None
     return (
-        record.created_by_sub is not None
-        and record.created_by_sub == visible_to.principal.sub
+        record.created_by_user_id is not None
+        and record.created_by_user_id == visible_to.principal.user_id
         and record.created_by_tenant_id == visible_to.principal.tenant_id
     )
 

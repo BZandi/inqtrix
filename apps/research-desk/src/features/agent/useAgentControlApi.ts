@@ -26,7 +26,11 @@ import type {
   AgentClarificationAnswerRequest,
   AgentTaskResultWire,
 } from './types'
-import { TERMINAL_AGENT_TASK_STATUSES, type AgentRunRecord } from './model'
+import {
+  TERMINAL_AGENT_TASK_STATUSES,
+  canEditAgentRun,
+  type AgentRunRecord,
+} from './model'
 
 export type ArtifactSaveResult =
   | { kind: 'saved'; revision: number }
@@ -63,6 +67,11 @@ export function useAgentControlApi({
   runsRef.current = runs
   const enabledRef = useRef(enabled)
   enabledRef.current = enabled
+  const requireEditableRun = useCallback((runId: string) => {
+    if (!canEditAgentRun(runsRef.current[runId])) {
+      throw new Error('Shared view-only agent runs are read-only.')
+    }
+  }, [])
   // Cache entries remember the live attempt they were fetched under so a
   // re-run of the SAME terminal status still invalidates (see loadTaskResult).
   const taskResultCacheRef = useRef(
@@ -206,6 +215,7 @@ export function useAgentControlApi({
       approvalId: string,
       decision: AgentApprovalDecisionRequest,
     ) => {
+      requireEditableRun(runId)
       const result = await decideAgentRunApproval(
         runId,
         approvalId,
@@ -238,7 +248,7 @@ export function useAgentControlApi({
       // seeding the fresh row keeps the card responsive meanwhile.
       return approval
     },
-    [dispatch],
+    [dispatch, requireEditableRun],
   )
 
   const answerClarification = useCallback(
@@ -247,6 +257,7 @@ export function useAgentControlApi({
       clarificationId: string,
       answer: AgentClarificationAnswerRequest,
     ) => {
+      requireEditableRun(runId)
       const result = await answerAgentRunClarification(
         runId,
         clarificationId,
@@ -262,7 +273,7 @@ export function useAgentControlApi({
       })
       return clarification
     },
-    [dispatch],
+    [dispatch, requireEditableRun],
   )
 
   const loadArtifact = useCallback(
@@ -356,6 +367,7 @@ export function useAgentControlApi({
 
   const cancelTask = useCallback(
     async (runId: string, taskId: string) => {
+      requireEditableRun(runId)
       const result = await cancelAgentRunTask(
         runId,
         taskId,
@@ -385,7 +397,7 @@ export function useAgentControlApi({
       }
       return result
     },
-    [dispatch],
+    [dispatch, requireEditableRun],
   )
 
   const saveArtifact = useCallback(
@@ -395,6 +407,7 @@ export function useAgentControlApi({
       contentMarkdown: string,
       expectedRevision: number,
     ): Promise<ArtifactSaveResult> => {
+      requireEditableRun(runId)
       try {
         const result = await updateAgentRunArtifact(
           runId,
@@ -421,7 +434,7 @@ export function useAgentControlApi({
         throw error
       }
     },
-    [loadArtifact],
+    [loadArtifact, requireEditableRun],
   )
 
   const exportArtifact = useCallback(
@@ -445,6 +458,7 @@ export function useAgentControlApi({
       | { kind: 'applied'; revision: number; appliedEditIds: string[] }
       | { kind: 'conflict'; currentRevision: number | null }
     > => {
+      requireEditableRun(runId)
       const refreshAfterApply = async () => {
         const patch = await getEditorPatch(patchId, optionsRef.current)
         dispatch({ patch, runId, type: 'setAgentRunPatch' })
@@ -500,11 +514,12 @@ export function useAgentControlApi({
         throw error
       }
     },
-    [dispatch],
+    [dispatch, requireEditableRun],
   )
 
   const rejectPatch = useCallback(
     async (runId: string, patchId: string, note: string) => {
+      requireEditableRun(runId)
       const patch = await rejectEditorPatch(
         patchId,
         note,
@@ -513,7 +528,7 @@ export function useAgentControlApi({
       dispatch({ patch, runId, type: 'setAgentRunPatch' })
       return patch
     },
-    [dispatch],
+    [dispatch, requireEditableRun],
   )
 
   return {

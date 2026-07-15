@@ -18,7 +18,71 @@ from __future__ import annotations
 
 from alembic import op
 
-from inqtrix.storage.editor_patch_orm import editor_patch_metadata
+# Frozen schema snapshot from the deployed revision. Historical migrations
+# must never import the live ORM because later authority changes would alter
+# the schema produced by a fresh traversal.
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    Float,
+    Index,
+    Integer,
+    MetaData,
+    Table,
+    Text,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSON
+
+PATCH_SOURCES = ("suggest", "instruct", "agent")
+PATCH_STATUSES = ("pending", "accepted", "rejected")
+
+editor_patch_metadata = MetaData()
+
+
+def _values(options: tuple[str, ...]) -> str:
+    return ", ".join(f"'{value}'" for value in options)
+
+
+editor_patches = Table(
+    "editor_patches",
+    editor_patch_metadata,
+    Column("patch_id", Text, primary_key=True),
+    Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
+    # Both FKs (document_id -> editor_documents(id) ON DELETE CASCADE,
+    # run_id -> runs(run_id) ON DELETE SET NULL) are raw DDL in migration
+    # 0031 — the parents live in other MetaData snapshots (module docstring).
+    Column("document_id", Text, nullable=False),
+    Column("run_id", Text, nullable=True),
+    Column("source", Text, nullable=False),
+    Column("status", Text, nullable=False, server_default=text("'pending'")),
+    Column("edits", JSON, nullable=False, server_default=text("'[]'")),
+    Column("summary", Text, nullable=False, server_default=text("''")),
+    Column("warnings", JSON, nullable=False, server_default=text("'[]'")),
+    Column("revision_before", Integer, nullable=False),
+    Column("applied_revision", Integer, nullable=True),
+    Column("applied_edit_ids", JSON, nullable=True),
+    Column("note", Text, nullable=False, server_default=text("''")),
+    Column("created_by_sub", Text, nullable=True),
+    Column("created_at", Float, nullable=False),
+    Column("decided_at", Float, nullable=True),
+    CheckConstraint(
+        f"source IN ({_values(PATCH_SOURCES)})", name="ck_editor_patches_source"
+    ),
+    CheckConstraint(
+        f"status IN ({_values(PATCH_STATUSES)})", name="ck_editor_patches_status"
+    ),
+    Index(
+        "ix_editor_patches_tenant_document",
+        "tenant_id",
+        "document_id",
+        "created_at",
+        "patch_id",
+    ),
+)
+"""Proposed anchored document edits with their apply/reject lifecycle;
+the ``pending -> accepted/rejected`` CAS happens in the store's mark
+writes."""
 
 revision = "0031_editor_patches"
 down_revision = "0030_agent_control"

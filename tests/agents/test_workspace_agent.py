@@ -422,6 +422,7 @@ def submit_agent(
     *,
     autonomy: str | None = None,
     session_id: str | None = None,
+    knowledge_filters: dict[str, Any] | None = None,
     source_policy: dict[str, str] | None = None,
     tool_directives: list[str] | None = None,
     agent_overrides: dict[str, Any] | None = None,
@@ -434,6 +435,8 @@ def submit_agent(
         body["autonomy"] = autonomy
     if session_id:
         body["session_id"] = session_id
+    if knowledge_filters is not None:
+        body["knowledge_filters"] = knowledge_filters
     if source_policy is not None:
         body["source_policy"] = source_policy
     if tool_directives is not None:
@@ -1514,6 +1517,96 @@ def test_ambiguous_assignment_asks_before_any_probe(monkeypatch):
         wait_status(client, run_id, {"waiting_for_approval"})
         approve_pending(client, run_id)
         wait_status(client, run_id, {"completed"})
+
+
+def test_collection_shared_during_clarification_cannot_expand_run_scope(
+    monkeypatch,
+):
+    """A resumed run keeps the empty collection set admitted at submission."""
+
+    class MutableKnowledge:
+        def __init__(self) -> None:
+            self.collections: list[SimpleNamespace] = []
+            self.list_calls = 0
+
+        async def list_collections(self, **_kwargs: Any) -> list[SimpleNamespace]:
+            self.list_calls += 1
+            return list(self.collections)
+
+        async def assert_collections_visible(
+            self, _collection_ids: list[str], **_kwargs: Any
+        ) -> None:
+            return None
+
+    late_collection_plan = {
+        "summary_markdown": "Eine neue Sammlung auswerten.",
+        "tasks": [
+            {
+                "id": "late",
+                "title": "Spaet geteilte Sammlung auswerten",
+                "tool_kind": "rag_query",
+                "gap_ids": ["g1"],
+                "objective": "Interne Befunde pruefen.",
+                "queries": ["Welche internen Befunde liegen vor?"],
+                "params": {"collection_ids": ["kc_late"]},
+            },
+            {
+                "id": "s",
+                "title": "Synthese",
+                "tool_kind": "synthesis",
+                "depends_on": ["late"],
+            },
+        ],
+    }
+    llm = ScriptedLLM(
+        overrides={
+            "AssignmentProfile": {
+                **PROFILE,
+                "scope_clarity": "ambiguous",
+                "clarification_questions": [
+                    {
+                        "prompt": "Welcher Markt?",
+                        "options": [],
+                        "multi_select": False,
+                    }
+                ],
+            },
+            "ExecutionPlanModel": late_collection_plan,
+        }
+    )
+    knowledge = MutableKnowledge()
+    client = make_agent_client(monkeypatch, llm=llm)
+    client.container.registry.get("workspace_agent")._knowledge = knowledge
+
+    with client:
+        run_id = submit_agent(
+            client,
+            knowledge_filters={"collection_ids": []},
+        )
+        wait_status(client, run_id, {"waiting_for_input"})
+
+        knowledge.collections = [
+            SimpleNamespace(
+                id="kc_late",
+                name="Later share",
+                embedding_model="emb-1",
+                document_count=1,
+            )
+        ]
+        clarification = client.get(
+            f"/v1/runs/{run_id}/clarifications"
+        ).json()["data"][0]
+        answered = client.post(
+            f"/v1/runs/{run_id}/clarifications/"
+            f"{clarification['clarification_id']}",
+            json={"answer": "Europa"},
+        )
+        assert answered.status_code == 200
+        summary = wait_status(client, run_id, {"failed"})
+
+    assert "plan_invalid" in summary["error"]["message"]
+    assert "kc_late" in summary["error"]["message"]
+    assert knowledge.list_calls == 0
 
 
 def test_structured_round_answer_maps_options(monkeypatch):

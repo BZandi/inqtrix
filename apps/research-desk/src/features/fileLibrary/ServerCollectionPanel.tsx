@@ -1,0 +1,375 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { FileText, Plus, RotateCcw, Users, XCircle } from '@/components/icons'
+import { Button } from '@/components/ui/button'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import {
+  deleteKnowledgeCollection,
+  deleteKnowledgeDocument,
+  listKnowledgeDocuments,
+} from '@/api/inqtrixClient'
+import type {
+  FileAssetRecord,
+  FileGroupRecord,
+  FileLibrarySectionRecord,
+} from '@/features/project/types'
+import type {
+  KnowledgeCollectionInfo,
+  KnowledgeDocumentInfo,
+} from '@/features/researchRuns/types'
+import { useLocale } from '@/i18n/LocaleProvider'
+import { AddDocsPanel } from './AddDocsPanel'
+import { ConfirmDelete } from './controls'
+import {
+  ingestAssetsIntoKnowledgeCollection,
+  type KnowledgeSyncOptions,
+} from './knowledgeSync'
+
+export type ServerCollectionJobState = {
+  completedDocuments: number
+  currentDocumentTitle?: string
+  error?: string
+  jobId: string
+  status: 'cancelling' | 'error' | 'queued' | 'running'
+  totalDocuments: number
+}
+
+type ServerCollectionPanelProps = {
+  assets: FileAssetRecord[]
+  collection: KnowledgeCollectionInfo
+  ensureAssetBodiesLoaded?: (assetIds: readonly string[]) => Promise<Map<string, string>>
+  groups: FileGroupRecord[]
+  job: ServerCollectionJobState | null
+  knowledgeSync: KnowledgeSyncOptions
+  onAssetReparsed: (assetId: string, text: string) => void
+  onCancelReindex: (jobId: string) => Promise<void>
+  onCollectionDeleted: () => void
+  onCollectionMutated: () => void
+  onShare?: (collection: KnowledgeCollectionInfo) => void
+  onStartReindex: (collectionId: string) => Promise<void>
+  query?: string
+  refreshToken?: number
+  sections: FileLibrarySectionRecord[]
+}
+
+/** Canonical server collection view. Accepted shares stay server objects: the
+ * recipient never gets a synthetic local VectorIndex that could drift from
+ * access, documents, or maintenance state. */
+export function ServerCollectionPanel({
+  assets,
+  collection,
+  ensureAssetBodiesLoaded,
+  groups,
+  job,
+  knowledgeSync,
+  onAssetReparsed,
+  onCancelReindex,
+  onCollectionDeleted,
+  onCollectionMutated,
+  onShare,
+  onStartReindex,
+  query = '',
+  refreshToken = 0,
+  sections,
+}: ServerCollectionPanelProps) {
+  const { t } = useLocale()
+  const [documents, setDocuments] = useState<KnowledgeDocumentInfo[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [adding, setAdding] = useState(false)
+  const [mutating, setMutating] = useState(false)
+  const generationRef = useRef(0)
+
+  const loadDocuments = useCallback(async () => {
+    const generation = ++generationRef.current
+    setLoading(true)
+    try {
+      const incoming: KnowledgeDocumentInfo[] = []
+      let cursor: string | undefined
+      do {
+        const page = await listKnowledgeDocuments(collection.id, {
+          ...knowledgeSync,
+          cursor,
+          limit: 100,
+        })
+        incoming.push(...page.data)
+        cursor = page.next_cursor ?? undefined
+      } while (cursor)
+      if (generation !== generationRef.current) return
+      setDocuments(incoming)
+      setError(null)
+    } catch (cause) {
+      if (generation !== generationRef.current) return
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      if (generation === generationRef.current) setLoading(false)
+    }
+  }, [collection.id, knowledgeSync])
+
+  useEffect(() => {
+    void loadDocuments()
+    return () => {
+      generationRef.current += 1
+    }
+  }, [loadDocuments, refreshToken])
+
+  const owner = collection.access.mode === 'owner'
+  const editable = owner
+    || (collection.access.mode === 'shared' && collection.access.permission === 'edit')
+  const memberIds = useMemo(() => new Set(
+    documents
+      .map((document) => document.metadata.fileId)
+      .filter((value): value is string => typeof value === 'string'),
+  ), [documents])
+  const activeJob = job?.status === 'error' ? null : job
+  const normalizedQuery = query.trim().toLocaleLowerCase()
+  const visibleDocuments = useMemo(
+    () => normalizedQuery.length === 0
+      ? documents
+      : documents.filter((document) => document.title.toLocaleLowerCase().includes(normalizedQuery)),
+    [documents, normalizedQuery],
+  )
+
+  const startReindex = async () => {
+    setError(null)
+    try {
+      await onStartReindex(collection.id)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
+  const cancelReindex = async () => {
+    if (!activeJob) return
+    try {
+      await onCancelReindex(activeJob.jobId)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
+  const addAssets = async (assetIds: string[]) => {
+    if (!editable || mutating) return
+    setMutating(true)
+    setError(null)
+    let ingestStarted = false
+    try {
+      const selected = assetIds
+        .map((assetId) => assets.find((asset) => asset.id === assetId))
+        .filter((asset): asset is FileAssetRecord => asset !== undefined)
+      const bodies = ensureAssetBodiesLoaded
+        ? await ensureAssetBodiesLoaded(selected.map((asset) => asset.id))
+        : null
+      const resolved = bodies
+        ? selected.map((asset) => ({
+            ...asset,
+            extractedText: bodies.get(asset.id) ?? asset.extractedText,
+          }))
+        : selected
+      ingestStarted = true
+      const result = await ingestAssetsIntoKnowledgeCollection(
+        collection.id,
+        resolved,
+        knowledgeSync,
+      )
+      for (const item of result.reparsed) onAssetReparsed(item.assetId, item.text)
+      setAdding(false)
+      await loadDocuments()
+      onCollectionMutated()
+      if (result.skippedFiles.length > 0) {
+        setError(t.vectorIndex.serverSkippedDocuments.replace(
+          '{names}',
+          result.skippedFiles.join(', '),
+        ))
+      }
+    } catch (cause) {
+      // Ingest is intentionally per document. If a later document fails, the
+      // earlier writes are already authoritative; refresh instead of leaving
+      // the panel looking as if the whole batch rolled back.
+      if (ingestStarted) {
+        await loadDocuments()
+        onCollectionMutated()
+      }
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setMutating(false)
+    }
+  }
+
+  const removeDocument = async (documentId: string) => {
+    if (!editable || mutating) return
+    setMutating(true)
+    try {
+      await deleteKnowledgeDocument(documentId, knowledgeSync)
+      await loadDocuments()
+      onCollectionMutated()
+      setError(null)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setMutating(false)
+    }
+  }
+
+  const removeCollection = async () => {
+    if (!owner || mutating) return
+    setMutating(true)
+    try {
+      await deleteKnowledgeCollection(collection.id, knowledgeSync)
+      onCollectionDeleted()
+      onCollectionMutated()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+      setMutating(false)
+    }
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="shrink-0 px-4 pt-0.5 md:px-6">
+        <div className="rounded-lg border border-border bg-card p-3.5 shadow-[0_1px_2px_var(--shadow-hairline)]">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="grid size-10 shrink-0 place-items-center rounded-lg border border-file/25 bg-file-subtle text-file">
+              <FileText className="size-5" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <h2 className="truncate t-card text-foreground">{collection.name}</h2>
+              <div className="mt-1 flex flex-wrap items-center gap-2 t-meta text-muted-foreground">
+                <span>{collection.embedding_model}</span>
+                <span>·</span>
+                <span>{t.vectorIndex.serverDocumentCount.replace('{count}', String(documents.length))}</span>
+                {collection.access.mode === 'shared' ? (
+                  <span className="rounded-md border border-brand/25 bg-brand-subtle px-1.5 py-0.5 t-meta-sm font-medium text-brand">
+                    {collection.access.permission === 'edit'
+                      ? t.sharing.sharedCanEdit
+                      : t.sharing.sharedViewOnly}
+                  </span>
+                ) : null}
+              </div>
+            </div>
+            <div className="flex shrink-0 flex-wrap items-center gap-2">
+              {owner && onShare ? (
+                <Button onClick={() => onShare(collection)} size="sm" type="button" variant="outline">
+                  <Users className="size-4" />
+                  {t.sharing.share}
+                </Button>
+              ) : null}
+              {editable ? (
+                <Button
+                  disabled={activeJob !== null || mutating}
+                  onClick={() => void startReindex()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  <RotateCcw className="size-4" />
+                  {t.vectorIndex.reindex}
+                </Button>
+              ) : null}
+              {activeJob ? (
+                <Button
+                  aria-label={t.vectorIndex.cancelIndexing}
+                  disabled={activeJob.status === 'cancelling'}
+                  onClick={() => void cancelReindex()}
+                  size="icon"
+                  type="button"
+                  variant="ghost"
+                >
+                  <XCircle className="size-4" />
+                </Button>
+              ) : null}
+              {owner ? (
+                <ConfirmDelete
+                  ariaLabel={t.fileLibrary.removeCollection}
+                  hint={t.fileLibrary.removeCollectionHint}
+                  label={t.fileLibrary.removeCollection}
+                  onConfirm={() => void removeCollection()}
+                />
+              ) : null}
+            </div>
+          </div>
+          {activeJob ? (
+            <p className="mt-3 border-t border-border/70 pt-3 t-meta text-muted-foreground">
+              {activeJob.status === 'cancelling'
+                ? t.vectorIndex.cancelling
+                : t.vectorIndex.progressPercentDocs(
+                    activeJob.totalDocuments > 0
+                      ? Math.round((activeJob.completedDocuments / activeJob.totalDocuments) * 100)
+                      : 0,
+                    activeJob.completedDocuments,
+                    activeJob.totalDocuments,
+                  )}
+              {activeJob.currentDocumentTitle ? ` · ${activeJob.currentDocumentTitle}` : ''}
+            </p>
+          ) : null}
+          {job?.error ? <p className="mt-2 t-meta text-destructive">{job.error}</p> : null}
+          {error ? <p className="mt-2 t-meta text-destructive">{error}</p> : null}
+        </div>
+      </div>
+
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="flex flex-col gap-4 px-4 pb-4 pt-4 md:px-6 md:pb-6">
+          {editable ? (
+            <div>
+              <Button disabled={mutating || activeJob !== null} onClick={() => setAdding(true)} size="sm" type="button">
+                <Plus className="size-4" />
+                {t.vectorIndex.addDocuments}
+              </Button>
+            </div>
+          ) : null}
+          {adding ? (
+            <div className="space-y-2">
+              <p className="rounded-md border border-warning/25 bg-warning-subtle px-3 py-2 t-meta text-warning">
+                {t.vectorIndex.sharedUploadOwnershipNotice}
+              </p>
+              <AddDocsPanel
+                docs={assets}
+                groups={groups}
+                memberIds={memberIds}
+                onAdd={(assetIds) => void addAssets(assetIds)}
+                onClose={() => setAdding(false)}
+                sections={sections}
+              />
+            </div>
+          ) : null}
+          {loading ? (
+            <p className="t-meta text-muted-foreground">{t.knowledge.viewerLoading}</p>
+          ) : visibleDocuments.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-border px-6 py-10 text-center">
+              <p className="t-label text-foreground">
+                {normalizedQuery.length > 0
+                  ? t.fileLibrary.emptySearchTitle
+                  : t.vectorIndex.indexEmptyTitle}
+              </p>
+              <p className="mt-1 t-meta text-muted-foreground">
+                {normalizedQuery.length > 0
+                  ? t.fileLibrary.emptySearchHint
+                  : t.vectorIndex.indexEmptyHint}
+              </p>
+            </div>
+          ) : (
+            <div className="overflow-hidden rounded-lg border border-border bg-card">
+              {visibleDocuments.map((document) => (
+                <div className="flex items-center gap-3 border-b border-border/70 px-3 py-2.5 last:border-b-0" key={document.id}>
+                  <FileText className="size-4 shrink-0 text-file" />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate t-list text-foreground">{document.title}</p>
+                    <p className="t-meta-sm text-muted-foreground">
+                      {t.vectorIndex.chunks.replace('{count}', String(document.chunk_count))}
+                    </p>
+                  </div>
+                  {editable ? (
+                    <ConfirmDelete
+                      ariaLabel={t.vectorIndex.removeDocument}
+                      hint={t.vectorIndex.removeDocumentHint}
+                      onConfirm={() => void removeDocument(document.id)}
+                    />
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </ScrollArea>
+    </div>
+  )
+}

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from inqtrix.auth.ratelimit import LoginRateLimiter
     from inqtrix.auth.sessions import FlowStore, SessionStore
     from inqtrix.auth.directory import UserDirectory
+    from inqtrix.auth.lifecycle import UserLifecycleService
 
 
 class LocalAuthProvider(OidcAuthProvider):
@@ -58,6 +59,8 @@ class LocalAuthProvider(OidcAuthProvider):
         registration_gate: "RegistrationGate | None" = None,
         invitations: "InvitationRepository | None" = None,
         login_rate_limiter: "LoginRateLimiter | None" = None,
+        trusted_proxy_hops: int = 1,
+        lifecycle: "UserLifecycleService | None" = None,
     ) -> None:
         super().__init__(
             client=None,
@@ -71,11 +74,13 @@ class LocalAuthProvider(OidcAuthProvider):
             pat_service=pat_service,
             registration_gate=registration_gate,
             invitations=invitations,
+            lifecycle=lifecycle,
         )
         self.authenticator = authenticator
         self.credentials = credentials
         self.registration = registration
         self.login_rate_limiter = login_rate_limiter
+        self.trusted_proxy_hops = trusted_proxy_hops
 
     @property
     def mode(self) -> "AuthMode":

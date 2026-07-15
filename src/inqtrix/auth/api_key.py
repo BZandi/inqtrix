@@ -17,9 +17,15 @@ from __future__ import annotations
 import logging
 
 import hmac
+import inspect
+from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Callable
 
 from fastapi import HTTPException, Request, status
+from fastapi.concurrency import run_in_threadpool
+from fastapi.dependencies.utils import get_dependant, solve_dependencies
+from fastapi.exceptions import RequestValidationError
+from starlette.responses import Response
 
 from inqtrix.auth.principal import (
     STATIC_PRINCIPAL,
@@ -178,12 +184,66 @@ class CallableGateAuthProvider(AuthProvider):
 
         gate = self._gate
 
+        async def resolve_live(request: Request) -> Principal:
+            """Re-evaluate the complete FastAPI gate graph for an SSE frame."""
+            dependant = get_dependant(path=request.url.path, call=gate)
+            missing = object()
+            previous_request_stack = request.scope.get(
+                "fastapi_inner_astack", missing
+            )
+            previous_function_stack = request.scope.get(
+                "fastapi_function_astack", missing
+            )
+            async with (
+                AsyncExitStack() as request_stack,
+                AsyncExitStack() as function_stack,
+            ):
+                request.scope["fastapi_inner_astack"] = request_stack
+                request.scope["fastapi_function_astack"] = function_stack
+                try:
+                    solved = await solve_dependencies(
+                        request=request,
+                        dependant=dependant,
+                        body=None,
+                        background_tasks=None,
+                        response=Response(),
+                        dependency_overrides_provider=request.app,
+                        dependency_cache={},
+                        async_exit_stack=request_stack,
+                        embed_body_fields=False,
+                    )
+                    if solved.errors:
+                        raise RequestValidationError(solved.errors)
+                    is_async_gate = inspect.iscoroutinefunction(
+                        gate
+                    ) or inspect.iscoroutinefunction(
+                        getattr(gate, "__call__", None)
+                    )
+                    result = (
+                        gate(**solved.values)
+                        if is_async_gate
+                        else await run_in_threadpool(gate, **solved.values)
+                    )
+                    if inspect.isawaitable(result):
+                        await result
+                finally:
+                    for key, previous in (
+                        ("fastapi_inner_astack", previous_request_stack),
+                        ("fastapi_function_astack", previous_function_stack),
+                    ):
+                        if previous is missing:
+                            request.scope.pop(key, None)
+                        else:
+                            request.scope[key] = previous
+            return STATIC_PRINCIPAL
+
         def get_principal(
             request: "Request",
             _gate_result: object = Depends(gate),
         ) -> Principal:
             return STATIC_PRINCIPAL
 
+        setattr(get_principal, "__inqtrix_live_resolver__", resolve_live)
         return get_principal
 
 
@@ -256,6 +316,9 @@ def _build_session_backends(settings: "Settings"):
             PostgresInvitationRepository,
         )
         from inqtrix.storage.pat_postgres import PostgresPatStore
+        from inqtrix.storage.user_lifecycle_postgres import (
+            PostgresUserLifecycleTransaction,
+        )
 
         session_factory = build_session_factory(
             build_engine(
@@ -281,6 +344,9 @@ def _build_session_backends(settings: "Settings"):
                 session_factory=session_factory, app_role=app_role
             ),
             session_factory,
+            PostgresUserLifecycleTransaction(
+                session_factory=session_factory, app_role=app_role
+            ),
         )
     log.warning(
         "PAT-Store laeuft im Memory-Modus: Zugriffstokens ueberleben "
@@ -291,6 +357,7 @@ def _build_session_backends(settings: "Settings"):
         MemoryFlowStore(),
         MemoryUserDirectory(),
         MemoryPatStore(),
+        None,
         None,
         None,
     )
@@ -328,11 +395,20 @@ def build_local_provider(settings: "Settings") -> AuthProvider:
         MemoryCredentialStore,
     )
     from inqtrix.auth.invitations import RegistrationGate
+    from inqtrix.auth.lifecycle import UserLifecycleService
     from inqtrix.auth.local import LocalAuthProvider
     from inqtrix.auth.pat import PatService, PatVerifier
 
     auth = settings.auth
-    sessions, flows, users, pat_store, invitation_repo, session_factory = (
+    (
+        sessions,
+        flows,
+        users,
+        pat_store,
+        invitation_repo,
+        session_factory,
+        lifecycle_transaction,
+    ) = (
         _build_session_backends(settings)
     )
     if session_factory is not None:
@@ -351,8 +427,17 @@ def build_local_provider(settings: "Settings") -> AuthProvider:
             "ueberleben KEINEN Neustart "
             "(INQTRIX_STORAGE_BACKEND=postgres fuer Persistenz)."
         )
+        from inqtrix.auth.lifecycle import MemoryUserLifecycleTransaction
+
+        lifecycle_transaction = MemoryUserLifecycleTransaction(
+            users=users,
+            sessions=sessions,
+            invitations=invitation_repo,
+            credentials=credentials,
+            pat_store=pat_store,
+        )
     authenticator = LocalAuthenticator(store=credentials)
-    pat_verifier = PatVerifier(store=pat_store, pepper=auth.pat_pepper)
+    pat_verifier = PatVerifier(store=pat_store, pepper=auth.pat_pepper, user_lookup=users)
     pat_service = PatService(
         store=pat_store,
         pepper=auth.pat_pepper,
@@ -363,6 +448,14 @@ def build_local_provider(settings: "Settings") -> AuthProvider:
         invitations=invitation_repo,
         users=users,
         registration="open",
+    )
+    lifecycle = UserLifecycleService(
+        users=users,
+        sessions=sessions,
+        invitations=invitation_repo,
+        credentials=credentials,
+        pat_service=pat_service,
+        transaction=lifecycle_transaction,
     )
     return LocalAuthProvider(
         authenticator=authenticator,
@@ -379,6 +472,8 @@ def build_local_provider(settings: "Settings") -> AuthProvider:
         registration_gate=registration_gate,
         invitations=invitation_repo,
         login_rate_limiter=_build_login_rate_limiter(settings),
+        trusted_proxy_hops=auth.trusted_proxy_hops,
+        lifecycle=lifecycle,
     )
 
 
@@ -391,11 +486,20 @@ def build_ldap_provider(settings: "Settings") -> AuthProvider:
     LDAP, never in Inqtrix).
     """
     from inqtrix.auth.invitations import RegistrationGate
+    from inqtrix.auth.lifecycle import UserLifecycleService
     from inqtrix.auth.ldap import LdapAuthProvider, LdapClient
     from inqtrix.auth.pat import PatService, PatVerifier
 
     auth = settings.auth
-    sessions, flows, users, pat_store, invitation_repo, _session_factory = (
+    (
+        sessions,
+        flows,
+        users,
+        pat_store,
+        invitation_repo,
+        _session_factory,
+        lifecycle_transaction,
+    ) = (
         _build_session_backends(settings)
     )
     ldap_client = LdapClient(
@@ -412,17 +516,33 @@ def build_ldap_provider(settings: "Settings") -> AuthProvider:
         ca_cert=auth.ldap_ca_cert,
         validate_cert=auth.ldap_tls_validate,
     )
-    pat_verifier = PatVerifier(store=pat_store, pepper=auth.pat_pepper)
+    pat_verifier = PatVerifier(store=pat_store, pepper=auth.pat_pepper, user_lookup=users)
     pat_service = PatService(
         store=pat_store,
         pepper=auth.pat_pepper,
         max_per_user=auth.pat_max_per_user,
         default_ttl_days=auth.pat_default_ttl_days,
     )
+    if lifecycle_transaction is None:
+        from inqtrix.auth.lifecycle import MemoryUserLifecycleTransaction
+
+        lifecycle_transaction = MemoryUserLifecycleTransaction(
+            users=users,
+            sessions=sessions,
+            invitations=invitation_repo,
+            pat_store=pat_store,
+        )
     registration_gate = RegistrationGate(
         invitations=invitation_repo,
         users=users,
         registration="open",
+    )
+    lifecycle = UserLifecycleService(
+        users=users,
+        sessions=sessions,
+        invitations=invitation_repo,
+        pat_service=pat_service,
+        transaction=lifecycle_transaction,
     )
     return LdapAuthProvider(
         ldap_client=ldap_client,
@@ -437,6 +557,8 @@ def build_ldap_provider(settings: "Settings") -> AuthProvider:
         pat_service=pat_service,
         registration_gate=registration_gate,
         login_rate_limiter=_build_login_rate_limiter(settings),
+        trusted_proxy_hops=auth.trusted_proxy_hops,
+        lifecycle=lifecycle,
     )
 
 
@@ -450,6 +572,7 @@ def build_oidc_provider(settings: "Settings") -> AuthProvider:
     factory, used exclusively on the HTTP loop.
     """
     from inqtrix.auth.invitations import RegistrationGate
+    from inqtrix.auth.lifecycle import UserLifecycleService
     from inqtrix.auth.oidc import OidcAuthProvider, OidcClient
     from inqtrix.auth.pat import PatService, PatVerifier
 
@@ -482,7 +605,15 @@ def build_oidc_provider(settings: "Settings") -> AuthProvider:
         discovery_url=auth.oidc_discovery_url,
         ca_cert=auth.oidc_ca_cert,
     )
-    sessions, flows, users, pat_store, invitation_repo, _session_factory = (
+    (
+        sessions,
+        flows,
+        users,
+        pat_store,
+        invitation_repo,
+        _session_factory,
+        lifecycle_transaction,
+    ) = (
         _build_session_backends(settings)
     )
     registration_gate = RegistrationGate(
@@ -490,12 +621,28 @@ def build_oidc_provider(settings: "Settings") -> AuthProvider:
         users=users,
         registration=auth.registration,
     )
-    pat_verifier = PatVerifier(store=pat_store, pepper=auth.pat_pepper)
+    pat_verifier = PatVerifier(store=pat_store, pepper=auth.pat_pepper, user_lookup=users)
     pat_service = PatService(
         store=pat_store,
         pepper=auth.pat_pepper,
         max_per_user=auth.pat_max_per_user,
         default_ttl_days=auth.pat_default_ttl_days,
+    )
+    if lifecycle_transaction is None:
+        from inqtrix.auth.lifecycle import MemoryUserLifecycleTransaction
+
+        lifecycle_transaction = MemoryUserLifecycleTransaction(
+            users=users,
+            sessions=sessions,
+            invitations=invitation_repo,
+            pat_store=pat_store,
+        )
+    lifecycle = UserLifecycleService(
+        users=users,
+        sessions=sessions,
+        invitations=invitation_repo,
+        pat_service=pat_service,
+        transaction=lifecycle_transaction,
     )
     return OidcAuthProvider(
         client=client,
@@ -522,4 +669,5 @@ def build_oidc_provider(settings: "Settings") -> AuthProvider:
         pat_service=pat_service,
         registration_gate=registration_gate,
         invitations=invitation_repo,
+        lifecycle=lifecycle,
     )

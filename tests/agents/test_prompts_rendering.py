@@ -1,7 +1,7 @@
 """Drift tripwire of the rendering-capabilities SSOT (plan M1 S5).
 
 The block tells the model what the FRONTEND renderer actually supports
-(MarkdownRenderer.tsx: remark-gfm, rehype-katex, rehype-pretty-code,
+(MarkdownRenderer.tsx: remark-gfm, rehype-katex, bounded Shiki highlighting,
 MermaidFigure). If a capability is ever removed from the renderer, this
 test is the reminder to update BOTH places — and if someone rewords the
 block, the consuming prompts must keep carrying it.

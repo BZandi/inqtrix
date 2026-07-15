@@ -1,25 +1,22 @@
 """Alembic environment for the inqtrix platform schema (async).
 
-URL resolution order:
+Online migrations accept only a live connection injected by the managed
+``inqtrix-migrate`` runner. That boundary keeps privilege preflight, advisory
+and table locks, temporary owner maintenance, Alembic, and postconditions in
+one PostgreSQL transaction.
 
-1. A live connection injected via ``config.attributes["connection"]``
-   — the test harness drives migrations over its own engine.
-2. ``sqlalchemy.url`` set programmatically on the config
-   (:func:`inqtrix.storage.migrate.run_migrations`).
-3. The ``INQTRIX_DATABASE_URL`` environment variable — the one
-   documented exception to the constructor-first rule, because the
-   ``alembic`` CLI has no settings bridge.
+Offline SQL rendering resolves ``sqlalchemy.url`` set programmatically on the
+config, then the ``INQTRIX_DATABASE_URL`` environment variable — the one
+documented exception to the constructor-first rule, because the ``alembic``
+CLI has no settings bridge.
 """
 
 from __future__ import annotations
 
-import asyncio
 import os
 
 from alembic import context
-from sqlalchemy import pool
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from inqtrix.storage.content_orm import content_metadata
 from inqtrix.storage.runs_orm import runs_metadata
@@ -78,33 +75,28 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    """Run every requested revision inside the caller's transaction."""
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        transactional_ddl=True,
+        transaction_per_migration=False,
+        on_version_apply=config.attributes.get("on_version_apply"),
+    )
     with context.begin_transaction():
         context.run_migrations()
 
 
-async def run_async_migrations() -> None:
-    # NullPool on purpose: migrations must not share or strand pooled
-    # connections with a running application loop.
-    section = config.get_section(config.config_ini_section, {})
-    section["sqlalchemy.url"] = _resolve_url()
-    connectable = async_engine_from_config(
-        section,
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-    await connectable.dispose()
-
-
 def run_migrations_online() -> None:
-    """Run migrations over an injected connection or a fresh engine."""
+    """Run migrations only through the managed connection-injection path."""
     connection = config.attributes.get("connection", None)
     if connection is not None:
         do_run_migrations(connection)
         return
-    asyncio.run(run_async_migrations())
+    raise RuntimeError(
+        "Online migrations must run through inqtrix-migrate so role, RLS, "
+        "locking, and postcondition checks share the Alembic transaction."
+    )
 
 
 if context.is_offline_mode():

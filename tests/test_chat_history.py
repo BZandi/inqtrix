@@ -10,23 +10,36 @@ re-runs the keyset/RLS half against a real database.
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
-from inqtrix.auth.permissions import SharePermission
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.pagination import decode_cursor
 from inqtrix.project.chat_memory import MemoryChatStore
-from inqtrix.project.chat_ports import ThreadGroupNotFound, ThreadNotFound
+from inqtrix.project.chat_ports import (
+    ChatMessage,
+    ThreadGroupNotFound,
+    ThreadNotFound,
+)
+from inqtrix.project.scoped_upsert import ResourceScope
 from inqtrix.services.chat_history_service import (
     ChatHistoryService,
     ChatValidationError,
 )
 
 
-def _scoped(sub: str) -> UserContext:
+USER_A = uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+USER_B = uuid.UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+
+
+def _scoped(user_id: uuid.UUID) -> UserContext:
     return UserContext(
         principal=Principal(
-            sub=sub, kind="oidc_session", tenant_id="default", role="member"
+            user_id=user_id,
+            kind="oidc_session",
+            tenant_id="default",
+            role="member",
         )
     )
 
@@ -40,7 +53,7 @@ async def _save_thread(
     service: ChatHistoryService,
     *,
     thread_id: str,
-    caller_sub: str | None,
+    caller_user_id: uuid.UUID | None,
     created_at: float,
     title: str = "T",
     group_id: str | None = None,
@@ -53,9 +66,9 @@ async def _save_thread(
         group_id=group_id,
         created_at=created_at,
         updated_at=created_at,
-        caller_sub=caller_sub,
+        caller_user_id=caller_user_id,
         workspace_id=None,
-        visible_to=_scoped(caller_sub) if caller_sub else None,
+        visible_to=_scoped(caller_user_id) if caller_user_id else None,
     )
 
 
@@ -67,14 +80,14 @@ async def test_thread_list_keyset_walks_without_skip_or_repeat(service) -> None:
     stamps = [10.0, 10.0, 20.0, 20.0, 30.0]
     for n, stamp in enumerate(stamps):
         await _save_thread(
-            service, thread_id=f"ct_{n}", caller_sub="user-a", created_at=stamp
+            service, thread_id=f"ct_{n}", caller_user_id=USER_A, created_at=stamp
         )
 
     seen: list[str] = []
     cursor = None
     for _ in range(10):  # generous bound
         page, next_cursor = await service.list_threads(
-            caller_sub="user-a", workspace_id=None, limit=2, after=cursor
+            caller_user_id=USER_A, workspace_id=None, limit=2, after=cursor
         )
         assert len(page) <= 2
         seen.extend(t.id for t in page)
@@ -94,34 +107,34 @@ async def test_thread_upsert_preserves_owner_and_created_at(service) -> None:
     """Re-saving a thread updates mutable metadata but never re-homes it
     or shifts its creation time (idempotent autosave)."""
     await _save_thread(
-        service, thread_id="ct_1", caller_sub="user-a", created_at=100.0,
+        service, thread_id="ct_1", caller_user_id=USER_A, created_at=100.0,
         title="first",
     )
     # The owner re-saves with a new title and a later updated_at.
     await service.save_thread(
         id="ct_1", title="second", preview="p", source="imported",
         group_id=None, created_at=999.0, updated_at=200.0,
-        caller_sub="user-a", workspace_id=None, visible_to=_scoped("user-a"),
+        caller_user_id=USER_A, workspace_id=None, visible_to=_scoped(USER_A),
     )
-    thread = await service.get_thread("ct_1", visible_to=_scoped("user-a"))
+    thread = await service.get_thread("ct_1", visible_to=_scoped(USER_A))
     assert thread.title == "second"
     assert thread.source == "imported"
     assert thread.created_at == 100.0  # NOT 999.0 — creation time is stable
     assert thread.updated_at == 200.0
-    assert thread.created_by_sub == "user-a"
+    assert thread.created_by_user_id == USER_A
 
 
 @pytest.mark.asyncio
 async def test_scoped_owner_isolation(service) -> None:
     """A scoped caller never sees or hijacks another user's thread."""
     await _save_thread(
-        service, thread_id="ct_a", caller_sub="user-a", created_at=1.0
+        service, thread_id="ct_a", caller_user_id=USER_A, created_at=1.0
     )
     # User B cannot read it, and it is absent from B's list.
     with pytest.raises(ThreadNotFound):
-        await service.get_thread("ct_a", visible_to=_scoped("user-b"))
+        await service.get_thread("ct_a", visible_to=_scoped(USER_B))
     page, _ = await service.list_threads(
-        caller_sub="user-b", workspace_id=None, limit=50, after=None
+        caller_user_id=USER_B, workspace_id=None, limit=50, after=None
     )
     assert page == []
     # User B cannot hijack A's thread id via a save.
@@ -129,11 +142,11 @@ async def test_scoped_owner_isolation(service) -> None:
         await service.save_thread(
             id="ct_a", title="hijack", preview="", source="api",
             group_id=None, created_at=1.0, updated_at=2.0,
-            caller_sub="user-b", workspace_id=None,
-            visible_to=_scoped("user-b"),
+            caller_user_id=USER_B, workspace_id=None,
+            visible_to=_scoped(USER_B),
         )
     # The owner still owns it unchanged.
-    thread = await service.get_thread("ct_a", visible_to=_scoped("user-a"))
+    thread = await service.get_thread("ct_a", visible_to=_scoped(USER_A))
     assert thread.title == "T"
 
 
@@ -142,12 +155,12 @@ async def test_unscoped_caller_sees_everything(service) -> None:
     """The anonymous/static principal (visible_to None) keeps the legacy
     full-visibility behaviour."""
     await _save_thread(
-        service, thread_id="ct_x", caller_sub=None, created_at=1.0
+        service, thread_id="ct_x", caller_user_id=None, created_at=1.0
     )
     thread = await service.get_thread("ct_x", visible_to=None)
     assert thread.id == "ct_x"
     page, _ = await service.list_threads(
-        caller_sub=None, workspace_id=None, limit=50, after=None
+        caller_user_id=None, workspace_id=None, limit=50, after=None
     )
     assert [t.id for t in page] == ["ct_x"]
 
@@ -157,7 +170,7 @@ async def test_message_append_idempotent_and_paginates(service) -> None:
     """Appending the same message id twice does not duplicate it, and the
     message page walks newest-first."""
     await _save_thread(
-        service, thread_id="ct_1", caller_sub="user-a", created_at=1.0
+        service, thread_id="ct_1", caller_user_id=USER_A, created_at=1.0
     )
     payload = [
         {"id": f"cm_{n}", "role": "user", "content_markdown": f"m{n}",
@@ -165,17 +178,17 @@ async def test_message_append_idempotent_and_paginates(service) -> None:
         for n in range(3)
     ]
     await service.append_messages(
-        "ct_1", messages=payload, visible_to=_scoped("user-a")
+        "ct_1", messages=payload, visible_to=_scoped(USER_A)
     )
     # Re-append cm_0 with edited content: upsert, not duplicate.
     await service.append_messages(
         "ct_1",
         messages=[{"id": "cm_0", "role": "user", "content_markdown": "edited",
                    "created_at": 0.0}],
-        visible_to=_scoped("user-a"),
+        visible_to=_scoped(USER_A),
     )
     page, next_cursor = await service.list_messages(
-        "ct_1", limit=50, after=None, visible_to=_scoped("user-a")
+        "ct_1", limit=50, after=None, visible_to=_scoped(USER_A)
     )
     assert [m.id for m in page] == ["cm_2", "cm_1", "cm_0"]  # newest first
     assert next_cursor is None
@@ -188,32 +201,32 @@ async def test_message_id_reuse_across_threads_does_not_overwrite(service) -> No
     """A message id colliding with another thread's message must NOT
     overwrite it — identity is thread-scoped (the isolation invariant)."""
     await _save_thread(
-        service, thread_id="ct_a", caller_sub="user-a", created_at=1.0
+        service, thread_id="ct_a", caller_user_id=USER_A, created_at=1.0
     )
     await _save_thread(
-        service, thread_id="ct_b", caller_sub="user-b", created_at=1.0
+        service, thread_id="ct_b", caller_user_id=USER_B, created_at=1.0
     )
     await service.append_messages(
         "ct_a",
         messages=[{"id": "cm_dup", "role": "assistant",
                    "content_markdown": "A-secret", "created_at": 1.0}],
-        visible_to=_scoped("user-a"),
+        visible_to=_scoped(USER_A),
     )
     # user-b appends the SAME id into their OWN thread.
     await service.append_messages(
         "ct_b",
         messages=[{"id": "cm_dup", "role": "user",
                    "content_markdown": "B-content", "created_at": 1.0}],
-        visible_to=_scoped("user-b"),
+        visible_to=_scoped(USER_B),
     )
     a_page, _ = await service.list_messages(
-        "ct_a", limit=50, after=None, visible_to=_scoped("user-a")
+        "ct_a", limit=50, after=None, visible_to=_scoped(USER_A)
     )
     a_msg = next(m for m in a_page if m.id == "cm_dup")
     assert a_msg.content_markdown == "A-secret"  # NOT clobbered
     assert a_msg.thread_id == "ct_a"
     b_page, _ = await service.list_messages(
-        "ct_b", limit=50, after=None, visible_to=_scoped("user-b")
+        "ct_b", limit=50, after=None, visible_to=_scoped(USER_B)
     )
     b_msg = next(m for m in b_page if m.id == "cm_dup")
     assert b_msg.content_markdown == "B-content"
@@ -224,22 +237,79 @@ async def test_message_id_reuse_across_threads_does_not_overwrite(service) -> No
 async def test_append_to_foreign_thread_denied(service) -> None:
     """A scoped non-owner cannot append into another user's thread."""
     await _save_thread(
-        service, thread_id="ct_a", caller_sub="user-a", created_at=1.0
+        service, thread_id="ct_a", caller_user_id=USER_A, created_at=1.0
     )
     with pytest.raises(ThreadNotFound):
         await service.append_messages(
             "ct_a",
             messages=[{"id": "cm_x", "role": "user",
                        "content_markdown": "x", "created_at": 1.0}],
-            visible_to=_scoped("user-b"),
+            visible_to=_scoped(USER_B),
         )
+
+
+@pytest.mark.asyncio
+async def test_stale_parent_scope_cannot_write_or_delete_after_id_reuse(
+    service,
+) -> None:
+    """A delete/recreate race cannot redirect child mutations to a new owner."""
+    await _save_thread(
+        service, thread_id="ct_reused", caller_user_id=USER_A, created_at=1.0
+    )
+    store = service.store
+    stale = await store.get_thread("ct_reused")
+    await store.delete_thread(
+        "ct_reused", scope=ResourceScope.from_record(stale)
+    )
+    await store.upsert_thread(
+        id="ct_reused",
+        title="B",
+        preview="",
+        source="api",
+        group_id=None,
+        created_at=2.0,
+        updated_at=2.0,
+        created_by_user_id=USER_B,
+        workspace_id=None,
+    )
+    message = ChatMessage(
+        id="cm_reused",
+        thread_id="ct_reused",
+        role="user",
+        content_markdown="B-owned",
+        created_at=2.0,
+    )
+
+    with pytest.raises(ThreadNotFound):
+        await store.append_messages(
+            [message],
+            expected_created_by_user_id=USER_A,
+            expected_workspace_id=None,
+        )
+
+    await store.append_messages(
+        [message],
+        expected_created_by_user_id=USER_B,
+        expected_workspace_id=None,
+    )
+    with pytest.raises(ThreadNotFound):
+        await store.delete_message(
+            "ct_reused",
+            "cm_reused",
+            expected_created_by_user_id=USER_A,
+            expected_workspace_id=None,
+        )
+    messages, _ = await store.list_messages_page(
+        "ct_reused", limit=50, after=None
+    )
+    assert messages == [message]
 
 
 async def _append(
     service: ChatHistoryService,
     *,
     thread_id: str,
-    caller_sub: str,
+    caller_user_id: uuid.UUID,
     message_ids: list[str],
 ) -> None:
     await service.append_messages(
@@ -249,15 +319,15 @@ async def _append(
              "created_at": float(n)}
             for n, mid in enumerate(message_ids)
         ],
-        visible_to=_scoped(caller_sub),
+        visible_to=_scoped(caller_user_id),
     )
 
 
 async def _message_ids(
-    service: ChatHistoryService, *, thread_id: str, caller_sub: str
+    service: ChatHistoryService, *, thread_id: str, caller_user_id: uuid.UUID
 ) -> list[str]:
     page, _ = await service.list_messages(
-        thread_id, limit=50, after=None, visible_to=_scoped(caller_sub)
+        thread_id, limit=50, after=None, visible_to=_scoped(caller_user_id)
     )
     return [m.id for m in page]
 
@@ -268,17 +338,17 @@ async def test_delete_message_removes_only_that_message_for_the_owner(service) -
     leaves its siblings — the durable counterpart the append-only push
     lacked, so a reload no longer resurrects it."""
     await _save_thread(
-        service, thread_id="ct_1", caller_sub="user-a", created_at=1.0
+        service, thread_id="ct_1", caller_user_id=USER_A, created_at=1.0
     )
     await _append(
-        service, thread_id="ct_1", caller_sub="user-a",
+        service, thread_id="ct_1", caller_user_id=USER_A,
         message_ids=["cm_0", "cm_1", "cm_2"],
     )
     await service.delete_message(
-        "ct_1", "cm_1", visible_to=_scoped("user-a")
+        "ct_1", "cm_1", visible_to=_scoped(USER_A)
     )
     assert await _message_ids(
-        service, thread_id="ct_1", caller_sub="user-a"
+        service, thread_id="ct_1", caller_user_id=USER_A
     ) == ["cm_2", "cm_0"]  # cm_1 gone, order otherwise intact (newest-first)
 
 
@@ -288,19 +358,19 @@ async def test_delete_message_is_idempotent(service) -> None:
     an error — a coalesced-burst or multi-device re-issue must not wedge
     the autosave retry loop."""
     await _save_thread(
-        service, thread_id="ct_1", caller_sub="user-a", created_at=1.0
+        service, thread_id="ct_1", caller_user_id=USER_A, created_at=1.0
     )
     await _append(
-        service, thread_id="ct_1", caller_sub="user-a", message_ids=["cm_0"]
+        service, thread_id="ct_1", caller_user_id=USER_A, message_ids=["cm_0"]
     )
-    await service.delete_message("ct_1", "cm_0", visible_to=_scoped("user-a"))
+    await service.delete_message("ct_1", "cm_0", visible_to=_scoped(USER_A))
     # Second delete of the same id, and a delete of an unknown id: both quiet.
-    await service.delete_message("ct_1", "cm_0", visible_to=_scoped("user-a"))
+    await service.delete_message("ct_1", "cm_0", visible_to=_scoped(USER_A))
     await service.delete_message(
-        "ct_1", "cm_never", visible_to=_scoped("user-a")
+        "ct_1", "cm_never", visible_to=_scoped(USER_A)
     )
     assert await _message_ids(
-        service, thread_id="ct_1", caller_sub="user-a"
+        service, thread_id="ct_1", caller_user_id=USER_A
     ) == []
 
 
@@ -310,46 +380,18 @@ async def test_delete_message_denied_for_a_foreign_caller(service) -> None:
     denial is the indistinct ThreadNotFound (existence undisclosed); the
     message survives."""
     await _save_thread(
-        service, thread_id="ct_a", caller_sub="user-a", created_at=1.0
+        service, thread_id="ct_a", caller_user_id=USER_A, created_at=1.0
     )
     await _append(
-        service, thread_id="ct_a", caller_sub="user-a", message_ids=["cm_0"]
+        service, thread_id="ct_a", caller_user_id=USER_A, message_ids=["cm_0"]
     )
     with pytest.raises(ThreadNotFound):
         await service.delete_message(
-            "ct_a", "cm_0", visible_to=_scoped("user-b")
+            "ct_a", "cm_0", visible_to=_scoped(USER_B)
         )
     assert await _message_ids(
-        service, thread_id="ct_a", caller_sub="user-a"
+        service, thread_id="ct_a", caller_user_id=USER_A
     ) == ["cm_0"]
-
-
-@pytest.mark.asyncio
-async def test_delete_message_needs_an_edit_share_not_merely_view(service) -> None:
-    """Deleting a message is the inverse of appending, so it takes editing
-    access (like append_messages), not the owner-only thread delete: an
-    EDIT share may delete, a VIEW share may not."""
-    await _save_thread(
-        service, thread_id="ct_a", caller_sub="user-a", created_at=1.0
-    )
-    await _append(
-        service, thread_id="ct_a", caller_sub="user-a",
-        message_ids=["cm_0", "cm_1"],
-    )
-    # A view share cannot delete.
-    with pytest.raises(ThreadNotFound):
-        await service.delete_message(
-            "ct_a", "cm_0", visible_to=_scoped("user-b"),
-            also_visible={"ct_a": SharePermission.VIEW},
-        )
-    # An edit share can.
-    await service.delete_message(
-        "ct_a", "cm_0", visible_to=_scoped("user-b"),
-        also_visible={"ct_a": SharePermission.EDIT},
-    )
-    assert await _message_ids(
-        service, thread_id="ct_a", caller_sub="user-a"
-    ) == ["cm_1"]
 
 
 @pytest.mark.asyncio
@@ -359,43 +401,43 @@ async def test_delete_message_blocked_across_a_different_workspace(service) -> N
     never a silent cross-project drop."""
     await service.save_thread(
         id="ct_1", title="T", preview="", source="api", group_id=None,
-        created_at=1.0, updated_at=1.0, caller_sub="user-a",
-        workspace_id="ws_a", visible_to=_scoped("user-a"),
+        created_at=1.0, updated_at=1.0, caller_user_id=USER_A,
+        workspace_id="ws_a", visible_to=_scoped(USER_A),
     )
     await service.append_messages(
         "ct_1",
         messages=[{"id": "cm_0", "role": "user", "content_markdown": "x",
                    "created_at": 0.0}],
-        visible_to=_scoped("user-a"),
+        visible_to=_scoped(USER_A),
     )
     with pytest.raises(ThreadNotFound):
         await service.delete_message(
-            "ct_1", "cm_0", visible_to=_scoped("user-a"),
+            "ct_1", "cm_0", visible_to=_scoped(USER_A),
             request_workspace_id="ws_b",
         )
     assert await _message_ids(
-        service, thread_id="ct_1", caller_sub="user-a"
+        service, thread_id="ct_1", caller_user_id=USER_A
     ) == ["cm_0"]
 
 
 @pytest.mark.asyncio
 async def test_delete_thread_cascades_and_is_owner_only(service) -> None:
     await _save_thread(
-        service, thread_id="ct_1", caller_sub="user-a", created_at=1.0
+        service, thread_id="ct_1", caller_user_id=USER_A, created_at=1.0
     )
     await service.append_messages(
         "ct_1",
         messages=[{"id": "cm_1", "role": "user", "content_markdown": "x",
                    "created_at": 1.0}],
-        visible_to=_scoped("user-a"),
+        visible_to=_scoped(USER_A),
     )
     # A foreign user cannot delete it.
     with pytest.raises(ThreadNotFound):
-        await service.delete_thread("ct_1", visible_to=_scoped("user-b"))
+        await service.delete_thread("ct_1", visible_to=_scoped(USER_B))
     # The owner can; the messages go with it.
-    await service.delete_thread("ct_1", visible_to=_scoped("user-a"))
+    await service.delete_thread("ct_1", visible_to=_scoped(USER_A))
     with pytest.raises(ThreadNotFound):
-        await service.get_thread("ct_1", visible_to=_scoped("user-a"))
+        await service.get_thread("ct_1", visible_to=_scoped(USER_A))
 
 
 @pytest.mark.asyncio
@@ -406,21 +448,21 @@ async def test_delete_thread_is_blocked_across_a_different_workspace(service) ->
     a different synced project) is denied as not-found and leaves the row."""
     await service.save_thread(
         id="ct_1", title="T", preview="", source="api", group_id=None,
-        created_at=1.0, updated_at=1.0, caller_sub="user-a",
-        workspace_id="ws_a", visible_to=_scoped("user-a"),
+        created_at=1.0, updated_at=1.0, caller_user_id=USER_A,
+        workspace_id="ws_a", visible_to=_scoped(USER_A),
     )
     with pytest.raises(ThreadNotFound):
         await service.delete_thread(
-            "ct_1", visible_to=_scoped("user-a"), request_workspace_id="ws_b"
+            "ct_1", visible_to=_scoped(USER_A), request_workspace_id="ws_b"
         )
     # Still present: the cross-workspace delete was a no-op, not a silent drop.
-    assert (await service.get_thread("ct_1", visible_to=_scoped("user-a"))).id == "ct_1"
+    assert (await service.get_thread("ct_1", visible_to=_scoped(USER_A))).id == "ct_1"
     # The owner in the SAME workspace deletes normally.
     await service.delete_thread(
-        "ct_1", visible_to=_scoped("user-a"), request_workspace_id="ws_a"
+        "ct_1", visible_to=_scoped(USER_A), request_workspace_id="ws_a"
     )
     with pytest.raises(ThreadNotFound):
-        await service.get_thread("ct_1", visible_to=_scoped("user-a"))
+        await service.get_thread("ct_1", visible_to=_scoped(USER_A))
 
 
 @pytest.mark.asyncio
@@ -428,17 +470,17 @@ async def test_group_delete_orphans_threads(service) -> None:
     """Deleting a group ungroups its threads (never deletes them)."""
     await service.save_group(
         id="ctg_1", title="G", created_at=1.0, updated_at=1.0,
-        caller_sub="user-a", workspace_id=None, visible_to=_scoped("user-a"),
+        caller_user_id=USER_A, workspace_id=None, visible_to=_scoped(USER_A),
     )
     await _save_thread(
-        service, thread_id="ct_1", caller_sub="user-a", created_at=2.0,
+        service, thread_id="ct_1", caller_user_id=USER_A, created_at=2.0,
         group_id="ctg_1",
     )
-    await service.delete_group("ctg_1", visible_to=_scoped("user-a"))
-    thread = await service.get_thread("ct_1", visible_to=_scoped("user-a"))
+    await service.delete_group("ctg_1", visible_to=_scoped(USER_A))
+    thread = await service.get_thread("ct_1", visible_to=_scoped(USER_A))
     assert thread.group_id is None
     with pytest.raises(ThreadGroupNotFound):
-        await service.delete_group("ctg_1", visible_to=_scoped("user-a"))
+        await service.delete_group("ctg_1", visible_to=_scoped(USER_A))
 
 
 @pytest.mark.asyncio
@@ -449,16 +491,16 @@ async def test_invalid_role_and_source_rejected(service) -> None:
         await service.save_thread(
             id="ct_1", title="T", preview="", source="bogus",
             group_id=None, created_at=1.0, updated_at=1.0,
-            caller_sub="user-a", workspace_id=None,
-            visible_to=_scoped("user-a"),
+            caller_user_id=USER_A, workspace_id=None,
+            visible_to=_scoped(USER_A),
         )
     await _save_thread(
-        service, thread_id="ct_2", caller_sub="user-a", created_at=1.0
+        service, thread_id="ct_2", caller_user_id=USER_A, created_at=1.0
     )
     with pytest.raises(ChatValidationError):
         await service.append_messages(
             "ct_2",
             messages=[{"id": "cm_1", "role": "system",
                        "content_markdown": "x", "created_at": 1.0}],
-            visible_to=_scoped("user-a"),
+            visible_to=_scoped(USER_A),
         )

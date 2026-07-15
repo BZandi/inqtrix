@@ -15,8 +15,11 @@ the items (load-on-open).
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
+
+from inqtrix.project.scoped_upsert import ResourceScope
 
 
 class KnowledgeSessionNotFound(KeyError):
@@ -36,7 +39,7 @@ class KnowledgeSessionGroup:
             key.
         title: User-facing folder label in the Knowledge Desk history panel.
         created_at/updated_at: Unix timestamps.
-        tenant_id/created_by_sub/workspace_id: The owner scope.
+        tenant_id/created_by_user_id/workspace_id: The owner scope.
     """
 
     id: str
@@ -44,7 +47,7 @@ class KnowledgeSessionGroup:
     created_at: float
     updated_at: float
     tenant_id: str = "default"
-    created_by_sub: str | None = None
+    created_by_user_id: uuid.UUID | None = None
     workspace_id: str | None = None
 
 
@@ -61,7 +64,7 @@ class KnowledgeSession:
             (question + the rendered answer record). ``"[]"`` on list rows
             (load-on-open); the full array on get.
         created_at/updated_at: Unix timestamps.
-        tenant_id/created_by_sub/workspace_id: The owner scope.
+        tenant_id/created_by_user_id/workspace_id: The owner scope.
     """
 
     id: str
@@ -71,7 +74,7 @@ class KnowledgeSession:
     group_id: str | None = None
     items_json: str = field(repr=False, default="[]")
     tenant_id: str = "default"
-    created_by_sub: str | None = None
+    created_by_user_id: uuid.UUID | None = None
     workspace_id: str | None = None
 
 
@@ -88,12 +91,12 @@ class KnowledgeSessionStore(Protocol):
         group_id: str | None,
         created_at: float,
         updated_at: float,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> KnowledgeSession: ...
 
     async def list_sessions(
-        self, *, created_by_sub: str | None, workspace_id: str | None
+        self, *, created_by_user_id: uuid.UUID | None, workspace_id: str | None
     ) -> list[KnowledgeSession]:
         """Sessions for the scope (newest-updated first), METADATA ONLY
         (``items_json="[]"`` — the items load via get_session)."""
@@ -104,7 +107,9 @@ class KnowledgeSessionStore(Protocol):
         :class:`KnowledgeSessionNotFound`."""
         ...
 
-    async def delete_session(self, session_id: str) -> None: ...
+    async def delete_session(
+        self, session_id: str, *, scope: ResourceScope
+    ) -> None: ...
 
     async def upsert_group(
         self,
@@ -113,17 +118,19 @@ class KnowledgeSessionStore(Protocol):
         title: str,
         created_at: float,
         updated_at: float,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> KnowledgeSessionGroup: ...
 
     async def list_groups(
-        self, *, created_by_sub: str | None, workspace_id: str | None
+        self, *, created_by_user_id: uuid.UUID | None, workspace_id: str | None
     ) -> list[KnowledgeSessionGroup]:
         """Groups for the scope, newest-created first."""
         ...
 
-    async def delete_group(self, group_id: str) -> None:
+    async def delete_group(
+        self, group_id: str, *, scope: ResourceScope
+    ) -> None:
         """Delete a group; its sessions orphan to ungrouped."""
         ...
 

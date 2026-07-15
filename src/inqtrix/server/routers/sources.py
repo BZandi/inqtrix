@@ -15,7 +15,6 @@ from fastapi import APIRouter, Depends
 
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.knowledge.stores.ports import DocumentNotFound
-from inqtrix.server.routers import build_shared_grants_dependency
 from inqtrix.services.request_parsing import error_response
 
 if TYPE_CHECKING:
@@ -38,12 +37,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         )
     principal_dep = container.principal_dependency
     user_context_dep = container.user_context_dependency
-    shared_collections_dep = build_shared_grants_dependency(
-        container.share_service,
-        principal_dep,
-        resource_type="knowledge_collection",
-    )
-
     router = APIRouter()
 
     @router.get("/v1/sources/{document_id}")
@@ -51,7 +44,6 @@ def build_router(container: "AppContainer") -> APIRouter:
         document_id: str,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
-        also_visible=Depends(shared_collections_dep),
     ):
         """Return the citable document view (full text + provenance).
 
@@ -67,7 +59,6 @@ def build_router(container: "AppContainer") -> APIRouter:
             document = await service.get_document(
                 document_id,
                 visible_to=visible_to,
-                also_visible=also_visible,
             )
         except DocumentNotFound:
             return error_response(404, "Quelle nicht gefunden", "not_found")

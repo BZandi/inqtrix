@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 import threading
 
 from inqtrix.content.ports import FileNotFound, FileRecord
@@ -39,7 +40,7 @@ class MemoryFileRegistry:
         self,
         *,
         tenant_id: str,
-        owner_sub: str | None,
+        owner_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> list[FileRecord]:
         """Newest-first listing with tenant/owner/namespace facets."""
@@ -48,7 +49,7 @@ class MemoryFileRegistry:
                 record
                 for record in self._records.values()
                 if record.tenant_id == tenant_id
-                and (owner_sub is None or record.owner_sub == owner_sub)
+                and (owner_user_id is None or record.owner_user_id == owner_user_id)
                 and (workspace_id is None or record.workspace_id == workspace_id)
             ]
         return sorted(records, key=lambda item: item.created_at, reverse=True)

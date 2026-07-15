@@ -2,7 +2,7 @@
 
 The vector-index layer of the project-persistence tier: the local file
 library's RAG indexes (the file<->collection mapping the user builds for
-retrieval), scoped per ``(tenant_id, created_by_sub, workspace_id)`` like
+retrieval), scoped per ``(tenant_id, created_by_user_id, workspace_id)`` like
 the chat/editor/asset entities. The vectors themselves live in Qdrant and
 the canonical chunk text in ``knowledge_*`` (M2); ``server_collection_id``
 references that backend collection. What persists HERE is the client's
@@ -44,6 +44,7 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.dialects.postgresql import UUID
 
 vector_index_metadata = MetaData()
 
@@ -52,7 +53,7 @@ vector_index_records = Table(
     vector_index_metadata,
     Column("id", Text, primary_key=True),
     Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
-    Column("created_by_sub", Text, nullable=True),
+    Column("created_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("workspace_id", Text, nullable=True),
     Column("title", Text, nullable=False, server_default=text("''")),
     Column("handle", Text, nullable=False, server_default=text("''")),
@@ -76,13 +77,13 @@ vector_index_records = Table(
     Index(
         "ix_vector_index_records_owner_created",
         "tenant_id",
-        "created_by_sub",
+        "created_by_user_id",
         "created_at",
         "id",
     ),
 )
 """One vector index (RAG file<->collection mapping). ``members`` and
-``history`` live in the child tables. ``created_by_sub`` is the ownership
+``history`` live in the child tables. ``created_by_user_id`` is the ownership
 anchor (``None`` = unscoped/anonymous deployments)."""
 
 vector_index_members = Table(

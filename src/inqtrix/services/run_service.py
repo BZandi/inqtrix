@@ -12,21 +12,27 @@ runs router — the store already is the in-memory repository.
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from inqtrix.core.context import RunContext, RuntimeContext
 from inqtrix.core.results import RunRequest, SourcePolicy, WebRecency
 from inqtrix.execution_failures import RunExecutionFailure
+from inqtrix.execution_authority import AuthorizationRevoked, guard_provider_context
 from inqtrix.quota.models import QuotaDimension, QuotaSubject, consumed_tokens
 from inqtrix.result import ResearchResult
 from inqtrix.services.agent_context import ResolvedAgentContext
 from inqtrix.state import build_run_snapshot
+from inqtrix.sync_bridge import run_coro_sync
 
 if TYPE_CHECKING:
     from inqtrix.auth.principal import Principal
+    from inqtrix.auth.directory import UserDirectory
     from inqtrix.core.algorithms import AgentAlgorithm, AlgorithmRegistry
     from inqtrix.server.runs import RunHandle, RunStore
     from inqtrix.services.quota_service import QuotaService
+    from inqtrix.services.execution_dependency_authority import (
+        ExecutionDependencyAuthorizer,
+    )
 
 
 def execute_run_request(
@@ -41,6 +47,7 @@ def execute_run_request(
     quota_subject: "QuotaSubject | None" = None,
     token_budget: int | None = None,
     workspace_id: str | None = None,
+    authority_check: Callable[[], None] | None = None,
 ) -> None:
     """Execute one resolved run request against its algorithm.
 
@@ -57,7 +64,8 @@ def execute_run_request(
         resolved: Stack/override/mode resolution for this request.
         runtime: App-level runtime context.
         principal: Submitting identity; ``None`` in worker processes,
-            which carry the metered subject in *quota_subject* instead.
+            which carry the explicit quota account in *quota_subject*
+            instead.
         quota_service: Optional usage meter. When wired (quotas on), the
             run's real LLM-token consumption is booked through its
             synchronous bridge AFTER execution (non-fatal — a recording
@@ -65,10 +73,10 @@ def execute_run_request(
             aborts a runaway run at a node boundary. ``None`` for
             unmetered deployments — byte-identical to the historical
             path.
-        quota_subject: Explicit metered subject for the worker path,
-            reconstructed from the run row's persisted (sub, tenant).
-            When ``None`` (the in-process path) the subject is derived
-            from *principal*. This is what makes token accounting fire
+        quota_subject: Explicit quota account for the worker path,
+            reconstructed from the run row's persisted effective-actor UUID
+            and tenant. When ``None`` (the in-process path), the account is
+            derived from *principal*. This makes token accounting fire
             regardless of which process executes the run.
         workspace_id: Persisted project namespace of the native run. Agent
             algorithms pass it unchanged to delegated children; it is not an
@@ -77,10 +85,17 @@ def execute_run_request(
     t0 = time.monotonic()
 
     def _event_sink(event_type: str, payload: dict[str, Any]) -> None:
+        if authority_check is not None:
+            authority_check()
         handle.emit(event_type, payload)
 
+    providers = resolved.providers
+    if authority_check is not None:
+        authority_check()
+        providers = guard_provider_context(providers, authority_check)
+
     run_context = RunContext(
-        providers=resolved.providers,
+        providers=providers,
         strategies=resolved.strategies,
         agent_settings=resolved.agent_settings,
         principal=principal,
@@ -96,6 +111,7 @@ def execute_run_request(
             runtime.settings.quota.max_tokens_per_run, token_budget
         ),
         park=handle.wait,
+        authority_check=authority_check,
     )
     agent_result = algorithm.run(
         run_request,
@@ -109,13 +125,13 @@ def execute_run_request(
     # spent what it spent, and that spend must count toward the monthly
     # quota (it is what blocks the NEXT submission).
     if quota_service is not None:
-        subject = (
+        quota_account = (
             quota_subject
             if quota_subject is not None
             else quota_service.subject_for(principal)
         )
         quota_service.record_blocking(
-            subject,
+            quota_account,
             QuotaDimension.LLM_TOKENS,
             consumed_tokens(result.get("usage")),
         )
@@ -162,7 +178,11 @@ def execute_run_request(
             + usage.get("completion_tokens", 0)
         ),
     }
+    if authority_check is not None:
+        authority_check()
     handle.emit_answer(answer)
+    if authority_check is not None:
+        authority_check()
     current_node = str(algorithm.capabilities().get("terminal_node", "answer"))
     handle.complete(
         payload,
@@ -202,11 +222,20 @@ class RunService:
         runtime: RuntimeContext,
         run_store: "RunStore",
         quota_service: "QuotaService | None" = None,
+        user_lookup: "UserDirectory | None" = None,
+        dependency_authorizer: "ExecutionDependencyAuthorizer | None" = None,
     ) -> None:
         self._registry = registry
         self._runtime = runtime
         self._run_store = run_store
         self._quota_service = quota_service
+        self._user_lookup = user_lookup
+        self._dependency_authorizer = dependency_authorizer
+
+    @property
+    def dependency_authorizer(self) -> "ExecutionDependencyAuthorizer | None":
+        """Shared pinned-dependency checker for API and queue workers."""
+        return self._dependency_authorizer
 
     @property
     def run_store(self) -> "RunStore":
@@ -232,7 +261,7 @@ class RunService:
         token_budget: int | None = None,
         origin_key: str = "",
         skill_ids: list[str] | None = None,
-        skill_revisions: dict[str, float] | None = None,
+        skill_revisions: dict[str, int] | None = None,
         tool_directives: list[str] | None = None,
         source_policy: dict[str, str] | SourcePolicy | None = None,
         web_recency: WebRecency | None = None,
@@ -279,7 +308,7 @@ class RunService:
             skill_ids: Router-ADMITTED skill ids (plan M3) — visibility
                 and count cap already enforced; carried on the request
                 and the worker replay payload.
-            skill_revisions: Admission-time ``updated_at`` pin for each
+            skill_revisions: Admission-time integer revision for each
                 attached skill; runtime loading fails closed on drift.
             tool_directives: Whitelisted composer tool hints (plan M3),
                 carried like ``skill_ids``.
@@ -354,16 +383,50 @@ class RunService:
         )
 
         def _work(handle: "RunHandle") -> None:
+            effective_principal = handle.effective_principal(principal)
+
+            def _check_authority() -> None:
+                if effective_principal is not None:
+                    if self._user_lookup is None:
+                        raise AuthorizationRevoked(
+                            "run execution has no live user lookup"
+                        )
+                    user = run_coro_sync(
+                        self._user_lookup.find_by_user_id(
+                            tenant_id=effective_principal.tenant_id,
+                            user_id=effective_principal.user_id,
+                        )
+                    )
+                    if user is None or user.disabled_at is not None:
+                        raise AuthorizationRevoked(
+                            "effective actor is missing or disabled"
+                        )
+                self._run_store.check_execution_authority(handle.run_id)
+                if self._dependency_authorizer is not None:
+                    self._dependency_authorizer.check(
+                        run_request,
+                        effective_principal,
+                    )
+
+            has_scoped_actor = (
+                effective_principal is not None
+                and effective_principal.user_id is not None
+            )
+            if has_scoped_actor:
+                handle.bind_authority_check(_check_authority)
             execute_run_request(
                 handle,
                 algorithm=algorithm,
                 run_request=run_request,
                 resolved=resolved,
                 runtime=self._runtime,
-                principal=principal,
+                principal=effective_principal,
                 quota_service=self._quota_service,
                 token_budget=token_budget,
                 workspace_id=workspace_id,
+                authority_check=(
+                    _check_authority if has_scoped_actor else None
+                ),
             )
 
         # Everything a worker process needs to re-resolve and execute
@@ -471,9 +534,12 @@ class RunService:
             },
             mode=resolved.mode,
             workspace_id=workspace_id,
-            created_by_sub=principal.sub if principal is not None else None,
+            created_by_user_id=principal.user_id if principal is not None else None,
             created_by_tenant_id=(
                 principal.tenant_id if principal is not None else None
+            ),
+            execution_scopes=(
+                principal.scopes if principal is not None else frozenset()
             ),
             request_payload=request_payload,
             kind=kind,

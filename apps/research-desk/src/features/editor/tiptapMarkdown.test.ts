@@ -1,6 +1,12 @@
+import { createEditorSchemaExtensions } from '@inqtrix/editor-schema'
+import { Editor as HeadlessEditor } from '@tiptap/core'
 import type { Editor } from '@tiptap/react'
 import { describe, expect, it } from 'vitest'
-import { normalizeEditorMarkdownForTiptap, serializeEditorMarkdown } from './tiptap'
+import {
+  normalizeEditorMarkdownForTiptap,
+  serializeEditorFinalProjectionMarkdown,
+  serializeEditorMarkdown,
+} from './tiptap'
 
 /** Unit Separator (U+001F) that `@tiptap/markdown` emits inside populated table
  * cells while serializing. It must never reach persisted markdown — it breaks
@@ -20,6 +26,50 @@ describe('serializeEditorMarkdown', () => {
   it('leaves artifact-free markdown unchanged', () => {
     const markdown = '# Title\n\nBody text with no tables.'
     expect(serializeEditorMarkdown(editorReturning(markdown))).toBe(markdown)
+  })
+
+  it('projects a collaboration replacement to its canonical final markdown', () => {
+    const metadata = {
+      authorId: 'user-1',
+      createdAt: 10,
+      patchId: 'patch-1',
+      suggestionId: 'suggestion-1',
+    }
+    const editor = new HeadlessEditor({
+      content: {
+        content: [{
+          content: [
+            {
+              marks: [{
+                attrs: { ...metadata, id: metadata.suggestionId, kind: 'deletion' },
+                type: 'deletion',
+              }],
+              text: 'old',
+              type: 'text',
+            },
+            {
+              marks: [{
+                attrs: { ...metadata, id: metadata.suggestionId, kind: 'insertion' },
+                type: 'insertion',
+              }],
+              text: 'new',
+              type: 'text',
+            },
+          ],
+          type: 'paragraph',
+        }],
+        type: 'doc',
+      },
+      element: null,
+      extensions: createEditorSchemaExtensions({ enableUndoRedo: false }),
+      injectCSS: false,
+    })
+
+    try {
+      expect(serializeEditorFinalProjectionMarkdown(editor)).toBe('new')
+    } finally {
+      editor.destroy()
+    }
   })
 })
 

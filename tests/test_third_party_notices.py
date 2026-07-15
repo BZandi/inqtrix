@@ -25,7 +25,12 @@ def _load_generator() -> ModuleType:
 
 def _write_fixture_repo(root: Path) -> None:
     (root / "package.json").write_text(
-        json.dumps({"packageManager": "pnpm@11.1.1"}),
+        json.dumps(
+            {
+                "packageManager": "pnpm@11.1.1",
+                "devDependencies": {"root-tool": "1.0.0"},
+            }
+        ),
         encoding="utf-8",
     )
     (root / "uv.lock").write_text(
@@ -82,6 +87,28 @@ version = "1.0.0"
         ),
         encoding="utf-8",
     )
+    server_root = root / "apps" / "collaboration-server"
+    server_root.mkdir(parents=True)
+    (server_root / "package.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {"server-runtime": "1.0.0"},
+                "devDependencies": {"server-tool": "1.0.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    schema_root = root / "packages" / "editor-schema"
+    schema_root.mkdir(parents=True)
+    (schema_root / "package.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {"shared-schema-runtime": "1.0.0"},
+                "devDependencies": {"schema-tool": "1.0.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
     (root / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
 
     packages = {
@@ -106,6 +133,31 @@ version = "1.0.0"
             "name": "rollup",
             "version": "1.0.0",
             "license": "Apache-2.0",
+        },
+        "server-runtime@1.0.0": {
+            "name": "server-runtime",
+            "version": "1.0.0",
+            "license": "MIT",
+        },
+        "shared-schema-runtime@1.0.0": {
+            "name": "shared-schema-runtime",
+            "version": "1.0.0",
+            "license": "MIT",
+        },
+        "root-tool@1.0.0": {
+            "name": "root-tool",
+            "version": "1.0.0",
+            "license": "MIT",
+        },
+        "server-tool@1.0.0": {
+            "name": "server-tool",
+            "version": "1.0.0",
+            "license": "MIT",
+        },
+        "schema-tool@1.0.0": {
+            "name": "schema-tool",
+            "version": "1.0.0",
+            "license": "MIT",
         },
     }
     for folder, package in packages.items():
@@ -153,6 +205,11 @@ def test_notice_documents_are_deterministic(tmp_path):
         ("loose-envify", "react-prod"),
         ("vite", "react-dev"),
         ("rollup", "react-dev"),
+        ("server-runtime", "node-prod"),
+        ("shared-schema-runtime", "react-prod"),
+        ("root-tool", "node-dev"),
+        ("server-tool", "node-dev"),
+        ("schema-tool", "node-dev"),
     }
     assert "| react-prod | `react` | 1.0.0 | MIT | pnpm package metadata |" in markdown
 

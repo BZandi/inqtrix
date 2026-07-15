@@ -37,6 +37,7 @@ import logging
 import secrets
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -45,6 +46,7 @@ from fastapi import HTTPException
 from inqtrix.auth.principal import Principal
 
 if TYPE_CHECKING:
+    from inqtrix.auth.directory import UserDirectory
     from inqtrix.auth.permissions import AuditSink
 
 log = logging.getLogger("inqtrix")
@@ -76,11 +78,9 @@ class PersonalAccessToken:
     Attributes:
         token_id: Public identifier AND primary key (hex).
         tenant_id: Tenant the token belongs to.
-        owner_issuer: IdP issuer of the owning user — together with
-            *owner_sub* the identity anchor (subjects are only unique
-            per issuer).
-        owner_sub: IdP subject of the owning user; verified requests
-            act as this principal.
+        owner_user_id: Canonical UUID of the owning user; verified requests
+            act as this principal. External issuer/subject identifiers never
+            enter the token contract.
         name: Operator-chosen label ("ci-runner"), display only.
         secret_hmac: Hex ``HMAC-SHA256(pepper, secret)``.
         created_at: Unix seconds.
@@ -96,8 +96,7 @@ class PersonalAccessToken:
 
     token_id: str
     tenant_id: str
-    owner_issuer: str
-    owner_sub: str
+    owner_user_id: uuid.UUID
     name: str
     secret_hmac: str
     created_at: float
@@ -165,7 +164,7 @@ class PatStore(Protocol):
     async def get(self, token_id: str) -> PersonalAccessToken | None: ...
 
     async def list_for_owner(
-        self, *, tenant_id: str, owner_issuer: str, owner_sub: str
+        self, *, tenant_id: str, owner_user_id: uuid.UUID
     ) -> tuple[PersonalAccessToken, ...]:
         """Non-revoked tokens of one owner, newest first."""
         ...
@@ -175,8 +174,7 @@ class PatStore(Protocol):
         *,
         tenant_id: str,
         token_id: str,
-        owner_issuer: str,
-        owner_sub: str,
+        owner_user_id: uuid.UUID,
         now: float,
     ) -> bool:
         """Guarded soft-revoke; ``True`` only when a LIVE row flipped.
@@ -193,7 +191,7 @@ class PatStore(Protocol):
         ...
 
     async def revoke_all_for_owner(
-        self, *, tenant_id: str, owner_issuer: str, owner_sub: str, now: float
+        self, *, tenant_id: str, owner_user_id: uuid.UUID, now: float
     ) -> int:
         """Disable-cascade helper; returns the number of revoked rows."""
         ...
@@ -208,7 +206,7 @@ class MemoryPatStore:
 
     def __init__(self) -> None:
         self._tokens: dict[str, PersonalAccessToken] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     async def create(self, token: PersonalAccessToken) -> None:
         with self._lock:
@@ -219,15 +217,14 @@ class MemoryPatStore:
             return self._tokens.get(token_id)
 
     async def list_for_owner(
-        self, *, tenant_id: str, owner_issuer: str, owner_sub: str
+        self, *, tenant_id: str, owner_user_id: uuid.UUID
     ) -> tuple[PersonalAccessToken, ...]:
         with self._lock:
             owned = [
                 token
                 for token in self._tokens.values()
                 if token.tenant_id == tenant_id
-                and token.owner_issuer == owner_issuer
-                and token.owner_sub == owner_sub
+                and token.owner_user_id == owner_user_id
                 and token.revoked_at is None
             ]
         return tuple(
@@ -239,8 +236,7 @@ class MemoryPatStore:
         *,
         tenant_id: str,
         token_id: str,
-        owner_issuer: str,
-        owner_sub: str,
+        owner_user_id: uuid.UUID,
         now: float,
     ) -> bool:
         with self._lock:
@@ -248,8 +244,7 @@ class MemoryPatStore:
             if (
                 token is None
                 or token.tenant_id != tenant_id
-                or token.owner_issuer != owner_issuer
-                or token.owner_sub != owner_sub
+                or token.owner_user_id != owner_user_id
                 or token.revoked_at is not None
             ):
                 return False
@@ -275,15 +270,14 @@ class MemoryPatStore:
             )
 
     async def revoke_all_for_owner(
-        self, *, tenant_id: str, owner_issuer: str, owner_sub: str, now: float
+        self, *, tenant_id: str, owner_user_id: uuid.UUID, now: float
     ) -> int:
         with self._lock:
             revoked = 0
             for token_id, token in list(self._tokens.items()):
                 if (
                     token.tenant_id == tenant_id
-                    and token.owner_issuer == owner_issuer
-                    and token.owner_sub == owner_sub
+                    and token.owner_user_id == owner_user_id
                     and token.revoked_at is None
                 ):
                     self._tokens[token_id] = dataclasses.replace(
@@ -312,6 +306,7 @@ class PatVerifier:
         *,
         store: PatStore,
         pepper: str,
+        user_lookup: "UserDirectory",
         audit: "AuditSink | None" = None,
     ) -> None:
         if not pepper.strip():
@@ -320,6 +315,7 @@ class PatVerifier:
             )
         self._store = store
         self._pepper = pepper
+        self._user_lookup = user_lookup
         self._audit = audit
 
     async def verify(self, bearer_value: str) -> Principal:
@@ -348,6 +344,12 @@ class PatVerifier:
         if record.expires_at is not None and record.expires_at <= now:
             await self._audit_rejection(record, "expired")
             raise self._unauthorized()
+        user = await self._user_lookup.find_by_user_id(
+            tenant_id=record.tenant_id, user_id=record.owner_user_id
+        )
+        if user is None or user.disabled_at is not None:
+            await self._audit_rejection(record, "user_disabled")
+            raise self._unauthorized()
         try:
             await self._store.touch_last_used(
                 record.token_id,
@@ -361,7 +363,7 @@ class PatVerifier:
                 exc,
             )
         return Principal(
-            sub=record.owner_sub,
+            user_id=record.owner_user_id,
             kind="pat",
             tenant_id=record.tenant_id,
             scopes=frozenset(record.scopes),
@@ -382,7 +384,7 @@ class PatVerifier:
         await self._audit.record(
             AuditEntry(
                 tenant_id=record.tenant_id,
-                actor_sub=record.owner_sub,
+                actor_user_id=record.owner_user_id,
                 action="pat.rejected",
                 resource_type="pat",
                 resource_id=record.token_id,
@@ -433,8 +435,7 @@ class PatService:
         self,
         *,
         tenant_id: str,
-        owner_issuer: str,
-        owner_sub: str,
+        owner_user_id: uuid.UUID,
         name: str,
         expires_in_days: int | None = None,
     ) -> MintedPat:
@@ -449,8 +450,7 @@ class PatService:
         """
         existing = await self._store.list_for_owner(
             tenant_id=tenant_id,
-            owner_issuer=owner_issuer,
-            owner_sub=owner_sub,
+            owner_user_id=owner_user_id,
         )
         now = time.time()
         active = [
@@ -469,8 +469,7 @@ class PatService:
         record = PersonalAccessToken(
             token_id=token_id,
             tenant_id=tenant_id,
-            owner_issuer=owner_issuer,
-            owner_sub=owner_sub,
+            owner_user_id=owner_user_id,
             name=name,
             secret_hmac=hash_pat_secret(self._pepper, secret),
             created_at=now,
@@ -485,22 +484,20 @@ class PatService:
         return MintedPat(record=record, plaintext=format_pat(token_id, secret))
 
     async def list_tokens(
-        self, *, tenant_id: str, owner_issuer: str, owner_sub: str
+        self, *, tenant_id: str, owner_user_id: uuid.UUID
     ) -> tuple[PersonalAccessToken, ...]:
         return await self._store.list_for_owner(
             tenant_id=tenant_id,
-            owner_issuer=owner_issuer,
-            owner_sub=owner_sub,
+            owner_user_id=owner_user_id,
         )
 
     async def revoke_all_for_owner(
-        self, *, tenant_id: str, owner_issuer: str, owner_sub: str
+        self, *, tenant_id: str, owner_user_id: uuid.UUID
     ) -> int:
         """Revoke every live token of one owner (admin disable cut-off)."""
         return await self._store.revoke_all_for_owner(
             tenant_id=tenant_id,
-            owner_issuer=owner_issuer,
-            owner_sub=owner_sub,
+            owner_user_id=owner_user_id,
             now=time.time(),
         )
 
@@ -509,14 +506,12 @@ class PatService:
         *,
         tenant_id: str,
         token_id: str,
-        owner_issuer: str,
-        owner_sub: str,
+        owner_user_id: uuid.UUID,
     ) -> bool:
         revoked = await self._store.revoke(
             tenant_id=tenant_id,
             token_id=token_id,
-            owner_issuer=owner_issuer,
-            owner_sub=owner_sub,
+            owner_user_id=owner_user_id,
             now=time.time(),
         )
         if revoked:
@@ -524,8 +519,7 @@ class PatService:
                 PersonalAccessToken(
                     token_id=token_id,
                     tenant_id=tenant_id,
-                    owner_issuer=owner_issuer,
-                    owner_sub=owner_sub,
+                    owner_user_id=owner_user_id,
                     name="",
                     secret_hmac="",
                     created_at=0.0,
@@ -547,7 +541,7 @@ class PatService:
         await self._audit.record(
             AuditEntry(
                 tenant_id=record.tenant_id,
-                actor_sub=record.owner_sub,
+                actor_user_id=record.owner_user_id,
                 action=action,
                 resource_type="pat",
                 resource_id=record.token_id,

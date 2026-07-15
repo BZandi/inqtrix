@@ -23,6 +23,7 @@ def _container(
     queue_backend: str = "memory",
     session_factory=None,
     knowledge_service=None,
+    file_service=None,
 ) -> SimpleNamespace:
     settings = Settings()
     settings.storage.backend = storage_backend  # type: ignore[assignment]
@@ -31,6 +32,7 @@ def _container(
         settings=settings,
         session_factory=session_factory,
         knowledge_service=knowledge_service,
+        file_service=file_service,
     )
 
 
@@ -43,6 +45,7 @@ async def test_memory_backends_are_trivially_ready() -> None:
         "database": "skipped",
         "queue": "skipped",
         "vector_store": "skipped",
+        "object_store": "skipped",
     }
 
 
@@ -73,6 +76,38 @@ async def test_postgres_declared_without_factory_is_a_visible_miswire() -> None:
 
 
 @pytest.mark.asyncio
+async def test_postgres_readiness_uses_schema_and_role_contract(monkeypatch) -> None:
+    observed: dict[str, object] = {}
+
+    async def verify(
+        session_factory,
+        *,
+        app_role: str,
+        login_policy: str,
+    ) -> None:
+        observed["session_factory"] = session_factory
+        observed["app_role"] = app_role
+        observed["login_policy"] = login_policy
+
+    monkeypatch.setattr(
+        "inqtrix.storage.runtime_contract.verify_database_runtime_contract",
+        verify,
+    )
+    factory = object()
+    status_code, payload = await readiness_payload(
+        _container(storage_backend="postgres", session_factory=factory)
+    )
+
+    assert status_code == 200
+    assert payload["checks"]["database"] == "ok"
+    assert observed == {
+        "session_factory": factory,
+        "app_role": "inqtrix_app",
+        "login_policy": "restricted",
+    }
+
+
+@pytest.mark.asyncio
 async def test_dead_vector_store_degrades_but_stays_ready() -> None:
     knowledge = SimpleNamespace(
         knowledge=SimpleNamespace(
@@ -85,3 +120,18 @@ async def test_dead_vector_store_degrades_but_stays_ready() -> None:
     assert status_code == 200
     assert payload["status"] == "degraded"
     assert payload["checks"]["vector_store"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_dead_object_store_degrades_but_stays_ready() -> None:
+    class _UnavailableFiles:
+        async def object_store_available(self) -> bool:
+            return False
+
+    status_code, payload = await readiness_payload(
+        _container(file_service=_UnavailableFiles())
+    )
+
+    assert status_code == 200
+    assert payload["status"] == "degraded"
+    assert payload["checks"]["object_store"] == "unavailable"

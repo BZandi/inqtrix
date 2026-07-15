@@ -30,6 +30,7 @@ import uvicorn
 
 from inqtrix.logging_config import build_uvicorn_log_config, configure_logging
 from inqtrix.server import create_app
+from inqtrix.settings import Settings
 
 
 _INQTRIX_LOG_PATH = configure_logging(
@@ -38,7 +39,8 @@ _INQTRIX_LOG_PATH = configure_logging(
     console=os.getenv("INQTRIX_LOG_CONSOLE", "").lower() == "true",
 )
 
-app = create_app()
+_SETTINGS = Settings()
+app = create_app(settings=_SETTINGS)
 
 
 def main() -> None:
@@ -48,6 +50,8 @@ def main() -> None:
         port=int(os.getenv("INQTRIX_SERVER_PORT", "5100")),
         workers=1,
         timeout_keep_alive=300,
+        ws_max_size=_SETTINGS.collaboration.max_frame_bytes,
+        ws_max_queue=_SETTINGS.collaboration.max_queued_frames,
     )
     if os.getenv("INQTRIX_LOG_INCLUDE_WEB", "true").lower() != "false":
         uvicorn_kwargs["log_config"] = build_uvicorn_log_config(

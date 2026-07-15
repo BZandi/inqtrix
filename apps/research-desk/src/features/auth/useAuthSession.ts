@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   buildLoginUrl,
   fetchAuthSession,
@@ -10,13 +10,14 @@ export type AuthSessionState = {
   /** `unknown` until the first probe answers; the UI shows neither
    * login nor logout while unknown to avoid a button flash. */
   status: 'anonymous' | 'authenticated' | 'unknown'
-  displayName: string | null
-  email: string | null
-  /** Instance role (`admin`/`user`) from the session payload; `null`
-   * while anonymous/unknown. Drives the admin-surface gate. */
-  role: string | null
-  /** Stable subject of the signed-in identity (self-row detection). */
-  sub: string | null
+  /** Canonical authenticated user. External issuer subjects never enter the
+   * SPA authorization state. */
+  user: {
+    displayName: string | null
+    email: string | null
+    id: string
+    role: string
+  } | null
   /** The user's canonical project namespace (cross-device), resolved
    * server-side from the session; `null` while anonymous/unknown or before a
    * namespace has been adopted. The desk scopes the project to this (not the
@@ -26,11 +27,33 @@ export type AuthSessionState = {
 
 const ANONYMOUS: AuthSessionState = {
   status: 'anonymous',
-  displayName: null,
-  email: null,
-  role: null,
-  sub: null,
+  user: null,
   projectNamespace: null,
+}
+
+/** Full reload is the account-switch boundary for all browser-held stores. */
+export function reloadApplication() {
+  window.location.reload()
+}
+
+/** Destroy the server session before crossing the hard reload boundary. */
+export async function logoutAndReload(
+  destroySession: () => Promise<unknown> = logoutSession,
+  reload: () => void = reloadApplication,
+  onError?: (error: unknown) => void,
+  awaitDurability?: () => Promise<void>,
+): Promise<boolean> {
+  try {
+    await awaitDurability?.()
+    await destroySession()
+  } catch (error) {
+    // A failed server-side logout must leave the confirmed session intact.
+    console.warn('Logout failed; the current session remains active.', error)
+    onError?.(error)
+    return false
+  }
+  reload()
+  return true
 }
 
 /**
@@ -38,43 +61,69 @@ const ANONYMOUS: AuthSessionState = {
  * when the server reports a cookie-session mode (`oidc`/`local`/`ldap`)
  * — in `none`/`apikey` deployments (and demo mode) the hook stays inert
  * and reports `anonymous` without any network traffic. `login` is the
- * OIDC full-page redirect (local/ldap use the credential form, then
- * `refresh()`); `logout` destroys the server-side session and re-probes.
+ * OIDC full-page redirect (local/ldap use the credential form); successful
+ * credential login and logout reload the document so no prior account's
+ * reducer or hook state can survive an identity transition.
  */
-export function useAuthSession(active: boolean, workspaceId?: string) {
+export function useAuthSession(
+  active: boolean,
+  workspaceId?: string,
+  awaitLogoutDurability?: () => Promise<void>,
+) {
   const [session, setSession] = useState<AuthSessionState>(
     active ? { ...ANONYMOUS, status: 'unknown' } : ANONYMOUS,
   )
+  const generationRef = useRef(0)
+  const controllerRef = useRef<AbortController | null>(null)
+  const [logoutError, setLogoutError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     if (!active) return
+    controllerRef.current?.abort()
+    const controller = new AbortController()
+    controllerRef.current = controller
+    const generation = generationRef.current + 1
+    generationRef.current = generation
     try {
       // Send the browser's namespace as the CANDIDATE: on a first authenticated
       // boot the server adopts it as the user's canonical project namespace and
       // returns it in `project_namespace`; thereafter it returns the already-
       // adopted value (the same on every device, so the data follows the user).
-      const info: AuthSessionInfo = await fetchAuthSession({ workspaceId })
+      const info: AuthSessionInfo = await fetchAuthSession({
+        signal: controller.signal,
+        workspaceId,
+      })
+      if (controller.signal.aborted || generation !== generationRef.current) return
       setSession(
         info.authenticated
           ? {
               status: 'authenticated',
-              displayName: info.display_name ?? null,
-              email: info.email ?? null,
-              role: info.role ?? null,
-              sub: info.sub ?? null,
+              user: {
+                displayName: info.user.display_name ?? null,
+                email: info.user.email ?? null,
+                id: info.user.id,
+                role: info.user.role,
+              },
               projectNamespace: info.project_namespace ?? null,
             }
           : ANONYMOUS,
       )
-    } catch {
+    } catch (error) {
+      if (controller.signal.aborted || generation !== generationRef.current) return
       // Server unreachable: treat as anonymous; the existing health
       // banner already surfaces connectivity problems.
+      console.warn('Authentication session probe failed.', error)
       setSession(ANONYMOUS)
+    } finally {
+      if (controllerRef.current === controller) controllerRef.current = null
     }
   }, [active, workspaceId])
 
   useEffect(() => {
     if (!active) {
+      generationRef.current += 1
+      controllerRef.current?.abort()
+      controllerRef.current = null
       setSession(ANONYMOUS)
       return
     }
@@ -89,6 +138,11 @@ export function useAuthSession(active: boolean, workspaceId?: string) {
         : { ...ANONYMOUS, status: 'unknown' },
     )
     void refresh()
+    return () => {
+      generationRef.current += 1
+      controllerRef.current?.abort()
+      controllerRef.current = null
+    }
   }, [active, refresh])
 
   const login = useCallback(() => {
@@ -98,12 +152,16 @@ export function useAuthSession(active: boolean, workspaceId?: string) {
   }, [])
 
   const logout = useCallback(async () => {
-    try {
-      await logoutSession()
-    } finally {
-      await refresh()
-    }
-  }, [refresh])
+    setLogoutError(null)
+    return logoutAndReload(
+      logoutSession,
+      reloadApplication,
+      (error) => {
+        setLogoutError(error instanceof Error ? error.message : String(error))
+      },
+      awaitLogoutDurability,
+    )
+  }, [awaitLogoutDurability])
 
-  return { session, login, logout, refresh }
+  return { session, login, logout, logoutError, refresh }
 }

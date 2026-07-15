@@ -55,11 +55,11 @@ function suggestPassword(): string {
 export function UsersPanel({
   admin,
   mode,
-  sessionSub,
+  sessionUserId,
 }: {
   admin: ReturnType<typeof useAdminUsers>
   mode: AuthMode
-  sessionSub: string | null
+  sessionUserId: string | null
 }) {
   const { locale, t } = useLocale()
   const { createUser, resetPassword, setDisabled, setRole, state } = admin
@@ -109,9 +109,9 @@ export function UsersPanel({
             <TableEmpty colSpan={5} title={t.adminUsers.empty} />
           ) : (
             rows.map((user) => {
-              const self = isSelf(user, sessionSub)
-              const roleGuardUser = canSetRole(rows, user, sessionSub, 'user')
-              const disableGuard = canDisable(rows, user, sessionSub)
+              const self = isSelf(user, sessionUserId)
+              const roleGuardUser = canSetRole(rows, user, sessionUserId, 'user')
+              const disableGuard = canDisable(rows, user, sessionUserId)
               const lockReason = (
                 guard: ReturnType<typeof canDisable>,
               ): string | undefined =>
@@ -121,7 +121,7 @@ export function UsersPanel({
                     ? t.adminUsers.lockedSelf
                     : t.adminUsers.lockedLastAdmin
               return (
-                <TableRow key={user.subject}>
+                <TableRow key={user.id}>
                   <TableCell>
                     <div className="flex items-center gap-2.5">
                       <InitialsAvatar
@@ -151,7 +151,7 @@ export function UsersPanel({
                     <Select
                       disabled={!roleGuardUser.allowed && user.instance_role === 'admin'}
                       onValueChange={(value) =>
-                        void setRole(user.subject, value as 'admin' | 'user')
+                        void setRole(user.id, value as 'admin' | 'user')
                       }
                       value={user.instance_role}
                     >
@@ -215,7 +215,7 @@ export function UsersPanel({
                         checked={!user.disabled}
                         disabled={!user.disabled && !disableGuard.allowed}
                         onCheckedChange={(checked) =>
-                          void setDisabled(user.subject, !checked)
+                          void setDisabled(user.id, !checked)
                         }
                         density="table"
                         title={
@@ -270,7 +270,7 @@ function ResetPasswordDialog({
     setError(null)
     setSubmitting(true)
     try {
-      await resetPassword(user.subject, password)
+      await resetPassword(user.id, password)
       setRevealed(password)
     } catch {
       setError(t.adminUsers.resetFailed)

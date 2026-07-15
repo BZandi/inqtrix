@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+import uuid
 
 import pytest
 import pytest_asyncio
@@ -20,6 +21,10 @@ from inqtrix.auth.pat import PersonalAccessToken
 from inqtrix.storage.db import build_engine, build_session_factory
 from inqtrix.storage.migrate import run_migrations
 from inqtrix.storage.pat_postgres import PostgresPatStore
+from tests.storage._canonical_users import (
+    canonical_user_id,
+    ensure_canonical_users,
+)
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
@@ -29,6 +34,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 APP_ROLE = "inqtrix_app"
+OWNER_1_ID = canonical_user_id("pat-owner-1")
+OWNER_2_ID = canonical_user_id("pat-owner-2")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -66,20 +73,23 @@ async def store(engine):
             await session.execute(
                 text("DELETE FROM personal_access_tokens")
             )
+            await ensure_canonical_users(
+                session,
+                (OWNER_1_ID, OWNER_2_ID),
+            )
     return PostgresPatStore(session_factory=factory, app_role=APP_ROLE)
 
 
 def make_token(
     token_id: str = "tok1",
     *,
-    owner_sub: str = "user-1",
+    owner_user_id: uuid.UUID = OWNER_1_ID,
     expires_at: float | None = None,
 ) -> PersonalAccessToken:
     return PersonalAccessToken(
         token_id=token_id,
         tenant_id="default",
-        owner_issuer="http://idp.example",
-        owner_sub=owner_sub,
+        owner_user_id=owner_user_id,
         name="ci",
         secret_hmac="ab" * 32,
         created_at=time.time(),
@@ -93,18 +103,17 @@ def make_token(
 @pytest.mark.asyncio
 async def test_roundtrip_and_owner_listing(store):
     await store.create(make_token("tok1"))
-    await store.create(make_token("tok2", owner_sub="user-2"))
+    await store.create(make_token("tok2", owner_user_id=OWNER_2_ID))
 
     loaded = await store.get("tok1")
     assert loaded is not None
-    assert loaded.owner_sub == "user-1"
+    assert loaded.owner_user_id == OWNER_1_ID
     assert loaded.scopes == ("runs:read",)
     assert loaded.expires_at is None
 
     listed = await store.list_for_owner(
         tenant_id="default",
-        owner_issuer="http://idp.example",
-        owner_sub="user-1",
+        owner_user_id=OWNER_1_ID,
     )
     assert [token.token_id for token in listed] == ["tok1"]
 
@@ -117,23 +126,20 @@ async def test_revoke_guards_owner_and_liveness(store):
     assert not await store.revoke(
         tenant_id="default",
         token_id="tok1",
-        owner_issuer="http://idp.example",
-        owner_sub="user-2",
+        owner_user_id=OWNER_2_ID,
         now=now,
     )
     assert await store.revoke(
         tenant_id="default",
         token_id="tok1",
-        owner_issuer="http://idp.example",
-        owner_sub="user-1",
+        owner_user_id=OWNER_1_ID,
         now=now,
     )
     # Idempotent: a second revoke is a no-op.
     assert not await store.revoke(
         tenant_id="default",
         token_id="tok1",
-        owner_issuer="http://idp.example",
-        owner_sub="user-1",
+        owner_user_id=OWNER_1_ID,
         now=now,
     )
     assert (await store.get("tok1")).revoked_at is not None
@@ -148,8 +154,7 @@ async def test_concurrent_double_revoke_flips_once(store):
             store.revoke(
                 tenant_id="default",
                 token_id="tok1",
-                owner_issuer="http://idp.example",
-                owner_sub="user-1",
+                owner_user_id=OWNER_1_ID,
                 now=now,
             )
             for _ in range(2)
@@ -175,11 +180,10 @@ async def test_last_used_throttle_is_one_guarded_statement(store):
 async def test_disable_cascade_revokes_only_that_owner(store):
     await store.create(make_token("tok1"))
     await store.create(make_token("tok2"))
-    await store.create(make_token("tok3", owner_sub="user-2"))
+    await store.create(make_token("tok3", owner_user_id=OWNER_2_ID))
     revoked = await store.revoke_all_for_owner(
         tenant_id="default",
-        owner_issuer="http://idp.example",
-        owner_sub="user-1",
+        owner_user_id=OWNER_1_ID,
         now=time.time(),
     )
     assert revoked == 2

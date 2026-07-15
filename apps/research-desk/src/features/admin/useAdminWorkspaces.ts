@@ -161,7 +161,7 @@ export function useAdminWorkspaces({
         setState((current) => {
           const workspaceId = `ws-demo-${current.workspaces.length + 1}`
           const workspace: AdminWorkspace = {
-            created_by_sub: DEMO_OWNER.subject,
+            created_by_user_id: DEMO_OWNER.userId,
             member_count: 1,
             name,
             workspace_id: workspaceId,
@@ -175,7 +175,7 @@ export function useAdminWorkspaces({
                   display_name: DEMO_OWNER.displayName,
                   email: DEMO_OWNER.email,
                   role: 'owner',
-                  sub: DEMO_OWNER.subject,
+                  user_id: DEMO_OWNER.userId,
                 },
               ],
             },
@@ -250,17 +250,17 @@ export function useAdminWorkspaces({
   const addMember = useCallback(
     (
       workspaceId: string,
-      member: { sub: string; display_name: string | null; email: string | null },
+      member: { user_id: string; display_name: string | null; email: string | null },
       role: WorkspaceRoleValue,
     ) => {
       if (demo) {
         setState((current) => {
           const members = [
             ...(current.members[workspaceId] ?? []).filter(
-              (existing) => existing.sub !== member.sub,
+              (existing) => existing.user_id !== member.user_id,
             ),
             { ...member, role },
-          ].sort((a, b) => a.sub.localeCompare(b.sub))
+          ].sort((a, b) => a.user_id.localeCompare(b.user_id))
           return {
             ...current,
             members: { ...current.members, [workspaceId]: members },
@@ -274,17 +274,17 @@ export function useAdminWorkspaces({
         return Promise.resolve()
       }
       return runMutation(workspaceId, async () => {
-        await addWorkspaceMember(workspaceId, member.sub, role)
+        await addWorkspaceMember(workspaceId, member.user_id, role)
       })
     },
     [demo, runMutation],
   )
 
   const setMemberRole = useCallback(
-    (workspaceId: string, sub: string, role: WorkspaceRoleValue) => {
+    (workspaceId: string, userId: string, role: WorkspaceRoleValue) => {
       if (demo) {
         const members = state.members[workspaceId] ?? []
-        if (wouldOrphanLastOwner(members, sub, role === 'owner')) {
+        if (wouldOrphanLastOwner(members, userId, role === 'owner')) {
           setState((current) => ({ ...current, mutationError: LAST_OWNER_MESSAGE }))
           return Promise.resolve()
         }
@@ -293,7 +293,7 @@ export function useAdminWorkspaces({
           members: {
             ...current.members,
             [workspaceId]: (current.members[workspaceId] ?? []).map((member) =>
-              member.sub === sub ? { ...member, role } : member,
+              member.user_id === userId ? { ...member, role } : member,
             ),
           },
           mutationError: null,
@@ -301,23 +301,23 @@ export function useAdminWorkspaces({
         return Promise.resolve()
       }
       return runMutation(workspaceId, async () => {
-        await setWorkspaceMemberRole(workspaceId, sub, role)
+        await setWorkspaceMemberRole(workspaceId, userId, role)
       })
     },
     [demo, runMutation, state.members],
   )
 
   const removeMember = useCallback(
-    (workspaceId: string, sub: string) => {
+    (workspaceId: string, userId: string) => {
       if (demo) {
         const members = state.members[workspaceId] ?? []
-        if (wouldOrphanLastOwner(members, sub, false)) {
+        if (wouldOrphanLastOwner(members, userId, false)) {
           setState((current) => ({ ...current, mutationError: LAST_OWNER_MESSAGE }))
           return Promise.resolve()
         }
         setState((current) => {
           const next = (current.members[workspaceId] ?? []).filter(
-            (member) => member.sub !== sub,
+            (member) => member.user_id !== userId,
           )
           return {
             ...current,
@@ -333,7 +333,7 @@ export function useAdminWorkspaces({
         return Promise.resolve()
       }
       return runMutation(workspaceId, async () => {
-        await removeWorkspaceMember(workspaceId, sub)
+        await removeWorkspaceMember(workspaceId, userId)
       })
     },
     [demo, runMutation, state.members],

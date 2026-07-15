@@ -128,7 +128,7 @@ def test_none_provider_resolves_anonymous_principal():
     provider = NoneAuthProvider()
     principal = provider.resolve_principal(_FakeRequest())
     assert principal is ANONYMOUS_PRINCIPAL
-    assert principal.sub == "__anonymous__"
+    assert principal.user_id is None
     assert principal.kind == "anonymous"
 
 
@@ -138,7 +138,7 @@ def test_api_key_provider_resolves_static_principal_on_valid_bearer():
         _FakeRequest({"Authorization": "Bearer secret-token"})
     )
     assert principal is STATIC_PRINCIPAL
-    assert principal.sub == "__static__"
+    assert principal.user_id is None
     assert principal.kind == "static"
 
 

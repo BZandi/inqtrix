@@ -13,11 +13,23 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
 from typing import Any, Callable
 
 import pytest
 
+from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.server.runs import RunStatus, RunStore
+
+
+USER_A = uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+USER_B = uuid.UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+
+
+def _visible_to(user_id: uuid.UUID) -> UserContext:
+    return UserContext(
+        principal=Principal(user_id=user_id, kind="oidc_session")
+    )
 
 
 def _wait_until(predicate: Callable[[], bool], *, timeout: float = 5.0) -> None:
@@ -38,7 +50,11 @@ def _store(**kwargs: Any) -> RunStore:
 
 
 def _submit_child(
-    store: RunStore, parent_id: str, work, *, created_by_sub: str | None = None
+    store: RunStore,
+    parent_id: str,
+    work,
+    *,
+    created_by_user_id: uuid.UUID | None = None,
 ) -> str:
     summary = store.submit(
         question="Kind-Recherche",
@@ -47,7 +63,7 @@ def _submit_child(
         kind="agent_child",
         parent_run_id=parent_id,
         root_run_id=parent_id,
-        created_by_sub=created_by_sub,
+        created_by_user_id=created_by_user_id,
     )
     return summary["run_id"]
 
@@ -66,7 +82,7 @@ class _SegmentedParent:
         child_works: list[Callable[[Any], None]],
         *,
         park_gate: threading.Event | None = None,
-        child_sub: str | None = None,
+        child_sub: uuid.UUID | None = None,
     ) -> None:
         self.store = store
         self.child_works = child_works
@@ -91,7 +107,7 @@ class _SegmentedParent:
                         self.store,
                         self.run_id,
                         work,
-                        created_by_sub=self.child_sub,
+                        created_by_user_id=self.child_sub,
                     )
                 )
             if self.park_gate is not None:
@@ -289,21 +305,21 @@ def test_per_user_cap_bounds_only_the_noisy_subject() -> None:
         hold.wait(timeout=10.0)
         handle.complete({"answer": "ok", "metrics": {}})
 
-    def submit(sub: str):
+    def submit(user_id: uuid.UUID):
         return store.submit(
             question="F",
             stack_name="default",
             work=slow_work,
-            created_by_sub=sub,
+            created_by_user_id=user_id,
         )
 
     try:
-        submit("user-a")
-        submit("user-a")
+        submit(USER_A)
+        submit(USER_A)
         with pytest.raises(RunPerUserLimit):
-            submit("user-a")
+            submit(USER_A)
         # Another subject is not starved by user-a's burst.
-        submit("user-b")
+        submit(USER_B)
         # Anonymous submissions are never capped.
         store.submit(
             question="F", stack_name="default", work=slow_work
@@ -341,20 +357,24 @@ def test_per_user_cap_ignores_parked_runs() -> None:
             question="F",
             stack_name="default",
             work=filler_work,
-            created_by_sub="user-a",
+            created_by_user_id=USER_A,
+            created_by_tenant_id="default",
         )
 
-    parent = _SegmentedParent(store, [child_work], child_sub="user-a")
+    parent = _SegmentedParent(store, [child_work], child_sub=USER_A)
     try:
         store.submit(
             question="Agent",
             stack_name="default",
             work=parent,
             kind="agent",
-            created_by_sub="user-a",
+            created_by_user_id=USER_A,
+            created_by_tenant_id="default",
         )
         _wait_until(
-            lambda: store.get(parent.run_id)["status"]
+            lambda: store.get(
+                parent.run_id, visible_to=_visible_to(USER_A)
+            )["status"]
             == "waiting_for_children"
         )
         # Parked parent excluded: counted in-flight is the child only,
@@ -367,7 +387,9 @@ def test_per_user_cap_ignores_parked_runs() -> None:
         hold_child.set()
         hold_filler.set()
         _wait_until(
-            lambda: store.get(parent.run_id)["status"] == "completed"
+            lambda: store.get(
+                parent.run_id, visible_to=_visible_to(USER_A)
+            )["status"] == "completed"
         )
         store.submit(
             question="F",
@@ -375,7 +397,8 @@ def test_per_user_cap_ignores_parked_runs() -> None:
             work=lambda handle: handle.complete(
                 {"answer": "x", "metrics": {}}
             ),
-            created_by_sub="user-a",
+            created_by_user_id=USER_A,
+            created_by_tenant_id="default",
         )
     finally:
         hold_child.set()
@@ -406,23 +429,23 @@ def test_per_user_cap_excludes_agent_parents() -> None:
             stack_name="default",
             work=blocking,
             kind="agent",
-            created_by_sub="user-a",
+            created_by_user_id=USER_A,
         )
         # The parent does NOT consume user-a's budget: both standard runs
         # are admitted despite the parent running.
         store.submit(
             question="F", stack_name="default", work=blocking,
-            created_by_sub="user-a",
+            created_by_user_id=USER_A,
         )
         store.submit(
             question="F", stack_name="default", work=blocking,
-            created_by_sub="user-a",
+            created_by_user_id=USER_A,
         )
         # Now 2 standard runs = cap: the third trips it (parent still free).
         with pytest.raises(RunPerUserLimit):
             store.submit(
                 question="F", stack_name="default", work=blocking,
-                created_by_sub="user-a",
+                created_by_user_id=USER_A,
             )
     finally:
         hold.set()

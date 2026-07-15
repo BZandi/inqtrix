@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 import time
 
 from sqlalchemy import select
@@ -22,7 +23,7 @@ _DEFAULT_TENANT = "default"
 
 
 class PostgresAgentMemoryCandidateStore(BaseSessionStore):
-    """Durable candidate store keyed by ``(tenant_id, sub, candidate_id)``."""
+    """Durable candidate store keyed by ``(tenant_id, user_id, candidate_id)``."""
 
     async def create_candidate(
         self, candidate: AgentMemoryCandidate
@@ -30,7 +31,7 @@ class PostgresAgentMemoryCandidateStore(BaseSessionStore):
         now = time.time()
         values = {
             "tenant_id": candidate.tenant_id or _DEFAULT_TENANT,
-            "sub": candidate.sub,
+            "user_id": candidate.user_id,
             "candidate_id": candidate.candidate_id,
             "scope": candidate.scope,
             "category": candidate.category,
@@ -49,7 +50,7 @@ class PostgresAgentMemoryCandidateStore(BaseSessionStore):
             .on_conflict_do_update(
                 index_elements=[
                     agent_memory_candidates.c.tenant_id,
-                    agent_memory_candidates.c.sub,
+                    agent_memory_candidates.c.user_id,
                     agent_memory_candidates.c.candidate_id,
                 ],
                 set_={
@@ -72,11 +73,11 @@ class PostgresAgentMemoryCandidateStore(BaseSessionStore):
             return self._from_row(row)
 
     async def list_candidates(
-        self, *, tenant_id: str, sub: str, status: str | None = None
+        self, *, tenant_id: str, user_id: uuid.UUID, status: str | None = None
     ) -> list[AgentMemoryCandidate]:
         stmt = select(agent_memory_candidates).where(
             agent_memory_candidates.c.tenant_id == (tenant_id or _DEFAULT_TENANT),
-            agent_memory_candidates.c.sub == sub,
+            agent_memory_candidates.c.user_id == user_id,
         )
         if status is not None:
             stmt = stmt.where(agent_memory_candidates.c.status == status)
@@ -89,11 +90,11 @@ class PostgresAgentMemoryCandidateStore(BaseSessionStore):
             return [self._from_row(row) for row in rows]
 
     async def get_candidate(
-        self, *, tenant_id: str, sub: str, candidate_id: str
+        self, *, tenant_id: str, user_id: uuid.UUID, candidate_id: str
     ) -> AgentMemoryCandidate:
         stmt = select(agent_memory_candidates).where(
             agent_memory_candidates.c.tenant_id == (tenant_id or _DEFAULT_TENANT),
-            agent_memory_candidates.c.sub == sub,
+            agent_memory_candidates.c.user_id == user_id,
             agent_memory_candidates.c.candidate_id == candidate_id,
         )
         async with self._session() as session:
@@ -106,14 +107,14 @@ class PostgresAgentMemoryCandidateStore(BaseSessionStore):
         self,
         *,
         tenant_id: str,
-        sub: str,
+        user_id: uuid.UUID,
         candidate_id: str,
         status: str,
         content: str | None = None,
         memory_id: str | None = None,
     ) -> AgentMemoryCandidate:
         row = await self.get_candidate(
-            tenant_id=tenant_id, sub=sub, candidate_id=candidate_id
+            tenant_id=tenant_id, user_id=user_id, candidate_id=candidate_id
         )
         values = {
             "status": status,
@@ -125,7 +126,7 @@ class PostgresAgentMemoryCandidateStore(BaseSessionStore):
             agent_memory_candidates.update()
             .where(
                 agent_memory_candidates.c.tenant_id == (tenant_id or _DEFAULT_TENANT),
-                agent_memory_candidates.c.sub == sub,
+                agent_memory_candidates.c.user_id == user_id,
                 agent_memory_candidates.c.candidate_id == candidate_id,
             )
             .values(**values)
@@ -143,7 +144,7 @@ class PostgresAgentMemoryCandidateStore(BaseSessionStore):
         return AgentMemoryCandidate(
             candidate_id=row["candidate_id"],
             tenant_id=row["tenant_id"],
-            sub=row["sub"],
+            user_id=row["user_id"],
             scope=row["scope"],
             category=row["category"],
             content=row["content"],
@@ -158,14 +159,14 @@ class PostgresAgentMemoryCandidateStore(BaseSessionStore):
 
 
 class PostgresAgentFeedbackStore(BaseSessionStore):
-    """Durable feedback store keyed by ``(tenant_id, sub, feedback_id)``."""
+    """Durable feedback store keyed by ``(tenant_id, user_id, feedback_id)``."""
 
     async def create_feedback(
         self, feedback: AgentFeedbackRecord
     ) -> AgentFeedbackRecord:
         values = {
             "tenant_id": feedback.tenant_id or _DEFAULT_TENANT,
-            "sub": feedback.sub,
+            "user_id": feedback.user_id,
             "feedback_id": feedback.feedback_id,
             "run_id": feedback.run_id,
             "memory_id": feedback.memory_id,
@@ -179,7 +180,7 @@ class PostgresAgentFeedbackStore(BaseSessionStore):
             .on_conflict_do_update(
                 index_elements=[
                     agent_feedback.c.tenant_id,
-                    agent_feedback.c.sub,
+                    agent_feedback.c.user_id,
                     agent_feedback.c.feedback_id,
                 ],
                 set_={
@@ -201,13 +202,13 @@ class PostgresAgentFeedbackStore(BaseSessionStore):
         self,
         *,
         tenant_id: str,
-        sub: str,
+        user_id: uuid.UUID,
         run_id: str | None = None,
         limit: int = 100,
     ) -> list[AgentFeedbackRecord]:
         stmt = select(agent_feedback).where(
             agent_feedback.c.tenant_id == (tenant_id or _DEFAULT_TENANT),
-            agent_feedback.c.sub == sub,
+            agent_feedback.c.user_id == user_id,
         )
         if run_id is not None:
             stmt = stmt.where(agent_feedback.c.run_id == run_id)
@@ -224,7 +225,7 @@ class PostgresAgentFeedbackStore(BaseSessionStore):
         return AgentFeedbackRecord(
             feedback_id=row["feedback_id"],
             tenant_id=row["tenant_id"],
-            sub=row["sub"],
+            user_id=row["user_id"],
             run_id=row["run_id"],
             memory_id=row["memory_id"],
             feedback=row["feedback"],

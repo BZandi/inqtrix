@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import uuid
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -46,6 +48,11 @@ TENANT_HEADER = "X-Test-Tenant"
 WORKSPACE_HEADER = "X-Inqtrix-Workspace-Id"
 
 
+def _user_id(label: str) -> uuid.UUID:
+    """Map a test header label to a stable canonical user UUID."""
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"inqtrix-visibility:{label}")
+
+
 class HeaderSubAuthProvider(AuthProvider):
     """Test-only provider: the sub header selects an OIDC principal.
 
@@ -53,6 +60,9 @@ class HeaderSubAuthProvider(AuthProvider):
     so one client exercises both the scoped and the legacy path. The
     optional tenant header simulates multi-tenant deployments.
     """
+
+    def __init__(self) -> None:
+        self.users = _HeaderUsers()
 
     @property
     def mode(self) -> AuthMode:
@@ -64,8 +74,21 @@ class HeaderSubAuthProvider(AuthProvider):
             return ANONYMOUS_PRINCIPAL
         tenant_id = request.headers.get(TENANT_HEADER, "default")
         return Principal(
-            sub=sub, kind="oidc_session", tenant_id=tenant_id, role="member"
+            user_id=_user_id(sub),
+            kind="oidc_session",
+            tenant_id=tenant_id,
+            role="member",
         )
+
+
+class _HeaderUsers:
+    """Live-user lookup for the scoped principals emitted by the fixture."""
+
+    async def find_by_user_id(self, *, tenant_id, user_id):
+        return SimpleNamespace(user_id=user_id, disabled_at=None)
+
+    async def has_user_id(self, *, tenant_id, user_id):
+        return True
 
 
 def make_visibility_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
@@ -103,7 +126,7 @@ def test_scoped_principal_cannot_see_anothers_run(monkeypatch):
     client = make_visibility_client(monkeypatch)
     with client:
         run_id = submit_run(client, sub="user-a")["run_id"]
-        wait_for_run_status(client, run_id, "completed")
+        wait_for_run_status_as(client, run_id, "completed", sub="user-a")
 
         as_b_get = client.get(
             f"/v1/runs/{run_id}", headers={SUB_HEADER: "user-b"}
@@ -181,9 +204,8 @@ def test_run_listing_is_filtered_per_scoped_principal(monkeypatch):
 
     ids_a = [item["run_id"] for item in listed_a["data"]]
     assert ids_a == [run_a]
-    # Legacy unscoped principals keep the historical see-everything view.
-    ids_anonymous = {item["run_id"] for item in listed_anonymous["data"]}
-    assert ids_anonymous == {run_a, run_b}
+    # Unscoped deployments see ownerless legacy rows only, never scoped data.
+    assert listed_anonymous["data"] == []
 
 
 def test_events_stream_is_visibility_gated(monkeypatch):
@@ -249,7 +271,7 @@ def test_visibility_denial_is_logged_for_operators(monkeypatch, caplog):
 
     assert denied.status_code == 404
     assert any(
-        "authz denied" in message and "user-b" in message
+        "authz denied" in message and str(_user_id("user-b")) in message
         for message in caplog.messages
     )
 
@@ -324,7 +346,10 @@ def test_owner_still_streams_events_under_scoped_auth(monkeypatch):
 def scoped_context(sub: str, *, tenant_id: str = "default") -> UserContext:
     return UserContext(
         principal=Principal(
-            sub=sub, kind="oidc_session", tenant_id=tenant_id, role="member"
+            user_id=_user_id(sub),
+            kind="oidc_session",
+            tenant_id=tenant_id,
+            role="member",
         )
     )
 
@@ -350,7 +375,7 @@ def test_cancel_of_running_run_denies_before_mutating():
         question="Testfrage?",
         stack_name="default",
         work=blocking_work,
-        created_by_sub="user-a",
+        created_by_user_id=_user_id("user-a"),
         created_by_tenant_id="default",
     )
     run_id = summary["run_id"]

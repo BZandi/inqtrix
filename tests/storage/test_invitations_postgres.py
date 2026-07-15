@@ -21,6 +21,7 @@ from sqlalchemy import insert, select, text
 from inqtrix.auth.invitations import DuplicateOpenInvitation
 from inqtrix.auth.pat import PersonalAccessToken
 from inqtrix.auth.permissions import WorkspaceRole
+from inqtrix.auth.sessions import AuthSession
 from inqtrix.storage.auth_postgres import (
     PostgresSessionStore,
     PostgresUserDirectory,
@@ -30,8 +31,10 @@ from inqtrix.storage.identity_orm import workspace_members, workspaces
 from inqtrix.storage.invitations_postgres import PostgresInvitationRepository
 from inqtrix.storage.migrate import run_migrations
 from inqtrix.storage.pat_postgres import PostgresPatStore
-
-from tests.storage.test_auth_postgres import make_session
+from tests.storage._canonical_users import (
+    canonical_user_id,
+    ensure_canonical_users,
+)
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
@@ -42,6 +45,8 @@ pytestmark = pytest.mark.skipif(
 
 APP_ROLE = "inqtrix_app"
 ISSUER = "http://idp.example"
+OWNER_ID = canonical_user_id("invitation-owner")
+INVITEE_ID = canonical_user_id("invitation-recipient")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -82,9 +87,9 @@ async def factory(engine):
                 "workspaces",
                 "personal_access_tokens",
                 "auth_sessions",
-                "users",
             ):
                 await session.execute(text(f"DELETE FROM {table}"))
+            await ensure_canonical_users(session, (OWNER_ID, INVITEE_ID))
     return factory
 
 
@@ -97,7 +102,7 @@ async def seed_workspace(factory) -> str:
                     id=workspace_id,
                     tenant_id="default",
                     name="Team",
-                    created_by_sub="owner-0",
+                    created_by_user_id=OWNER_ID,
                 )
             )
     return str(workspace_id)
@@ -114,7 +119,7 @@ async def test_concurrent_acceptance_consumes_exactly_once(factory):
         workspace_id=workspace_id,
         email="alice@example.com",
         role=WorkspaceRole.EDITOR,
-        invited_by_sub="owner-0",
+        invited_by_user_id=OWNER_ID,
         expires_at=time.time() + 3600,
     )
     results = await asyncio.gather(
@@ -122,8 +127,7 @@ async def test_concurrent_acceptance_consumes_exactly_once(factory):
             repo.accept_open_for_email(
                 tenant_id="default",
                 email="ALICE@example.com",
-                issuer=ISSUER,
-                sub="user-1",
+                user_id=INVITEE_ID,
                 now=time.time(),
             )
             for _ in range(2)
@@ -136,7 +140,7 @@ async def test_concurrent_acceptance_consumes_exactly_once(factory):
         role = (
             await session.execute(
                 select(workspace_members.c.role).where(
-                    workspace_members.c.sub == "user-1"
+                    workspace_members.c.user_id == INVITEE_ID
                 )
             )
         ).scalar_one()
@@ -155,7 +159,7 @@ async def test_existing_role_is_never_downgraded(factory):
                 insert(workspace_members).values(
                     tenant_id="default",
                     workspace_id=uuid.UUID(workspace_id),
-                    sub="user-1",
+                    user_id=INVITEE_ID,
                     role="owner",
                 )
             )
@@ -164,14 +168,13 @@ async def test_existing_role_is_never_downgraded(factory):
         workspace_id=workspace_id,
         email="alice@example.com",
         role=WorkspaceRole.VIEWER,
-        invited_by_sub="owner-0",
+        invited_by_user_id=OWNER_ID,
         expires_at=time.time() + 3600,
     )
     accepted = await repo.accept_open_for_email(
         tenant_id="default",
         email="alice@example.com",
-        issuer=ISSUER,
-        sub="user-1",
+        user_id=INVITEE_ID,
         now=time.time(),
     )
     assert len(accepted) == 1
@@ -179,7 +182,7 @@ async def test_existing_role_is_never_downgraded(factory):
         role = (
             await session.execute(
                 select(workspace_members.c.role).where(
-                    workspace_members.c.sub == "user-1"
+                    workspace_members.c.user_id == INVITEE_ID
                 )
             )
         ).scalar_one()
@@ -197,7 +200,7 @@ async def test_duplicate_open_invitation_hits_the_partial_unique(factory):
         workspace_id=workspace_id,
         email="alice@example.com",
         role=WorkspaceRole.VIEWER,
-        invited_by_sub="owner-0",
+        invited_by_user_id=OWNER_ID,
         expires_at=time.time() + 3600,
     )
     await repo.create(**kwargs)
@@ -216,7 +219,7 @@ async def test_expired_and_revoked_never_accept(factory):
         workspace_id=workspace_id,
         email="old@example.com",
         role=WorkspaceRole.VIEWER,
-        invited_by_sub="owner-0",
+        invited_by_user_id=OWNER_ID,
         expires_at=time.time() - 1,
     )
     revocable = await repo.create(
@@ -224,7 +227,7 @@ async def test_expired_and_revoked_never_accept(factory):
         workspace_id=workspace_id,
         email="gone@example.com",
         role=WorkspaceRole.VIEWER,
-        invited_by_sub="owner-0",
+        invited_by_user_id=OWNER_ID,
         expires_at=time.time() + 3600,
     )
     assert await repo.revoke(
@@ -237,8 +240,7 @@ async def test_expired_and_revoked_never_accept(factory):
         accepted = await repo.accept_open_for_email(
             tenant_id="default",
             email=email,
-            issuer=ISSUER,
-            sub="user-1",
+            user_id=INVITEE_ID,
             now=time.time(),
         )
         assert accepted == ()
@@ -258,21 +260,21 @@ async def test_disable_cascade_is_atomic(factory):
         session_factory=factory, app_role=APP_ROLE
     )
     pat_store = PostgresPatStore(session_factory=factory, app_role=APP_ROLE)
-    await directory.record_login(
+    subject = f"disable-cascade-{uuid.uuid4()}"
+    user = await directory.record_login(
         tenant_id="default",
         issuer=ISSUER,
-        subject="user-1",
+        subject=subject,
         email="alice@example.com",
         email_verified=True,
         display_name="Alice",
     )
-    from inqtrix.auth.sessions import AuthSession
-
     await sessions.create(
         AuthSession(
             id="sess-1",
-            sub="user-1",
+            user_id=user.id,
             issuer=ISSUER,
+            subject=subject,
             email="alice@example.com",
             display_name="Alice",
             groups=(),
@@ -285,8 +287,7 @@ async def test_disable_cascade_is_atomic(factory):
         PersonalAccessToken(
             token_id="tok1",
             tenant_id="default",
-            owner_issuer=ISSUER,
-            owner_sub="user-1",
+            owner_user_id=user.id,
             name="ci",
             secret_hmac="ab" * 32,
             created_at=time.time(),
@@ -296,14 +297,14 @@ async def test_disable_cascade_is_atomic(factory):
         )
     )
     assert await directory.disable_user(
-        tenant_id="default", issuer=ISSUER, subject="user-1", now=time.time()
+        tenant_id="default", user_id=user.id, now=time.time()
     )
-    found = await directory.find_user(
-        tenant_id="default", issuer=ISSUER, subject="user-1"
+    found = await directory.find_by_user_id(
+        tenant_id="default", user_id=user.id
     )
     assert found is not None and found.disabled_at is not None
     assert (await pat_store.get("tok1")).revoked_at is not None
     # Second disable is a guarded no-op.
     assert not await directory.disable_user(
-        tenant_id="default", issuer=ISSUER, subject="user-1", now=time.time()
+        tenant_id="default", user_id=user.id, now=time.time()
     )

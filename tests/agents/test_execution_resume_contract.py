@@ -73,6 +73,8 @@ def test_instant_web_task_books_provider_reported_usage() -> None:
             run_id="run-usage",
             workspace_id="ws-usage",
         ),
+        request=SimpleNamespace(knowledge_filters={}),
+        knowledge_collection_ids=None,
         emit=lambda event_type, payload: events.append((event_type, payload)),
         visible_to=None,
     )
@@ -160,6 +162,20 @@ def _save(
             ),
             tasks=tasks,
         )
+    )
+
+
+async def _request_task_cancel(
+    control: MemoryAgentControlStore, task_id: str
+) -> None:
+    async def _authorize(control_write: Any) -> Any:
+        return control_write(None, lambda _child_run_id: "cancelled")
+
+    await control.request_plan_task_cancel(
+        run_id="run-a",
+        plan_id="plan-a",
+        task_id=task_id,
+        authorize=_authorize,
     )
 
 
@@ -390,11 +406,7 @@ def test_cancel_requested_local_task_discards_late_provider_result() -> None:
     synthesis = _task("s", "synthesis")
     _save(control, [local, synthesis])
     deps = _deps(control, _RunService(_RunStore([])))
-    asyncio.run(
-        control.request_plan_task_cancel(
-            run_id="run-a", plan_id="plan-a", task_id="i"
-        )
-    )
+    asyncio.run(_request_task_cancel(control, "i"))
 
     _emit_task_ended(
         deps,
@@ -427,11 +439,7 @@ def test_cancel_requested_child_folds_as_cancelled_not_failed() -> None:
     )
     synthesis = _task("s", "synthesis")
     _save(control, [research, synthesis])
-    asyncio.run(
-        control.request_plan_task_cancel(
-            run_id="run-a", plan_id="plan-a", task_id="r"
-        )
-    )
+    asyncio.run(_request_task_cancel(control, "r"))
     run_store = _RunStore(
         [
             {

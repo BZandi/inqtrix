@@ -1,22 +1,20 @@
-"""Workspace-scoped sharing (opt-in): the grant + typeahead co-member boundary.
+"""Workspace-scoped direct sharing over canonical user UUIDs.
 
-Pins ``settings.sharing.restrict_to_workspace_members``. With it OFF, sharing
-is tenant-wide (byte-identical to before the knob existed). With it ON, a grant
-and the typeahead are confined to the grantor's workspace co-members; the
-grant-time check is the authoritative boundary (the typeahead filter is the
-convenience half). Resources are not workspace-scoped, so "co-member" is
-relative to the GRANTOR, not the resource.
+The optional boundary is enforced both by the user picker and by the grant
+write.  Membership facts and share recipients use local ``users.id`` values;
+IdP subjects are only external login bindings.
 """
 
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from inqtrix.auth.identity_memory import MemoryIdentityStore
-from inqtrix.auth.permissions import PermissionService, WorkspaceRole
+from inqtrix.auth.permissions import AuthorizationService, WorkspaceRole
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server.container import build_container
 from inqtrix.server.routers.auth import build_auth_router
@@ -33,9 +31,21 @@ from tests.contract._app import StubSearch
 from tests.test_knowledge_routes import KnowledgeStubLLM
 from tests.test_oidc_bff import ISSUER, FakeIdp, make_provider, run_login
 
-GRANTOR = "user-1234"  # the FakeIdp default login (resource owner)
-COMEMBER = "co-member"  # shares a workspace with the grantor
-STRANGER = "stranger"  # exists, but in a different workspace
+GRANTOR_SUBJECT = "user-1234"
+COMEMBER_SUBJECT = "co-member"
+STRANGER_SUBJECT = "stranger"
+UNKNOWN_USER_ID = uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+
+
+def test_memory_identity_atomic_capabilities_require_a_bound_event_sink():
+    identity = MemoryIdentityStore()
+    assert not identity.atomic_share_effects
+    assert not identity.atomic_workspace_effects
+
+    identity.bind_user_event_sink(lambda **_kwargs: None)
+
+    assert identity.atomic_share_effects
+    assert identity.atomic_workspace_effects
 
 
 def make_world(*, restrict: bool):
@@ -52,8 +62,11 @@ def make_world(*, restrict: bool):
         ),
         semaphore_factory=lambda: asyncio.Semaphore(1),
         auth_provider=provider,
-        permissions=PermissionService(
-            members=identity, groups=identity, shares=identity, audit=identity
+        permissions=AuthorizationService(
+            members=identity,
+            shares=identity,
+            audit=identity,
+            restrict_to_workspace_members=restrict,
         ),
         workspace_admin=identity,
     )
@@ -63,178 +76,308 @@ def make_world(*, restrict: bool):
     app.include_router(build_shares_router(container))
     app.include_router(build_users_router(container))
     client = TestClient(app, base_url="http://127.0.0.1:5100")
-    run_login(client, idp)  # establishes the GRANTOR session
+    run_login(client, idp)
 
     async def _arrange():
-        for sub, email, name in (
-            (COMEMBER, "cora@example.com", "Cora Member"),
-            (STRANGER, "stan@example.com", "Stan Stranger"),
-        ):
-            await users.record_login(
-                tenant_id="default",
-                issuer=ISSUER,
-                subject=sub,
-                email=email,
-                email_verified=True,
-                display_name=name,
-            )
-        # GRANTOR + COMEMBER share one workspace; STRANGER sits in another.
+        grantor = await users.find_user(
+            tenant_id="default",
+            issuer=ISSUER,
+            subject=GRANTOR_SUBJECT,
+        )
+        assert grantor is not None
+        comember = await users.record_login(
+            tenant_id="default",
+            issuer=ISSUER,
+            subject=COMEMBER_SUBJECT,
+            email="cora@example.com",
+            email_verified=True,
+            display_name="Cora Member",
+        )
+        stranger = await users.record_login(
+            tenant_id="default",
+            issuer=ISSUER,
+            subject=STRANGER_SUBJECT,
+            email="stan@example.com",
+            email_verified=True,
+            display_name="Stan Stranger",
+        )
+
         workspace_id, _ = await identity.create_workspace(
-            tenant_id="default", name="Team", created_by_sub=GRANTOR
+            tenant_id="default",
+            name="Team",
+            created_by_user_id=grantor.user_id,
         )
         await identity.assign_member(
             tenant_id="default",
             workspace_id=workspace_id,
-            sub=COMEMBER,
+            user_id=comember.user_id,
             role=WorkspaceRole.EDITOR,
         )
         await identity.create_workspace(
-            tenant_id="default", name="Other", created_by_sub=STRANGER
+            tenant_id="default",
+            name="Other",
+            created_by_user_id=stranger.user_id,
         )
-        return workspace_id
+        return grantor.user_id, comember.user_id, stranger.user_id, workspace_id
 
-    shared_workspace = asyncio.run(_arrange())
-    container.run_store.submit(
+    grantor_id, comember_id, stranger_id, shared_workspace = asyncio.run(
+        _arrange()
+    )
+    owned = container.run_store.submit(
         question="meine Recherche",
         stack_name="default",
         work=lambda handle: handle.complete({"answer": "ok"}),
-        created_by_sub=GRANTOR,
-    )
-    owned = container.run_store.list()[0]["run_id"]
+        created_by_user_id=grantor_id,
+        created_by_tenant_id="default",
+    )["run_id"]
     csrf = client.cookies.get("inqtrix_csrf")
-    return client, csrf, owned, identity, shared_workspace
+    return (
+        client,
+        csrf,
+        owned,
+        identity,
+        shared_workspace,
+        comember_id,
+        stranger_id,
+    )
 
 
-def grant(client, csrf, owned, subject, permission="view"):
+def grant(
+    client: TestClient,
+    csrf: str,
+    owned: str,
+    recipient_user_id: uuid.UUID,
+    permission: str = "view",
+):
     return client.post(
         "/v1/shares",
         json={
             "resource_type": "run",
             "resource_id": owned,
-            "invitees": [{"subject_id": subject, "permission": permission}],
+            "invitees": [
+                {
+                    "user_id": str(recipient_user_id),
+                    "permission": permission,
+                }
+            ],
         },
         headers={"X-CSRF-Token": csrf},
     )
 
 
-def search(client, q):
+def search(client: TestClient, query: str) -> set[uuid.UUID]:
     return {
-        row["subject"]
-        for row in client.get("/v1/users/search", params={"q": q}).json()["data"]
+        uuid.UUID(row["id"])
+        for row in client.get(
+            "/v1/users/search", params={"q": query}
+        ).json()["data"]
     }
 
 
 def test_off_keeps_sharing_tenant_wide():
-    # The backwards-compat contract rests on this default.
     assert SharingSettings().restrict_to_workspace_members is False
-    client, csrf, owned, _identity, _ws = make_world(restrict=False)
+    client, csrf, owned, _identity, _ws, _comember_id, stranger_id = (
+        make_world(restrict=False)
+    )
+
     with client:
-        # The stranger is searchable and a grant to them succeeds.
-        assert STRANGER in search(client, "stan")
-        assert grant(client, csrf, owned, STRANGER).status_code == 201
+        assert stranger_id in search(client, "stan")
+        assert grant(client, csrf, owned, stranger_id).status_code == 201
 
 
 def test_on_grant_allows_comember_denies_stranger():
-    client, csrf, owned, identity, _ws = make_world(restrict=True)
+    client, csrf, owned, identity, _ws, comember_id, stranger_id = make_world(
+        restrict=True
+    )
+
     with client:
-        assert grant(client, csrf, owned, COMEMBER).status_code == 201
-        # A non-co-member is hidden behind 404 (indistinguishable from a
-        # foreign resource), and the denial is audited (Designprinzip 1) —
-        # not a leaky 400 that would reveal the stranger exists.
-        denied = grant(client, csrf, owned, STRANGER)
+        assert grant(client, csrf, owned, comember_id).status_code == 201
+        denied = grant(client, csrf, owned, stranger_id)
         assert denied.status_code == 404
         assert any(
             entry.action == "share.denied"
-            and entry.detail.get("subject") == STRANGER
+            and entry.detail.get("recipient_user_id") == str(stranger_id)
             for entry in identity.audit_entries
         )
 
 
-def test_on_nonexistent_invitee_is_404_like_a_non_member():
-    """Existence is not leaked: a non-existent sub and a real non-co-member
-    both produce a byte-identical 404 under workspace-scoped sharing."""
-    client, csrf, owned, _identity, _ws = make_world(restrict=True)
+def test_on_nonexistent_invitee_is_hidden_like_a_non_member():
+    client, csrf, owned, _identity, _ws, _comember_id, stranger_id = (
+        make_world(restrict=True)
+    )
+
     with client:
-        ghost = grant(client, csrf, owned, "ghost-sub")
-        stranger = grant(client, csrf, owned, STRANGER)
+        ghost = grant(client, csrf, owned, UNKNOWN_USER_ID)
+        stranger = grant(client, csrf, owned, stranger_id)
         assert ghost.status_code == 404
         assert stranger.status_code == 404
         assert ghost.json() == stranger.json()
 
 
 def test_on_typeahead_scopes_to_comembers():
-    client, _csrf, _owned, _identity, _ws = make_world(restrict=True)
+    client, _csrf, _owned, _identity, _ws, comember_id, stranger_id = (
+        make_world(restrict=True)
+    )
+
     with client:
-        # The co-member is offered; the stranger is filtered out.
-        assert search(client, "cora") == {COMEMBER}
-        assert search(client, "stan") == set()
+        assert search(client, "cora") == {comember_id}
+        assert stranger_id not in search(client, "stan")
 
 
-def test_on_grant_re_enforced_after_membership_removal():
-    """The boundary is the WRITE gate, not a one-time check: once a co-member
-    leaves the shared workspace, a later (re-)grant to them is refused."""
-    client, csrf, owned, identity, shared_workspace = make_world(restrict=True)
+def test_on_grant_rechecks_membership_after_removal():
+    client, csrf, owned, identity, workspace_id, comember_id, _stranger_id = (
+        make_world(restrict=True)
+    )
+
     with client:
-        assert grant(client, csrf, owned, COMEMBER).status_code == 201
-        # COMEMBER leaves the only workspace they shared with the grantor.
+        assert grant(client, csrf, owned, comember_id).status_code == 201
         asyncio.run(
             identity.remove_member(
                 tenant_id="default",
-                workspace_id=shared_workspace,
-                sub=COMEMBER,
+                workspace_id=workspace_id,
+                user_id=comember_id,
             )
         )
-        denied = grant(client, csrf, owned, COMEMBER, permission="edit")
-        assert denied.status_code == 404
+        duplicate_or_denied = grant(
+            client,
+            csrf,
+            owned,
+            comember_id,
+            permission="edit",
+        )
+        assert duplicate_or_denied.status_code == 404
 
 
-def test_share_workspace_predicate():
-    """The membership-boundary predicate behind both halves of the policy."""
-    identity = MemoryIdentityStore()
-    permissions = PermissionService(
-        members=identity, groups=identity, shares=identity, audit=identity
+def test_last_common_workspace_removal_revokes_existing_share():
+    client, csrf, owned, identity, workspace_id, comember_id, _stranger_id = (
+        make_world(restrict=True)
     )
+
+    with client:
+        created = grant(client, csrf, owned, comember_id)
+        assert created.status_code == 201
+        share_id = created.json()["data"][0]["id"]
+        assert asyncio.run(
+            identity.get_share(tenant_id="default", share_id=share_id)
+        ) is not None
+
+        assert asyncio.run(
+            identity.remove_member(
+                tenant_id="default",
+                workspace_id=workspace_id,
+                user_id=comember_id,
+            )
+        )
+
+        assert asyncio.run(
+            identity.get_share(tenant_id="default", share_id=share_id)
+        ) is None
+        assert any(
+            entry.action == "share.workspace_boundary_revoked"
+            for entry in identity.audit_entries
+        )
+
+
+def test_another_common_workspace_preserves_existing_share():
+    client, csrf, owned, identity, workspace_id, comember_id, _stranger_id = (
+        make_world(restrict=True)
+    )
+
+    with client:
+        created = grant(client, csrf, owned, comember_id)
+        assert created.status_code == 201
+        share_id = created.json()["data"][0]["id"]
+        record = asyncio.run(
+            identity.get_share(tenant_id="default", share_id=share_id)
+        )
+        assert record is not None
+
+        async def arrange_and_remove() -> None:
+            second_workspace_id, _ = await identity.create_workspace(
+                tenant_id="default",
+                name="Second Team",
+                created_by_user_id=record.granted_by_user_id,
+            )
+            await identity.assign_member(
+                tenant_id="default",
+                workspace_id=second_workspace_id,
+                user_id=comember_id,
+                role=WorkspaceRole.EDITOR,
+            )
+            assert await identity.remove_member(
+                tenant_id="default",
+                workspace_id=workspace_id,
+                user_id=comember_id,
+            )
+
+        asyncio.run(arrange_and_remove())
+
+        assert asyncio.run(
+            identity.get_share(tenant_id="default", share_id=share_id)
+        ) is not None
+
+
+def test_share_workspace_predicate_uses_canonical_user_ids():
+    identity = MemoryIdentityStore()
+    permissions = AuthorizationService(
+        members=identity,
+        shares=identity,
+        audit=identity,
+    )
+    first_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    second_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
+    third_id = uuid.UUID("33333333-3333-4333-8333-333333333333")
+    nobody_id = uuid.UUID("44444444-4444-4444-8444-444444444444")
+    loner_id = uuid.UUID("55555555-5555-4555-8555-555555555555")
 
     async def scenario():
         workspace_id, _ = await identity.create_workspace(
-            tenant_id="default", name="Team", created_by_sub="a"
+            tenant_id="default",
+            name="Team",
+            created_by_user_id=first_id,
         )
         await identity.assign_member(
             tenant_id="default",
             workspace_id=workspace_id,
-            sub="b",
+            user_id=second_id,
             role=WorkspaceRole.VIEWER,
         )
-        # A second workspace also shared by a and b, so the intersection runs
-        # over a multi-element grantor set and can match on a later element.
-        second_id, _ = await identity.create_workspace(
-            tenant_id="default", name="Team2", created_by_sub="a"
+        second_workspace_id, _ = await identity.create_workspace(
+            tenant_id="default",
+            name="Team2",
+            created_by_user_id=first_id,
         )
         await identity.assign_member(
             tenant_id="default",
-            workspace_id=second_id,
-            sub="b",
+            workspace_id=second_workspace_id,
+            user_id=second_id,
             role=WorkspaceRole.VIEWER,
         )
         await identity.create_workspace(
-            tenant_id="default", name="Other", created_by_sub="c"
+            tenant_id="default",
+            name="Other",
+            created_by_user_id=third_id,
         )
         return (
-            # a and b share "Team" (and "Team2").
             await permissions.share_workspace(
-                tenant_id="default", sub_a="a", sub_b="b"
+                tenant_id="default",
+                user_id_a=first_id,
+                user_id_b=second_id,
             ),
-            # a and c are in different workspaces.
             await permissions.share_workspace(
-                tenant_id="default", sub_a="a", sub_b="c"
+                tenant_id="default",
+                user_id_a=first_id,
+                user_id_b=third_id,
             ),
-            # The target has no workspace at all.
             await permissions.share_workspace(
-                tenant_id="default", sub_a="a", sub_b="nobody"
+                tenant_id="default",
+                user_id_a=first_id,
+                user_id_b=nobody_id,
             ),
-            # The grantor has no workspace at all.
             await permissions.share_workspace(
-                tenant_id="default", sub_a="loner", sub_b="a"
+                tenant_id="default",
+                user_id_a=loner_id,
+                user_id_b=first_id,
             ),
         )
 

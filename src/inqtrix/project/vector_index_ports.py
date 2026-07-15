@@ -15,8 +15,11 @@ and history are replaced wholesale on each upsert.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
+
+from inqtrix.project.scoped_upsert import ResourceScope
 
 
 class VectorIndexNotFound(KeyError):
@@ -99,7 +102,7 @@ class VectorIndexRecord:
     created_at: float = 0.0
     updated_at: float = 0.0
     tenant_id: str = "default"
-    created_by_sub: str | None = None
+    created_by_user_id: uuid.UUID | None = None
     workspace_id: str | None = None
 
 
@@ -123,7 +126,7 @@ class VectorIndexStore(Protocol):
         history: tuple[VectorIndexHistoryEntry, ...],
         created_at: float,
         updated_at: float,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> VectorIndexRecord:
         """Insert or update the record AND replace its members + history
@@ -133,7 +136,7 @@ class VectorIndexStore(Protocol):
     async def list_indexes_page(
         self,
         *,
-        created_by_sub: str | None,
+        created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
         limit: int,
         after: tuple[float, str] | None,
@@ -147,6 +150,8 @@ class VectorIndexStore(Protocol):
         service for the owner check on upsert / delete."""
         ...
 
-    async def delete_index(self, index_id: str) -> None: ...
+    async def delete_index(
+        self, index_id: str, *, scope: ResourceScope
+    ) -> None: ...
 
     async def aclose(self) -> None: ...

@@ -8,19 +8,20 @@ i.e. a cookie-session mode with quotas on):
   principal.
 * ``/v1/admin/quota*`` — the editable admin surface, gated to the instance
   admin (``instance_role == "admin"``, 404-not-403 house convention): an
-  overview of metered subjects with their usage and effective limits, plus
+  overview of metered users with their usage and effective limits, plus
   setting the tenant default / per-user overrides and resetting flow usage.
 
-Quota subjects are ``(tenant_id, sub)`` and quota administration is
-tenant-wide, so it lives on the instance-admin axis — never on workspace
-ownership (a workspace owner administers collaboration, not the
-deployment's quotas). Every admin mutation is audited (``quota.override`` /
-``quota.override_cleared`` / ``quota.reset``).
+Quota accounting is keyed by the canonical ``(tenant_id, user_id)`` pair.
+Administration is tenant-wide, so it lives on the instance-admin axis —
+never on workspace ownership (a workspace owner administers collaboration,
+not the deployment's quotas). Every admin mutation is audited
+(``quota.override`` / ``quota.override_cleared`` / ``quota.reset``).
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Request
@@ -42,6 +43,16 @@ def _parse_dimension(value: object) -> QuotaDimension | None:
         return QuotaDimension(str(value))
     except ValueError:
         return None
+
+
+def _parse_user_target(value: object) -> tuple[uuid.UUID | None, bool]:
+    """Parse a canonical user UUID or the explicit tenant-default target."""
+    if value == "default":
+        return None, True
+    try:
+        return uuid.UUID(str(value)), True
+    except (ValueError, TypeError, AttributeError):
+        return None, False
 
 
 def build_router(container: "AppContainer") -> APIRouter:
@@ -73,7 +84,9 @@ def build_router(container: "AppContainer") -> APIRouter:
         guard — never on workspace ownership. Returns ``(principal, None)``
         for an admin or ``(None, error_response)`` otherwise.
         """
-        resolved, error = await require_instance_admin(provider, request)
+        resolved, error = await require_instance_admin(
+            provider, request, principal_dep
+        )
         if error is not None:
             return None, error
         principal, _session, _mirror = resolved
@@ -83,14 +96,14 @@ def build_router(container: "AppContainer") -> APIRouter:
     async def my_usage(request: Request):
         """The caller's own usage per dimension (the composer meter).
 
-        Empty for an unscoped principal (no metered subject) — the UI
+        Empty for an unscoped principal (no canonical user UUID) — the UI
         only shows the meter for authenticated users anyway.
         """
         principal = await principal_dep(request)
-        subject = quota_service.subject_for(principal)
-        if subject is None:
+        quota_account = quota_service.subject_for(principal)
+        if quota_account is None:
             return {"object": "list", "data": []}
-        rows = await quota_service.usage_for(subject)
+        rows = await quota_service.usage_for(quota_account)
         return {
             "object": "list",
             "data": [
@@ -108,31 +121,33 @@ def build_router(container: "AppContainer") -> APIRouter:
 
     @router.get("/v1/admin/quota")
     async def admin_overview(request: Request):
-        """Admin overview: metered subjects, usage, limits, ceilings."""
+        """Admin overview: metered users, usage, limits, and ceilings."""
         principal, error = await _admin(request)
         if error is not None:
             return error
         snapshot = await quota_service.admin_snapshot(principal.tenant_id)
         if users is not None and snapshot["subjects"]:
-            profiles = await users.profiles_for_subjects(
+            profiles = await users.profiles_for_user_ids(
                 tenant_id=principal.tenant_id,
-                subs=tuple(row["sub"] for row in snapshot["subjects"]),
+                user_ids=tuple(row["user_id"] for row in snapshot["subjects"]),
             )
             for row in snapshot["subjects"]:
-                profile = profiles.get(row["sub"])
+                profile = profiles.get(row["user_id"])
                 row["display_name"] = (
                     profile.display_name if profile is not None else None
                 )
                 row["email"] = profile.email if profile is not None else None
+        for row in snapshot["subjects"]:
+            row["user_id"] = str(row["user_id"])
         return snapshot
 
     @router.put("/v1/admin/quota/limits")
     async def set_limit(request: Request):
         """Set the tenant default or a per-user override (instance admin only).
 
-        Body: ``{"subject_id": "<sub>"|"__quota_default__", "dimension":
-        "<dim>", "value": <int>=0>}``. ``value`` ``0`` is explicit
-        unlimited; the operator ceiling still clamps at read.
+        Body: ``{"user_id": "<uuid>"|"default", "dimension": "<dim>",
+        "value": <int>=0>}``. ``value`` ``0`` is explicit unlimited; the
+        operator ceiling still clamps at read.
         """
         principal, error = await _admin(request)
         if error is not None:
@@ -147,10 +162,12 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(
                 400, "Ungueltiger JSON-Body", "invalid_request_error"
             )
-        subject_id = str(body.get("subject_id", "") or "")
-        if not subject_id:
+        subject_user_id, valid_target = _parse_user_target(body.get("user_id"))
+        if not valid_target:
             return error_response(
-                400, "Feld 'subject_id' ist erforderlich", "invalid_request_error"
+                400,
+                "Feld 'user_id' muss eine UUID oder 'default' sein",
+                "invalid_request_error",
             )
         dimension = _parse_dimension(body.get("dimension"))
         if dimension is None:
@@ -170,41 +187,44 @@ def build_router(container: "AppContainer") -> APIRouter:
             )
         await quota_service.set_limit_for(
             tenant_id=principal.tenant_id,
-            subject_sub=subject_id,
+            subject_user_id=subject_user_id,
             dimension=dimension,
             value=raw_value,
-            set_by_sub=principal.sub,
+            set_by_user_id=principal.user_id,
         )
         await _audit(
             principal,
             "quota.override",
-            subject_id,
+            "default" if subject_user_id is None else str(subject_user_id),
             dimension,
             {"value": str(raw_value)},
         )
-        return {"subject_id": subject_id, "dimension": dimension.value, "value": raw_value}
+        return {
+            "user_id": "default" if subject_user_id is None else str(subject_user_id),
+            "dimension": dimension.value,
+            "value": raw_value,
+        }
 
     @router.delete("/v1/admin/quota/limits", status_code=204)
     async def clear_limit(
         request: Request,
-        subject_id: str = "",
+        user_id: str = "",
         dimension: str = "",
     ):
         """Drop a limit so it falls back to the next layer (instance admin only).
 
-        ``subject_id`` and ``dimension`` are query parameters (not path
-        segments): an OIDC ``sub`` may be a URI containing slashes, which
-        a path segment cannot represent — and this keeps the identifying
-        fields off the path, consistent with the body-carried subject on
-        PUT/reset.
+        ``user_id`` and ``dimension`` are query parameters. The former is
+        either a canonical user UUID or the explicit ``default`` target,
+        matching the body-carried target used by PUT and reset.
         """
         principal, error = await _admin(request)
         if error is not None:
             return error
-        if not subject_id:
+        subject_user_id, valid_target = _parse_user_target(user_id)
+        if not valid_target:
             return error_response(
                 400,
-                "Query-Parameter 'subject_id' ist erforderlich",
+                "Query-Parameter 'user_id' muss eine UUID oder 'default' sein",
                 "invalid_request_error",
             )
         parsed = _parse_dimension(dimension)
@@ -214,14 +234,15 @@ def build_router(container: "AppContainer") -> APIRouter:
             )
         await quota_service.clear_limit_for(
             tenant_id=principal.tenant_id,
-            subject_sub=subject_id,
+            subject_user_id=subject_user_id,
             dimension=parsed,
         )
-        await _audit(principal, "quota.override_cleared", subject_id, parsed, {})
+        target = "default" if subject_user_id is None else str(subject_user_id)
+        await _audit(principal, "quota.override_cleared", target, parsed, {})
 
     @router.post("/v1/admin/quota/reset")
     async def reset_usage(request: Request):
-        """Zero one subject's current-window flow usage (instance admin only).
+        """Zero one user's current-window flow usage (instance admin only).
 
         Stock dimensions cannot be reset (freed by deletion, never
         reset) — the attempt is a 400, not a silent no-op.
@@ -239,10 +260,10 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(
                 400, "Ungueltiger JSON-Body", "invalid_request_error"
             )
-        subject_id = str(body.get("subject_id", "") or "")
-        if not subject_id:
+        subject_user_id, valid_target = _parse_user_target(body.get("user_id"))
+        if not valid_target or subject_user_id is None:
             return error_response(
-                400, "Feld 'subject_id' ist erforderlich", "invalid_request_error"
+                400, "Feld 'user_id' muss eine Nutzer-UUID sein", "invalid_request_error"
             )
         dimension = _parse_dimension(body.get("dimension"))
         if dimension is None:
@@ -252,19 +273,19 @@ def build_router(container: "AppContainer") -> APIRouter:
         try:
             await quota_service.reset_for(
                 tenant_id=principal.tenant_id,
-                subject_sub=subject_id,
+                subject_user_id=subject_user_id,
                 dimension=dimension,
             )
         except ValueError as exc:
             # Stock dimension reset rejected by the store contract.
             return error_response(400, str(exc), "invalid_request_error")
-        await _audit(principal, "quota.reset", subject_id, dimension, {})
-        return {"subject_id": subject_id, "dimension": dimension.value}
+        await _audit(principal, "quota.reset", str(subject_user_id), dimension, {})
+        return {"user_id": str(subject_user_id), "dimension": dimension.value}
 
     async def _audit(
         principal,
         action: str,
-        subject_id: str,
+        target_id: str,
         dimension: QuotaDimension,
         detail: dict[str, str],
     ) -> None:
@@ -273,10 +294,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         await workspace_admin.record(
             AuditEntry(
                 tenant_id=principal.tenant_id,
-                actor_sub=principal.sub,
+                actor_user_id=principal.user_id,
                 action=action,
                 resource_type="quota",
-                resource_id=f"{subject_id}:{dimension.value}",
+                resource_id=f"{target_id}:{dimension.value}",
                 detail=detail,
             )
         )

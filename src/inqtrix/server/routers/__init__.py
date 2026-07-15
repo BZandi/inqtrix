@@ -10,9 +10,8 @@ dependency so every gated endpoint resolves a
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any
 
-from fastapi import Depends
 from fastapi.responses import JSONResponse
 
 from inqtrix.quota.models import QuotaDimension, QuotaExceeded
@@ -20,7 +19,6 @@ from inqtrix.server.metrics import record_admission_rejected
 from inqtrix.services.agent_context import StackResolutionError
 
 if TYPE_CHECKING:
-    from inqtrix.auth.permissions import SharePermission
     from inqtrix.auth.principal import Principal
 
 
@@ -114,37 +112,3 @@ def stack_error_response(exc: StackResolutionError) -> JSONResponse:
     if exc.available:
         content["error"]["available_stacks"] = exc.available
     return JSONResponse(status_code=400, content=content)
-
-
-def build_shared_grants_dependency(
-    share_service: Any,
-    principal_dep: Callable[..., "Principal"],
-    *,
-    resource_type: str,
-) -> Callable[..., Any]:
-    """One FastAPI dependency: the caller's shared-in grants of a kind.
-
-    Resolves ``{resource_id: SharePermission}`` via ONE indexed query
-    per request, or ``None`` outside the sharing surface (no share
-    service wired, or an anonymous/static principal) — ``None`` keeps
-    every store's historical behaviour byte-identical. Defined once so
-    the runs, knowledge, and future resource routers cannot drift.
-    """
-
-    async def shared_grants_dep(
-        principal: "Principal" = Depends(principal_dep),
-    ) -> "Mapping[str, SharePermission] | None":
-        if share_service is None or principal.kind in (
-            "anonymous",
-            "static",
-        ):
-            return None
-        shared = await share_service.shared_with_me(
-            principal, resource_type=resource_type
-        )
-        return {
-            resource_id: record.permission
-            for resource_id, record in shared.items()
-        }
-
-    return shared_grants_dep

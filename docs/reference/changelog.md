@@ -8,6 +8,12 @@ No released artefacts yet. The repository is marked experimental (see the discla
 
 ### Added
 
+- **App-wide Markdown block actions.** Mermaid diagrams now preserve their native
+  type scale up to the available reading width and offer a shared responsive modal
+  viewer, source copy, and high-resolution PNG export. Markdown tables offer exact
+  source copy plus full-width PNG and UTF-8 CSV export across chat, knowledge,
+  reports, file previews, and Agent Desk.
+
 - **Model cards + direct model selection.** A curated, provider-neutral model-card
   catalogue (`src/inqtrix/model_cards.py`) with cross-provider alias resolution
   (Anthropic / Bedrock region+version / Azure deployment → one card); an optional
@@ -20,6 +26,38 @@ No released artefacts yet. The repository is marked experimental (see the discla
   See [Model cards](../configuration/model-cards.md).
 
 ### Changed
+
+- **Fast run cancellation.** Cancelling a running research run now takes
+  effect within seconds instead of minutes: provider retry ladders check for
+  cancellation before every attempt and during backoff sleeps, the search and
+  claim-extraction fan-outs abandon queued calls (visible as a warning
+  progress message plus the `cancel_abandoned_work` iteration-log marker),
+  and answer composition stops between report sections. The residual worst
+  case is the remainder of one in-flight provider HTTP attempt. Run summaries
+  additively expose `cancel_requested: true` while a cancel is pending, and
+  the web client's delete action now cancels an active run, waits (bounded)
+  for the terminal transition, and then deletes — resolving the previous
+  409 `run_active` dead end after cancelling. Reranker retries are now
+  visible on the knowledge event surface (`inqtrix.knowledge.rerank.retry`)
+  instead of server-log-only, and the runtime availability probes name the
+  probe bound and exception type in their warning instead of an empty
+  message. The Research Desk composer and start-screen suggestion buttons
+  are visibly disabled while the auth session is still resolving instead of
+  silently ignoring clicks.
+
+- **External PostgreSQL as a Compose building block.** The new
+  `deploy/compose/compose.external-db.yaml` override detaches the bundled
+  database container so the stack runs against a managed/external
+  PostgreSQL 15+ (pgvector-enabled images work; the extension stays unused).
+  `deploy/.env.stack.example` documents the four-step recipe and the
+  `restricted` vs `bundled_legacy` runtime-login policies inline, and the
+  docs gained explicit external-Postgres, S3-compatible (incl. Nutanix
+  Objects) and custom-chart guidance.
+
+- **Consistent Agent Desk presentation.** Direct answers now render in full like
+  chat responses, the compact Settings selector follows the shared small-button
+  typography, and newly selected live research logs position the current step
+  immediately without an animated full-log scroll.
 
 - **No silent token truncation on the frontend** (Designprinzip 1). Document
   ingest and chat/editor attachment context no longer truncate per document; the

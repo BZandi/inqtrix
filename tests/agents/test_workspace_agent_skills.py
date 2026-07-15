@@ -56,7 +56,7 @@ def _create_skill(client, **overrides) -> str:
     payload = {**SKILL_PAYLOAD, **overrides}
     service = client.container.skill_service
     record = asyncio.run(
-        service.create(payload, tenant_id="default", owner_sub=None)
+        service.create(payload, tenant_id="default", owner_user_id=None)
     )
     return record.id
 
@@ -231,7 +231,7 @@ def _record(**overrides):
     base: dict[str, Any] = {
         "id": "sk_unit",
         "tenant_id": "default",
-        "owner_sub": None,
+        "owner_user_id": None,
         "label": "unit",
         "title": "Unit",
         "description": "",

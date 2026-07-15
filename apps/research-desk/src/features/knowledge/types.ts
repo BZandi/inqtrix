@@ -46,6 +46,11 @@ export type DocumentViewerTarget = {
 export type KnowledgeDataSource = {
   search: (query: string, collectionIds: string[], topK: number) => Promise<KnowledgeSearchHit[]>
   loadDocumentText: (documentId: string) => Promise<KnowledgeDocumentText>
+  /** Metadata-only authorization probe. The Original affordance stays disabled
+   * until this confirms access for the current principal. */
+  canLoadFileContent:
+    | ((fileId: string) => Promise<boolean>)
+    | null
   /** Original binary for the viewer's Original tab; null = no original
    * available in this deployment (demo, or files feature off). */
   loadFileContent:

@@ -19,6 +19,8 @@ deploy/env/*.env
 # Node / frontend artefacts (rebuilt inside Dockerfile.web)
 **/node_modules
 apps/research-desk/dist
+apps/collaboration-server/dist
+packages/editor-schema/dist
 
 # VCS, local agent memory, IDE
 .git

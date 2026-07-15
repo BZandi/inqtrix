@@ -57,7 +57,7 @@ _RENDERING_CAPABILITIES = (
 """SSOT of what the frontend renderer actually supports (plan M1 S5).
 
 Cross-reference: apps/research-desk/src/components/markdown/
-MarkdownRenderer.tsx (remark-gfm, rehype-katex, rehype-pretty-code,
+MarkdownRenderer.tsx (remark-gfm, rehype-katex, bounded Shiki highlighting,
 MermaidFigure). The drift test in tests/agents/test_prompts_rendering.py
 asserts each feature is named here — removing one from the renderer must
 update BOTH places. The M2 kernel imports the SAME accessor."""

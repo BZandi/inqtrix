@@ -16,20 +16,22 @@ import {
   vectorIndexMembersResolved,
 } from '@/features/project/selectors'
 import type { EmbedModelDescriptor, EmbedModelId, FileAssetRecord, ProjectState } from '@/features/project/types'
+import type { KnowledgeCollectionInfo } from '@/features/researchRuns/types'
 import { createDefaultFileParser } from '@/features/files/parsing'
 import { ingestFiles, type ServerFileUpload } from '@/features/files/ingest'
 import { Dropzone } from '@/features/files/Dropzone'
-import { FILE_SECTION_TEMP_ID } from '@/features/files/sections'
+import { temporaryFileSectionId } from '@/features/files/sections'
 import type { ResearchDeskAction } from '../researchDesk/state'
 import {
   ingestNewVectorIndexMembers,
-  reindexVectorIndexOnServer,
+  createVectorIndexCollectionOnServer,
   type KnowledgeReindexResult,
   type KnowledgeSyncOptions,
   type MemberProgress,
 } from './knowledgeSync'
 import { useIndexingJobApi } from './useIndexingJobApi'
 import { Rail } from './Rail'
+import { ServerCollectionPanel, type ServerCollectionJobState } from './ServerCollectionPanel'
 import { useEmbeddingQuota } from '@/features/quota/useEmbeddingQuota'
 import { IndexBar } from './IndexBar'
 import { AddDocsPanel } from './AddDocsPanel'
@@ -181,6 +183,11 @@ export function FileLibraryWorkspace({
   fileApiOptions,
   knowledgeSync,
   onAssetsIngested,
+  onRefreshServerCollections,
+  onShareServerCollection,
+  serverCollections = [],
+  serverCollectionsLoaded = false,
+  serverCollectionsRefreshToken = 0,
   serverFeatureLabels = null,
   serverFileUpload,
   state,
@@ -194,7 +201,8 @@ export function FileLibraryWorkspace({
   ensureAssetBodiesLoaded?: (assetIds: readonly string[]) => Promise<Map<string, string>>
   /** Server options for the file preview (asset body + original download),
    * gated on the FILES/persistence tier (not knowledge); `null` in demo/offline.
-   * Whether the Original tab is usable is then `serverFileId && fileApiOptions`. */
+   * The viewer additionally probes the current principal's live file access
+   * before exposing original-binary controls. */
   fileApiOptions: ClientOptions | null
   /** Connection facts for real server-side embedding runs; `null` keeps
    * the historical client-side simulation (demo/offline). */
@@ -203,6 +211,13 @@ export function FileLibraryWorkspace({
    * just-ingested assets, upgrading the instant client parse. No-op without
    * a server parser. */
   onAssetsIngested?: (assets: FileAssetRecord[]) => void
+  /** Refreshes the authoritative collection list after a document, job, or
+   * lifecycle mutation. */
+  onRefreshServerCollections?: () => Promise<void>
+  onShareServerCollection?: (collection: KnowledgeCollectionInfo) => void
+  serverCollections?: KnowledgeCollectionInfo[]
+  serverCollectionsLoaded?: boolean
+  serverCollectionsRefreshToken?: number
   /** Labels of active server features for the visible mode indicator;
    * `null` hides the line (demo or no server connected). */
   serverFeatureLabels?: string[] | null
@@ -221,8 +236,9 @@ export function FileLibraryWorkspace({
   const [pickerIndexId, setPickerIndexId] = useState<string | null>(null)
   const [previewAssetId, setPreviewAssetId] = useState<string | null>(null)
   const [isMobileDetailOpen, setIsMobileDetailOpen] = useState(false)
+  const [serverJobs, setServerJobs] = useState<Record<string, ServerCollectionJobState>>({})
   const fileInputRef = useRef<HTMLInputElement | null>(null)
-  const targetRef = useRef<UploadTarget>({ groupId: null, sectionId: FILE_SECTION_TEMP_ID })
+  const targetRef = useRef<UploadTarget | null>(null)
   const reindexTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
   const selectNewestIndex = useRef(false)
 
@@ -241,11 +257,13 @@ export function FileLibraryWorkspace({
   const sections = useMemo(() => projectFileLibrarySections(state), [state.fileLibrarySections, state.fileLibrarySectionOrder])
   const groups = useMemo(() => projectFileGroups(state), [state.fileGroups, state.fileGroupOrder])
   const assets = useMemo(() => projectFileAssets(state), [state.fileAssets, state.fileAssetOrder])
+  const temporarySectionId = useMemo(() => temporaryFileSectionId(sections), [sections])
   const indexes = useMemo(() => projectVectorIndexes(state), [state.vectorIndexes, state.vectorIndexOrder])
   const storageTotalBytes = useMemo(() => projectStorageTotalBytes(state), [state.fileAssets, state.fileAssetOrder])
 
   const assetsInSection = (sectionId: string) => assets.filter((asset) => asset.sectionId === sectionId)
   const customCollections = useMemo(() => sections.filter((section) => section.kind === 'custom'), [sections])
+  const defaultUploadSectionId = customCollections[0]?.id ?? temporarySectionId
   const railCollections = useMemo(
     () => sections.filter((section) => section.kind === 'custom' || assets.some((asset) => asset.sectionId === section.id)),
     [sections, assets],
@@ -258,7 +276,14 @@ export function FileLibraryWorkspace({
       setActive({ kind: 'all' })
       setPickerIndexId(null)
     }
-  }, [active, indexes, sections])
+    if (
+      active.kind === 'server-collection'
+      && serverCollectionsLoaded
+      && !serverCollections.some((collection) => collection.id === active.collectionId)
+    ) {
+      setActive({ kind: 'all' })
+    }
+  }, [active, indexes, sections, serverCollections, serverCollectionsLoaded])
 
   // After creating an index, select it and open its add-documents panel.
   useEffect(() => {
@@ -297,7 +322,7 @@ export function FileLibraryWorkspace({
   const breadcrumbFor = (asset: FileAssetRecord) => [sectionTitle(asset.sectionId), groupTitle(asset.groupId)].filter(Boolean).join(' / ')
 
   const blocks: Block[] = useMemo(() => {
-    if (active.kind === 'index') return []
+    if (active.kind === 'index' || active.kind === 'server-collection') return []
     const pool = assets.filter(matchesQuery)
     if (q) return [{ band: null, breadcrumb: true, items: sortAssets(pool), key: 'search' }]
     if (active.kind === 'all') {
@@ -335,6 +360,12 @@ export function FileLibraryWorkspace({
   const activeIndex = useMemo(
     () => (active.kind === 'index' ? vectorIndexById(state, active.indexId) : null),
     [active, state.vectorIndexes],
+  )
+  const activeServerCollection = useMemo(
+    () => active.kind === 'server-collection'
+      ? serverCollections.find((collection) => collection.id === active.collectionId) ?? null
+      : null,
+    [active, serverCollections],
   )
   const allIndexMembers = useMemo(
     () => (activeIndex ? vectorIndexMembersResolved(state, activeIndex.id) : []),
@@ -402,31 +433,95 @@ export function FileLibraryWorkspace({
   const renameFile = (fileId: string, label: string) => dispatch({ fileId, label, type: 'renameFileAsset' })
   const deleteFile = (fileId: string) => dispatch({ fileId, type: 'deleteFileAsset' })
 
+  const localIndexIdForCollection = (collectionId: string): string | null =>
+    indexes.find((index) => index.serverCollectionId === collectionId)?.id ?? null
+  const clearServerJob = (collectionId: string) => {
+    setServerJobs((current) => {
+      if (!current[collectionId]) return current
+      const next = { ...current }
+      delete next[collectionId]
+      return next
+    })
+  }
+
   const { cancelReindex, startReindex } = useIndexingJobApi({
     apiKey: knowledgeSync?.apiKey,
     enabled: knowledgeSync !== null,
-    onCancelled: (indexId) => dispatch({ indexId, type: 'markVectorIndexCancelled' }),
-    onComplete: (indexId) => dispatch({ indexId, type: 'completeVectorIndexReindex' }),
-    onDocumentCompleted: (indexId, documentId) =>
-      dispatch({ indexId, serverDocumentId: documentId, type: 'markVectorIndexDocumentEmbedded' }),
-    onError: (indexId, message) => dispatch({ indexId, message, type: 'markVectorIndexError' }),
-    onProgress: (indexId, completedDocuments, totalDocuments, currentDocumentTitle) =>
-      dispatch({ completedDocuments, currentDocumentTitle, indexId, totalDocuments, type: 'markVectorIndexProgress' }),
-    onQueued: (indexId, queuePosition) =>
-      dispatch({ indexId, queuePosition, type: 'markVectorIndexQueued' }),
-    onStart: (indexId, jobId, totalDocuments) =>
-      dispatch({ indexId, jobId, source: 'server', totalDocuments, type: 'startVectorIndexReindex' }),
+    onCancelled: (collectionId) => {
+      clearServerJob(collectionId)
+      const indexId = localIndexIdForCollection(collectionId)
+      if (indexId) dispatch({ indexId, type: 'markVectorIndexCancelled' })
+    },
+    onComplete: (collectionId) => {
+      clearServerJob(collectionId)
+      void onRefreshServerCollections?.()
+      const indexId = localIndexIdForCollection(collectionId)
+      if (indexId) dispatch({ indexId, type: 'completeVectorIndexReindex' })
+    },
+    onDocumentCompleted: (collectionId, documentId) => {
+      const indexId = localIndexIdForCollection(collectionId)
+      if (indexId) dispatch({ indexId, serverDocumentId: documentId, type: 'markVectorIndexDocumentEmbedded' })
+    },
+    onError: (collectionId, message) => {
+      setServerJobs((current) => ({
+        ...current,
+        [collectionId]: {
+          ...(current[collectionId] ?? {
+            completedDocuments: 0,
+            jobId: '',
+            totalDocuments: 0,
+          }),
+          error: message,
+          status: 'error',
+        },
+      }))
+      const indexId = localIndexIdForCollection(collectionId)
+      if (indexId) dispatch({ indexId, message, type: 'markVectorIndexError' })
+    },
+    onProgress: (collectionId, completedDocuments, totalDocuments, currentDocumentTitle) => {
+      setServerJobs((current) => ({
+        ...current,
+        [collectionId]: {
+          ...(current[collectionId] ?? { jobId: '', status: 'running' }),
+          completedDocuments,
+          currentDocumentTitle,
+          status: current[collectionId]?.status === 'cancelling' ? 'cancelling' : 'running',
+          totalDocuments,
+        },
+      }))
+      const indexId = localIndexIdForCollection(collectionId)
+      if (indexId) dispatch({ completedDocuments, currentDocumentTitle, indexId, totalDocuments, type: 'markVectorIndexProgress' })
+    },
+    onQueued: (collectionId, queuePosition) => {
+      setServerJobs((current) => {
+        const existing = current[collectionId]
+        if (!existing) return current
+        return { ...current, [collectionId]: { ...existing, status: 'queued' } }
+      })
+      const indexId = localIndexIdForCollection(collectionId)
+      if (indexId) dispatch({ indexId, queuePosition, type: 'markVectorIndexQueued' })
+    },
+    onStart: (collectionId, jobId, totalDocuments, status) => {
+      setServerJobs((current) => ({
+        ...current,
+        [collectionId]: {
+          completedDocuments: 0,
+          jobId,
+          status,
+          totalDocuments,
+        },
+      }))
+      const indexId = localIndexIdForCollection(collectionId)
+      if (indexId) dispatch({ indexId, jobId, source: 'server', totalDocuments, type: 'startVectorIndexReindex' })
+    },
+    refreshToken: serverCollectionsRefreshToken,
     workspaceId: knowledgeSync?.workspaceId ?? '',
   })
 
   // `onlyFileId` scopes the run to a SINGLE pending member (the per-row "Index
   // this file" action) — it filters the pending set to that one document so the
   // incremental path ingests just it. Omitted = the whole index (top button).
-  // `forceRebuild` (the "Neu aufbauen" action) bypasses the cheap incremental /
-  // re-embed paths and re-ingests every member from its original file, so an OLD
-  // collection picks up ingest-time provenance (page numbers, file_id, parser
-  // upgrades) it predates — at the cost of re-embedding all + a brief churn.
-  const triggerReindex = (indexId: string, onlyFileId?: string, forceRebuild = false) => {
+  const triggerReindex = (indexId: string, onlyFileId?: string) => {
     const index = vectorIndexById(state, indexId)
     // One job per index at a time (the per-row action must not race the top run).
     if (!index || index.status === 'indexing') return
@@ -444,7 +539,7 @@ export function FileLibraryWorkspace({
       // incremental add / per-row action, the whole index for a refresh/rebuild,
       // so the demo never makes already-embedded rows read "läuft".
       const demoWorkingSet =
-        !forceRebuild && pendingEntries.length > 0
+        pendingEntries.length > 0
           ? pendingEntries.map((entry) => entry.asset.id)
           : memberEntries.map((entry) => entry.asset.id)
       dispatch({
@@ -516,6 +611,8 @@ export function FileLibraryWorkspace({
             serverDocumentIds: result.serverDocumentIds,
             type: 'completeVectorIndexReindex',
           })
+          await onRefreshServerCollections?.()
+          setActive({ collectionId: result.collectionId, kind: 'server-collection' })
         } catch (error: unknown) {
           dispatch({
             indexId,
@@ -530,7 +627,7 @@ export function FileLibraryWorkspace({
     // (pending) members — ingest just those into the existing collection. No
     // full rebuild, no re-embedding of documents already present. (This closes
     // the bug where docs added after the first build were never ingested.)
-    if (!forceRebuild && index.serverCollectionId && sameModel && pendingEntries.length > 0) {
+    if (index.serverCollectionId && sameModel && pendingEntries.length > 0) {
       const pendingAssets = pendingEntries.map((entry) => entry.asset)
       // The complete embedded set after this run = members already embedded
       // plus whatever of the pending set actually ingests.
@@ -566,8 +663,8 @@ export function FileLibraryWorkspace({
     // at ingest (the incremental-add + file paths), not here — so this stays the
     // cheap, churn-free refresh rather than a delete+recreate that risks
     // orphaning the prior collection.
-    if (!forceRebuild && index.serverCollectionId && sameModel) {
-      void startReindex(index).catch((error: unknown) => {
+    if (index.serverCollectionId && sameModel) {
+      void startReindex(index.serverCollectionId).catch((error: unknown) => {
         dispatch({
           indexId,
           message: error instanceof Error ? error.message : String(error),
@@ -577,11 +674,19 @@ export function FileLibraryWorkspace({
       return
     }
 
-    // Full rebuild: first build (no collection yet), the embedding model changed
-    // (a new vector dimension needs a fresh collection), OR an explicit "Neu
-    // aufbauen" (forceRebuild) to re-read the original files. Client-driven
-    // re-ingest of all current members (captures page numbers + file_id via the
-    // ingest paths); deletes any stale prior collection.
+    // A built collection keeps both its id and embedding model. Replacing it
+    // would revoke shares and leave existing references pointing at nothing.
+    if (index.serverCollectionId) {
+      dispatch({
+        indexId,
+        message: t.vectorIndex.modelImmutable,
+        type: 'markVectorIndexError',
+      })
+      return
+    }
+
+    // First build only: create the server collection once, then ingest the
+    // complete local working set. Subsequent refreshes use the in-place job.
     const memberAssets = memberEntries.map((entry) => entry.asset)
     dispatch({
       indexId,
@@ -593,7 +698,7 @@ export function FileLibraryWorkspace({
       type: 'startVectorIndexReindex',
     })
     runClientIngest(memberAssets, (resolved, onMemberDone) =>
-      reindexVectorIndexOnServer(index, resolved, sync, onMemberDone),
+      createVectorIndexCollectionOnServer(index, resolved, sync, onMemberDone),
     )
   }
 
@@ -746,8 +851,14 @@ export function FileLibraryWorkspace({
       ? t.fileLibrary.allCollections
       : active.kind === 'collection'
         ? activeCollection?.title ?? ''
-        : activeIndex?.title ?? ''
-  const crumbRoot = active.kind === 'index' ? t.vectorIndex.title : t.fileLibrary.sectionCollections
+        : active.kind === 'server-collection'
+          ? activeServerCollection?.name ?? ''
+          : activeIndex?.title ?? ''
+  const crumbRoot = active.kind === 'index'
+    ? t.vectorIndex.title
+    : active.kind === 'server-collection'
+      ? t.fileLibrary.sectionServerCollections
+      : t.fileLibrary.sectionCollections
 
   function selectActiveTarget(target: ActiveTarget) {
     setActive(target)
@@ -760,7 +871,9 @@ export function FileLibraryWorkspace({
         className="hidden"
         multiple
         onChange={(event) => {
-          void ingestInto(Array.from(event.target.files ?? []), targetRef.current)
+          if (targetRef.current) {
+            void ingestInto(Array.from(event.target.files ?? []), targetRef.current)
+          }
           event.target.value = ''
         }}
         ref={fileInputRef}
@@ -772,7 +885,9 @@ export function FileLibraryWorkspace({
         className={cn('lg:flex', isMobileDetailOpen ? 'hidden' : 'flex')}
         collections={railCollections.map((collection) => ({ count: assetsInSection(collection.id).length, id: collection.id, title: collection.title }))}
         embeddingQuota={embeddingQuota}
-        indexes={indexes.map((index) => ({ count: index.members.length, id: index.id, status: index.status, title: index.title }))}
+        indexes={indexes
+          .filter((index) => !index.serverCollectionId)
+          .map((index) => ({ count: index.members.length, id: index.id, status: index.status, title: index.title }))}
         onDropToCollection={(sectionId, fileId) => moveFile(fileId, sectionId, null)}
         onNewCollection={handleNewCollection}
         onNewIndex={handleNewIndex}
@@ -780,8 +895,15 @@ export function FileLibraryWorkspace({
         onSelectAll={() => selectActiveTarget({ kind: 'all' })}
         onSelectCollection={(sectionId) => selectActiveTarget({ kind: 'collection', sectionId })}
         onSelectIndex={(indexId) => selectActiveTarget({ indexId, kind: 'index' })}
+        onSelectServerCollection={(collectionId) => selectActiveTarget({ collectionId, kind: 'server-collection' })}
         query={query}
-        storage={{ collectionCount: railCollections.length, docCount: assets.length, indexCount: indexes.length, usedBytes: storageTotalBytes }}
+        serverCollections={serverCollections.map((collection) => ({
+          access: collection.access,
+          count: collection.document_count,
+          id: collection.id,
+          title: collection.name,
+        }))}
+        storage={{ collectionCount: serverCollections.length, docCount: assets.length, indexCount: indexes.filter((index) => !index.serverCollectionId).length, usedBytes: storageTotalBytes }}
         totalDocCount={assets.length}
       />
 
@@ -824,14 +946,18 @@ export function FileLibraryWorkspace({
             )}
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
-            <ViewToggle onChange={setView} value={view} />
-            <SortSelect onChange={setSort} value={sort} />
+            {active.kind !== 'server-collection' ? (
+              <>
+                <ViewToggle onChange={setView} value={view} />
+                <SortSelect onChange={setSort} value={sort} />
+              </>
+            ) : null}
             {active.kind === 'index' && activeIndex ? (
               <Button className="gap-1.5 bg-brand text-brand-foreground hover:bg-brand/90" onClick={() => setPickerIndexId(activeIndex.id)} size="sm" type="button">
                 <Plus className="size-4" />
                 {t.vectorIndex.addDocuments}
               </Button>
-            ) : (
+            ) : active.kind === 'server-collection' ? null : (
               <>
                 {active.kind === 'collection' && activeCollection ? (
                   <>
@@ -861,7 +987,7 @@ export function FileLibraryWorkspace({
                     openUpload(
                       active.kind === 'collection'
                         ? { groupId: null, sectionId: active.sectionId }
-                        : { groupId: null, sectionId: customCollections[0]?.id ?? FILE_SECTION_TEMP_ID },
+                        : { groupId: null, sectionId: defaultUploadSectionId },
                     )
                   }
                   size="sm"
@@ -875,7 +1001,40 @@ export function FileLibraryWorkspace({
           </div>
         </header>
 
-        {active.kind === 'index' && activeIndex ? (
+        {active.kind === 'server-collection' && activeServerCollection && knowledgeSync ? (
+          <ServerCollectionPanel
+            assets={assets}
+            collection={activeServerCollection}
+            ensureAssetBodiesLoaded={ensureAssetBodiesLoaded}
+            groups={groups}
+            job={serverJobs[activeServerCollection.id] ?? null}
+            knowledgeSync={knowledgeSync}
+            onAssetReparsed={(assetId, text) => dispatch({ assetId, extractedText: text, type: 'upgradeFileAssetParse' })}
+            onCancelReindex={async (jobId) => {
+              setServerJobs((current) => ({
+                ...current,
+                [activeServerCollection.id]: {
+                  ...current[activeServerCollection.id],
+                  status: 'cancelling',
+                },
+              }))
+              await cancelReindex(jobId)
+            }}
+            onCollectionDeleted={() => {
+              const localIndexId = localIndexIdForCollection(activeServerCollection.id)
+              if (localIndexId) dispatch({ indexId: localIndexId, type: 'deleteVectorIndex' })
+              selectActiveTarget({ kind: 'all' })
+            }}
+            onCollectionMutated={() => void onRefreshServerCollections?.()}
+            onShare={onShareServerCollection}
+            onStartReindex={async (collectionId) => {
+              await startReindex(collectionId)
+            }}
+            query={query}
+            refreshToken={serverCollectionsRefreshToken}
+            sections={railCollections}
+          />
+        ) : active.kind === 'index' && activeIndex ? (
           <div className="flex min-h-0 flex-1 flex-col">
             {/* Sticky sub-header: the IndexBar stays put; only the member list
                 below scrolls. Kept OUTSIDE the ScrollArea (shrink-0), matching the
@@ -898,7 +1057,6 @@ export function FileLibraryWorkspace({
                   dispatch({ dims: descriptor?.dims, indexId, model, type: 'setVectorIndexModel' })
                 }}
                 onReindex={triggerReindex}
-                onRebuild={(indexId) => triggerReindex(indexId, undefined, true)}
                 serverBacked={knowledgeSync !== null}
                 serverFeatureLabels={serverFeatureLabels}
               />
@@ -915,7 +1073,7 @@ export function FileLibraryWorkspace({
                       setPickerIndexId(null)
                     }}
                     onClose={() => setPickerIndexId(null)}
-                    onUpload={() => openUpload({ groupId: null, indexId: activeIndex.id, sectionId: FILE_SECTION_TEMP_ID })}
+                    onUpload={() => openUpload({ groupId: null, indexId: activeIndex.id, sectionId: temporarySectionId })}
                     sections={railCollections}
                   />
                 ) : null}
@@ -923,7 +1081,7 @@ export function FileLibraryWorkspace({
                   <IndexEmpty onAdd={() => setPickerIndexId(activeIndex.id)} />
                 ) : indexMembers.length === 0 ? (
                   <EmptyState
-                    onUpload={() => openUpload({ groupId: null, indexId: activeIndex.id, sectionId: FILE_SECTION_TEMP_ID })}
+                    onUpload={() => openUpload({ groupId: null, indexId: activeIndex.id, sectionId: temporarySectionId })}
                     searching
                   />
                 ) : view === 'list' ? (
@@ -974,12 +1132,12 @@ export function FileLibraryWorkspace({
               <Dropzone
                 label={t.fileLibrary.dropFiles}
                 onFiles={(files) =>
-                  void ingestInto(files, active.kind === 'collection' ? { groupId: null, sectionId: active.sectionId } : { groupId: null, sectionId: customCollections[0]?.id ?? FILE_SECTION_TEMP_ID })
+                  void ingestInto(files, active.kind === 'collection' ? { groupId: null, sectionId: active.sectionId } : { groupId: null, sectionId: defaultUploadSectionId })
                 }
               >
                 {isLibraryEmpty ? (
                   <EmptyState
-                    onUpload={() => openUpload({ groupId: null, sectionId: customCollections[0]?.id ?? FILE_SECTION_TEMP_ID })}
+                    onUpload={() => openUpload({ groupId: null, sectionId: defaultUploadSectionId })}
                     searching={Boolean(q)}
                   />
                 ) : (

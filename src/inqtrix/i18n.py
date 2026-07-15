@@ -296,6 +296,16 @@ MESSAGES: dict[str, dict[str, str]] = {
         "de": "Antwort-Synthese",
         "en": "answer synthesis",
     },
+    "cancel_fanout_abandoned": {
+        "de": (
+            "Abbruch angefordert: {abandoned} von {total} {operation}-Aufrufen "
+            "verworfen, {in_flight} laufende Aufrufe werden beendet."
+        ),
+        "en": (
+            "Cancel requested: abandoned {abandoned} of {total} {operation} "
+            "calls, finishing {in_flight} in-flight calls."
+        ),
+    },
     "claim_extract_failed": {
         "de": "ALGO-FAIL claim_extraction: {failed} von {total} Claim-Extraktionen fehlgeschlagen",
         "en": "ALGO-FAIL claim_extraction: {failed} of {total} claim extractions failed",

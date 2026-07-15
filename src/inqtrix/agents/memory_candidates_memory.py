@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 import threading
 import time
 from dataclasses import replace
@@ -18,7 +19,7 @@ class MemoryAgentMemoryCandidateStore:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._rows: dict[tuple[str, str, str], AgentMemoryCandidate] = {}
+        self._rows: dict[tuple[str, uuid.UUID, str], AgentMemoryCandidate] = {}
 
     async def create_candidate(
         self, candidate: AgentMemoryCandidate
@@ -31,19 +32,19 @@ class MemoryAgentMemoryCandidateStore:
                 updated_at=candidate.updated_at or now,
             )
             self._rows[
-                (stored.tenant_id, stored.sub, stored.candidate_id)
+                (stored.tenant_id, stored.user_id, stored.candidate_id)
             ] = stored
             return stored
 
     async def list_candidates(
-        self, *, tenant_id: str, sub: str, status: str | None = None
+        self, *, tenant_id: str, user_id: uuid.UUID, status: str | None = None
     ) -> list[AgentMemoryCandidate]:
         with self._lock:
             rows = [
                 row
-                for (row_tenant, row_sub, _), row in self._rows.items()
+                for (row_tenant, row_user_id, _), row in self._rows.items()
                 if row_tenant == tenant_id
-                and row_sub == sub
+                and row_user_id == user_id
                 and (status is None or row.status == status)
             ]
             return sorted(
@@ -51,10 +52,10 @@ class MemoryAgentMemoryCandidateStore:
             )
 
     async def get_candidate(
-        self, *, tenant_id: str, sub: str, candidate_id: str
+        self, *, tenant_id: str, user_id: uuid.UUID, candidate_id: str
     ) -> AgentMemoryCandidate:
         with self._lock:
-            row = self._rows.get((tenant_id, sub, candidate_id))
+            row = self._rows.get((tenant_id, user_id, candidate_id))
             if row is None:
                 raise AgentMemoryNotFound(candidate_id)
             return row
@@ -63,14 +64,14 @@ class MemoryAgentMemoryCandidateStore:
         self,
         *,
         tenant_id: str,
-        sub: str,
+        user_id: uuid.UUID,
         candidate_id: str,
         status: str,
         content: str | None = None,
         memory_id: str | None = None,
     ) -> AgentMemoryCandidate:
         with self._lock:
-            row = self._rows.get((tenant_id, sub, candidate_id))
+            row = self._rows.get((tenant_id, user_id, candidate_id))
             if row is None:
                 raise AgentMemoryNotFound(candidate_id)
             stored = replace(
@@ -80,7 +81,7 @@ class MemoryAgentMemoryCandidateStore:
                 memory_id=row.memory_id if memory_id is None else memory_id,
                 updated_at=time.time(),
             )
-            self._rows[(tenant_id, sub, candidate_id)] = stored
+            self._rows[(tenant_id, user_id, candidate_id)] = stored
             return stored
 
 
@@ -89,7 +90,7 @@ class MemoryAgentFeedbackStore:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._rows: dict[tuple[str, str, str], AgentFeedbackRecord] = {}
+        self._rows: dict[tuple[str, uuid.UUID, str], AgentFeedbackRecord] = {}
 
     async def create_feedback(
         self, feedback: AgentFeedbackRecord
@@ -100,7 +101,7 @@ class MemoryAgentFeedbackStore:
                 created_at=feedback.created_at or time.time(),
             )
             self._rows[
-                (stored.tenant_id, stored.sub, stored.feedback_id)
+                (stored.tenant_id, stored.user_id, stored.feedback_id)
             ] = stored
             return stored
 
@@ -108,16 +109,16 @@ class MemoryAgentFeedbackStore:
         self,
         *,
         tenant_id: str,
-        sub: str,
+        user_id: uuid.UUID,
         run_id: str | None = None,
         limit: int = 100,
     ) -> list[AgentFeedbackRecord]:
         with self._lock:
             rows = [
                 row
-                for (row_tenant, row_sub, _), row in self._rows.items()
+                for (row_tenant, row_user_id, _), row in self._rows.items()
                 if row_tenant == tenant_id
-                and row_sub == sub
+                and row_user_id == user_id
                 and (run_id is None or row.run_id == run_id)
             ]
             return sorted(

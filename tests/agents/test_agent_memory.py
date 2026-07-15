@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from types import SimpleNamespace
 from typing import Any
 
@@ -28,11 +29,19 @@ from inqtrix.auth.principal import (
 from inqtrix.server.routers.agent_memory import build_router
 from inqtrix.services.agent_memory_service import AgentMemoryService
 
+OWNER_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
+OTHER_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
 OWNER = Principal(
-    sub="owner-1", kind="oidc_session", tenant_id="default", role="member"
+    user_id=OWNER_ID,
+    kind="oidc_session",
+    tenant_id="default",
+    role="member",
 )
 OTHER = Principal(
-    sub="other-1", kind="oidc_session", tenant_id="default", role="member"
+    user_id=OTHER_ID,
+    kind="oidc_session",
+    tenant_id="default",
+    role="member",
 )
 
 
@@ -285,7 +294,7 @@ def test_opt_in_enabled_reads_account_preference_default_off() -> None:
 
     asyncio.run(
         store.upsert_preferences(
-            sub=OWNER.sub,
+            user_id=OWNER_ID,
             contrast_mode="standard",
             locale="en",
             theme="system",
@@ -554,7 +563,8 @@ def test_router_rejects_owner_fields_and_static_memory_access() -> None:
 
     assert client.get("/v1/agent/memory", headers={"x-kind": "static"}).status_code == 404
     injected = client.get(
-        "/v1/agent/memory?user_id=other-1", headers={"x-sub": OWNER.sub}
+        f"/v1/agent/memory?user_id={OTHER_ID}",
+        headers={"x-user-id": str(OWNER_ID)},
     )
     assert injected.status_code == 400
     assert "Owner fields" in injected.json()["error"]["message"]
@@ -573,22 +583,22 @@ def test_router_rejects_owner_fields_and_static_memory_access() -> None:
     accepted = client.post(
         f"/v1/agent/memory/candidates/{candidate.candidate_id}:accept",
         json={},
-        headers={"x-sub": OWNER.sub},
+        headers={"x-user-id": str(OWNER_ID)},
     )
     assert accepted.status_code == 200
     memory_id = accepted.json()["memory_id"]
 
     tamper = client.patch(
         f"/v1/agent/memory/{memory_id}",
-        json={"content": "tamper", "user_id": OTHER.sub},
-        headers={"x-sub": OWNER.sub},
+        json={"content": "tamper", "user_id": str(OTHER_ID)},
+        headers={"x-user-id": str(OWNER_ID)},
     )
     assert tamper.status_code == 400
 
     other_update = client.patch(
         f"/v1/agent/memory/{memory_id}",
         json={"content": "tamper", "scope": "user", "category": "preference"},
-        headers={"x-sub": OTHER.sub},
+        headers={"x-user-id": str(OTHER_ID)},
     )
     assert other_update.status_code == 404
 
@@ -609,7 +619,7 @@ def test_router_feedback_history_and_memory_search_are_scoped() -> None:
 
     searched = client.get(
         "/v1/agent/memory?q=decision&scope=user&limit=5",
-        headers={"x-sub": OWNER.sub},
+        headers={"x-user-id": str(OWNER_ID)},
     )
     assert searched.status_code == 200
     assert searched.json()["data"][0]["id"] == memory.memory_id
@@ -618,7 +628,7 @@ def test_router_feedback_history_and_memory_search_are_scoped() -> None:
     injected = client.post(
         "/v1/agent/runs/run_4/feedback",
         json={"feedback": "positive", "tenant_id": "other"},
-        headers={"x-sub": OWNER.sub},
+        headers={"x-user-id": str(OWNER_ID)},
     )
     assert injected.status_code == 400
 
@@ -629,21 +639,21 @@ def test_router_feedback_history_and_memory_search_are_scoped() -> None:
             "reason": "useful",
             "memory_id": memory.memory_id,
         },
-        headers={"x-sub": OWNER.sub},
+        headers={"x-user-id": str(OWNER_ID)},
     )
     assert posted.status_code == 200
     assert posted.json()["run_id"] == "run_4"
 
     other = client.get(
         "/v1/agent/memory/feedback",
-        headers={"x-sub": OTHER.sub},
+        headers={"x-user-id": str(OTHER_ID)},
     )
     assert other.status_code == 200
     assert other.json()["data"] == []
 
     owner = client.get(
         "/v1/agent/memory/feedback?run_id=run_4",
-        headers={"x-sub": OWNER.sub},
+        headers={"x-user-id": str(OWNER_ID)},
     )
     assert owner.status_code == 200
     assert [row["feedback"] for row in owner.json()["data"]] == ["positive"]
@@ -651,7 +661,7 @@ def test_router_feedback_history_and_memory_search_are_scoped() -> None:
     foreign = client.post(
         "/v1/agent/runs/run_4/feedback",
         json={"feedback": "negative", "memory_id": memory.memory_id},
-        headers={"x-sub": OTHER.sub},
+        headers={"x-user-id": str(OTHER_ID)},
     )
     assert foreign.status_code == 404
 
@@ -663,9 +673,12 @@ def _memory_client(service: AgentMemoryService) -> TestClient:
             return ANONYMOUS_PRINCIPAL
         if kind == "static":
             return STATIC_PRINCIPAL
-        sub = request.headers.get("x-sub", OWNER.sub)
+        user_id = request.headers.get("x-user-id", str(OWNER_ID))
         return Principal(
-            sub=sub, kind="oidc_session", tenant_id="default", role="member"
+            user_id=uuid.UUID(user_id),
+            kind="oidc_session",
+            tenant_id="default",
+            role="member",
         )
 
     app = FastAPI()

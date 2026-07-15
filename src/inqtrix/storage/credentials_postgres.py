@@ -11,6 +11,7 @@ closed rather than silently creating a second account.
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING
 
 from sqlalchemy import func, select, text, update
@@ -28,6 +29,7 @@ DEFAULT_TENANT = "default"
 
 def _record_from_row(row) -> LocalCredential:
     return LocalCredential(
+        user_id=row.user_id,
         subject=row.subject,
         email=row.email,
         password_hash=row.password_hash,
@@ -104,6 +106,7 @@ class PostgresCredentialStore:
             result = await db.execute(
                 pg_insert(creds)
                 .values(
+                    user_id=credential.user_id,
                     subject=credential.subject,
                     tenant_id=tenant_id,
                     email=credential.email,
@@ -130,43 +133,43 @@ class PostgresCredentialStore:
             ).first()
         return _record_from_row(row) if row is not None else None
 
-    async def get_by_subject(
-        self, *, tenant_id: str, subject: str
+    async def get_by_user_id(
+        self, *, tenant_id: str, user_id: uuid.UUID
     ) -> LocalCredential | None:
         async with self._scope() as db:
             row = (
                 await db.execute(
                     select(creds).where(
                         creds.c.tenant_id == tenant_id,
-                        creds.c.subject == subject,
+                        creds.c.user_id == user_id,
                     )
                 )
             ).first()
         return _record_from_row(row) if row is not None else None
 
     async def set_password(
-        self, *, tenant_id: str, subject: str, password_hash: str
+        self, *, tenant_id: str, user_id: uuid.UUID, password_hash: str
     ) -> bool:
         async with self._scope() as db:
             result = await db.execute(
                 update(creds)
                 .where(
                     creds.c.tenant_id == tenant_id,
-                    creds.c.subject == subject,
+                    creds.c.user_id == user_id,
                 )
                 .values(password_hash=password_hash)
             )
         return bool(result.rowcount)
 
     async def set_disabled(
-        self, *, tenant_id: str, subject: str, disabled_at: float | None
+        self, *, tenant_id: str, user_id: uuid.UUID, disabled_at: float | None
     ) -> bool:
         async with self._scope() as db:
             result = await db.execute(
                 update(creds)
                 .where(
                     creds.c.tenant_id == tenant_id,
-                    creds.c.subject == subject,
+                    creds.c.user_id == user_id,
                 )
                 .values(disabled_at=disabled_at)
             )

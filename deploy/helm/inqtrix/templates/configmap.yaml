@@ -36,7 +36,26 @@ precedence: config > extraConfig > derived).
        config/extraConfig value still wins (e.g. to point at an external S3). The
        replica hint feeds the app's own startup guard (defense in depth for
        non-Helm deploys). */}}
-{{- $derived := dict "INQTRIX_OBJECT_STORE_BACKEND" "local" "INQTRIX_REPLICA_COUNT" (printf "%d" (int $storeSharers)) }}
+{{- $runtimeLoginPolicy := ternary "bundled_legacy" "restricted" .Values.postgres.enabled }}
+{{- $derived := dict "INQTRIX_OBJECT_STORE_BACKEND" "local" "INQTRIX_REPLICA_COUNT" (printf "%d" (int $storeSharers)) "INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY" $runtimeLoginPolicy }}
+{{- $explicitPublicBase := coalesce .Values.config.INQTRIX_PUBLIC_BASE_URL .Values.extraConfig.INQTRIX_PUBLIC_BASE_URL "" }}
+{{- /* OpenShift assigns route.host only after admission when it is empty. The
+       chart cannot derive a trust anchor from a value that does not yet exist,
+       so collaboration must receive the final origin explicitly instead of
+       rendering a deployment whose TLS WebSockets always fail origin checks. */}}
+{{- if and .Values.collaboration.enabled .Values.openshift.enabled .Values.route.enabled (not .Values.route.host) (not $explicitPublicBase) }}
+{{- fail "Collaboration with an automatically assigned OpenShift Route host requires config.INQTRIX_PUBLIC_BASE_URL (or extraConfig.INQTRIX_PUBLIC_BASE_URL) set to the final public origin. Alternatively set route.host explicitly." }}
+{{- end }}
+{{- /* The public URL is a trust anchor for same-origin WebSocket checks after
+       TLS termination. Derive it only from the chart-owned ingress/Route;
+       explicit config or extraConfig still wins through merge precedence. */}}
+{{- if and .Values.ingress.enabled (not .Values.openshift.enabled) }}
+{{- $publicScheme := ternary "https" "http" .Values.ingress.tls.enabled }}
+{{- $_ := set $derived "INQTRIX_PUBLIC_BASE_URL" (printf "%s://%s" $publicScheme .Values.ingress.host) }}
+{{- else if and .Values.openshift.enabled .Values.route.enabled .Values.route.host }}
+{{- $publicScheme := ternary "https" "http" .Values.route.tls.enabled }}
+{{- $_ := set $derived "INQTRIX_PUBLIC_BASE_URL" (printf "%s://%s" $publicScheme .Values.route.host) }}
+{{- end }}
 {{- if .Values.qdrant.enabled }}
 {{- $_ := set $derived "INQTRIX_KNOWLEDGE_ENABLED" "true" }}
 {{- $_ := set $derived "INQTRIX_VECTOR_BACKEND" "qdrant" }}
@@ -48,18 +67,32 @@ precedence: config > extraConfig > derived).
 {{- if and .Values.valkey.enabled .Values.worker.enabled }}
 {{- $_ := set $derived "INQTRIX_QUEUE_BACKEND" "valkey" }}
 {{- end }}
-{{- /* Bundled MinIO: point the object store at the in-cluster S3 endpoint. The
-       bucket is created on first write by the app, so only backend/endpoint/bucket
-       are wired here; the access/secret keys are derived into the Secret. */}}
+{{- /* Bundled MinIO: point the object store at the in-cluster S3 endpoint and
+       retain the historical static/path-style/create-if-missing contract. The
+       access/secret keys are derived into the Secret. */}}
 {{- if .Values.s3.enabled }}
 {{- $_ := set $derived "INQTRIX_OBJECT_STORE_BACKEND" "s3" }}
+{{- $_ := set $derived "INQTRIX_S3_AUTH_MODE" "static" }}
 {{- $_ := set $derived "INQTRIX_S3_ENDPOINT_URL" (printf "http://%s-minio:9000" (include "inqtrix.fullname" .)) }}
 {{- $_ := set $derived "INQTRIX_S3_BUCKET" .Values.s3.bucket }}
+{{- $_ := set $derived "INQTRIX_S3_ADDRESSING_STYLE" "path" }}
+{{- $_ := set $derived "INQTRIX_S3_BUCKET_PROVISIONING" "create_if_missing" }}
+{{- end }}
+{{- if .Values.s3.caBundle.existingConfigMap }}
+{{- $_ := set $derived "INQTRIX_S3_CA_BUNDLE" .Values.s3.caBundle.mountPath }}
 {{- end }}
 {{- /* Prometheus /metrics: the image bakes in the metrics extra, so this flag
        alone mounts the endpoint (scrape wiring lives on the api pod annotations). */}}
 {{- if .Values.metrics.enabled }}
 {{- $_ := set $derived "INQTRIX_METRICS_ENABLED" "true" }}
+{{- end }}
+{{- /* Collaboration stays absent from the default ConfigMap. Enabling the
+       module wires FastAPI only to the private ClusterIP Service; the browser
+       continues to use the same-origin /collaboration gateway. */}}
+{{- if .Values.collaboration.enabled }}
+{{- $_ := set $derived "INQTRIX_COLLABORATION_ENABLED" "true" }}
+{{- $_ := set $derived "INQTRIX_COLLABORATION_HTTP_URL" (printf "http://%s-collaboration:%d" (include "inqtrix.fullname" .) (int .Values.service.collaborationPort)) }}
+{{- $_ := set $derived "INQTRIX_COLLABORATION_WS_URL" (printf "ws://%s-collaboration:%d/collaboration" (include "inqtrix.fullname" .) (int .Values.service.collaborationPort)) }}
 {{- end }}
 {{- $merged := merge (deepCopy .Values.config) .Values.extraConfig $derived }}
 apiVersion: v1

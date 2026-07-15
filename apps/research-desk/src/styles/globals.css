@@ -2710,7 +2710,8 @@
   line-height: inherit;
 }
 
-:where(.editor-prose, .report-markdown, .chat-markdown) :where(.tableWrapper, div:has(> table)) {
+:where(.editor-prose) :where(.tableWrapper, div:has(> table)),
+:where(.report-markdown, .chat-markdown) .inqtrix-markdown-table {
   margin: 1rem 0;
   border-radius: 0.5rem;
 }
@@ -2720,10 +2721,36 @@
   line-height: 1.4;
 }
 
-:where(.editor-prose, .report-markdown, .chat-markdown) :where(.tableWrapper, div:has(> table)) > table {
+:where(.editor-prose) :where(.tableWrapper, div:has(> table)) > table,
+:where(.report-markdown, .chat-markdown) .inqtrix-markdown-table table {
   margin: 0;
   border: 0;
   border-radius: 0;
+}
+
+.inqtrix-markdown-block-actions {
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+
+.inqtrix-markdown-block:hover > .inqtrix-markdown-block-actions,
+.inqtrix-markdown-block:focus-within > .inqtrix-markdown-block-actions {
+  pointer-events: auto;
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .inqtrix-markdown-block-actions {
+    pointer-events: auto;
+    opacity: 1;
+  }
+}
+
+@media print {
+  .inqtrix-markdown-block-actions {
+    display: none;
+  }
 }
 
 :where(.editor-prose, .report-markdown, .chat-markdown) :where(th, td) {

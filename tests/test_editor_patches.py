@@ -10,15 +10,16 @@ Postgres lockstep counterpart lives in
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from inqtrix.auth.directory import MemoryUserDirectory
 from inqtrix.auth.identity_memory import MemoryIdentityStore
-from inqtrix.auth.permissions import PermissionService
-from inqtrix.auth.principal import Principal
+from inqtrix.auth.permissions import AuthorizationService
+from inqtrix.auth.principal import ANONYMOUS_PRINCIPAL, Principal, UserContext
 from inqtrix.capabilities import CapabilityContext, build_capability_registry
 from inqtrix.project.editor_memory import MemoryEditorStore
 from inqtrix.project.editor_patch_memory import MemoryEditorPatchStore
@@ -46,8 +47,34 @@ from tests.test_runs_sharing import (
     RECIPIENT,
     SUB_HEADER,
     OidcHeaderProvider,
-    scoped,
 )
+
+
+def scoped(user_id: uuid.UUID, *, tenant_id: str = "default") -> UserContext:
+    """Build the canonical local-user context used by these tests."""
+    return UserContext(
+        principal=Principal(
+            user_id=user_id,
+            kind="oidc_session",
+            tenant_id=tenant_id,
+            role="member",
+        )
+    )
+
+
+class _CanonicalOidcHeaderProvider(OidcHeaderProvider):
+    """Adapt the shared HTTP test provider to canonical local user ids."""
+
+    def resolve_principal(self, request: Request) -> Principal:
+        user_id = request.headers.get(SUB_HEADER, "")
+        if not user_id:
+            return ANONYMOUS_PRINCIPAL
+        return Principal(
+            user_id=uuid.UUID(user_id),
+            kind="oidc_session",
+            tenant_id="default",
+            role="member",
+        )
 
 # ------------------------------------------------------------------ #
 # apply_edits: the deterministic anchor matrix
@@ -204,7 +231,7 @@ async def _seed_document(
         diff_anchor_updated_at=None,
         created_at=1.0,
         updated_at=1.0,
-        caller_sub=sub,
+        caller_user_id=sub,
         workspace_id=None,
         visible_to=scoped(sub),
     )
@@ -243,7 +270,7 @@ async def test_service_lifecycle_propose_apply_replay_and_conflicts() -> None:
         edits=_raw_edits(),
         summary="Zwei Aenderungen",
         warnings=["Ein Anker unsicher"],
-        created_by_sub=OWNER,
+        created_by_user_id=OWNER,
         visible_to=scoped(OWNER),
     )
     assert patch.status == "pending"
@@ -303,7 +330,7 @@ async def test_service_reject_flow_and_replay() -> None:
         edits=_raw_edits()[:1],
         summary="",
         warnings=[],
-        created_by_sub=OWNER,
+        created_by_user_id=OWNER,
         visible_to=scoped(OWNER),
     )
 
@@ -355,7 +382,7 @@ async def test_agent_proposal_is_audited_as_an_agent_write() -> None:
     )
     await _seed_document(persistence)
     principal = Principal(
-        sub=OWNER, kind="oidc_session", tenant_id="default", role="member"
+        user_id=OWNER, kind="oidc_session", tenant_id="default", role="member"
     )
 
     patch = await service.propose(
@@ -365,7 +392,7 @@ async def test_agent_proposal_is_audited_as_an_agent_write() -> None:
         edits=_raw_edits()[:1],
         summary="Agentenvorschlag",
         warnings=[],
-        created_by_sub=OWNER,
+        created_by_user_id=OWNER,
         visible_to=scoped(OWNER),
         principal=principal,
     )
@@ -374,7 +401,7 @@ async def test_agent_proposal_is_audited_as_an_agent_write() -> None:
     entry = audit.entries[0]
     assert entry.action == "editor.patch_proposed"
     assert entry.actor_type == "agent"
-    assert entry.actor_sub == OWNER  # the owner acted on whose behalf
+    assert entry.actor_user_id == OWNER  # the owner acted on whose behalf
     assert entry.resource_type == "editor_document"
     assert entry.resource_id == "ed_doc"
     assert entry.detail["patch_id"] == patch.patch_id
@@ -404,7 +431,7 @@ async def test_proposal_audit_is_skipped_without_a_principal() -> None:
         edits=_raw_edits()[:1],
         summary="",
         warnings=[],
-        created_by_sub=OWNER,
+        created_by_user_id=OWNER,
         visible_to=scoped(OWNER),
     )
     assert audit.entries == []
@@ -417,12 +444,12 @@ async def test_service_list_filters_by_status_and_orders_newest_first() -> None:
     first = await service.propose(
         document_id="ed_doc", run_id=None, source="instruct",
         edits=_raw_edits()[:1], summary="", warnings=[],
-        created_by_sub=OWNER, visible_to=scoped(OWNER),
+        created_by_user_id=OWNER, visible_to=scoped(OWNER),
     )
     second = await service.propose(
         document_id="ed_doc", run_id="run-1", source="agent",
         edits=_raw_edits()[:1], summary="", warnings=[],
-        created_by_sub=OWNER, visible_to=scoped(OWNER),
+        created_by_user_id=OWNER, visible_to=scoped(OWNER),
     )
     await service.reject(first.patch_id, note="", visible_to=scoped(OWNER))
 
@@ -448,14 +475,14 @@ async def test_service_validates_source_and_edit_positions() -> None:
         await service.propose(
             document_id="ed_doc", run_id=None, source="bogus",
             edits=_raw_edits()[:1], summary="", warnings=[],
-            created_by_sub=OWNER, visible_to=scoped(OWNER),
+            created_by_user_id=OWNER, visible_to=scoped(OWNER),
         )
     with pytest.raises(EditorPatchValidationError):
         await service.propose(
             document_id="ed_doc", run_id=None, source="instruct",
             edits=[{"find": "x", "position": "sideways", "text": "y"}],
             summary="", warnings=[],
-            created_by_sub=OWNER, visible_to=scoped(OWNER),
+            created_by_user_id=OWNER, visible_to=scoped(OWNER),
         )
 
 
@@ -469,7 +496,7 @@ async def test_foreign_caller_gets_indistinct_not_found_everywhere() -> None:
     patch = await service.propose(
         document_id="ed_doc", run_id=None, source="instruct",
         edits=_raw_edits()[:1], summary="", warnings=[],
-        created_by_sub=OWNER, visible_to=scoped(OWNER),
+        created_by_user_id=OWNER, visible_to=scoped(OWNER),
     )
 
     stranger = scoped(RECIPIENT)
@@ -477,7 +504,7 @@ async def test_foreign_caller_gets_indistinct_not_found_everywhere() -> None:
         await service.propose(
             document_id="ed_doc", run_id=None, source="instruct",
             edits=_raw_edits()[:1], summary="", warnings=[],
-            created_by_sub=RECIPIENT, visible_to=stranger,
+            created_by_user_id=RECIPIENT, visible_to=stranger,
         )
     with pytest.raises(DocumentNotFound):
         await service.list_for_document(
@@ -521,7 +548,7 @@ def test_patch_capability_propose_and_apply_roundtrip() -> None:
     registry = build_capability_registry(editor_patch_service=service)
     context = CapabilityContext(
         principal=Principal(
-            sub=OWNER, kind="oidc_session", tenant_id="default", role="member"
+            user_id=OWNER, kind="oidc_session", tenant_id="default", role="member"
         ),
         visible_to=scoped(OWNER),
         run_id="run-agent-1",
@@ -576,7 +603,7 @@ def make_world() -> tuple[TestClient, object]:
             await users.record_login(
                 tenant_id="default",
                 issuer="http://idp.example",
-                subject=sub,
+                subject=str(sub),
                 email=f"{sub}@example.com",
                 email_verified=True,
                 display_name=name,
@@ -591,9 +618,9 @@ def make_world() -> tuple[TestClient, object]:
             storage=StorageSettings(backend="memory", database_url=""),
         ),
         semaphore_factory=lambda: asyncio.Semaphore(1),
-        auth_provider=OidcHeaderProvider(users),
-        permissions=PermissionService(
-            members=identity, groups=identity, shares=identity, audit=identity
+        auth_provider=_CanonicalOidcHeaderProvider(users),
+        permissions=AuthorizationService(
+            members=identity, shares=identity, audit=identity
         ),
         workspace_admin=identity,
     )
@@ -603,8 +630,8 @@ def make_world() -> tuple[TestClient, object]:
     return TestClient(app), container
 
 
-def as_user(sub: str) -> dict[str, str]:
-    return {SUB_HEADER: sub}
+def as_user(user_id: uuid.UUID) -> dict[str, str]:
+    return {SUB_HEADER: str(user_id)}
 
 
 def _seed_http_document(client: TestClient, *, revision: int = 3) -> None:
@@ -632,7 +659,7 @@ def _propose_http(container, *, edits: list[dict] | None = None) -> str:
             edits=edits if edits is not None else _raw_edits(),
             summary="Zwei Aenderungen",
             warnings=["Ein Anker unsicher"],
-            created_by_sub=OWNER,
+            created_by_user_id=OWNER,
             visible_to=scoped(OWNER),
         )
     )
@@ -834,7 +861,7 @@ async def test_interleaved_autosave_beats_patch_apply_with_409() -> None:
         edits=_raw_edits(),
         summary="Aenderung",
         warnings=[],
-        created_by_sub=OWNER,
+        created_by_user_id=OWNER,
         visible_to=scoped(OWNER),
     )
 
@@ -855,7 +882,7 @@ async def test_interleaved_autosave_beats_patch_apply_with_409() -> None:
         diff_anchor_updated_at=None,
         created_at=1.0,
         updated_at=2.0,
-        caller_sub=OWNER,
+        caller_user_id=OWNER,
         workspace_id=None,
         visible_to=scoped(OWNER),
     )
@@ -901,7 +928,7 @@ async def test_db_window_conflict_disambiguates_replay_vs_interleave(
         edits=_raw_edits(),
         summary="Aenderung",
         warnings=[],
-        created_by_sub=OWNER,
+        created_by_user_id=OWNER,
         visible_to=scoped(OWNER),
     )
 
@@ -964,14 +991,14 @@ async def test_same_patch_winner_wrote_doc_not_yet_marked_replays_not_409() -> N
         edits=_raw_edits(),
         summary="Aenderung",
         warnings=[],
-        created_by_sub=OWNER,
+        created_by_user_id=OWNER,
         visible_to=scoped(OWNER),
     )
 
     original_save = service._save_applied_document
 
     async def _winner_wrote_but_unmarked(
-        document, *, content_markdown, revision, visible_to, also_visible
+        document, *, content_markdown, revision, visible_to
     ):
         # Simulate the parallel winner: the doc IS advanced to this
         # apply's result, but the winner has not marked the patch yet.
@@ -987,7 +1014,7 @@ async def test_same_patch_winner_wrote_doc_not_yet_marked_replays_not_409() -> N
             diff_anchor_updated_at=document.diff_anchor_updated_at,
             created_at=document.created_at,
             updated_at=document.updated_at + 1,
-            caller_sub=OWNER,
+            caller_user_id=OWNER,
             workspace_id=None,
             visible_to=scoped(OWNER),
         )

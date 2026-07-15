@@ -20,7 +20,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from queue import Queue
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from inqtrix.core.events import EventSink
 
@@ -106,3 +106,7 @@ class RunContext:
     progress_queue: Queue | None = field(default=None, repr=False)
     token_budget: int = 0
     park: Any = None
+    authority_check: Callable[[], None] | None = field(
+        default=None, repr=False
+    )
+    """Live effective-actor check used at capability/tool safepoints."""

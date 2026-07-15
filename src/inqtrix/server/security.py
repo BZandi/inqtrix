@@ -113,6 +113,13 @@ def make_cors_middleware_kwargs(server: ServerSettings) -> dict[str, Any] | None
     return {
         "allow_origins": origins,
         "allow_methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Authorization", "Content-Type"],
+        "allow_headers": [
+            "Authorization",
+            "Content-Type",
+            "Last-Event-ID",
+            "X-CSRF-Token",
+            "X-Inqtrix-Expected-User-Id",
+            "X-Inqtrix-Workspace-Id",
+        ],
         "allow_credentials": True,
     }

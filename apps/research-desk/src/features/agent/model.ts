@@ -369,10 +369,25 @@ export function isGateAgentRun(status: ResearchRunStatus): boolean {
   return status === 'waiting_for_approval' || status === 'waiting_for_input'
 }
 
+/** The single Agent-UI permission gate. A view share is strictly read-only;
+ * edit shares and owned/unscoped/local runs keep the existing status gates. */
+export function canEditAgentRun(
+  run: Pick<AgentRunRecord, 'access'> | null | undefined,
+): boolean {
+  return Boolean(
+    run
+    && (run.access?.mode !== 'shared' || run.access.permission === 'edit'),
+  )
+}
+
 export type AgentRunRecord = {
   runId: string
   sessionId?: string
   kind: 'agent' | 'agent_child' | 'standard'
+  /** Durable run-tree links used to retain loaded children while their root
+   * remains visible and prune the whole tree when the root disappears. */
+  parentRunId?: string
+  rootRunId?: string
   question: string
   autonomy?: string
   /** Thoroughness (plan M4): 'deep' shows the badge; unset = normal. */
@@ -441,6 +456,11 @@ export type AgentSessionRecord = {
   runIds: string[]
   /** Persistent source availability for runs started in this session. */
   sourcePolicy: AgentSourcePolicy
+  /** `false` only for recipient-side views derived from shared runs. Such
+   * sessions exist solely to render the Agent Desk and must never cross the
+   * agent-session persistence API. Absent means persistable for backwards
+   * compatibility with existing local state. */
+  persistable?: boolean
 }
 
 export type AgentSessionGroupRecord = {
@@ -682,6 +702,21 @@ export function isAgentRunSummary(summary: ResearchRunSummary): boolean {
   )
 }
 
+/**
+ * Session identity for one agent summary. Shared runs must not materialize the
+ * owner's `session_id` in the recipient's syncable session namespace. A view
+ * session is therefore derived from the server-generated root run id; children
+ * resolve to the same id and the whole tree prunes together.
+ */
+export function agentSessionIdFromSummary(
+  summary: ResearchRunSummary,
+): string | undefined {
+  if (summary.access?.mode === 'shared') {
+    return `shared-agent-view:${summary.root_run_id || summary.run_id}`
+  }
+  return summary.session_id || undefined
+}
+
 export function agentRunFromSummary(
   summary: ResearchRunSummary,
 ): AgentRunRecord {
@@ -690,8 +725,10 @@ export function agentRunFromSummary(
     runId: summary.run_id,
     // '' and null both mean "sessionless" on the wire — normalize to
     // undefined so merges can never stomp a known session with emptiness.
-    sessionId: summary.session_id || undefined,
+    sessionId: agentSessionIdFromSummary(summary),
     kind: summary.kind ?? 'standard',
+    parentRunId: summary.parent_run_id,
+    rootRunId: summary.root_run_id,
     question: summary.question,
     autonomy: autonomyFromOverrides(summary.agent_overrides),
     depth: depthFromOverrides(summary.agent_overrides),
@@ -734,6 +771,8 @@ export function mergeAgentRunSummary(
   return {
     ...current,
     sessionId: next.sessionId || current.sessionId,
+    parentRunId: next.parentRunId ?? current.parentRunId,
+    rootRunId: next.rootRunId ?? current.rootRunId,
     status: next.status,
     phase,
     station: agentPhaseStation(phase) ?? current.station,

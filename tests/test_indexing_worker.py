@@ -11,8 +11,16 @@ actually landed (the ack gate).
 from __future__ import annotations
 
 import threading
+import uuid
 
-from inqtrix.worker.indexing_loop import FencedIndexingJobHandle
+import pytest
+
+from inqtrix.runs.indexing_postgres import ClaimedIndexingJob
+from inqtrix.runs.indexing_queue import QueuedIndexingJob
+from inqtrix.worker.indexing_loop import (
+    FencedIndexingJobHandle,
+    IndexingWorkerLoop,
+)
 
 
 class StubStore:
@@ -21,6 +29,7 @@ class StubStore:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
         self.terminal_lands = True
+        self.worker_id = "worker-test"
 
     def set_total(self, job_id, total_documents, *, fence_attempt=None):
         self.calls.append(("set_total", total_documents, fence_attempt))
@@ -49,6 +58,45 @@ class StubStore:
 
     def document_completed(self, job_id, document_id, *, fence_attempt=None):
         self.calls.append(("document_completed", document_id, fence_attempt))
+
+
+class StubQueue:
+    """Recording queue surface used by direct worker-execution tests."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def ack(self, message_id: str) -> None:
+        self.calls.append(("ack", message_id))
+
+
+def make_loop(
+    *,
+    store: StubStore,
+    queue: StubQueue,
+    authority=None,
+) -> IndexingWorkerLoop:
+    """Build a reindex loop without starting its claim machinery."""
+    return IndexingWorkerLoop(
+        store=store,
+        queue=queue,
+        knowledge_service=object(),
+        concurrency=1,
+        max_attempts=3,
+        heartbeat_seconds=1.0,
+        claim_idle_seconds=5.0,
+        authority=authority,
+    )
+
+
+def queued_job() -> QueuedIndexingJob:
+    """Return one deterministic dispatch record."""
+    return QueuedIndexingJob(
+        message_id="1-0",
+        job_id="ix_1",
+        tenant_id="default",
+        delivery_count=1,
+    )
 
 
 def test_fenced_handle_threads_the_attempt_into_every_write():
@@ -81,3 +129,105 @@ def test_fenced_out_terminal_write_records_no_landing():
     handle.complete()
 
     assert handle.terminal_landed is False
+
+
+def test_ownerless_worker_job_executes_with_an_explicit_null_actor(
+    monkeypatch,
+) -> None:
+    store = StubStore()
+    queue = StubQueue()
+    observed: dict[str, object] = {}
+
+    class RecordingAuthority:
+        def check(self, collection_id, principal) -> None:
+            observed["authority"] = (collection_id, principal)
+
+    def execute(handle, **kwargs) -> None:
+        observed["actor_user_id"] = kwargs["actor_user_id"]
+        observed["quota_subject"] = kwargs["quota_subject"]
+        kwargs["authority_check"]()
+        handle.complete()
+
+    monkeypatch.setattr(
+        "inqtrix.worker.indexing_loop.execute_reindex_job",
+        execute,
+    )
+    loop = make_loop(
+        store=store,
+        queue=queue,
+        authority=RecordingAuthority(),
+    )
+    try:
+        loop._execute(
+            queued_job(),
+            ClaimedIndexingJob(
+                job_id="ix_1",
+                tenant_id="default",
+                attempt=1,
+                collection_id="kc_1",
+                embedding_model="embedding-model",
+            ),
+            threading.Event(),
+        )
+    finally:
+        loop._executor.shutdown(wait=True)
+
+    assert observed == {
+        "actor_user_id": None,
+        "quota_subject": None,
+        "authority": ("kc_1", None),
+    }
+    assert queue.calls == [("ack", "1-0")]
+
+
+@pytest.mark.parametrize(
+    ("created_by_user_id", "created_by_tenant_id"),
+    [
+        (uuid.UUID("11111111-1111-4111-8111-111111111111"), None),
+        (None, "default"),
+        (uuid.UUID("11111111-1111-4111-8111-111111111111"), ""),
+    ],
+)
+def test_worker_fails_closed_on_incomplete_requester_attribution(
+    monkeypatch,
+    created_by_user_id,
+    created_by_tenant_id,
+) -> None:
+    store = StubStore()
+    queue = StubQueue()
+    executed = False
+
+    def execute(_handle, **_kwargs) -> None:
+        nonlocal executed
+        executed = True
+
+    monkeypatch.setattr(
+        "inqtrix.worker.indexing_loop.execute_reindex_job",
+        execute,
+    )
+    loop = make_loop(store=store, queue=queue)
+    try:
+        loop._execute(
+            queued_job(),
+            ClaimedIndexingJob(
+                job_id="ix_1",
+                tenant_id="default",
+                attempt=4,
+                collection_id="kc_1",
+                embedding_model="embedding-model",
+                created_by_user_id=created_by_user_id,
+                created_by_tenant_id=created_by_tenant_id,
+            ),
+            threading.Event(),
+        )
+    finally:
+        loop._executor.shutdown(wait=True)
+
+    assert executed is False
+    assert any(
+        call[0] == "fail"
+        and call[2] == "authorization_revoked"
+        and call[3] == 4
+        for call in store.calls
+    )
+    assert queue.calls == [("ack", "1-0")]

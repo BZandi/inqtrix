@@ -16,13 +16,14 @@ from __future__ import annotations
 import logging
 import secrets
 import time
-from typing import TYPE_CHECKING
+import uuid
+from typing import TYPE_CHECKING, Callable
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
+from inqtrix.auth.lifecycle import LoginCommand, UserDisabledError
 from inqtrix.auth.oidc import OidcExchangeError, make_pkce_pair
-from inqtrix.auth.provisioning import apply_admin_grant
 from inqtrix.auth.sessions import (
     FLOW_TTL_SECONDS,
     AuthSession,
@@ -33,6 +34,7 @@ from inqtrix.services.request_parsing import error_response
 
 if TYPE_CHECKING:
     from inqtrix.auth.oidc import OidcAuthProvider
+    from inqtrix.auth.principal import Principal
 
 log = logging.getLogger("inqtrix")
 
@@ -40,7 +42,10 @@ _FLOW_COOKIE_SECURE = "__Host-inqtrix_oidc"
 _FLOW_COOKIE_DEV = "inqtrix_oidc"
 
 
-def build_auth_router(provider: "OidcAuthProvider") -> APIRouter:
+def build_auth_router(
+    provider: "OidcAuthProvider",
+    principal_dependency: Callable[..., "Principal"] | None = None,
+) -> APIRouter:
     """Bind the BFF routes against one cookie-session provider instance.
 
     OIDC mounts the IdP redirect flow; local (and, later, ldap) mount the
@@ -52,8 +57,16 @@ def build_auth_router(provider: "OidcAuthProvider") -> APIRouter:
     action (``/v1/admin/workspaces``), so the owner setup mints only the
     instance admin and the first workspace is created deliberately.
     """
+    if principal_dependency is None:
+        from inqtrix.auth.principal_generation import (
+            bind_principal_generation,
+        )
+
+        principal_dependency = bind_principal_generation(
+            provider.build_principal_dependency()
+        )
     if provider.mode in {"local", "ldap"}:
-        return _build_password_auth_router(provider)
+        return _build_password_auth_router(provider, principal_dependency)
 
     async def no_store(response: Response) -> None:
         # The auth surface emits identity facts and the CSRF token —
@@ -182,34 +195,18 @@ def build_auth_router(provider: "OidcAuthProvider") -> APIRouter:
                 )
             except RegistrationDenied as exc:
                 log.warning(
-                    "Registrierung abgelehnt: sub=%s", subject
+                    "Registrierung abgelehnt: kind=oidc_session reason=invite"
                 )
                 return error_response(403, str(exc), "registration_denied")
-        if users is not None:
-            await users.record_login(
-                tenant_id="default",
-                issuer=issuer,
-                subject=subject,
-                email=email or "",
-                email_verified=claims.get("email_verified") is True,
-                display_name=display_name,
-            )
-            # Admin elevation from IdP claims (configured admin roles or
-            # groups), with the same grant-only semantics as the LDAP
-            # admin-group path; on a fresh instance the first login still
-            # bootstraps the owner.
-            await apply_admin_grant(
-                users,
-                tenant_id="default",
-                issuer=issuer,
-                subject=subject,
-                is_admin=provider.map_admin(claims, groups),
-                first_login_owner=True,
+        if users is None:
+            return error_response(
+                503, "Nutzerverzeichnis ist nicht verfuegbar", "server_error"
             )
         session = AuthSession(
             id=new_session_id(),
-            sub=subject,
+            user_id=uuid.uuid4(),
             issuer=issuer,
+            subject=subject,
             email=email,
             display_name=display_name,
             groups=groups,
@@ -217,10 +214,45 @@ def build_auth_router(provider: "OidcAuthProvider") -> APIRouter:
             created_at=time.time(),
             expires_at=time.time() + provider.session_max_age_seconds,
         )
-        await provider.sessions.create(session)
+        if provider.lifecycle is None:
+            return error_response(
+                503, "Nutzerverwaltung ist nicht verfuegbar", "server_error"
+            )
+        from inqtrix.auth.invitations import RegistrationDenied
+
+        try:
+            admitted_user = await provider.lifecycle.provision_login(
+                LoginCommand(
+                    tenant_id="default",
+                    issuer=issuer,
+                    subject=subject,
+                    email=email or "",
+                    email_verified=claims.get("email_verified") is True,
+                    display_name=display_name,
+                    session=session,
+                    is_admin=provider.map_admin(claims, groups),
+                    first_login_owner=True,
+                    invitation_required=bool(
+                        provider.registration_gate is not None
+                        and provider.registration_gate.registration == "invite"
+                    ),
+                )
+            )
+        except RegistrationDenied as exc:
+            log.warning(
+                "Registrierung atomar abgelehnt: "
+                "kind=oidc_session reason=invite"
+            )
+            return error_response(403, str(exc), "registration_denied")
+        except UserDisabledError:
+            log.warning(
+                "OIDC-Login fuer deaktiviertes Konto abgelehnt: "
+                "kind=oidc_session reason=disabled"
+            )
+            return error_response(403, "Konto ist deaktiviert.", "registration_denied")
         log.info(
-            "OIDC-Login erfolgreich: sub=%s session=%s",
-            subject,
+            "OIDC-Login erfolgreich: user_id=%s kind=oidc_session session=%s",
+            admitted_user.user_id,
             session.id[:8],
         )
         response = RedirectResponse(flow.next_path, status_code=303)
@@ -248,8 +280,7 @@ def build_auth_router(provider: "OidcAuthProvider") -> APIRouter:
     @router.post("/api/auth/logout")
     async def logout(request: Request):
         """Destroy the server-side session (CSRF-protected)."""
-        principal_dep = provider.build_principal_dependency()
-        principal = await principal_dep(request)
+        principal = await principal_dependency(request)
         if principal.session_id:
             await provider.sessions.delete(principal.session_id)
         response = JSONResponse({"logged_out": True})
@@ -258,7 +289,7 @@ def build_auth_router(provider: "OidcAuthProvider") -> APIRouter:
         return response
 
     if provider.pat_service is not None:
-        _register_token_routes(router, provider)
+        _register_token_routes(router, provider, principal_dependency)
 
     return router
 
@@ -270,11 +301,23 @@ _RATE_LIMITED_MSG = (
 )
 
 
-def _login_throttle_key(mode: str, identifier: str, request: Request) -> str:
-    """Brute-force throttle key: ``mode:lower(identifier):client_ip``."""
+_DEFAULT_TRUSTED_PROXY_HOPS = 1
+
+
+def _login_throttle_key(
+    mode: str, identifier: str, request: Request, trusted_proxy_hops: int
+) -> str:
+    """Brute-force throttle key: ``mode:lower(identifier):client_ip``.
+
+    ``trusted_proxy_hops`` is the provider's configured reverse-proxy depth,
+    threaded to :func:`client_ip` so the client IP is read from the trusted
+    (right) end of ``X-Forwarded-For`` and cannot be spoofed per request to
+    evade the lockout.
+    """
     from inqtrix.auth.ratelimit import client_ip
 
-    return f"{mode}:{identifier.strip().lower()}:{client_ip(request)}"
+    ip = client_ip(request, trusted_proxy_hops)
+    return f"{mode}:{identifier.strip().lower()}:{ip}"
 
 
 async def _read_json_object(request: Request):
@@ -292,7 +335,10 @@ async def _read_json_object(request: Request):
     return body, None
 
 
-def _build_password_auth_router(provider) -> APIRouter:
+def _build_password_auth_router(
+    provider,
+    principal_dependency: Callable[..., "Principal"],
+) -> APIRouter:
     """Routes for password-based cookie-session modes (local; ldap later).
 
     Mounts the first-run owner setup and the password login route, plus the
@@ -328,18 +374,19 @@ def _build_password_auth_router(provider) -> APIRouter:
             name, path="/", secure=provider.secure_cookies
         )
 
-    async def _mint_session(
+    def _new_session(
         *,
+        user_id: uuid.UUID,
         subject: str,
         issuer: str,
         email: str | None,
         display_name: str | None,
-        status_code: int = 200,
-    ) -> JSONResponse:
-        session = AuthSession(
+    ) -> AuthSession:
+        return AuthSession(
             id=new_session_id(),
-            sub=subject,
+            user_id=user_id,
             issuer=issuer,
+            subject=subject,
             email=email,
             display_name=display_name,
             groups=(),
@@ -347,7 +394,10 @@ def _build_password_auth_router(provider) -> APIRouter:
             created_at=_time.time(),
             expires_at=_time.time() + provider.session_max_age_seconds,
         )
-        await provider.sessions.create(session)
+
+    def _session_response(
+        session: AuthSession, *, status_code: int = 200
+    ) -> JSONResponse:
         response = JSONResponse({"authenticated": True}, status_code=status_code)
         _set_cookie(
             response, provider.session_cookie, session.id, http_only=True
@@ -403,46 +453,47 @@ def _build_password_auth_router(provider) -> APIRouter:
             if error is not None:
                 return error
             email, password = parsed
+            if users is None:
+                return error_response(
+                    503, "Nutzerverzeichnis ist nicht verfuegbar", "server_error"
+                )
             display_name = str(body.get("display_name", "")).strip() or email
             credential = LocalCredential(
+                user_id=uuid.uuid4(),
                 subject=new_subject(),
                 email=email,
                 password_hash=hash_password(password),
                 display_name=display_name,
                 created_at=_time.time(),
             )
-            created = await provider.credentials.create(
-                credential, tenant_id="default", allow_first_only=True
-            )
-            if not created:
-                # Idempotent permanent lock: the owner exists already.
+            if provider.lifecycle is None:
                 return error_response(
-                    409, "Owner ist bereits eingerichtet", "setup_locked"
+                    503, "Nutzerverwaltung ist nicht verfuegbar", "server_error"
                 )
-            if users is not None:
-                await users.record_login(
-                    tenant_id="default",
-                    issuer=LOCAL_ISSUER,
-                    subject=credential.subject,
-                    email=email,
-                    email_verified=True,
-                    display_name=display_name,
-                )
-                # The first owner is the instance admin, unconditionally.
-                await users.set_instance_role(
-                    tenant_id="default",
-                    issuer=LOCAL_ISSUER,
-                    subject=credential.subject,
-                    role="admin",
-                )
-            log.info("Lokaler Owner angelegt: sub=%s", credential.subject)
-            return await _mint_session(
+            session = _new_session(
+                user_id=credential.user_id,
                 subject=credential.subject,
                 issuer=LOCAL_ISSUER,
                 email=email,
                 display_name=display_name,
-                status_code=201,
             )
+            user = await provider.lifecycle.create_local_account(
+                tenant_id="default",
+                credential=credential,
+                role="admin",
+                session=session,
+                first_only=True,
+            )
+            if user is None:
+                # Idempotent permanent lock: the owner exists already.
+                return error_response(
+                    409, "Owner ist bereits eingerichtet", "setup_locked"
+                )
+            log.info(
+                "Lokaler Owner angelegt: user_id=%s kind=oidc_session",
+                user.user_id,
+            )
+            return _session_response(session, status_code=201)
 
         @router.post("/api/auth/login/local")
         async def login_local(request: Request):
@@ -456,7 +507,14 @@ def _build_password_auth_router(provider) -> APIRouter:
             ).strip()
             password = str(body.get("password", ""))
             limiter = getattr(provider, "login_rate_limiter", None)
-            throttle_key = _login_throttle_key("local", email, request)
+            throttle_key = _login_throttle_key(
+                "local",
+                email,
+                request,
+                getattr(
+                    provider, "trusted_proxy_hops", _DEFAULT_TRUSTED_PROXY_HOPS
+                ),
+            )
             if limiter is not None and limiter.locked(throttle_key):
                 return error_response(429, _RATE_LIMITED_MSG, "rate_limited")
             try:
@@ -471,21 +529,34 @@ def _build_password_auth_router(provider) -> APIRouter:
                 )
             if limiter is not None:
                 limiter.reset(throttle_key)
-            if users is not None:
-                await users.record_login(
-                    tenant_id="default",
-                    issuer=LOCAL_ISSUER,
-                    subject=credential.subject,
-                    email=credential.email,
-                    email_verified=True,
-                    display_name=credential.display_name,
+            if users is None or provider.lifecycle is None:
+                return error_response(
+                    503, "Nutzerverzeichnis ist nicht verfuegbar", "server_error"
                 )
-            return await _mint_session(
+            session = _new_session(
+                user_id=credential.user_id,
                 subject=credential.subject,
                 issuer=LOCAL_ISSUER,
                 email=credential.email,
                 display_name=credential.display_name,
             )
+            try:
+                await provider.lifecycle.provision_login(
+                    LoginCommand(
+                        tenant_id="default",
+                        issuer=LOCAL_ISSUER,
+                        subject=credential.subject,
+                        email=credential.email,
+                        email_verified=True,
+                        display_name=credential.display_name,
+                        session=session,
+                    )
+                )
+            except UserDisabledError:
+                return error_response(
+                    401, "Ungueltige Anmeldedaten", "unauthorized"
+                )
+            return _session_response(session)
 
         @router.post("/api/auth/password")
         async def change_password(request: Request):
@@ -497,7 +568,7 @@ def _build_password_auth_router(provider) -> APIRouter:
             is enforced by the principal dependency on this unsafe method.
             """
             resolved, error = await _session_principal_for_tokens(
-                provider, request
+                provider, request, principal_dependency
             )
             if error is not None:
                 return error
@@ -519,8 +590,8 @@ def _build_password_auth_router(provider) -> APIRouter:
                     f"Passwort muss mindestens {_MIN_PASSWORD_LEN} Zeichen lang sein",
                     "invalid_request_error",
                 )
-            credential = await provider.credentials.get_by_subject(
-                tenant_id="default", subject=session.sub
+            credential = await provider.credentials.get_by_user_id(
+                tenant_id="default", user_id=session.user_id
             )
             if credential is None or not verify_password(
                 credential.password_hash, current
@@ -530,7 +601,7 @@ def _build_password_auth_router(provider) -> APIRouter:
                 )
             await provider.credentials.set_password(
                 tenant_id="default",
-                subject=session.sub,
+                user_id=session.user_id,
                 password_hash=hash_password(new_password),
             )
             return JSONResponse({"changed": True})
@@ -551,7 +622,14 @@ def _build_password_auth_router(provider) -> APIRouter:
             ).strip()
             password = str(body.get("password", ""))
             limiter = getattr(provider, "login_rate_limiter", None)
-            throttle_key = _login_throttle_key("ldap", username, request)
+            throttle_key = _login_throttle_key(
+                "ldap",
+                username,
+                request,
+                getattr(
+                    provider, "trusted_proxy_hops", _DEFAULT_TRUSTED_PROXY_HOPS
+                ),
+            )
             if limiter is not None and limiter.locked(throttle_key):
                 return error_response(429, _RATE_LIMITED_MSG, "rate_limited")
             try:
@@ -567,7 +645,7 @@ def _build_password_auth_router(provider) -> APIRouter:
                 )
             if limiter is not None:
                 limiter.reset(throttle_key)
-            if users is not None:
+            if users is not None and provider.lifecycle is not None:
                 # Disabled enforcement parity with local (the authenticator
                 # checks credential.disabled_at) and oidc (the registration
                 # gate checks the mirror): the directory itself has no
@@ -584,31 +662,36 @@ def _build_password_auth_router(provider) -> APIRouter:
                     return error_response(
                         401, "Ungueltige Anmeldedaten", "unauthorized"
                     )
-                await users.record_login(
-                    tenant_id="default",
-                    issuer=LDAP_ISSUER,
-                    subject=identity.subject,
-                    email=identity.email,
-                    email_verified=True,
-                    display_name=identity.display_name,
+            else:
+                return error_response(
+                    503, "Nutzerverzeichnis ist nicht verfuegbar", "server_error"
                 )
-                # Admin-group membership GRANTS instance-admin (grant-only,
-                # never demotes — see apply_admin_grant); on a fresh instance
-                # the first LDAP login may bootstrap the owner.
-                await apply_admin_grant(
-                    users,
-                    tenant_id="default",
-                    issuer=LDAP_ISSUER,
-                    subject=identity.subject,
-                    is_admin=identity.is_admin,
-                    first_login_owner=provider.first_login_owner,
-                )
-            return await _mint_session(
+            session = _new_session(
+                user_id=uuid.uuid4(),
                 subject=identity.subject,
                 issuer=LDAP_ISSUER,
                 email=identity.email,
                 display_name=identity.display_name,
             )
+            try:
+                await provider.lifecycle.provision_login(
+                    LoginCommand(
+                        tenant_id="default",
+                        issuer=LDAP_ISSUER,
+                        subject=identity.subject,
+                        email=identity.email,
+                        email_verified=True,
+                        display_name=identity.display_name,
+                        session=session,
+                        is_admin=identity.is_admin,
+                        first_login_owner=provider.first_login_owner,
+                    )
+                )
+            except UserDisabledError:
+                return error_response(
+                    401, "Ungueltige Anmeldedaten", "unauthorized"
+                )
+            return _session_response(session)
 
     @router.get("/api/auth/session")
     async def session_info(request: Request):
@@ -618,8 +701,7 @@ def _build_password_auth_router(provider) -> APIRouter:
     @router.post("/api/auth/logout")
     async def logout(request: Request):
         """Destroy the server-side session (CSRF-protected)."""
-        principal_dep = provider.build_principal_dependency()
-        principal = await principal_dep(request)
+        principal = await principal_dependency(request)
         if principal.session_id:
             await provider.sessions.delete(principal.session_id)
         response = JSONResponse({"logged_out": True})
@@ -628,19 +710,20 @@ def _build_password_auth_router(provider) -> APIRouter:
         return response
 
     if provider.pat_service is not None:
-        _register_token_routes(router, provider)
+        _register_token_routes(router, provider, principal_dependency)
 
     return router
 
 
 async def _session_principal_for_tokens(
-    provider: "OidcAuthProvider", request: Request
+    provider: "OidcAuthProvider",
+    request: Request,
+    principal_dependency: Callable[..., "Principal"],
 ):
     """Token management is SESSION-only: a PAT can never mint or
     revoke PATs (a leaked token must not be able to extend itself or
     cut off its siblings)."""
-    principal_dep = provider.build_principal_dependency()
-    principal = await principal_dep(request)
+    principal = await principal_dependency(request)
     if principal.kind != "oidc_session":
         return None, error_response(
             403,
@@ -667,7 +750,9 @@ def _token_payload(record) -> dict:
 
 
 def _register_token_routes(
-    router: APIRouter, provider: "OidcAuthProvider"
+    router: APIRouter,
+    provider: "OidcAuthProvider",
+    principal_dependency: Callable[..., "Principal"],
 ) -> None:
     """Personal-access-token management under the BFF surface.
 
@@ -680,7 +765,7 @@ def _register_token_routes(
     @router.post("/api/auth/tokens", status_code=201)
     async def create_token(request: Request):
         resolved, error = await _session_principal_for_tokens(
-            provider, request
+            provider, request, principal_dependency
         )
         if error is not None:
             return error
@@ -714,8 +799,7 @@ def _register_token_routes(
         try:
             minted = await provider.pat_service.create_token(
                 tenant_id="default",
-                owner_issuer=session.issuer,
-                owner_sub=session.sub,
+                owner_user_id=session.user_id,
                 name=name,
                 expires_in_days=expires_in_days,
             )
@@ -734,22 +818,21 @@ def _register_token_routes(
     @router.get("/api/auth/tokens")
     async def list_tokens(request: Request):
         resolved, error = await _session_principal_for_tokens(
-            provider, request
+            provider, request, principal_dependency
         )
         if error is not None:
             return error
         _principal, session = resolved
         tokens = await provider.pat_service.list_tokens(
             tenant_id="default",
-            owner_issuer=session.issuer,
-            owner_sub=session.sub,
+            owner_user_id=session.user_id,
         )
         return {"tokens": [_token_payload(record) for record in tokens]}
 
     @router.delete("/api/auth/tokens/{token_id}")
     async def revoke_token(token_id: str, request: Request):
         resolved, error = await _session_principal_for_tokens(
-            provider, request
+            provider, request, principal_dependency
         )
         if error is not None:
             return error
@@ -757,8 +840,7 @@ def _register_token_routes(
         revoked = await provider.pat_service.revoke_token(
             tenant_id="default",
             token_id=token_id,
-            owner_issuer=session.issuer,
-            owner_sub=session.sub,
+            owner_user_id=session.user_id,
         )
         if not revoked:
             # Foreign or unknown ids are indistinguishable — denial

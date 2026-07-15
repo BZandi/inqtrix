@@ -16,6 +16,12 @@ import { DEMO_OWNER } from '@/features/sharing/demoShares'
 // digital twin (anonymised demo data; never Date.now()).
 const DEMO_TS = 1_767_225_600
 const DAY = 86_400
+const DEMO_USER_IDS = {
+  ines: '00000000-0000-4000-8000-000000000011',
+  mara: '00000000-0000-4000-8000-000000000012',
+  paul: '00000000-0000-4000-8000-000000000014',
+  tomas: '00000000-0000-4000-8000-000000000013',
+} as const
 
 /**
  * Seeded instance users for the demo admin surface (digital twin). The
@@ -26,7 +32,7 @@ const DAY = 86_400
 export function seedAdminUsers(): AdminUser[] {
   return [
     {
-      subject: DEMO_OWNER.subject,
+      id: DEMO_OWNER.userId,
       email: DEMO_OWNER.email,
       display_name: DEMO_OWNER.displayName,
       instance_role: 'admin',
@@ -34,7 +40,7 @@ export function seedAdminUsers(): AdminUser[] {
       last_login_at: DEMO_TS - 2 * DAY,
     },
     {
-      subject: 'user-ines',
+      id: DEMO_USER_IDS.ines,
       email: 'ines.adesina@example.com',
       display_name: 'Ines Adesina',
       instance_role: 'admin',
@@ -42,7 +48,7 @@ export function seedAdminUsers(): AdminUser[] {
       last_login_at: DEMO_TS - 1 * DAY,
     },
     {
-      subject: 'user-mara',
+      id: DEMO_USER_IDS.mara,
       email: 'mara.lindqvist@example.com',
       display_name: 'Mara Lindqvist',
       instance_role: 'user',
@@ -50,7 +56,7 @@ export function seedAdminUsers(): AdminUser[] {
       last_login_at: DEMO_TS - 5 * DAY,
     },
     {
-      subject: 'user-tomas',
+      id: DEMO_USER_IDS.tomas,
       email: 'tomas.berg@example.com',
       display_name: 'Tomas Berg',
       instance_role: 'user',
@@ -58,7 +64,7 @@ export function seedAdminUsers(): AdminUser[] {
       last_login_at: DEMO_TS - 11 * DAY,
     },
     {
-      subject: 'user-paul',
+      id: DEMO_USER_IDS.paul,
       email: 'paul.henning@example.com',
       display_name: 'Paul Henning',
       instance_role: 'user',
@@ -83,13 +89,13 @@ export type DemoWorkspaceSeed = {
  */
 export function seedAdminWorkspaces(): DemoWorkspaceSeed[] {
   const users = seedAdminUsers()
-  const member = (sub: string, role: WorkspaceRoleValue): WorkspaceMember => {
-    const user = users.find((candidate) => candidate.subject === sub)
+  const member = (userId: string, role: WorkspaceRoleValue): WorkspaceMember => {
+    const user = users.find((candidate) => candidate.id === userId)
     return {
       display_name: user?.display_name ?? null,
       email: user?.email ?? null,
       role,
-      sub,
+      user_id: userId,
     }
   }
   const make = (
@@ -98,29 +104,29 @@ export function seedAdminWorkspaces(): DemoWorkspaceSeed[] {
     createdBy: string,
     roster: Array<[string, WorkspaceRoleValue]>,
   ): DemoWorkspaceSeed => ({
-    members: roster.map(([sub, role]) => member(sub, role)),
+    members: roster.map(([userId, role]) => member(userId, role)),
     workspace: {
-      created_by_sub: createdBy,
+      created_by_user_id: createdBy,
       member_count: roster.length,
       name,
       workspace_id: workspaceId,
     },
   })
-  const owner = DEMO_OWNER.subject
+  const owner = DEMO_OWNER.userId
   return [
     make('ws-default', 'Default workspace', owner, [
       [owner, 'owner'],
-      ['user-ines', 'editor'],
+      [DEMO_USER_IDS.ines, 'editor'],
     ]),
     make('ws-research', 'Research Team', owner, [
       [owner, 'owner'],
-      ['user-mara', 'editor'],
-      ['user-tomas', 'commenter'],
-      ['user-paul', 'viewer'],
+      [DEMO_USER_IDS.mara, 'editor'],
+      [DEMO_USER_IDS.tomas, 'commenter'],
+      [DEMO_USER_IDS.paul, 'viewer'],
     ]),
-    make('ws-legal', 'Legal', 'user-ines', [
-      ['user-ines', 'owner'],
-      ['user-mara', 'viewer'],
+    make('ws-legal', 'Legal', DEMO_USER_IDS.ines, [
+      [DEMO_USER_IDS.ines, 'owner'],
+      [DEMO_USER_IDS.mara, 'viewer'],
     ]),
   ]
 }

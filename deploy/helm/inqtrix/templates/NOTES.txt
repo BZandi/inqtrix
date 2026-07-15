@@ -10,7 +10,14 @@ Components:
   - Object store (MinIO): {{ include "inqtrix.fullname" . }}-minio:9000 (bundled S3)
 {{- end }}
 {{- if .Values.migrations.enabled }}
-  - Schema migrations ran as a {{ if .Values.postgres.enabled }}post-install{{ else }}pre-install{{ end }}/pre-upgrade hook (inqtrix-migrate).
+  - Schema migrations ran automatically as a {{ if .Values.postgres.enabled }}post-install{{ else }}pre-install{{ end }}/pre-upgrade hook (inqtrix-migrate, RLS mode {{ .Values.migrations.rlsMode }}).
+{{- if .Values.migrations.databaseSecret.name }}
+    The direct migration DSN came only from Secret {{ .Values.migrations.databaseSecret.name }}; API/worker did not receive it.
+{{- else }}
+    The hook used the backwards-compatible runtime/bundled database URL. For
+    managed PostgreSQL, configure migrations.databaseSecret.name/key with a
+    dedicated direct migration login.
+{{- end }}
 {{- end }}
 
 Open the Research Desk:
@@ -71,6 +78,20 @@ OpenShift (they run under the arbitrary UID).
 Verify the deployment:
   kubectl -n {{ .Release.Namespace }} wait --for=condition=ready pod -l app.kubernetes.io/instance={{ .Release.Name }} --timeout=5m
   helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+The Helm test calls /readyz. When S3 is configured it also requires a live
+object-store probe; API readiness remains degraded (HTTP 200) during a temporary
+S3 outage so unrelated product areas stay available.
+{{- if and .Release.IsUpgrade (eq .Values.migrations.rlsMode "owner") }}
+
+Owner-mode upgrade: ownerMaintenanceConfirmed authorized a pre-upgrade hook to
+remove the API HPA, scale API/worker/collaboration to zero, and wait for their
+pods to terminate before migration. The hook revoked its temporary RoleBinding
+before exit; when API autoscaling is enabled, the successful release apply
+reactivates the HPA with its positive minReplicas. A failed migration intentionally leaves
+those database clients quiesced; correct or roll back the release before
+restoring traffic. A successful Helm apply restores desired replicas and HPA.
+{{- end }}
 
 Scaling note: more than one API replica requires the postgres storage backend,
 a Valkey queue with worker.enabled, and the S3 object-store backend (a local

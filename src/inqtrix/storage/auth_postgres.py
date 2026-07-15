@@ -11,6 +11,7 @@ bundle's engine, never the run store's background-loop engine
 from __future__ import annotations
 
 import time
+import uuid
 from typing import TYPE_CHECKING
 
 from sqlalchemy import delete, func, or_, select, update
@@ -19,12 +20,50 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from inqtrix.auth.sessions import AuthSession, LoginFlow
 from inqtrix.storage.auth_orm import auth_flows, auth_sessions
 from inqtrix.storage.db import tenant_session
-from inqtrix.storage.identity_orm import users
+from inqtrix.storage.identity_orm import tenant_security_state, users
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 DEFAULT_TENANT = "default"
+
+
+async def insert_auth_session(
+    db: "AsyncSession", *, tenant_id: str, session: AuthSession
+) -> None:
+    """Insert one browser session inside an existing transaction."""
+    await db.execute(
+        delete(auth_sessions).where(auth_sessions.c.expires_at <= time.time())
+    )
+    await db.execute(
+        auth_sessions.insert().values(
+            id=session.id,
+            tenant_id=tenant_id,
+            user_id=session.user_id,
+            issuer=session.issuer,
+            subject=session.subject,
+            email=session.email,
+            display_name=session.display_name,
+            groups=list(session.groups),
+            csrf_random=session.csrf_random,
+            created_at=session.created_at,
+            expires_at=session.expires_at,
+        )
+    )
+
+
+async def lock_tenant_security(db: "AsyncSession", tenant_id: str) -> None:
+    """Lock the stable tenant row used by first/last-admin commands."""
+    await db.execute(
+        pg_insert(tenant_security_state)
+        .values(tenant_id=tenant_id)
+        .on_conflict_do_nothing(index_elements=[tenant_security_state.c.tenant_id])
+    )
+    await db.execute(
+        select(tenant_security_state.c.tenant_id)
+        .where(tenant_security_state.c.tenant_id == tenant_id)
+        .with_for_update()
+    )
 
 
 class PostgresSessionStore:
@@ -55,24 +94,8 @@ class PostgresSessionStore:
     async def create(self, session: AuthSession) -> None:
         """Persist one session and lazily evict expired rows."""
         async with self._scope() as db:
-            await db.execute(
-                delete(auth_sessions).where(
-                    auth_sessions.c.expires_at <= time.time()
-                )
-            )
-            await db.execute(
-                auth_sessions.insert().values(
-                    id=session.id,
-                    tenant_id=DEFAULT_TENANT,
-                    sub=session.sub,
-                    issuer=session.issuer,
-                    email=session.email,
-                    display_name=session.display_name,
-                    groups=list(session.groups),
-                    csrf_random=session.csrf_random,
-                    created_at=session.created_at,
-                    expires_at=session.expires_at,
-                )
+            await insert_auth_session(
+                db, tenant_id=DEFAULT_TENANT, session=session
             )
 
     async def get(self, session_id: str) -> AuthSession | None:
@@ -89,8 +112,9 @@ class PostgresSessionStore:
             return None
         return AuthSession(
             id=row["id"],
-            sub=row["sub"],
+            user_id=row["user_id"],
             issuer=row["issuer"],
+            subject=row["subject"],
             email=row["email"],
             display_name=row["display_name"],
             groups=tuple(row["groups"] or []),
@@ -108,13 +132,12 @@ class PostgresSessionStore:
                 )
             )
 
-    async def delete_for_owner(self, *, issuer: str, sub: str) -> int:
+    async def delete_for_user(self, *, user_id: uuid.UUID) -> int:
         """Purge every session of one identity (admin disable cut-off)."""
         async with self._scope() as db:
             result = await db.execute(
                 delete(auth_sessions).where(
-                    auth_sessions.c.sub == sub,
-                    auth_sessions.c.issuer == issuer,
+                    auth_sessions.c.user_id == user_id,
                 )
             )
         return int(result.rowcount or 0)
@@ -201,6 +224,11 @@ class PostgresUserDirectory:
         self._session_factory = session_factory
         self._app_role = app_role
 
+    @staticmethod
+    async def _lock_tenant_security(db: "AsyncSession", tenant_id: str) -> None:
+        """Serialize first/last-admin commands on one stable tenant row."""
+        await lock_tenant_security(db, tenant_id)
+
     async def record_login(
         self,
         *,
@@ -210,14 +238,18 @@ class PostgresUserDirectory:
         email: str,
         email_verified: bool,
         display_name: str | None,
-    ) -> None:
-        """Upsert the mirror row; the unique pair is the identity."""
+        canonical_user_id: uuid.UUID | None = None,
+    ) -> "MirroredUser":
+        """Upsert and return the mirror row for an external login binding."""
+        from inqtrix.auth.directory import MirroredUser
+
         async with tenant_session(
             self._session_factory,
             tenant_id=tenant_id,
             app_role=self._app_role,
         ) as db:
             statement = pg_insert(users).values(
+                **({"id": canonical_user_id} if canonical_user_id is not None else {}),
                 tenant_id=tenant_id,
                 issuer=issuer,
                 subject=subject,
@@ -229,17 +261,44 @@ class PostgresUserDirectory:
                 # matching the memory backend.
                 last_login_at=func.now(),
             )
-            await db.execute(
+            row = (
+                await db.execute(
                 statement.on_conflict_do_update(
-                    constraint="uq_users_issuer_subject",
+                    constraint="uq_users_tenant_issuer_subject",
                     set_={
                         "email": statement.excluded.email,
                         "email_verified": statement.excluded.email_verified,
                         "display_name": statement.excluded.display_name,
                         "last_login_at": func.now(),
                     },
+                ).returning(users)
                 )
-            )
+            ).first()
+        assert row is not None
+        return self._to_user(row, MirroredUser)
+
+    @staticmethod
+    def _to_user(row, mirrored_user_type):
+        """Map one SQLAlchemy user row without duplicating profile semantics."""
+        return mirrored_user_type(
+            user_id=row.id,
+            tenant_id=row.tenant_id,
+            issuer=row.issuer,
+            subject=row.subject,
+            email=row.email,
+            email_verified=row.email_verified,
+            display_name=row.display_name,
+            disabled_at=(
+                row.disabled_at.timestamp() if row.disabled_at is not None else None
+            ),
+            instance_role=row.instance_role,
+            last_login_at=(
+                row.last_login_at.timestamp()
+                if row.last_login_at is not None
+                else None
+            ),
+            default_workspace_id=row.default_workspace_id,
+        )
 
     async def find_user(
         self, *, tenant_id: str, issuer: str, subject: str
@@ -262,33 +321,31 @@ class PostgresUserDirectory:
             ).first()
         if row is None:
             return None
-        return MirroredUser(
-            issuer=row.issuer,
-            subject=row.subject,
-            email=row.email,
-            email_verified=row.email_verified,
-            display_name=row.display_name,
-            disabled_at=(
-                row.disabled_at.timestamp()
-                if row.disabled_at is not None
-                else None
-            ),
-            instance_role=row.instance_role,
-            last_login_at=(
-                row.last_login_at.timestamp()
-                if row.last_login_at is not None
-                else None
-            ),
-            default_workspace_id=row.default_workspace_id,
-        )
+        return self._to_user(row, MirroredUser)
 
-    async def profiles_for_subjects(
-        self, *, tenant_id: str, subs: tuple[str, ...]
-    ) -> dict[str, "MirroredUser"]:
+    async def find_by_user_id(
+        self, *, tenant_id: str, user_id: uuid.UUID
+    ) -> "MirroredUser | None":
+        """Lookup by canonical UUID for every authorization path."""
+        from inqtrix.auth.directory import MirroredUser
+
+        async with tenant_session(
+            self._session_factory,
+            tenant_id=tenant_id,
+            app_role=self._app_role,
+        ) as db:
+            row = (
+                await db.execute(select(users).where(users.c.id == user_id))
+            ).first()
+        return self._to_user(row, MirroredUser) if row is not None else None
+
+    async def profiles_for_user_ids(
+        self, *, tenant_id: str, user_ids: tuple[uuid.UUID, ...]
+    ) -> dict[uuid.UUID, "MirroredUser"]:
         """``sub -> profile`` for share-listing enrichment (one query)."""
         from inqtrix.auth.directory import MirroredUser
 
-        if not subs:
+        if not user_ids:
             return {}
         async with tenant_session(
             self._session_factory,
@@ -299,12 +356,14 @@ class PostgresUserDirectory:
                 await db.execute(
                     select(users).where(
                         users.c.tenant_id == tenant_id,
-                        users.c.subject.in_(list(subs)),
+                        users.c.id.in_(list(user_ids)),
                     )
                 )
             ).all()
         return {
-            row.subject: MirroredUser(
+            row.id: MirroredUser(
+                user_id=row.id,
+                tenant_id=row.tenant_id,
                 issuer=row.issuer,
                 subject=row.subject,
                 email=row.email,
@@ -319,8 +378,8 @@ class PostgresUserDirectory:
             for row in rows
         }
 
-    async def has_subject(self, *, tenant_id: str, sub: str) -> bool:
-        """Active mirrored identity with this subject exists."""
+    async def has_user_id(self, *, tenant_id: str, user_id: uuid.UUID) -> bool:
+        """Active mirrored identity with this canonical UUID exists."""
         async with tenant_session(
             self._session_factory,
             tenant_id=tenant_id,
@@ -328,10 +387,10 @@ class PostgresUserDirectory:
         ) as db:
             row = (
                 await db.execute(
-                    select(users.c.subject)
+                    select(users.c.id)
                     .where(
                         users.c.tenant_id == tenant_id,
-                        users.c.subject == sub,
+                        users.c.id == user_id,
                         users.c.disabled_at.is_(None),
                     )
                     .limit(1)
@@ -345,7 +404,7 @@ class PostgresUserDirectory:
         tenant_id: str,
         query: str,
         limit: int = 10,
-        exclude_subject: str = "",
+        exclude_user_id: uuid.UUID | None = None,
     ) -> tuple["MirroredUser", ...]:
         """Prefix search over email and display name (share typeahead)."""
         from inqtrix.auth.directory import MirroredUser
@@ -365,7 +424,7 @@ class PostgresUserDirectory:
                     .where(
                         users.c.tenant_id == tenant_id,
                         users.c.disabled_at.is_(None),
-                        users.c.subject != exclude_subject,
+                        users.c.id != exclude_user_id,
                         or_(
                             users.c.email.ilike(pattern),
                             users.c.display_name.ilike(pattern),
@@ -377,6 +436,8 @@ class PostgresUserDirectory:
             ).all()
         return tuple(
             MirroredUser(
+                user_id=row.id,
+                tenant_id=row.tenant_id,
                 issuer=row.issuer,
                 subject=row.subject,
                 email=row.email,
@@ -388,7 +449,7 @@ class PostgresUserDirectory:
         )
 
     async def disable_user(
-        self, *, tenant_id: str, issuer: str, subject: str, now: float
+        self, *, tenant_id: str, user_id: uuid.UUID, now: float
     ) -> bool:
         """Disable cascade in ONE transaction: mirror flag, session
         purge, and PAT revocation land together or not at all — a
@@ -408,8 +469,7 @@ class PostgresUserDirectory:
             result = await db.execute(
                 update(users)
                 .where(
-                    users.c.issuer == issuer,
-                    users.c.subject == subject,
+                    users.c.id == user_id,
                     users.c.disabled_at.is_(None),
                 )
                 .values(disabled_at=disabled_at)
@@ -418,16 +478,14 @@ class PostgresUserDirectory:
                 return False
             await db.execute(
                 delete(auth_sessions).where(
-                    auth_sessions.c.sub == subject,
-                    auth_sessions.c.issuer == issuer,
+                    auth_sessions.c.user_id == user_id,
                 )
             )
             await db.execute(
                 update(pats)
                 .where(
                     pats.c.tenant_id == tenant_id,
-                    pats.c.owner_issuer == issuer,
-                    pats.c.owner_sub == subject,
+                    pats.c.owner_user_id == user_id,
                     pats.c.revoked_at.is_(None),
                 )
                 .values(revoked_at=now)
@@ -435,7 +493,7 @@ class PostgresUserDirectory:
         return True
 
     async def set_instance_role(
-        self, *, tenant_id: str, issuer: str, subject: str, role: str
+        self, *, tenant_id: str, user_id: uuid.UUID, role: str
     ) -> bool:
         """Set the instance role; ``True`` when a row changed."""
         async with tenant_session(
@@ -445,13 +503,13 @@ class PostgresUserDirectory:
         ) as db:
             result = await db.execute(
                 update(users)
-                .where(users.c.issuer == issuer, users.c.subject == subject)
+                .where(users.c.id == user_id)
                 .values(instance_role=role)
             )
         return bool(result.rowcount)
 
     async def resolve_default_workspace(
-        self, *, tenant_id: str, issuer: str, subject: str, candidate: str
+        self, *, tenant_id: str, user_id: uuid.UUID, candidate: str
     ) -> str | None:
         """Return the user's project namespace, claiming ``candidate`` if unset.
 
@@ -469,8 +527,7 @@ class PostgresUserDirectory:
             await db.execute(
                 update(users)
                 .where(
-                    users.c.issuer == issuer,
-                    users.c.subject == subject,
+                    users.c.id == user_id,
                     users.c.default_workspace_id.is_(None),
                 )
                 .values(default_workspace_id=candidate)
@@ -478,8 +535,7 @@ class PostgresUserDirectory:
             row = (
                 await db.execute(
                     select(users.c.default_workspace_id).where(
-                        users.c.issuer == issuer,
-                        users.c.subject == subject,
+                        users.c.id == user_id,
                     )
                 )
             ).first()
@@ -489,8 +545,7 @@ class PostgresUserDirectory:
         self,
         *,
         tenant_id: str,
-        issuer: str,
-        subject: str,
+        user_id: uuid.UUID,
         disabled_at: float | None,
     ) -> bool:
         """Set/clear the mirror disable flag; ``True`` when a row changed.
@@ -500,6 +555,7 @@ class PostgresUserDirectory:
         that denies oidc/ldap re-admission. ``None`` re-enables.
         """
         import datetime as dt
+        from inqtrix.storage.credentials_orm import local_credentials
 
         value = (
             dt.datetime.fromtimestamp(disabled_at, tz=dt.timezone.utc)
@@ -513,8 +569,13 @@ class PostgresUserDirectory:
         ) as db:
             result = await db.execute(
                 update(users)
-                .where(users.c.issuer == issuer, users.c.subject == subject)
+                .where(users.c.id == user_id)
                 .values(disabled_at=value)
+            )
+            await db.execute(
+                update(local_credentials)
+                .where(local_credentials.c.user_id == user_id)
+                .values(disabled_at=disabled_at)
             )
         return bool(result.rowcount)
 
@@ -538,6 +599,8 @@ class PostgresUserDirectory:
             ).all()
         return tuple(
             MirroredUser(
+                user_id=row.id,
+                tenant_id=row.tenant_id,
                 issuer=row.issuer,
                 subject=row.subject,
                 email=row.email,
@@ -577,7 +640,7 @@ class PostgresUserDirectory:
         return int(result.scalar_one())
 
     async def promote_if_no_admin(
-        self, *, tenant_id: str, issuer: str, subject: str
+        self, *, tenant_id: str, user_id: uuid.UUID
     ) -> bool:
         """Promote this user to admin IFF no active admin exists yet.
 
@@ -590,49 +653,32 @@ class PostgresUserDirectory:
             tenant_id=tenant_id,
             app_role=self._app_role,
         ) as db:
+            await self._lock_tenant_security(db, tenant_id)
             has_admin = (
-                select(users.c.id)
-                .where(
-                    users.c.tenant_id == tenant_id,
-                    users.c.instance_role == "admin",
-                    users.c.disabled_at.is_(None),
+                await db.execute(
+                    select(users.c.id)
+                    .where(
+                        users.c.tenant_id == tenant_id,
+                        users.c.instance_role == "admin",
+                        users.c.disabled_at.is_(None),
+                    )
+                    .limit(1)
                 )
-                .limit(1)
-                .exists()
-            )
+            ).first()
+            if has_admin is not None:
+                return False
             result = await db.execute(
                 update(users)
                 .where(
-                    users.c.issuer == issuer,
-                    users.c.subject == subject,
-                    ~has_admin,
+                    users.c.id == user_id,
+                    users.c.disabled_at.is_(None),
                 )
                 .values(instance_role="admin")
             )
         return bool(result.rowcount)
 
-    def _other_active_admin_exists(self, *, tenant_id: str, issuer: str, subject: str):
-        """``EXISTS`` clause: an active admin OTHER than ``(issuer, subject)``.
-
-        The guard at the heart of the atomic last-admin operations — folded
-        into the same statement as the write so the check-and-act cannot be
-        split by a concurrent transaction (the racy alternative was a separate
-        ``count_admins`` read in the router).
-        """
-        return (
-            select(users.c.id)
-            .where(
-                users.c.tenant_id == tenant_id,
-                users.c.instance_role == "admin",
-                users.c.disabled_at.is_(None),
-                or_(users.c.issuer != issuer, users.c.subject != subject),
-            )
-            .limit(1)
-            .exists()
-        )
-
     async def demote_if_not_last_admin(
-        self, *, tenant_id: str, issuer: str, subject: str
+        self, *, tenant_id: str, user_id: uuid.UUID
     ) -> bool:
         """Demote to ``user`` unless this is the last active admin (atomic)."""
         async with tenant_session(
@@ -640,29 +686,42 @@ class PostgresUserDirectory:
             tenant_id=tenant_id,
             app_role=self._app_role,
         ) as db:
-            other_admin = self._other_active_admin_exists(
-                tenant_id=tenant_id, issuer=issuer, subject=subject
-            )
+            await self._lock_tenant_security(db, tenant_id)
+            target = (
+                await db.execute(select(users).where(users.c.id == user_id))
+            ).first()
+            if target is None:
+                return False
+            if target.instance_role == "admin" and target.disabled_at is None:
+                other_admin = (
+                    await db.execute(
+                        select(users.c.id)
+                        .where(
+                            users.c.tenant_id == tenant_id,
+                            users.c.instance_role == "admin",
+                            users.c.disabled_at.is_(None),
+                            users.c.id != user_id,
+                        )
+                        .limit(1)
+                    )
+                ).first()
+                if other_admin is None:
+                    return False
             result = await db.execute(
                 update(users)
-                .where(
-                    users.c.issuer == issuer,
-                    users.c.subject == subject,
-                    or_(
-                        users.c.instance_role != "admin",
-                        users.c.disabled_at.is_not(None),
-                        other_admin,
-                    ),
-                )
+                .where(users.c.id == user_id)
                 .values(instance_role="user")
             )
         return bool(result.rowcount)
 
     async def disable_if_not_last_admin(
-        self, *, tenant_id: str, issuer: str, subject: str, disabled_at: float
+        self, *, tenant_id: str, user_id: uuid.UUID, disabled_at: float
     ) -> bool:
         """Set the disable flag unless this is the last active admin (atomic)."""
         import datetime as dt
+
+        from inqtrix.storage.credentials_orm import local_credentials
+        from inqtrix.storage.pat_orm import personal_access_tokens as pats
 
         value = dt.datetime.fromtimestamp(disabled_at, tz=dt.timezone.utc)
         async with tenant_session(
@@ -670,20 +729,46 @@ class PostgresUserDirectory:
             tenant_id=tenant_id,
             app_role=self._app_role,
         ) as db:
-            other_admin = self._other_active_admin_exists(
-                tenant_id=tenant_id, issuer=issuer, subject=subject
-            )
+            await self._lock_tenant_security(db, tenant_id)
+            target = (
+                await db.execute(select(users).where(users.c.id == user_id))
+            ).first()
+            if target is None:
+                return False
+            if target.instance_role == "admin" and target.disabled_at is None:
+                other_admin = (
+                    await db.execute(
+                        select(users.c.id)
+                        .where(
+                            users.c.tenant_id == tenant_id,
+                            users.c.instance_role == "admin",
+                            users.c.disabled_at.is_(None),
+                            users.c.id != user_id,
+                        )
+                        .limit(1)
+                    )
+                ).first()
+                if other_admin is None:
+                    return False
             result = await db.execute(
                 update(users)
-                .where(
-                    users.c.issuer == issuer,
-                    users.c.subject == subject,
-                    or_(
-                        users.c.instance_role != "admin",
-                        users.c.disabled_at.is_not(None),
-                        other_admin,
-                    ),
-                )
+                .where(users.c.id == user_id)
                 .values(disabled_at=value)
+            )
+            await db.execute(
+                delete(auth_sessions).where(auth_sessions.c.user_id == user_id)
+            )
+            await db.execute(
+                update(pats)
+                .where(
+                    pats.c.owner_user_id == user_id,
+                    pats.c.revoked_at.is_(None),
+                )
+                .values(revoked_at=disabled_at)
+            )
+            await db.execute(
+                update(local_credentials)
+                .where(local_credentials.c.user_id == user_id)
+                .values(disabled_at=disabled_at)
             )
         return bool(result.rowcount)

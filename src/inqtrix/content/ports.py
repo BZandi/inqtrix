@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -21,7 +22,7 @@ class FileRecord:
     Attributes:
         id: Server-assigned stable identifier (``fl_...``).
         tenant_id: Tenant scope (uniform with every platform table).
-        owner_sub: Verified subject that uploaded the file — the
+        owner_user_id: Canonical local user UUID that uploaded the file — the
             authorization anchor for the creator-access rule.
         workspace_id: Optional client-side UI namespace (NOT an
             authorization input — same semantics as on runs).
@@ -39,7 +40,7 @@ class FileRecord:
 
     id: str
     tenant_id: str
-    owner_sub: str
+    owner_user_id: uuid.UUID | None
     workspace_id: str | None
     file_name: str
     content_type: str
@@ -71,12 +72,13 @@ class FileRegistry(Protocol):
         self,
         *,
         tenant_id: str,
-        owner_sub: str | None,
+        owner_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> list[FileRecord]:
         """Records newest-first, filtered by tenant and the optional
-        owner/namespace facets (``owner_sub=None`` means unscoped —
-        the legacy see-everything view)."""
+        owner/namespace facets. ``owner_user_id=None`` leaves the repository
+        query unfiltered; callers remain responsible for excluding scoped
+        rows from anonymous/static views."""
         ...
 
     async def delete(self, file_id: str, *, tenant_id: str) -> FileRecord:

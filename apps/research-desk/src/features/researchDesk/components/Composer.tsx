@@ -52,6 +52,9 @@ type ComposerProps = {
   reduceMotion: boolean | null
   selectedStack: string
   setForm: Dispatch<SetStateAction<ComposerFormState>>
+  /** Externally disable submission (send button, Enter, form submit) —
+   * e.g. while the auth session is still resolving. Typing stays enabled. */
+  submitDisabled?: boolean
 }
 
 export type ComposerFormState = {
@@ -156,13 +159,13 @@ export function buildComposerRequest(
 }
 
 export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer(
-  { form, onHide, onSubmit, reduceMotion, selectedStack, setForm },
+  { form, onHide, onSubmit, reduceMotion, selectedStack, setForm, submitDisabled },
   ref,
 ) {
   const { t } = useLocale()
   const questionTextareaRef = useRef<HTMLTextAreaElement | null>(null)
   const [openMenu, setOpenMenu] = useState<ComposerMenuKey | null>(null)
-  const canSubmit = form.question.trim().length > 0
+  const canSubmit = !submitDisabled && form.question.trim().length > 0
   const reportProfileOptions: ComposerOption[] = [
     {
       description: t.composer.optionSchnellDescription,

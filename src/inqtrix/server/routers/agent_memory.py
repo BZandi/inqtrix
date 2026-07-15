@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
 _OWNER_FIELDS = frozenset(
-    {"sub", "tenant_id", "user_id", "owner", "owner_sub", "namespace"}
+    {"user_id", "tenant_id", "user_id", "owner", "owner_user_id", "namespace"}
 )
 
 

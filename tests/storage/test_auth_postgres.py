@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 
 import pytest
 import pytest_asyncio
@@ -25,6 +26,10 @@ from inqtrix.storage.auth_postgres import (
 from inqtrix.storage.db import build_engine, build_session_factory
 from inqtrix.storage.identity_orm import users
 from inqtrix.storage.migrate import run_migrations
+from tests.storage._canonical_users import (
+    canonical_user_id,
+    ensure_canonical_users,
+)
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
@@ -34,6 +39,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 APP_ROLE = "inqtrix_app"
+SESSION_USER_ID = canonical_user_id("auth-session-user")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -70,15 +76,21 @@ async def session_factory(engine):
                 )
             await session.execute(text("DELETE FROM auth_flows"))
             await session.execute(text("DELETE FROM auth_sessions"))
-            await session.execute(text("DELETE FROM users"))
+            await ensure_canonical_users(session, (SESSION_USER_ID,))
     return factory
 
 
-def make_session(session_id: str = "sess-1", *, ttl: float = 60.0) -> AuthSession:
+def make_session(
+    session_id: str = "sess-1",
+    *,
+    user_id: uuid.UUID = SESSION_USER_ID,
+    ttl: float = 60.0,
+) -> AuthSession:
     return AuthSession(
         id=session_id,
-        sub="user-1234",
+        user_id=user_id,
         issuer="http://127.0.0.1:5556/dex",
+        subject="user-1234",
         email="alice@example.com",
         display_name="alice",
         groups=("team-a",),
@@ -97,7 +109,8 @@ async def test_session_roundtrip_and_delete(session_factory):
 
     loaded = await store.get("sess-1")
     assert loaded is not None
-    assert loaded.sub == "user-1234"
+    assert loaded.user_id == SESSION_USER_ID
+    assert loaded.subject == "user-1234"
     assert loaded.groups == ("team-a",)
     assert loaded.csrf_random == "ab" * 16
 
@@ -202,7 +215,15 @@ async def test_user_mirror_upserts_on_the_issuer_subject_anchor(
                         users.c.email,
                         users.c.display_name,
                         users.c.last_login_at,
-                    ).where(users.c.subject == "user-1")
+                    ).where(
+                        users.c.subject == "user-1",
+                        users.c.issuer.in_(
+                            (
+                                "http://idp.example",
+                                "http://other-idp.example",
+                            )
+                        ),
+                    )
                 )
             )
             .all()

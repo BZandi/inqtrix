@@ -1,15 +1,11 @@
 import type { FileAssetOrigin, FileAssetRecord } from '@/features/project/types'
+import { createProjectEntityId } from '@/features/project/entityId'
 import { createDefaultFileParser, type FileParser } from './parsing'
-import { FILE_SECTION_TEMP_ID } from './sections'
 
 export type IngestOrigin = {
   groupId?: string | null
   kind: FileAssetOrigin
-  sectionId?: string
-}
-
-function createFileId(): string {
-  return `file-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  sectionId: string
 }
 
 function slugifyFileName(fileName: string): string {
@@ -48,7 +44,7 @@ function uniqueLabel(base: string, used: Set<string>): string {
  * it is slow (S3 round-trip + parse) and would block the file from appearing.
  * Instead the ORIGINAL bytes are uploaded for later use, and the server parse
  * happens lazily at vector-index time, back-filling the text + provenance
- * (see knowledgeSync.reindexVectorIndexOnServer).
+ * (see knowledgeSync.createVectorIndexCollectionOnServer).
  */
 export type ServerFileUpload = (file: File) => Promise<string>
 
@@ -60,7 +56,7 @@ export async function ingestFiles(
   serverUpload?: ServerFileUpload,
 ): Promise<FileAssetRecord[]> {
   const used = new Set(existingLabels)
-  const sectionId = origin.sectionId ?? FILE_SECTION_TEMP_ID
+  const sectionId = origin.sectionId
   const groupId = origin.groupId ?? null
   const records: FileAssetRecord[] = []
 
@@ -92,7 +88,7 @@ export async function ingestFiles(
       parserId: 'client',
       fileName: file.name,
       groupId,
-      id: createFileId(),
+      id: createProjectEntityId('file'),
       label: uniqueLabel(slugifyFileName(file.name), used),
       mimeType: file.type || 'application/octet-stream',
       origin: origin.kind,

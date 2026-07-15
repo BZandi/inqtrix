@@ -3,7 +3,7 @@
 The durable tier behind the Ask view's saved sessions — the knowledge
 counterpart of chat threads. Knowledge Q&A was ephemeral (reducer-only); a
 session persists a titled conversation so it survives reload + crosses devices,
-scoped per ``(tenant_id, created_by_sub, workspace_id)`` like the chat/editor/
+scoped per ``(tenant_id, created_by_user_id, workspace_id)`` like the chat/editor/
 asset entities.
 
 Two tables: ``knowledge_session_groups`` stores optional folder metadata, and
@@ -32,6 +32,7 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.dialects.postgresql import UUID
 
 knowledge_sessions_metadata = MetaData()
 
@@ -40,7 +41,7 @@ knowledge_session_groups = Table(
     knowledge_sessions_metadata,
     Column("id", Text, primary_key=True),
     Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
-    Column("created_by_sub", Text, nullable=True),
+    Column("created_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("workspace_id", Text, nullable=True),
     Column("title", Text, nullable=False, server_default=text("''")),
     Column("created_at", Float, nullable=False),
@@ -48,7 +49,7 @@ knowledge_session_groups = Table(
     Index(
         "ix_knowledge_session_groups_owner_created",
         "tenant_id",
-        "created_by_sub",
+        "created_by_user_id",
         "workspace_id",
         "created_at",
         "id",
@@ -61,7 +62,7 @@ knowledge_sessions = Table(
     knowledge_sessions_metadata,
     Column("id", Text, primary_key=True),
     Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
-    Column("created_by_sub", Text, nullable=True),
+    Column("created_by_user_id", UUID(as_uuid=True), nullable=True),
     Column("workspace_id", Text, nullable=True),
     Column("title", Text, nullable=False, server_default=text("''")),
     Column(
@@ -78,7 +79,7 @@ knowledge_sessions = Table(
     Index(
         "ix_knowledge_sessions_owner_updated",
         "tenant_id",
-        "created_by_sub",
+        "created_by_user_id",
         "workspace_id",
         "updated_at",
         "id",

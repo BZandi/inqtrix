@@ -101,6 +101,43 @@ export type ProjectUiState = {
 
 export type EditorDocumentSource = 'blank' | 'imported-research-report' | 'pasted' | 'agent-artifact'
 
+export type EditorDocumentContentMode = 'collaboration' | 'markdown'
+
+export type EditorDocumentAccess = {
+  mode: 'owner' | 'shared'
+  permission: 'edit' | 'suggest' | 'view'
+}
+
+export type EditorDocumentCollaboration = {
+  generation: number
+  persistedSequence: number
+  projectionSequence: number
+  projectionUpdatedAt?: string
+  schemaVersion: number
+}
+
+export type EditorCollaborationConnectionStatus =
+  | 'access_revoked'
+  | 'connected'
+  | 'connecting'
+  | 'error'
+  | 'inactive'
+  | 'incompatible'
+  | 'read_only'
+  | 'reconnecting'
+
+export type EditorCollaborationDurabilityStatus =
+  | 'error'
+  | 'idle'
+  | 'pending'
+  | 'saved'
+
+export type EditorCollaborationUser = {
+  color: string
+  id: string
+  name: string
+}
+
 export type EditorFolderRecord = {
   createdAt: string
   id: string
@@ -164,11 +201,19 @@ export type EditorSuggestionEvidence = {
   sources: EditorSuggestionEvidenceSource[]
 }
 
+export type EditorSuggestionCollaborationPublication = {
+  commandId: string
+  patchId: string
+  sequence: number
+  suggestionIds: string[]
+}
+
 export type EditorSuggestionRecord = {
   anchor: EditorCommentAnchorRecord
   anchorText?: string
   blockId: string
   changeSummary?: string[]
+  collaborationPublication?: EditorSuggestionCollaborationPublication
   createdAt: string
   documentId: string
   editPosition?: EditorSuggestionEditPosition
@@ -196,12 +241,20 @@ export type EditorSuggestionGroupRecord = {
 }
 
 export type EditorDocumentRecord = {
+  /** Authoritative caller relationship; absent on local/legacy project files. */
+  access?: EditorDocumentAccess
+  /** Server-owned Yjs room metadata; present only in collaboration mode. */
+  collaboration?: EditorDocumentCollaboration
   contentMarkdown: string
+  /** Absent on local project files and interpreted as legacy markdown mode. */
+  contentMode?: EditorDocumentContentMode
   createdAt: string
   diffAnchorMarkdown?: string
   diffAnchorUpdatedAt?: string
   folderId: string | null
   id: string
+  /** Independent compare-and-swap revision for title/folder changes. */
+  metadataRevision?: number
   revision: number
   source: EditorDocumentSource
   sourceRunId?: string
@@ -210,6 +263,12 @@ export type EditorDocumentRecord = {
 }
 
 export type EditorPanelTab = 'comments' | 'assistant'
+
+export type EditorCommentOutboxEntry = {
+  documentId: string
+  operation: 'delete' | 'upsert'
+  updatedAt?: string
+}
 
 export type EditorViewMode = 'live' | 'source'
 
@@ -281,6 +340,10 @@ export type ResearchRunResultRecord = {
 export type ResearchRunRecord = {
   access?: ResearchRunAccess
   agentOverrides: Record<string, unknown>
+  /** Transient server state: a cancel is pending on a still-running run.
+   * Hydrated from the API summary only (never serialized to project files:
+   * the pending state would be stale by the next load). */
+  cancelRequested?: boolean
   createdAt: string
   /** Run-tree role; absent = plain standalone run (historical shape). */
   kind?: 'standard' | 'agent' | 'agent_child'
@@ -320,7 +383,7 @@ export type ChatRuleVisibility = {
 }
 
 export type ChatRuleRecord = {
-  /** Shared-in annotation from the server (recipients of a share). */
+  /** Canonical server authorization metadata; absent only for local rules. */
   access?: ResearchRunAccess
   category?: ChatRuleCategory
   contentMarkdown: string
@@ -331,9 +394,8 @@ export type ChatRuleRecord = {
   linkedContextRefs?: ChatContextReferenceRecord[]
   /** Server template id once synced; absent = browser-local rule. */
   serverTemplateId?: string
-  /** Exact server `updated_at` (unix seconds) of the loaded version —
-   * the optimistic-concurrency precondition for the next save. */
-  serverUpdatedAt?: number
+  /** Integer compare-and-swap revision loaded from the server. */
+  serverRevision?: number
   title: string
   updatedAt: string
   visibility?: ChatRuleVisibility
@@ -775,6 +837,8 @@ export type KnowledgeThreadItemRecord = {
 export type KnowledgeSessionRecord = {
   createdAt: string
   id: string
+  /** Local-only marker for the untouched startup session; never sent over the wire. */
+  isBootstrapPlaceholder?: boolean
   title: string
   updatedAt: string
 }
@@ -796,6 +860,9 @@ export type ProjectState = {
   chatThreads: Record<string, ChatThreadRecord>
   connection: ProjectConnection
   dirty: boolean
+  /** Ephemeral per-user comment writes. Project serialization intentionally
+   * omits this map; a sync lifecycle reset starts from an empty outbox. */
+  editorCommentOutbox?: Record<string, EditorCommentOutboxEntry>
   editorComments: Record<string, EditorCommentThreadRecord>
   editorDocumentOrder: string[]
   editorDocuments: Record<string, EditorDocumentRecord>
@@ -887,6 +954,7 @@ export function fromRunSummary(
   return {
     access: summary.access,
     agentOverrides: summary.agent_overrides,
+    cancelRequested: summary.cancel_requested === true ? true : undefined,
     createdAt: submittedAt,
     kind: summary.kind,
     parentRunId: summary.parent_run_id,
@@ -1316,4 +1384,3 @@ function queueNoteFromSummary(summary: ResearchRunSummary) {
 function confidenceScore(confidence: number | undefined) {
   return confidence ? `${confidence.toFixed(1)} / 10` : undefined
 }
-

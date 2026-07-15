@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from inqtrix.auth.principal import Principal, UserContext
@@ -17,9 +19,19 @@ from inqtrix.services.asset_records_service import (
 )
 
 
-def _scoped(sub: str) -> UserContext:
+USER = uuid.UUID("11111111-1111-4111-8111-111111111111")
+USER_A = uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+USER_B = uuid.UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+
+
+def _scoped(user_id: uuid.UUID) -> UserContext:
     return UserContext(
-        principal=Principal(sub=sub, kind="oidc_session", tenant_id="default", role="member")
+        principal=Principal(
+            user_id=user_id,
+            kind="oidc_session",
+            tenant_id="default",
+            role="member",
+        )
     )
 
 
@@ -31,7 +43,7 @@ def service() -> AssetRecordsService:
 async def _section(service, sid, *, owner, created_at=1.0):
     await service.save_section(
         id=sid, kind="custom", title="S", created_at=created_at, updated_at=created_at,
-        caller_sub=owner, workspace_id=None, visible_to=_scoped(owner),
+        caller_user_id=owner, workspace_id=None, visible_to=_scoped(owner),
     )
 
 
@@ -43,28 +55,28 @@ async def _asset(service, aid, *, owner, section_id="fsec_1", group_id=None,
         page_count=2, parse_status="parsed", parse_warning=None,
         text_truncated=False, size_bytes=10, server_file_id="fl_1",
         extracted_text=text, created_at=created_at, updated_at=created_at,
-        caller_sub=owner, workspace_id=None, visible_to=_scoped(owner),
+        caller_user_id=owner, workspace_id=None, visible_to=_scoped(owner),
     )
 
 
 @pytest.mark.asyncio
 async def test_asset_body_lazy_listed_loaded_on_get(service) -> None:
-    await _section(service, "fsec_1", owner="u")
-    await _asset(service, "fa_1", owner="u", text="the heavy extracted text")
-    page, _ = await service.list_assets(caller_sub="u", workspace_id=None, limit=50, after=None)
+    await _section(service, "fsec_1", owner=USER)
+    await _asset(service, "fa_1", owner=USER, text="the heavy extracted text")
+    page, _ = await service.list_assets(caller_user_id=USER, workspace_id=None, limit=50, after=None)
     assert page[0].extracted_text == ""  # body excluded from list
-    full = await service.get_asset("fa_1", visible_to=_scoped("u"))
+    full = await service.get_asset("fa_1", visible_to=_scoped(USER))
     assert full.extracted_text == "the heavy extracted text"
 
 
 @pytest.mark.asyncio
 async def test_asset_keyset_walks(service) -> None:
-    await _section(service, "fsec_1", owner="u")
+    await _section(service, "fsec_1", owner=USER)
     for n, ts in enumerate([10.0, 10.0, 20.0, 30.0, 30.0]):
-        await _asset(service, f"fa_{n}", owner="u", created_at=ts)
+        await _asset(service, f"fa_{n}", owner=USER, created_at=ts)
     seen, cursor = [], None
     for _ in range(10):
-        pg, nxt = await service.list_assets(caller_sub="u", workspace_id=None, limit=2, after=cursor)
+        pg, nxt = await service.list_assets(caller_user_id=USER, workspace_id=None, limit=2, after=cursor)
         seen.extend(a.id for a in pg)
         if nxt is None:
             break
@@ -74,21 +86,21 @@ async def test_asset_keyset_walks(service) -> None:
 
 @pytest.mark.asyncio
 async def test_asset_upsert_preserves_owner_and_created_at(service) -> None:
-    await _section(service, "fsec_1", owner="u")
-    await _asset(service, "fa_1", owner="u", created_at=100.0, text="v1")
+    await _section(service, "fsec_1", owner=USER)
+    await _asset(service, "fa_1", owner=USER, created_at=100.0, text="v1")
     await service.save_asset(
         id="fa_1", section_id="fsec_1", group_id=None, title="renamed", label="A",
         file_name="a.pdf", mime_type="application/pdf", origin="library",
         page_count=2, parse_status="parsed", parse_warning=None, text_truncated=False,
         size_bytes=10, server_file_id="fl_1", extracted_text="v2",
-        created_at=999.0, updated_at=200.0, caller_sub="u", workspace_id=None,
-        visible_to=_scoped("u"),
+        created_at=999.0, updated_at=200.0, caller_user_id=USER, workspace_id=None,
+        visible_to=_scoped(USER),
     )
-    asset = await service.get_asset("fa_1", visible_to=_scoped("u"))
+    asset = await service.get_asset("fa_1", visible_to=_scoped(USER))
     assert asset.title == "renamed"
     assert asset.extracted_text == "v2"
     assert asset.created_at == 100.0
-    assert asset.created_by_sub == "u"
+    assert asset.created_by_user_id == USER
 
 
 @pytest.mark.asyncio
@@ -96,27 +108,27 @@ async def test_parser_id_round_trips_as_metadata(service) -> None:
     """parser_id (parse provenance) survives save and rides the metadata
     list (not just the body GET), so the UI badge is correct after a
     keyset-paged reload. Defaults to None when the caller omits it."""
-    await _section(service, "fsec_1", owner="u")
+    await _section(service, "fsec_1", owner=USER)
     await service.save_asset(
         id="fa_srv", section_id="fsec_1", group_id=None, title="A", label="A",
         file_name="a.pdf", mime_type="application/pdf", origin="library",
         page_count=2, parse_status="parsed", parse_warning=None,
         text_truncated=False, size_bytes=10, server_file_id="fl_1",
         parser_id="markitdown", extracted_text="body", created_at=1.0,
-        updated_at=1.0, caller_sub="u", workspace_id=None, visible_to=_scoped("u"),
+        updated_at=1.0, caller_user_id=USER, workspace_id=None, visible_to=_scoped(USER),
     )
-    await _asset(service, "fa_local", owner="u", created_at=2.0)  # no parser_id
+    await _asset(service, "fa_local", owner=USER, created_at=2.0)  # no parser_id
     by_id = {
         a.id: a
         for a, _ in [
-            (await service.get_asset("fa_srv", visible_to=_scoped("u")), None),
-            (await service.get_asset("fa_local", visible_to=_scoped("u")), None),
+            (await service.get_asset("fa_srv", visible_to=_scoped(USER)), None),
+            (await service.get_asset("fa_local", visible_to=_scoped(USER)), None),
         ]
     }
     assert by_id["fa_srv"].parser_id == "markitdown"
     assert by_id["fa_local"].parser_id is None
     page, _ = await service.list_assets(
-        caller_sub="u", workspace_id=None, limit=50, after=None
+        caller_user_id=USER, workspace_id=None, limit=50, after=None
     )
     assert {a.id: a.parser_id for a in page} == {
         "fa_srv": "markitdown",
@@ -126,29 +138,29 @@ async def test_parser_id_round_trips_as_metadata(service) -> None:
 
 @pytest.mark.asyncio
 async def test_owner_isolation(service) -> None:
-    await _section(service, "fsec_1", owner="u-a")
-    await _asset(service, "fa_a", owner="u-a")
+    await _section(service, "fsec_1", owner=USER_A)
+    await _asset(service, "fa_a", owner=USER_A)
     with pytest.raises(AssetNotFound):
-        await service.get_asset("fa_a", visible_to=_scoped("u-b"))
-    page, _ = await service.list_assets(caller_sub="u-b", workspace_id=None, limit=50, after=None)
+        await service.get_asset("fa_a", visible_to=_scoped(USER_B))
+    page, _ = await service.list_assets(caller_user_id=USER_B, workspace_id=None, limit=50, after=None)
     assert page == []
 
 
 @pytest.mark.asyncio
 async def test_section_delete_cascades_group_delete_orphans(service) -> None:
-    await _section(service, "fsec_1", owner="u")
+    await _section(service, "fsec_1", owner=USER)
     await service.save_group(
         id="fg_1", section_id="fsec_1", title="G", created_at=1.0, updated_at=1.0,
-        caller_sub="u", workspace_id=None, visible_to=_scoped("u"),
+        caller_user_id=USER, workspace_id=None, visible_to=_scoped(USER),
     )
-    await _asset(service, "fa_1", owner="u", group_id="fg_1")
+    await _asset(service, "fa_1", owner=USER, group_id="fg_1")
     # Delete the group -> asset orphans to ungrouped (group_id null).
-    await service.delete_group("fg_1", visible_to=_scoped("u"))
-    assert (await service.get_asset("fa_1", visible_to=_scoped("u"))).group_id is None
+    await service.delete_group("fg_1", visible_to=_scoped(USER))
+    assert (await service.get_asset("fa_1", visible_to=_scoped(USER))).group_id is None
     # Delete the section -> its assets + groups cascade away.
-    await service.delete_section("fsec_1", visible_to=_scoped("u"))
+    await service.delete_section("fsec_1", visible_to=_scoped(USER))
     with pytest.raises(AssetNotFound):
-        await service.get_asset("fa_1", visible_to=_scoped("u"))
+        await service.get_asset("fa_1", visible_to=_scoped(USER))
 
 
 @pytest.mark.asyncio
@@ -156,9 +168,9 @@ async def test_validation(service) -> None:
     with pytest.raises(AssetValidationError):
         await service.save_section(
             id="fsec_x", kind="bogus", title="S", created_at=1.0, updated_at=1.0,
-            caller_sub="u", workspace_id=None, visible_to=_scoped("u"),
+            caller_user_id=USER, workspace_id=None, visible_to=_scoped(USER),
         )
-    await _section(service, "fsec_1", owner="u")
+    await _section(service, "fsec_1", owner=USER)
     with pytest.raises(AssetValidationError):
         await _asset_bad_origin(service)
 
@@ -169,5 +181,5 @@ async def _asset_bad_origin(service):
         file_name="a", mime_type="x", origin="bogus", page_count=None,
         parse_status="parsed", parse_warning=None, text_truncated=False, size_bytes=0,
         server_file_id=None, extracted_text="", created_at=1.0, updated_at=1.0,
-        caller_sub="u", workspace_id=None, visible_to=_scoped("u"),
+        caller_user_id=USER, workspace_id=None, visible_to=_scoped(USER),
     )

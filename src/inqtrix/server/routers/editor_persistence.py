@@ -9,10 +9,12 @@ single-document GET returns the body (load-on-open).
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Request
 
+from inqtrix.auth.permissions import AccessMode, ResourceAccess, SharePermission
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.pagination import (
     InvalidCursor,
@@ -21,6 +23,8 @@ from inqtrix.pagination import (
     list_envelope,
 )
 from inqtrix.project.editor_ports import (
+    DocumentContentModeConflict,
+    DocumentMetadataConflict,
     DocumentNotFound,
     DocumentRevisionConflict,
     EditorComment,
@@ -38,11 +42,24 @@ if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
 
-def _caller_sub(principal: Principal) -> str | None:
-    return principal.sub if principal.kind in ("oidc_session", "pat") else None
+def _caller_user_id(principal: Principal) -> uuid.UUID | None:
+    return principal.user_id if principal.kind in ("oidc_session", "pat") else None
 
 
-def _document_meta_payload(document: EditorDocument) -> dict[str, Any]:
+def _access_payload(access: ResourceAccess | None) -> dict[str, str]:
+    """Public editor access contract with effective write permission."""
+    if access is not None and access.mode is AccessMode.SHARED:
+        return {
+            "mode": "shared",
+            "permission": (access.permission or SharePermission.VIEW).value,
+        }
+    return {"mode": "owner", "permission": SharePermission.EDIT.value}
+
+
+def _document_meta_payload(
+    document: EditorDocument,
+    access: ResourceAccess | None = None,
+) -> dict[str, Any]:
     """Document WITHOUT the body — the list shape."""
     return {
         "id": document.id,
@@ -55,12 +72,32 @@ def _document_meta_payload(document: EditorDocument) -> dict[str, Any]:
         "diff_anchor_updated_at": document.diff_anchor_updated_at,
         "created_at": document.created_at,
         "updated_at": document.updated_at,
+        "content_mode": document.content_mode,
+        "metadata_revision": document.metadata_revision,
+        "access": _access_payload(access),
+        "collaboration": (
+            {
+                "generation": document.collaboration_generation,
+                "schema_version": document.collaboration_schema_version,
+                "persisted_sequence": document.persisted_sequence,
+                "projection_sequence": document.projection_sequence,
+                "projection_updated_at": document.projection_updated_at,
+            }
+            if document.content_mode == "collaboration"
+            else None
+        ),
     }
 
 
-def _document_detail_payload(document: EditorDocument) -> dict[str, Any]:
+def _document_detail_payload(
+    document: EditorDocument,
+    access: ResourceAccess | None = None,
+) -> dict[str, Any]:
     """Document WITH the body — the get-one / upsert-response shape."""
-    return {**_document_meta_payload(document), "content_markdown": document.content_markdown}
+    return {
+        **_document_meta_payload(document, access),
+        "content_markdown": document.content_markdown,
+    }
 
 
 def _folder_payload(folder: EditorFolder) -> dict[str, Any]:
@@ -83,6 +120,11 @@ def _comment_payload(comment: EditorComment) -> dict[str, Any]:
         "evidence_preset": comment.evidence_preset,
         "created_at": comment.created_at,
         "updated_at": comment.updated_at,
+        "created_by_user_id": (
+            str(comment.created_by_user_id)
+            if comment.created_by_user_id is not None
+            else None
+        ),
     }
 
 
@@ -110,14 +152,22 @@ def build_router(container: "AppContainer") -> APIRouter:
         except InvalidCursor:
             return error_response(400, "Ungueltiger Cursor", "invalid_cursor")
         limit = clamp_limit(req.query_params.get("limit"))
-        documents, next_cursor = await service.list_documents(
-            caller_sub=_caller_sub(principal),
-            workspace_id=workspace_id_from_request(req),
-            limit=limit,
-            after=after,
-        )
+        scope = req.query_params.get("scope", "owned")
+        try:
+            documents, next_cursor = await service.list_visible_documents(
+                caller_user_id=_caller_user_id(principal),
+                workspace_id=workspace_id_from_request(req),
+                scope=scope,
+                limit=limit,
+                after=after,
+            )
+        except EditorValidationError as exc:
+            return error_response(400, str(exc), "invalid_request_error")
         return list_envelope(
-            [_document_meta_payload(document) for document in documents],
+            [
+                _document_meta_payload(document, access)
+                for document, access in documents
+            ],
             next_cursor,
         )
 
@@ -128,12 +178,12 @@ def build_router(container: "AppContainer") -> APIRouter:
     ):
         """One document WITH its body (load-on-open)."""
         try:
-            document = await service.get_document(
+            document, access = await service.get_document_with_access(
                 document_id, visible_to=visible_to
             )
         except DocumentNotFound:
             return error_response(404, "Dokument nicht gefunden", "not_found")
-        return _document_detail_payload(document)
+        return _document_detail_payload(document, access)
 
     @router.put("/v1/editor/documents/{document_id}")
     async def save_document(
@@ -201,7 +251,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 ),
                 created_at=float(created_at),
                 updated_at=float(updated_at),
-                caller_sub=_caller_sub(principal),
+                caller_user_id=_caller_user_id(principal),
                 workspace_id=workspace_id_from_request(req),
                 visible_to=visible_to,
             )
@@ -209,6 +259,13 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(400, str(exc), "invalid_request_error")
         except DocumentNotFound:
             return error_response(404, "Dokument nicht gefunden", "not_found")
+        except DocumentContentModeConflict:
+            return error_response(
+                409,
+                "Der Dokumentinhalt wird bereits live synchronisiert.",
+                "conflict",
+                reason="content_mode_changed",
+            )
         except DocumentRevisionConflict as exc:
             # A concurrent writer (agent patch apply vs. this autosave)
             # moved the document past the caller's base. 409 with the
@@ -221,6 +278,106 @@ def build_router(container: "AppContainer") -> APIRouter:
                 "conflict",
                 current_revision=exc.current_revision,
             )
+        return _document_detail_payload(document)
+
+    @router.patch("/v1/editor/documents/{document_id}")
+    async def patch_document_metadata(
+        document_id: str,
+        req: Request,
+        visible_to: UserContext | None = Depends(user_context_dep),
+    ):
+        """Owner-only metadata CAS that never mutates the document body."""
+        body = await _json_object(req)
+        if not isinstance(body, dict):
+            return error_response(
+                400, "Ungueltiger JSON-Body", "invalid_request_error"
+            )
+        expected = body.get("expected_metadata_revision")
+        if not isinstance(expected, int):
+            return error_response(
+                400,
+                "expected_metadata_revision muss eine Ganzzahl sein",
+                "invalid_request_error",
+            )
+        title = body.get("title")
+        if title is not None and not isinstance(title, str):
+            return error_response(
+                400, "title muss ein String sein", "invalid_request_error"
+            )
+        set_folder_id = "folder_id" in body
+        folder_id = body.get("folder_id")
+        if set_folder_id and folder_id is not None and not isinstance(folder_id, str):
+            return error_response(
+                400,
+                "folder_id muss ein String oder null sein",
+                "invalid_request_error",
+            )
+        set_diff_anchor_markdown = "diff_anchor_markdown" in body
+        diff_anchor_markdown = body.get("diff_anchor_markdown")
+        if (
+            set_diff_anchor_markdown
+            and diff_anchor_markdown is not None
+            and not isinstance(diff_anchor_markdown, str)
+        ):
+            return error_response(
+                400,
+                "diff_anchor_markdown muss ein String oder null sein",
+                "invalid_request_error",
+            )
+        set_diff_anchor_updated_at = "diff_anchor_updated_at" in body
+        diff_anchor_updated_at = body.get("diff_anchor_updated_at")
+        if set_diff_anchor_updated_at and (
+            diff_anchor_updated_at is not None
+            and (
+                isinstance(diff_anchor_updated_at, bool)
+                or not isinstance(diff_anchor_updated_at, (int, float))
+            )
+        ):
+            return error_response(
+                400,
+                "diff_anchor_updated_at muss eine Zahl oder null sein",
+                "invalid_request_error",
+            )
+        if (
+            title is None
+            and not set_folder_id
+            and not set_diff_anchor_markdown
+            and not set_diff_anchor_updated_at
+        ):
+            return error_response(
+                400,
+                "Mindestens ein Metadatenfeld ist erforderlich",
+                "invalid_request_error",
+            )
+        try:
+            document = await service.patch_document_metadata(
+                document_id,
+                expected_metadata_revision=expected,
+                title=title,
+                folder_id=folder_id,
+                set_folder_id=set_folder_id,
+                diff_anchor_markdown=diff_anchor_markdown,
+                set_diff_anchor_markdown=set_diff_anchor_markdown,
+                diff_anchor_updated_at=(
+                    float(diff_anchor_updated_at)
+                    if diff_anchor_updated_at is not None
+                    else None
+                ),
+                set_diff_anchor_updated_at=set_diff_anchor_updated_at,
+                visible_to=visible_to,
+            )
+        except (DocumentNotFound, FolderNotFound):
+            return error_response(404, "Dokument nicht gefunden", "not_found")
+        except DocumentMetadataConflict as exc:
+            return error_response(
+                409,
+                "Die Dokumentmetadaten wurden zwischenzeitlich geaendert.",
+                "conflict",
+                reason="metadata_conflict",
+                current_metadata_revision=exc.current_revision,
+            )
+        except EditorValidationError as exc:
+            return error_response(400, str(exc), "invalid_request_error")
         return _document_detail_payload(document)
 
     @router.delete("/v1/editor/documents/{document_id}", status_code=204)
@@ -267,6 +424,7 @@ def build_router(container: "AppContainer") -> APIRouter:
     async def save_comments(
         document_id: str,
         req: Request,
+        principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
         """Upsert comments into a document the caller may edit."""
@@ -283,7 +441,10 @@ def build_router(container: "AppContainer") -> APIRouter:
             )
         try:
             stored = await service.save_comments(
-                document_id, comments=raw_comments, visible_to=visible_to
+                document_id,
+                comments=raw_comments,
+                visible_to=visible_to,
+                caller_user_id=_caller_user_id(principal),
             )
         except DocumentNotFound:
             return error_response(404, "Dokument nicht gefunden", "not_found")
@@ -320,7 +481,7 @@ def build_router(container: "AppContainer") -> APIRouter:
     ):
         """All of the caller's editor folders (newest first)."""
         folders = await service.list_folders(
-            caller_sub=_caller_sub(principal),
+            caller_user_id=_caller_user_id(principal),
             workspace_id=workspace_id_from_request(req),
         )
         return {
@@ -356,7 +517,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 title=str(body.get("title", "")),
                 created_at=float(created_at),
                 updated_at=float(updated_at),
-                caller_sub=_caller_sub(principal),
+                caller_user_id=_caller_user_id(principal),
                 workspace_id=workspace_id_from_request(req),
                 visible_to=visible_to,
             )

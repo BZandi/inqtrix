@@ -1,0 +1,35 @@
+{
+  "name": "@inqtrix/collaboration-server",
+  "private": true,
+  "version": "0.1.0",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "pretest": "node build.mjs",
+    "start": "node dist/main.cjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@handlewithcare/prosemirror-suggest-changes": "0.1.8",
+    "@hocuspocus/server": "4.3.0",
+    "@inqtrix/editor-schema": "0.1.0",
+    "@tiptap/core": "3.27.1",
+    "@tiptap/pm": "3.27.1",
+    "@tiptap/y-tiptap": "3.0.6",
+    "ws": "8.18.3",
+    "yjs": "13.6.31"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.4",
+    "@types/ws": "8.18.1",
+    "esbuild": "0.28.1",
+    "typescript": "6.0.3",
+    "vitest": "4.1.7"
+  },
+  "engines": {
+    "node": ">=22.12.0",
+    "pnpm": ">=11.1.1"
+  }
+}

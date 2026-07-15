@@ -219,6 +219,8 @@ def test_make_cors_kwargs_parses_comma_separated_origins():
     ]
     assert "POST" in kwargs["allow_methods"]
     assert "Authorization" in kwargs["allow_headers"]
+    assert "X-Inqtrix-Expected-User-Id" in kwargs["allow_headers"]
+    assert "X-Inqtrix-Workspace-Id" in kwargs["allow_headers"]
     assert kwargs["allow_credentials"] is True
 
 

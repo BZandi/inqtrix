@@ -13,7 +13,62 @@ from __future__ import annotations
 
 from alembic import op
 
-from inqtrix.storage.quota_orm import quota_metadata
+# Frozen schema snapshot from the deployed revision. Historical migrations
+# must never import the live ORM because later authority changes would alter
+# the schema produced by a fresh traversal.
+from sqlalchemy import (
+    BigInteger,
+    Column,
+    Float,
+    Index,
+    MetaData,
+    PrimaryKeyConstraint,
+    Table,
+    Text,
+    text,
+)
+
+quota_metadata = MetaData()
+
+quota_usage_counters = Table(
+    "quota_usage_counters",
+    quota_metadata,
+    Column(
+        "tenant_id", Text, nullable=False, server_default=text("'default'")
+    ),
+    Column("subject_sub", Text, nullable=False),
+    Column("dimension", Text, nullable=False),
+    Column("period_start", Float, nullable=False),
+    Column("used", BigInteger, nullable=False, server_default=text("0")),
+    Column("updated_at", Float, nullable=False),
+    PrimaryKeyConstraint(
+        "tenant_id",
+        "subject_sub",
+        "dimension",
+        "period_start",
+        name="pk_quota_usage_counters",
+    ),
+    Index("ix_quota_usage_subject", "tenant_id", "subject_sub"),
+)
+
+quota_limits = Table(
+    "quota_limits",
+    quota_metadata,
+    Column(
+        "tenant_id", Text, nullable=False, server_default=text("'default'")
+    ),
+    Column("subject_sub", Text, nullable=False),
+    Column("dimension", Text, nullable=False),
+    Column("limit_value", BigInteger, nullable=False),
+    Column("set_by_sub", Text, nullable=False),
+    Column("set_at", Float, nullable=False),
+    PrimaryKeyConstraint(
+        "tenant_id",
+        "subject_sub",
+        "dimension",
+        name="pk_quota_limits",
+    ),
+)
 
 revision = "0007_quota"
 down_revision = "0006_prompt_templates"

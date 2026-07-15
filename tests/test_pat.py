@@ -9,6 +9,8 @@ and the disable-cascade helper.
 from __future__ import annotations
 
 import time
+import uuid
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -26,6 +28,25 @@ from inqtrix.auth.pat import (
 )
 
 PEPPER = "test-pepper"
+USER_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
+OTHER_USER_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
+
+
+class ActiveUserLookup:
+    async def find_by_user_id(self, *, tenant_id, user_id):
+        if tenant_id == "default" and user_id == USER_ID:
+            return SimpleNamespace(disabled_at=None)
+        return None
+
+
+def make_verifier(
+    store: MemoryPatStore, *, pepper: str = PEPPER
+) -> PatVerifier:
+    return PatVerifier(
+        store=store,
+        pepper=pepper,
+        user_lookup=ActiveUserLookup(),
+    )
 
 
 def make_service(store: MemoryPatStore | None = None, **kwargs) -> PatService:
@@ -37,8 +58,7 @@ async def mint(
 ):
     return await service.create_token(
         tenant_id="default",
-        owner_issuer="http://idp.example",
-        owner_sub="user-1",
+        owner_user_id=USER_ID,
         name=name,
         expires_in_days=expires_in_days,
     )
@@ -67,7 +87,7 @@ class TestVerifyMatrix:
     def setup(self):
         store = MemoryPatStore()
         service = make_service(store)
-        verifier = PatVerifier(store=store, pepper=PEPPER)
+        verifier = make_verifier(store)
         return store, service, verifier
 
     async def assert_uniform_401(self, verifier, value):
@@ -86,7 +106,7 @@ class TestVerifyMatrix:
         minted = await mint(service)
         principal = await verifier.verify(minted.plaintext)
         assert principal.kind == "pat"
-        assert principal.sub == "user-1"
+        assert principal.user_id == USER_ID
         assert principal.pat_id == minted.record.token_id
         assert principal.tenant_id == "default"
 
@@ -115,8 +135,7 @@ class TestVerifyMatrix:
         assert await service.revoke_token(
             tenant_id="default",
             token_id=minted.record.token_id,
-            owner_issuer="http://idp.example",
-            owner_sub="user-1",
+            owner_user_id=USER_ID,
         )
         await self.assert_uniform_401(verifier, minted.plaintext)
 
@@ -133,12 +152,16 @@ class TestVerifyMatrix:
     async def test_pepper_mismatch_is_uniform_401(self, setup):
         store, service, _verifier = setup
         minted = await mint(service)
-        other = PatVerifier(store=store, pepper="other-pepper")
+        other = make_verifier(store, pepper="other-pepper")
         await self.assert_uniform_401(other, minted.plaintext)
 
     def test_empty_pepper_is_a_wiring_error(self):
         with pytest.raises(ValueError, match="Pepper"):
-            PatVerifier(store=MemoryPatStore(), pepper="  ")
+            PatVerifier(
+                store=MemoryPatStore(),
+                pepper="  ",
+                user_lookup=ActiveUserLookup(),
+            )
 
 
 class TestLastUsedThrottle:
@@ -148,7 +171,7 @@ class TestLastUsedThrottle:
     ):
         store = MemoryPatStore()
         service = make_service(store)
-        verifier = PatVerifier(store=store, pepper=PEPPER)
+        verifier = make_verifier(store)
         minted = await mint(service)
         base = minted.record.created_at
         monkeypatch.setattr(time, "time", lambda: base + 10)
@@ -182,8 +205,7 @@ class TestManagement:
         await service.revoke_token(
             tenant_id="default",
             token_id=minted.record.token_id,
-            owner_issuer="http://idp.example",
-            owner_sub="user-1",
+            owner_user_id=USER_ID,
         )
         await mint(service, name="replacement")
 
@@ -195,15 +217,13 @@ class TestManagement:
         assert not await store.revoke(
             tenant_id="default",
             token_id=minted.record.token_id,
-            owner_issuer="http://idp.example",
-            owner_sub="user-2",
+            owner_user_id=OTHER_USER_ID,
             now=time.time(),
         )
         assert not await store.revoke(
-            tenant_id="default",
+            tenant_id="other",
             token_id=minted.record.token_id,
-            owner_issuer="http://other-idp.example",
-            owner_sub="user-1",
+            owner_user_id=USER_ID,
             now=time.time(),
         )
 
@@ -215,8 +235,7 @@ class TestManagement:
         kwargs = dict(
             tenant_id="default",
             token_id=minted.record.token_id,
-            owner_issuer="http://idp.example",
-            owner_sub="user-1",
+            owner_user_id=USER_ID,
         )
         assert await service.revoke_token(**kwargs) is True
         assert await service.revoke_token(**kwargs) is False
@@ -247,15 +266,13 @@ class TestManagement:
         await mint(service, name="b")
         revoked = await store.revoke_all_for_owner(
             tenant_id="default",
-            owner_issuer="http://idp.example",
-            owner_sub="user-1",
+            owner_user_id=USER_ID,
             now=time.time(),
         )
         assert revoked == 2
         assert await service.list_tokens(
             tenant_id="default",
-            owner_issuer="http://idp.example",
-            owner_sub="user-1",
+            owner_user_id=USER_ID,
         ) == ()
 
     @pytest.mark.asyncio
@@ -265,8 +282,7 @@ class TestManagement:
         minted = await mint(service)
         listed = await service.list_tokens(
             tenant_id="default",
-            owner_issuer="http://idp.example",
-            owner_sub="user-1",
+            owner_user_id=USER_ID,
         )
         assert minted.plaintext not in repr(listed)
         # The stored hash never equals the secret half of the token.

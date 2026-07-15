@@ -24,7 +24,6 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
-from inqtrix.auth.principal import ANONYMOUS_PRINCIPAL, STATIC_PRINCIPAL
 from inqtrix.core.results import AgentResult, RunRequest
 from inqtrix.i18n import detect_ui_language_confident
 from inqtrix.knowledge.contextualize import contextualize_followup_question
@@ -492,14 +491,12 @@ class KnowledgeAlgorithm:
         # retrieval would then range over every tenant collection. Surface
         # it LOUDLY (No Silent Fallbacks) instead of silently answering
         # from foreign documents — behaviour is unchanged, the marker just
-        # makes a future re-opening impossible to miss. The sentinel
-        # principals of the none/apikey modes are excluded (same rule as
-        # the worker's created_by_sub check): there the unbounded scope IS
-        # the deliberate see-everything contract, not a bypass.
+        # makes a future re-opening impossible to miss. The none/apikey modes
+        # carry ``user_id=None``: there the unbounded scope IS the deliberate
+        # see-everything contract, not a bypass.
         if (
             context.principal is not None
-            and context.principal.sub
-            not in (ANONYMOUS_PRINCIPAL.sub, STATIC_PRINCIPAL.sub)
+            and context.principal.user_id is not None
             and collection_ids is None
         ):
             log.warning(
@@ -545,6 +542,27 @@ class KnowledgeAlgorithm:
                 llm, context, query_question, emit, decompose_usage
             )
 
+        def _on_rerank_retry(notice: dict[str, Any]) -> None:
+            # Rerank retries stay visible on the run's event surface (no
+            # silent fallbacks); the notice dict is the shared
+            # _RetryNoticeMixin shape. Fires on the rerank worker thread
+            # while this run-worker thread is parked in run_coro_sync, so
+            # the emit is temporally exclusive per run.
+            emit(
+                "inqtrix.knowledge.rerank.retry",
+                {
+                    "provider": str(notice.get("provider", "")),
+                    "model": str(notice.get("model", "")),
+                    "attempt": int(notice.get("attempt", 0) or 0),
+                    "max_attempts": int(notice.get("max_attempts", 0) or 0),
+                    "delay_seconds": float(
+                        notice.get("delay_seconds", 0.0) or 0.0
+                    ),
+                    "error_code": str(notice.get("error_code", "")),
+                    "status_code": notice.get("status_code"),
+                },
+            )
+
         def _retrieve(query: str, k: int = top_k) -> list[RetrievalCandidate]:
             # The research graph is synchronous (a node on a run-worker
             # thread); the knowledge store is async. Bridge per call.
@@ -556,6 +574,7 @@ class KnowledgeAlgorithm:
                     top_k=k,
                     use_reranker=plan.rerank,
                     rerank_candidate_depth=plan.rerank_candidate_depth,
+                    on_provider_retry=_on_rerank_retry,
                 )
             )
 

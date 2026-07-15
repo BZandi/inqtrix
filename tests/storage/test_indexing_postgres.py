@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+import uuid
 
 import pytest
 import pytest_asyncio
@@ -36,6 +37,21 @@ pytestmark = pytest.mark.skipif(
 )
 
 APP_ROLE = "inqtrix_app"
+USER_A = uuid.UUID("11111111-1111-4111-8111-111111111111")
+USER_B = uuid.UUID("22222222-2222-4222-8222-222222222222")
+COLLECTION_IDS = {
+    "col-1",
+    "col-2",
+    "col-3",
+    "col-a",
+    "col-b",
+    "col-c",
+    "col-doc",
+    "col-h",
+    "col-owned",
+    "col-x",
+}
+OWNED_COLLECTION_ID = "col-owned"
 
 SUMMARY_KEYS = {
     "job_id",
@@ -93,6 +109,88 @@ async def store(engine):
                 )
             await session.execute(text("DELETE FROM indexing_job_events"))
             await session.execute(text("DELETE FROM indexing_jobs"))
+            for collection_id in COLLECTION_IDS:
+                await session.execute(
+                    text(
+                        "DELETE FROM user_events WHERE "
+                        "resource_type = 'knowledge_collection' "
+                        "AND resource_id = :resource_id"
+                    ),
+                    {"resource_id": collection_id},
+                )
+                await session.execute(
+                    text(
+                        "DELETE FROM audit_log WHERE "
+                        "resource_type = 'knowledge_collection' "
+                        "AND resource_id = :resource_id"
+                    ),
+                    {"resource_id": collection_id},
+                )
+                await session.execute(
+                    text(
+                        "DELETE FROM resource_shares WHERE "
+                        "resource_type = 'knowledge_collection' "
+                        "AND resource_id = :resource_id"
+                    ),
+                    {"resource_id": collection_id},
+                )
+            for user_id, subject in (
+                (USER_A, "indexing-owner"),
+                (USER_B, "indexing-recipient"),
+            ):
+                await session.execute(
+                    text(
+                        "INSERT INTO users "
+                        "(id, tenant_id, issuer, subject, email, "
+                        "email_verified) VALUES "
+                        "(:id, 'default', 'pytest-indexing', :subject, "
+                        ":email, true) ON CONFLICT (id) DO UPDATE SET "
+                        "disabled_at = NULL"
+                    ),
+                    {
+                        "id": user_id,
+                        "subject": subject,
+                        "email": f"{subject}@example.test",
+                    },
+                )
+            for collection_id in COLLECTION_IDS:
+                owner_user_id = (
+                    USER_A if collection_id == OWNED_COLLECTION_ID else None
+                )
+                await session.execute(
+                    text(
+                        "INSERT INTO knowledge_collections "
+                        "(id, tenant_id, name, embedding_model, embedding_dim, "
+                        "created_by_user_id, created_at) VALUES "
+                        "(:id, 'default', :name, 'text-embedding-3-large', 8, "
+                        ":owner_user_id, :created_at) ON CONFLICT (id) "
+                        "DO UPDATE SET created_by_user_id = "
+                        "EXCLUDED.created_by_user_id"
+                    ),
+                    {
+                        "id": collection_id,
+                        "name": f"Fixture {collection_id}",
+                        "owner_user_id": owner_user_id,
+                        "created_at": time.time(),
+                    },
+                )
+            await session.execute(
+                text(
+                    "INSERT INTO resource_shares "
+                    "(id, tenant_id, recipient_user_id, resource_type, "
+                    "resource_id, permission, granted_by_user_id, "
+                    "accepted_at) VALUES "
+                    "(:id, 'default', :recipient_user_id, "
+                    "'knowledge_collection', :resource_id, 'edit', "
+                    ":owner_user_id, now())"
+                ),
+                {
+                    "id": uuid.UUID("33333333-3333-4333-8333-333333333333"),
+                    "recipient_user_id": USER_B,
+                    "resource_id": OWNED_COLLECTION_ID,
+                    "owner_user_id": USER_A,
+                },
+            )
     store = PostgresIndexingJobStore(
         engine=build_engine(TEST_DATABASE_URL),
         app_role=APP_ROLE,
@@ -131,6 +229,86 @@ def submit_reembed(store, *, collection_id="col-a", work=None, **kwargs):
         work=work or _default_work,
         **kwargs,
     )
+
+
+def effect_cursor(store: PostgresIndexingJobStore) -> int:
+    """Return the last user-invalidation id visible to the store tenant."""
+
+    async def _read() -> int:
+        async with store._session("default") as session:
+            value = await session.scalar(
+                text("SELECT COALESCE(MAX(id), 0) FROM user_events")
+            )
+            return int(value or 0)
+
+    return store._call(_read())
+
+
+def maintenance_effects(
+    store: PostgresIndexingJobStore,
+    *,
+    action: str,
+    resource_id: str,
+    after_event_id: int,
+) -> tuple[int, set[uuid.UUID]]:
+    """Read one maintenance audit count and its new invalidation targets."""
+
+    async def _read() -> tuple[int, set[uuid.UUID]]:
+        async with store._session("default") as session:
+            audit_count = await session.scalar(
+                text(
+                    "SELECT count(*) FROM audit_log WHERE action = :action "
+                    "AND resource_type = 'knowledge_collection' "
+                    "AND resource_id = :resource_id"
+                ),
+                {"action": action, "resource_id": resource_id},
+            )
+            targets = (
+                await session.execute(
+                    text(
+                        "SELECT target_user_id FROM user_events "
+                        "WHERE id > :after_event_id "
+                        "AND scope = 'indexing' "
+                        "AND resource_type = 'knowledge_collection' "
+                        "AND resource_id = :resource_id"
+                    ),
+                    {
+                        "after_event_id": after_event_id,
+                        "resource_id": resource_id,
+                    },
+                )
+            ).scalars()
+            return int(audit_count or 0), set(targets)
+
+    return store._call(_read())
+
+
+def age_job(
+    store: PostgresIndexingJobStore,
+    job_id: str,
+    *,
+    created_at: float | None = None,
+    finished_at: float | None = None,
+) -> None:
+    """Backdate selected lifecycle timestamps for retention tests."""
+
+    async def _update() -> None:
+        values: dict[str, float] = {}
+        if created_at is not None:
+            values["created_at"] = created_at
+        if finished_at is not None:
+            values["finished_at"] = finished_at
+        assignments = ", ".join(f"{column} = :{column}" for column in values)
+        async with store._session("default") as session:
+            await session.execute(
+                text(
+                    f"UPDATE indexing_jobs SET {assignments} "
+                    "WHERE job_id = :job_id"
+                ),
+                {"job_id": job_id, **values},
+            )
+
+    store._call(_update())
 
 
 def test_submit_executes_and_keeps_the_wire_shape(store):
@@ -210,13 +388,120 @@ def test_per_collection_history_cap_evicts_oldest(store):
     survive the lazy cleanup."""
     ids = []
     for _ in range(3):
-        summary = submit_reembed(store, collection_id="col-h")
+        summary = submit_reembed(
+            store,
+            collection_id=OWNED_COLLECTION_ID,
+            created_by_user_id=USER_A,
+            created_by_tenant_id="default",
+        )
         wait_for_status(store, summary["job_id"], {"completed"})
         ids.append(summary["job_id"])
 
-    surviving = {row["job_id"] for row in store.list(collection_id="col-h")}
+    cursor = effect_cursor(store)
+    surviving = {
+        row["job_id"]
+        for row in store.list(collection_id=OWNED_COLLECTION_ID)
+    }
     assert ids[0] not in surviving
     assert {ids[1], ids[2]} <= surviving
+    audit_count, targets = maintenance_effects(
+        store,
+        action="indexing.history_evicted",
+        resource_id=OWNED_COLLECTION_ID,
+        after_event_id=cursor,
+    )
+    assert audit_count == 1
+    assert targets == {USER_A, USER_B}
+
+
+def test_terminal_ttl_deletion_is_audited_and_invalidates_shared_views(
+    store,
+) -> None:
+    summary = submit_reembed(
+        store,
+        collection_id=OWNED_COLLECTION_ID,
+        created_by_user_id=USER_A,
+        created_by_tenant_id="default",
+    )
+    wait_for_status(store, summary["job_id"], {"completed"})
+    age_job(
+        store,
+        summary["job_id"],
+        finished_at=time.time() - 301,
+    )
+    cursor = effect_cursor(store)
+
+    assert store.list(collection_id=OWNED_COLLECTION_ID) == []
+    with pytest.raises(IndexingJobNotFound):
+        store.get(summary["job_id"])
+    audit_count, targets = maintenance_effects(
+        store,
+        action="indexing.retention_deleted",
+        resource_id=OWNED_COLLECTION_ID,
+        after_event_id=cursor,
+    )
+    assert audit_count == 1
+    assert targets == {USER_A, USER_B}
+
+
+def test_stuck_active_job_is_failed_not_deleted_and_requests_local_stop(
+    store,
+) -> None:
+    release = threading.Event()
+    cancel_observed = threading.Event()
+
+    def slow(handle):
+        handle.begin(1)
+        while not handle.cancelled and not release.wait(0.01):
+            pass
+        if handle.cancelled:
+            cancel_observed.set()
+            handle.cancel("lifecycle_timeout")
+        else:
+            handle.complete()
+
+    summary = submit_reembed(
+        store,
+        collection_id=OWNED_COLLECTION_ID,
+        work=slow,
+        created_by_user_id=USER_A,
+        created_by_tenant_id="default",
+    )
+    try:
+        wait_for_status(store, summary["job_id"], {"running"})
+        age_job(
+            store,
+            summary["job_id"],
+            created_at=time.time() - (8 * 86_400),
+        )
+        cursor = effect_cursor(store)
+
+        rows = store.list(collection_id=OWNED_COLLECTION_ID)
+        failed = next(row for row in rows if row["job_id"] == summary["job_id"])
+        assert failed["status"] == "failed"
+        assert failed["error"]["type"] == "stuck_job_timeout"
+        assert store.has_active_job(OWNED_COLLECTION_ID) is False
+        assert cancel_observed.wait(2)
+
+        subscription = store.subscribe(summary["job_id"])
+        try:
+            assert subscription.replay[-1]["type"] == "inqtrix.index.failed"
+            assert (
+                subscription.replay[-1]["data"]["error"]["type"]
+                == "stuck_job_timeout"
+            )
+        finally:
+            subscription.close()
+        audit_count, targets = maintenance_effects(
+            store,
+            action="indexing.stuck_timeout",
+            resource_id=OWNED_COLLECTION_ID,
+            after_event_id=cursor,
+        )
+        assert audit_count == 1
+        assert targets == {USER_A, USER_B}
+    finally:
+        release.set()
 
 
 def test_cancel_of_queued_job_is_immediate(store):
@@ -248,18 +533,44 @@ def test_cancel_of_queued_job_is_immediate(store):
         wait_for_status(store, second["job_id"], {"completed"})
 
 
+def test_cancel_running_keeps_collection_reserved_until_worker_exits(store):
+    release = threading.Event()
+
+    def slow(handle):
+        handle.begin(1)
+        release.wait(10)
+        handle.complete()
+
+    first = submit_reembed(store, collection_id="col-x", work=slow)
+    try:
+        wait_for_status(store, first["job_id"], {"running"})
+        cancelling = store.cancel(first["job_id"])
+        assert cancelling["status"] == "cancelling"
+        assert store.has_active_job("col-x") is True
+        with pytest.raises(IndexingJobConflict):
+            submit_reembed(store, collection_id="col-x")
+    finally:
+        release.set()
+
+    wait_for_status(store, first["job_id"], {"cancelled"})
+    assert store.has_active_job("col-x") is False
+    second = submit_reembed(store, collection_id="col-x")
+    wait_for_status(store, second["job_id"], {"completed"})
+
+
 def test_scoped_visibility_denies_with_404_semantics(store):
     summary = submit_reembed(
-        store, created_by_sub="user-a", created_by_tenant_id="default"
+        store,
+        created_by_user_id=str(USER_A),
+        created_by_tenant_id="default",
     )
     wait_for_status(store, summary["job_id"], {"completed"})
 
     foreign = UserContext(
         principal=Principal(
-            sub="user-b", kind="oidc_session", tenant_id="default"
+            user_id=USER_B, kind="oidc_session", tenant_id="default"
         ),
         workspace_ids=(),
-        groups=(),
     )
     with pytest.raises(IndexingJobNotFound):
         store.get(summary["job_id"], visible_to=foreign)
@@ -267,10 +578,9 @@ def test_scoped_visibility_denies_with_404_semantics(store):
 
     owner = UserContext(
         principal=Principal(
-            sub="user-a", kind="oidc_session", tenant_id="default"
+            user_id=USER_A, kind="oidc_session", tenant_id="default"
         ),
         workspace_ids=(),
-        groups=(),
     )
     assert store.get(summary["job_id"], visible_to=owner)["status"] == (
         "completed"
@@ -394,10 +704,17 @@ def test_orphan_sweep_fails_stale_rows_on_first_touch(store):
         handle.complete()
 
     try:
-        running = submit_reembed(store, collection_id="col-a", work=slow)
+        running = submit_reembed(
+            store,
+            collection_id=OWNED_COLLECTION_ID,
+            work=slow,
+            created_by_user_id=USER_A,
+            created_by_tenant_id="default",
+        )
         second = submit_reembed(store, collection_id="col-b", work=slow)
         third = submit_reembed(store, collection_id="col-c", work=slow)
         assert store.get(third["job_id"])["status"] == "queued"
+        cursor = effect_cursor(store)
 
         restarted = PostgresIndexingJobStore(
             engine=build_engine(TEST_DATABASE_URL),
@@ -415,6 +732,14 @@ def test_orphan_sweep_fails_stale_rows_on_first_touch(store):
             assert swept["error"]["type"] == "server_restarted"
             assert restarted.get(running["job_id"])["status"] == "failed"
             assert restarted.get(second["job_id"])["status"] == "failed"
+            audit_count, targets = maintenance_effects(
+                restarted,
+                action="indexing.server_restarted",
+                resource_id=OWNED_COLLECTION_ID,
+                after_event_id=cursor,
+            )
+            assert audit_count == 1
+            assert targets == {USER_A, USER_B}
         finally:
             restarted.close()
     finally:

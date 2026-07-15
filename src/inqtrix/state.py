@@ -225,12 +225,14 @@ def initial_state(
 
 
 def check_cancel_event(state: dict[str, Any]) -> None:
-    """Abort the run at a node boundary for either stop reason.
+    """Abort the run at a graph checkpoint for either stop reason.
 
-    Called by every LangGraph node at its entry point, so this is the
-    one place that decides whether the loop continues. Two reasons,
-    both best-effort (in-flight provider HTTP calls are not
-    interrupted):
+    Called by every LangGraph node at its entry point and at additional
+    intra-node checkpoints (between fan-outs, per answer section).
+    Provider-level cancellation (retry attempts, backoff sleeps) runs
+    through :func:`inqtrix.providers.base.provider_cancel_scope` on the
+    same event. Two reasons, both best-effort (an in-flight provider
+    HTTP attempt is not interrupted mid-request):
 
     * the per-run cancel event was set (client disconnect / native run
       cancellation), or

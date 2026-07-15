@@ -42,7 +42,6 @@ import { ConversationSkeleton } from '@/components/ui/conversation-skeleton'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { WelcomeState } from '@/components/ui/welcome-state'
-import { useMarkdownCodePreload } from '@/components/markdown/useMarkdownCodePreload'
 import { useLocale } from '@/i18n/LocaleProvider'
 import {
   decideConversationAppend,
@@ -265,15 +264,6 @@ export function KnowledgeWorkspace({
     ].join('\u0001')).join('\u0000'),
     [items],
   )
-  const knowledgeAnswerMarkdownsForHighlight = useMemo(
-    () => items.flatMap((item) => {
-      const markdown = item.answer?.answerMarkdown?.trim()
-      return markdown ? [markdown] : []
-    }),
-    [items],
-  )
-  useMarkdownCodePreload(knowledgeAnswerMarkdownsForHighlight)
-
   const knowledgeScroll = useScrollRestoration({
     contentReady: knowledgeContentReady,
     getViewport: () =>

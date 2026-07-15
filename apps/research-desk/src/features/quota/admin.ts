@@ -18,7 +18,7 @@ export type QuotaAdminCell = {
 }
 
 export type QuotaAdminSubject = {
-  sub: string
+  user_id: string
   display_name?: string | null
   email?: string | null
   dimensions: Record<string, QuotaAdminCell>
@@ -53,7 +53,7 @@ export function quotaAdminAvailable(
 }
 
 /** Sentinel the admin API uses for the tenant-wide "for all" default. */
-export const QUOTA_DEFAULT_SUBJECT = '__quota_default__'
+export const QUOTA_DEFAULT_USER_ID = 'default'
 
 /** Bytes per GiB — the storage fields edit in GB, the API stores bytes. */
 export const GIB = 1024 ** 3
@@ -148,12 +148,12 @@ export function storageDraftAction(
   return value === currentBytes ? { kind: 'noop' } : { kind: 'commit', value }
 }
 
-/** The label a row sorts/searches by — display name, else email, else sub. */
+/** The label a row sorts/searches by — display name, else email, else user id. */
 function subjectLabel(subject: QuotaAdminSubject): string {
-  return (subject.display_name || subject.email || subject.sub).toLowerCase()
+  return (subject.display_name || subject.email || subject.user_id).toLowerCase()
 }
 
-/** Case-insensitive substring filter over name, email and sub. */
+/** Case-insensitive substring filter over name, email and canonical user id. */
 export function filterAdminSubjects(
   subjects: ReadonlyArray<QuotaAdminSubject>,
   query: string,
@@ -164,7 +164,7 @@ export function filterAdminSubjects(
     (subject) =>
       subjectLabel(subject).includes(needle) ||
       (subject.email ?? '').toLowerCase().includes(needle) ||
-      subject.sub.toLowerCase().includes(needle),
+      subject.user_id.toLowerCase().includes(needle),
   )
 }
 
@@ -232,7 +232,7 @@ export function seedQuotaAdminSnapshot(nowSeconds: number): QuotaAdminSnapshot {
         },
         display_name: 'Olga Owner',
         email: 'olga@example.com',
-        sub: 'user-olga',
+        user_id: '00000000-0000-4000-8000-000000000001',
       },
       {
         // Custom run/storage limit, runs in the warning band.
@@ -244,7 +244,7 @@ export function seedQuotaAdminSnapshot(nowSeconds: number): QuotaAdminSnapshot {
         },
         display_name: 'Rita Recipient',
         email: 'rita@example.com',
-        sub: 'user-rita',
+        user_id: '00000000-0000-4000-8000-000000000002',
       },
       {
         // Runs exhausted.
@@ -256,7 +256,7 @@ export function seedQuotaAdminSnapshot(nowSeconds: number): QuotaAdminSnapshot {
         },
         display_name: 'Stefan Schulz',
         email: 'stefan@example.com',
-        sub: 'user-stefan',
+        user_id: '00000000-0000-4000-8000-000000000003',
       },
     ],
     tenant_default: {

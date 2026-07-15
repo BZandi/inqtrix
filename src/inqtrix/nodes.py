@@ -15,8 +15,9 @@ import json
 import logging
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, ContextManager, NamedTuple
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator, NamedTuple, Sequence, TypeVar
 
 from openai import OpenAIError
 
@@ -37,6 +38,7 @@ from inqtrix.evidence import (
 )
 from inqtrix.search_result import GroundedSearchResult
 from inqtrix.exceptions import (
+    AgentCancelled,
     AgentModelCapacityError,
     AgentRateLimited,
     AgentTimeout,
@@ -1175,15 +1177,27 @@ def _provider_retry_reason(notice: dict[str, Any]) -> str:
     return "transient_error"
 
 
+@contextmanager
 def _provider_retry_progress_context(
     provider: object,
     s: dict[str, Any],
     *,
     operation_label: str,
     testing_mode: bool = False,
-) -> ContextManager[object]:
-    """Bind provider retry attempts to live progress events for one call."""
-    from inqtrix.providers.base import observe_provider_retries
+) -> Iterator[object]:
+    """Bind retry progress and run cancellation to one provider call.
+
+    Two thread-local scopes are entered together: retry attempts become
+    live warning progress events, and the run's ``_cancel_event`` (when
+    present) becomes a provider-level cancel probe so in-flight retry
+    ladders and backoff sleeps stop promptly after a cancel request.
+    Entering here — inside fan-out worker functions — puts both bindings
+    on the thread that actually performs the provider call.
+    """
+    from inqtrix.providers.base import (
+        observe_provider_retries,
+        provider_cancel_scope,
+    )
 
     def _on_retry(notice: dict[str, Any]) -> None:
         provider_label = str(notice.get("provider") or type(provider).__name__)
@@ -1233,7 +1247,141 @@ def _provider_retry_progress_context(
             testing_mode=testing_mode,
         )
 
-    return observe_provider_retries(provider, _on_retry)
+    cancel_event = s.get("_cancel_event")
+    probe = cancel_event.is_set if cancel_event is not None else None
+    with provider_cancel_scope(probe):
+        with observe_provider_retries(provider, _on_retry) as bound:
+            yield bound
+
+
+_FanoutItem = TypeVar("_FanoutItem")
+_FanoutResult = TypeVar("_FanoutResult")
+
+# How often the fan-out coordinator re-checks the run's cancel event while
+# waiting for worker futures. Internal wake-up granularity, not a setting.
+_FANOUT_CANCEL_POLL_SECONDS: float = 0.5
+
+
+def _map_cancellable(
+    s: dict[str, Any],
+    fn: Callable[[_FanoutItem], _FanoutResult],
+    items: Sequence[_FanoutItem],
+    *,
+    max_workers: int,
+    operation_label: str,
+    testing_mode: bool = False,
+) -> list[_FanoutResult]:
+    """Run *fn* over *items* on a thread pool, honouring run cancellation.
+
+    Without a ``_cancel_event`` in *s* this is exactly
+    ``list(ThreadPoolExecutor.map(fn, items))`` (library mode stays
+    byte-identical). With one, the coordinator re-checks the event every
+    ``_FANOUT_CANCEL_POLL_SECONDS`` instead of blocking until every item
+    returns: queued items are cancelled, the abandonment is made visible
+    on all three channels (log, warning progress event, iteration-log
+    marker ``cancel_abandoned_work``), the still-running calls are awaited
+    (they stop early through the provider cancel probe bound inside the
+    worker) and :class:`AgentCancelled` is raised.
+
+    Args:
+        s: Agent state; read for ``_cancel_event`` and used for progress
+            and iteration-log emission.
+        fn: Per-item worker executed on the pool threads.
+        items: Materialized work list; results keep this order.
+        max_workers: Thread-pool width (callers keep their existing
+            provider-derived sizing).
+        operation_label: Localized operation name for the progress text.
+        testing_mode: Forwarded to :func:`append_iteration_log`.
+
+    Returns:
+        Results in submission order.
+
+    Raises:
+        AgentCancelled: When the run's cancel event is observed. Worker
+            exceptions re-raise like ``ex.map``: the lowest-submission-index
+            failure propagates, and queued (not yet started) items are
+            cancelled instead of still being executed against a provider
+            that already failed fatally.
+    """
+    cancel_event = s.get("_cancel_event")
+    if cancel_event is None:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            return list(ex.map(fn, items))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures: list[Future[_FanoutResult]] = [
+            ex.submit(fn, item) for item in items
+        ]
+        pending: set[Future[_FanoutResult]] = set(futures)
+        failed = False
+        while pending and not failed:
+            if cancel_event.is_set():
+                abandoned = sum(1 for future in pending if future.cancel())
+                in_flight = [
+                    future for future in pending if not future.cancelled()
+                ]
+                node = str(s.get("_current_node") or "")
+                log.warning(
+                    "Cancel requested during %s fan-out (node=%s): "
+                    "abandoned %d of %d calls, waiting for %d in-flight.",
+                    operation_label,
+                    node,
+                    abandoned,
+                    len(items),
+                    len(in_flight),
+                )
+                emit_progress(
+                    s,
+                    t(
+                        s,
+                        "cancel_fanout_abandoned",
+                        abandoned=abandoned,
+                        total=len(items),
+                        operation=operation_label,
+                        in_flight=len(in_flight),
+                    ),
+                    severity="warning",
+                )
+                append_iteration_log(
+                    s,
+                    {
+                        "event": "cancel_abandoned_work",
+                        "node": node,
+                        "operation": operation_label,
+                        "abandoned": abandoned,
+                        "in_flight": len(in_flight),
+                        "total": len(items),
+                    },
+                    testing_mode=testing_mode,
+                )
+                # In-flight calls stop at the next provider cancel probe;
+                # waiting for them keeps the pool free of orphan threads
+                # that would emit into an already-terminal run.
+                wait(in_flight)
+                raise AgentCancelled(
+                    "Lauf waehrend paralleler Provider-Aufrufe abgebrochen."
+                )
+            done, pending = wait(
+                pending,
+                timeout=_FANOUT_CANCEL_POLL_SECONDS,
+                return_when=FIRST_COMPLETED,
+            )
+            failed = any(
+                not future.cancelled() and future.exception() is not None
+                for future in done
+            )
+        if failed:
+            # ex.map parity: a fatal worker failure abandons the queued
+            # remainder instead of still executing it (each queued item
+            # would serve its own retry ladder against a provider that
+            # already failed), then the lowest-index failure propagates.
+            for future in pending:
+                future.cancel()
+            wait([future for future in pending if not future.cancelled()])
+        for future in futures:
+            if not future.cancelled():
+                future.result()
+        return [future.result() for future in futures]
 
 
 def _repair_answer_markdown_tail(answer: str) -> str:
@@ -1396,6 +1544,7 @@ def _compose_answer_sections(
     rendered_by_display_index: dict[int, str] = {}
 
     for index, section_spec in write_plan:
+        check_cancel_event(s)
         sections_attempted += 1
         emit_progress(
             s,
@@ -3159,18 +3308,20 @@ def search(
         provider_cap or len(new_q),
     )
 
-    with ThreadPoolExecutor(max_workers=_n_workers) as ex:
-        _outcomes = list(
-            ex.map(
-                _search_one,
-                (
-                    (query_index, q, domain_filter)
-                    for query_index, (q, domain_filter) in enumerate(
-                        zip(new_q, _query_domain_filters, strict=True)
-                    )
-                ),
+    _outcomes = _map_cancellable(
+        s,
+        _search_one,
+        [
+            (query_index, q, domain_filter)
+            for query_index, (q, domain_filter) in enumerate(
+                zip(new_q, _query_domain_filters, strict=True)
             )
-        )
+        ],
+        max_workers=_n_workers,
+        operation_label=t(s, "retry_operation_search"),
+        testing_mode=settings.testing_mode,
+    )
+    check_cancel_event(s)
     results = [outcome.result for outcome in _outcomes]
     notices = [outcome.notice for outcome in _outcomes]
 
@@ -3411,18 +3562,21 @@ def search(
         # limiter (one fan-out at a time, sequential with the already-
         # finished search pool), so no separate semaphore is needed.
         _llm_workers = _claim_fanout_width(len(_claim_inputs), providers.llm)
-        with ThreadPoolExecutor(max_workers=_llm_workers) as ex:
-            for idx, result_tuple, warning, metadata, retry_notices in ex.map(
-                _do_claim_extract,
-                _claim_inputs,
-            ):
-                _claim_results[idx] = result_tuple
-                _claim_retry_notices.extend(retry_notices)
-                if metadata:
-                    _claim_metadata[idx] = metadata
-                if warning:
-                    _claim_fallbacks += 1
-                    _claim_warnings[idx] = warning
+        for idx, result_tuple, warning, metadata, retry_notices in _map_cancellable(
+            s,
+            _do_claim_extract,
+            _claim_inputs,
+            max_workers=_llm_workers,
+            operation_label=t(s, "retry_operation_claim_extraction"),
+            testing_mode=settings.testing_mode,
+        ):
+            _claim_results[idx] = result_tuple
+            _claim_retry_notices.extend(retry_notices)
+            if metadata:
+                _claim_metadata[idx] = metadata
+            if warning:
+                _claim_fallbacks += 1
+                _claim_warnings[idx] = warning
     s["_claim_extraction_attempts_total"] = (
         int(s.get("_claim_extraction_attempts_total", 0) or 0)
         + len(_claim_inputs)

@@ -16,7 +16,8 @@ spec:
       labels:
         {{- include "inqtrix.labels" (dict "root" . "component" "web") | nindent 8 }}
     spec:
-      serviceAccountName: {{ include "inqtrix.serviceAccountName" . }}
+      serviceAccountName: {{ include "inqtrix.internalServiceAccountName" (dict "root" . "component" "web") }}
+      automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -31,10 +32,14 @@ spec:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           env:
             # The nginx config template resolves this to the API Service DNS at
-            # container start (envsubst). Single origin: nginx proxies /api, /v1
-            # and /health to the API.
+            # container start (envsubst). Single origin: nginx proxies /api,
+            # /v1, /health, and /collaboration to the API.
             - name: INQTRIX_API_UPSTREAM
               value: "{{ include "inqtrix.fullname" . }}-api:{{ .Values.service.apiPort }}"
+            # nginx overwrites client forwarding headers with the protocol
+            # owned by the chart's public TLS boundary.
+            - name: INQTRIX_EXTERNAL_SCHEME
+              value: {{ if or (and (not .Values.openshift.enabled) .Values.ingress.enabled .Values.ingress.tls.enabled) (and .Values.openshift.enabled .Values.route.enabled .Values.route.tls.enabled) }}"https"{{ else }}"http"{{ end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.webPort }}

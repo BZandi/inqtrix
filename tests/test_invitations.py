@@ -10,6 +10,7 @@ users are denied in every mode.
 from __future__ import annotations
 
 import time
+import uuid
 
 import pytest
 
@@ -24,6 +25,7 @@ from inqtrix.auth.invitations import (
 from inqtrix.auth.permissions import WorkspaceRole
 
 ISSUER = "http://idp.example"
+OWNER_ID = uuid.uuid5(uuid.NAMESPACE_URL, "inqtrix-test:owner")
 
 
 def make_world(registration="invite"):
@@ -47,14 +49,25 @@ async def invite(invitations, email="alice@example.com", workspace="ws-1",
         workspace_id=workspace,
         email=email,
         role=role,
-        invited_by_sub="owner-1",
+        invited_by_user_id=OWNER_ID,
         expires_at=time.time() + ttl,
     )
 
 
-async def admit(gate, *, sub="user-1", email="alice@example.com"):
-    return await gate.admit(
+async def admit(gate, users, *, sub="user-1", email="alice@example.com"):
+    await gate.admit(
         tenant_id="default", issuer=ISSUER, sub=sub, email=email
+    )
+    user = await users.record_login(
+        tenant_id="default",
+        issuer=ISSUER,
+        subject=sub,
+        email=email,
+        email_verified=True,
+        display_name=email,
+    )
+    return await gate.accept(
+        tenant_id="default", email=email, user_id=user.user_id
     )
 
 
@@ -62,7 +75,7 @@ async def admit(gate, *, sub="user-1", email="alice@example.com"):
 async def test_invite_mode_rejects_unknown_users_generically():
     _identity, _invitations, _users, gate = make_world()
     with pytest.raises(RegistrationDenied) as excinfo:
-        await admit(gate, email="stranger@example.com")
+        await admit(gate, _users, email="stranger@example.com")
     # The denial must not confirm whether an invitation exists.
     assert "Einladung" in str(excinfo.value)
     assert "stranger" not in str(excinfo.value)
@@ -70,12 +83,14 @@ async def test_invite_mode_rejects_unknown_users_generically():
 
 @pytest.mark.asyncio
 async def test_acceptance_admits_and_creates_the_membership():
-    identity, invitations, _users, gate = make_world()
+    identity, invitations, users, gate = make_world()
     await invite(invitations)
-    accepted = await admit(gate)
+    accepted = await admit(gate, users)
     assert len(accepted) == 1
     role = await identity.role_in_workspace(
-        tenant_id="default", sub="user-1", workspace_id="ws-1"
+        tenant_id="default",
+        user_id=accepted[0].accepted_by_user_id,
+        workspace_id="ws-1",
     )
     assert role is WorkspaceRole.EDITOR
 
@@ -84,7 +99,7 @@ async def test_acceptance_admits_and_creates_the_membership():
 async def test_acceptance_is_one_time():
     _identity, invitations, users, gate = make_world()
     await invite(invitations)
-    first = await admit(gate)
+    first = await admit(gate, users)
     assert len(first) == 1
     # The user now exists in the mirror (callback records the login);
     # the second login passes WITHOUT consuming anything again.
@@ -96,27 +111,29 @@ async def test_acceptance_is_one_time():
         email_verified=True,
         display_name="Alice",
     )
-    second = await admit(gate)
+    second = await admit(gate, users)
     assert second == ()
 
 
 @pytest.mark.asyncio
 async def test_case_insensitive_email_matching():
-    _identity, invitations, _users, gate = make_world()
+    _identity, invitations, users, gate = make_world()
     await invite(invitations, email="Alice@Example.com")
-    accepted = await admit(gate, email="alice@example.COM")
+    accepted = await admit(gate, users, email="alice@example.COM")
     assert len(accepted) == 1
 
 
 @pytest.mark.asyncio
 async def test_multiple_workspaces_accept_in_one_login():
-    identity, invitations, _users, gate = make_world()
+    identity, invitations, users, gate = make_world()
     await invite(invitations, workspace="ws-1", role=WorkspaceRole.VIEWER)
     await invite(invitations, workspace="ws-2", role=WorkspaceRole.OWNER)
-    accepted = await admit(gate)
+    accepted = await admit(gate, users)
     assert len(accepted) == 2
     assert await identity.role_in_workspace(
-        tenant_id="default", sub="user-1", workspace_id="ws-2"
+        tenant_id="default",
+        user_id=accepted[0].accepted_by_user_id,
+        workspace_id="ws-2",
     ) is WorkspaceRole.OWNER
 
 
@@ -134,15 +151,15 @@ async def test_expired_and_revoked_invitations_never_match():
         now=time.time(),
     )
     with pytest.raises(RegistrationDenied):
-        await admit(gate)
+        await admit(gate, _users)
     with pytest.raises(RegistrationDenied):
-        await admit(gate, sub="user-2", email="bob@example.com")
+        await admit(gate, _users, sub="user-2", email="bob@example.com")
 
 
 @pytest.mark.asyncio
 async def test_existing_users_pass_and_still_collect_new_invitations():
     identity, invitations, users, gate = make_world()
-    await users.record_login(
+    existing = await users.record_login(
         tenant_id="default",
         issuer=ISSUER,
         subject="user-1",
@@ -151,24 +168,32 @@ async def test_existing_users_pass_and_still_collect_new_invitations():
         display_name="Alice",
     )
     # No invitation: existing user passes anyway.
-    assert await admit(gate) == ()
+    assert await admit(gate, users) == ()
     # Invited AFTER registration: next login grants the membership.
     await invite(invitations, workspace="ws-2", role=WorkspaceRole.VIEWER)
-    accepted = await admit(gate)
+    accepted = await admit(gate, users)
     assert len(accepted) == 1
     assert await identity.role_in_workspace(
-        tenant_id="default", sub="user-1", workspace_id="ws-2"
+        tenant_id="default", user_id=existing.user_id, workspace_id="ws-2"
     ) is WorkspaceRole.VIEWER
 
 
 @pytest.mark.asyncio
 async def test_existing_membership_is_never_downgraded():
-    identity, invitations, _users, gate = make_world()
-    identity.add_member("ws-1", "user-1", WorkspaceRole.OWNER)
+    identity, invitations, users, gate = make_world()
+    existing = await users.record_login(
+        tenant_id="default",
+        issuer=ISSUER,
+        subject="user-1",
+        email="alice@example.com",
+        email_verified=True,
+        display_name="Alice",
+    )
+    identity.add_member("ws-1", existing.user_id, WorkspaceRole.OWNER)
     await invite(invitations, role=WorkspaceRole.VIEWER)
-    await admit(gate)
+    await admit(gate, users)
     assert await identity.role_in_workspace(
-        tenant_id="default", sub="user-1", workspace_id="ws-1"
+        tenant_id="default", user_id=existing.user_id, workspace_id="ws-1"
     ) is WorkspaceRole.OWNER
 
 
@@ -176,13 +201,13 @@ async def test_existing_membership_is_never_downgraded():
 async def test_missing_email_with_unknown_user_is_denied_in_invite_mode():
     _identity, _invitations, _users, gate = make_world()
     with pytest.raises(RegistrationDenied):
-        await admit(gate, email="")
+        await admit(gate, _users, email="")
 
 
 @pytest.mark.asyncio
 async def test_open_mode_admits_everyone():
     _identity, _invitations, _users, gate = make_world(registration="open")
-    assert await admit(gate, email="anyone@example.com") == ()
+    assert await admit(gate, _users, email="anyone@example.com") == ()
 
 
 @pytest.mark.asyncio
@@ -199,11 +224,11 @@ async def test_disabled_users_are_denied_in_every_mode():
             email_verified=True,
             display_name="Alice",
         )
-        users.users[(ISSUER, "user-1")] = dataclasses.replace(
-            users.users[(ISSUER, "user-1")], disabled_at=time.time()
+        users.users[("default", ISSUER, "user-1")] = dataclasses.replace(
+            users.users[("default", ISSUER, "user-1")], disabled_at=time.time()
         )
         with pytest.raises(RegistrationDenied, match="deaktiviert"):
-            await admit(gate)
+            await admit(gate, users)
 
 
 @pytest.mark.asyncio

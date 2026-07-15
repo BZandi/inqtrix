@@ -25,6 +25,10 @@ from inqtrix.services.editor_persistence_service import EditorPersistenceService
 from inqtrix.storage.db import build_engine, build_session_factory
 from inqtrix.storage.editor_patch_postgres import PostgresEditorPatchStore
 from inqtrix.storage.migrate import run_migrations
+from tests.storage._canonical_users import (
+    canonical_user_id,
+    ensure_canonical_users,
+)
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
@@ -34,6 +38,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 APP_ROLE = "inqtrix_app"
+OWNER_USER_ID = canonical_user_id("editor-patch-owner")
 
 _DOC = "# Titel\n\nAlpha beta gamma.\n\nDelta epsilon zeta."
 
@@ -69,6 +74,7 @@ async def wiped():
             await session.execute(text("DELETE FROM editor_comments"))
             await session.execute(text("DELETE FROM editor_documents"))
             await session.execute(text("DELETE FROM editor_folders"))
+            await ensure_canonical_users(session, (OWNER_USER_ID,))
     await engine.dispose()
     yield
 
@@ -116,7 +122,7 @@ async def _seed_document(
         diff_anchor_updated_at=None,
         created_at=1.0,
         updated_at=1.0,
-        caller_sub=None,
+        caller_user_id=None,
         workspace_id=None,
         visible_to=None,
     )
@@ -154,7 +160,7 @@ async def test_patch_lifecycle_lockstep(service, persistence):
         edits=_raw_edits(),
         summary="Zwei Aenderungen",
         warnings=["Ein Anker unsicher"],
-        created_by_sub="user-owner",
+        created_by_user_id=OWNER_USER_ID,
         visible_to=None,
     )
     assert patch.status == "pending"
@@ -202,12 +208,12 @@ async def test_reject_flow_and_list_filters(service, persistence):
     first = await service.propose(
         document_id="ed_doc", run_id=None, source="suggest",
         edits=_raw_edits()[:1], summary="", warnings=[],
-        created_by_sub=None, visible_to=None,
+        created_by_user_id=None, visible_to=None,
     )
     second = await service.propose(
         document_id="ed_doc", run_id=None, source="agent",
         edits=_raw_edits()[:1], summary="", warnings=[],
-        created_by_sub=None, visible_to=None,
+        created_by_user_id=None, visible_to=None,
     )
 
     rejected = await service.reject(
@@ -234,7 +240,7 @@ async def test_patches_cascade_with_their_document(service, persistence):
     await service.propose(
         document_id="ed_doc", run_id=None, source="instruct",
         edits=_raw_edits()[:1], summary="", warnings=[],
-        created_by_sub=None, visible_to=None,
+        created_by_user_id=None, visible_to=None,
     )
 
     await persistence.delete_document("ed_doc", visible_to=None)

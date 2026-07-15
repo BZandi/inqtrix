@@ -26,6 +26,9 @@ type ResearchRunColumnProps = {
   expandedJobId: string | null
   isComposerVisible: boolean
   isReportVisible: boolean
+  /** Disable run submission (composer send + suggestion buttons) while the
+   * auth session is still resolving, instead of a silent no-op. */
+  isSubmitDisabled: boolean
   jobs: ResearchJob[]
   onActiveFilterChange: (filter: JobFilter) => void
   onCancelJob: (jobId: string) => void
@@ -43,7 +46,6 @@ type ResearchRunColumnProps = {
   selectedJobId: string | null
   selectedStack: string
   shareCountByRunId?: Record<string, number>
-  sharedByLabelByRunId?: ReadonlyMap<string, string>
 }
 
 export function ResearchRunColumn({
@@ -54,6 +56,7 @@ export function ResearchRunColumn({
   expandedJobId,
   isComposerVisible,
   isReportVisible,
+  isSubmitDisabled,
   jobs,
   onActiveFilterChange,
   onCancelJob,
@@ -71,7 +74,6 @@ export function ResearchRunColumn({
   selectedJobId,
   selectedStack,
   shareCountByRunId,
-  sharedByLabelByRunId,
 }: ResearchRunColumnProps) {
   const { t } = useLocale()
   // Seed the question from the session-scoped shell draft so it survives a view
@@ -107,6 +109,7 @@ export function ResearchRunColumn({
       />
       {allJobs.length === 0 ? (
         <ResearchEmptyState
+          disabled={isSubmitDisabled}
           onSuggestionSelect={(question) => onComposerSubmit(
             buildComposerRequest(composerForm, question, selectedStack),
           )}
@@ -164,7 +167,6 @@ export function ResearchRunColumn({
                     onDelete={() => onDeleteJob(job.id)}
                     onSelect={() => onSelectJob(job.id)}
                     onToggleExpanded={() => onToggleJob(job.id)}
-                    sharedByLabel={sharedByLabelByRunId?.get(job.id) ?? ''}
                   />
                 ))}
               </AnimatePresence>
@@ -188,6 +190,7 @@ export function ResearchRunColumn({
             reduceMotion={reduceMotion}
             selectedStack={selectedStack}
             setForm={setComposerForm}
+            submitDisabled={isSubmitDisabled}
           />
         ) : (
           <motion.div
@@ -217,8 +220,10 @@ export function ResearchRunColumn({
 }
 
 function ResearchEmptyState({
+  disabled,
   onSuggestionSelect,
 }: {
+  disabled?: boolean
   onSuggestionSelect: (question: string) => void
 }) {
   const { t } = useLocale()
@@ -245,6 +250,7 @@ function ResearchEmptyState({
             {suggestions.map((suggestion) => (
               <Button
                 className="h-8 rounded-md px-2.5 text-xs"
+                disabled={disabled}
                 key={suggestion.label}
                 onClick={() => onSuggestionSelect(suggestion.question)}
                 type="button"

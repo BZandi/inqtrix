@@ -1,4 +1,13 @@
 {{- if .Values.migrations.enabled }}
+{{- if and .Values.migrations.databaseSecret.name (eq .Values.migrations.databaseSecret.name (include "inqtrix.secretName" .)) }}
+{{- fail "migrations.databaseSecret.name must differ from the runtime application Secret; a privileged migration DSN must never enter API or worker envFrom" }}
+{{- end }}
+{{- if not (has .Values.migrations.rlsMode (list "auto" "owner" "bypass")) }}
+{{- fail "migrations.rlsMode must be one of: auto, owner, bypass" }}
+{{- end }}
+{{- if and .Release.IsUpgrade (eq .Values.migrations.rlsMode "owner") (not .Values.migrations.ownerMaintenanceConfirmed) }}
+{{- fail "migrations.rlsMode=owner on upgrade requires migrations.ownerMaintenanceConfirmed=true to authorize the chart-owned quiesce hook before migration" }}
+{{- end }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -26,11 +35,9 @@ spec:
       labels:
         {{- include "inqtrix.labels" (dict "root" . "component" "migrate") | nindent 8 }}
     spec:
+      serviceAccountName: {{ include "inqtrix.internalServiceAccountName" (dict "root" . "component" "migrate") }}
       restartPolicy: Never
-      # Uses the namespace "default" ServiceAccount (no serviceAccountName): the
-      # chart's own ServiceAccount is a normal resource that does not exist during
-      # the pre-install hook phase, so referencing it would deadlock a fresh
-      # external-DB install. inqtrix-migrate makes no Kubernetes API calls anyway.
+      automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -49,18 +56,28 @@ spec:
             - -c
             - |
               n=0
-              until python -c "import asyncio,os,re,asyncpg; asyncio.run(asyncpg.connect(re.sub(r'^(postgres(?:ql)?)\+[a-z0-9]+', r'\1', os.environ['INQTRIX_DATABASE_URL'])))" 2>/dev/null; do
+              until python -c "import asyncio,os,re,asyncpg; u=os.environ.get('INQTRIX_MIGRATION_DATABASE_URL') or os.environ.get('INQTRIX_DATABASE_URL'); asyncio.run(asyncpg.connect(re.sub(r'^(postgres(?:ql)?)\+[a-z0-9]+', r'\1', u)))" 2>/dev/null; do
                 n=$((n+1)); [ "$n" -ge 60 ] && { echo "database not reachable after timeout" >&2; exit 1; }
                 echo "waiting for database ($n)..."; sleep 2
               done
               exec inqtrix-migrate
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
-          # inqtrix-migrate only needs the database URL (StorageSettings reads it;
-          # every other field defaults). Supplying it directly -- not via the
-          # release ConfigMap/Secret -- means the hook does not depend on those
-          # not-yet-created resources during a fresh install.
+          # The optional migration Secret is injected only into this Job. The
+          # runtime Secret is retained as a backwards-compatible fallback for
+          # bundled and existing installations.
           env:
+            - name: INQTRIX_MIGRATION_RLS_MODE
+              value: {{ .Values.migrations.rlsMode | quote }}
+            - name: INQTRIX_MIGRATION_SERVICES_QUIESCED
+              value: {{ .Values.migrations.ownerMaintenanceConfirmed | quote }}
+          {{- if .Values.migrations.databaseSecret.name }}
+            - name: INQTRIX_MIGRATION_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.migrations.databaseSecret.name }}
+                  key: {{ .Values.migrations.databaseSecret.key }}
+          {{- else }}
             - name: INQTRIX_DATABASE_URL
             {{- if .Values.secret.existingSecret }}
               valueFrom:
@@ -70,6 +87,7 @@ spec:
             {{- else }}
               value: {{ include "inqtrix.databaseUrl" . | quote }}
             {{- end }}
+          {{- end }}
           resources:
             {{- toYaml .Values.migrations.resources | nindent 12 }}
           volumeMounts:

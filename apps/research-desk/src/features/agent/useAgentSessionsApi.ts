@@ -10,7 +10,10 @@ import {
   saveAgentSession,
   saveAgentSessionGroup,
 } from '@/api/inqtrixClient'
-import { syncCollection } from '@/features/project/syncCollection'
+import {
+  deleteTolerant404,
+  syncCollection,
+} from '@/features/project/syncCollection'
 import {
   useProjectSyncLifecycle,
   type SyncLifecycleToken,
@@ -19,6 +22,7 @@ import type { ResearchDeskAction } from '@/features/researchDesk/state'
 import type { AgentSessionGroupRecord, AgentSessionRecord } from './model'
 import {
   agentSessionFingerprint,
+  persistableAgentSessionsInOrder,
   serverAgentSessionGroupPayload,
   serverAgentSessionPayload,
 } from './agentSessionSync'
@@ -105,7 +109,7 @@ export function useAgentSessionsApi({
           }
           for (const wire of serverSessions) {
             const record = sessionsRef.current[wire.id]
-            if (record) {
+            if (record?.persistable !== false) {
               syncedRef.current.set(wire.id, agentSessionFingerprint(record))
             }
           }
@@ -152,13 +156,17 @@ export function useAgentSessionsApi({
             optionsRef.current,
           )
         },
-        deleteOne: (id) => deleteAgentSessionGroup(id, optionsRef.current),
+        deleteOne: (id) => deleteTolerant404(
+          () => deleteAgentSessionGroup(id, optionsRef.current),
+        ),
       })
 
       const currentSessions = sessionsRef.current
-      for (const sessionId of sessionOrderRef.current) {
-        const session = currentSessions[sessionId]
-        if (!session) continue
+      for (const session of persistableAgentSessionsInOrder(
+        currentSessions,
+        sessionOrderRef.current,
+      )) {
+        const sessionId = session.id
         const fingerprint = agentSessionFingerprint(session)
         if (syncedRef.current.get(sessionId) !== fingerprint) {
           await saveAgentSession(
@@ -170,8 +178,15 @@ export function useAgentSessionsApi({
         }
       }
       for (const sessionId of [...syncedRef.current.keys()]) {
-        if (!(sessionId in currentSessions)) {
-          await deleteAgentSession(sessionId, optionsRef.current)
+        const current = currentSessions[sessionId]
+        if (!current) {
+          await deleteTolerant404(
+            () => deleteAgentSession(sessionId, optionsRef.current),
+          )
+          syncedRef.current.delete(sessionId)
+        } else if (current.persistable === false) {
+          // A derived view never issues CREATE/UPDATE/DELETE through the
+          // session API, even if a stale local fingerprint used the same id.
           syncedRef.current.delete(sessionId)
         }
       }
@@ -199,6 +214,9 @@ export function useAgentSessionsApi({
   // items_json so its source policy is hydrated before the user submits.
   useEffect(() => {
     if (!syncActive || !hydrated || !selectedSessionId) return undefined
+    if (sessionsRef.current[selectedSessionId]?.persistable === false) {
+      return undefined
+    }
     let cancelled = false
     void getAgentSession(selectedSessionId, optionsRef.current)
       .then((session) => {
@@ -213,7 +231,13 @@ export function useAgentSessionsApi({
     return () => {
       cancelled = true
     }
-  }, [dispatch, hydrated, selectedSessionId, syncActive])
+  }, [
+    dispatch,
+    hydrated,
+    selectedSessionId,
+    sessions[selectedSessionId ?? '']?.persistable,
+    syncActive,
+  ])
 
   useEffect(() => {
     if (!syncActive) return undefined

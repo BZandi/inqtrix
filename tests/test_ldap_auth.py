@@ -23,6 +23,10 @@ from inqtrix.auth.ldap import (
     LdapError,
     _first,
 )
+from inqtrix.auth.lifecycle import (
+    MemoryUserLifecycleTransaction,
+    UserLifecycleService,
+)
 from inqtrix.auth.pat import MemoryPatStore, PatService, PatVerifier
 from inqtrix.auth.principal import resolve_auth_mode
 from inqtrix.auth.sessions import MemoryFlowStore, MemorySessionStore
@@ -184,20 +188,34 @@ def test_resolve_auth_mode_ldap_requires_connection_settings():
 
 
 def _provider(*, admin_member: bool = False, admin_group_dn: str = "") -> LdapAuthProvider:
+    users = MemoryUserDirectory()
+    pat_store = MemoryPatStore()
+    sessions = MemorySessionStore()
+    lifecycle = UserLifecycleService(
+        users=users,
+        sessions=sessions,
+        pat_service=None,
+        transaction=MemoryUserLifecycleTransaction(
+            users=users, sessions=sessions, pat_store=pat_store
+        ),
+    )
     return LdapAuthProvider(
         ldap_client=_client(admin_member=admin_member, admin_group_dn=admin_group_dn),
         first_login_owner=True,
-        sessions=MemorySessionStore(),
+        sessions=sessions,
         flows=MemoryFlowStore(),
-        users=MemoryUserDirectory(),
+        users=users,
         session_secret="s" * 32,
         session_max_age_seconds=3600,
         secure_cookies=False,
-        pats=PatVerifier(store=MemoryPatStore(), pepper="p" * 32),
+        pats=PatVerifier(
+            store=pat_store, pepper="p" * 32, user_lookup=users
+        ),
         pat_service=PatService(
-            store=MemoryPatStore(), pepper="p" * 32, max_per_user=10, default_ttl_days=0
+            store=pat_store, pepper="p" * 32, max_per_user=10, default_ttl_days=0
         ),
         registration_gate=None,
+        lifecycle=lifecycle,
     )
 
 
@@ -208,7 +226,7 @@ def _client_for(provider: LdapAuthProvider) -> TestClient:
 
     @app.get("/v1/protected")
     async def protected(principal=Depends(principal_dep)):
-        return {"sub": principal.sub, "kind": principal.kind}
+        return {"sub": principal.user_id, "kind": principal.kind}
 
     return TestClient(app, base_url="http://127.0.0.1:5100")
 
@@ -224,7 +242,7 @@ def test_login_ldap_route_establishes_session_and_first_login_owner():
     assert protected.status_code == 200
     assert protected.json()["kind"] == "oidc_session"  # shared session kind
     # First LDAP login becomes the instance admin (no admin existed yet).
-    assert client.get("/api/auth/session").json()["role"] == "admin"
+    assert client.get("/api/auth/session").json()["user"]["role"] == "admin"
 
 
 def test_login_ldap_wrong_password_is_401():
@@ -245,12 +263,15 @@ def test_disabled_ldap_user_cannot_relogin():
         "/api/auth/login/ldap", json={"username": "bob", "password": USER_PW}
     )
     assert first.status_code == 200
+    user = asyncio.run(
+        provider.users.find_user(
+            tenant_id="default", issuer=LDAP_ISSUER, subject="uuid-bob-123"
+        )
+    )
+    assert user is not None
     asyncio.run(
         provider.users.set_disabled(
-            tenant_id="default",
-            issuer=LDAP_ISSUER,
-            subject="uuid-bob-123",
-            disabled_at=1.0,
+            tenant_id="default", user_id=user.user_id, disabled_at=1.0
         )
     )
     relogin = client.post(

@@ -13,7 +13,35 @@ from __future__ import annotations
 
 from alembic import op
 
-from inqtrix.storage.pat_orm import pat_metadata
+# Frozen schema snapshot from the deployed revision. Historical migrations
+# must never import the live ORM because later authority changes would alter
+# the schema produced by a fresh traversal.
+from sqlalchemy import Column, Float, Index, MetaData, Table, Text, text
+from sqlalchemy.dialects.postgresql import JSONB
+
+pat_metadata = MetaData()
+
+personal_access_tokens = Table(
+    "personal_access_tokens",
+    pat_metadata,
+    Column("token_id", Text, primary_key=True),
+    Column(
+        "tenant_id", Text, nullable=False, server_default=text("'default'")
+    ),
+    Column("owner_issuer", Text, nullable=False),
+    Column("owner_sub", Text, nullable=False),
+    Column("name", Text, nullable=False),
+    Column("secret_hmac", Text, nullable=False),
+    Column("scopes", JSONB, nullable=False, server_default=text("'[]'")),
+    Column("created_at", Float, nullable=False),
+    Column("expires_at", Float, nullable=True),
+    Column("last_used_at", Float, nullable=True),
+    Column("revoked_at", Float, nullable=True),
+    Index("ix_pat_owner", "tenant_id", "owner_issuer", "owner_sub"),
+)
+"""Personal access tokens. The primary key serves the verification
+lookup; ``ix_pat_owner`` serves listing and the disable cascade. No
+index on ``secret_hmac`` — it is never queried, only compared."""
 
 revision = "0005_personal_access_tokens"
 down_revision = "0004_auth_sessions"

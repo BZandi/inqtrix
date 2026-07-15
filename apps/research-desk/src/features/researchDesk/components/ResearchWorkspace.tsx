@@ -28,6 +28,9 @@ type ResearchWorkspaceProps = {
   isComposerVisible: boolean
   isDesktop: boolean
   isReportVisible: boolean
+  /** Disable run submission (composer send + start-screen suggestions)
+   * while the auth session is still resolving, instead of a silent no-op. */
+  isSubmitDisabled: boolean
   jobs: ResearchJob[]
   onActiveFilterChange: (filter: JobFilter) => void
   onCancelJob: (jobId: string) => void
@@ -49,7 +52,6 @@ type ResearchWorkspaceProps = {
   selectedRun: ResearchRunRecord | null
   selectedStack: string
   shareCountByRunId?: Record<string, number>
-  sharedByLabelByRunId?: ReadonlyMap<string, string>
 }
 
 export function ResearchWorkspace({
@@ -61,6 +63,7 @@ export function ResearchWorkspace({
   isComposerVisible,
   isDesktop,
   isReportVisible,
+  isSubmitDisabled,
   jobs,
   onActiveFilterChange,
   onCancelJob,
@@ -82,7 +85,6 @@ export function ResearchWorkspace({
   selectedRun,
   selectedStack,
   shareCountByRunId,
-  sharedByLabelByRunId,
 }: ResearchWorkspaceProps) {
   const { t } = useLocale()
   const [isMobileReportOpen, setIsMobileReportOpen] = useState(false)
@@ -124,6 +126,7 @@ export function ResearchWorkspace({
       expandedJobId={expandedJobId}
       isComposerVisible={isComposerVisible}
       isReportVisible={controlReportVisible}
+      isSubmitDisabled={isSubmitDisabled}
       jobs={jobs}
       onActiveFilterChange={onActiveFilterChange}
       onCancelJob={onCancelJob}
@@ -141,7 +144,6 @@ export function ResearchWorkspace({
       selectedJobId={selectedJobId}
       selectedStack={selectedStack}
       shareCountByRunId={shareCountByRunId}
-      sharedByLabelByRunId={sharedByLabelByRunId}
     />
   )
 

@@ -11,6 +11,7 @@ proxying the IdP's admin API.
 from __future__ import annotations
 
 import threading
+import uuid
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -20,16 +21,19 @@ class MirroredUser:
     """One mirrored identity (memory backend's record shape).
 
     Attributes:
+        tenant_id: Tenant owning the canonical identity.
         disabled_at: Soft-disable timestamp; a disabled user is denied
             at login admission. ``None`` (the default, and the value
             for rows written before the field existed) means active.
     """
 
+    user_id: uuid.UUID
     issuer: str
     subject: str
     email: str
     email_verified: bool
     display_name: str | None
+    tenant_id: str = "default"
     disabled_at: float | None = None
     # Instance-wide role for the admin surface (admin|user). Additive
     # default so every existing record / serialized row reads as a regular
@@ -56,8 +60,9 @@ class UserDirectory(Protocol):
         email: str,
         email_verified: bool,
         display_name: str | None,
-    ) -> None:
-        """Upsert one identity on successful login (JIT provisioning)."""
+        canonical_user_id: uuid.UUID | None = None,
+    ) -> MirroredUser:
+        """Upsert and return one identity on successful login."""
         ...
 
     async def find_user(
@@ -66,14 +71,20 @@ class UserDirectory(Protocol):
         """The mirrored identity (incl. instance_role), or ``None``."""
         ...
 
+    async def find_by_user_id(
+        self, *, tenant_id: str, user_id: uuid.UUID
+    ) -> "MirroredUser | None":
+        """Return the user with canonical *user_id*, or ``None``."""
+        ...
+
     async def set_instance_role(
-        self, *, tenant_id: str, issuer: str, subject: str, role: str
+        self, *, tenant_id: str, user_id: uuid.UUID, role: str
     ) -> bool:
         """Set the instance role (admin|user); ``True`` when a row changed."""
         ...
 
     async def resolve_default_workspace(
-        self, *, tenant_id: str, issuer: str, subject: str, candidate: str
+        self, *, tenant_id: str, user_id: uuid.UUID, candidate: str
     ) -> str | None:
         """Return the user's canonical project namespace, ADOPTING ``candidate``
         on the first call (when none is set yet).
@@ -92,8 +103,7 @@ class UserDirectory(Protocol):
         self,
         *,
         tenant_id: str,
-        issuer: str,
-        subject: str,
+        user_id: uuid.UUID,
         disabled_at: float | None,
     ) -> bool:
         """Set/clear the mirror disable flag; ``True`` when a row changed."""
@@ -110,13 +120,13 @@ class UserDirectory(Protocol):
         ...
 
     async def promote_if_no_admin(
-        self, *, tenant_id: str, issuer: str, subject: str
+        self, *, tenant_id: str, user_id: uuid.UUID
     ) -> bool:
         """Promote to admin iff no active admin exists (first-login owner)."""
         ...
 
     async def demote_if_not_last_admin(
-        self, *, tenant_id: str, issuer: str, subject: str
+        self, *, tenant_id: str, user_id: uuid.UUID
     ) -> bool:
         """Demote to ``user`` atomically, guarding the last-admin invariant.
 
@@ -130,7 +140,7 @@ class UserDirectory(Protocol):
         ...
 
     async def disable_if_not_last_admin(
-        self, *, tenant_id: str, issuer: str, subject: str, disabled_at: float
+        self, *, tenant_id: str, user_id: uuid.UUID, disabled_at: float
     ) -> bool:
         """Set the disable flag atomically, guarding the last-admin invariant.
 
@@ -162,8 +172,8 @@ class MemoryUserDirectory:
     """Process-local mirror (zero-infrastructure default)."""
 
     def __init__(self) -> None:
-        self.users: dict[tuple[str, str], MirroredUser] = {}
-        self._lock = threading.Lock()
+        self.users: dict[tuple[str, str, str], MirroredUser] = {}
+        self._lock = threading.RLock()
 
     async def record_login(
         self,
@@ -174,17 +184,25 @@ class MemoryUserDirectory:
         email: str,
         email_verified: bool,
         display_name: str | None,
-    ) -> None:
+        canonical_user_id: uuid.UUID | None = None,
+    ) -> MirroredUser:
         import time
 
         with self._lock:
-            existing = self.users.get((issuer, subject))
-            self.users[(issuer, subject)] = MirroredUser(
+            key = (tenant_id, issuer, subject)
+            existing = self.users.get(key)
+            user = MirroredUser(
+                user_id=(
+                    existing.user_id
+                    if existing is not None
+                    else (canonical_user_id or uuid.uuid4())
+                ),
                 issuer=issuer,
                 subject=subject,
                 email=email,
                 email_verified=email_verified,
                 display_name=display_name,
+                tenant_id=tenant_id,
                 # Preserve admin-managed state (disable + role) across logins;
                 # only profile fields and the login timestamp refresh.
                 disabled_at=(
@@ -200,50 +218,74 @@ class MemoryUserDirectory:
                     existing.default_workspace_id if existing is not None else None
                 ),
             )
+            self.users[key] = user
+            return user
+
+    def _key_for_user_id(
+        self, tenant_id: str, user_id: uuid.UUID
+    ) -> tuple[str, str, str] | None:
+        """Return the external-binding key for a canonical UUID.
+
+        The caller must hold ``self._lock``.
+        """
+        return next(
+            (
+                key
+                for key, user in self.users.items()
+                if user.tenant_id == tenant_id and user.user_id == user_id
+            ),
+            None,
+        )
 
     async def resolve_default_workspace(
-        self, *, tenant_id: str, issuer: str, subject: str, candidate: str
+        self, *, tenant_id: str, user_id: uuid.UUID, candidate: str
     ) -> str | None:
         """Return the adopted project namespace, claiming ``candidate`` if unset."""
         from dataclasses import replace
 
         with self._lock:
-            existing = self.users.get((issuer, subject))
+            key = self._key_for_user_id(tenant_id, user_id)
+            existing = self.users.get(key) if key is not None else None
             if existing is None:
                 return None
             if existing.default_workspace_id is not None:
                 return existing.default_workspace_id
-            self.users[(issuer, subject)] = replace(
+            assert key is not None
+            self.users[key] = replace(
                 existing, default_workspace_id=candidate
             )
             return candidate
 
     async def set_instance_role(
-        self, *, tenant_id: str, issuer: str, subject: str, role: str
+        self, *, tenant_id: str, user_id: uuid.UUID, role: str
     ) -> bool:
         """Set the instance role; ``True`` when a row changed."""
         from dataclasses import replace
 
         with self._lock:
-            existing = self.users.get((issuer, subject))
+            key = self._key_for_user_id(tenant_id, user_id)
+            existing = self.users.get(key) if key is not None else None
             if existing is None:
                 return False
-            self.users[(issuer, subject)] = replace(
+            assert key is not None
+            self.users[key] = replace(
                 existing, instance_role=role
             )
             return True
 
     async def set_disabled(
-        self, *, tenant_id: str, issuer: str, subject: str, disabled_at: float | None
+        self, *, tenant_id: str, user_id: uuid.UUID, disabled_at: float | None
     ) -> bool:
         """Set/clear the soft-disable timestamp; ``True`` when a row changed."""
         from dataclasses import replace
 
         with self._lock:
-            existing = self.users.get((issuer, subject))
+            key = self._key_for_user_id(tenant_id, user_id)
+            existing = self.users.get(key) if key is not None else None
             if existing is None:
                 return False
-            self.users[(issuer, subject)] = replace(
+            assert key is not None
+            self.users[key] = replace(
                 existing, disabled_at=disabled_at
             )
             return True
@@ -253,7 +295,16 @@ class MemoryUserDirectory:
     ) -> tuple[MirroredUser, ...]:
         """All mirrored identities (admin listing)."""
         with self._lock:
-            return tuple(sorted(self.users.values(), key=lambda u: u.email))
+            return tuple(
+                sorted(
+                    (
+                        user
+                        for user in self.users.values()
+                        if user.tenant_id == tenant_id
+                    ),
+                    key=lambda user: user.email,
+                )
+            )
 
     async def count_admins(self, *, tenant_id: str) -> int:
         """Active instance-admins (the last-admin guard reads this)."""
@@ -261,11 +312,40 @@ class MemoryUserDirectory:
             return sum(
                 1
                 for u in self.users.values()
-                if u.instance_role == "admin" and u.disabled_at is None
+                if u.tenant_id == tenant_id
+                and u.instance_role == "admin"
+                and u.disabled_at is None
             )
 
+    def active_admin_user_ids_nowait(
+        self, tenant_id: str
+    ) -> tuple[uuid.UUID, ...]:
+        """Return active instance-admin UUIDs for synchronous memory fan-out."""
+        with self._lock:
+            return tuple(
+                sorted(
+                    (
+                        user.user_id
+                        for user in self.users.values()
+                        if user.tenant_id == tenant_id
+                        and user.instance_role == "admin"
+                        and user.disabled_at is None
+                    ),
+                    key=str,
+                )
+            )
+
+    def is_active_nowait(
+        self, *, tenant_id: str, user_id: uuid.UUID
+    ) -> bool:
+        """Return current active status under the shared memory boundary."""
+        with self._lock:
+            key = self._key_for_user_id(tenant_id, user_id)
+            user = self.users.get(key) if key is not None else None
+            return user is not None and user.disabled_at is None
+
     async def promote_if_no_admin(
-        self, *, tenant_id: str, issuer: str, subject: str
+        self, *, tenant_id: str, user_id: uuid.UUID
     ) -> bool:
         """Promote this user to admin IFF no active admin exists yet.
 
@@ -278,17 +358,20 @@ class MemoryUserDirectory:
             has_admin = any(
                 u.instance_role == "admin" and u.disabled_at is None
                 for u in self.users.values()
+                if u.tenant_id == tenant_id
             )
-            existing = self.users.get((issuer, subject))
+            key = self._key_for_user_id(tenant_id, user_id)
+            existing = self.users.get(key) if key is not None else None
             if has_admin or existing is None:
                 return False
-            self.users[(issuer, subject)] = replace(
+            assert key is not None
+            self.users[key] = replace(
                 existing, instance_role="admin"
             )
             return True
 
     def _is_last_active_admin(
-        self, existing: MirroredUser, issuer: str, subject: str
+        self, existing: MirroredUser, user_id: uuid.UUID
     ) -> bool:
         """Whether *existing* is an active admin with no other active admin.
 
@@ -299,42 +382,47 @@ class MemoryUserDirectory:
         if existing.instance_role != "admin" or existing.disabled_at is not None:
             return False
         return not any(
-            u.instance_role == "admin"
+            u.tenant_id == existing.tenant_id
+            and u.instance_role == "admin"
             and u.disabled_at is None
-            and (u.issuer, u.subject) != (issuer, subject)
+            and u.user_id != user_id
             for u in self.users.values()
         )
 
     async def demote_if_not_last_admin(
-        self, *, tenant_id: str, issuer: str, subject: str
+        self, *, tenant_id: str, user_id: uuid.UUID
     ) -> bool:
         """Demote to ``user`` unless this is the last active admin (atomic)."""
         from dataclasses import replace
 
         with self._lock:
-            existing = self.users.get((issuer, subject))
+            key = self._key_for_user_id(tenant_id, user_id)
+            existing = self.users.get(key) if key is not None else None
             if existing is None:
                 return False
-            if self._is_last_active_admin(existing, issuer, subject):
+            if self._is_last_active_admin(existing, user_id):
                 return False
-            self.users[(issuer, subject)] = replace(
+            assert key is not None
+            self.users[key] = replace(
                 existing, instance_role="user"
             )
             return True
 
     async def disable_if_not_last_admin(
-        self, *, tenant_id: str, issuer: str, subject: str, disabled_at: float
+        self, *, tenant_id: str, user_id: uuid.UUID, disabled_at: float
     ) -> bool:
         """Set the disable flag unless this is the last active admin (atomic)."""
         from dataclasses import replace
 
         with self._lock:
-            existing = self.users.get((issuer, subject))
+            key = self._key_for_user_id(tenant_id, user_id)
+            existing = self.users.get(key) if key is not None else None
             if existing is None:
                 return False
-            if self._is_last_active_admin(existing, issuer, subject):
+            if self._is_last_active_admin(existing, user_id):
                 return False
-            self.users[(issuer, subject)] = replace(
+            assert key is not None
+            self.users[key] = replace(
                 existing, disabled_at=disabled_at
             )
             return True
@@ -343,27 +431,34 @@ class MemoryUserDirectory:
         self, *, tenant_id: str, issuer: str, subject: str
     ) -> MirroredUser | None:
         with self._lock:
-            return self.users.get((issuer, subject))
+            return self.users.get((tenant_id, issuer, subject))
 
-    async def profiles_for_subjects(
-        self, *, tenant_id: str, subs: tuple[str, ...]
-    ) -> dict[str, MirroredUser]:
-        """``sub -> profile`` for share-listing enrichment (one pass)."""
-        wanted = set(subs)
+    async def find_by_user_id(
+        self, *, tenant_id: str, user_id: uuid.UUID
+    ) -> MirroredUser | None:
+        with self._lock:
+            key = self._key_for_user_id(tenant_id, user_id)
+            return self.users.get(key) if key is not None else None
+
+    async def profiles_for_user_ids(
+        self, *, tenant_id: str, user_ids: tuple[uuid.UUID, ...]
+    ) -> dict[uuid.UUID, MirroredUser]:
+        """``user_id -> profile`` for share-listing enrichment (one pass)."""
+        wanted = set(user_ids)
         with self._lock:
             return {
-                user.subject: user
+                user.user_id: user
                 for user in self.users.values()
-                if user.subject in wanted
+                if user.tenant_id == tenant_id and user.user_id in wanted
             }
 
-    async def has_subject(self, *, tenant_id: str, sub: str) -> bool:
-        """Whether any active mirrored identity carries this subject
-        (the share-grant typo guard; issuer-agnostic by design — the
-        share table keys on the bare sub)."""
+    async def has_user_id(self, *, tenant_id: str, user_id: uuid.UUID) -> bool:
+        """Whether an active mirrored user carries this canonical UUID."""
         with self._lock:
             return any(
-                user.subject == sub and user.disabled_at is None
+                user.tenant_id == tenant_id
+                and user.user_id == user_id
+                and user.disabled_at is None
                 for user in self.users.values()
             )
 
@@ -373,7 +468,7 @@ class MemoryUserDirectory:
         tenant_id: str,
         query: str,
         limit: int = 10,
-        exclude_subject: str = "",
+        exclude_user_id: uuid.UUID | None = None,
     ) -> tuple[MirroredUser, ...]:
         """Prefix search over email and display name (share typeahead).
 
@@ -387,8 +482,9 @@ class MemoryUserDirectory:
             matches = [
                 user
                 for user in self.users.values()
-                if user.disabled_at is None
-                and user.subject != exclude_subject
+                if user.tenant_id == tenant_id
+                and user.disabled_at is None
+                and user.user_id != exclude_user_id
                 and (
                     user.email.lower().startswith(needle)
                     or (user.display_name or "").lower().startswith(needle)

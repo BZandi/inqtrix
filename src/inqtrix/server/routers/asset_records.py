@@ -10,6 +10,7 @@ extracted text (load-on-open).
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Request
@@ -39,8 +40,8 @@ if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
 
-def _caller_sub(principal: Principal) -> str | None:
-    return principal.sub if principal.kind in ("oidc_session", "pat") else None
+def _caller_user_id(principal: Principal) -> uuid.UUID | None:
+    return principal.user_id if principal.kind in ("oidc_session", "pat") else None
 
 
 def _section_payload(s: AssetSection) -> dict[str, Any]:
@@ -88,7 +89,7 @@ def build_router(container: "AppContainer") -> APIRouter:
     @router.get("/v1/assets/sections")
     async def list_sections(req: Request, principal: Principal = Depends(principal_dep)):
         sections = await service.list_sections(
-            caller_sub=_caller_sub(principal), workspace_id=workspace_id_from_request(req)
+            caller_user_id=_caller_user_id(principal), workspace_id=workspace_id_from_request(req)
         )
         return {"object": "list", "data": [_section_payload(s) for s in sections]}
 
@@ -105,7 +106,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             section = await service.save_section(
                 id=section_id, kind=str(body.get("kind", "custom")),
                 title=str(body.get("title", "")), created_at=float(body["created_at"]),
-                updated_at=float(body["updated_at"]), caller_sub=_caller_sub(principal),
+                updated_at=float(body["updated_at"]), caller_user_id=_caller_user_id(principal),
                 workspace_id=workspace_id_from_request(req), visible_to=visible_to,
             )
         except AssetValidationError as exc:
@@ -132,7 +133,7 @@ def build_router(container: "AppContainer") -> APIRouter:
     @router.get("/v1/assets/groups")
     async def list_groups(req: Request, principal: Principal = Depends(principal_dep)):
         groups = await service.list_groups(
-            caller_sub=_caller_sub(principal), workspace_id=workspace_id_from_request(req)
+            caller_user_id=_caller_user_id(principal), workspace_id=workspace_id_from_request(req)
         )
         return {"object": "list", "data": [_group_payload(g) for g in groups]}
 
@@ -152,7 +153,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             group = await service.save_group(
                 id=group_id, section_id=section_id, title=str(body.get("title", "")),
                 created_at=float(body["created_at"]), updated_at=float(body["updated_at"]),
-                caller_sub=_caller_sub(principal),
+                caller_user_id=_caller_user_id(principal),
                 workspace_id=workspace_id_from_request(req), visible_to=visible_to,
             )
         except GroupNotFound:
@@ -182,7 +183,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(400, "Ungueltiger Cursor", "invalid_cursor")
         limit = clamp_limit(req.query_params.get("limit"))
         assets, next_cursor = await service.list_assets(
-            caller_sub=_caller_sub(principal),
+            caller_user_id=_caller_user_id(principal),
             workspace_id=workspace_id_from_request(req), limit=limit, after=after,
         )
         return list_envelope([_asset_meta_payload(a) for a in assets], next_cursor)
@@ -228,7 +229,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 parser_id=(str(body["parser_id"]) if body.get("parser_id") is not None else None),
                 extracted_text=str(body.get("extracted_text", "")),
                 created_at=float(body["created_at"]), updated_at=float(body["updated_at"]),
-                caller_sub=_caller_sub(principal),
+                caller_user_id=_caller_user_id(principal),
                 workspace_id=workspace_id_from_request(req), visible_to=visible_to,
             )
         except AssetValidationError as exc:

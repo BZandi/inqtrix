@@ -1,13 +1,13 @@
 import { ingestFiles } from '@/features/files/ingest'
 import type { FileParser } from '@/features/files/parsing'
-import { FILE_SECTION_TEMP_ID } from '@/features/files/sections'
+import { createFileSectionId } from '@/features/files/sections'
 import type { FileAssetRecord, ProjectState } from '@/features/project/types'
 
 /**
  * Ingest chat attachments for an incognito session: client-parse only, never
  * uploaded.
  *
- * Mirrors a normal chat attach (`{ kind: 'chat', sectionId: FILE_SECTION_TEMP_ID }`)
+ * Mirrors a normal chat attach with an ephemeral local section id
  * but deliberately omits the `serverUpload` callback, so {@link ingestFiles}
  * leaves `serverFileId === null` and the original bytes never leave the device.
  * The returned records carry the in-browser `extractedText`, which is all the
@@ -22,7 +22,7 @@ export async function ingestIncognitoFiles(
 ): Promise<FileAssetRecord[]> {
   return ingestFiles(
     files,
-    { kind: 'chat', sectionId: FILE_SECTION_TEMP_ID },
+    { kind: 'chat', sectionId: createFileSectionId() },
     parser,
     existingLabels,
   )

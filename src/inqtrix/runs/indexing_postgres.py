@@ -42,14 +42,17 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from queue import Queue
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy import case, delete, func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
+from inqtrix.auth.permissions import SharePermission
+from inqtrix.execution_authority import AuthorizationRevoked
 from inqtrix.runs.durable_store import (
     DEFAULT_TENANT,
     DurableJobStoreBase,
@@ -57,6 +60,7 @@ from inqtrix.runs.durable_store import (
     _LocalJob,
 )
 from inqtrix.server.indexing import (
+    ACTIVE_INDEXING_STATUS_VALUES,
     TERMINAL_INDEXING_EVENTS,
     TERMINAL_INDEXING_STATUSES,
     IndexingJobConflict,
@@ -70,7 +74,14 @@ from inqtrix.server.indexing import (
     build_indexing_job_summary,
     new_indexing_job_id,
 )
+from inqtrix.knowledge.stores.ports import CollectionNotFound
 from inqtrix.storage.indexing_orm import indexing_job_events, indexing_jobs
+from inqtrix.storage.knowledge_orm import knowledge_collections
+from inqtrix.storage.resource_access import (
+    LockedResourceAccess,
+    append_resource_effects,
+    lock_resource_access,
+)
 from inqtrix.urls import sanitize_error
 
 if TYPE_CHECKING:
@@ -82,7 +93,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("inqtrix")
 
 _TERMINAL_VALUES = tuple(status.value for status in TERMINAL_INDEXING_STATUSES)
-_ACTIVE_VALUES = (IndexingJobStatus.QUEUED.value, IndexingJobStatus.RUNNING.value)
+_ACTIVE_VALUES = ACTIVE_INDEXING_STATUS_VALUES
 
 _STUCK_ROW_MAX_AGE_SECONDS = 7 * 86_400.0
 """Hard retention cap for jobs that never reached a terminal state — a
@@ -101,11 +112,20 @@ class ClaimedIndexingJob:
     attempt: int
     collection_id: str
     embedding_model: str
-    # Persisted attribution of the submitter, so the worker can meter
-    # the re-embed against the right quota subject without a live
-    # principal (the worker has none).
-    created_by_sub: str | None = None
+    # Persisted attribution of the submitter, so the worker can meter the
+    # re-embed against the canonical user UUID without a live principal.
+    created_by_user_id: uuid.UUID | None = None
     created_by_tenant_id: str | None = None
+    cancel_requested: bool = False
+
+
+@dataclass(frozen=True)
+class _MaintenanceAction:
+    """One retention or recovery mutation applied under lifecycle locks."""
+
+    action: str
+    error: dict[str, str] | None = None
+    request_cancel: bool = False
 
 
 class PostgresIndexingJobStore(DurableJobStoreBase):
@@ -140,7 +160,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
 
     Tenancy: job rows live in the single deployment tenant (``default``)
     at the RLS layer — per-user visibility is the
-    ``(created_by_sub, created_by_tenant_id)`` predicate, exactly like
+    ``(created_by_user_id, created_by_tenant_id)`` predicate, exactly like
     the run store and the in-memory reindex store.
     """
 
@@ -159,6 +179,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         completed_ttl_seconds: int,
         history_limit: int,
         worker_id: str,
+        restrict_to_workspace_members: bool = False,
         recover_orphans: bool | None = None,
     ) -> None:
         # The engine/session/loop/dispatch plumbing lives in
@@ -175,6 +196,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         self._max_queue_size = max_queue_size
         self._completed_ttl_seconds = completed_ttl_seconds
         self._history_limit = history_limit
+        self._restrict_to_workspace_members = restrict_to_workspace_members
 
     # -- public surface (IndexingJobStore parity) ------------------------- #
 
@@ -187,7 +209,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         work: IndexingWork,
         index_id: str | None = None,
         workspace_id: str | None = None,
-        created_by_sub: str | None = None,
+        created_by_user_id: uuid.UUID | None = None,
         created_by_tenant_id: str | None = None,
     ) -> dict[str, Any]:
         """Persist one queued reindex job, then dispatch locally or enqueue.
@@ -206,7 +228,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 embedding_model=embedding_model,
                 index_id=index_id,
                 workspace_id=workspace_id,
-                created_by_sub=created_by_sub,
+                created_by_user_id=created_by_user_id,
                 created_by_tenant_id=created_by_tenant_id,
             )
         )
@@ -250,16 +272,21 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
             self._list_db(collection_id, workspace_id, visible_to)
         )
 
+    def has_active_job(self, collection_id: str) -> bool:
+        """Whether *collection_id* has a queued/running/cancelling job."""
+        return self._call(self._has_active_job_db(collection_id))
+
     def cancel(
         self,
         job_id: str,
         *,
         workspace_id: str | None = None,
         visible_to: "UserContext | None" = None,
+        actor_user_id: uuid.UUID | None = None,
     ) -> dict[str, Any]:
         """Request cancellation for a queued or running reindex job."""
         summary = self._call(
-            self._cancel_db(job_id, workspace_id, visible_to)
+            self._cancel_db(job_id, workspace_id, visible_to, actor_user_id)
         )
         with self._lock:
             local = self._local.get(job_id)
@@ -442,19 +469,119 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
 
     # -- async database operations ---------------------------------------- #
 
+    async def _has_active_job_db(self, collection_id: str) -> bool:
+        async with self._session(DEFAULT_TENANT) as session:
+            active = await session.scalar(
+                select(indexing_jobs.c.job_id)
+                .where(
+                    indexing_jobs.c.collection_id == collection_id,
+                    indexing_jobs.c.status.in_(_ACTIVE_VALUES),
+                )
+                .limit(1)
+            )
+            return active is not None
+
+    async def _lock_collection_access_for_job(
+        self,
+        session: "AsyncSession",
+        *,
+        job_id: str,
+        actor_user_id: uuid.UUID | None = None,
+    ) -> tuple[Any, LockedResourceAccess] | None:
+        """Lock parent collection access, then the immutable job pointer."""
+        pointer = (
+            await session.execute(
+                select(
+                    indexing_jobs.c.collection_id,
+                    indexing_jobs.c.created_by_user_id,
+                ).where(indexing_jobs.c.job_id == job_id)
+            )
+        ).first()
+        if pointer is None:
+            return None
+        effective_actor = (
+            actor_user_id
+            if actor_user_id is not None
+            else pointer.created_by_user_id
+        )
+        access = await lock_resource_access(
+            session,
+            tenant_id=DEFAULT_TENANT,
+            actor_user_id=effective_actor,
+            resource_type="knowledge_collection",
+            resource_table=knowledge_collections,
+            id_column=knowledge_collections.c.id,
+            resource_id=pointer.collection_id,
+            owner_column=knowledge_collections.c.created_by_user_id,
+            minimum=SharePermission.EDIT,
+            restrict_to_workspace_members=self._restrict_to_workspace_members,
+        )
+        if access is None:
+            return None
+        row = (
+            await session.execute(
+                select(indexing_jobs)
+                .where(indexing_jobs.c.job_id == job_id)
+                .with_for_update()
+            )
+        ).mappings().first()
+        if row is None or row["collection_id"] != pointer.collection_id:
+            return None
+        return row, access
+
+    async def _append_collection_effects(
+        self,
+        session: "AsyncSession",
+        *,
+        row: Any,
+        access: LockedResourceAccess,
+        action: str,
+        actor_user_id: uuid.UUID | None = None,
+    ) -> None:
+        """Invalidate the parent collection views in the same transaction."""
+        await append_resource_effects(
+            session,
+            tenant_id=row["tenant_id"],
+            actor_user_id=(
+                actor_user_id
+                if actor_user_id is not None
+                else row["created_by_user_id"]
+            ),
+            owner_user_id=access.owner_user_id,
+            action=action,
+            resource_type="knowledge_collection",
+            resource_id=row["collection_id"],
+            scope="indexing",
+        )
+
     async def _submit_db(self, **fields: Any) -> dict[str, Any]:
         async with self._session(DEFAULT_TENANT) as session:
             await self._cleanup_db(session)
+            collection_id = fields["collection_id"]
+            access = await lock_resource_access(
+                session,
+                tenant_id=DEFAULT_TENANT,
+                actor_user_id=fields["created_by_user_id"],
+                resource_type="knowledge_collection",
+                resource_table=knowledge_collections,
+                id_column=knowledge_collections.c.id,
+                resource_id=collection_id,
+                owner_column=knowledge_collections.c.created_by_user_id,
+                minimum=SharePermission.EDIT,
+                restrict_to_workspace_members=self._restrict_to_workspace_members,
+            )
+            if access is None:
+                raise CollectionNotFound(collection_id)
             active = await session.scalar(
                 select(func.count())
                 .select_from(indexing_jobs)
                 .where(
-                    indexing_jobs.c.collection_id == fields["collection_id"],
+                    indexing_jobs.c.collection_id == collection_id,
                     indexing_jobs.c.status.in_(_ACTIVE_VALUES),
                 )
             )
             if active:
-                raise IndexingJobConflict(fields["collection_id"])
+                raise IndexingJobConflict(collection_id)
             queued = await session.scalar(
                 select(func.count())
                 .select_from(indexing_jobs)
@@ -466,7 +593,12 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 select(func.count())
                 .select_from(indexing_jobs)
                 .where(
-                    indexing_jobs.c.status == IndexingJobStatus.RUNNING.value
+                    indexing_jobs.c.status.in_(
+                        (
+                            IndexingJobStatus.RUNNING.value,
+                            IndexingJobStatus.CANCELLING.value,
+                        )
+                    )
                 )
             )
             if (
@@ -495,6 +627,12 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 {"status": "queued", "queue_position": position},
             )
             row = await self._row_db(session, job_id)
+            await self._append_collection_effects(
+                session,
+                row=row,
+                access=access,
+                action="indexing.submitted",
+            )
             return await self._row_summary(session, row)
 
     async def _insert_with_unique_id(
@@ -513,7 +651,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                     embedding_model=fields["embedding_model"],
                     index_id=fields["index_id"],
                     workspace_id=fields["workspace_id"],
-                    created_by_sub=fields["created_by_sub"],
+                    created_by_user_id=fields["created_by_user_id"],
                     created_by_tenant_id=fields["created_by_tenant_id"],
                     created_at=created_at,
                 )
@@ -573,9 +711,9 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 raise IndexingJobNotFound(job_id)
             return row
         log.warning(
-            "authz denied: reindex job %s hidden from sub=%s tenant=%s",
+            "authz denied: reindex job %s hidden from user_id=%s tenant=%s",
             job_id,
-            visible_to.principal.sub if visible_to else "",
+            visible_to.principal.user_id if visible_to else "",
             visible_to.principal.tenant_id if visible_to else "",
         )
         raise IndexingJobNotFound(job_id)
@@ -610,7 +748,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 )
             if visible_to is not None:
                 query = query.where(
-                    indexing_jobs.c.created_by_sub == visible_to.principal.sub,
+                    indexing_jobs.c.created_by_user_id == visible_to.principal.user_id,
                     indexing_jobs.c.created_by_tenant_id
                     == visible_to.principal.tenant_id,
                 )
@@ -630,12 +768,24 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         job_id: str,
         workspace_id: str | None,
         visible_to: "UserContext | None",
+        actor_user_id: uuid.UUID | None,
     ) -> dict[str, Any]:
         async with self._session(DEFAULT_TENANT) as session:
             await self._cleanup_db(session)
-            row = await self._visible_row_db(
-                session, job_id, workspace_id, visible_to
+            locked = await self._lock_collection_access_for_job(
+                session,
+                job_id=job_id,
+                actor_user_id=actor_user_id,
             )
+            if locked is None:
+                raise IndexingJobNotFound(job_id)
+            row, access = locked
+            if not _workspace_matches_row(row, workspace_id):
+                raise IndexingJobNotFound(job_id)
+            if visible_to is not None and actor_user_id is None and not _visible_row(
+                row, visible_to
+            ):
+                raise IndexingJobNotFound(job_id)
             status = row["status"]
             if status == IndexingJobStatus.QUEUED.value:
                 cancelled = (
@@ -668,6 +818,13 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                             ),
                         },
                     )
+                    await self._append_collection_effects(
+                        session,
+                        row=await self._row_db(session, job_id),
+                        access=access,
+                        action="indexing.cancelled",
+                        actor_user_id=actor_user_id,
+                    )
                 else:
                     # Lost the CAS to a concurrent claim: the job runs
                     # now — degrade to the two-phase cancel request.
@@ -681,7 +838,10 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                             indexing_jobs.c.status
                             == IndexingJobStatus.RUNNING.value,
                         )
-                        .values(cancel_requested=True)
+                        .values(
+                            status=IndexingJobStatus.CANCELLING.value,
+                            cancel_requested=True,
+                        )
                         .returning(indexing_jobs.c.job_id)
                     )
                 ).scalar_one_or_none()
@@ -692,9 +852,16 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                         row["tenant_id"],
                         "inqtrix.index.cancel_requested",
                         {
-                            "status": "running",
+                            "status": "cancelling",
                             "reason": "client_requested_cancel",
                         },
+                    )
+                    await self._append_collection_effects(
+                        session,
+                        row=await self._row_db(session, job_id),
+                        access=access,
+                        action="indexing.cancel_requested",
+                        actor_user_id=actor_user_id,
                     )
             fresh = await self._row_db(session, job_id)
             return await self._row_summary(session, fresh)
@@ -816,6 +983,14 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         fence_attempt: int | None = None,
     ) -> None:
         async with self._session(DEFAULT_TENANT) as session:
+            locked = await self._lock_collection_access_for_job(
+                session, job_id=job_id
+            )
+            if locked is None:
+                raise AuthorizationRevoked(
+                    "reindex requester lost collection edit access"
+                )
+            _job, _access = locked
             if not await self._fence_ok(session, job_id, fence_attempt):
                 return
             values: dict[str, Any] = {}
@@ -855,6 +1030,14 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         fence_attempt: int | None = None,
     ) -> None:
         async with self._session(DEFAULT_TENANT) as session:
+            locked = await self._lock_collection_access_for_job(
+                session, job_id=job_id
+            )
+            if locked is None:
+                raise AuthorizationRevoked(
+                    "reindex requester lost collection edit access"
+                )
+            _job, _access = locked
             if not await self._fence_ok(session, job_id, fence_attempt):
                 return
             # A standalone event (no column write); guard against a late event
@@ -890,8 +1073,34 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         warn_on_noop: bool = True,
     ) -> bool:
         async with self._session(DEFAULT_TENANT) as session:
+            locked = await self._lock_collection_access_for_job(
+                session, job_id=job_id
+            )
+            if locked is None:
+                return await self._terminalize_revoked_job_db(
+                    session,
+                    job_id=job_id,
+                    fence_attempt=fence_attempt,
+                )
+            _locked_row, access = locked
             values: dict[str, Any] = {
-                "status": status.value,
+                "status": (
+                    case(
+                        (
+                            (
+                                indexing_jobs.c.cancel_requested.is_(True)
+                                | (
+                                    indexing_jobs.c.status
+                                    == IndexingJobStatus.CANCELLING.value
+                                )
+                            ),
+                            IndexingJobStatus.CANCELLED.value,
+                        ),
+                        else_=IndexingJobStatus.COMPLETED.value,
+                    )
+                    if status == IndexingJobStatus.COMPLETED
+                    else status.value
+                ),
                 "finished_at": time.time(),
             }
             if error is not None:
@@ -927,6 +1136,15 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                     )
                 return False
             row = await self._row_db(session, job_id)
+            if (
+                status == IndexingJobStatus.COMPLETED
+                and row["status"] == IndexingJobStatus.CANCELLED.value
+            ):
+                event_type = "inqtrix.index.cancelled"
+                extra = {
+                    "status": "cancelled",
+                    "reason": "client_requested_cancel",
+                }
             await self._append_events_db(
                 session,
                 job_id,
@@ -934,15 +1152,112 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 event_type,
                 {**extra, "snapshot": _snapshot_from_row(row)},
             )
+            await self._append_collection_effects(
+                session,
+                row=row,
+                access=access,
+                action=f"indexing.{row['status']}",
+            )
             return True
+
+    async def _terminalize_revoked_job_db(
+        self,
+        session: "AsyncSession",
+        *,
+        job_id: str,
+        fence_attempt: int | None,
+    ) -> bool:
+        """Fail a job whose requester lost collection edit authority."""
+        error = {
+            "message": "Collection authorization was revoked during reindexing.",
+            "type": "authorization_revoked",
+        }
+        query = (
+            update(indexing_jobs)
+            .where(
+                indexing_jobs.c.job_id == job_id,
+                indexing_jobs.c.status.notin_(_TERMINAL_VALUES),
+            )
+            .values(
+                status=IndexingJobStatus.FAILED.value,
+                finished_at=time.time(),
+                current_document_title="",
+                error=error,
+            )
+            .returning(
+                indexing_jobs.c.tenant_id,
+                indexing_jobs.c.collection_id,
+                indexing_jobs.c.created_by_user_id,
+            )
+        )
+        if fence_attempt is not None:
+            query = query.where(
+                indexing_jobs.c.claimed_by == self._worker_id,
+                indexing_jobs.c.attempt == fence_attempt,
+            )
+        landed = (await session.execute(query)).first()
+        if landed is None:
+            return False
+        row = await self._row_db(session, job_id)
+        await self._append_events_db(
+            session,
+            job_id,
+            landed.tenant_id,
+            "inqtrix.index.failed",
+            {
+                "status": "failed",
+                "error": error,
+                "snapshot": _snapshot_from_row(row),
+            },
+        )
+        owner_user_id = (
+            await session.execute(
+                select(knowledge_collections.c.created_by_user_id).where(
+                    knowledge_collections.c.tenant_id == landed.tenant_id,
+                    knowledge_collections.c.id == landed.collection_id,
+                )
+            )
+        ).scalar_one_or_none()
+        requester_targets = (
+            (landed.created_by_user_id,)
+            if landed.created_by_user_id is not None
+            else ()
+        )
+        await append_resource_effects(
+            session,
+            tenant_id=landed.tenant_id,
+            actor_user_id=landed.created_by_user_id,
+            owner_user_id=owner_user_id,
+            action="indexing.authorization_revoked",
+            resource_type="knowledge_collection",
+            resource_id=landed.collection_id,
+            scope="indexing",
+            additional_targets=requester_targets,
+        )
+        return True
 
     async def _claim_db(
         self, job_id: str, tenant_id: str, *, allow_takeover: bool
     ) -> ClaimedIndexingJob | None:
         async with self._session(tenant_id) as session:
+            locked = await self._lock_collection_access_for_job(
+                session, job_id=job_id
+            )
+            if locked is None:
+                await self._terminalize_revoked_job_db(
+                    session,
+                    job_id=job_id,
+                    fence_attempt=None,
+                )
+                return None
             allowed = [IndexingJobStatus.QUEUED.value]
             if allow_takeover:
-                allowed.append(IndexingJobStatus.RUNNING.value)
+                allowed.extend(
+                    (
+                        IndexingJobStatus.RUNNING.value,
+                        IndexingJobStatus.CANCELLING.value,
+                    )
+                )
             row = (
                 await session.execute(
                     update(indexing_jobs)
@@ -951,7 +1266,13 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                         indexing_jobs.c.status.in_(allowed),
                     )
                     .values(
-                        status=IndexingJobStatus.RUNNING.value,
+                        status=case(
+                            (
+                                indexing_jobs.c.cancel_requested.is_(True),
+                                IndexingJobStatus.CANCELLING.value,
+                            ),
+                            else_=IndexingJobStatus.RUNNING.value,
+                        ),
                         claimed_by=self._worker_id,
                         attempt=indexing_jobs.c.attempt + 1,
                         started_at=time.time(),
@@ -960,8 +1281,9 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                         indexing_jobs.c.attempt,
                         indexing_jobs.c.collection_id,
                         indexing_jobs.c.embedding_model,
-                        indexing_jobs.c.created_by_sub,
+                        indexing_jobs.c.created_by_user_id,
                         indexing_jobs.c.created_by_tenant_id,
+                        indexing_jobs.c.cancel_requested,
                     )
                 )
             ).first()
@@ -973,7 +1295,10 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 job_id,
                 tenant_id,
                 "inqtrix.index.started",
-                {"status": "running", "snapshot": _snapshot_from_row(started_row)},
+                {
+                    "status": started_row["status"],
+                    "snapshot": _snapshot_from_row(started_row),
+                },
             )
             return ClaimedIndexingJob(
                 job_id=job_id,
@@ -981,8 +1306,9 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 attempt=int(row[0]),
                 collection_id=row[1],
                 embedding_model=row[2],
-                created_by_sub=row[3],
+                created_by_user_id=row[3],
                 created_by_tenant_id=row[4],
+                cancel_requested=bool(row[5]),
             )
 
     async def _cancel_requested_db(self, job_ids: dict[str, str]) -> set[str]:
@@ -1018,111 +1344,308 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
             return [(row[0], row[1]) for row in rows]
 
     async def _cleanup_db(self, session: "AsyncSession") -> None:
-        if self._sweep_orphans:
-            self._sweep_orphans = False
-            await self._recover_orphans_db(session)
-        await session.execute(
-            delete(indexing_jobs).where(
-                indexing_jobs.c.status.in_(_TERMINAL_VALUES),
-                indexing_jobs.c.finished_at.isnot(None),
-                indexing_jobs.c.finished_at
-                < time.time() - self._completed_ttl_seconds,
-            )
-        )
-        await self._enforce_history_cap_db(session)
-        stuck = (
-            (
-                await session.execute(
-                    delete(indexing_jobs)
-                    .where(
-                        indexing_jobs.c.status.notin_(_TERMINAL_VALUES),
-                        indexing_jobs.c.created_at
-                        < time.time() - _STUCK_ROW_MAX_AGE_SECONDS,
-                    )
-                    .returning(indexing_jobs.c.job_id)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        if stuck:
-            log.warning(
-                "%d Reindex-Job-Zeilen nach %d Tagen ohne Abschluss "
-                "geloescht: %s",
-                len(stuck),
-                int(_STUCK_ROW_MAX_AGE_SECONDS // 86_400),
-                ", ".join(stuck[:5]),
-            )
+        """Apply recovery and retention through one locked lifecycle path.
 
-    async def _enforce_history_cap_db(self, session: "AsyncSession") -> None:
-        """Delete terminal jobs beyond the per-collection history cap.
-
-        Newest-first by ``finished_at`` (created_at fallback), exactly
-        like the in-memory store's ``_beyond_history_locked``; the
-        partition is per collection.
+        Collection rows are locked in canonical order before any job row.
+        This is the same collection-to-job order used by normal lifecycle
+        writes, so cleanup cannot deadlock with a claim, progress write, or
+        terminal transition. Active rows are failed rather than deleted;
+        terminal history is invalidated and audited before deletion.
         """
-        ranked = (
-            select(
-                indexing_jobs.c.job_id,
-                func.row_number()
-                .over(
-                    partition_by=indexing_jobs.c.collection_id,
-                    order_by=func.coalesce(
+        now = time.time()
+        recover_orphans = self._sweep_orphans
+        recovery_rows = []
+        if recover_orphans:
+            recovery_rows = (
+                await session.execute(
+                    select(
+                        indexing_jobs.c.job_id,
+                        indexing_jobs.c.collection_id,
+                    ).where(indexing_jobs.c.status.in_(_ACTIVE_VALUES))
+                )
+            ).all()
+        recovery_ids = {row.job_id for row in recovery_rows}
+
+        candidate_rows = await self._retention_candidate_rows_db(
+            session,
+            now=now,
+        )
+        history_rows = await self._history_overflow_rows_db(session)
+        candidate_pairs = {
+            (row.job_id, row.collection_id)
+            for row in (*recovery_rows, *candidate_rows, *history_rows)
+        }
+        if not candidate_pairs:
+            if recover_orphans:
+                self._sweep_orphans = False
+            return
+
+        collection_ids = tuple(
+            sorted({collection_id for _job_id, collection_id in candidate_pairs})
+        )
+        locked_collections = (
+            await session.execute(
+                select(
+                    knowledge_collections.c.id,
+                    knowledge_collections.c.created_by_user_id,
+                )
+                .where(
+                    knowledge_collections.c.tenant_id == DEFAULT_TENANT,
+                    knowledge_collections.c.id.in_(collection_ids),
+                )
+                .order_by(knowledge_collections.c.id)
+                .with_for_update()
+            )
+        ).all()
+        owner_by_collection = {
+            row.id: row.created_by_user_id for row in locked_collections
+        }
+
+        # Re-evaluate ordinary retention after the collection locks land.
+        # Recovery deliberately keeps its initial id snapshot: jobs accepted
+        # concurrently by this new process are not previous-process orphans.
+        candidate_rows = await self._retention_candidate_rows_db(
+            session,
+            now=now,
+            collection_ids=collection_ids,
+        )
+        history_rows = await self._history_overflow_rows_db(
+            session,
+            collection_ids=collection_ids,
+        )
+        history_ids = {row.job_id for row in history_rows}
+        job_ids = tuple(
+            sorted(
+                recovery_ids
+                | {row.job_id for row in candidate_rows}
+                | history_ids
+            )
+        )
+        locked_jobs = (
+            await session.execute(
+                select(indexing_jobs)
+                .where(indexing_jobs.c.job_id.in_(job_ids))
+                .order_by(indexing_jobs.c.job_id)
+                .with_for_update()
+            )
+        ).mappings().all()
+
+        terminal_cutoff = now - self._completed_ttl_seconds
+        stuck_cutoff = now - _STUCK_ROW_MAX_AGE_SECONDS
+        for row in locked_jobs:
+            action = self._maintenance_action_for_row(
+                row,
+                recovery_ids=recovery_ids,
+                history_ids=history_ids,
+                terminal_cutoff=terminal_cutoff,
+                stuck_cutoff=stuck_cutoff,
+            )
+            if action is None:
+                continue
+            await self._apply_maintenance_action_db(
+                session,
+                row=row,
+                owner_user_id=owner_by_collection.get(row["collection_id"]),
+                action=action,
+                now=now,
+            )
+        if recover_orphans:
+            # Retry on the next transaction if any recovery mutation above
+            # raises and rolls this transaction back.
+            self._sweep_orphans = False
+
+    async def _retention_candidate_rows_db(
+        self,
+        session: "AsyncSession",
+        *,
+        now: float,
+        collection_ids: tuple[str, ...] | None = None,
+    ) -> list[Any]:
+        """Return TTL-expired or non-terminal timeout candidates."""
+        terminal_expired = (
+            indexing_jobs.c.status.in_(_TERMINAL_VALUES)
+            & indexing_jobs.c.finished_at.isnot(None)
+            & (
+                indexing_jobs.c.finished_at
+                < now - self._completed_ttl_seconds
+            )
+        )
+        active_stuck = (
+            indexing_jobs.c.status.notin_(_TERMINAL_VALUES)
+            & (
+                indexing_jobs.c.created_at
+                < now - _STUCK_ROW_MAX_AGE_SECONDS
+            )
+        )
+        statement = select(
+            indexing_jobs.c.job_id,
+            indexing_jobs.c.collection_id,
+        ).where(terminal_expired | active_stuck)
+        if collection_ids is not None:
+            statement = statement.where(
+                indexing_jobs.c.collection_id.in_(collection_ids)
+            )
+        return (await session.execute(statement)).all()
+
+    async def _history_overflow_rows_db(
+        self,
+        session: "AsyncSession",
+        *,
+        collection_ids: tuple[str, ...] | None = None,
+    ) -> list[Any]:
+        """Return terminal jobs beyond the per-collection history cap."""
+        ranked_statement = select(
+            indexing_jobs.c.job_id,
+            indexing_jobs.c.collection_id,
+            func.row_number()
+            .over(
+                partition_by=indexing_jobs.c.collection_id,
+                order_by=(
+                    func.coalesce(
                         indexing_jobs.c.finished_at,
                         indexing_jobs.c.created_at,
                     ).desc(),
-                )
-                .label("rn"),
+                    indexing_jobs.c.job_id.desc(),
+                ),
             )
-            .where(indexing_jobs.c.status.in_(_TERMINAL_VALUES))
-            .subquery()
-        )
-        doomed = select(ranked.c.job_id).where(ranked.c.rn > self._history_limit)
-        await session.execute(
-            delete(indexing_jobs).where(indexing_jobs.c.job_id.in_(doomed))
-        )
-
-    async def _recover_orphans_db(self, session: "AsyncSession") -> None:
-        """Fail queued/running rows left behind by a previous process.
-
-        Only meaningful in no-queue mode: in-process execution cannot
-        survive a restart (the work closures are gone). Queue mode never
-        sweeps — workers own those rows.
-        """
-        error = {
-            "message": "Ein Server-Neustart hat die Indizierung unterbrochen.",
-            "type": "server_restarted",
-        }
-        rows = (
+            .label("rn"),
+        ).where(indexing_jobs.c.status.in_(_TERMINAL_VALUES))
+        if collection_ids is not None:
+            ranked_statement = ranked_statement.where(
+                indexing_jobs.c.collection_id.in_(collection_ids)
+            )
+        ranked = ranked_statement.subquery()
+        return (
             await session.execute(
-                update(indexing_jobs)
-                .where(indexing_jobs.c.status.in_(_ACTIVE_VALUES))
-                .values(
-                    status=IndexingJobStatus.FAILED.value,
-                    finished_at=time.time(),
-                    error=error,
+                select(ranked.c.job_id, ranked.c.collection_id).where(
+                    ranked.c.rn > self._history_limit
                 )
-                .returning(indexing_jobs.c.job_id, indexing_jobs.c.tenant_id)
             )
         ).all()
-        for job_id, tenant_id in rows:
-            log.warning(
-                "Verwaister Reindex-Job %s nach Neustart als "
-                "fehlgeschlagen markiert.",
-                job_id,
+
+    @staticmethod
+    def _maintenance_action_for_row(
+        row: Any,
+        *,
+        recovery_ids: set[str],
+        history_ids: set[str],
+        terminal_cutoff: float,
+        stuck_cutoff: float,
+    ) -> _MaintenanceAction | None:
+        """Choose one mutation after all lifecycle locks have landed."""
+        status = row["status"]
+        job_id = row["job_id"]
+        if job_id in recovery_ids and status in _ACTIVE_VALUES:
+            return _MaintenanceAction(
+                action="indexing.server_restarted",
+                error={
+                    "message": (
+                        "Ein Server-Neustart hat die Indizierung unterbrochen."
+                    ),
+                    "type": "server_restarted",
+                },
             )
-            recovered = await self._row_db(session, job_id)
+        if (
+            status not in _TERMINAL_VALUES
+            and row["created_at"] < stuck_cutoff
+        ):
+            return _MaintenanceAction(
+                action="indexing.stuck_timeout",
+                error={
+                    "message": (
+                        "The reindex job exceeded the maximum lifecycle age."
+                    ),
+                    "type": "stuck_job_timeout",
+                },
+                request_cancel=True,
+            )
+        if (
+            status in _TERMINAL_VALUES
+            and row["finished_at"] is not None
+            and row["finished_at"] < terminal_cutoff
+        ):
+            return _MaintenanceAction(action="indexing.retention_deleted")
+        if status in _TERMINAL_VALUES and job_id in history_ids:
+            return _MaintenanceAction(action="indexing.history_evicted")
+        return None
+
+    async def _apply_maintenance_action_db(
+        self,
+        session: "AsyncSession",
+        *,
+        row: Any,
+        owner_user_id: uuid.UUID | None,
+        action: _MaintenanceAction,
+        now: float,
+    ) -> None:
+        """Apply one audited terminalization or deletion atomically."""
+        if action.error is not None:
+            values: dict[str, Any] = {
+                "status": IndexingJobStatus.FAILED.value,
+                "finished_at": now,
+                "current_document_title": "",
+                "error": action.error,
+            }
+            if action.request_cancel:
+                values["cancel_requested"] = True
+            landed = (
+                await session.execute(
+                    update(indexing_jobs)
+                    .where(
+                        indexing_jobs.c.job_id == row["job_id"],
+                        indexing_jobs.c.status.notin_(_TERMINAL_VALUES),
+                    )
+                    .values(**values)
+                    .returning(indexing_jobs.c.job_id)
+                )
+            ).scalar_one_or_none()
+            if landed is None:
+                return
+            row = await self._row_db(session, row["job_id"])
             await self._append_events_db(
                 session,
-                job_id,
-                tenant_id,
+                row["job_id"],
+                row["tenant_id"],
                 "inqtrix.index.failed",
                 {
                     "status": "failed",
-                    "error": error,
-                    "snapshot": _snapshot_from_row(recovered),
+                    "error": action.error,
+                    "snapshot": _snapshot_from_row(row),
                 },
             )
+            if action.request_cancel:
+                with self._lock:
+                    local = self._local.get(row["job_id"])
+                    if local is not None:
+                        local.cancel_event.set()
+
+        requester_targets = (
+            (row["created_by_user_id"],)
+            if row["created_by_user_id"] is not None
+            else ()
+        )
+        await append_resource_effects(
+            session,
+            tenant_id=row["tenant_id"],
+            actor_user_id=None,
+            owner_user_id=owner_user_id,
+            action=action.action,
+            resource_type="knowledge_collection",
+            resource_id=row["collection_id"],
+            scope="indexing",
+            additional_targets=requester_targets,
+        )
+        if action.error is None:
+            await session.execute(
+                delete(indexing_jobs).where(
+                    indexing_jobs.c.job_id == row["job_id"]
+                )
+            )
+        log.warning(
+            "Reindex lifecycle maintenance applied %s to job %s.",
+            action.action,
+            row["job_id"],
+        )
 
 
 def _record_from_row(row: Any) -> IndexingJobRecord:
@@ -1141,7 +1664,7 @@ def _record_from_row(row: Any) -> IndexingJobRecord:
         created_at=row["created_at"],
         index_id=row["index_id"],
         workspace_id=row["workspace_id"],
-        created_by_sub=row["created_by_sub"],
+        created_by_user_id=row["created_by_user_id"],
         created_by_tenant_id=row["created_by_tenant_id"],
         status=IndexingJobStatus(row["status"]),
         started_at=row["started_at"],
@@ -1168,7 +1691,7 @@ def _visible_row(row: Any, visible_to: "UserContext | None") -> bool:
     if visible_to is None:
         return True
     return (
-        row["created_by_sub"] is not None
-        and row["created_by_sub"] == visible_to.principal.sub
+        row["created_by_user_id"] is not None
+        and row["created_by_user_id"] == visible_to.principal.user_id
         and row["created_by_tenant_id"] == visible_to.principal.tenant_id
     )

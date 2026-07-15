@@ -14,8 +14,15 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+from inqtrix.auth.permissions import SharePermission
+
+if TYPE_CHECKING:
+    from inqtrix.auth.memory_authority import MemoryAuthorityCoordinator
 
 SKILL_DELIVERABLES = ("", "chat", "canvas", "email", "talking_points")
 """Output-form hint the skill pins ('' = the agent decides). ``email``
@@ -58,13 +65,14 @@ class SkillNotFound(KeyError):
 
 
 class SkillConflict(RuntimeError):
-    """Raised when an optimistic-concurrency precondition fails.
+    """Raised when a mandatory integer revision is stale."""
 
-    Same contract as the prompt-template conflict: a caller passing the
-    ``updated_at`` it loaded asserts "overwrite only if nothing changed
-    since"; a mismatch answers HTTP 409 instead of silently clobbering
-    the intervening edit.
-    """
+    def __init__(self, skill_id: str, current_revision: int) -> None:
+        self.skill_id = skill_id
+        self.current_revision = current_revision
+        super().__init__(
+            f"skill {skill_id} is at revision {current_revision}"
+        )
 
 
 @dataclass(frozen=True)
@@ -74,8 +82,8 @@ class SkillRecord:
     Attributes:
         id: Server-assigned stable identifier (``sk_...``).
         tenant_id: Tenant scope (v1 runs one tenant per deployment).
-        owner_sub: Creating OIDC subject; ``None`` = open skill
-            (anonymous/static creators), visible and editable for all.
+        owner_user_id: Canonical creating user UUID; ``None`` means an
+            ownerless record in an unscoped deployment.
         label: The ``/``-mention token (``[a-z0-9-]``, unique per user
             surface by convention, not enforced).
         title: Display title in the skill library.
@@ -104,13 +112,13 @@ class SkillRecord:
             the routing layer accepts.
         include_in_autocomplete: Whether the ``/``-menu offers it.
         created_at: Unix timestamp of creation.
-        updated_at: Unix timestamp of the last write; also the
-            optimistic-concurrency anchor (:class:`SkillConflict`).
+        revision: Monotonic compare-and-swap version, starting at one.
+        updated_at: Unix timestamp of the last write, used for display only.
     """
 
     id: str
     tenant_id: str
-    owner_sub: str | None
+    owner_user_id: uuid.UUID | None
     label: str
     title: str
     description: str = ""
@@ -125,6 +133,7 @@ class SkillRecord:
     model_tier: str = ""
     effort: str = ""
     include_in_autocomplete: bool = True
+    revision: int = 1
     created_at: float = 0.0
     updated_at: float = 0.0
 
@@ -145,10 +154,17 @@ class SkillRepository(Protocol):
         self,
         record: SkillRecord,
         *,
-        expected_updated_at: float | None = None,
+        expected_revision: int,
+        actor_user_id: uuid.UUID | None,
     ) -> SkillRecord: ...
 
-    async def delete(self, skill_id: str, *, tenant_id: str) -> None: ...
+    async def delete(
+        self,
+        skill_id: str,
+        *,
+        tenant_id: str,
+        actor_user_id: uuid.UUID | None,
+    ) -> None: ...
 
 
 def new_skill_id() -> str:
@@ -162,11 +178,86 @@ class MemorySkillRepository:
     def __init__(self) -> None:
         self._records: dict[str, SkillRecord] = {}
         self._lock = threading.RLock()
+        self._authority: MemoryAuthorityCoordinator | None = None
+
+    @property
+    def atomic_resource_effects(self) -> bool:
+        """Whether writes include audit and invalidations under one lock."""
+        return self._authority is not None
+
+    def bind_authority_coordinator(
+        self, coordinator: "MemoryAuthorityCoordinator"
+    ) -> None:
+        """Join the process-wide memory authority and register ownership."""
+        self._authority = coordinator
+        self._lock = coordinator.lock
+        coordinator.register_resource("skill_template", self._resource_snapshot)
+
+    def _resource_snapshot(self, tenant_id: str, skill_id: str):
+        """Return existence and owner while the shared lock is held."""
+        from inqtrix.auth.memory_authority import MemoryResourceSnapshot
+
+        record = self._records.get(skill_id)
+        return MemoryResourceSnapshot(
+            exists=record is not None and record.tenant_id == tenant_id,
+            owner_user_id=(
+                record.owner_user_id
+                if record is not None and record.tenant_id == tenant_id
+                else None
+            ),
+        )
+
+    @contextmanager
+    def _mutation_guard(
+        self,
+        record: SkillRecord,
+        *,
+        actor_user_id: uuid.UUID | None,
+        owner_only: bool = False,
+    ) -> Iterator[None]:
+        """Hold final live authority across one repository mutation."""
+        if self._authority is None:
+            yield
+            return
+        from inqtrix.execution_authority import AuthorizationRevoked
+
+        try:
+            with self._authority.resource_access_guard(
+                tenant_id=record.tenant_id,
+                owner_user_id=record.owner_user_id,
+                actor_user_id=actor_user_id,
+                resource_type="skill_template",
+                resource_id=record.id,
+                minimum=SharePermission.EDIT,
+                owner_only=owner_only,
+            ):
+                yield
+        except AuthorizationRevoked as exc:
+            raise SkillNotFound(record.id) from exc
 
     async def create(self, record: SkillRecord) -> SkillRecord:
         with self._lock:
-            self._records[record.id] = record
-            return record
+            guard = (
+                self._authority.creation_guard(
+                    tenant_id=record.tenant_id,
+                    actor_user_id=record.owner_user_id,
+                )
+                if self._authority is not None
+                else nullcontext()
+            )
+            with guard:
+                self._records[record.id] = record
+                if self._authority is not None:
+                    self._authority.append_resource_effects(
+                        tenant_id=record.tenant_id,
+                        actor_user_id=record.owner_user_id,
+                        owner_user_id=record.owner_user_id,
+                        action="skill_template.created",
+                        resource_type="skill_template",
+                        resource_id=record.id,
+                        scope="skills",
+                    )
+                return record
 
     async def get(self, skill_id: str, *, tenant_id: str) -> SkillRecord:
         with self._lock:
@@ -188,27 +279,62 @@ class MemorySkillRepository:
         self,
         record: SkillRecord,
         *,
-        expected_updated_at: float | None = None,
+        expected_revision: int,
+        actor_user_id: uuid.UUID | None,
     ) -> SkillRecord:
         with self._lock:
             current = self._records.get(record.id)
             if current is None or current.tenant_id != record.tenant_id:
                 raise SkillNotFound(record.id)
-            # Optimistic-concurrency guard under the same lock as the
-            # write, so the check-then-write is atomic. None =
-            # unconditional overwrite (legacy callers).
-            if (
-                expected_updated_at is not None
-                and current.updated_at != expected_updated_at
+            with self._mutation_guard(
+                current, actor_user_id=actor_user_id
             ):
-                raise SkillConflict(record.id)
-            stored = replace(record, updated_at=time.time())
-            self._records[record.id] = stored
-            return stored
+                if current.revision != expected_revision:
+                    raise SkillConflict(record.id, current.revision)
+                stored = replace(
+                    record,
+                    tenant_id=current.tenant_id,
+                    owner_user_id=current.owner_user_id,
+                    revision=current.revision + 1,
+                    updated_at=time.time(),
+                )
+                self._records[record.id] = stored
+                if self._authority is not None:
+                    self._authority.append_resource_effects(
+                        tenant_id=stored.tenant_id,
+                        actor_user_id=actor_user_id,
+                        owner_user_id=stored.owner_user_id,
+                        action="skill_template.updated",
+                        resource_type="skill_template",
+                        resource_id=stored.id,
+                        scope="skills",
+                    )
+                return stored
 
-    async def delete(self, skill_id: str, *, tenant_id: str) -> None:
+    async def delete(
+        self,
+        skill_id: str,
+        *,
+        tenant_id: str,
+        actor_user_id: uuid.UUID | None,
+    ) -> None:
         with self._lock:
             record = self._records.get(skill_id)
             if record is None or record.tenant_id != tenant_id:
                 raise SkillNotFound(skill_id)
-            del self._records[skill_id]
+            with self._mutation_guard(
+                record, actor_user_id=actor_user_id, owner_only=True
+            ):
+                if record.owner_user_id != actor_user_id:
+                    raise SkillNotFound(skill_id)
+                if self._authority is not None:
+                    self._authority.revoke_deleted_resource(
+                        tenant_id=record.tenant_id,
+                        actor_user_id=actor_user_id,
+                        owner_user_id=record.owner_user_id,
+                        action="skill_template.deleted",
+                        resource_type="skill_template",
+                        resource_id=record.id,
+                        scope="skills",
+                    )
+                del self._records[skill_id]

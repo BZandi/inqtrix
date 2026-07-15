@@ -1,6 +1,6 @@
 # Stack quickstart — 5 minutes to Research Desk
 
-> Files: `deploy/compose/compose.stack.yaml`, `deploy/.env.stack.example`, `deploy/docker/Dockerfile.api`, `deploy/docker/Dockerfile.web`
+> Files: `deploy/compose/compose.stack.yaml`, `deploy/.env.stack.example`, `deploy/docker/Dockerfile.api`, `deploy/docker/Dockerfile.web`, `deploy/docker/Dockerfile.collaboration`
 
 ## Scope
 
@@ -57,8 +57,10 @@ That minimum (secrets + one LLM + one search) gets you research + chat. The same
 |---|---|---|
 | Cited answers over your documents (RAG) | `INQTRIX_KNOWLEDGE_ENABLED`, `INQTRIX_VECTOR_BACKEND=qdrant`, `INQTRIX_QDRANT_*` | `--profile knowledge` |
 | Durable / scaled runs | `INQTRIX_QUEUE_BACKEND=valkey`, `INQTRIX_VALKEY_*` | `--profile workers` |
-| S3 object store (instead of the local volume) | `INQTRIX_OBJECT_STORE_BACKEND=s3` + S3 creds | `--profile s3` |
+| Bundled S3 object store (instead of the local volume) | the SeaweedFS static/path/create-if-missing block | `--profile s3` |
+| Managed/native S3 | the default-chain or external S3-compatible block; do not start bundled SeaweedFS | no S3 profile |
 | SSO login | the OIDC block + `INQTRIX_AUTH_MODE=oidc` | `--profile oidc` |
+| Live shared editor documents | `INQTRIX_COLLABORATION_ENABLED=true` + an independent 32+ character `INQTRIX_COLLABORATION_SECRET` | `--profile collaboration` |
 
 Which feature needs which component (and which is on by default) is the matrix in [Platform components](platform-components.md); the full variable list is [Settings and env](../configuration/settings-and-env.md).
 
@@ -71,7 +73,13 @@ docker compose -f deploy/compose/compose.stack.yaml \
   --env-file deploy/.env.stack up -d --build
 ```
 
-This builds the API and web images, starts Postgres, runs the schema migration once (the `migrate` service), then starts the API and the nginx web container. First build pulls images and installs dependencies, so it takes a few minutes; subsequent starts are fast.
+This builds the API and web images, starts Postgres, runs the schema migration
+once through the automatic `migrate` dependency, then starts the API and nginx
+web container. A normal install/update never requires a separate manual
+`inqtrix-migrate` command. Managed PostgreSQL can place its dedicated direct DSN
+in the optional migration-only env file; see [Database migrations](../deployment/database-migrations.md).
+First build pulls images and installs dependencies, so it takes a few minutes;
+subsequent starts are fast.
 
 ```bash
 docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack ps   # wait for healthy
@@ -79,7 +87,29 @@ docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack
 
 ## 3. Open
 
-Open <http://localhost:8080>. The browser talks to a single origin; nginx proxies `/api`, `/v1` and `/health` to the API container. Type a question into the composer — the research run streams live.
+Open <http://localhost:8080>. The browser talks to a single origin; nginx proxies `/api`, `/v1`, `/health`, and the optional `/collaboration` WebSocket to the API container. Type a question into the composer - the research run streams live.
+
+The web port binds to `127.0.0.1` by default. For a temporary multi-user test
+on a trusted local network, expose only the web ingress and open it through the
+host's LAN address:
+
+```bash
+INQTRIX_WEB_BIND_ADDRESS=0.0.0.0 \
+podman compose -f deploy/compose/compose.stack.yaml \
+  --env-file deploy/.env.azure.stack \
+  --profile knowledge --profile s3 --profile workers up -d --build
+
+# On another device: http://<HOST-LAN-IP>:8080
+```
+
+You can instead put `INQTRIX_WEB_BIND_ADDRESS=0.0.0.0` in the selected stack
+env file so the original command stays unchanged. Keep `api`, Postgres,
+Qdrant, Valkey, and the object store private; Compose publishes only nginx.
+Use `local`, `ldap`, or `oidc` auth for distinct users. Plain HTTP requires
+`INQTRIX_OIDC_INSECURE_DEV_COOKIES=true` for the cookie-session modes and is
+appropriate only on a trusted test LAN. For any broader or persistent rollout,
+keep the loopback bind and terminate TLS at a reverse proxy as described in
+[Deploy to production](../how-to/deploy-to-production.md).
 
 ## 4. Verify
 
@@ -113,9 +143,27 @@ The default stack is Postgres + API + web. Add capabilities with compose profile
 # Knowledge/RAG (Qdrant) and/or durable run workers (Valkey):
 docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack \
   --profile knowledge --profile workers up -d
+
+# Live editor collaboration (private single Node replica):
+docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack \
+  --profile collaboration up -d --build
 ```
 
 Which feature needs which component is the decision tree in [Platform components](platform-components.md). Day-to-day start/stop/update/backup commands are in [Runbooks](../deployment/runbooks.md).
+
+To attach an external/managed PostgreSQL instead of the bundled container
+(any PostgreSQL 15+ works, including pgvector-enabled images — the extension
+stays unused), add the `deploy/compose/compose.external-db.yaml` override and
+follow the "External PostgreSQL" block in `deploy/.env.stack.example`:
+
+```bash
+docker compose -f deploy/compose/compose.stack.yaml \
+  -f deploy/compose/compose.external-db.yaml \
+  --env-file deploy/.env.stack up -d --build
+```
+
+The migration contract (dedicated migration DSN, RLS mode) is described in
+[Database migrations](../deployment/database-migrations.md).
 
 Profiles and env switches must move together: the profile starts the backing
 container, while the env block tells the API to use it. If an env block such as
@@ -123,6 +171,11 @@ container, while the env block tells the API to use it. If an env block such as
 `INQTRIX_OBJECT_STORE_BACKEND=s3` is enabled without the matching profile or an
 external reachable service, `/v1/capabilities` degrades the affected feature and
 the admin System page marks the backend as not reachable.
+
+Collaboration is stricter: enabling its API flag without Postgres, cookie auth,
+private service URLs, or a valid independent secret fails FastAPI startup. The
+profile without the flag merely starts an unused private service. See
+[Deploy editor collaboration](../deployment/editor-collaboration.md).
 
 Enterprise SSO is the `oidc` profile (`--profile oidc`, `INQTRIX_AUTH_MODE=oidc`); it needs the `INQTRIX_OIDC_*` block in `deploy/.env.stack` and `INQTRIX_PUBLIC_BASE_URL=http://localhost:8080` so the callback URL is derived correctly. See [Auth modes](../deployment/auth-modes.md).
 
@@ -140,9 +193,11 @@ docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.azure
 - [Provider recipes](provider-recipes.md) — every LLM × search `.env` combination.
 - [Platform components](platform-components.md) — do you need Postgres / Qdrant / Valkey / S3? The decision tree + feature matrix.
 - [Runbooks](../deployment/runbooks.md) — start, stop, update, backup, restore, reset.
+- [Editor collaboration](../deployment/editor-collaboration.md) - optional service, security, and recovery.
 
 ## Related docs
 
 - [Overview](overview.md)
 - [First research run](first-research-run.md)
 - [Deployment modes](../deployment/deployment-modes.md)
+- [Editor collaboration](../deployment/editor-collaboration.md)

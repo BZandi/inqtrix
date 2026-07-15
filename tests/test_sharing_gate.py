@@ -19,7 +19,7 @@ from inqtrix.auth.api_key import (
     build_local_provider,
 )
 from inqtrix.auth.identity_memory import MemoryIdentityStore
-from inqtrix.auth.permissions import PermissionService
+from inqtrix.auth.permissions import AuthorizationService
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server.container import build_container
 from inqtrix.settings import AuthSettings, ServerSettings, Settings, StorageSettings
@@ -46,8 +46,8 @@ def _container(auth_provider):
         ),
         semaphore_factory=lambda: asyncio.Semaphore(1),
         auth_provider=auth_provider,
-        permissions=PermissionService(
-            members=identity, groups=identity, shares=identity, audit=identity
+        permissions=AuthorizationService(
+            members=identity, shares=identity, audit=identity
         ),
         workspace_admin=identity,
     )

@@ -1,5 +1,12 @@
 # Metrics (`/metrics`)
 
+## Scope
+
+This page describes the API Prometheus endpoint and the private metrics exposed
+by the optional editor collaboration service. It covers scrape boundaries and
+bounded-cardinality series, not alert thresholds or a complete monitoring
+stack.
+
 Inqtrix can expose a Prometheus scrape endpoint for the API process. It is
 **off by default** and mounts only when both are true:
 
@@ -53,6 +60,29 @@ bottleneck, `reason="per_user_limit"` means a single user is hitting
 biting. Pair the gauges (`queue_depth` vs `active`/`capacity`) with these to
 tell "saturated" apart from "throttling one noisy tenant".
 
+## Collaboration service metrics
+
+The optional Node service always exposes Prometheus text at its private
+`GET /metrics` endpoint. It is not routed through nginx or the public web
+Service and has no bearer gate of its own, so restrict scraping to the private
+service network. `INQTRIX_METRICS_ENABLED` controls the FastAPI endpoint only;
+it does not mount or unmount the sidecar endpoint.
+
+| Metric family | Meaning |
+|---|---|
+| `inqtrix_collaboration_active_connections`, `inqtrix_collaboration_rooms` | Current live transport and loaded-room counts. |
+| `inqtrix_collaboration_document_queue_depth` | Serialized work waiting for one document/generation. |
+| `inqtrix_collaboration_update_validation_seconds`, `inqtrix_collaboration_update_persistence_seconds`, `inqtrix_collaboration_durable_ack_seconds` | Validation, database commit, and end-to-end durable acknowledgement latency. |
+| `inqtrix_collaboration_rejections_total`, `inqtrix_collaboration_websocket_rejections_total`, `inqtrix_collaboration_http_rejections_total` | Bounded rejection reasons for document, transport, and internal HTTP policy. |
+| `inqtrix_collaboration_instance_ready`, `inqtrix_collaboration_instance_epoch`, `inqtrix_collaboration_instance_renew_failures_total` | Single-writer fencing state. Readiness becomes false when the active lease expires. |
+| `inqtrix_collaboration_internal_api_seconds`, `inqtrix_collaboration_internal_api_errors_total`, `inqtrix_collaboration_http_request_seconds`, `inqtrix_collaboration_http_requests_total` | Node-to-FastAPI and FastAPI-to-Node operation health. |
+| `inqtrix_collaboration_policy_poll_seconds`, `inqtrix_collaboration_policy_poll_errors_total`, `inqtrix_collaboration_policy_revalidations_total`, `inqtrix_collaboration_policy_revalidation_timeouts_total`, `inqtrix_collaboration_policy_resets_total` | Revocation-feed polling and connection revalidation. Alert on polling failures separately because readiness currently keys on the fencing lease. |
+| `inqtrix_collaboration_snapshots_total`, `inqtrix_collaboration_snapshot_errors_total`, `inqtrix_collaboration_compaction_runs_total`, `inqtrix_collaboration_compaction_pruned_total` | Snapshot and retention maintenance outcomes. |
+
+No series labels a user, room, document, token, comment, or update body. Use
+document metadata (`persisted_sequence` and `projection_sequence`) for targeted
+projection-lag diagnosis instead of adding document IDs to Prometheus.
+
 ## Readiness vs. liveness
 
 `/metrics` is for scraping, not health checks. Kubernetes probes use:
@@ -61,3 +91,14 @@ tell "saturated" apart from "throttling one noisy tenant".
 - `/readyz` — readiness: database `SELECT 1` and the queue `PING` must pass
   (503 when either is down); a dead vector store degrades to `200` with a
   `degraded` body, since research/chat/files still work.
+
+The collaboration process has separate private probes: `/health/live` means
+the Node process is running, while `/health/ready` additionally requires its
+active single-writer fencing lease.
+
+## Related docs
+
+- [Deploy editor collaboration](../deployment/editor-collaboration.md)
+- [Logging](logging.md)
+- [Security hardening](../deployment/security-hardening.md)
+- [Runbooks](../deployment/runbooks.md)

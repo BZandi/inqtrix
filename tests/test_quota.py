@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import uuid
 
 import pytest
 
 from inqtrix.quota.memory import MemoryQuotaStore
 from inqtrix.quota.models import (
-    DEFAULT_SUBJECT,
+    DEFAULT_USER_ID,
     STOCK_PERIOD,
     DimensionUsage,
     QuotaDimension,
@@ -27,6 +28,11 @@ from inqtrix.quota.models import (
 JUNE = dt.datetime(2026, 6, 13, 12, 0, tzinfo=dt.timezone.utc).timestamp()
 JULY = dt.datetime(2026, 7, 2, 9, 0, tzinfo=dt.timezone.utc).timestamp()
 DEC = dt.datetime(2026, 12, 20, 0, 0, tzinfo=dt.timezone.utc).timestamp()
+USER_1 = uuid.UUID("11111111-1111-4111-8111-111111111111")
+USER_2 = uuid.UUID("22222222-2222-4222-8222-222222222222")
+OWNER = uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+USER_USAGE = uuid.UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+USER_LIMIT = uuid.UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
 
 
 # ---------------------------------------------------------------------------
@@ -137,11 +143,11 @@ def store():
     return MemoryQuotaStore()
 
 
-def _add(store, sub, dim, period, amount):
+def _add(store, user_id: uuid.UUID, dim, period, amount):
     return asyncio.run(
         store.add_usage(
             tenant_id="default",
-            subject_sub=sub,
+            subject_user_id=user_id,
             dimension=dim,
             period_start=period,
             amount=amount,
@@ -149,11 +155,11 @@ def _add(store, sub, dim, period, amount):
     )
 
 
-def _read(store, subs, dims, now):
+def _read(store, user_ids: list[uuid.UUID], dims, now):
     return asyncio.run(
         store.read_usage(
             tenant_id="default",
-            subject_subs=subs,
+            subject_user_ids=user_ids,
             dimensions=dims,
             now=now,
         )
@@ -162,51 +168,51 @@ def _read(store, subs, dims, now):
 
 def test_increment_accumulates_within_a_window(store):
     june = current_period_start(JUNE)
-    assert _add(store, "u1", QuotaDimension.RUNS, june, 1) == 1
-    assert _add(store, "u1", QuotaDimension.RUNS, june, 1) == 2
-    usage = _read(store, ["u1"], [QuotaDimension.RUNS], JUNE)
-    assert usage["u1"][QuotaDimension.RUNS] == 2
+    assert _add(store, USER_1, QuotaDimension.RUNS, june, 1) == 1
+    assert _add(store, USER_1, QuotaDimension.RUNS, june, 1) == 2
+    usage = _read(store, [USER_1], [QuotaDimension.RUNS], JUNE)
+    assert usage[USER_1][QuotaDimension.RUNS] == 2
 
 
 def test_lazy_rollover_starts_next_month_at_zero(store):
     june = current_period_start(JUNE)
     july = current_period_start(JULY)
-    _add(store, "u1", QuotaDimension.RUNS, june, 5)
+    _add(store, USER_1, QuotaDimension.RUNS, june, 5)
     # July reads as 0 (the June counter belongs to a past window) without
     # being rewritten.
-    assert _read(store, ["u1"], [QuotaDimension.RUNS], JULY)["u1"][
+    assert _read(store, [USER_1], [QuotaDimension.RUNS], JULY)[USER_1][
         QuotaDimension.RUNS
     ] == 0
-    assert _add(store, "u1", QuotaDimension.RUNS, july, 1) == 1
+    assert _add(store, USER_1, QuotaDimension.RUNS, july, 1) == 1
     # June's history is untouched.
-    assert _read(store, ["u1"], [QuotaDimension.RUNS], JUNE)["u1"][
+    assert _read(store, [USER_1], [QuotaDimension.RUNS], JUNE)[USER_1][
         QuotaDimension.RUNS
     ] == 5
 
 
 def test_stock_release_clamps_at_zero_and_never_rolls(store):
-    _add(store, "u1", QuotaDimension.STORED_BYTES, STOCK_PERIOD, 1000)
-    assert _add(store, "u1", QuotaDimension.STORED_BYTES, STOCK_PERIOD, -400) == 600
+    _add(store, USER_1, QuotaDimension.STORED_BYTES, STOCK_PERIOD, 1000)
+    assert _add(store, USER_1, QuotaDimension.STORED_BYTES, STOCK_PERIOD, -400) == 600
     # Over-release clamps at 0, not negative.
-    assert _add(store, "u1", QuotaDimension.STORED_BYTES, STOCK_PERIOD, -5000) == 0
+    assert _add(store, USER_1, QuotaDimension.STORED_BYTES, STOCK_PERIOD, -5000) == 0
     # Stock ignores the calendar month entirely.
-    assert _read(store, ["u1"], [QuotaDimension.STORED_BYTES], JULY)["u1"][
+    assert _read(store, [USER_1], [QuotaDimension.STORED_BYTES], JULY)[USER_1][
         QuotaDimension.STORED_BYTES
     ] == 0
 
 
 def test_reset_zeroes_current_window(store):
     june = current_period_start(JUNE)
-    _add(store, "u1", QuotaDimension.RUNS, june, 200)
+    _add(store, USER_1, QuotaDimension.RUNS, june, 200)
     asyncio.run(
         store.reset_usage(
             tenant_id="default",
-            subject_sub="u1",
+            subject_user_id=USER_1,
             dimension=QuotaDimension.RUNS,
             now=JUNE,
         )
     )
-    assert _read(store, ["u1"], [QuotaDimension.RUNS], JUNE)["u1"][
+    assert _read(store, [USER_1], [QuotaDimension.RUNS], JUNE)[USER_1][
         QuotaDimension.RUNS
     ] == 0
 
@@ -217,7 +223,7 @@ def test_reset_rejects_stock_dimension(store):
         asyncio.run(
             store.reset_usage(
                 tenant_id="default",
-                subject_sub="u1",
+                subject_user_id=USER_1,
                 dimension=QuotaDimension.STORED_BYTES,
                 now=JUNE,
             )
@@ -228,79 +234,79 @@ def test_limits_roundtrip_and_clear(store):
     asyncio.run(
         store.set_limit(
             tenant_id="default",
-            subject_sub="u1",
+            subject_user_id=USER_1,
             dimension=QuotaDimension.RUNS,
             value=400,
-            set_by_sub="owner",
+            set_by_user_id=OWNER,
         )
     )
     asyncio.run(
         store.set_limit(
             tenant_id="default",
-            subject_sub=DEFAULT_SUBJECT,
+            subject_user_id=DEFAULT_USER_ID,
             dimension=QuotaDimension.RUNS,
             value=200,
-            set_by_sub="owner",
+            set_by_user_id=OWNER,
         )
     )
     limits = asyncio.run(
         store.get_limits(
             tenant_id="default",
-            subject_subs=["u1", DEFAULT_SUBJECT],
+            subject_user_ids=[USER_1, DEFAULT_USER_ID],
             dimensions=[QuotaDimension.RUNS],
         )
     )
-    assert limits["u1"][QuotaDimension.RUNS] == 400
-    assert limits[DEFAULT_SUBJECT][QuotaDimension.RUNS] == 200
+    assert limits[USER_1][QuotaDimension.RUNS] == 400
+    assert limits[DEFAULT_USER_ID][QuotaDimension.RUNS] == 200
 
     asyncio.run(
         store.clear_limit(
             tenant_id="default",
-            subject_sub="u1",
+            subject_user_id=USER_1,
             dimension=QuotaDimension.RUNS,
         )
     )
     after = asyncio.run(
         store.get_limits(
             tenant_id="default",
-            subject_subs=["u1"],
+            subject_user_ids=[USER_1],
             dimensions=[QuotaDimension.RUNS],
         )
     )
-    assert "u1" not in after
+    assert USER_1 not in after
 
 
 def test_usage_isolated_per_tenant_and_subject(store):
     june = current_period_start(JUNE)
-    _add(store, "u1", QuotaDimension.RUNS, june, 3)
-    usage = _read(store, ["u1", "u2"], [QuotaDimension.RUNS], JUNE)
-    assert usage["u1"][QuotaDimension.RUNS] == 3
-    assert usage["u2"][QuotaDimension.RUNS] == 0
+    _add(store, USER_1, QuotaDimension.RUNS, june, 3)
+    usage = _read(store, [USER_1, USER_2], [QuotaDimension.RUNS], JUNE)
+    assert usage[USER_1][QuotaDimension.RUNS] == 3
+    assert usage[USER_2][QuotaDimension.RUNS] == 0
 
 
 def test_list_subjects_unions_usage_and_limits(store):
     """The admin-overview source: usage subjects union limit subjects,
     with the tenant-default sentinel excluded (memory/Postgres parity)."""
     june = current_period_start(JUNE)
-    _add(store, "user-usage", QuotaDimension.RUNS, june, 1)
+    _add(store, USER_USAGE, QuotaDimension.RUNS, june, 1)
     asyncio.run(
         store.set_limit(
             tenant_id="default",
-            subject_sub="user-limit",
+            subject_user_id=USER_LIMIT,
             dimension=QuotaDimension.RUNS,
             value=5,
-            set_by_sub="owner",
+            set_by_user_id=OWNER,
         )
     )
     asyncio.run(
         store.set_limit(
             tenant_id="default",
-            subject_sub=DEFAULT_SUBJECT,
+            subject_user_id=DEFAULT_USER_ID,
             dimension=QuotaDimension.RUNS,
             value=2,
-            set_by_sub="owner",
+            set_by_user_id=OWNER,
         )
     )
-    subs = asyncio.run(store.list_subjects(tenant_id="default"))
-    assert set(subs) == {"user-usage", "user-limit"}
-    assert DEFAULT_SUBJECT not in subs
+    user_ids = asyncio.run(store.list_subjects(tenant_id="default"))
+    assert set(user_ids) == {USER_USAGE, USER_LIMIT}
+    assert DEFAULT_USER_ID not in user_ids

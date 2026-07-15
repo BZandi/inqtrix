@@ -29,7 +29,11 @@ from sqlalchemy.exc import IntegrityError
 from inqtrix.auth.invitations import DuplicateOpenInvitation, Invitation
 from inqtrix.auth.permissions import WorkspaceRole
 from inqtrix.storage.db import tenant_session
-from inqtrix.storage.identity_orm import invitations, workspace_members
+from inqtrix.storage.identity_orm import (
+    invitations,
+    workspace_members,
+    workspaces,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -50,12 +54,112 @@ def _record_from_row(row) -> Invitation:
         workspace_id=str(row.workspace_id),
         email=row.email,
         role=WorkspaceRole(row.role),
-        invited_by_sub=row.invited_by_sub,
+        invited_by_user_id=row.invited_by_user_id,
         created_at=_to_unix(row.created_at) or 0.0,
         expires_at=_to_unix(row.expires_at) or 0.0,
         accepted_at=_to_unix(row.accepted_at),
-        accepted_by_sub=row.accepted_by_sub,
+        accepted_by_user_id=row.accepted_by_user_id,
         revoked_at=_to_unix(row.revoked_at),
+    )
+
+
+async def accept_open_invitations(
+    db: "AsyncSession",
+    *,
+    tenant_id: str,
+    email: str,
+    user_id: uuid.UUID,
+    now: float,
+) -> tuple[Invitation, ...]:
+    """Consume matching invitations and grant memberships in one transaction.
+
+    Workspace rows are locked before invitation rows. Workspace deletion uses
+    the same order, preventing the workspace/invitation lock inversion that
+    would otherwise deadlock a login against a concurrent deletion. Both the
+    foreign-key parent and the invitation's open status are rechecked inside
+    this transaction before the guarded update.
+    """
+    candidate_workspace_ids = tuple(
+        (
+            await db.execute(
+                select(invitations.c.workspace_id)
+                .where(
+                    invitations.c.tenant_id == tenant_id,
+                    func.lower(invitations.c.email) == email.lower(),
+                    invitations.c.accepted_at.is_(None),
+                    invitations.c.revoked_at.is_(None),
+                    invitations.c.expires_at > _to_datetime(now),
+                )
+                .distinct()
+                .order_by(invitations.c.workspace_id)
+            )
+        ).scalars()
+    )
+    if not candidate_workspace_ids:
+        return ()
+    locked_workspace_ids = tuple(
+        (
+            await db.execute(
+                select(workspaces.c.id)
+                .where(
+                    workspaces.c.tenant_id == tenant_id,
+                    workspaces.c.id.in_(candidate_workspace_ids),
+                )
+                .order_by(workspaces.c.id)
+                .with_for_update()
+            )
+        ).scalars()
+    )
+    if not locked_workspace_ids:
+        return ()
+    consumed = (
+        await db.execute(
+            update(invitations)
+            .where(
+                invitations.c.tenant_id == tenant_id,
+                invitations.c.workspace_id.in_(locked_workspace_ids),
+                func.lower(invitations.c.email) == email.lower(),
+                invitations.c.accepted_at.is_(None),
+                invitations.c.revoked_at.is_(None),
+                invitations.c.expires_at > _to_datetime(now),
+            )
+            .values(accepted_at=_to_datetime(now), accepted_by_user_id=user_id)
+            .returning(
+                invitations.c.id,
+                invitations.c.workspace_id,
+                invitations.c.email,
+                invitations.c.role,
+                invitations.c.invited_by_user_id,
+                invitations.c.created_at,
+                invitations.c.expires_at,
+            )
+        )
+    ).all()
+    for row in consumed:
+        await db.execute(
+            pg_insert(workspace_members)
+            .values(
+                tenant_id=tenant_id,
+                workspace_id=row.workspace_id,
+                user_id=user_id,
+                role=row.role,
+            )
+            .on_conflict_do_nothing(index_elements=["workspace_id", "user_id"])
+        )
+    return tuple(
+        Invitation(
+            id=str(row.id),
+            tenant_id=tenant_id,
+            workspace_id=str(row.workspace_id),
+            email=row.email,
+            role=WorkspaceRole(row.role),
+            invited_by_user_id=row.invited_by_user_id,
+            created_at=_to_unix(row.created_at) or 0.0,
+            expires_at=_to_unix(row.expires_at) or 0.0,
+            accepted_at=now,
+            accepted_by_user_id=user_id,
+        )
+        for row in consumed
     )
 
 
@@ -91,7 +195,7 @@ class PostgresInvitationRepository:
         workspace_id: str,
         email: str,
         role: WorkspaceRole,
-        invited_by_sub: str,
+        invited_by_user_id: uuid.UUID,
         expires_at: float,
     ) -> Invitation:
         invitation_id = uuid.uuid4()
@@ -104,7 +208,7 @@ class PostgresInvitationRepository:
                         workspace_id=uuid.UUID(workspace_id),
                         email=email,
                         role=role.value,
-                        invited_by_sub=invited_by_sub,
+                        invited_by_user_id=invited_by_user_id,
                         expires_at=_to_datetime(expires_at),
                     )
                 )
@@ -118,7 +222,7 @@ class PostgresInvitationRepository:
             workspace_id=workspace_id,
             email=email,
             role=role,
-            invited_by_sub=invited_by_sub,
+            invited_by_user_id=invited_by_user_id,
             created_at=time.time(),
             expires_at=expires_at,
         )
@@ -157,14 +261,13 @@ class PostgresInvitationRepository:
             )
         return bool(result.rowcount)
 
-    async def accept_open_for_email(
-        self, *, tenant_id: str, email: str, issuer: str, sub: str, now: float
-    ) -> tuple[Invitation, ...]:
-        """One transaction: guarded consume + membership grants."""
+    async def has_open_for_email(
+        self, *, tenant_id: str, email: str, now: float
+    ) -> bool:
         async with self._scope(tenant_id) as db:
-            consumed = (
+            row = (
                 await db.execute(
-                    update(invitations)
+                    select(invitations.c.id)
                     .where(
                         invitations.c.tenant_id == tenant_id,
                         func.lower(invitations.c.email) == email.lower(),
@@ -172,45 +275,20 @@ class PostgresInvitationRepository:
                         invitations.c.revoked_at.is_(None),
                         invitations.c.expires_at > _to_datetime(now),
                     )
-                    .values(
-                        accepted_at=_to_datetime(now), accepted_by_sub=sub
-                    )
-                    .returning(
-                        invitations.c.id,
-                        invitations.c.workspace_id,
-                        invitations.c.email,
-                        invitations.c.role,
-                        invitations.c.invited_by_sub,
-                        invitations.c.created_at,
-                        invitations.c.expires_at,
-                    )
+                    .limit(1)
                 )
-            ).all()
-            for row in consumed:
-                await db.execute(
-                    pg_insert(workspace_members)
-                    .values(
-                        tenant_id=tenant_id,
-                        workspace_id=row.workspace_id,
-                        sub=sub,
-                        role=row.role,
-                    )
-                    .on_conflict_do_nothing(
-                        index_elements=["workspace_id", "sub"]
-                    )
-                )
-        return tuple(
-            Invitation(
-                id=str(row.id),
+            ).first()
+        return row is not None
+
+    async def accept_open_for_email(
+        self, *, tenant_id: str, email: str, user_id: uuid.UUID, now: float
+    ) -> tuple[Invitation, ...]:
+        """One transaction: guarded consume + membership grants."""
+        async with self._scope(tenant_id) as db:
+            return await accept_open_invitations(
+                db,
                 tenant_id=tenant_id,
-                workspace_id=str(row.workspace_id),
-                email=row.email,
-                role=WorkspaceRole(row.role),
-                invited_by_sub=row.invited_by_sub,
-                created_at=_to_unix(row.created_at) or 0.0,
-                expires_at=_to_unix(row.expires_at) or 0.0,
-                accepted_at=now,
-                accepted_by_sub=sub,
+                email=email,
+                user_id=user_id,
+                now=now,
             )
-            for row in consumed
-        )

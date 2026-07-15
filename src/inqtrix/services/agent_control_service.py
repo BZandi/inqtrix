@@ -19,9 +19,9 @@ Sits between the thin routers in
   signals, rows are truth — a failed signal is logged loudly, never
   rolled into a transaction.
 
-Authorization happens in the ROUTER (the run resolve with the caller's
-visibility, mutation gating on owner/edit-share); this service never sees
-principals beyond the attribution subs it stores.
+The router performs the first indistinguishable-404 gate. The service carries
+the same live user context into every subsequent run read and mutation so a
+revocation between routing and the control write cannot revive stale access.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ import asyncio
 import logging
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import ValidationError
@@ -67,6 +68,7 @@ from inqtrix.agents.scheduler import (
 from inqtrix.agents.web_execution_policy import derive_web_research_policy
 from inqtrix.auth.permissions import AuditEntry
 from inqtrix.exceptions import RunNotFound
+from inqtrix.execution_authority import pinned_knowledge_collection_ids
 
 if TYPE_CHECKING:
     from inqtrix.agents.control_ports import AgentControlStore
@@ -182,7 +184,48 @@ def _validated_tool_edit(
                 f"(erwartet {proposed_tool!r}, erhalten {edited_tool!r})."
             ]
         )
-    return [{"tool": proposed_tool, "args": dict(action["args"])}]
+    for identifier_key in ("action_id", "id"):
+        proposed_id = proposed[0].get(identifier_key)
+        edited_id = action.get(identifier_key, proposed_id)
+        if proposed_id is not None and edited_id != proposed_id:
+            raise AgentControlValidationError(
+                ["Die gespeicherte Action-ID kann nicht geaendert werden."]
+            )
+
+    from inqtrix.agents.kernel.tools import build_kernel_tools
+
+    tools = {
+        str(tool.name): tool
+        for tool in build_kernel_tools()
+    }
+    selected = tools.get(proposed_tool)
+    if selected is None:
+        raise AgentControlValidationError(
+            [f"Unbekanntes Werkzeug {proposed_tool!r}."]
+        )
+    args = dict(action["args"])
+    schema = selected.tool_call_schema
+    unknown = sorted(set(args) - set(schema.model_fields))
+    if unknown:
+        raise AgentControlValidationError(
+            ["Unbekannte Tool-Felder: " + ", ".join(unknown)]
+        )
+    try:
+        schema.model_validate(args, strict=True)
+    except ValidationError as exc:
+        errors = [
+            "Tool-Argumente entsprechen nicht dem Eingabeschema: "
+            + "; ".join(
+                ".".join(str(part) for part in item.get("loc", ()))
+                for item in exc.errors()
+            )
+        ]
+        raise AgentControlValidationError(errors) from exc
+    normalized = {"tool": proposed_tool, "args": args}
+    for identifier_key in ("action_id", "id"):
+        if identifier_key in proposed[0]:
+            normalized[identifier_key] = proposed[0][identifier_key]
+    return [normalized]
 
 
 def _validated_round_answers(
@@ -299,6 +342,42 @@ class AgentControlService:
         """Whether control rows survive restarts (Postgres backend)."""
         return self._durable
 
+    @staticmethod
+    def _caller_context(
+        principal: "Principal | None",
+        visible_to: "UserContext | None" = None,
+    ) -> "UserContext | None":
+        """Return the live canonical-user context for a control command."""
+        if visible_to is not None or principal is None:
+            return visible_to
+        if principal.user_id is None:
+            return None
+        from inqtrix.auth.principal import UserContext
+
+        return UserContext(principal=principal)
+
+    async def _execution_context(self, run_id: str) -> "UserContext | None":
+        """Resolve the current effective actor for internal reconciliation."""
+        principal = await asyncio.to_thread(
+            self._run_store.execution_principal, run_id
+        )
+        return self._caller_context(principal)
+
+    async def _run_summary(
+        self,
+        run_id: str,
+        *,
+        principal: "Principal | None" = None,
+        visible_to: "UserContext | None" = None,
+    ) -> dict[str, Any]:
+        """Read a run through the caller or its current effective actor."""
+        context = self._caller_context(principal, visible_to)
+        if context is None and principal is None:
+            context = await self._execution_context(run_id)
+        return await asyncio.to_thread(
+            self._run_store.get, run_id, visible_to=context
+        )
+
     # -- plans ------------------------------------------------------------ #
 
     async def get_plan(
@@ -336,47 +415,30 @@ class AgentControlService:
         task_id: str,
         *,
         workspace_id: str | None,
+        principal: "Principal | None",
+        visible_to: "UserContext | None" = None,
     ) -> PlanTaskRecord:
         """Cancel one source task without cancelling its parent run.
 
-        The control row is committed first. A research child then receives
-        the existing run-level cancellation signal; a synchronous local task
+        The task-row CAS and an optional research-child cancellation share the
+        run store's live authorization transaction. A synchronous local task
         remains ``cancel_requested`` until its current provider call returns
         and the mission discards that result.
         """
         plan, tasks = await self._store.get_plan(run_id)
-        try:
-            task = next(row for row in tasks if row.task_id == task_id)
-        except StopIteration as exc:
-            raise PlanTaskNotFound(task_id) from exc
-        stored = await self._store.request_plan_task_cancel(
+        if not any(row.task_id == task_id for row in tasks):
+            raise PlanTaskNotFound(task_id)
+        stored, child_status = await self._store.request_plan_task_cancel(
             run_id=run_id,
             plan_id=plan.plan_id,
             task_id=task_id,
+            authorize=self._authorized_control_callable(
+                run_id,
+                principal=principal,
+                visible_to=visible_to,
+                workspace_id=workspace_id,
+            ),
         )
-        child_status: str | None = None
-        if stored.child_run_id and stored.status in {
-            "cancel_requested",
-            "cancelled",
-        }:
-            try:
-                child = await asyncio.to_thread(
-                    self._run_store.cancel,
-                    stored.child_run_id,
-                    workspace_id=workspace_id,
-                )
-                child_status = str(child.get("status") or "")
-            except RunNotFound:
-                # The child may have crossed its terminal boundary between
-                # the task-row lock and this signal. The parent fold still
-                # observes cancel_requested and discards that late result.
-                log.warning(
-                    "Task %s cancel: child %s was already unavailable; "
-                    "the task result remains discard-only.",
-                    task_id,
-                    stored.child_run_id,
-                )
-                child_status = "already_terminal_or_missing"
         await self._emit(
             run_id,
             TASK_CANCEL_REQUESTED_EVENT,
@@ -407,7 +469,7 @@ class AgentControlService:
             attempted, otherwise ``False``.
         """
         try:
-            summary = await asyncio.to_thread(self._run_store.get, run_id)
+            summary = await self._run_summary(run_id)
         except RunNotFound:
             return False
         status = str(summary.get("status") or "")
@@ -444,8 +506,13 @@ class AgentControlService:
             if task.status != "running" or not task.child_run_id:
                 continue
             try:
+                child_context = await self._execution_context(
+                    task.child_run_id
+                )
                 child = await asyncio.to_thread(
-                    self._run_store.get, task.child_run_id
+                    self._run_store.get,
+                    task.child_run_id,
+                    visible_to=child_context,
                 )
             except RunNotFound:
                 child = {}
@@ -455,6 +522,7 @@ class AgentControlService:
                 self._run_store,
                 task.child_run_id,
                 attempt,
+                visible_to=child_context,
             )
             if outcome is None:
                 continue
@@ -517,6 +585,7 @@ class AgentControlService:
             ApprovalNotFound / ApprovalAlreadyDecided / RunNotFound /
             RunActive: Mapped by the router (404 / 409).
         """
+        visible_to = self._caller_context(principal, visible_to)
         if decision not in APPROVAL_DECISIONS:
             raise AgentControlValidationError(
                 [
@@ -591,14 +660,16 @@ class AgentControlService:
                 "report_guidance": report_guidance,
             }
 
-        decided_by = principal.sub if principal is not None else None
+        decided_by = principal.user_id if principal is not None else None
         if approval.status != "pending":
             # Sequential replay: the SAME decision answers 200 with the
             # stored state, a different one conflicts. For edit the plan
             # payload IS the decision — a retry carrying a DIFFERENT
             # plan must conflict, never be swallowed as a replay.
             if _same_decision(approval, decision, decision_payload):
-                summary = await asyncio.to_thread(self._run_store.get, run_id)
+                summary = await self._run_summary(
+                    run_id, principal=principal, visible_to=visible_to
+                )
                 return approval, summary, True
             raise ApprovalAlreadyDecided(approval)
         replayed = False
@@ -609,8 +680,8 @@ class AgentControlService:
                 decision=decision,
                 decision_payload=decision_payload,
                 note=note,
-                decided_by_sub=decided_by,
-                resume=self._resume_callable(run_id),
+                decided_by_user_id=decided_by,
+                resume=self._resume_callable(run_id, principal),
                 edited_plan=edited_plan,
                 edited_tasks=edited_tasks,
             )
@@ -627,7 +698,9 @@ class AgentControlService:
             if replay is None:
                 raise
             approval = replay
-            summary = await asyncio.to_thread(self._run_store.get, run_id)
+            summary = await self._run_summary(
+                run_id, principal=principal, visible_to=visible_to
+            )
             replayed = True
         if not replayed:
             # Row truth and run resume committed together before this signal.
@@ -640,7 +713,7 @@ class AgentControlService:
                 {
                     "approval_id": approval_id,
                     "status": APPROVAL_STATUS_BY_DECISION[decision],
-                    "decided_by_sub": decided_by,
+                    "decided_by_user_id": decided_by,
                 },
             )
             await self._record_audit(
@@ -707,7 +780,9 @@ class AgentControlService:
                 ],
                 error_type="task_budget_server_managed",
             )
-        run_summary = await asyncio.to_thread(self._run_store.get, run_id)
+        run_summary = await self._run_summary(
+            run_id, visible_to=visible_to
+        )
         overrides = run_summary.get("agent_overrides") or {}
         depth = (
             str(overrides.get("depth") or "normal")
@@ -730,7 +805,7 @@ class AgentControlService:
         # 400 now instead of a task failure after approval (E5 semantics,
         # earlier surface). A missing knowledge collaborator (memory/dev)
         # skips the check: the runtime E5 gate still guards retrieval.
-        catalog = await self._collection_catalog(visible_to)
+        catalog = await self._collection_catalog(run_id, visible_to)
         errors = (
             resolve_plan_collections(plan, catalog)
             if catalog is not None
@@ -798,19 +873,44 @@ class AgentControlService:
         return record, tasks
 
     async def _collection_catalog(
-        self, visible_to: "UserContext | None"
+        self,
+        run_id: str,
+        visible_to: "UserContext | None",
     ) -> list[CollectionCatalogEntry] | None:
-        """Caller-visible catalog for edit canonicalization.
+        """Caller-visible, run-admitted catalog for edit canonicalization.
 
         ``None`` degrades (no knowledge collaborator wired — memory/dev);
-        the runtime E5 gate still guards retrieval. The listing applies
-        the SAME per-collection access rule as that gate, so "in the
-        catalog" and "visible" cannot drift.
+        the runtime E5 gate still guards retrieval. A scoped run's persisted
+        collection IDs are authoritative, including an explicit empty list.
+        The live listing is intersected with that immutable boundary, so a
+        share accepted while a plan is parked cannot expand the run.
         """
         if self._knowledge is None:
             return None
+        request_body = await asyncio.to_thread(
+            self._run_store.execution_request_body, run_id
+        )
+        knowledge_filters = request_body.get("knowledge_filters")
+        if knowledge_filters is None:
+            knowledge_filters = {}
+        if not isinstance(knowledge_filters, dict):
+            raise RuntimeError(
+                "Persisted run knowledge filters are invalid."
+            )
+        context = visible_to
+        if context is None:
+            context = await self._execution_context(run_id)
+        admitted_ids = pinned_knowledge_collection_ids(
+            knowledge_filters,
+            scoped_principal=(
+                context is not None
+                and context.principal.user_id is not None
+            ),
+        )
+        if admitted_ids == frozenset():
+            return []
         collections = await self._knowledge.list_collections(
-            visible_to=visible_to
+            visible_to=context
         )
         return [
             CollectionCatalogEntry(
@@ -818,6 +918,7 @@ class AgentControlService:
                 name=str(item.name),
             )
             for item in collections
+            if admitted_ids is None or str(item.id) in admitted_ids
         ]
 
     # -- clarifications ------------------------------------------------------ #
@@ -845,6 +946,7 @@ class AgentControlService:
         one pick or non-empty free text) — the round parks the run once,
         so a partial answer would strand the remaining questions.
         """
+        visible_to = self._caller_context(principal)
         has_answer = bool(answer and answer.strip())
         has_option = bool(option_id)
         has_answers = bool(answers)
@@ -869,7 +971,7 @@ class AgentControlService:
             normalized_answers = _validated_round_answers(
                 clarification, answers or {}
             )
-        answered_by = principal.sub if principal is not None else None
+        answered_by = principal.user_id if principal is not None else None
         normalized_answer = (answer or "").strip()
         normalized_option = option_id or ""
         if clarification.status != "pending":
@@ -878,16 +980,11 @@ class AgentControlService:
                 and clarification.option_id == normalized_option
                 and clarification.answers == normalized_answers
             ):
-                summary = await asyncio.to_thread(self._run_store.get, run_id)
+                summary = await self._run_summary(
+                    run_id, principal=principal, visible_to=visible_to
+                )
                 return clarification, summary, True
             raise ClarificationAlreadyAnswered(clarification)
-        # Clarification signals retain their established pre-resume ordering;
-        # the answered row remains authoritative for reconciliation.
-        await self._emit(
-            run_id,
-            CLARIFICATION_ANSWERED_EVENT,
-            {"clarification_id": clarification_id},
-        )
         replayed = False
         try:
             clarification, summary = (
@@ -897,8 +994,8 @@ class AgentControlService:
                     answer=normalized_answer,
                     option_id=normalized_option,
                     answers=normalized_answers,
-                    answered_by_sub=answered_by,
-                    resume=self._resume_callable(run_id),
+                    answered_by_user_id=answered_by,
+                    resume=self._resume_callable(run_id, principal),
                 )
             )
         except Exception as exc:
@@ -914,9 +1011,19 @@ class AgentControlService:
             if replay is None:
                 raise
             clarification = replay
-            summary = await asyncio.to_thread(self._run_store.get, run_id)
+            summary = await self._run_summary(
+                run_id, principal=principal, visible_to=visible_to
+            )
             replayed = True
         if not replayed:
+            # The answer row and resume committed together before the signal.
+            # Emitting earlier would leave a false answered event when live
+            # authority or the waiting->queued CAS rejects the composed write.
+            await self._emit(
+                run_id,
+                CLARIFICATION_ANSWERED_EVENT,
+                {"clarification_id": clarification_id},
+            )
             await self._record_audit(
                 principal,
                 action="agent.clarification_answered",
@@ -977,6 +1084,8 @@ class AgentControlService:
         content_markdown: str,
         expected_revision: int,
         principal: "Principal | None",
+        visible_to: "UserContext | None" = None,
+        workspace_id: str | None = None,
     ) -> ArtifactRecord:
         """Optimistic user edit (E13); emits the multi-tab update signal."""
         artifact = await self._store.user_update_artifact(
@@ -984,6 +1093,12 @@ class AgentControlService:
             artifact_id=artifact_id,
             content_markdown=content_markdown,
             expected_revision=expected_revision,
+            authorize=self._authorized_control_callable(
+                run_id,
+                principal=principal,
+                visible_to=visible_to,
+                workspace_id=workspace_id,
+            ),
         )
         await self._emit(
             run_id,
@@ -1013,7 +1128,7 @@ class AgentControlService:
         title: str | None,
         folder_id: str | None,
         principal: "Principal | None",
-        caller_sub: str | None,
+        caller_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> dict[str, Any]:
         """Copy an artifact into a NEW editor document (endpoint #12).
@@ -1047,7 +1162,7 @@ class AgentControlService:
             diff_anchor_updated_at=None,
             created_at=now,
             updated_at=now,
-            caller_sub=caller_sub,
+            caller_user_id=caller_user_id,
             workspace_id=workspace_id,
             visible_to=None,
         )
@@ -1070,7 +1185,31 @@ class AgentControlService:
 
     # -- composition helpers ---------------------------------------------------- #
 
-    def _resume_callable(self, run_id: str):
+    def _authorized_control_callable(
+        self,
+        run_id: str,
+        *,
+        principal: "Principal | None",
+        visible_to: "UserContext | None" = None,
+        workspace_id: str | None = None,
+    ) -> Callable[[Any], Awaitable[Any]]:
+        """Build the live caller-authority callback for a control mutation."""
+        caller = self._caller_context(principal, visible_to)
+
+        async def _authorize(control_write: Any) -> Any:
+            return await asyncio.to_thread(
+                self._run_store.authorized_control_write,
+                run_id,
+                workspace_id=workspace_id,
+                visible_to=caller,
+                control_write=control_write,
+            )
+
+        return _authorize
+
+    def _resume_callable(
+        self, run_id: str, principal: "Principal | None"
+    ):
         """The resume hook the store composes with (rule R9).
 
         Awaitable so the blocking run-store call leaves the event loop;
@@ -1079,14 +1218,20 @@ class AgentControlService:
         """
 
         async def _resume(control_write: Any) -> dict[str, Any]:
-            if control_write is None:
-                return await asyncio.to_thread(
-                    self._run_store.resume_run, run_id
-                )
+            kwargs: dict[str, Any] = {
+                "actor_user_id": (
+                    principal.user_id if principal is not None else None
+                ),
+                "execution_scopes": (
+                    principal.scopes if principal is not None else frozenset()
+                ),
+            }
+            if control_write is not None:
+                kwargs["control_write"] = control_write
             return await asyncio.to_thread(
                 self._run_store.resume_run,
                 run_id,
-                control_write=control_write,
+                **kwargs,
             )
 
         return _resume
@@ -1096,10 +1241,10 @@ class AgentControlService:
     ) -> None:
         """Append one signal event; a failure is loud but non-fatal.
 
-        Signals never gate the row truth (rule R1): approval decisions and
-        artifact edits emit after their commit; clarification answers retain
-        their existing pre-resume ordering. Off-loop via ``to_thread`` — the
-        durable store blocks on a database round-trip.
+        Signals never gate the row truth (rule R1): approval decisions,
+        clarification answers, and artifact edits emit only after their
+        authoritative write commits. Off-loop via ``to_thread`` — the durable
+        store blocks on a database round-trip.
         """
         try:
             await asyncio.to_thread(
@@ -1126,7 +1271,7 @@ class AgentControlService:
         await self._audit.record(
             AuditEntry(
                 tenant_id=principal.tenant_id,
-                actor_sub=principal.sub,
+                actor_user_id=principal.user_id,
                 action=action,
                 resource_type="run",
                 resource_id=run_id,

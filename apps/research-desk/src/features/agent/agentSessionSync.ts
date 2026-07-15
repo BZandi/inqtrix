@@ -24,6 +24,18 @@ export function agentSessionFingerprint(
   ].join('\u0000')
 }
 
+/** Ordered sessions admitted to the persistence API. Shared-run view sessions
+ * stay entirely client-derived and are deliberately absent. */
+export function persistableAgentSessionsInOrder(
+  sessions: Readonly<Record<string, AgentSessionRecord>>,
+  sessionOrder: readonly string[],
+): AgentSessionRecord[] {
+  return sessionOrder.flatMap((sessionId) => {
+    const session = sessions[sessionId]
+    return session && session.persistable !== false ? [session] : []
+  })
+}
+
 export function serverAgentSessionPayload(session: AgentSessionRecord): {
   title: string
   items_json: string

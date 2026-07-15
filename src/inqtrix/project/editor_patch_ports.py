@@ -22,10 +22,11 @@ applied-edit truth) must survive that.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-PATCH_SOURCES = ("suggest", "instruct", "agent")
+PATCH_SOURCES = ("suggest", "instruct", "agent", "human")
 """Who proposed the edits: the editor assistant's per-paragraph suggest
 call, its document-level instruct call, or the workspace-agent patch
 phase (M7). The ORM builds its CHECK constraint from this tuple."""
@@ -102,8 +103,8 @@ class EditorPatchRecord:
             and were applied (``None`` until accepted; skipped edits are
             visible as the difference).
         note: Free-text the rejecting user attached (empty otherwise).
-        created_by_sub: Verified subject that proposed the patch, or
-            ``None`` for unscoped principals.
+        created_by_user_id: Canonical UUID of the user that proposed the
+            patch, or ``None`` for unscoped principals.
         created_at: Unix seconds of the proposal.
         decided_at: Unix seconds of the accept/reject decision, ``None``
             while pending.
@@ -118,10 +119,16 @@ class EditorPatchRecord:
     summary: str = ""
     warnings: tuple[str, ...] = ()
     revision_before: int = 0
+    collaboration_generation: int | None = None
+    base_sequence: int | None = None
+    decision_sequence: int | None = None
+    suggestion_ids: tuple[str, ...] = ()
     applied_revision: int | None = None
     applied_edit_ids: tuple[str, ...] | None = None
     note: str = ""
-    created_by_sub: str | None = None
+    created_by_user_id: uuid.UUID | None = None
+    decided_by_user_id: uuid.UUID | None = None
+    command_id: uuid.UUID | None = None
     created_at: float = 0.0
     decided_at: float | None = None
 
@@ -160,6 +167,9 @@ class EditorPatchStore(Protocol):
         *,
         applied_revision: int,
         applied_edit_ids: list[str],
+        decision_sequence: int | None = None,
+        decided_by_user_id: uuid.UUID | None = None,
+        command_id: uuid.UUID | None = None,
     ) -> EditorPatchRecord:
         """CAS ``pending -> accepted`` with the apply outcome.
 
@@ -169,7 +179,15 @@ class EditorPatchStore(Protocol):
         """
         ...
 
-    async def mark_rejected(self, patch_id: str, *, note: str) -> EditorPatchRecord:
+    async def mark_rejected(
+        self,
+        patch_id: str,
+        *,
+        note: str,
+        decision_sequence: int | None = None,
+        decided_by_user_id: uuid.UUID | None = None,
+        command_id: uuid.UUID | None = None,
+    ) -> EditorPatchRecord:
         """CAS ``pending -> rejected`` with the optional note.
 
         Same error contract as :meth:`mark_applied`.

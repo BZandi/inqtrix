@@ -6,8 +6,12 @@
  * reuse the surface without the editor shell.
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import Collaboration from '@tiptap/extension-collaboration'
+import CollaborationCaret from '@tiptap/extension-collaboration-caret'
+import type { Extensions } from '@tiptap/core'
 import { EditorContent, useEditor, type Editor } from '@tiptap/react'
 import { BubbleMenu } from '@tiptap/react/menus'
+import { EDITOR_YJS_FRAGMENT } from '@inqtrix/editor-schema'
 import { useReducedMotion } from 'motion/react'
 import { X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
@@ -29,7 +33,8 @@ import {
 } from '@/features/textImprove'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
-import { commentDecorationPluginKey, createEditorExtensions, normalizeEditorMarkdownForTiptap, serializeEditorMarkdown, suggestionDecorationPluginKey } from '../tiptap'
+import { collaborationCaretOptions, commentDecorationPluginKey, createEditorExtensions, normalizeEditorMarkdownForTiptap, serializeEditorFinalProjectionMarkdown, serializeEditorMarkdown, suggestionDecorationPluginKey, type CollaborationReviewOverlayUpdate } from '../tiptap'
+import type { CollaborationDocumentHandle } from '../useCollaborationDocument'
 import { BlockHandle } from '../BlockHandle'
 import { TableControls } from '../TableControls'
 import { SelectionToolbar } from '../SelectionToolbar'
@@ -50,6 +55,8 @@ import type { EditorCopy } from '../editorCopy'
 import { escapeCssIdentifier, resetExternalContentFlag } from '../editorDom'
 
 export type MarkdownEditorSurfaceProps = {
+  collaboration?: CollaborationDocumentHandle | null
+  collaborationReviewPolicy?: CollaborationReviewOverlayUpdate
   comments: EditorCommentThreadRecord[]
   copy: EditorCopy
   diffAnchorMarkdown: string | null
@@ -73,12 +80,137 @@ export type MarkdownEditorSurfaceProps = {
   onStopSuggestion: (suggestionId: string) => void
   runningSuggestionIds: readonly string[]
   selectedCommentId: string | null
+  suggestionActionsDisabled?: boolean
   suggestionErrors: Record<string, string>
   suggestions: EditorSuggestionRecord[]
   textImprovement: Omit<TextImprovementApiOptions, 'locale'>
 }
 
+export type ReadyCollaborationBinding = {
+  canEdit: boolean
+  document: NonNullable<CollaborationDocumentHandle['document']>
+  lifecycleKey: string
+  provider: NonNullable<CollaborationDocumentHandle['provider']>
+  synced: true
+  user: NonNullable<CollaborationDocumentHandle['user']>
+}
+
+export type EditorSurfaceLifecyclePolicy = {
+  applyExternalContent: boolean
+  editable: boolean
+  emitFullBodyChanges: boolean
+  renderSourceEditor: boolean
+}
+
+export type EditorSurfaceInitialContent = {
+  content?: string
+  contentType?: 'markdown'
+}
+
+/** Use the last durable projection only until the live Yjs binding exists. */
+export function editorSurfaceInitialContent({
+  collaborationMode,
+  collaborationReady,
+  contentMarkdown,
+}: {
+  collaborationMode: boolean
+  collaborationReady: boolean
+  contentMarkdown: string
+}): EditorSurfaceInitialContent {
+  if (collaborationMode && collaborationReady) return {}
+  return { content: contentMarkdown, contentType: 'markdown' }
+}
+
+export function editorSurfaceLifecyclePolicy({
+  collaborationMode,
+  collaborationReady,
+  collaborationCanEdit,
+  mode,
+}: {
+  collaborationCanEdit: boolean
+  collaborationMode: boolean
+  collaborationReady: boolean
+  mode: ProjectState['editorUi']['viewMode']
+}): EditorSurfaceLifecyclePolicy {
+  if (!collaborationMode) {
+    return {
+      applyExternalContent: true,
+      editable: mode === 'live',
+      emitFullBodyChanges: true,
+      renderSourceEditor: mode === 'source',
+    }
+  }
+  return {
+    applyExternalContent: !collaborationReady,
+    editable: mode === 'live' && collaborationReady && collaborationCanEdit,
+    emitFullBodyChanges: false,
+    renderSourceEditor: false,
+  }
+}
+
+export function configureEditorExtensionsForCollaboration(
+  extensions: Extensions,
+  collaboration: ReadyCollaborationBinding | null,
+  collaborationMode = collaboration !== null,
+): Extensions {
+  if (!collaborationMode) return extensions
+  const collaborationExtensions = extensions.map((extension) => (
+    extension.name === 'starterKit'
+      ? extension.configure({ undoRedo: false })
+      : extension
+  ))
+  if (!collaboration) return collaborationExtensions
+  return [
+    ...collaborationExtensions,
+    Collaboration.configure({
+      document: collaboration.document,
+      field: EDITOR_YJS_FRAGMENT,
+    }),
+    CollaborationCaret.configure({
+      ...collaborationCaretOptions,
+      provider: collaboration.provider,
+      user: collaboration.user,
+    }),
+  ]
+}
+
+/** Provider construction precedes Yjs sync. Only the lifecycle's explicit
+ * synced bit may replace the exact server projection with the live binding. */
+export function isCollaborationSurfaceSynced(
+  collaboration: CollaborationDocumentHandle | null,
+  document?: EditorDocumentRecord,
+): boolean {
+  return collaboration?.synced === true
+    && (!document || (
+      collaboration.documentId === document.id
+      && collaboration.generation === (document.collaboration?.generation ?? null)
+    ))
+}
+
+export function collaborationBindingForEditorDocument(
+  document: EditorDocumentRecord,
+  collaboration: CollaborationDocumentHandle | null,
+): ReadyCollaborationBinding | null {
+  if (
+    document.contentMode !== 'collaboration'
+    || !isCollaborationSurfaceSynced(collaboration, document)
+    || !collaboration?.document
+    || !collaboration.provider
+    || !collaboration.user
+  ) return null
+  return {
+    canEdit: collaboration.canEdit,
+    document: collaboration.document,
+    lifecycleKey: collaboration.lifecycleKey,
+    provider: collaboration.provider,
+    synced: true,
+    user: collaboration.user,
+  }
+}
+
 export function MarkdownEditorSurface({
+  collaboration = null,
+  collaborationReviewPolicy,
   comments,
   copy,
   diffAnchorMarkdown,
@@ -98,6 +230,7 @@ export function MarkdownEditorSurface({
   onStopSuggestion,
   runningSuggestionIds,
   selectedCommentId,
+  suggestionActionsDisabled = false,
   suggestionErrors,
   suggestions,
   textImprovement,
@@ -120,6 +253,23 @@ export function MarkdownEditorSurface({
   const suggestionUiSignature = suggestions.map((suggestion) =>
     `${suggestion.id}:${runningSuggestionIds.includes(suggestion.id) ? 'running' : 'idle'}:${suggestionErrors[suggestion.id] ?? ''}`).join('|')
   const tiptapContentMarkdown = normalizeEditorMarkdownForTiptap(document.contentMarkdown)
+  const collaborationMode = document.contentMode === 'collaboration'
+  const collaborationBinding = collaborationBindingForEditorDocument(document, collaboration)
+  const lifecyclePolicy = editorSurfaceLifecyclePolicy({
+    collaborationCanEdit: collaboration?.canEdit ?? false,
+    collaborationMode,
+    collaborationReady: collaborationBinding !== null,
+    mode,
+  })
+  const initialContent = editorSurfaceInitialContent({
+    collaborationMode,
+    collaborationReady: collaborationBinding !== null,
+    contentMarkdown: tiptapContentMarkdown,
+  })
+  const editorLifecycleKey = collaborationMode
+    ? collaborationBinding?.lifecycleKey
+      ?? `collaboration-projection:${document.id}:${document.collaboration?.projectionSequence ?? document.updatedAt}`
+    : 'legacy'
 
   useEffect(() => {
     suggestionsRef.current = suggestions
@@ -136,9 +286,8 @@ export function MarkdownEditorSurface({
   }, [onAcceptSuggestion, onEditSuggestion, onMarkSuggestionStale, onRefineSuggestion, onRejectSuggestion, onSelectComment, onStopSuggestion])
 
   const editor = useEditor({
-    content: tiptapContentMarkdown,
-    contentType: 'markdown',
-    editable: mode === 'live',
+    ...initialContent,
+    editable: lifecyclePolicy.editable,
     editorProps: {
       attributes: {
         class: 'editor-prose min-h-full focus:outline-none',
@@ -154,7 +303,8 @@ export function MarkdownEditorSurface({
         return true
       },
     },
-    extensions: createEditorExtensions({
+    extensions: configureEditorExtensionsForCollaboration(createEditorExtensions({
+      collaborationReview: collaborationReviewPolicy,
       syntaxMarkerRemoveLabel: copy.removeFormatting,
       placeholderEmpty: copy.placeholderEmpty,
       placeholderHeading: copy.placeholderHeading,
@@ -195,7 +345,7 @@ export function MarkdownEditorSurface({
         const suggestion = suggestionsRef.current.find((item) => item.id === suggestionId)
         if (suggestion?.origin.commentId) onSelectCommentRef.current(suggestion.origin.commentId)
       },
-    }),
+    }), collaborationBinding, collaborationMode),
     immediatelyRender: false,
     onCreate: ({ editor: createdEditor }) => {
       editorInstanceRef.current = createdEditor
@@ -204,31 +354,37 @@ export function MarkdownEditorSurface({
       editorInstanceRef.current = null
     },
     onUpdate: ({ editor: currentEditor }) => {
-      if (isApplyingExternalContentRef.current || !currentEditor.isEditable) return
+      if (
+        !lifecyclePolicy.emitFullBodyChanges
+        || isApplyingExternalContentRef.current
+        || !currentEditor.isEditable
+      ) return
       onChange(serializeEditorMarkdown(currentEditor))
     },
-  })
+  }, [editorLifecycleKey])
 
   useEffect(() => {
-    onEditorReady(editor)
+    onEditorReady(editor && !editor.isDestroyed ? editor : null)
     return () => onEditorReady(null)
   }, [editor, onEditorReady])
 
   useEffect(() => {
-    if (!editor || documentIdRef.current === document.id) return
+    if (!editor || editor.isDestroyed || documentIdRef.current === document.id) return
     documentIdRef.current = document.id
+    if (!lifecyclePolicy.applyExternalContent) return
     isApplyingExternalContentRef.current = true
     editor.commands.setContent(tiptapContentMarkdown, {
       contentType: 'markdown',
       emitUpdate: false,
     })
     resetExternalContentFlag(isApplyingExternalContentRef)
-  }, [document.id, editor, tiptapContentMarkdown])
+  }, [document.id, editor, lifecyclePolicy.applyExternalContent, tiptapContentMarkdown])
 
   useEffect(() => {
-    if (!editor) return
+    if (!editor || editor.isDestroyed) return
     const previousMode = previousModeRef.current
     previousModeRef.current = mode
+    if (!lifecyclePolicy.applyExternalContent) return
     if (mode !== 'live') return
     const shouldReparseMarkdown = previousMode === 'source'
     if (!shouldReparseMarkdown && serializeEditorMarkdown(editor) === tiptapContentMarkdown) return
@@ -238,14 +394,15 @@ export function MarkdownEditorSurface({
       emitUpdate: false,
     })
     resetExternalContentFlag(isApplyingExternalContentRef)
-  }, [editor, mode, tiptapContentMarkdown])
+  }, [editor, lifecyclePolicy.applyExternalContent, mode, tiptapContentMarkdown])
 
   useEffect(() => {
-    editor?.setEditable(mode === 'live')
-  }, [editor, mode])
+    if (!editor || editor.isDestroyed) return
+    editor.setEditable(lifecyclePolicy.editable)
+  }, [editor, lifecyclePolicy.editable])
 
   useEffect(() => {
-    if (!editor || mode !== 'live') return
+    if (!editor || editor.isDestroyed || mode !== 'live') return
     const items = comments
       .filter((comment) => comment.status !== 'resolved')
       .map((comment) => {
@@ -274,7 +431,7 @@ export function MarkdownEditorSurface({
   }, [commentsSignature, document.contentMarkdown, editor, mode, selectedCommentId])
 
   useEffect(() => {
-    if (!editor || mode !== 'live') return
+    if (!editor || editor.isDestroyed || mode !== 'live') return
     const staleSuggestionIds: string[] = []
     const items = suggestions.flatMap((suggestion) => {
       const target = resolveSuggestionDecorationTarget(editor, suggestion)
@@ -294,6 +451,7 @@ export function MarkdownEditorSurface({
         isRunning: runningSuggestionIds.includes(suggestion.id),
         proposedLabel: copy.proposedText,
         proposedText: suggestion.proposedText,
+        providerActionsDisabled: suggestionActionsDisabled,
         refineLabel: copy.refineSuggestion,
         refinementPlaceholder: copy.refinementPlaceholder,
         rejectLabel: copy.reject,
@@ -314,7 +472,7 @@ export function MarkdownEditorSurface({
     editor.view.dispatch(editor.state.tr.setMeta(suggestionDecorationPluginKey, { items }))
     resetExternalContentFlag(isApplyingExternalContentRef)
     for (const suggestionId of staleSuggestionIds) onMarkSuggestionStaleRef.current(suggestionId)
-  }, [copy.accept, copy.cancelEdit, copy.editSuggestion, copy.proposedText, copy.refineSuggestion, copy.refinementPlaceholder, copy.reject, copy.revision, copy.saveSuggestion, copy.sendRefinement, copy.refiningSuggestion, copy.stopRun, document.revision, editor, mode, selectedCommentId, suggestionUiSignature, suggestionsSignature])
+  }, [copy.accept, copy.cancelEdit, copy.editSuggestion, copy.proposedText, copy.refineSuggestion, copy.refinementPlaceholder, copy.reject, copy.revision, copy.saveSuggestion, copy.sendRefinement, copy.refiningSuggestion, copy.stopRun, document.revision, editor, mode, selectedCommentId, suggestionActionsDisabled, suggestionUiSignature, suggestionsSignature])
 
   useEffect(() => {
     if (!selectedCommentId) return
@@ -324,7 +482,7 @@ export function MarkdownEditorSurface({
     target?.scrollIntoView({ block: 'center', behavior: 'smooth' })
   }, [selectedCommentId])
 
-  if (mode === 'source') {
+  if (lifecyclePolicy.renderSourceEditor) {
     return (
       <MarkdownSourceEditor
         labels={{
@@ -357,7 +515,11 @@ export function MarkdownEditorSurface({
       <DocumentDiffView
         anchorMarkdown={diffAnchorMarkdown}
         copy={copy}
-        currentMarkdown={document.contentMarkdown}
+        currentMarkdown={editor && !editor.isDestroyed
+          ? collaborationMode
+            ? serializeEditorFinalProjectionMarkdown(editor)
+            : serializeEditorMarkdown(editor)
+          : document.contentMarkdown}
       />
     )
   }
@@ -370,7 +532,7 @@ export function MarkdownEditorSurface({
             : 'min-h-[calc(100svh-var(--header-h)-10rem)] w-full px-10 py-8'
         }
       >
-        {editor ? (
+        {editor && lifecyclePolicy.editable ? (
           <EditorBubbleMenu
             copy={copy}
             editor={editor}
@@ -382,7 +544,7 @@ export function MarkdownEditorSurface({
             textImprovement={textImprovement}
           />
         ) : null}
-        {editor && mode === 'live' ? (
+        {editor && lifecyclePolicy.editable ? (
           <BlockHandle
             editor={editor}
             labels={{
@@ -404,7 +566,7 @@ export function MarkdownEditorSurface({
             }}
           />
         ) : null}
-        {editor && mode === 'live' ? (
+        {editor && lifecyclePolicy.editable ? (
           <TableControls
             editor={editor}
             labels={{

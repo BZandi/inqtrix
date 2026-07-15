@@ -1,30 +1,33 @@
-"""HTTP tests for the file surface: upload, visibility, shares, limits.
+"""HTTP tests for the private file surface: upload, visibility, and limits.
 
 Memory registry + a tmp-path local object store — fully offline. The
 auth provider maps a request header to scoped principals (same pattern
-as the run-visibility suite) so creator-only access, share grants, and
-the legacy unscoped view are all exercised over the real routers.
+as the run-visibility suite) so creator-only access and the ownerless
+legacy view are exercised over the real routers.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from inqtrix.auth.identity_memory import MemoryIdentityStore
-from inqtrix.auth.permissions import PermissionService, SharePermission
+from inqtrix.auth.permissions import AuthorizationService
 from inqtrix.knowledge.parsing import DocumentParseError, DocumentParser
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server.container import build_container
 from inqtrix.server.routers import capabilities as capabilities_router
 from inqtrix.server.routers import files as files_router
-from inqtrix.services.file_service import FILE_RESOURCE_TYPE
+from inqtrix.services.file_service import FileService
 from inqtrix.settings import Settings, StorageSettings
+from inqtrix.storage.object_store import LocalFSObjectStore, ObjectStoreError
 
 from tests.contract._app import StubLLM, StubSearch
 from tests.test_runs_visibility import SUB_HEADER, HeaderSubAuthProvider
@@ -57,8 +60,8 @@ def make_files_client(
     document_parser: DocumentParser | None = None,
 ) -> tuple[TestClient, MemoryIdentityStore]:
     identity = MemoryIdentityStore()
-    permissions = PermissionService(
-        members=identity, groups=identity, shares=identity, audit=identity
+    permissions = AuthorizationService(
+        members=identity, shares=identity, audit=identity
     )
     container = build_container(
         providers=ProviderContext(llm=StubLLM(), search=StubSearch()),
@@ -252,35 +255,7 @@ def test_listing_is_creator_scoped_and_legacy_unscoped(tmp_path):
         listed_anonymous = client.get("/v1/files").json()
 
     assert [item["id"] for item in listed_a["data"]] == [file_a]
-    assert {item["id"] for item in listed_anonymous["data"]} == {
-        file_a,
-        file_b,
-    }
-
-
-def test_share_grant_opens_read_but_not_delete(tmp_path):
-    client, identity = make_files_client(tmp_path)
-    with client:
-        file_id = upload(client, sub="user-a")["id"]
-        identity.add_share(
-            subject_type="user",
-            subject_id="user-b",
-            resource_type=FILE_RESOURCE_TYPE,
-            resource_id=file_id,
-            permission=SharePermission.VIEW,
-        )
-
-        shared_read = client.get(
-            f"/v1/files/{file_id}/content", headers={SUB_HEADER: "user-b"}
-        )
-        shared_delete = client.delete(
-            f"/v1/files/{file_id}", headers={SUB_HEADER: "user-b"}
-        )
-
-    assert shared_read.status_code == 200
-    assert shared_read.content == PAYLOAD
-    # view does not imply manage; the denial stays a 404.
-    assert shared_delete.status_code == 404
+    assert listed_anonymous["data"] == []
 
 
 def test_owner_delete_removes_metadata_and_blob(tmp_path):
@@ -300,6 +275,64 @@ def test_owner_delete_removes_metadata_and_blob(tmp_path):
     assert deleted.status_code == 204
     assert gone.status_code == 404
     assert not any(blob_root.rglob("fl_*"))
+
+
+def test_delete_keeps_metadata_and_quota_anchor_when_blob_delete_fails(
+    tmp_path, monkeypatch
+):
+    client, _ = make_files_client(tmp_path)
+    with client:
+        file_id = upload(client, sub="user-a")["id"]
+
+        def fail_delete(self, key):
+            raise ObjectStoreError("temporary object-store failure")
+
+        monkeypatch.setattr(LocalFSObjectStore, "delete", fail_delete)
+        failed = client.delete(
+            f"/v1/files/{file_id}", headers={SUB_HEADER: "user-a"}
+        )
+        metadata = client.get(
+            f"/v1/files/{file_id}", headers={SUB_HEADER: "user-a"}
+        )
+
+    assert failed.status_code == 503
+    assert failed.json()["error"]["type"] == "object_store_unavailable"
+    assert metadata.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_object_store_probe_is_single_flight_across_caller_timeouts() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    class BlockingStore:
+        def is_available(self) -> bool:
+            nonlocal calls
+            calls += 1
+            started.set()
+            release.wait(timeout=2)
+            return True
+
+    service = FileService(
+        registry=Mock(),
+        object_store=BlockingStore(),  # type: ignore[arg-type]
+        permissions=Mock(),
+        max_file_bytes=1024,
+    )
+    first = asyncio.create_task(service.object_store_available())
+    assert await asyncio.to_thread(started.wait, 1)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(service.object_store_available(), timeout=0.01)
+    assert calls == 1
+
+    release.set()
+    assert await service.object_store_available() is True
+    assert calls == 1
 
 
 def test_workspace_namespace_filters_listing(tmp_path):
@@ -338,8 +371,8 @@ def test_capabilities_advertise_files_feature(tmp_path):
 # ------------------------------------------------------------------ #
 
 
-def test_missing_blob_is_a_loud_502_not_an_empty_200(tmp_path):
-    """A registry row whose blob vanished must answer 502, never a
+def test_missing_blob_is_a_loud_503_not_an_empty_200(tmp_path):
+    """A registry row whose blob vanished must answer 503, never a
     200 with an empty body (the stream opens eagerly)."""
     client, _ = make_files_client(tmp_path)
     blob_root = tmp_path / "blobs"
@@ -351,8 +384,8 @@ def test_missing_blob_is_a_loud_502_not_an_empty_200(tmp_path):
         content = client.get(f"/v1/files/{file_id}/content")
         metadata = client.get(f"/v1/files/{file_id}")
 
-    assert content.status_code == 502
-    assert content.json()["error"]["type"] == "server_error"
+    assert content.status_code == 503
+    assert content.json()["error"]["type"] == "object_store_unavailable"
     assert metadata.status_code == 200
 
 
@@ -403,30 +436,6 @@ def test_multi_chunk_413_leaves_no_spool_files(tmp_path, monkeypatch):
     assert not list(spool_dir.glob("inqtrix-upload-*"))
 
 
-def test_manage_share_grants_read_and_delete(tmp_path):
-    client, identity = make_files_client(tmp_path)
-    with client:
-        file_id = upload(client, sub="user-a")["id"]
-        identity.add_share(
-            subject_type="user",
-            subject_id="user-b",
-            resource_type=FILE_RESOURCE_TYPE,
-            resource_id=file_id,
-            permission=SharePermission.MANAGE,
-        )
-
-        read = client.get(
-            f"/v1/files/{file_id}/content", headers={SUB_HEADER: "user-b"}
-        )
-        deleted = client.delete(
-            f"/v1/files/{file_id}", headers={SUB_HEADER: "user-b"}
-        )
-
-    assert read.status_code == 200
-    assert deleted.status_code == 204
-    assert not any((tmp_path / "blobs").rglob("fl_*"))
-
-
 def test_legacy_anonymous_reads_scoped_files_and_tenants_stay_separate(
     tmp_path,
 ):
@@ -443,26 +452,20 @@ def test_legacy_anonymous_reads_scoped_files_and_tenants_stay_separate(
             "/v1/files/fl_missing", headers={SUB_HEADER: "user-a"}
         )
 
-    # Legacy unscoped principals keep full access (historical mode).
-    assert as_anonymous.status_code == 200
+    # Anonymous/static modes can read only genuinely ownerless legacy rows.
+    assert as_anonymous.status_code == 404
     # Same sub in another tenant: hidden, byte-identical to absence.
     assert as_other_tenant.status_code == 404
     assert as_other_tenant.json() == missing.json()
 
 
 def test_s3_backend_without_credentials_fails_loudly():
-    from inqtrix.server.container import build_object_store
-
-    with pytest.raises(RuntimeError, match="INQTRIX_S3_ENDPOINT_URL"):
-        build_object_store(
-            Settings(
-                storage=StorageSettings(
-                    object_store_backend="s3",
-                    s3_endpoint_url="http://127.0.0.1:8333",
-                    s3_access_key="key",
-                    s3_secret_key="",
-                )
-            )
+    with pytest.raises(ValueError, match="INQTRIX_S3_AUTH_MODE=static"):
+        StorageSettings(
+            object_store_backend="s3",
+            s3_endpoint_url="http://127.0.0.1:8333",
+            s3_access_key="key",
+            s3_secret_key="",
         )
 
 

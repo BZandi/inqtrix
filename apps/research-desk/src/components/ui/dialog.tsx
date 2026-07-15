@@ -1,11 +1,14 @@
 import type { ReactNode } from 'react'
 import * as React from 'react'
+import { createPortal } from 'react-dom'
 
 import { X } from '@/components/icons'
 import { useModalFocusTrap } from '@/components/ui/use-modal-focus-trap'
 import { cn } from '@/lib/utils'
 
 type DialogProps = {
+  contentClassName?: string
+  contentProps?: Omit<React.ComponentPropsWithoutRef<'div'>, 'children' | 'className'>
   children: ReactNode
   className?: string
   /** Localised label for the close affordance (defaults to "Close"). */
@@ -31,6 +34,8 @@ export function Dialog({
   children,
   className,
   closeLabel = 'Close',
+  contentClassName,
+  contentProps,
   description,
   dismissable = true,
   footer,
@@ -43,7 +48,7 @@ export function Dialog({
   useModalFocusTrap({ dismissable, onClose, open, panelRef })
 
   if (!open) return null
-  return (
+  return createPortal((
     <div
       className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-background/75 px-4 py-8 backdrop-blur"
       onMouseDown={(event) => {
@@ -79,7 +84,7 @@ export function Dialog({
             <X className="icon-sm" />
           </button>
         </div>
-        <div className="px-4 py-4">{children}</div>
+        <div {...contentProps} className={cn('px-4 py-4', contentClassName)}>{children}</div>
         {footer ? (
           <div className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
             {footer}
@@ -87,5 +92,5 @@ export function Dialog({
         ) : null}
       </section>
     </div>
-  )
+  ), document.body)
 }

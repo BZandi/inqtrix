@@ -26,9 +26,12 @@ import math
 import threading
 import time
 import uuid
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from inqtrix.auth.permissions import SharePermission
 from inqtrix.pagination import keyset_page
 from inqtrix.knowledge.stores.ports import (
     CollectionNotFound,
@@ -39,6 +42,9 @@ from inqtrix.knowledge.stores.ports import (
     KnowledgeDocument,
     RetrievalCandidate,
 )
+
+if TYPE_CHECKING:
+    from inqtrix.auth.memory_authority import MemoryAuthorityCoordinator
 
 
 def _new_id(prefix: str) -> str:
@@ -62,6 +68,103 @@ class MemoryKnowledgeStore:
         self._documents: dict[str, KnowledgeDocument] = {}
         self._chunks: dict[str, list[DocumentChunk]] = {}
         self._lock = threading.RLock()
+        self._resource_access_guard: Callable[..., Any] | None = None
+        self._authority: MemoryAuthorityCoordinator | None = None
+
+    @property
+    def atomic_resource_effects(self) -> bool:
+        """Whether resource writes include audit and invalidations atomically."""
+        return self._authority is not None
+
+    def bind_authority_coordinator(
+        self, coordinator: "MemoryAuthorityCoordinator"
+    ) -> None:
+        """Join the single process-local identity/resource boundary."""
+        self._authority = coordinator
+        self._lock = coordinator.lock
+        self._resource_access_guard = coordinator.resource_access_guard
+        coordinator.register_resource(
+            "knowledge_collection", self._resource_snapshot
+        )
+
+    def _resource_snapshot(self, tenant_id: str, collection_id: str):
+        """Return existence and owner while the shared lock is held."""
+        from inqtrix.auth.memory_authority import MemoryResourceSnapshot
+
+        collection = self._collections.get(collection_id)
+        return MemoryResourceSnapshot(
+            exists=(
+                collection is not None and collection.tenant_id == tenant_id
+            ),
+            owner_user_id=(
+                collection.created_by_user_id
+                if collection is not None and collection.tenant_id == tenant_id
+                else None
+            ),
+        )
+
+    def bind_authorization(
+        self,
+        *,
+        resource_access_guard: Callable[..., Any],
+    ) -> None:
+        """Bind the identity-store lock used by shared collection writes.
+
+        The collection lock is acquired before this guard. That order matches
+        the durable resource-then-share transaction order and turns a revoke
+        racing the final in-memory write into one observable outcome.
+        """
+        self._resource_access_guard = resource_access_guard
+
+    @contextmanager
+    def _collection_edit_guard(
+        self,
+        collection: KnowledgeCollection,
+        *,
+        actor_user_id: uuid.UUID | None,
+        denied_resource_id: str,
+        denied_error: type[KeyError],
+        owner_only: bool = False,
+    ) -> Iterator[None]:
+        """Hold live edit authority across one already-locked mutation."""
+        if self._resource_access_guard is None:
+            if actor_user_id == collection.created_by_user_id:
+                yield
+                return
+            raise denied_error(denied_resource_id)
+
+        from inqtrix.execution_authority import AuthorizationRevoked
+
+        try:
+            guard = (
+                self._authority.resource_access_guard
+                if self._authority is not None
+                else self._resource_access_guard
+            )
+            assert guard is not None
+            kwargs = {"owner_only": owner_only} if self._authority is not None else {}
+            with guard(
+                tenant_id=collection.tenant_id,
+                owner_user_id=collection.created_by_user_id,
+                actor_user_id=actor_user_id,
+                resource_type="knowledge_collection",
+                resource_id=collection.id,
+                minimum=SharePermission.EDIT,
+                **kwargs,
+            ):
+                yield
+        except AuthorizationRevoked as exc:
+            raise denied_error(denied_resource_id) from exc
+
+    @property
+    def supports_safe_reindex(self) -> bool:
+        """In-process jobs and mutations share one serialized boundary."""
+        return True
+
+    @property
+    def supports_collection_sharing(self) -> bool:
+        """The in-process collection and identity stores share one process."""
+        return True
 
     async def is_available(self) -> bool:
         """In-memory knowledge is available whenever the process is alive."""
@@ -83,7 +186,7 @@ class MemoryKnowledgeStore:
         name: str,
         embedding_model: str,
         embedding_dim: int,
-        created_by_sub: str | None = None,
+        created_by_user_id: uuid.UUID | None = None,
     ) -> KnowledgeCollection:
         """Create a collection with its immutable embedding identity."""
         if embedding_dim <= 0:
@@ -91,16 +194,35 @@ class MemoryKnowledgeStore:
                 f"embedding_dim must be positive, got {embedding_dim}"
             )
         with self._lock:
-            collection = KnowledgeCollection(
-                id=_new_id("kc"),
-                name=name,
-                embedding_model=embedding_model,
-                embedding_dim=embedding_dim,
-                created_at=time.time(),
-                created_by_sub=created_by_sub,
+            guard = (
+                self._authority.creation_guard(
+                    tenant_id="default",
+                    actor_user_id=created_by_user_id,
+                )
+                if self._authority is not None
+                else nullcontext()
             )
-            self._collections[collection.id] = collection
-            return collection
+            with guard:
+                collection = KnowledgeCollection(
+                    id=_new_id("kc"),
+                    name=name,
+                    embedding_model=embedding_model,
+                    embedding_dim=embedding_dim,
+                    created_at=time.time(),
+                    created_by_user_id=created_by_user_id,
+                )
+                self._collections[collection.id] = collection
+                if self._authority is not None:
+                    self._authority.append_resource_effects(
+                        tenant_id=collection.tenant_id,
+                        actor_user_id=created_by_user_id,
+                        owner_user_id=created_by_user_id,
+                        action="knowledge_collection.created",
+                        resource_type="knowledge_collection",
+                        resource_id=collection.id,
+                        scope="knowledge_collections",
+                    )
+                return collection
 
     async def list_collections(self) -> list[KnowledgeCollection]:
         """Return all collections, newest first."""
@@ -115,20 +237,45 @@ class MemoryKnowledgeStore:
         """Return one collection or raise :class:`CollectionNotFound`."""
         return self._get_collection(collection_id)
 
-    async def delete_collection(self, collection_id: str) -> None:
+    async def delete_collection(
+        self,
+        collection_id: str,
+        *,
+        actor_user_id: uuid.UUID | None = None,
+    ) -> None:
         """Delete a collection and every document/chunk inside it."""
         with self._lock:
-            if collection_id not in self._collections:
+            collection = self._collections.get(collection_id)
+            if collection is None:
                 raise CollectionNotFound(collection_id)
-            del self._collections[collection_id]
-            doomed = [
-                document_id
-                for document_id, document in self._documents.items()
-                if document.collection_id == collection_id
-            ]
-            for document_id in doomed:
-                self._documents.pop(document_id, None)
-                self._chunks.pop(document_id, None)
+            with self._collection_edit_guard(
+                collection,
+                actor_user_id=actor_user_id,
+                denied_resource_id=collection_id,
+                denied_error=CollectionNotFound,
+                owner_only=True,
+            ):
+                if collection.created_by_user_id != actor_user_id:
+                    raise CollectionNotFound(collection_id)
+                if self._authority is not None:
+                    self._authority.revoke_deleted_resource(
+                        tenant_id=collection.tenant_id,
+                        actor_user_id=actor_user_id,
+                        owner_user_id=collection.created_by_user_id,
+                        action="knowledge_collection.deleted",
+                        resource_type="knowledge_collection",
+                        resource_id=collection.id,
+                        scope="knowledge_collections",
+                    )
+                del self._collections[collection_id]
+                doomed = [
+                    document_id
+                    for document_id, document in self._documents.items()
+                    if document.collection_id == collection_id
+                ]
+                for document_id in doomed:
+                    self._documents.pop(document_id, None)
+                    self._chunks.pop(document_id, None)
 
     # -- documents --------------------------------------------------------- #
 
@@ -143,6 +290,7 @@ class MemoryKnowledgeStore:
         embeddings: list[list[float]],
         source_chunks: list[str] | None = None,
         page_numbers: list[int | None] | None = None,
+        actor_user_id: uuid.UUID | None = None,
     ) -> KnowledgeDocument:
         """Store a document with its pre-chunked, pre-embedded content.
 
@@ -160,50 +308,68 @@ class MemoryKnowledgeStore:
             )
         with self._lock:
             collection = self._get_collection(collection_id)
-            for index, embedding in enumerate(embeddings):
-                if len(embedding) != collection.embedding_dim:
-                    raise EmbeddingDimensionMismatch(
-                        f"chunk {index} has dimension {len(embedding)}, "
-                        f"collection {collection_id} requires "
-                        f"{collection.embedding_dim} "
-                        f"(model {collection.embedding_model})"
-                    )
-            document = KnowledgeDocument(
-                id=_new_id("kd"),
-                collection_id=collection_id,
-                title=title,
-                text=text,
-                metadata=dict(metadata),
-                chunk_count=len(chunks),
-                created_at=time.time(),
-            )
-            self._documents[document.id] = document
-            sources = source_chunks or []
-            pages = page_numbers or []
-            self._chunks[document.id] = [
-                DocumentChunk(
-                    id=_new_id("kch"),
-                    document_id=document.id,
+            with self._collection_edit_guard(
+                collection,
+                actor_user_id=actor_user_id,
+                denied_resource_id=collection_id,
+                denied_error=CollectionNotFound,
+            ):
+                for index, embedding in enumerate(embeddings):
+                    if len(embedding) != collection.embedding_dim:
+                        raise EmbeddingDimensionMismatch(
+                            f"chunk {index} has dimension {len(embedding)}, "
+                            f"collection {collection_id} requires "
+                            f"{collection.embedding_dim} "
+                            f"(model {collection.embedding_model})"
+                        )
+                document = KnowledgeDocument(
+                    id=_new_id("kd"),
                     collection_id=collection_id,
-                    chunk_index=index,
-                    text=chunk_text,
-                    embedding=tuple(embedding),
-                    source_text=(
-                        sources[index] if index < len(sources) else ""
-                    ),
-                    page_number=pages[index] if index < len(pages) else None,
+                    title=title,
+                    text=text,
+                    metadata=dict(metadata),
+                    chunk_count=len(chunks),
+                    created_at=time.time(),
                 )
-                for index, (chunk_text, embedding) in enumerate(
-                    zip(chunks, embeddings)
+                self._documents[document.id] = document
+                sources = source_chunks or []
+                pages = page_numbers or []
+                self._chunks[document.id] = [
+                    DocumentChunk(
+                        id=_new_id("kch"),
+                        document_id=document.id,
+                        collection_id=collection_id,
+                        chunk_index=index,
+                        text=chunk_text,
+                        embedding=tuple(embedding),
+                        source_text=(
+                            sources[index] if index < len(sources) else ""
+                        ),
+                        page_number=(
+                            pages[index] if index < len(pages) else None
+                        ),
+                    )
+                    for index, (chunk_text, embedding) in enumerate(
+                        zip(chunks, embeddings)
+                    )
+                ]
+                # dataclasses.replace, NOT field-by-field reconstruction:
+                # a manual copy silently drops every field added later
+                # (created_by_user_id was lost exactly that way).
+                self._collections[collection_id] = replace(
+                    collection, document_count=collection.document_count + 1
                 )
-            ]
-            # dataclasses.replace, NOT field-by-field reconstruction:
-            # a manual copy silently drops every field added later
-            # (created_by_sub was lost exactly that way).
-            self._collections[collection_id] = replace(
-                collection, document_count=collection.document_count + 1
-            )
-            return document
+                if self._authority is not None:
+                    self._authority.append_resource_effects(
+                        tenant_id=collection.tenant_id,
+                        actor_user_id=actor_user_id,
+                        owner_user_id=collection.created_by_user_id,
+                        action="knowledge_document.added",
+                        resource_type="knowledge_collection",
+                        resource_id=collection.id,
+                        scope="knowledge_collections",
+                    )
+                return document
 
     async def list_documents(self, collection_id: str) -> list[KnowledgeDocument]:
         """Return a collection's documents, newest first."""
@@ -270,19 +436,42 @@ class MemoryKnowledgeStore:
             )
             return [replace(chunk, embedding=()) for chunk in ordered]
 
-    async def delete_document(self, document_id: str) -> None:
+    async def delete_document(
+        self,
+        document_id: str,
+        *,
+        actor_user_id: uuid.UUID | None = None,
+    ) -> None:
         """Delete one document and its chunks."""
         with self._lock:
-            document = self._documents.pop(document_id, None)
+            document = self._documents.get(document_id)
             if document is None:
                 raise DocumentNotFound(document_id)
-            self._chunks.pop(document_id, None)
             collection = self._collections.get(document.collection_id)
-            if collection is not None:
+            if collection is None:
+                raise DocumentNotFound(document_id)
+            with self._collection_edit_guard(
+                collection,
+                actor_user_id=actor_user_id,
+                denied_resource_id=document_id,
+                denied_error=DocumentNotFound,
+            ):
+                self._documents.pop(document_id, None)
+                self._chunks.pop(document_id, None)
                 self._collections[collection.id] = replace(
                     collection,
                     document_count=max(0, collection.document_count - 1),
                 )
+                if self._authority is not None:
+                    self._authority.append_resource_effects(
+                        tenant_id=collection.tenant_id,
+                        actor_user_id=actor_user_id,
+                        owner_user_id=collection.created_by_user_id,
+                        action="knowledge_document.deleted",
+                        resource_type="knowledge_collection",
+                        resource_id=collection.id,
+                        scope="knowledge_collections",
+                    )
 
     async def reembed_document(
         self,
@@ -292,6 +481,7 @@ class MemoryKnowledgeStore:
         embeddings: list[list[float]],
         source_chunks: list[str] | None = None,
         page_numbers: list[int | None] | None = None,
+        actor_user_id: uuid.UUID | None = None,
     ) -> KnowledgeDocument:
         """Rebuild one document's chunks/vectors in place (keep its id).
 
@@ -312,48 +502,68 @@ class MemoryKnowledgeStore:
             if document is None:
                 raise DocumentNotFound(document_id)
             collection = self._get_collection(document.collection_id)
-            for index, embedding in enumerate(embeddings):
-                if len(embedding) != collection.embedding_dim:
-                    raise EmbeddingDimensionMismatch(
-                        f"chunk {index} has dimension {len(embedding)}, "
-                        f"collection {document.collection_id} requires "
-                        f"{collection.embedding_dim} "
-                        f"(model {collection.embedding_model})"
+            with self._collection_edit_guard(
+                collection,
+                actor_user_id=actor_user_id,
+                denied_resource_id=document_id,
+                denied_error=DocumentNotFound,
+            ):
+                for index, embedding in enumerate(embeddings):
+                    if len(embedding) != collection.embedding_dim:
+                        raise EmbeddingDimensionMismatch(
+                            f"chunk {index} has dimension {len(embedding)}, "
+                            f"collection {document.collection_id} requires "
+                            f"{collection.embedding_dim} "
+                            f"(model {collection.embedding_model})"
+                        )
+                sources = source_chunks or []
+                pages = page_numbers or []
+                # Reuse chunk ids by position so a re-embed does not orphan
+                # existing citations: (document_id, chunk_index) is the
+                # citation key, but a stable chunk_id lets exact provenance
+                # links survive reindex too. Positions beyond the previous
+                # chunk count get fresh ids; a shrunk document drops the tail.
+                previous_ids = [
+                    chunk.id for chunk in self._chunks.get(document_id, [])
+                ]
+                self._chunks[document_id] = [
+                    DocumentChunk(
+                        id=(
+                            previous_ids[index]
+                            if index < len(previous_ids)
+                            else _new_id("kch")
+                        ),
+                        document_id=document_id,
+                        collection_id=document.collection_id,
+                        chunk_index=index,
+                        text=chunk_text,
+                        embedding=tuple(embedding),
+                        source_text=(
+                            sources[index] if index < len(sources) else ""
+                        ),
+                        page_number=(
+                            pages[index] if index < len(pages) else None
+                        ),
                     )
-            sources = source_chunks or []
-            pages = page_numbers or []
-            # Reuse chunk ids by position so a re-embed does not orphan
-            # existing citations: (document_id, chunk_index) is the
-            # citation key, but a stable chunk_id lets exact provenance
-            # links survive reindex too. Positions beyond the previous
-            # chunk count get fresh ids; a shrunk document drops the tail.
-            previous_ids = [chunk.id for chunk in self._chunks.get(document_id, [])]
-            self._chunks[document_id] = [
-                DocumentChunk(
-                    id=(
-                        previous_ids[index]
-                        if index < len(previous_ids)
-                        else _new_id("kch")
-                    ),
-                    document_id=document_id,
-                    collection_id=document.collection_id,
-                    chunk_index=index,
-                    text=chunk_text,
-                    embedding=tuple(embedding),
-                    source_text=(
-                        sources[index] if index < len(sources) else ""
-                    ),
-                    page_number=pages[index] if index < len(pages) else None,
-                )
-                for index, (chunk_text, embedding) in enumerate(
-                    zip(chunks, embeddings)
-                )
-            ]
-            # dataclasses.replace, NOT field-by-field reconstruction:
-            # a manual copy silently drops every field added later.
-            updated = replace(document, chunk_count=len(chunks))
-            self._documents[document_id] = updated
-            return updated
+                    for index, (chunk_text, embedding) in enumerate(
+                        zip(chunks, embeddings)
+                    )
+                ]
+                # dataclasses.replace, NOT field-by-field reconstruction:
+                # a manual copy silently drops every field added later.
+                updated = replace(document, chunk_count=len(chunks))
+                self._documents[document_id] = updated
+                if self._authority is not None:
+                    self._authority.append_resource_effects(
+                        tenant_id=collection.tenant_id,
+                        actor_user_id=actor_user_id,
+                        owner_user_id=collection.created_by_user_id,
+                        action="knowledge_document.reindexed",
+                        resource_type="knowledge_collection",
+                        resource_id=collection.id,
+                        scope="knowledge_collections",
+                    )
+                return updated
 
     # -- retrieval ----------------------------------------------------------- #
 

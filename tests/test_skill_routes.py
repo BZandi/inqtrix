@@ -12,6 +12,7 @@ the share layer at all.
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 import pytest
 from fastapi import FastAPI
@@ -19,7 +20,7 @@ from fastapi.testclient import TestClient
 
 from inqtrix.auth.directory import MemoryUserDirectory
 from inqtrix.auth.identity_memory import MemoryIdentityStore
-from inqtrix.auth.permissions import PermissionService
+from inqtrix.auth.permissions import AuthorizationService
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server.container import build_container
 from inqtrix.server.routers.shares import build_router as build_shares_router
@@ -30,8 +31,8 @@ from tests.contract._app import StubLLM, StubSearch
 from tests.test_runs_sharing import (
     OWNER,
     RECIPIENT,
-    SUB_HEADER,
     OidcHeaderProvider,
+    user_headers,
 )
 
 PAYLOAD = {
@@ -77,14 +78,18 @@ def make_world():
     users = MemoryUserDirectory()
 
     async def mirror() -> None:
-        for sub, name in ((OWNER, "Olga Owner"), (RECIPIENT, "Rita Recipient")):
+        for user_id, subject, name in (
+            (OWNER, "user-owner", "Olga Owner"),
+            (RECIPIENT, "user-recipient", "Rita Recipient"),
+        ):
             await users.record_login(
                 tenant_id="default",
                 issuer="http://idp.example",
-                subject=sub,
-                email=f"{sub}@example.com",
+                subject=subject,
+                email=f"{subject}@example.com",
                 email_verified=True,
                 display_name=name,
+                canonical_user_id=user_id,
             )
 
     asyncio.run(mirror())
@@ -97,8 +102,8 @@ def make_world():
         ),
         semaphore_factory=lambda: asyncio.Semaphore(1),
         auth_provider=OidcHeaderProvider(users),
-        permissions=PermissionService(
-            members=identity, groups=identity, shares=identity, audit=identity
+        permissions=AuthorizationService(
+            members=identity, shares=identity, audit=identity
         ),
         workspace_admin=identity,
     )
@@ -115,13 +120,17 @@ def world():
     return make_world()
 
 
-def as_user(sub: str) -> dict[str, str]:
-    return {SUB_HEADER: sub}
+def as_user(user_id: uuid.UUID) -> dict[str, str]:
+    return user_headers(user_id)
 
 
-def create_skill(client: TestClient, *, sub: str = OWNER, **overrides) -> dict:
+def create_skill(
+    client: TestClient, *, user_id: uuid.UUID = OWNER, **overrides
+) -> dict:
     response = client.post(
-        "/v1/skills", json={**PAYLOAD, **overrides}, headers=as_user(sub)
+        "/v1/skills",
+        json={**PAYLOAD, **overrides},
+        headers=as_user(user_id),
     )
     assert response.status_code == 201, response.text
     return response.json()
@@ -130,6 +139,7 @@ def create_skill(client: TestClient, *, sub: str = OWNER, **overrides) -> dict:
 def test_crud_roundtrip_with_sanitized_points(world):
     client, _container = world
     created = create_skill(client)
+    assert created["access"] == {"mode": "owner"}
     assert created["label"] == "sprechzettel"
     assert created["deliverable"] == "talking_points"
     assert created["allowed_tools"] == [
@@ -151,7 +161,11 @@ def test_crud_roundtrip_with_sanitized_points(world):
 
     updated = client.put(
         f"/v1/skills/{created['id']}",
-        json={**PAYLOAD, "title": "Sprechzettel v2"},
+        json={
+            **PAYLOAD,
+            "title": "Sprechzettel v2",
+            "expected_revision": created["revision"],
+        },
         headers=as_user(OWNER),
     )
     assert updated.status_code == 200
@@ -245,7 +259,9 @@ def test_stranger_is_blind_and_share_wiring_works(world):
     ] == []
     assert (
         client.put(
-            f"/v1/skills/{skill_id}", json=PAYLOAD, headers=as_user(RECIPIENT)
+            f"/v1/skills/{skill_id}",
+            json={**PAYLOAD, "expected_revision": created["revision"]},
+            headers=as_user(RECIPIENT),
         ).status_code
         == 404
     )
@@ -257,7 +273,9 @@ def test_stranger_is_blind_and_share_wiring_works(world):
         json={
             "resource_type": "skill_template",
             "resource_id": skill_id,
-            "invitees": [{"subject_id": RECIPIENT, "permission": "view"}],
+            "invitees": [
+                {"user_id": str(RECIPIENT), "permission": "view"}
+            ],
         },
         headers=as_user(OWNER),
     )
@@ -266,16 +284,21 @@ def test_stranger_is_blind_and_share_wiring_works(world):
     accepted = client.post(
         f"/v1/shares/{share_id}/accept", headers=as_user(RECIPIENT)
     )
-    assert accepted.status_code in (200, 404)
+    assert accepted.status_code == 200
 
     visible = client.get("/v1/skills", headers=as_user(RECIPIENT)).json()[
         "data"
     ]
     assert [item["id"] for item in visible] == [skill_id]
-    assert visible[0]["access"] == {"via": "share", "permission": "view"}
+    assert visible[0]["access"] == {
+        "mode": "shared",
+        "permission": "view",
+    }
     assert (
         client.put(
-            f"/v1/skills/{skill_id}", json=PAYLOAD, headers=as_user(RECIPIENT)
+            f"/v1/skills/{skill_id}",
+            json={**PAYLOAD, "expected_revision": created["revision"]},
+            headers=as_user(RECIPIENT),
         ).status_code
         == 404
     )
@@ -290,16 +313,16 @@ def test_stranger_is_blind_and_share_wiring_works(world):
 def test_stale_precondition_is_409(world):
     client, _container = world
     created = create_skill(client)
-    stale = created["updated_at"] - 1.0
     response = client.put(
         f"/v1/skills/{created['id']}",
-        json={**PAYLOAD, "expected_updated_at": stale},
+        json={**PAYLOAD, "expected_revision": created["revision"] + 1},
         headers=as_user(OWNER),
     )
     assert response.status_code == 409
+    assert response.json()["error"]["current_revision"] == created["revision"]
     fresh = client.put(
         f"/v1/skills/{created['id']}",
-        json={**PAYLOAD, "expected_updated_at": created["updated_at"]},
+        json={**PAYLOAD, "expected_revision": created["revision"]},
         headers=as_user(OWNER),
     )
     assert fresh.status_code == 200

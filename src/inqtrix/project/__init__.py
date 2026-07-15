@@ -2,7 +2,7 @@
 
 When the platform runs with a Postgres backend, the entities that
 otherwise live only in the local markdown project become server-
-persistent, scoped per ``(tenant_id, created_by_sub, workspace_id)`` like
+persistent, scoped per ``(tenant_id, created_by_user_id, workspace_id)`` like
 the other owned resources. Without Postgres the app stays local-first —
 the tier is capability-gated, never forced.
 

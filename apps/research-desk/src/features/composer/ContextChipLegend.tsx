@@ -1,5 +1,5 @@
 import { useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import { GripVertical, X } from '@/components/icons'
+import { GripVertical, LoaderCircle, RefreshCw, X } from '@/components/icons'
 import { attachmentChipVisual } from '@/features/files/attachmentChips'
 import { chatContextRefKey, type ChatAttachmentChipModel } from '@/features/project/selectors'
 import type { ChatContextReferenceRecord } from '@/features/project/types'
@@ -17,8 +17,16 @@ type ChipScope = 'pill' | 'pending'
 type ContextChipLegendProps = {
   chips: ChatAttachmentChipModel[]
   /** Locale strings kept out of the shared component so it stays surface-agnostic. */
-  labels: { removeContext: string; reorderHint: string }
+  labels: {
+    attachmentFailed: string
+    attachmentPending: string
+    attachmentRetry: string
+    removeContext: string
+    reorderHint: string
+  }
   onRemove: (ref: ChatContextReferenceRecord) => void
+  /** Uses the existing durable UploadOperation/byte registry coordinator. */
+  onRetry?: (chip: ChatAttachmentChipModel) => void
   /** Reorder within the pending (non-positional) run by pending index. */
   onReorderPending: (fromIndex: number, toIndex: number) => void
   /** Reorder within the pill (`[N]`) run by reading-order index. */
@@ -44,6 +52,7 @@ export function ContextChipLegend({
   onRemove,
   onReorderPending,
   onReorderPill,
+  onRetry,
   pendingKeys,
   pillKeys,
 }: ContextChipLegendProps) {
@@ -156,6 +165,8 @@ export function ContextChipLegend({
             className={cn(
               'group relative inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-semibold transition',
               chipClassName,
+              chip.readiness === 'pending' && 'border-warning/50 bg-warning/10 text-warning',
+              chip.readiness === 'failed' && 'border-destructive/50 bg-destructive/10 text-destructive',
               canReorder && 'cursor-grab active:cursor-grabbing',
               draggedKey === key && 'scale-[0.98] cursor-grabbing opacity-80 shadow-[0_8px_20px_var(--shadow-soft)] ring-1 ring-ring/50',
             )}
@@ -177,7 +188,12 @@ export function ContextChipLegend({
               ? (event) => beginPointerReorder(event, scope, scopeIndex, scopeCount, key)
               : undefined}
             tabIndex={canReorder ? 0 : undefined}
-            title={canReorder ? `${chip.title} · ${labels.reorderHint}` : chip.title}
+            title={[
+              chip.title,
+              chip.readiness === 'pending' ? labels.attachmentPending : null,
+              chip.readiness === 'failed' ? chip.error ?? labels.attachmentFailed : null,
+              canReorder ? labels.reorderHint : null,
+            ].filter(Boolean).join(' · ')}
           >
             {showBeforeIndicator && (
               <span className="pointer-events-none absolute -left-1 top-1 bottom-1 w-0.5 rounded-full bg-ring shadow-[0_0_0_1px_var(--background)]" />
@@ -206,6 +222,28 @@ export function ContextChipLegend({
             <span className="min-w-0 flex-1 truncate">{chip.label}</span>
             {chip.fileCount !== null && (
               <span className="shrink-0 t-hint font-bold tabular-nums opacity-75">{chip.fileCount}</span>
+            )}
+            {chip.readiness === 'pending' && (
+              <span className="inline-flex max-w-36 shrink items-center gap-1 truncate t-hint font-medium">
+                <LoaderCircle className="size-3 shrink-0 animate-spin motion-reduce:animate-none" />
+                <span className="truncate">{labels.attachmentPending}</span>
+              </span>
+            )}
+            {chip.readiness === 'failed' && (
+              <span className="max-w-48 shrink truncate t-hint font-medium">
+                {chip.error ?? labels.attachmentFailed}
+              </span>
+            )}
+            {chip.readiness === 'failed' && chip.retryAssetIds.length > 0 && onRetry && (
+              <button
+                aria-label={labels.attachmentRetry}
+                className="shrink-0 rounded-sm p-0.5 transition hover:bg-background/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={() => onRetry(chip)}
+                title={labels.attachmentRetry}
+                type="button"
+              >
+                <RefreshCw className="size-3" />
+              </button>
             )}
             <button
               aria-label={labels.removeContext}

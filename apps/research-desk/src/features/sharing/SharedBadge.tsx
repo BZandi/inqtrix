@@ -23,7 +23,7 @@ export function SharedBadge({
     : t.sharing.sharedCount.replace('{count}', String(count))
 
   const body = (
-    <span className="inline-flex items-center gap-1 text-muted-foreground">
+    <span aria-hidden="true" className="inline-flex items-center gap-1 text-muted-foreground">
       <Users className="size-3" />
       {!isSharedWithMe && (
         <span className="t-hint tabular-nums">{count}</span>
@@ -47,8 +47,9 @@ export function SharedBadge({
             {body}
           </button>
         ) : (
-          <span aria-label={tooltip} className="grid h-6 place-items-center px-1">
+          <span className="grid h-6 place-items-center px-1">
             {body}
+            <span className="sr-only">{tooltip}</span>
           </span>
         )}
       </TooltipTrigger>

@@ -76,31 +76,49 @@ export function useServerDiscovery({ enabled }: UseServerDiscoveryOptions) {
       // Clear any error from a prior pass so `lastError` reflects only this
       // discovery attempt (a stale error must not stick once it is resolved).
       if (!ignore) setLastError(null)
-      try {
-        const healthPayload = await fetchHealth()
-        if (!ignore) setHealth(healthPayload)
-      } catch (error) {
-        if (!ignore) setLastError(messageFromError(error))
+      // Health and capabilities are independent probes — only the stack
+      // listing below needs the capability manifest. Awaiting them one
+      // after the other made the shell wait two round-trips where one
+      // suffices; on a remote connection that is the difference between
+      // a brief and a noticeable blank screen. State is still applied in
+      // the original order so error precedence and the `ready` moment
+      // are unchanged.
+      const [healthResult, capabilitiesResult] = await Promise.allSettled([
+        fetchHealth(),
+        fetchCapabilities(),
+      ])
+
+      if (healthResult.status === 'fulfilled') {
+        if (!ignore) setHealth(healthResult.value)
+      } else if (!ignore) {
+        setLastError(messageFromError(healthResult.reason))
       }
       // Health has now been probed (ok or failed): the auth mode is
       // determinable, so listing may proceed once the caller is admitted.
       if (!ignore) setReady(true)
 
-      try {
-        const capabilitiesPayload = await fetchCapabilities()
-        if (!ignore) setCapabilities(capabilitiesPayload)
-      } catch (error) {
+      let capabilitiesSupportsStacks = false
+      if (capabilitiesResult.status === 'fulfilled') {
+        capabilitiesSupportsStacks = Boolean(
+          capabilitiesResult.value?.features?.multi_stack,
+        )
+        if (!ignore) setCapabilities(capabilitiesResult.value)
+      } else if (!ignore) {
         // 404 = older backend without the capability manifest; every
         // capability-gated affordance simply stays hidden. Anything
         // else is a real error and surfaces like the other probes.
-        if (!ignore) {
-          setCapabilities(null)
-          if (!hasHttpStatus(error, 404)) setLastError(messageFromError(error))
+        setCapabilities(null)
+        if (!hasHttpStatus(capabilitiesResult.reason, 404)) {
+          setLastError(messageFromError(capabilitiesResult.reason))
         }
       }
 
       try {
-        const stackPayload = await discoverStacks()
+        // Ask the manifest instead of probing: a single-stack server does
+        // not mount GET /v1/stacks at all.
+        const stackPayload = capabilitiesSupportsStacks
+          ? await discoverStacks()
+          : null
         if (!ignore) {
           if (stackPayload) {
             setDefaultStackName(stackPayload.default)
@@ -160,10 +178,6 @@ async function discoverStacks() {
       return payload
     })
     .catch((error) => {
-      if (hasHttpStatus(error, 404)) {
-        entry.status = 'unsupported'
-        return null
-      }
       stackDiscoveryCache.delete(STACK_DISCOVERY_CACHE_KEY)
       throw error
     })

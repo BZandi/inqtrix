@@ -14,7 +14,7 @@ Native runs are short-lived server resources addressed by an opaque `run_id`:
 | Route | Method | Purpose |
 |---|---|---|
 | `/v1/runs` | POST | Create a queued research run. Accepts either `question` or OpenAI-style `messages`. Agent runs additionally accept `response_form` (`"auto"`\|`"chat"`\|`"canvas"`), `source_policy`, and the one-shot `execution_directive`; see below. Returns HTTP 202 with the run summary. |
-| `/v1/runs` | GET | List queued, running, and short-lived terminal runs currently in memory. |
+| `/v1/runs` | GET | List visible queued, running, waiting, and retained terminal runs from the configured run store. |
 | `/v1/runs/{run_id}` | GET | Fetch the current run summary. |
 | `/v1/runs/{run_id}/events` | GET | Stream buffered and live events as Server-Sent Events. The server sends periodic SSE comment heartbeats (`: keepalive`) without allocating event sequences. The optional `?after=<sequence>` query parameter filters the REPLAY to events with a higher sequence (reconnect support); the live tail is unaffected. A non-integer value returns 400. With `?format=json` the SAME replay buffer returns immediately as a JSON page `{"object": "list", "data": [...], "terminal": bool}` instead of a stream — the polling fallback for clients behind SSE-buffering proxies. |
 | `/v1/runs/{run_id}/children` | GET | List an agent run's direct child runs, newest first, as `{"object": "list", "data": [...]}`. Access is decided on the parent (a view share suffices); the children's own URLs stay owner-scoped. Standard runs return an empty list. |
@@ -32,11 +32,13 @@ Native runs are short-lived server resources addressed by an opaque `run_id`:
 | `/v1/agent-sessions*`, `/v1/agent-session-groups*` | GET/PUT/DELETE | Saved agent-desk sessions — a structural clone of the `/v1/knowledge-sessions` surface (private per user, metadata lists, load-on-open bodies, groups). |
 | `/v1/agent/memory*` | GET/PATCH/POST/DELETE | Personal long-term agent memory: accepted memories, candidates, search (`GET /v1/agent/memory?q=`), clear, and feedback history. Auth derives ownership; client owner fields are rejected. |
 | `/v1/agent/runs/{run_id}/feedback` | POST | Store personal run feedback (`positive`/`negative`/`neutral`, optional `reason`, optional owner-checked `memory_id`). Shared run access does not grant personal memory access. |
-| `/v1/runs/{run_id}/result` | GET | Fetch the final `ResearchResult.to_export_payload()` report after completion; current Agent Desk results include the same canonical `execution` block as the live snapshot. |
+| `/v1/runs/{run_id}/result` | GET | Fetch the final `ResearchResult.to_export_payload()` report after completion. Agent Desk results include the same canonical `execution` block as the live snapshot; Knowledge results include the text-free `knowledge_profile`, `knowledge_gate`, `knowledge_grounding`, `knowledge_retrieval`, `knowledge_candidates`, and `knowledge_evidence_used` receipt reconstructed from the result and terminal snapshot. |
 | `/v1/runs/{run_id}/cancel` | POST | Cancel a queued run or request cancellation for a running run. Cancelling an agent run cascades over its child runs. |
 | `/v1/runs/{run_id}` | DELETE | Permanently delete a terminal run (owner-only); returns 409 while the run is still active. Revokes any shares on the run. To delete an active run, cancel it first, poll the summary until it turns terminal (its summary carries `cancel_requested: true` in the meantime), then delete — the reference web client automates exactly this flow. |
 
-The `run_id` identifies the job, not a user. Future authentication can add a user or tenant owner beside it; clients should still address work by `run_id`.
+The opaque `run_id` identifies the job, while the server binds that job to its
+tenant, workspace, owner, and optional shares. Clients address work by
+`run_id`; possession of an id never grants access.
 
 ### Agent source and execution request
 
@@ -86,7 +88,14 @@ resolved model and reasoning effort.
 
 ## Queue and lifecycle
 
-`RUN_MAX_CONCURRENT` caps active native provider work when set; otherwise native runs reuse `MAX_CONCURRENT`. Additional `/v1/runs` jobs enter a bounded FIFO queue controlled by `RUN_QUEUE_MAX_SIZE` (default 50). Terminal runs stay in memory for `RUN_COMPLETED_TTL_SECONDS` (default 300) so a UI can fetch the report after the terminal event. Persistence across refreshes beyond that window is intentionally left to a future database adapter.
+`RUN_MAX_CONCURRENT` caps active native provider work when set; otherwise
+native runs reuse `MAX_CONCURRENT`. Additional `/v1/runs` jobs enter a bounded
+FIFO queue controlled by `RUN_QUEUE_MAX_SIZE` (default 50). With the in-memory
+store, terminal runs remain fetchable for `RUN_COMPLETED_TTL_SECONDS` (default
+300). With the PostgreSQL run store, terminal rows, their event history, and
+result payloads survive process restarts and are retained for
+`RUN_POSTGRES_RETENTION_SECONDS` (default 90 days). Both stores enforce their
+configured cleanup and history bounds.
 
 ```mermaid
 stateDiagram
@@ -179,6 +188,11 @@ Every list/detail response returns the same summary shape:
 
 `mode` is `research` for the normal graph path and `direct_llm` when the run uses the explicit direct-provider chat mode. `snapshot` is a compact derived view from `AgentState`. It deliberately omits raw provider responses, full evidence ledgers, and secrets. The source and claim quality fields are live counters for UI cards and diagnostics; the final authoritative report payload still comes from `/result`.
 
+Agent summaries additionally expose a `timing` object with
+`total_seconds`, `active_seconds`, `waiting_seconds`, `queued_seconds`,
+`segment_count`, `resume_count`, and `current_segment_id`. Standard run
+summaries retain their historical exact key set.
+
 Agent summaries and state-bearing agent events add one canonical
 `snapshot.execution` block with an exact, algorithm-independent key set:
 
@@ -241,23 +255,59 @@ Event payloads are sanitized through the same recursive drop-list used by runtim
 
 | Event | When emitted | Important data |
 |---|---|---|
-| `inqtrix.run.queued` | Run record created. | `status`, `queue_position` |
-| `inqtrix.run.started` | Worker thread starts. | `status`, `snapshot` |
+| `inqtrix.run.queued` | Run record created or a parked run is admitted for another segment. | `status`, `queue_position`, optional `resumed`, `segment_id`, `segment_ordinal` |
+| `inqtrix.run.started` | The first execution segment starts. | `status`, `snapshot`, `segment_id`, `segment_ordinal`, `reason` |
+| `inqtrix.run.resumed` | A later execution segment actually starts. | `status`, `snapshot`, `segment_id`, `segment_ordinal`, `reason` |
 | `inqtrix.run.snapshot` | A snapshot was updated for a state-bearing event. | `snapshot` |
 | `inqtrix.progress.message` | Existing `emit_progress(...)` message fires. | `message`, `phase`, `severity`, `snapshot` |
 | `inqtrix.node.model_resolution` | A node resolves its provider model and reasoning effort. | `node`, `model`, `tier`, `effort`, `model_source`, `effort_source`, `requested_tier` |
 | `inqtrix.node.started` | LangGraph enters a node. | `node`, `snapshot` |
 | `inqtrix.node.finished` | Node returns normally. | `node`, `snapshot` |
 | `inqtrix.node.failed` | Node raises. | `node`, `snapshot` |
-| `inqtrix.output_text.delta` | Final answer text is emitted in word-aligned chunks. | `delta` |
+| `inqtrix.answer.started` | One final-answer publication begins after the empty durable answer artifact is committed as `writing`. | `artifact_id`, `publication_id`, `status=writing` |
+| `inqtrix.output_text.delta` | Final Markdown is emitted in word-aligned chunks. | `artifact_id`, `publication_id`, UTF-8 byte `offset`, `delta` |
+| `inqtrix.answer.ready` | The publication completed without a gap. | `artifact_id`, `publication_id`, `bytes`, `status=ready` |
+| `inqtrix.answer.interrupted` | Publication stopped before completion. | `artifact_id`, `publication_id`, `offset`, `status=interrupted`, `stage` (`staging` / `streaming` / `finalizing` / `publishing_ready`) |
 | `inqtrix.run.completed` | Result payload was stored. | `metrics`, `result_url`, `snapshot` |
 | `inqtrix.run.waiting` | Agent run parked itself for an approval, user input, or its running children. | `status` (`waiting_for_approval` / `waiting_for_input` / `waiting_for_children`), `snapshot` |
 | `inqtrix.run.cancel_requested` | Client requested cancellation while running. | `status`, `reason` |
 | `inqtrix.run.cancelled` | Run is terminal cancelled. | `status`, `reason` (`cancelled_while_waiting` / `approval_timeout` / `children_timeout` for parked runs), `snapshot` |
 | `inqtrix.run.failed` | Worker failed. | `status`, `error`, `snapshot` |
 
-A resumed run emits a second `inqtrix.run.queued` event whose payload carries
-`resumed: true`, so clients can tell a resume from the original admission.
+A resumed run first emits another `inqtrix.run.queued` event with
+`resumed: true`; `inqtrix.run.resumed` follows only when the worker actually
+starts that segment. `started_at` remains the first execution start. Agent-run
+summaries expose the accumulated active, explicit-wait and resumed-queue time
+in `timing`; worker reclaim does not create a false execution segment.
+
+Knowledge runs additionally emit these typed retrieval events:
+
+| Event | When emitted | Important data |
+|---|---|---|
+| `inqtrix.knowledge.retrieval.completed` | The shared retrieval implementation has produced the initial candidate set for the evidence budget. | `candidate_count`, `top_k`, `final_k`, `final_k_overridden`, `collection_document_count`, `degradations`, `warnings` |
+| `inqtrix.knowledge.retrieval.degraded` | A technical vector boundary or stalled candidate page prevented the requested candidate pool from filling. Ordinary corpus exhaustion does not emit this event. | `reason`, `retrieval_mode`, `stage=vector_candidate_pool`, `requested_candidate_pool`, `returned_candidate_pool`, `final_top_k`, `returned_hits`, `final_evidence_complete`, optional `candidate_cap` |
+| `inqtrix.knowledge.retrieval.warning` | Canonical hydration excluded one or more unsafe candidates. The event is a cumulative, text-free snapshot after the last retrieval, including decomposition and gate rewrites. | `code`, `reason`, `stage`, `count`, optional `recommended_action`; known codes include `chunks_require_reindex` and `chunks_pending_reconciliation` |
+
+Candidate-pool completeness and final-evidence completeness are separate
+facts: a reranker may still fill every final evidence slot from a technically
+under-filled pool. Each degradation is therefore also persisted in the
+text-free `knowledge_retrieval.degradations` result receipt. The terminal
+snapshot and `/result` export expose that same deduplicated receipt, and saved
+Knowledge sessions retain it with the answer. Reconnect, reload, or export
+cannot turn a visible degradation into an ordinary successful retrieval. A
+transport timeout, provider retry exhaustion, gate parse fallback, or other
+quality downgrade likewise remains a typed event/result marker or terminal
+failure; it is never hidden behind a completed event.
+
+Store-side source-integrity exclusions remain typed on the
+`RetrievalCandidateBatch` through embedding-model fusion, decomposition
+interleave, reranking and gate-rewrite merges. Their bounded public projection
+is persisted in `knowledge_retrieval.warnings` and rendered through the same
+warning surface as synchronous Knowledge search; no query, source id, chunk
+text or excerpt is part of that receipt. `count` is consequently the number of
+exclusion observations across the run's retrieval calls, not a distinct-chunk
+count: without identifiers the same unsafe point returned for two queries
+cannot and must not be guessed to be one unique point.
 
 Agent control actions additionally emit signal events (rows are the truth,
 clients reconcile via the GET endpoints above):
@@ -266,11 +316,15 @@ clients reconcile via the GET endpoints above):
 |---|---|---|
 | `inqtrix.agent.approval.decided` | A user decided an approval. | `approval_id`, `status`, `decided_by_user_id` |
 | `inqtrix.agent.clarification.answered` | A user answered a clarification. | `clarification_id` |
+| `inqtrix.agent.limit.reached` | A deterministic tool/step/token ceiling was reached. Recoverable ceilings park the run instead of silently returning a partial answer. | `kind`, `used`, `limit`, `ceiling`, `state`, supported `actions` |
+| `inqtrix.agent.limit.decided` | The user explicitly chose a terminal partial answer or cancellation after a recoverable limit. | `clarification_id`, `kind`, `decision` |
+| `inqtrix.agent.artifact.created` | An agent artifact was committed for the first time. For an answer this precedes `answer.started` and exposes only an empty `writing` body. | `artifact_id`, `kind`, `revision`, `status` |
 | `inqtrix.agent.artifact.updated` | An artifact revision advanced through a user PUT (multi-tab signal); agent-side writes emit it with the agent runtime. | `artifact_id`, `revision`, `updated_by` |
+| `inqtrix.agent.citation.validation` | A final kernel chat answer contained unknown citation labels and completed its single bounded repair decision. | `status` (`repaired` / `degraded`), `unknown_labels`, `resolution` |
 | `inqtrix.agent.artifact.edit_conflict` | A follow-up turn found the session memo edited by the user since it read it (E13); the agent preserved that text and appended its update instead of overwriting. The client refetches the reconciled memo. | `artifact_id`, `kind` |
 | `inqtrix.agent.patch.proposed` | The agent proposed an editor patch (M7); the always-gated patch approval follows. | `patch_id`, `document_id`, `artifact_id`, `edit_count` |
 
-The cognitive kernel (mode `agent_kernel`, plan M2) additionally
+The cognitive kernel (`mode=agent_kernel`) additionally
 emits `inqtrix.agent.tool.started` (`tool`, `tool_call_id`, redacted
 `args_preview`), `inqtrix.agent.tool.finished` (`tool`, `tool_call_id`,
 `status`, `result_preview`), `inqtrix.agent.todo.updated` (the
@@ -280,8 +334,8 @@ kind `intent` — the model's one-sentence intent line before tool
 calls); plus `phase.changed` (`execution` -> `done`) for timeline
 compatibility. A successful `load_skill` call emits
 `inqtrix.agent.skill.loaded` (`skill_id`, `label`) — the visible
-counterpart of the tool-limit narrowing it applies. In Deep mode
-(plan M4) the verification pass reports as one narration with
+counterpart of the tool-limit narrowing it applies. In Deep mode the
+verification pass reports as one narration with
 `narration_id=kernel_deep_review` (finding count or "keine Befunde")
 plus an `inqtrix.node.model_resolution` event for the
 `agent_deep_review` node.
@@ -348,6 +402,15 @@ same id with a fresh sequence, and clients upsert by `narration_id`
 instead of appending a duplicate line. The payload passes a strict
 sanitizer allowlist (exactly the fields above).
 
+The final answer body never uses the narration channel. The server first
+persists an empty `writing` answer artifact, then emits `answer.started` and
+the contiguous deltas. Immediately before `answer.ready`, the same artifact is
+CAS-finalized with the complete Markdown and the exact reference list exported
+in the run result. Clients render only contiguous deltas for the matching
+publication id through the shared Markdown renderer and refetch the
+authoritative artifact on `ready` or `interrupted`; they never infer a complete
+answer from an artifact signal alone.
+
 Decision/answer signals are emitted while the run is still parked, so they
 PRECEDE the resumed `inqtrix.run.queued` event. They are optimistic: in the
 rare race of two conflicting decisions, the loser's signal can remain in
@@ -370,7 +433,26 @@ edits (M7), alongside the user's `editor.patch_applied` /
 
 Terminal events are `inqtrix.run.completed`, `inqtrix.run.failed`, and `inqtrix.run.cancelled`. A browser can close its SSE connection after receiving one of those.
 
-Background knowledge reindex jobs use the same endpoint and event model on a parallel surface: `GET /v1/knowledge/indexing-jobs/{job_id}/events` streams `inqtrix.index.{queued,started,progress,document_completed,cancel_requested,completed,failed,cancelled}` (the progress event carries a `snapshot` with `completed_documents`/`total_documents`; the non-terminal `document_completed` event carries the just-embedded `document_id` and `outcome`, so a UI can flip that one document to done before the whole run finishes), and in the durable backend they run over a separate Valkey stream consumed by the same `inqtrix-worker` — see [Web server mode](../deployment/webserver-mode.md).
+Background knowledge indexing operations use the same endpoint and event model
+on a parallel surface: `GET
+/v1/knowledge/indexing-jobs/{job_id}/events`. The operation summary identifies
+`operation_kind` as `collection_generation` or `document_revision`; both use
+the shared durable queue, checkpoint, cancellation, and replay contract. The
+stream includes `inqtrix.index.{queued,started,phase,progress,
+document_completed,context_batch_completed,cancel_requested,paused_dependency,
+paused_validation,resumed,completed,ready_raw_by_user_choice,superseded,failed,
+cancelled}`. Progress snapshots contain real phases and known counters rather
+than invented percentages. A dependency timeout or validation failure pauses
+the operation visibly and leaves the active generation unchanged. Paused and
+other non-terminal jobs are never failed by the terminal-history TTL or an
+implicit maximum age. Continuing without contextualization requires the
+explicit raw-build decision. Queue-backed recovery re-enqueues stale queued
+rows and reclaims abandoned running/cancelling deliveries under a new attempt
+fence. A no-queue restart reconstructs paused execution from the durable
+operation identity before emitting `resumed`; an unsafe reconstruction returns
+`resume_unavailable` without changing the status or checkpoint. In the durable
+backend the jobs use a separate Valkey stream consumed by the same
+`inqtrix-worker` — see [Web server mode](../deployment/webserver-mode.md).
 
 Cancellation is a two-step lifecycle for running jobs. `POST
 /v1/runs/{run_id}/cancel` returns the current summary, but a running summary can

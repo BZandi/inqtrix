@@ -1,4 +1,4 @@
-"""Deep mode on the kernel (plan M4): budgets, prompts, verification.
+"""Deep-mode kernel budgets, prompts, and verification.
 
 Deep must verify MEASURABLY, not just cost more: the trajectory pins
 that a deep run issues the rubric review call, that findings trigger
@@ -139,7 +139,10 @@ def test_deep_run_reviews_and_revises_once():
                 ],
             },
             {
-                "chat_markdown": "Ueberarbeitete Antwort mit Beleg [W1].",
+                "chat_markdown": (
+                    "Ueberarbeitete Einordnung ohne externe "
+                    "Tatsachenbehauptung."
+                ),
                 "artifacts": [],
             },
         ],
@@ -157,7 +160,9 @@ def test_deep_run_reviews_and_revises_once():
         summary = wait_status(client, run["run_id"], {"completed", "failed"})
         assert summary["status"] == "completed", summary
         result = client.get(f"/v1/runs/{run['run_id']}/result").json()
-        assert result["answer"] == "Ueberarbeitete Antwort mit Beleg [W1]."
+        assert result["answer"] == (
+            "Ueberarbeitete Einordnung ohne externe Tatsachenbehauptung."
+        )
         # Exactly review + revision, in that order, on the right models:
         # the rubric check runs mid-tier, the revision on the kernel's
         # own high-tier resolution (with the deep effort default).
@@ -234,7 +239,7 @@ def test_deep_revision_receives_every_review_finding():
 
 def test_deep_run_without_findings_keeps_the_answer():
     llm = StructuredScriptedLLM(
-        [_text_turn("Belegte Antwort [W1].")],
+        [_text_turn("Kurze direkte Einordnung.")],
         [
             {
                 "complete": True,
@@ -257,7 +262,7 @@ def test_deep_run_without_findings_keeps_the_answer():
         summary = wait_status(client, run["run_id"], {"completed", "failed"})
         assert summary["status"] == "completed", summary
         result = client.get(f"/v1/runs/{run['run_id']}/result").json()
-        assert result["answer"] == "Belegte Antwort [W1]."
+        assert result["answer"] == "Kurze direkte Einordnung."
         # Review ran, revision did NOT.
         assert [c["schema_name"] for c in llm.structured_calls] == [
             "DeepReviewVerdict"

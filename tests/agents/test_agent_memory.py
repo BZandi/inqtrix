@@ -279,6 +279,40 @@ def test_agent_memory_read_and_write_require_user_opt_in() -> None:
     )
 
 
+def test_stage_candidates_is_idempotent_per_source_run() -> None:
+    """A redelivered terminal segment must not DUPLICATE a run's memory
+    candidates — both engines stage from the terminal write, which can
+    re-run after a crash. Second staging returns the SAME candidates."""
+    service = _service()
+    candidates = [
+        {
+            "scope": "user",
+            "category": "project_fact",
+            "content": "Bevorzugt Primaerquellen.",
+            "reason": "wiederholte Bitte",
+            "confidence": 0.9,
+        }
+    ]
+    first = asyncio.run(
+        service.stage_candidates(
+            principal=OWNER, candidates=candidates, source_run_id="run_dup"
+        )
+    )
+    assert len(first) == 1
+    second = asyncio.run(
+        service.stage_candidates(
+            principal=OWNER, candidates=candidates, source_run_id="run_dup"
+        )
+    )
+    assert [c.candidate_id for c in second] == [
+        c.candidate_id for c in first
+    ]
+    pending = asyncio.run(
+        service.list_candidates(principal=OWNER, status="pending")
+    )
+    assert len(pending) == 1
+
+
 def test_opt_in_enabled_reads_account_preference_default_off() -> None:
     from inqtrix.project.account_preferences_memory import (
         MemoryAccountPreferencesStore,
@@ -693,3 +727,176 @@ def _memory_client(service: AgentMemoryService) -> TestClient:
     client = TestClient(app)
     client.service = service  # type: ignore[attr-defined]
     return client
+
+
+# -- kernel wiring (Phase 5 / F9): same service, same gates ---------------- #
+
+
+def _kernel_algo_and_deps(
+    service: AgentMemoryService, *, opt_in: bool
+) -> tuple[Any, Any, list[tuple[str, dict[str, Any]]]]:
+    """Minimal kernel algorithm + deps pair for the memory seams."""
+    pytest.importorskip("deepagents")
+    from inqtrix.agents.kernel.algorithm import KernelAgentAlgorithm
+    from inqtrix.agents.kernel.deps import KernelDeps
+
+    algo = KernelAgentAlgorithm(
+        control_store=None,  # type: ignore[arg-type]
+        checkpointer=None,  # type: ignore[arg-type]
+        platform=SimpleNamespace(),  # type: ignore[arg-type]
+        agent_memory_service=service,
+    )
+    events: list[tuple[str, dict[str, Any]]] = []
+    deps = KernelDeps(
+        run_id="run_kernel_memory",
+        control=None,  # type: ignore[arg-type]
+        platform=SimpleNamespace(),  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        model=None,
+        reasoning_effort=None,
+        timeout=5.0,
+        event_sink=lambda event_type, payload: events.append(
+            (event_type, payload)
+        ),
+    )
+    deps.memory = service
+    deps.memory_opt_in = opt_in
+    deps.principal = OWNER
+    deps.question = "Wie praesentiere ich Anbieter?"
+    return algo, deps, events
+
+
+def test_kernel_recall_injects_k5_briefing() -> None:
+    """The kernel recalls the SAME memory the mission engine reads (K5)."""
+    from inqtrix.agents.prompts import build_kernel_user_message
+
+    provider = FakeMemoryProvider()
+    service = _service(provider)
+    asyncio.run(
+        provider.retain(
+            namespace=service._namespace_for(OWNER),  # type: ignore[attr-defined]
+            content="Bevorzugt kompakte Vergleichstabellen.",
+            scope="user",
+            category="preference",
+            confidence=0.9,
+            source_run_id="run_seed",
+        )
+    )
+    algo, deps, _events = _kernel_algo_and_deps(service, opt_in=True)
+    request = SimpleNamespace(
+        question="Wie praesentiere ich Anbieter?", history="", session_id=""
+    )
+
+    algo._recall_memory_briefing(request, deps)
+
+    assert deps.memory_status == "used"
+    assert "Bevorzugt kompakte Vergleichstabellen." in deps.memory_briefing
+
+    message = build_kernel_user_message(
+        "Frage", memory_briefing=deps.memory_briefing
+    )
+    assert "Nicht zitierfaehiges Langzeit-Memory" in message
+    assert "Bevorzugt kompakte Vergleichstabellen." in message
+    assert "NIEMALS als Beleg zitieren" in message
+    # Without a briefing the K5 section must not render at all.
+    assert "Langzeit-Memory" not in build_kernel_user_message("Frage")
+
+
+def test_kernel_recall_respects_opt_out_and_narrates_unavailable() -> None:
+    provider = FakeMemoryProvider()
+    service = _service(provider)
+    request = SimpleNamespace(question="Frage", history="", session_id="")
+
+    algo, deps, _events = _kernel_algo_and_deps(service, opt_in=False)
+    algo._recall_memory_briefing(request, deps)
+    assert deps.memory_status == "disabled"
+    assert provider.recall_queries == []
+
+    provider.fail_recall = True
+    algo, deps, events = _kernel_algo_and_deps(service, opt_in=True)
+    algo._recall_memory_briefing(request, deps)
+    assert deps.memory_status == "unavailable"
+    narrations = [
+        payload
+        for event_type, payload in events
+        if event_type == "inqtrix.agent.narration"
+    ]
+    assert narrations and narrations[-1]["narration_id"] == (
+        "kernel_memory_recall"
+    )
+
+
+def test_kernel_stages_candidates_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from inqtrix.agents import memory_reflection
+    from inqtrix.agents.phase_models import (
+        MemoryCandidateModel,
+        MemoryReflection,
+    )
+
+    pytest.importorskip("deepagents")
+    from inqtrix.agents.kernel.algorithm import _stage_kernel_memory
+
+    provider = FakeMemoryProvider()
+    service = _service(provider)
+    reflection = MemoryReflection(
+        candidates=[
+            MemoryCandidateModel(
+                scope="user",
+                category="preference",
+                content="Bevorzugt deutsche Antworten.",
+                reason="Der Nutzer fragte auf Deutsch.",
+                confidence=0.8,
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        memory_reflection,
+        "run_memory_reflection",
+        lambda *args, **kwargs: SimpleNamespace(value=reflection, usage={}),
+    )
+    _algo, deps, _events = _kernel_algo_and_deps(service, opt_in=True)
+
+    _stage_kernel_memory(deps, "Finale Antwort mit Substanz.")
+
+    pending = asyncio.run(
+        service.list_candidates(principal=OWNER, status="pending")
+    )
+    assert [row.content for row in pending] == [
+        "Bevorzugt deutsche Antworten."
+    ]
+    # Candidate-only: nothing is auto-retained to the provider.
+    assert provider.rows == {}
+
+    # Opt-out stages nothing (same privacy gate as recall).
+    _algo, deps_off, _ = _kernel_algo_and_deps(service, opt_in=False)
+    _stage_kernel_memory(deps_off, "Weitere Antwort.")
+    still_pending = asyncio.run(
+        service.list_candidates(principal=OWNER, status="pending")
+    )
+    assert len(still_pending) == 1
+
+
+def test_kernel_recall_latches_once_per_segment() -> None:
+    """Deep verify rebuilds the user message — recall must not run twice."""
+    provider = FakeMemoryProvider()
+    service = _service(provider)
+    asyncio.run(
+        provider.retain(
+            namespace=service._namespace_for(OWNER),  # type: ignore[attr-defined]
+            content="Bevorzugt kompakte Vergleichstabellen.",
+            scope="user",
+            category="preference",
+            confidence=0.9,
+            source_run_id="run_seed",
+        )
+    )
+    algo, deps, _events = _kernel_algo_and_deps(service, opt_in=True)
+    request = SimpleNamespace(
+        question="Wie praesentiere ich Anbieter?", history="", session_id=""
+    )
+    algo._recall_memory_briefing(request, deps)
+    algo._recall_memory_briefing(request, deps)
+    assert len(provider.recall_queries) == 1
+    assert deps.memory_status == "used"

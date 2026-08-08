@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import re
 from abc import ABC, abstractmethod
-from typing import Any
 
 from inqtrix.report_profiles import ReportProfile
 from inqtrix.text import aspect_synonyms, tokenize

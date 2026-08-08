@@ -62,7 +62,10 @@ the server's own deadline.
 ```bash
 # Terminal 1 — server in testing mode
 export TESTING_MODE=true
+# uv
 uv run python -m inqtrix
+# or standard Python/pip, after `python -m pip install -e .`
+python -m inqtrix
 
 # Terminal 2 — canonical suite
 inqtrix-parity run --endpoint http://127.0.0.1:5100

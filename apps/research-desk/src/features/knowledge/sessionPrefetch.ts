@@ -8,7 +8,7 @@ export function recentKnowledgeSessionsForPrefetch(
   limit = RECENT_KNOWLEDGE_SESSION_PREFETCH_COUNT,
 ): KnowledgeSessionRecord[] {
   return Object.values(sessions)
-    .filter((session) => serverKnownIds.has(session.id))
+    .filter((session) => serverKnownIds.has(session.id) && !session.deletion)
     .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0))
     .slice(0, limit)
 }

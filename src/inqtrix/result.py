@@ -9,11 +9,22 @@ tooling, custom integrations).
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from inqtrix.core.results import SourcePolicy
+from inqtrix.evidence import (
+    attach_web_search_lineage,
+    build_web_search_ledger,
+)
 from inqtrix.urls import normalize_url
 
 
@@ -33,6 +44,175 @@ def _empty_tier_counts() -> dict[str, int]:
 T = TypeVar("T")
 
 
+_KNOWLEDGE_MACHINE_TOKEN = r"^[A-Za-z0-9_.:-]+$"
+_KNOWLEDGE_RESULT_KEYS = frozenset(
+    {
+        "knowledge_profile",
+        "knowledge_gate",
+        "knowledge_grounding",
+        "knowledge_retrieval",
+        "knowledge_candidates",
+        "knowledge_evidence_used",
+    }
+)
+_KNOWLEDGE_PROFILE_KEYS = frozenset(
+    {
+        "id",
+        "requested",
+        "auto_selected",
+        "auto_reason",
+        "degraded_stages",
+    }
+)
+_KNOWLEDGE_GATE_KEYS = frozenset(
+    {
+        "enabled",
+        "marker",
+        "sufficient",
+        "coverage",
+        "rounds_used",
+        "max_rounds",
+        "second_pass",
+        "exhausted",
+    }
+)
+_KNOWLEDGE_GROUNDING_KEYS = frozenset(
+    {
+        "enabled",
+        "marker",
+        "status",
+        "failure_code",
+        "format_repaired",
+        "quotes_total",
+        "quotes_verified",
+    }
+)
+_KNOWLEDGE_RETRIEVAL_KEYS = frozenset(
+    {
+        "reason",
+        "retrieval_mode",
+        "stage",
+        "requested_candidate_pool",
+        "returned_candidate_pool",
+        "final_top_k",
+        "final_evidence_complete",
+        "requested_top_k",
+        "returned_hits",
+        "candidate_cap",
+    }
+)
+_KNOWLEDGE_RETRIEVAL_WARNING_KEYS = frozenset(
+    {
+        "code",
+        "reason",
+        "stage",
+        "count",
+        "recommended_action",
+    }
+)
+
+
+def _selected_mapping(
+    value: object,
+    *,
+    keys: frozenset[str],
+    label: str,
+) -> dict[str, Any]:
+    """Project one raw state block onto its explicit safe field allow-set.
+
+    Knowledge ``result_state`` also carries model-authored gate reasons and
+    verbatim grounding quotes.  They remain in the internal execution state
+    and in the already-authorized evidence references, but they are not
+    duplicated into the compact lifecycle metadata persisted on a run.
+    """
+
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object")
+    return {key: value[key] for key in keys if key in value}
+
+
+def _merge_scalar(
+    target: dict[str, Any],
+    key: str,
+    value: Any,
+    *,
+    label: str,
+) -> None:
+    if key not in target:
+        target[key] = value
+        return
+    if target[key] != value:
+        raise ValueError(f"conflicting {label}.{key} values")
+
+
+def _merge_block(
+    current: dict[str, Any] | None,
+    incoming: dict[str, Any],
+    *,
+    label: str,
+    union_keys: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    merged = dict(current or {})
+    for key, value in incoming.items():
+        if key in union_keys:
+            existing = merged.get(key, [])
+            if not isinstance(existing, list) or not isinstance(value, list):
+                raise ValueError(f"{label}.{key} must be a list")
+            combined = list(existing)
+            for item in value:
+                if item not in combined:
+                    combined.append(item)
+            merged[key] = combined
+            continue
+        _merge_scalar(merged, key, value, label=label)
+    return merged
+
+
+def _append_retrieval_degradation(
+    degradations: list[dict[str, Any]],
+    incoming: dict[str, Any],
+) -> None:
+    """Append one receipt, enriching a legacy subset instead of duplicating it."""
+
+    for index, existing in enumerate(degradations):
+        if existing == incoming:
+            return
+        shared_keys = set(existing).intersection(incoming)
+        if not all(existing[key] == incoming[key] for key in shared_keys):
+            continue
+        existing_keys = set(existing)
+        incoming_keys = set(incoming)
+        if existing_keys.issubset(incoming_keys):
+            degradations[index] = incoming
+            return
+        if incoming_keys.issubset(existing_keys):
+            return
+    degradations.append(incoming)
+
+
+def _append_retrieval_warning(
+    warnings: list[dict[str, Any]],
+    incoming: dict[str, Any],
+) -> None:
+    """Merge cumulative warning snapshots without double-counting replays."""
+
+    identity_keys = ("code", "reason", "stage", "recommended_action")
+    identity = tuple(incoming.get(key) for key in identity_keys)
+    for index, existing in enumerate(warnings):
+        if tuple(existing.get(key) for key in identity_keys) != identity:
+            continue
+        warnings[index] = {
+            **existing,
+            **incoming,
+            "count": max(
+                int(existing.get("count", 0) or 0),
+                int(incoming.get("count", 0) or 0),
+            ),
+        }
+        return
+    warnings.append(incoming)
+
+
 class AgentToolUseCounts(BaseModel):
     """Successful source-tool invocations split by source family."""
 
@@ -50,6 +230,42 @@ class AgentToolUseCounts(BaseModel):
         description="Successful project-knowledge tool invocations.",
     )
     """Successful project-knowledge tool invocations; never negative."""
+
+
+class AgentExecutionLimit(BaseModel):
+    """One server-authored, user-visible execution boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    used: int | None = Field(
+        None,
+        ge=0,
+        description="Committed usage when the runtime can measure it exactly.",
+    )
+    limit: int = Field(ge=0, description="Currently effective allowance.")
+    ceiling: int = Field(ge=0, description="Operator-enforced maximum allowance.")
+    recoverable: bool = Field(
+        description="Whether the run can resume from its authoritative checkpoint."
+    )
+    extendable: bool = Field(
+        description="Whether an explicit extension remains below the ceiling."
+    )
+    reason: str = Field(
+        "",
+        description="Stable machine-readable reason for a fixed boundary.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_contract(self) -> "AgentExecutionLimit":
+        if self.ceiling < self.limit:
+            raise ValueError("execution limit ceiling must not be below limit")
+        if self.extendable and (
+            not self.recoverable or self.ceiling <= self.limit
+        ):
+            raise ValueError(
+                "an extendable execution limit needs a recoverable higher ceiling"
+            )
+        return self
 
 
 class AgentExecution(BaseModel):
@@ -103,6 +319,512 @@ class AgentExecution(BaseModel):
         description="Actual source-tool invocation counts keyed by source."
     )
     """Actual source-tool invocation counts keyed by web and knowledge."""
+    limits: dict[str, AgentExecutionLimit] = Field(
+        default_factory=dict,
+        description=(
+            "Server-authored execution boundaries keyed by stable limit id."
+        ),
+    )
+    """Visible limits; an empty mapping preserves older result payloads."""
+
+
+class KnowledgeProfileResult(BaseModel):
+    """Effective Knowledge profile without question or evidence content."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: Literal["schnell", "standard", "gruendlich", "tief"]
+    requested: Literal[
+        "schnell", "standard", "gruendlich", "tief", "auto"
+    ] | None = None
+    auto_selected: bool = False
+    auto_reason: str | None = Field(
+        None,
+        max_length=64,
+        pattern=_KNOWLEDGE_MACHINE_TOKEN,
+    )
+    degraded_stages: list[str] = Field(default_factory=list, max_length=16)
+
+    @field_validator("requested", "auto_reason", mode="before")
+    @classmethod
+    def _blank_optional_values(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @model_validator(mode="after")
+    def _validate_profile_contract(self) -> "KnowledgeProfileResult":
+        if self.auto_selected and self.requested not in {None, "auto"}:
+            raise ValueError(
+                "an auto-selected profile cannot name a non-auto request"
+            )
+        if not self.auto_selected and self.auto_reason:
+            raise ValueError(
+                "auto_reason is valid only for an auto-selected profile"
+            )
+        for stage in self.degraded_stages:
+            if not isinstance(stage, str) or not re.fullmatch(
+                _KNOWLEDGE_MACHINE_TOKEN, stage
+            ):
+                raise ValueError("degraded_stages must contain machine tokens")
+            if len(stage) > 64:
+                raise ValueError("degraded stage exceeds 64 characters")
+        if len(set(self.degraded_stages)) != len(self.degraded_stages):
+            raise ValueError("degraded_stages must be deduplicated")
+        return self
+
+
+class KnowledgeGateResult(BaseModel):
+    """Bounded sufficiency-gate receipt safe for run lifecycle surfaces."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    marker: str | None = Field(
+        None,
+        max_length=64,
+        pattern=_KNOWLEDGE_MACHINE_TOKEN,
+    )
+    sufficient: bool | None = None
+    coverage: Literal["full", "partial", "none"] | None = None
+    rounds_used: int | None = Field(None, ge=0, le=32)
+    max_rounds: int | None = Field(None, ge=0, le=32)
+    second_pass: bool | None = None
+    exhausted: bool | None = None
+
+    @field_validator("marker", mode="before")
+    @classmethod
+    def _blank_marker(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @model_validator(mode="after")
+    def _validate_gate_contract(self) -> "KnowledgeGateResult":
+        if not self.enabled and (
+            self.marker is not None
+            or self.sufficient is not None
+            or self.coverage is not None
+            or self.rounds_used not in {None, 0}
+            or self.max_rounds not in {None, 0}
+            or self.second_pass not in {None, False}
+            or self.exhausted not in {None, False}
+        ):
+            raise ValueError("a disabled Knowledge gate cannot report a verdict")
+        if (
+            self.rounds_used is not None
+            and self.max_rounds is not None
+            and self.rounds_used > self.max_rounds
+        ):
+            raise ValueError("gate rounds_used cannot exceed max_rounds")
+        if self.second_pass is True and not (self.rounds_used or 0) >= 1:
+            raise ValueError("second_pass requires at least one rewrite round")
+        return self
+
+
+class KnowledgeGroundingResult(BaseModel):
+    """Grounding verdict and counts; verbatim source quotes are excluded."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    marker: str | None = Field(
+        None,
+        max_length=64,
+        pattern=_KNOWLEDGE_MACHINE_TOKEN,
+    )
+    status: Literal["verified", "rejected_format", "rejected_quote"] | None = None
+    failure_code: Literal[
+        "knowledge_grounding_format_invalid",
+        "knowledge_grounding_quote_unverified",
+    ] | None = None
+    format_repaired: bool | None = None
+    quotes_total: int | None = Field(None, ge=0, le=1_000)
+    quotes_verified: int | None = Field(None, ge=0, le=1_000)
+
+    @field_validator("marker", "status", "failure_code", mode="before")
+    @classmethod
+    def _blank_optional_values(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @model_validator(mode="after")
+    def _validate_grounding_contract(self) -> "KnowledgeGroundingResult":
+        if not self.enabled and (
+            self.marker is not None
+            or self.status is not None
+            or self.failure_code is not None
+            or self.format_repaired not in {None, False}
+            or self.quotes_total not in {None, 0}
+            or self.quotes_verified not in {None, 0}
+        ):
+            raise ValueError(
+                "disabled Knowledge grounding cannot report a verdict"
+            )
+        if (
+            self.quotes_verified is not None
+            and self.quotes_total is not None
+            and self.quotes_verified > self.quotes_total
+        ):
+            raise ValueError("quotes_verified cannot exceed quotes_total")
+        if self.status == "verified" and self.failure_code is not None:
+            raise ValueError("verified grounding cannot carry a failure code")
+        if self.status in {"rejected_format", "rejected_quote"} and (
+            self.failure_code is None
+        ):
+            raise ValueError("rejected grounding requires a failure code")
+        return self
+
+
+class KnowledgeRetrievalDegradationResult(BaseModel):
+    """One technical retrieval shortfall, separate from corpus exhaustion."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(
+        max_length=64,
+        pattern=_KNOWLEDGE_MACHINE_TOKEN,
+    )
+    retrieval_mode: str = Field(
+        max_length=64,
+        pattern=_KNOWLEDGE_MACHINE_TOKEN,
+    )
+    stage: str = Field(
+        "vector_candidate_pool",
+        max_length=64,
+        pattern=_KNOWLEDGE_MACHINE_TOKEN,
+    )
+    requested_candidate_pool: int | None = Field(None, ge=0, le=1_000_000)
+    returned_candidate_pool: int | None = Field(None, ge=0, le=1_000_000)
+    final_top_k: int | None = Field(None, ge=0, le=1_000_000)
+    final_evidence_complete: bool | None = None
+    requested_top_k: int = Field(ge=0, le=1_000_000)
+    returned_hits: int = Field(ge=0, le=1_000_000)
+    candidate_cap: int | None = Field(None, ge=0, le=1_000_000)
+
+    @model_validator(mode="after")
+    def _validate_retrieval_contract(
+        self,
+    ) -> "KnowledgeRetrievalDegradationResult":
+        final_top_k = (
+            self.requested_top_k
+            if self.final_top_k is None
+            else self.final_top_k
+        )
+        if self.final_top_k is not None and self.requested_top_k != final_top_k:
+            raise ValueError("requested_top_k must describe the final_top_k")
+        if self.returned_hits > final_top_k:
+            raise ValueError("returned_hits cannot exceed final_top_k")
+        if (
+            self.requested_candidate_pool is not None
+            and self.returned_candidate_pool is not None
+            and self.returned_candidate_pool > self.requested_candidate_pool
+        ):
+            raise ValueError(
+                "returned_candidate_pool cannot exceed requested_candidate_pool"
+            )
+        if (
+            self.returned_candidate_pool is not None
+            and self.returned_hits > self.returned_candidate_pool
+        ):
+            raise ValueError(
+                "final returned_hits cannot exceed the returned candidate pool"
+            )
+        if (
+            self.candidate_cap is not None
+            and self.returned_candidate_pool is not None
+            and self.returned_candidate_pool > self.candidate_cap
+        ):
+            raise ValueError("returned candidate pool cannot exceed candidate_cap")
+        complete = self.returned_hits >= final_top_k
+        if (
+            self.final_evidence_complete is not None
+            and self.final_evidence_complete is not complete
+        ):
+            raise ValueError("final_evidence_complete conflicts with hit counts")
+        self.final_top_k = final_top_k
+        self.final_evidence_complete = complete
+        return self
+
+
+class KnowledgeRetrievalWarningResult(BaseModel):
+    """One source-integrity warning emitted by canonical retrieval."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(max_length=64, pattern=_KNOWLEDGE_MACHINE_TOKEN)
+    reason: str = Field(max_length=64, pattern=_KNOWLEDGE_MACHINE_TOKEN)
+    stage: str = Field(max_length=64, pattern=_KNOWLEDGE_MACHINE_TOKEN)
+    count: int = Field(ge=1, le=1_000_000)
+    recommended_action: str | None = Field(
+        None,
+        max_length=64,
+        pattern=_KNOWLEDGE_MACHINE_TOKEN,
+    )
+
+    @field_validator("recommended_action", mode="before")
+    @classmethod
+    def _blank_recommended_action(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
+
+
+class KnowledgeRetrievalResult(BaseModel):
+    """Deduplicated bounded warning ledger for one Knowledge answer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    degradations: list[KnowledgeRetrievalDegradationResult] = Field(
+        default_factory=list,
+        max_length=64,
+    )
+    warnings: list[KnowledgeRetrievalWarningResult] | None = Field(
+        None,
+        max_length=64,
+    )
+
+    @model_validator(mode="after")
+    def _validate_deduplicated(self) -> "KnowledgeRetrievalResult":
+        identities = [
+            item.model_dump_json(exclude_none=True)
+            for item in self.degradations
+        ]
+        if len(identities) != len(set(identities)):
+            raise ValueError("retrieval degradations must be deduplicated")
+        if self.warnings is not None:
+            warning_identities = [
+                (
+                    item.code,
+                    item.reason,
+                    item.stage,
+                    item.recommended_action,
+                )
+                for item in self.warnings
+            ]
+            if len(warning_identities) != len(set(warning_identities)):
+                raise ValueError("retrieval warnings must be deduplicated")
+        return self
+
+
+class KnowledgeResultState(BaseModel):
+    """Compact, text-free Knowledge execution receipt persisted with a run.
+
+    The model deliberately excludes user queries, gate prose, verbatim quotes,
+    document bodies and provider payloads.  Evidence text continues to travel
+    only through the separately authorized reference contract.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile: KnowledgeProfileResult | None = None
+    gate: KnowledgeGateResult | None = None
+    grounding: KnowledgeGroundingResult | None = None
+    retrieval: KnowledgeRetrievalResult | None = None
+    candidate_count: int | None = Field(None, ge=0, le=1_000_000)
+    evidence_used: int | None = Field(None, ge=0, le=1_000_000)
+
+    @model_validator(mode="after")
+    def _validate_counts(self) -> "KnowledgeResultState":
+        if (
+            self.candidate_count is not None
+            and self.evidence_used is not None
+            and self.evidence_used > self.candidate_count
+        ):
+            raise ValueError("knowledge evidence_used cannot exceed candidates")
+        return self
+
+    @classmethod
+    def from_sources(
+        cls,
+        *sources: Mapping[str, Any] | "KnowledgeResultState" | None,
+    ) -> "KnowledgeResultState | None":
+        """Conflict-check and merge raw result/snapshot projections.
+
+        Multiple sources are expected during reload: the final result is
+        authoritative presentation, while the compact snapshot is its durable
+        lifecycle companion.  Equal/subset blocks merge; conflicting known
+        fields fail closed. Retrieval degradations and source-integrity
+        warnings accumulate in first-seen order; repeated cumulative warning
+        snapshots retain the highest observed count.
+        """
+
+        mappings: list[Mapping[str, Any]] = []
+        for source in sources:
+            if source is None:
+                continue
+            if isinstance(source, cls):
+                mappings.append(source.to_export_fields())
+                continue
+            if not isinstance(source, Mapping):
+                raise ValueError("Knowledge result source must be an object")
+            nested = source.get("result_state")
+            if nested is not None:
+                if not isinstance(nested, Mapping):
+                    raise ValueError("result_state must be an object")
+                mappings.append(nested)
+            knowledge = source.get("knowledge")
+            if isinstance(knowledge, cls):
+                mappings.append(knowledge.to_export_fields())
+            elif knowledge is not None:
+                if not isinstance(knowledge, Mapping):
+                    raise ValueError("knowledge must be an object")
+                nested_model = cls.model_validate(knowledge)
+                mappings.append(nested_model.to_export_fields())
+            mappings.append(source)
+
+        profile: dict[str, Any] | None = None
+        gate: dict[str, Any] | None = None
+        grounding: dict[str, Any] | None = None
+        degradations: list[dict[str, Any]] = []
+        warnings: list[dict[str, Any]] = []
+        warnings_present = False
+        candidate_count: int | None = None
+        evidence_used: int | None = None
+        found = False
+        for mapping in mappings:
+            if not any(key in mapping for key in _KNOWLEDGE_RESULT_KEYS):
+                continue
+            found = True
+            if "knowledge_profile" in mapping:
+                profile = _merge_block(
+                    profile,
+                    _selected_mapping(
+                        mapping["knowledge_profile"],
+                        keys=_KNOWLEDGE_PROFILE_KEYS,
+                        label="knowledge_profile",
+                    ),
+                    label="knowledge_profile",
+                    union_keys=frozenset({"degraded_stages"}),
+                )
+            if "knowledge_gate" in mapping:
+                gate = _merge_block(
+                    gate,
+                    _selected_mapping(
+                        mapping["knowledge_gate"],
+                        keys=_KNOWLEDGE_GATE_KEYS,
+                        label="knowledge_gate",
+                    ),
+                    label="knowledge_gate",
+                )
+            if "knowledge_grounding" in mapping:
+                grounding = _merge_block(
+                    grounding,
+                    _selected_mapping(
+                        mapping["knowledge_grounding"],
+                        keys=_KNOWLEDGE_GROUNDING_KEYS,
+                        label="knowledge_grounding",
+                    ),
+                    label="knowledge_grounding",
+                )
+            if "knowledge_retrieval" in mapping:
+                retrieval = _selected_mapping(
+                    mapping["knowledge_retrieval"],
+                    keys=frozenset({"degradations", "warnings"}),
+                    label="knowledge_retrieval",
+                )
+                raw_degradations = retrieval.get("degradations", [])
+                if not isinstance(raw_degradations, list):
+                    raise ValueError(
+                        "knowledge_retrieval.degradations must be a list"
+                    )
+                for raw_degradation in raw_degradations:
+                    projected = _selected_mapping(
+                        raw_degradation,
+                        keys=_KNOWLEDGE_RETRIEVAL_KEYS,
+                        label="knowledge_retrieval.degradation",
+                    )
+                    parsed = KnowledgeRetrievalDegradationResult.model_validate(
+                        projected
+                    ).model_dump(exclude_none=True)
+                    _append_retrieval_degradation(degradations, parsed)
+                if len(degradations) > 64:
+                    raise ValueError(
+                        "knowledge retrieval degradations exceed the safe limit"
+                    )
+                if "warnings" in retrieval:
+                    warnings_present = True
+                    raw_warnings = retrieval["warnings"]
+                    if not isinstance(raw_warnings, list):
+                        raise ValueError(
+                            "knowledge_retrieval.warnings must be a list"
+                        )
+                    for raw_warning in raw_warnings:
+                        projected = _selected_mapping(
+                            raw_warning,
+                            keys=_KNOWLEDGE_RETRIEVAL_WARNING_KEYS,
+                            label="knowledge_retrieval.warning",
+                        )
+                        parsed = (
+                            KnowledgeRetrievalWarningResult.model_validate(
+                                projected
+                            ).model_dump(exclude_none=True)
+                        )
+                        _append_retrieval_warning(warnings, parsed)
+                    if len(warnings) > 64:
+                        raise ValueError(
+                            "knowledge retrieval warnings exceed the safe limit"
+                        )
+            if "knowledge_candidates" in mapping:
+                value = mapping["knowledge_candidates"]
+                if candidate_count is None:
+                    candidate_count = value
+                elif candidate_count != value:
+                    raise ValueError("conflicting knowledge_candidates values")
+            if "knowledge_evidence_used" in mapping:
+                value = mapping["knowledge_evidence_used"]
+                if evidence_used is None:
+                    evidence_used = value
+                elif evidence_used != value:
+                    raise ValueError(
+                        "conflicting knowledge_evidence_used values"
+                    )
+
+        if not found:
+            return None
+        return cls.model_validate(
+            {
+                "profile": profile,
+                "gate": gate,
+                "grounding": grounding,
+                "retrieval": (
+                    {
+                        "degradations": degradations,
+                        **(
+                            {"warnings": warnings}
+                            if warnings_present or warnings
+                            else {}
+                        ),
+                    }
+                    if degradations
+                    or warnings
+                    or any(
+                        "knowledge_retrieval" in mapping
+                        for mapping in mappings
+                    )
+                    else None
+                ),
+                "candidate_count": candidate_count,
+                "evidence_used": evidence_used,
+            }
+        )
+
+    def to_export_fields(self) -> dict[str, Any]:
+        """Return the established flat Knowledge result wire projection."""
+
+        payload: dict[str, Any] = {}
+        if self.profile is not None:
+            payload["knowledge_profile"] = self.profile.model_dump(
+                exclude_none=True
+            )
+        if self.gate is not None:
+            payload["knowledge_gate"] = self.gate.model_dump(exclude_none=True)
+        if self.grounding is not None:
+            payload["knowledge_grounding"] = self.grounding.model_dump(
+                exclude_none=True
+            )
+        if self.retrieval is not None:
+            payload["knowledge_retrieval"] = self.retrieval.model_dump(
+                exclude_none=True
+            )
+        if self.candidate_count is not None:
+            payload["knowledge_candidates"] = self.candidate_count
+        if self.evidence_used is not None:
+            payload["knowledge_evidence_used"] = self.evidence_used
+        return payload
 
 
 def _limit_items(items: list[T], limit: int | None) -> list[T]:
@@ -189,7 +911,9 @@ def _report_references_from_state(
         excerpt_raw = reference.get("excerpt")
         source_text_raw = reference.get("source_text")
         grounded_support_raw = reference.get("grounded_support")
+        provider_snippet_raw = reference.get("provider_snippet")
         page_number_raw = reference.get("page_number")
+        source_span_raw = reference.get("source_span")
         report_references.append(
             ReportReference(
                 label=label,
@@ -205,10 +929,75 @@ def _report_references_from_state(
                     if grounded_support_raw
                     else None
                 ),
+                provider_snippet=(
+                    str(provider_snippet_raw)
+                    if provider_snippet_raw
+                    else None
+                ),
                 page_number=(
                     int(page_number_raw)
                     if isinstance(page_number_raw, (int, float))
                     and not isinstance(page_number_raw, bool)
+                    else None
+                ),
+                reference_id=(
+                    str(reference.get("reference_id"))
+                    if reference.get("reference_id")
+                    else None
+                ),
+                source_id=(
+                    str(reference.get("source_id"))
+                    if reference.get("source_id")
+                    else None
+                ),
+                query_id=(
+                    str(reference.get("query_id"))
+                    if reference.get("query_id")
+                    else None
+                ),
+                query_ids=[
+                    str(value)
+                    for value in reference.get("query_ids", [])
+                    if str(value)
+                ],
+                citation_id=(
+                    str(reference.get("citation_id"))
+                    if reference.get("citation_id")
+                    else None
+                ),
+                citation_ids=[
+                    str(value)
+                    for value in reference.get("citation_ids", [])
+                    if str(value)
+                ],
+                source_run_id=(
+                    str(reference.get("source_run_id"))
+                    if reference.get("source_run_id")
+                    else None
+                ),
+                source_run_ids=[
+                    str(value)
+                    for value in reference.get("source_run_ids", [])
+                    if str(value)
+                ],
+                source_span=(
+                    dict(source_span_raw)
+                    if isinstance(source_span_raw, dict)
+                    else None
+                ),
+                revision_id=(
+                    str(reference.get("revision_id"))
+                    if reference.get("revision_id")
+                    else None
+                ),
+                generation_id=(
+                    str(reference.get("generation_id"))
+                    if reference.get("generation_id")
+                    else None
+                ),
+                provenance_status=(
+                    str(reference.get("provenance_status"))
+                    if reference.get("provenance_status")
                     else None
                 ),
             )
@@ -222,8 +1011,8 @@ class Source(BaseModel):
     Sources are the URLs that contributed to the final answer. Each
     source carries a ``tier`` label assigned by the active
     ``SourceTieringStrategy``; downstream consumers can use the tier to
-    weight, filter, or visualise sources without re-running the tiering
-    logic.
+    order or visualise sources without re-running the tiering logic. The tier
+    is not a claim-verification result and never filters the provider result.
     """
 
     url: str = Field(
@@ -338,6 +1127,14 @@ class ReportReference(BaseModel):
         ),
     )
     """Bounded provider-answer context for a web citation; never presented as a verbatim source excerpt."""
+    provider_snippet: str | None = Field(
+        None,
+        description=(
+            "Snippet supplied by the web-search provider for this citation. "
+            "It is provider metadata, not a verbatim excerpt independently "
+            "read from the linked page."
+        ),
+    )
     page_number: int | None = Field(
         None,
         description=(
@@ -348,6 +1145,65 @@ class ReportReference(BaseModel):
         ),
     )
     """Best-effort 1-based source page of the cited chunk (PDF knowledge sources only). ``None`` when unmapped or for web references."""
+    reference_id: str | None = Field(
+        None,
+        description=(
+            "Opaque run-local reference identity used to resolve the durable "
+            "evidence artifact."
+        ),
+    )
+    """Opaque run-local reference identity used to resolve the evidence artifact."""
+    source_id: str | None = Field(
+        None,
+        description="Stable source identity inside the web-search ledger.",
+    )
+    """Stable source identity inside the web-search ledger."""
+    query_id: str | None = Field(
+        None,
+        description="Primary provider-search invocation that returned the source.",
+    )
+    query_ids: list[str] = Field(
+        default_factory=list,
+        description="All provider-search invocations that returned the source.",
+    )
+    citation_id: str | None = Field(
+        None,
+        description="Primary provider citation record for this reference.",
+    )
+    citation_ids: list[str] = Field(
+        default_factory=list,
+        description="All provider citation records linked to this reference.",
+    )
+    source_run_id: str | None = Field(
+        None,
+        description="Run that executed the primary provider search.",
+    )
+    source_run_ids: list[str] = Field(
+        default_factory=list,
+        description="Runs whose provider searches returned this reference.",
+    )
+    source_span: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "Exact Knowledge source span, offset unit, and content-hash "
+            "contract where available."
+        ),
+    )
+    """Exact Knowledge source span and offset contract where available."""
+    revision_id: str | None = Field(
+        None,
+        description="Immutable Knowledge document revision that supplied the hit.",
+    )
+    generation_id: str | None = Field(
+        None,
+        description="Index generation from which the Knowledge hit was resolved.",
+    )
+    provenance_status: str | None = Field(
+        None,
+        description=(
+            "Machine-readable source-span verification status for the evidence."
+        ),
+    )
 
 
 class Claim(BaseModel):
@@ -373,13 +1229,13 @@ class Claim(BaseModel):
         "unverified",
         description=(
             "Verification status assigned by the consolidation "
-            "strategy. One of ``verified`` (multiple supporting "
-            "sources, no contradiction), ``contested`` (supporting "
+            "strategy. One of ``verified`` (sufficient provider-grounded "
+            "support and no contradiction), ``contested`` (supporting "
             "and contradicting sources both present), or ``unverified`` "
             "(insufficient evidence)."
         ),
     )
-    """Verification status assigned by the consolidation strategy. One of ``verified`` (multiple supporting sources, no contradiction), ``contested`` (supporting and contradicting sources both present), or ``unverified`` (insufficient evidence)."""
+    """Verification status assigned by the consolidation strategy."""
     claim_type: str = Field(
         "fact",
         description=(
@@ -394,13 +1250,12 @@ class Claim(BaseModel):
     needs_primary: bool = Field(
         False,
         description=(
-            "True when the claim's strength would benefit from a "
-            "primary-tier source but is currently only backed by "
-            "secondary sources. Surfaced in DEEP-profile reports as a "
-            "transparency hint."
+            "True when the claim needs primary-tier or independently "
+            "corroborated provider-grounded support. Surfaced in DEEP-profile "
+            "reports as an evidence-depth transparency hint."
         ),
     )
-    """True when the claim's strength would benefit from a primary-tier source but is currently only backed by secondary sources. Surfaced in DEEP-profile reports as a transparency hint."""
+    """Whether the claim needs stronger primary or corroborated web evidence."""
     status_reason: str = Field(
         "",
         description=(
@@ -760,6 +1615,13 @@ class ResearchResultExportOptions(BaseModel):
         ),
     )
     """When ``True``, include the ``top_claims`` list. Combine with ``max_claims`` to cap the list length."""
+    include_evidence_bundle: bool = Field(
+        True,
+        description=(
+            "Include the versioned, lossless evidence manifest and its "
+            "structured child-to-parent outcome when available."
+        ),
+    )
     max_sources: int | None = Field(
         None,
         description=(
@@ -853,6 +1715,21 @@ class ResearchResult(BaseModel):
         ),
     )
     """Effective Agent Desk execution state; ``None`` for non-agent and legacy results."""
+    knowledge: KnowledgeResultState | None = Field(
+        None,
+        description=(
+            "Text-free Knowledge profile, gate, grounding and retrieval "
+            "receipt. Exported through the established flat Knowledge keys."
+        ),
+    )
+    """Typed Knowledge execution receipt; ``None`` for non-Knowledge and legacy results."""
+    web_search_ledger: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "Read-only audit projection of provider search requests, provider "
+            "answers and citations. Linked pages are not fetched by Inqtrix."
+        ),
+    )
 
     def to_export_payload(
         self,
@@ -873,8 +1750,9 @@ class ResearchResult(BaseModel):
         Returns:
             A new ``dict`` with the selected top-level keys
             (``answer``, ``metrics``, ``top_sources``, ``references``,
-            ``top_claims`` and, for agent runs, ``execution``), each value
-            already converted from the Pydantic model via
+            ``top_claims`` and, where applicable, ``execution`` plus the
+            flat, text-free ``knowledge_*`` receipt), each value already
+            converted from the Pydantic model via
             :meth:`pydantic.BaseModel.model_dump`.
             Caller may mutate freely — the dict is independent of the
             source model.
@@ -915,8 +1793,17 @@ class ResearchResult(BaseModel):
                 for claim in _limit_items(self.top_claims, export_options.max_claims)
             ]
 
+        if (
+            export_options.include_evidence_bundle
+            and self.web_search_ledger is not None
+        ):
+            payload["web_search_ledger"] = dict(self.web_search_ledger)
+
         if self.execution is not None:
             payload["execution"] = self.execution.model_dump()
+
+        if self.knowledge is not None:
+            payload.update(self.knowledge.to_export_fields())
 
         return payload
 
@@ -974,9 +1861,43 @@ class ResearchResult(BaseModel):
             Source(url=u, tier=tier_by_url.get(u) or tiering.tier_for_url(u))
             for u in ordered_urls[:60]
         ]
+        web_search_ledger = build_web_search_ledger(
+            run_id=str(result_state.get("_run_id", "") or "legacy_research"),
+            query_records=[
+                dict(record)
+                for record in result_state.get("query_records", []) or []
+                if isinstance(record, dict)
+            ],
+            query_synthesis={
+                str(key): dict(value)
+                for key, value in (
+                    (result_state.get("query_synthesis") or {}).items()
+                    if isinstance(
+                        result_state.get("query_synthesis"), Mapping
+                    )
+                    else ()
+                )
+                if isinstance(value, dict)
+            },
+            citation_records=[
+                dict(record)
+                for record in (
+                    result_state.get("provider_citation_records", []) or []
+                )
+                if isinstance(record, dict)
+            ],
+        )
+        raw_references = [
+            dict(reference)
+            for reference in (
+                result_state.get("report_references")
+                or result_state.get("references", [])
+                or []
+            )
+            if isinstance(reference, dict)
+        ]
         references = _report_references_from_state(
-            result_state.get("report_references")
-            or result_state.get("references", []),
+            attach_web_search_lineage(raw_references, web_search_ledger),
             tier_by_url=tier_by_url,
             tiering=tiering,
         )
@@ -1047,6 +1968,9 @@ class ResearchResult(BaseModel):
             completion_tokens=usage.get("completion_tokens", 0),
         )
 
+        if not web_search_ledger.get("searches"):
+            web_search_ledger = None
+
         return cls(
             answer=raw.get("answer", ""),
             metrics=metrics,
@@ -1058,4 +1982,26 @@ class ResearchResult(BaseModel):
                 if isinstance(result_state.get("execution"), dict)
                 else None
             ),
+            knowledge=KnowledgeResultState.from_sources(result_state, raw),
+            web_search_ledger=web_search_ledger,
         )
+
+
+def merge_knowledge_result_payload(
+    result: Mapping[str, Any],
+    snapshot: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Merge the safe Knowledge receipt into one completed result response.
+
+    Stored results created by the current run service already carry these
+    fields.  The snapshot merge is an additive recovery seam for imported or
+    rolling-upgrade rows whose presentation result predates the projection.
+    Conflicting known metadata raises instead of choosing one source silently;
+    old rows without Knowledge metadata remain byte-compatible.
+    """
+
+    payload = dict(result)
+    knowledge = KnowledgeResultState.from_sources(snapshot, result)
+    if knowledge is not None:
+        payload.update(knowledge.to_export_fields())
+    return payload

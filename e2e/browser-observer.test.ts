@@ -48,11 +48,29 @@ test('browser observer records one real durable ACK without content or unrelated
     dispatchClose(collaboration, 1012)
     dispatchClose(vite, 1006)
 
-    assert.deepEqual(fakeWindow.__inqtrixCollaborationSocketObserver, {
+    const observerState = fakeWindow.__inqtrixCollaborationSocketObserver!
+    const durableAck = observerState.events.find((event) => (
+      event.kind === 'durable_ack'
+    ))
+    assert.equal(typeof durableAck?.observedAt, 'number')
+    assert.deepEqual({
+      ...observerState,
+      events: observerState.events.map((event) => (
+        event.kind === 'durable_ack'
+          ? { ...event, observedAt: '<measured>' }
+          : event
+      )),
+    }, {
       events: [
         { kind: 'open', order: 1, socketId: 1 },
         { kind: 'protocol_error', order: 2, socketId: 1 },
-        { kind: 'durable_ack', order: 3, sequence: 17, socketId: 1 },
+        {
+          kind: 'durable_ack',
+          observedAt: '<measured>',
+          order: 3,
+          sequence: 17,
+          socketId: 1,
+        },
         { code: 1012, kind: 'close', order: 4, socketId: 1 },
       ],
       pendingFrameDecodes: 0,
@@ -68,7 +86,13 @@ test('browser observer records one real durable ACK without content or unrelated
         0,
         1012,
       )?.durableAcks,
-      [{ kind: 'durable_ack', order: 3, sequence: 17, socketId: 1 }],
+      [{
+        kind: 'durable_ack',
+        observedAt: durableAck!.observedAt,
+        order: 3,
+        sequence: 17,
+        socketId: 1,
+      }],
     )
     assert.deepEqual(
       collaborationSocketWindow(
@@ -78,6 +102,14 @@ test('browser observer records one real durable ACK without content or unrelated
         1012,
       )?.protocolErrors,
       [{ kind: 'protocol_error', order: 2, socketId: 1 }],
+    )
+    assert.equal(
+      collaborationSocketWindow(
+        fakeWindow.__inqtrixCollaborationSocketObserver!.events,
+        1,
+        0,
+      )?.close.code,
+      1012,
     )
   } finally {
     if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)

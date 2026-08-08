@@ -77,13 +77,15 @@ long-term memory.
 | Route | Method | Purpose |
 |---|---|---|
 | `/v1/knowledge/collections` | POST / GET | Create (immutable embedding model) / list collections. |
-| `/v1/knowledge/collections/{id}` | DELETE | Delete a collection with all documents. |
-| `/v1/knowledge/collections/{id}/documents` | POST / GET | Ingest one document (`text` OR `file_id`) / list documents. |
-| `/v1/knowledge/documents/{id}` | DELETE | Delete one document and its chunks. |
+| `/v1/knowledge/collections/{id}` | DELETE | Start the durable collection-and-vector deletion; HTTP 202 returns a `DeletionOperation`. |
+| `/v1/knowledge/collections/{id}/document-revisions` | POST | Reserve an immutable text/asset revision and return its server-owned indexing job (HTTP 202). |
+| `/v1/knowledge/collections/{id}/documents` | POST / GET | Compatibility ingestion (`text` OR raw `file_id`) over the same revision job / list documents. |
+| `/v1/knowledge/documents/{id}` | DELETE | Start the durable document-and-vector deletion; HTTP 202 returns a `DeletionOperation`. |
 | `/v1/knowledge/documents/{id}/text` | GET | Full extracted text (the document viewer's source). |
 | `/v1/knowledge/documents/{id}/chunks/{chunk_index}` | GET | One chunk plus up to `?context=0..3` neighbour chunks per side (the evidence view). |
 | `/v1/knowledge/search` | POST | Synchronous retrieval search (debug/evaluation surface). |
 | `/v1/sources/{document_id}` | GET | Citable source view — the target of HTTP knowledge citations. |
+| `/v1/knowledge/indexing-jobs*` | GET / POST | Read, cancel, resume, explicitly resume without contextualization, and stream collection-generation or document-revision jobs. |
 
 See [Knowledge engine](../knowledge/overview.md) for the data model, ingestion chain, and answer path.
 
@@ -91,9 +93,11 @@ See [Knowledge engine](../knowledge/overview.md) for the data model, ingestion c
 
 | Route | Method | Purpose |
 |---|---|---|
-| `/v1/files` | POST / GET | Streamed upload (spooled, hash/size-accounted, `INQTRIX_MAX_FILE_BYTES` cap → 413) / list. |
-| `/v1/files/{file_id}` | GET / DELETE | Metadata / delete. |
+| `/v1/files` | POST / GET | Streamed upload (spooled, hash/size-accounted, `INQTRIX_MAX_FILE_BYTES` cap → 413) / list. A normal bound upload also returns its durable upload operation and server-owned parse state. |
+| `/v1/files/{file_id}` | GET / DELETE | Metadata / start deletion through the linked asset lifecycle. |
 | `/v1/files/{file_id}/content` | GET | Streamed download (clients never see store URLs or credentials). |
+| `/v1/uploads` / `/v1/uploads/{operation_id}` | GET | List/read durable bound-upload and parse checkpoints. |
+| `/v1/uploads/{operation_id}/retry` | POST | Retry the same recoverable upload operation; missing bytes are requested explicitly. |
 
 ### Project persistence (gated; durable when `features.project_persistence=true`)
 
@@ -106,6 +110,11 @@ See [Knowledge engine](../knowledge/overview.md) for the data model, ingestion c
 | `/v1/agent-session-groups*` | GET / PUT / DELETE | List and manage private Agent Desk session folders. |
 | `/v1/agent-sessions` | GET | List Agent Desk session metadata; `items_json` is excluded so the session body remains load-on-open. |
 | `/v1/agent-sessions/{session_id}` | GET / PUT / DELETE | Load, upsert, or delete one Agent Desk session. The UI-owned `items_json` includes the session source policy; PUT also carries `title`, `created_at`, `updated_at`, and optional `group_id`. |
+| `/v1/assets/{asset_id}` | GET / PUT / DELETE | Read/upsert a file-library asset or start its aggregate deletion. The DELETE response is HTTP 202 and is not terminal. |
+| `/v1/assets/deletion-operations` | POST / GET | Start a stable bulk manifest or list retained deletion receipts for recovery after reload. |
+| `/v1/deletion-operations/{operation_id}` | GET | Read authoritative progress for asset, group, section, vector-index, knowledge-document, or knowledge-collection deletion. |
+| `/v1/deletion-operations/{operation_id}/retry` | POST | Resume the same failed cleanup manifest (HTTP 202). |
+| `/v1/vector-indexes/{index_id}` | DELETE | Fence the index and its backing collection, then start the same durable deletion lifecycle. |
 | `/v1/editor/documents/{document_id}` | PUT | Autosave upsert of one editor document. The save must carry a STRICTLY newer `revision` than the stored row (monotonic guard; debounced multi-edit flushes legitimately jump several revisions) — a stale-or-equal counter answers 409 `conflict` with `current_revision`, and the client refetches and rebases instead of silently overwriting a concurrent writer (e.g. an applied agent patch). |
 | `/v1/editor/documents/{document_id}/patches` | GET | Patch metadata of one editor document (no edit bodies), newest first; `?status=pending\|accepted\|rejected` filters. |
 | `/v1/editor/patches/{patch_id}` | GET | One patch with its anchored edits, warnings, and the document's CURRENT revision. |
@@ -129,7 +138,7 @@ capability flag is true.
 |---|---|---|
 | `/api/auth/login` | GET | Start the authorization-code + PKCE flow at the IdP. |
 | `/api/auth/callback` | GET | Code exchange, claim mapping, session cookie. |
-| `/api/auth/session` | GET | Current session for the SPA. |
+| `/api/auth/session` | GET | Current session for the SPA; a valid session also refreshes the readable CSRF double-submit cookie. |
 | `/api/auth/logout` | POST | End the session. |
 
 ### Test
@@ -228,8 +237,8 @@ alias.
 
 `POST /v1/runs` accepts a run into a FIFO queue and returns immediately; `GET /v1/runs/{run_id}/events` replays the buffered events (up to `RUN_EVENT_BUFFER_SIZE`, default 200) and then streams live named SSE events. This stream is the contract the React Research Desk renders from:
 
-- Lifecycle: `inqtrix.run.queued`, `inqtrix.run.started`, `inqtrix.run.snapshot`, `inqtrix.run.cancel_requested`, `inqtrix.run.cancelled`, `inqtrix.run.failed`, `inqtrix.run.completed`.
-- Progress: `inqtrix.node.started`, `inqtrix.progress.message`, `inqtrix.output_text.delta`.
+- Lifecycle: `inqtrix.run.queued`, `inqtrix.run.started`, `inqtrix.run.resumed`, `inqtrix.run.snapshot`, `inqtrix.run.cancel_requested`, `inqtrix.run.cancelled`, `inqtrix.run.failed`, `inqtrix.run.completed`.
+- Progress and answer publication: `inqtrix.node.started`, `inqtrix.progress.message`, `inqtrix.answer.started`, `inqtrix.output_text.delta`, `inqtrix.answer.ready`, `inqtrix.answer.interrupted`.
 - Knowledge steps (`mode=knowledge`): `inqtrix.knowledge.profile.resolved`, `decomposition.completed`, `retrieval.completed`, `evidence.truncated`, `gate.evaluated`, `grounding.checked`.
 - Agent execution facts: every state-bearing agent snapshot exposes the
   canonical `execution` block; kernel tool events report actual usage, and
@@ -265,9 +274,24 @@ A capability flag never downgrades silently: a profile stage the operator ceilin
 | Run execution | `INQTRIX_QUEUE_BACKEND` | `memory` (in-process, default) / `valkey` (Valkey Stream consumed by `inqtrix-worker` processes; requires `INQTRIX_STORAGE_BACKEND=postgres` — the run row is the source of truth, the stream only the dispatch channel). |
 | Vectors (knowledge) | `INQTRIX_VECTOR_BACKEND` | `memory` / `qdrant` — see [Knowledge engine](../knowledge/overview.md). |
 
-Contradictory combinations (`valkey` without postgres, `s3` without credentials, `postgres` without a URL) fail loudly at startup. The worker (`uv run inqtrix-worker`) executes runs with at-least-once delivery: `INQTRIX_WORKER_CONCURRENCY` bounds parallel runs per process, heartbeats keep long runs from being reclaimed, and `INQTRIX_WORKER_MAX_ATTEMPTS` dead-letters crash loops. One Valkey queue instance is injected into both the Postgres run store and worker loop, so child submission, child-terminal parent wake, resume, and ordinary dispatch share the same path. Claiming a durable run row and dispatching its stream message remain separate operations: a successor message is held unacknowledged until the older delivery is acknowledged, which prevents a fast resume from being mistaken for a duplicate and dropped. The dev compose stack at `deploy/compose/compose.dev.yaml` provides `postgres`, `seaweedfs`, `qdrant`, and `valkey`, plus `dex` behind the `oidc` profile — see [Local infrastructure](../development/local-infrastructure.md).
+Contradictory combinations (`valkey` without postgres, `s3` without credentials, `postgres` without a URL) fail loudly at startup. The worker (`uv run inqtrix-worker`, or `python -m inqtrix.worker` after a normal pip install) executes runs with at-least-once delivery: `INQTRIX_WORKER_CONCURRENCY` bounds parallel runs per process, heartbeats keep long runs from being reclaimed, and `INQTRIX_WORKER_MAX_ATTEMPTS` dead-letters crash loops. One Valkey queue instance is injected into both the Postgres run store and worker loop, so child submission, child-terminal parent wake, resume, and ordinary dispatch share the same path. Claiming a durable run row and dispatching its stream message remain separate operations: a successor message is held unacknowledged until the older delivery is acknowledged, which prevents a fast resume from being mistaken for a duplicate and dropped. Host-side development selects services from the canonical stack and adds only `deploy/compose/compose.dev-ports.yaml` for the `inqtrix-dev` project name and loopback ports; `dex` remains behind the `oidc` profile — see [Local infrastructure](../development/local-infrastructure.md).
 
-When the knowledge engine is enabled, the same `inqtrix-worker` process also consumes a **second Valkey stream** (`inqtrix:index:jobs`, dead-letter `inqtrix:index:dead`) for background vector-index reindex (re-embed) jobs, using the identical fencing/heartbeat/reclaim/dead-letter machinery on a separate consumer group. This makes a reindex durable — it survives a server restart, not just closing the browser. Two consequences for operators: in queue mode (`postgres` + `valkey`) durable reindex **requires at least one running worker** (the API only persists and enqueues the job); and a worker started with knowledge disabled has no reindex consumer (logged at startup: `Knowledge-Engine deaktiviert — kein Reindex-Consumer`, never a silent no-op). Reindex sizing reuses `INQTRIX_REINDEX_*` (concurrency, queue size, TTL, per-collection history) and the worker mechanics reuse `INQTRIX_WORKER_*` — there are no separate indexing-worker knobs. Monitor the `inqtrix:index:dead` dead-letter stream alongside `inqtrix:runs:dead`.
+When the knowledge engine is enabled, the same `inqtrix-worker` process also
+consumes the dedicated indexing stream (`inqtrix:index:jobs`, dead-letter
+`inqtrix:index:dead`) for both collection-generation builds and individual
+document revisions. The durable Postgres job owns checkpoints, pause/cancel
+state, and publication fencing; Valkey is dispatch only. A worker started with
+knowledge disabled has no indexing consumer and logs that state explicitly.
+Index admission/history uses `INQTRIX_REINDEX_*`; delivery, reclaim, and
+dead-letter mechanics reuse `INQTRIX_WORKER_*`.
+
+Two further streams carry recovery work that must not be represented as a
+finished browser mutation: aggregate deletion uses
+`inqtrix:deletion:jobs`/`inqtrix:deletion:dead`, and bound upload/finalization
+uses `inqtrix:upload:jobs`/`inqtrix:upload:dead`. Their Postgres rows remain the
+source of truth, and the same worker process starts the corresponding
+consumers. Operators should monitor these dead-letter streams alongside
+`inqtrix:index:dead` and `inqtrix:runs:dead`.
 
 The admin System page reads `GET /v1/admin/system/runtime` for the deployment
 shape behind those switches. The endpoint is session-only and instance-admin
@@ -280,8 +304,8 @@ checks are read-only pings/head requests and deliberately omit database URLs,
 object-store paths, bucket names, service endpoints, and credentials.
 `runs.execution=worker_dispatch` means runs are configured to dispatch through
 Valkey to workers; it is not a live worker-count heartbeat, and it describes
-the run path only — the reindex consumer rides the same
-`INQTRIX_QUEUE_BACKEND=valkey` switch on its own stream.
+the run path only. Indexing, deletion, and upload recovery use their own
+streams under the same durable queue deployment.
 
 ## Concurrency and cancel
 
@@ -293,18 +317,22 @@ Streaming disconnects and `POST /v1/runs/{run_id}/cancel` set the same cancel ev
 
 ## Deployment sizing: with or without Valkey
 
-Valkey and the worker are **optional** and not wired into any feature — they are confined to the job-dispatch tier (`runs/` + the worker entry point). Every function (research, knowledge retrieval, chat, editor, reindex) runs the same execution bodies whether dispatched in-process or to a worker. Three tiers, chosen by two switches:
+Valkey and the worker are optional execution infrastructure, not an alternate
+product implementation. They dispatch the same run, indexing, deletion, and
+upload-recovery bodies whose durable records live in Postgres. Knowledge
+retrieval, ordinary chat, and editor reads remain normal request paths. Three
+tiers are chosen by the storage and queue switches:
 
 | Mode | `INQTRIX_STORAGE_BACKEND` | `INQTRIX_QUEUE_BACKEND` | Execution | Durable across restart? | Multiple API replicas? |
 |---|---|---|---|---|---|
 | In-memory | `memory` | `memory` | in the API process | no (lost on restart) | no |
-| **Postgres, no broker** | `postgres` | `memory` | in the API process | records yes; in-flight jobs fail visibly on restart | **no — single API process** |
+| **Postgres, no broker** | `postgres` | `memory` | in the API process | records and paused checkpoints yes; queued/running/cancelling closures fail visibly on restart; paused indexing work is reconstructed on explicit resume | **no — single API process** |
 | Postgres + Valkey | `postgres` | `valkey` | `inqtrix-worker` processes | yes (redelivery) | yes |
 
 **Sizing guidance.** For a small-to-mid deployment (say up to ~100 users with bursty, occasional runs/reindexes), **`postgres` + `memory` on a single API process is the right, simpler choice**: durable records, no broker, no worker. Tune `MAX_CONCURRENT` / `INQTRIX_REINDEX_MAX_CONCURRENT` to your provider's rate limit and the host's CPU/RAM. Two constraints define this mode:
 
 - **Bounded concurrency, then a queue.** Beyond the active caps, jobs wait (FIFO) and then return 429. Sustained simultaneous *long* runs are what saturates it, not raw user count.
-- **Single API process.** In-process durable mode assumes ONE API process: on restart it marks in-flight rows `failed` (`server_restarted` — visible, not silent), and two replicas sharing one Postgres would sweep each other's in-flight jobs. Running more than one replica, or needing in-flight jobs to survive a restart, is the cue to switch on Valkey + the worker (`--profile workers`).
+- **Single API process.** In-process durable mode assumes ONE API process: on restart it marks lost queued/running/cancelling closures `failed` (`server_restarted` — visible, not silent), while durable `paused_dependency`/`paused_validation` rows and checkpoints remain paused. Explicit resume reconstructs the operation from its canonical document/revision or generation identity before queueing it. Two replicas sharing one Postgres would still sweep each other's in-flight closures. Running more than one replica, or needing actively executing jobs to survive a restart, is the cue to switch on Valkey + the worker (`--profile workers`).
 
 **When to add Valkey + worker** is therefore about *operational shape*, not a fixed headcount: (a) more than one API replica (HA / load balancing), (b) isolating long jobs from the request-serving process, or (c) in-flight jobs that must survive a restart. With the worker tier, per-worker parallelism is `INQTRIX_WORKER_CONCURRENCY` and you scale by running more worker replicas; the API-side `MAX_CONCURRENT` / `REINDEX_MAX_CONCURRENT` then govern admission only.
 

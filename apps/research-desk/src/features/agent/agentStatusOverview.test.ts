@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import type { AgentPermissionModeEntry } from '@/features/researchRuns/types'
+import type {
+  AgentLimitCapabilities,
+  AgentPermissionModeEntry,
+} from '@/features/researchRuns/types'
 import {
   buildAgentOverview,
   countAgentToolUse,
@@ -39,6 +42,31 @@ const AUTONOMOUS: AgentPermissionModeEntry = {
   kernel_always_gated: ['propose_editor_patch'],
 }
 
+const LIMITS: AgentLimitCapabilities = {
+  tokens: {
+    enabled: true,
+    limit: 20_000,
+    ceiling: 20_000,
+    recoverable: false,
+    extendable: false,
+    reason: 'operator_ceiling_exactly_once_required',
+  },
+  kernel: {
+    schnell: { tool_calls: 30, tool_calls_ceiling: 30, steps: 33, steps_ceiling: 33 },
+    normal: { tool_calls: 30, tool_calls_ceiling: 60, steps: 73, steps_ceiling: 145 },
+    deep: { tool_calls: 60, tool_calls_ceiling: 120, steps: 121, steps_ceiling: 241 },
+  },
+  directives: { quick_web: { web_searches: 1 } },
+  mission: {
+    discovery_tool_calls: 15,
+    plan_tasks: 8,
+    replan_rounds: 2,
+    clarification_rounds: 2,
+    parallel_children: 6,
+  },
+  research: { rounds: 2 },
+}
+
 function source(overrides: Partial<AgentOverviewSource> = {}): AgentOverviewSource {
   return {
     durable: true,
@@ -48,6 +76,7 @@ function source(overrides: Partial<AgentOverviewSource> = {}): AgentOverviewSour
       { id: 'editor.patch.propose', summary: '', effect: 'write', read_only: false, idempotent: false },
     ],
     permission_modes: { autonomous: AUTONOMOUS, balanced: BALANCED },
+    limits: LIMITS,
     ...overrides,
   }
 }
@@ -62,6 +91,7 @@ describe('buildAgentOverview', () => {
     })
     expect(balanced.brain).toBe('workspace_agent')
     expect(balanced.kernel).toBe('selectable')
+    expect(balanced.limits).toBe(LIMITS)
     expect(balanced.approvals).toEqual([
       { id: 'plan', state: 'asks' },
       { id: 'web_search', state: 'asks' },
@@ -88,12 +118,12 @@ describe('buildAgentOverview', () => {
     expect(defaultEngineMode(agent, null)).toBe('workspace_agent')
     expect(
       defaultEngineMode(agent, {
-        agent_kernel: true, embedding_provider: true, knowledge: true, openapi: true,
+        agent_kernel: true, embedding_provider: true, knowledge: true, multi_stack: false, openapi: true,
       }),
     ).toBe('agent_kernel')
     expect(
       defaultEngineMode(source(), {
-        agent_kernel: true, embedding_provider: true, knowledge: true, openapi: true,
+        agent_kernel: true, embedding_provider: true, knowledge: true, multi_stack: false, openapi: true,
       }),
     ).toBe('workspace_agent')
   })
@@ -155,6 +185,16 @@ describe('buildAgentOverview', () => {
       mode: 'workspace_agent',
     })
     expect(overview.approvals).toBeNull()
+  })
+
+  it('hides limit claims when an older server does not publish them', () => {
+    const overview = buildAgentOverview({
+      agent: source({ limits: undefined }),
+      autonomy: 'balanced',
+      kernelSelectable: true,
+      mode: 'agent_kernel',
+    })
+    expect(overview.limits).toBeNull()
   })
 
   it('reports tool availability from the manifest, missing ids as unavailable', () => {

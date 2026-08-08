@@ -1,3 +1,29 @@
+{{- $explicitPublicBase := coalesce .Values.config.INQTRIX_PUBLIC_BASE_URL .Values.extraConfig.INQTRIX_PUBLIC_BASE_URL "" -}}
+{{- $publicBase := $explicitPublicBase -}}
+{{- if and (not $publicBase) .Values.ingress.enabled (not .Values.openshift.enabled) -}}
+{{- $publicScheme := ternary "https" "http" .Values.ingress.tls.enabled -}}
+{{- $publicBase = printf "%s://%s" $publicScheme .Values.ingress.host -}}
+{{- else if and (not $publicBase) .Values.openshift.enabled .Values.route.enabled .Values.route.host -}}
+{{- $publicScheme := ternary "https" "http" .Values.route.tls.enabled -}}
+{{- $publicBase = printf "%s://%s" $publicScheme .Values.route.host -}}
+{{- end -}}
+{{- $publicScheme := "" -}}
+{{- if $publicBase -}}
+{{- $normalizedPublicBase := lower $publicBase -}}
+{{- if hasPrefix "https://" $normalizedPublicBase -}}
+{{- $publicScheme = "https" -}}
+{{- else if hasPrefix "http://" $normalizedPublicBase -}}
+{{- $publicScheme = "http" -}}
+{{- else -}}
+{{- fail "INQTRIX_PUBLIC_BASE_URL must be an absolute HTTP(S) origin" -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.web.externalScheme (not (or (eq .Values.web.externalScheme "http") (eq .Values.web.externalScheme "https"))) -}}
+{{- fail "web.externalScheme must be http or https" -}}
+{{- end -}}
+{{- if and $publicScheme .Values.web.externalScheme (ne $publicScheme .Values.web.externalScheme) -}}
+{{- fail "web.externalScheme must match the scheme in INQTRIX_PUBLIC_BASE_URL" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -31,21 +57,58 @@ spec:
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           env:
-            # The nginx config template resolves this to the API Service DNS at
-            # container start (envsubst). Single origin: nginx proxies /api,
-            # /v1, /health, and /collaboration to the API.
-            - name: INQTRIX_API_UPSTREAM
-              value: "{{ include "inqtrix.fullname" . }}-api:{{ .Values.service.apiPort }}"
-            # nginx overwrites client forwarding headers with the protocol
-            # owned by the chart's public TLS boundary.
+            # The Python web gateway is the one public origin and proxies /api,
+            # /v1, /health, /readyz, and /collaboration to FastAPI.
+            - name: INQTRIX_BACKEND_URL
+              value: "http://{{ include "inqtrix.fullname" . }}-api:{{ .Values.service.apiPort }}"
+            # The gateway overwrites client forwarding headers with the protocol
+            # owned by the chart's public TLS boundary. web.externalScheme
+            # overrides the derivation for TLS terminators the chart does not
+            # own (own LoadBalancer, Gateway API, service mesh). It must match
+            # INQTRIX_PUBLIC_BASE_URL when both are explicit; a contradiction
+            # makes gateway startup fail.
             - name: INQTRIX_EXTERNAL_SCHEME
+              {{- if .Values.web.externalScheme }}
+              value: {{ .Values.web.externalScheme | quote }}
+              {{- else if $publicScheme }}
+              value: {{ $publicScheme | quote }}
+              {{- else }}
               value: {{ if or (and (not .Values.openshift.enabled) .Values.ingress.enabled .Values.ingress.tls.enabled) (and .Values.openshift.enabled .Values.route.enabled .Values.route.tls.enabled) }}"https"{{ else }}"http"{{ end }}
+              {{- end }}
+            {{- if $publicBase }}
+            - name: INQTRIX_PUBLIC_BASE_URL
+              value: {{ $publicBase | quote }}
+            {{- end }}
+            {{- $maxFileBytes := coalesce .Values.config.INQTRIX_MAX_FILE_BYTES .Values.extraConfig.INQTRIX_MAX_FILE_BYTES "" }}
+            {{- if $maxFileBytes }}
+            {{- /* int64 silently casts an unparsable value to 0, which would
+                   render a 10 MiB cap and kill uploads without any error --
+                   fail the render instead of deriving from garbage. */}}
+            {{- if not (regexMatch "^[0-9]+$" (toString $maxFileBytes)) }}
+            {{- fail (printf "config.INQTRIX_MAX_FILE_BYTES must be plain bytes (digits only), got %q. Size syntax such as 110m is unsupported; use an integer byte value." (toString $maxFileBytes)) }}
+            {{- end }}
+            - name: INQTRIX_MAX_FILE_BYTES
+              value: {{ toString $maxFileBytes | quote }}
+            {{- end }}
+            {{- $frameBytes := coalesce .Values.config.INQTRIX_COLLABORATION_MAX_FRAME_BYTES .Values.extraConfig.INQTRIX_COLLABORATION_MAX_FRAME_BYTES "" }}
+            {{- if $frameBytes }}
+            - name: INQTRIX_COLLABORATION_MAX_FRAME_BYTES
+              value: {{ toString $frameBytes | quote }}
+            {{- end }}
+            {{- $queuedFrames := coalesce .Values.config.INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES .Values.extraConfig.INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES "" }}
+            {{- if $queuedFrames }}
+            - name: INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES
+              value: {{ toString $queuedFrames | quote }}
+            {{- end }}
+            {{- with .Values.web.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.webPort }}
           readinessProbe:
             httpGet:
-              path: /
+              path: /health
               port: http
             periodSeconds: 10
             timeoutSeconds: 3

@@ -66,7 +66,14 @@ def _reset_inqtrix_logger():
 def fake_agent_run(monkeypatch: pytest.MonkeyPatch):
     """Replace ``agent_run`` with a deterministic stub for chat completions."""
 
-    def _fake_run(question, *, history, providers, strategies, settings):
+    def _fake_run(
+        question,
+        *,
+        history,
+        providers,
+        strategies,
+        settings,
+    ):
         return {
             "answer": "stubbed answer",
             "result_state": {},

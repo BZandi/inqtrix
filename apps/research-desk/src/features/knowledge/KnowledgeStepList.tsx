@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { motion, useReducedMotion } from 'motion/react'
-import { Check } from '@/components/icons'
+import { AlertTriangle, Check, Info } from '@/components/icons'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
@@ -195,6 +195,20 @@ export function KnowledgeStepList({
                       )}
                     >
                       {line.secondary}
+                    </span>
+                  )}
+                  {line.warning && (
+                    <span className="mt-0.5 flex items-start gap-1 t-meta-sm text-warning">
+                      <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+                      <span className="min-w-0 break-words">{line.warning}</span>
+                    </span>
+                  )}
+                  {line.information && (
+                    <span className="mt-0.5 flex items-start gap-1 t-meta-sm text-brand">
+                      <Info className="mt-0.5 size-3 shrink-0" />
+                      <span className="min-w-0 break-words text-foreground/75">
+                        {line.information}
+                      </span>
                     </span>
                   )}
                 </span>

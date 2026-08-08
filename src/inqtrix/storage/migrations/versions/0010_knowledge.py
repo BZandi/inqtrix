@@ -53,7 +53,7 @@ are immutable after creation; ``created_by_sub`` is the ownership anchor
 (``None`` = legacy/unscoped, visible to all — the established rule). Knowledge
 is the cross-workspace SHARING surface (owner + ACL via resource_shares), NOT
 per-workspace project data, so there is deliberately NO workspace_id dimension
-here (see ADR-AUTH-6 and docs/architecture/data-architecture.md). A dead
+here (see docs/architecture/data-architecture.md). A dead
 always-NULL workspace_id column was dropped in migration 0018."""
 
 knowledge_documents = Table(

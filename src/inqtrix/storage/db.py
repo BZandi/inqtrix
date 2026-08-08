@@ -21,6 +21,11 @@ survives as an empty string for the connection lifetime — the
 documented ``current_setting`` gotcha), so a forgotten
 ``tenant_session`` produces a loud error, never another tenant's rows.
 
+Request cancellation cannot be allowed to interrupt transaction
+finalization. ``tenant_session`` shields rollback/commit and session close
+from both AnyIO level cancellation and direct asyncio task cancellation, so
+an abandoned HTTP response cannot strand a checked-out pool connection.
+
 Transaction-pooler contract (PgBouncer ``pool_mode=transaction``): this
 module is deliberately pooler-safe — no session-scoped SET, no
 LISTEN/NOTIFY, no session advisory locks — and MUST stay that way; a
@@ -35,18 +40,26 @@ pooler — DDL and long transactions do not multiplex.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
+import weakref
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from types import TracebackType
+from typing import Any, AsyncIterator
 
+from anyio import CancelScope
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
+    AsyncSessionTransaction,
     async_sessionmaker,
     create_async_engine,
 )
 from sqlalchemy.pool import NullPool
+
+log = logging.getLogger("inqtrix")
 
 TENANT_GUC = "inqtrix.tenant_id"
 """Name of the per-transaction GUC carrying the tenant id for RLS."""
@@ -55,6 +68,69 @@ _SAFE_ROLE_PATTERN = re.compile(r"^[a-z_][a-z0-9_]*$")
 """Allowed shape for the application role identifier. ``SET ROLE`` is a
 utility statement and cannot take bind parameters, so the identifier is
 validated against this conservative pattern before interpolation."""
+
+_ENGINE_LOOPS: "weakref.WeakKeyDictionary[Any, Any]" = weakref.WeakKeyDictionary()
+"""First event loop seen per POOLED engine, for :func:`_warn_on_loop_change`.
+Weak keys so a disposed engine does not pin its loop."""
+
+_LOOP_MISMATCH_REPORTED: "weakref.WeakSet[Any]" = weakref.WeakSet()
+"""Engines already reported. The failure repeats every call; one warning
+names the cause without drowning the log that carries the crash."""
+
+
+def _warn_on_loop_change(session_factory: "async_sessionmaker[AsyncSession]") -> None:
+    """Name the cause when a POOLED engine is touched from a second loop.
+
+    asyncpg connections are event-loop-affine. A pooled engine therefore
+    belongs to exactly ONE loop: either a persistent one (the HTTP loop, a
+    job store's dedicated loop) or none at all. Reached from a second loop
+    — the classic case being a sync run thread driving it through
+    ``run_coro_sync``/``asyncio.run``, one fresh loop per call — the pool
+    hands back a connection bound to a foreign or already-dead loop and
+    ``pool_pre_ping`` fails with "Future attached to a different loop". The
+    same reuse also corrupts asyncpg's protocol state and poisons the pool
+    for every later borrower, including the request path.
+
+    :mod:`inqtrix.sync_bridge`, :func:`build_engine` and
+    ``build_run_thread_persistence`` all state the resulting invariant —
+    anything reachable from a per-call loop MUST sit on a NullPool engine —
+    and none of them could enforce it: not every caller goes through
+    ``sync_bridge`` (the agents use bare ``asyncio.run``), so no wrapper
+    sees them all. :func:`tenant_session` does; it is the one chokepoint
+    every tenant-scoped read and write passes through.
+
+    Warns rather than raises: the asyncpg failure follows within the same
+    call anyway, so raising would only replace one error with another. The
+    value is naming the cause — and catching the latent case that has not
+    crashed yet because the pool happened to be empty.
+
+    NullPool engines are skipped: holding no connection, they are
+    loop-agnostic by construction and are exactly what the invariant asks
+    for.
+    """
+    engine = session_factory.kw.get("bind")
+    if engine is None or isinstance(engine.pool, NullPool):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    first = _ENGINE_LOOPS.get(engine)
+    if first is None:
+        _ENGINE_LOOPS[engine] = loop
+        return
+    if first is loop or engine in _LOOP_MISMATCH_REPORTED:
+        return
+    _LOOP_MISMATCH_REPORTED.add(engine)
+    log.warning(
+        "Pooled database engine %s reached from a second event loop. "
+        "asyncpg connections are loop-affine: this pool is bound to the "
+        "loop that first touched it, and the next checkout can fail with "
+        "'Future attached to a different loop' or corrupt the connection "
+        "for other callers. A store driven from a sync thread via "
+        "asyncio.run must be built with null_pool=True.",
+        id(engine),
+    )
 
 
 def build_engine(
@@ -100,15 +176,44 @@ def build_engine(
         infrastructure idle limits.
     """
     if null_pool:
-        return create_async_engine(database_url, poolclass=NullPool)
-    return create_async_engine(
-        database_url,
-        pool_pre_ping=True,
-        pool_recycle=1800,
-        pool_size=pool_size,
-        max_overflow=max_overflow,
-        pool_timeout=pool_timeout,
-    )
+        engine = create_async_engine(database_url, poolclass=NullPool)
+    else:
+        engine = create_async_engine(
+            database_url,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            pool_size=pool_size,
+            max_overflow=max_overflow,
+            pool_timeout=pool_timeout,
+        )
+    _make_asyncpg_pool_invalidation_atomic(engine)
+    return engine
+
+
+def _make_asyncpg_pool_invalidation_atomic(engine: AsyncEngine) -> None:
+    """Let a cancelled asyncpg termination finish pool bookkeeping.
+
+    SQLAlchemy's asyncpg adapter force-closes the driver connection after a
+    graceful close is cancelled, then re-raises ``CancelledError``. The pool
+    clears the invalidated connection record only after ``do_terminate``
+    returns, so that re-raise otherwise leaves a closed handle available for
+    a later checkout. Suppressing cancellation only at this dialect hook lets
+    invalidation finish; the original query cancellation still propagates
+    from SQLAlchemy's execution path.
+    """
+
+    dialect = engine.sync_engine.dialect
+    terminate = dialect.do_terminate
+
+    def terminate_without_interrupting_pool_state(
+        dbapi_connection: Any,
+    ) -> None:
+        try:
+            terminate(dbapi_connection)
+        except asyncio.CancelledError:
+            return
+
+    dialect.do_terminate = terminate_without_interrupting_pool_state
 
 
 def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
@@ -119,6 +224,75 @@ def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessio
     (``MissingGreenlet``).
     """
     return async_sessionmaker(engine, expire_on_commit=False)
+
+
+async def _finalize_tenant_session(
+    session: AsyncSession,
+    transaction: AsyncSessionTransaction,
+    *,
+    session_entered: bool,
+    transaction_entered: bool,
+    exc_type: type[BaseException] | None,
+    exc: BaseException | None,
+    traceback: TracebackType | None,
+) -> bool:
+    """Finish the transaction and session even inside a cancelled request.
+
+    Starlette uses AnyIO's level cancellation: after a client disconnects,
+    every await in the cancelled request scope is cancelled again. Plain
+    ``async with`` finalizers therefore may never finish their rollback or
+    return the asyncpg connection to SQLAlchemy's pool. The nested AnyIO
+    shield protects that finalization from the request scope; the asyncio
+    task and shield also preserve it if a caller uses direct task
+    cancellation instead.
+    """
+
+    async def cleanup() -> bool:
+        suppressed = False
+        session_exit = (exc_type, exc, traceback)
+        try:
+            if transaction_entered:
+                try:
+                    suppressed = bool(
+                        await transaction.__aexit__(
+                            exc_type,
+                            exc,
+                            traceback,
+                        )
+                    )
+                    if suppressed:
+                        session_exit = (None, None, None)
+                except BaseException as cleanup_error:
+                    session_exit = (
+                        type(cleanup_error),
+                        cleanup_error,
+                        cleanup_error.__traceback__,
+                    )
+                    log.exception("Tenant database transaction cleanup failed")
+                    raise
+            return suppressed
+        finally:
+            if session_entered:
+                try:
+                    await session.__aexit__(*session_exit)
+                except BaseException:
+                    log.exception("Tenant database session cleanup failed")
+                    raise
+
+    with CancelScope(shield=True):
+        cleanup_task = asyncio.create_task(
+            cleanup(),
+            name="inqtrix-tenant-session-cleanup",
+        )
+        try:
+            return await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            # ``CancelScope(shield=True)`` handles Starlette/AnyIO
+            # cancellation. A direct ``Task.cancel()`` can still interrupt
+            # this task, so wait for the held cleanup task before preserving
+            # that cancellation.
+            await cleanup_task
+            raise
 
 
 @asynccontextmanager
@@ -154,14 +328,45 @@ async def tenant_session(
         raise ValueError("tenant_id must be non-empty for a tenant session")
     if app_role and not _SAFE_ROLE_PATTERN.fullmatch(app_role):
         raise ValueError(f"app_role has an unsafe identifier shape: {app_role!r}")
-    async with session_factory() as session:
-        async with session.begin():
-            if app_role:
-                # Identifier validated above; SET ROLE cannot be
-                # parameterized (Postgres utility statement).
-                await session.execute(text(f'SET LOCAL ROLE "{app_role}"'))
-            await session.execute(
-                text("SELECT set_config(:guc, :tenant, true)"),
-                {"guc": TENANT_GUC, "tenant": tenant_id},
-            )
-            yield session
+    _warn_on_loop_change(session_factory)
+    session = session_factory()
+    transaction = session.begin()
+    session_entered = False
+    transaction_entered = False
+    try:
+        await session.__aenter__()
+        session_entered = True
+        await transaction.__aenter__()
+        transaction_entered = True
+        if app_role:
+            # Identifier validated above; SET ROLE cannot be
+            # parameterized (Postgres utility statement).
+            await session.execute(text(f'SET LOCAL ROLE "{app_role}"'))
+        await session.execute(
+            text("SELECT set_config(:guc, :tenant, true)"),
+            {"guc": TENANT_GUC, "tenant": tenant_id},
+        )
+        yield session
+    except BaseException as error:
+        suppressed = await _finalize_tenant_session(
+            session,
+            transaction,
+            session_entered=session_entered,
+            transaction_entered=transaction_entered,
+            exc_type=type(error),
+            exc=error,
+            traceback=error.__traceback__,
+        )
+        if suppressed:
+            return
+        raise
+    else:
+        await _finalize_tenant_session(
+            session,
+            transaction,
+            session_entered=session_entered,
+            transaction_entered=transaction_entered,
+            exc_type=None,
+            exc=None,
+            traceback=None,
+        )

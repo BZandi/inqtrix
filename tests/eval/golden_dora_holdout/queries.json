@@ -1,5 +1,5 @@
 {
- "description": "HELD-OUT split of the DORA tier (Regulation (EU) 2022/2554): 8 stratified queries (3 multi / 2 fact / 2 paraphrase / 1 exact) removed from golden_dora. POLICY: never tuned against — no retrieval knob, prompt, or profile change may be optimized on this set; it runs only as a release gate to detect over-fitting of the tuning tiers. Its baseline lives in baselines/dora_holdout__<model>.json and is established as a deliberate reviewed commit. The corpus is SHARED with golden_dora (see GOLDEN_SETS['dora_holdout'] in tests/eval/harness.py) — rebuild via golden_dora/build_corpus.py.",
+ "description": "HELD-OUT split of the DORA tier (Regulation (EU) 2022/2554): 8 stratified queries (3 multi / 2 fact / 2 paraphrase / 1 exact) removed from golden_dora. POLICY: never tuned against — no retrieval knob, prompt, or profile change may be optimized on this set; it runs only as a held-out regression gate to detect over-fitting of the tuning tiers. Its baseline lives in baselines/dora_holdout__<model>.json and is established as a deliberate reviewed commit. The corpus is SHARED with golden_dora (see GOLDEN_SETS['dora_holdout'] in tests/eval/harness.py) — rebuild via golden_dora/build_corpus.py.",
  "queries": [
   {
    "id": "d03",

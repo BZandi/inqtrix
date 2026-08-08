@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from inqtrix.agents.evidence import (
     enrich_instant_evidence,
     evidence_digest,
@@ -268,3 +270,60 @@ def test_kernel_ledger_assigns_stable_labels_across_resume() -> None:
     assert sorted(
         item["label"] for item in resumed.evidence_refs.values()
     ) == ["K1", "W1", "W2"]
+
+
+def test_instant_search_without_urls_keeps_provider_answer_as_evidence() -> None:
+    from inqtrix.agents.control_memory import MemoryAgentControlStore
+    from inqtrix.agents.kernel.deps import KernelDeps, run_coro
+
+    store = MemoryAgentControlStore()
+    deps = KernelDeps(
+        run_id="run_kernel_provider_answer_only",
+        control=store,
+        platform=None,  # type: ignore[arg-type]
+        llm=None,  # type: ignore[arg-type]
+        model=None,
+        reasoning_effort=None,
+        timeout=1.0,
+    )
+    provider_answer = (
+        "Frankreich gewann die Fußball-Weltmeisterschaft 2018 gegen "
+        "Kroatien. " + ("Zusätzlicher Kontext. " * 60)
+    )
+
+    registered = deps.register_instant_web_search(
+        SimpleNamespace(
+            answer=provider_answer,
+            completion_tokens=32,
+            duration_ms=418,
+            finished_at="2026-07-23T12:00:01Z",
+            parameters={"max_sources": 8},
+            prompt_tokens=64,
+            provider="AzureFoundryWebSearch",
+            query="Fußball-Weltmeisterschaft 2018 Sieger Finalgegner",
+            query_id="query-answer-only",
+            sources=[],
+            started_at="2026-07-23T12:00:00Z",
+        )
+    )
+
+    assert len(registered) == 1
+    reference = registered[0]
+    assert reference["label"] == "W1"
+    assert reference["query_id"] == "query-answer-only"
+    assert reference["evidence_kind"] == "provider_search_answer"
+    assert reference.get("url") is None
+    assert reference["grounded_support"].endswith("…")
+
+    artifact, _ = run_coro(
+        store.get_artifact(
+            deps.run_id,
+            f"art_{deps.run_id[-12:]}_evidence",
+        )
+    )
+    search = artifact.payload["web_search_ledger"]["searches"][
+        "query-answer-only"
+    ]
+    assert search["provider_answer"] == provider_answer
+    assert search["citations"] == []
+    assert artifact.refs[0]["reference_id"] == reference["reference_id"]

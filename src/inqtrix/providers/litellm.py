@@ -19,7 +19,7 @@ from inqtrix.constants import (
     DEFAULT_LLM_MAX_OUTPUT_TOKENS,
     REASONING_TIMEOUT,
 )
-from inqtrix.exceptions import AgentModelCapacityError, AgentRateLimited, AgentTimeout
+from inqtrix.exceptions import AgentModelCapacityError, AgentRateLimited
 from inqtrix.providers.base import (
     LLMProvider,
     ChatTurn,
@@ -386,32 +386,62 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                 ),
             )
         except RateLimitError as e:
-            log.error("FATAL Rate-Limit (%s): %s", use_model, e)
+            log.error(
+                "FATAL Rate-Limit (model=%s, error_type=%s)",
+                use_model,
+                type(e).__name__,
+            )
             raise AgentRateLimited(use_model, e)
         except APIStatusError as e:
             if e.status_code == 429:
-                log.error("FATAL Rate-Limit (%s): %s", use_model, e)
+                log.error(
+                    "FATAL Rate-Limit "
+                    "(model=%s, status=%s, error_type=%s)",
+                    use_model,
+                    e.status_code,
+                    type(e).__name__,
+                )
                 raise AgentRateLimited(use_model, e)
             if is_model_capacity_error(e):
-                log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, e)
+                log.warning(
+                    "ALGO-FAIL model_capacity "
+                    "(model=%s, status=%s, error_type=%s)",
+                    use_model,
+                    e.status_code,
+                    type(e).__name__,
+                )
                 raise AgentModelCapacityError(
                     use_model,
                     "llm_complete",
                     str(e),
                     original=e,
                 ) from e
-            log.error("LLM-Aufruf fehlgeschlagen (%s): %s", use_model, e)
+            log.error(
+                "LLM-Aufruf fehlgeschlagen "
+                "(model=%s, status=%s, error_type=%s)",
+                use_model,
+                e.status_code,
+                type(e).__name__,
+            )
             raise
         except OpenAIError as e:
             if is_model_capacity_error(e):
-                log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, e)
+                log.warning(
+                    "ALGO-FAIL model_capacity (model=%s, error_type=%s)",
+                    use_model,
+                    type(e).__name__,
+                )
                 raise AgentModelCapacityError(
                     use_model,
                     "llm_complete",
                     str(e),
                     original=e,
                 ) from e
-            log.error("LLM-Aufruf fehlgeschlagen (%s): %s", use_model, e)
+            log.error(
+                "LLM-Aufruf fehlgeschlagen (model=%s, error_type=%s)",
+                use_model,
+                type(e).__name__,
+            )
             raise
 
     def supports_tool_calls(self, *, model: str | None = None) -> bool:
@@ -521,32 +551,63 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                 track_tokens(state, response)
             return response
         except RateLimitError as exc:
-            log.error("FATAL Rate-Limit (%s): %s", use_model, exc)
+            log.error(
+                "FATAL Rate-Limit (model=%s, error_type=%s)",
+                use_model,
+                type(exc).__name__,
+            )
             raise AgentRateLimited(use_model, exc)
         except APIStatusError as exc:
             if exc.status_code == 429:
-                log.error("FATAL Rate-Limit (%s): %s", use_model, exc)
+                log.error(
+                    "FATAL Rate-Limit "
+                    "(model=%s, status=%s, error_type=%s)",
+                    use_model,
+                    exc.status_code,
+                    type(exc).__name__,
+                )
                 raise AgentRateLimited(use_model, exc)
             if is_model_capacity_error(exc):
-                log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, exc)
+                log.warning(
+                    "ALGO-FAIL model_capacity "
+                    "(model=%s, status=%s, error_type=%s)",
+                    use_model,
+                    exc.status_code,
+                    type(exc).__name__,
+                )
                 raise AgentModelCapacityError(
                     use_model,
                     "llm_structured",
                     str(exc),
                     original=exc,
                 ) from exc
-            log.error("LLM-Structured-Aufruf fehlgeschlagen (%s): %s", use_model, exc)
+            log.error(
+                "LLM-Structured-Aufruf fehlgeschlagen "
+                "(model=%s, status=%s, error_type=%s)",
+                use_model,
+                exc.status_code,
+                type(exc).__name__,
+            )
             raise
         except OpenAIError as exc:
             if is_model_capacity_error(exc):
-                log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, exc)
+                log.warning(
+                    "ALGO-FAIL model_capacity (model=%s, error_type=%s)",
+                    use_model,
+                    type(exc).__name__,
+                )
                 raise AgentModelCapacityError(
                     use_model,
                     "llm_structured",
                     str(exc),
                     original=exc,
                 ) from exc
-            log.error("LLM-Structured-Aufruf fehlgeschlagen (%s): %s", use_model, exc)
+            log.error(
+                "LLM-Structured-Aufruf fehlgeschlagen "
+                "(model=%s, error_type=%s)",
+                use_model,
+                type(exc).__name__,
+            )
             raise
 
     def chat(
@@ -560,7 +621,7 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         deadline: float | None = None,
         reasoning_effort: str | None = None,
     ) -> ChatTurn:
-        """Run one native tool-calling chat turn (plan M2 step 1).
+        """Run one native tool-calling chat turn.
 
         Same transport, retry loop, and error mapping as
         :meth:`complete_with_metadata` — the only differences are the
@@ -594,32 +655,62 @@ class LiteLLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             )
             return chat_turn_from_openai_response(response, model=use_model)
         except RateLimitError as e:
-            log.error("FATAL Rate-Limit (%s): %s", use_model, e)
+            log.error(
+                "FATAL Rate-Limit (model=%s, error_type=%s)",
+                use_model,
+                type(e).__name__,
+            )
             raise AgentRateLimited(use_model, e)
         except APIStatusError as e:
             if e.status_code == 429:
-                log.error("FATAL Rate-Limit (%s): %s", use_model, e)
+                log.error(
+                    "FATAL Rate-Limit "
+                    "(model=%s, status=%s, error_type=%s)",
+                    use_model,
+                    e.status_code,
+                    type(e).__name__,
+                )
                 raise AgentRateLimited(use_model, e)
             if is_model_capacity_error(e):
-                log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, e)
+                log.warning(
+                    "ALGO-FAIL model_capacity "
+                    "(model=%s, status=%s, error_type=%s)",
+                    use_model,
+                    e.status_code,
+                    type(e).__name__,
+                )
                 raise AgentModelCapacityError(
                     use_model,
                     "llm_chat",
                     str(e),
                     original=e,
                 ) from e
-            log.error("LLM-Chat fehlgeschlagen (%s): %s", use_model, e)
+            log.error(
+                "LLM-Chat fehlgeschlagen "
+                "(model=%s, status=%s, error_type=%s)",
+                use_model,
+                e.status_code,
+                type(e).__name__,
+            )
             raise
         except OpenAIError as e:
             if is_model_capacity_error(e):
-                log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, e)
+                log.warning(
+                    "ALGO-FAIL model_capacity (model=%s, error_type=%s)",
+                    use_model,
+                    type(e).__name__,
+                )
                 raise AgentModelCapacityError(
                     use_model,
                     "llm_chat",
                     str(e),
                     original=e,
                 ) from e
-            log.error("LLM-Chat fehlgeschlagen (%s): %s", use_model, e)
+            log.error(
+                "LLM-Chat fehlgeschlagen (model=%s, error_type=%s)",
+                use_model,
+                type(e).__name__,
+            )
             raise
 
     def is_available(self) -> bool:

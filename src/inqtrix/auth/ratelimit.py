@@ -149,10 +149,10 @@ def client_ip(request, trusted_proxy_hops: int = 1) -> str:
     left-most entries are whatever the original client sent and are therefore
     attacker-controlled. Reading the left-most hop (the historical behaviour)
     let a client mint a fresh throttle key per request by rotating a spoofed
-    value, defeating the login lockout entirely. Both bundled proxies (the
-    nginx ``web`` container and ``scripts/run_research_desk.py``) APPEND the
-    real peer on the right and strip nothing, so the trustworthy value is the
-    hop our own infrastructure wrote, counted from the right.
+    value, defeating the login lockout entirely. Both supported web adapters
+    (the packaged Python gateway and the explicit nginx alternative) APPEND
+    the real peer on the right and strip nothing, so the trustworthy value is
+    the hop our own infrastructure wrote, counted from the right.
 
     Args:
         request: The incoming Starlette/FastAPI request.

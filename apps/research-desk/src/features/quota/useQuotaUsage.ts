@@ -57,10 +57,26 @@ export function useQuotaUsage(enabled: boolean) {
       return
     }
     void reload()
+    // A hidden tab has nobody looking at the meter, but the timer kept
+    // billing a quota aggregate to the database every 30 seconds per
+    // open tab — forever. Skipping the hidden ticks and refreshing once
+    // on return shows the same number to the user and stops the
+    // background load. `visibilitychange` fires on both directions, so
+    // a tab that was hidden for an hour is current again immediately.
+    const visible = (): boolean => (
+      typeof document === 'undefined' || document.visibilityState === 'visible'
+    )
     const timer = setInterval(() => {
-      void reload()
+      if (visible()) void reload()
     }, REFRESH_MS)
-    return () => clearInterval(timer)
+    const onVisibilityChange = (): void => {
+      if (visible()) void reload()
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => {
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
   }, [enabled, reload])
 
   return { reload, state }

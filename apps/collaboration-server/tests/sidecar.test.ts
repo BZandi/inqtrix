@@ -13,6 +13,7 @@ import * as Y from 'yjs'
 
 import type { IntrospectedLease } from '../src/contracts'
 import { hashBytes } from '../src/documentState'
+import { CloseCodes, CollaborationError } from '../src/errors'
 import { CollaborationSidecar } from '../src/sidecar'
 import {
   FakeCollaborationApi,
@@ -139,6 +140,373 @@ describe('private sidecar listener', () => {
     await sidecar.stop()
   })
 
+  it('broadcasts comment invalidations without revalidating document leases', async () => {
+    const api = new FakeCollaborationApi()
+    const configured = settings({ policyPollMs: 60_000 })
+    const sidecar = new CollaborationSidecar(configured, {
+      api,
+      logger: silentLogger,
+    })
+    await sidecar.start()
+    const harness = sidecar as unknown as CommentPolicyHarness
+    await vi.waitFor(() => expect(harness.policyPollInFlight).toBeNull())
+    const first = {
+      context: {
+        documentId: DOCUMENT_ID,
+        expiresAt: Date.now() / 1_000 + 60,
+        generation: 1,
+        leaseId: 'lease-first',
+        policyCursor: 0,
+        tenantId: configured.tenantId,
+        user: { id: USER_ID },
+      },
+      sendStateless: vi.fn(),
+    }
+    const second = {
+      context: {
+        documentId: DOCUMENT_ID,
+        expiresAt: Date.now() / 1_000 + 60,
+        generation: 1,
+        leaseId: 'lease-second',
+        policyCursor: 0,
+        tenantId: configured.tenantId,
+        user: { id: '22222222-2222-4222-8222-222222222222' },
+      },
+      sendStateless: vi.fn(),
+    }
+    harness.hocuspocus.documents.set(ROOM, {
+      getConnections: () => [first, second],
+      name: ROOM,
+    })
+    api.policyImplementation = async () => ({
+      cursor: 3,
+      events: [
+        {
+          id: 1,
+          resourceId: DOCUMENT_ID,
+          resourceType: 'editor_document',
+          scope: 'collaboration_comment_changed',
+          targetUserId: USER_ID,
+        },
+        {
+          id: 2,
+          resourceId: DOCUMENT_ID,
+          resourceType: 'editor_document',
+          scope: 'collaboration_comment_changed',
+          targetUserId: second.context.user.id,
+        },
+        {
+          id: 3,
+          resourceId: DOCUMENT_ID,
+          resourceType: 'editor_document',
+          scope: 'collaboration_comment_mention',
+          targetUserId: USER_ID,
+        },
+      ],
+      resetRequired: false,
+    })
+
+    await harness.pollPolicyEvents()
+
+    expect(first.sendStateless).toHaveBeenNthCalledWith(
+      1,
+      JSON.stringify({
+        document_id: DOCUMENT_ID,
+        type: 'collaboration_comment_changed',
+      }),
+    )
+    expect(first.sendStateless).toHaveBeenNthCalledWith(
+      2,
+      JSON.stringify({
+        document_id: DOCUMENT_ID,
+        type: 'collaboration_comment_mentioned',
+      }),
+    )
+    expect(second.sendStateless).toHaveBeenCalledTimes(1)
+    expect(second.sendStateless).toHaveBeenCalledWith(
+      JSON.stringify({
+        document_id: DOCUMENT_ID,
+        type: 'collaboration_comment_changed',
+      }),
+    )
+
+    harness.hocuspocus.documents.delete(ROOM)
+    await sidecar.stop()
+  })
+
+  it('revalidates only account sockets whose lease check predates a policy event', async () => {
+    const api = new FakeCollaborationApi()
+    api.loadedState = await documentState(
+      DOCUMENT_ID,
+      markdownDocument('Policy cursor'),
+    )
+    const configured = settings({ policyPollMs: 60_000 })
+    const sidecar = new CollaborationSidecar(configured, {
+      api,
+      logger: silentLogger,
+    })
+    await sidecar.start()
+    const harness = sidecar as unknown as GuestPolicyHarness
+    await vi.waitFor(() => expect(harness.policyPollInFlight).toBeNull())
+    const stale = policyConnection({
+      id: USER_ID,
+      kind: 'user',
+      policyCursor: 11,
+      socketId: 'stale-account-socket',
+    })
+    const covered = policyConnection({
+      id: USER_ID,
+      kind: 'user',
+      policyCursor: 12,
+      socketId: 'covered-account-socket',
+    })
+    harness.hocuspocus.documents.set(ROOM, {
+      getConnections: () => [stale, covered],
+      name: ROOM,
+    })
+    api.policyImplementation = async () => ({
+      cursor: 12,
+      events: [{
+        id: 12,
+        resourceId: DOCUMENT_ID,
+        resourceType: 'editor_document',
+        scope: 'share:accepted',
+        targetUserId: USER_ID,
+      }],
+      resetRequired: false,
+    })
+
+    await harness.pollPolicyEvents()
+
+    expect(api.loads).toHaveLength(1)
+    expect(stale.requestToken).toHaveBeenCalledTimes(1)
+    expect(covered.requestToken).not.toHaveBeenCalled()
+
+    harness.hocuspocus.documents.delete(ROOM)
+    await sidecar.stop()
+  })
+
+  it('skips an authoritative generation read when every socket covers the policy event', async () => {
+    const api = new FakeCollaborationApi()
+    api.loadedState = await documentState(
+      DOCUMENT_ID,
+      markdownDocument('Covered policy cursor'),
+    )
+    const configured = settings({ policyPollMs: 60_000 })
+    const sidecar = new CollaborationSidecar(configured, {
+      api,
+      logger: silentLogger,
+    })
+    await sidecar.start()
+    const harness = sidecar as unknown as GuestPolicyHarness
+    await vi.waitFor(() => expect(harness.policyPollInFlight).toBeNull())
+    const first = policyConnection({
+      id: USER_ID,
+      kind: 'user',
+      policyCursor: 12,
+      socketId: 'first-covered-account-socket',
+    })
+    const second = policyConnection({
+      id: USER_ID,
+      kind: 'user',
+      policyCursor: 13,
+      socketId: 'second-covered-account-socket',
+    })
+    harness.hocuspocus.documents.set(ROOM, {
+      getConnections: () => [first, second],
+      name: ROOM,
+    })
+    api.policyImplementation = async () => ({
+      cursor: 12,
+      events: [{
+        id: 12,
+        resourceId: DOCUMENT_ID,
+        resourceType: 'editor_document',
+        scope: 'share:accepted',
+        targetUserId: USER_ID,
+      }],
+      resetRequired: false,
+    })
+
+    await harness.pollPolicyEvents()
+
+    expect(api.loads).toHaveLength(0)
+    expect(first.requestToken).not.toHaveBeenCalled()
+    expect(second.requestToken).not.toHaveBeenCalled()
+
+    harness.hocuspocus.documents.delete(ROOM)
+    await sidecar.stop()
+  })
+
+  it('keeps the generation check when any socket context is unclear', async () => {
+    const api = new FakeCollaborationApi()
+    api.loadedState = await documentState(
+      DOCUMENT_ID,
+      markdownDocument('Unclear policy cursor'),
+    )
+    const configured = settings({ policyPollMs: 60_000 })
+    const sidecar = new CollaborationSidecar(configured, {
+      api,
+      logger: silentLogger,
+    })
+    await sidecar.start()
+    const harness = sidecar as unknown as GuestPolicyHarness
+    await vi.waitFor(() => expect(harness.policyPollInFlight).toBeNull())
+    const covered = policyConnection({
+      id: USER_ID,
+      kind: 'user',
+      policyCursor: 12,
+      socketId: 'covered-account-socket',
+    })
+    const unclear = policyConnection({
+      id: USER_ID,
+      kind: 'user',
+      policyCursor: 12,
+      socketId: 'unclear-account-socket',
+    })
+    delete (unclear.context as Partial<GuestPolicyConnection['context']>).policyCursor
+    harness.hocuspocus.documents.set(ROOM, {
+      getConnections: () => [covered, unclear],
+      name: ROOM,
+    })
+    api.policyImplementation = async () => ({
+      cursor: 12,
+      events: [{
+        id: 12,
+        resourceId: DOCUMENT_ID,
+        resourceType: 'editor_document',
+        scope: 'share:accepted',
+        targetUserId: USER_ID,
+      }],
+      resetRequired: false,
+    })
+
+    await harness.pollPolicyEvents()
+
+    expect(api.loads).toHaveLength(1)
+    expect(covered.requestToken).not.toHaveBeenCalled()
+    expect(unclear.requestToken).not.toHaveBeenCalled()
+
+    harness.hocuspocus.documents.delete(ROOM)
+    await sidecar.stop()
+  })
+
+  it('revalidates all account sockets when the policy feed requires a reset', async () => {
+    const api = new FakeCollaborationApi()
+    const configured = settings({ policyPollMs: 60_000 })
+    const sidecar = new CollaborationSidecar(configured, {
+      api,
+      logger: silentLogger,
+    })
+    await sidecar.start()
+    const harness = sidecar as unknown as GuestPolicyHarness
+    await vi.waitFor(() => expect(harness.policyPollInFlight).toBeNull())
+    const covered = policyConnection({
+      id: USER_ID,
+      kind: 'user',
+      policyCursor: 99,
+      socketId: 'covered-account-socket',
+    })
+    harness.hocuspocus.documents.set(ROOM, {
+      getConnections: () => [covered],
+      name: ROOM,
+    })
+    api.policyImplementation = async () => ({
+      cursor: 100,
+      events: [],
+      resetRequired: true,
+    })
+
+    await harness.pollPolicyEvents()
+
+    expect(covered.requestToken).toHaveBeenCalledTimes(1)
+
+    harness.hocuspocus.documents.delete(ROOM)
+    await sidecar.stop()
+  })
+
+  it('revalidates only guest sockets whose lease check predates a guest policy event', async () => {
+    const api = new FakeCollaborationApi()
+    const configured = settings({ policyPollMs: 60_000 })
+    const sidecar = new CollaborationSidecar(configured, {
+      api,
+      logger: silentLogger,
+    })
+    await sidecar.start()
+    const harness = sidecar as unknown as GuestPolicyHarness
+    await vi.waitFor(() => expect(harness.policyPollInFlight).toBeNull())
+    const guest = policyConnection({
+      id: '33333333-3333-4333-8333-333333333333',
+      kind: 'guest',
+      policyCursor: 0,
+      socketId: 'guest-socket',
+    })
+    const coveredGuest = policyConnection({
+      id: '44444444-4444-4444-8444-444444444444',
+      kind: 'guest',
+      policyCursor: 1,
+      socketId: 'covered-guest-socket',
+    })
+    const account = policyConnection({
+      id: USER_ID,
+      kind: 'user',
+      policyCursor: 0,
+      socketId: 'account-socket',
+    })
+    harness.hocuspocus.documents.set(ROOM, {
+      getConnections: () => [guest, coveredGuest, account],
+      name: ROOM,
+    })
+    api.policyImplementation = async () => ({
+      cursor: 1,
+      events: [{
+        id: 1,
+        resourceId: DOCUMENT_ID,
+        resourceType: 'editor_document',
+        scope: 'collaboration_guest_policy',
+        targetUserId: USER_ID,
+      }],
+      resetRequired: false,
+    })
+
+    await harness.pollPolicyEvents()
+
+    expect(guest.requestToken).toHaveBeenCalledTimes(1)
+    expect(coveredGuest.requestToken).not.toHaveBeenCalled()
+    expect(account.requestToken).not.toHaveBeenCalled()
+
+    harness.hocuspocus.documents.delete(ROOM)
+    await sidecar.stop()
+  })
+
+  it('closes a connection when token revalidation rejects its current lease', async () => {
+    const sidecar = new CollaborationSidecar(settings(), {
+      api: new FakeCollaborationApi(),
+      logger: silentLogger,
+    })
+    const harness = sidecar as unknown as TokenRenewalHarness
+    const guest = policyConnection({
+      id: '33333333-3333-4333-8333-333333333333',
+      kind: 'guest',
+      socketId: 'guest-socket',
+    })
+    harness.authenticator.renew = vi.fn().mockRejectedValue(
+      new CollaborationError('access_revoked', {
+        closeCode: CloseCodes.accessRevoked,
+        httpStatus: 403,
+      }),
+    )
+
+    await expect(
+      harness.renewConnectionToken(guest, guest.context, ROOM, 'replacement-token'),
+    ).rejects.toMatchObject({ reason: 'access_revoked' })
+
+    expect(guest.close).toHaveBeenCalledWith({
+      code: CloseCodes.accessRevoked,
+      reason: 'access_revoked',
+    })
+  })
+
   it('schedules global maintenance without waiting for a snapshot', async () => {
     const api = new FakeCollaborationApi()
     const configured = settings({
@@ -214,6 +582,109 @@ describe('private sidecar listener', () => {
     const closed = nextClose(socket)
     socket.close()
     await withTimeout(closed, 1_000, 'reconcile disconnect')
+    await sidecar.stop()
+  })
+
+  it('accepts one authenticated awareness state without counting a scratch client', async () => {
+    const api = new FakeCollaborationApi()
+    const configured = settings({ policyPollMs: 60_000 })
+    const document = markdownDocument('Awareness')
+    api.loadedState = await documentState(DOCUMENT_ID, document)
+    document.destroy()
+    api.lease = validLease(configured, api.loadedState.schemaHash, 60)
+    const sidecar = new CollaborationSidecar(configured, {
+      api,
+      logger: silentLogger,
+    })
+    await sidecar.start()
+    const socket = await openSocket(sidecar, configured.secret)
+    const authenticated = nextMessage(socket)
+    socket.send(authFrame(ROOM, 'lease-token'))
+    await withTimeout(authenticated, 1_000, 'awareness authentication')
+
+    const clientId = 7
+    socket.send(awarenessFrame(ROOM, clientId, 1, {
+      user: { color: '#badbad', id: 'spoofed', name: 'Spoofed' },
+    }))
+
+    const hocuspocusDocument = (
+      sidecar as unknown as {
+        hocuspocus: {
+          documents: Map<string, {
+            awareness: { getStates(): Map<number, Record<string, unknown>> }
+          }>
+        }
+      }
+    ).hocuspocus.documents.get(ROOM)
+    await vi.waitFor(() => expect(hocuspocusDocument?.awareness.getStates().get(clientId)).toEqual({
+      user: { color: '#123456', id: USER_ID, name: 'Ada' },
+    }))
+    expect(socket.readyState).toBe(WebSocket.OPEN)
+    const metrics = await fetch(`http://127.0.0.1:${sidecar.address?.port}/metrics`)
+    expect(await metrics.text()).toContain(
+      'inqtrix_collaboration_awareness_scratch_states_removed_total 1',
+    )
+
+    const closed = nextClose(socket)
+    socket.close()
+    await withTimeout(closed, 1_000, 'awareness disconnect')
+    await sidecar.stop()
+  })
+
+  it('drops excess awareness without closing the durable document transport', async () => {
+    const api = new FakeCollaborationApi()
+    const configured = settings({
+      awarenessRateLimit: 1,
+      awarenessRateWindowMs: 60_000,
+      policyPollMs: 60_000,
+    })
+    const document = markdownDocument('Awareness burst')
+    api.loadedState = await documentState(DOCUMENT_ID, document)
+    document.destroy()
+    api.lease = validLease(configured, api.loadedState.schemaHash, 60)
+    const sidecar = new CollaborationSidecar(configured, {
+      api,
+      logger: silentLogger,
+    })
+    await sidecar.start()
+    const socket = await openSocket(sidecar, configured.secret)
+    const authenticated = nextMessage(socket)
+    socket.send(authFrame(ROOM, 'lease-token'))
+    await withTimeout(authenticated, 1_000, 'awareness-burst authentication')
+
+    const clientId = 8
+    socket.send(awarenessFrame(ROOM, clientId, 1, {
+      cursor: { anchor: 1, head: 1 },
+      user: { color: '#badbad', id: 'spoofed', name: 'Spoofed' },
+    }))
+    const hocuspocusDocument = (
+      sidecar as unknown as {
+        hocuspocus: {
+          documents: Map<string, {
+            awareness: { getStates(): Map<number, Record<string, unknown>> }
+          }>
+        }
+      }
+    ).hocuspocus.documents.get(ROOM)
+    await vi.waitFor(() => expect(hocuspocusDocument?.awareness.getStates().get(clientId)).toEqual({
+      cursor: { anchor: 1, head: 1 },
+      user: { color: '#123456', id: USER_ID, name: 'Ada' },
+    }))
+
+    socket.send(awarenessFrame(ROOM, clientId, 2, {
+      cursor: { anchor: 2, head: 2 },
+      user: { color: '#badbad', id: 'spoofed', name: 'Spoofed' },
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 30))
+
+    expect(socket.readyState).toBe(WebSocket.OPEN)
+    expect(hocuspocusDocument?.awareness.getStates().get(clientId)).toEqual({
+      cursor: { anchor: 1, head: 1 },
+      user: { color: '#123456', id: USER_ID, name: 'Ada' },
+    })
+    const closed = nextClose(socket)
+    socket.close()
+    await withTimeout(closed, 1_000, 'awareness-burst disconnect')
     await sidecar.stop()
   })
 
@@ -421,6 +892,114 @@ describe('private sidecar listener', () => {
     await withTimeout(recoveredClosed, 1_000, 'recovered disconnect')
     document.destroy()
     await sidecar.stop()
+  })
+
+  it('closes a quarantined five-writer room without an exception storm', async () => {
+    const api = new FakeCollaborationApi()
+    const configured = settings({
+      policyPollMs: 60_000,
+      snapshotIdleMs: 50,
+    })
+    const document = markdownDocument('Hello')
+    api.loadedState = await documentState(DOCUMENT_ID, document)
+    api.lease = validLease(configured, api.loadedState.schemaHash, 60)
+    const persistence = deferred<{
+      duplicate: boolean
+      persistedSequence: number
+      sequence: number
+    }>()
+    api.persistImplementation = () => persistence.promise
+    const sidecar = new CollaborationSidecar(configured, {
+      api,
+      logger: silentLogger,
+    })
+    const sockets: WebSocket[] = []
+    const closeEvents: Array<Promise<{ code: number; reason: string }>> = []
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    await sidecar.start()
+    try {
+      for (let writer = 1; writer <= 5; writer += 1) {
+        const socket = await openSocket(sidecar, configured.secret)
+        sockets.push(socket)
+        closeEvents.push(nextClose(socket))
+        const authenticated = nextMessage(socket)
+        socket.send(authFrame(ROOM, 'lease-token'))
+        await withTimeout(authenticated, 1_000, `writer ${writer} authentication`)
+        const synchronized = nextMessage(socket)
+        socket.send(syncFrame(ROOM, 0, Y.encodeStateVector(document)))
+        await withTimeout(synchronized, 1_000, `writer ${writer} synchronization`)
+      }
+
+      sockets[0]?.send(syncFrame(
+        ROOM,
+        2,
+        editorUpdate(document, 'Hello from writer 1'),
+      ))
+      await vi.waitFor(() => expect(api.persisted).toHaveLength(1))
+
+      for (let writer = 2; writer <= 5; writer += 1) {
+        const socket = sockets[writer - 1]
+        if (!socket) throw new Error('five-writer socket fixture is incomplete')
+        for (let frame = 1; frame <= 5; frame += 1) {
+          socket.send(syncFrame(
+            ROOM,
+            2,
+            editorUpdate(document, `Hello from writer ${writer}, frame ${frame}`),
+          ))
+        }
+      }
+
+      sockets[0]?.close()
+      await withTimeout(closeEvents[0]!, 1_000, 'initiating writer close')
+      await vi.waitFor(() => expect(
+        (sidecar as unknown as {
+          coordinator: { requiresReconstruction: (room: string) => boolean }
+        }).coordinator.requiresReconstruction(ROOM),
+      ).toBe(true))
+      persistence.resolve({ duplicate: false, persistedSequence: 1, sequence: 1 })
+
+      const collateralCloses = await Promise.all(
+        closeEvents.slice(1).map((event, index) => (
+          withTimeout(event, 1_000, `collateral writer ${index + 2} close`)
+        )),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 20))
+
+      const processingFailures = consoleError.mock.calls.filter(
+        ([message]) => (
+          typeof message === 'string'
+          && message.startsWith('closing connection ')
+        ),
+      )
+      const internalFailures = processingFailures.filter(([, error]) => (
+        error instanceof CollaborationError
+        && error.reason === 'internal_consistency'
+      ))
+      const processingSocketIds = processingFailures.map(([message]) => {
+        const match = typeof message === 'string'
+          ? /^closing connection ([^ ]+)/.exec(message)
+          : null
+        if (!match?.[1]) throw new Error('processing failure omitted its socket id')
+        return match[1]
+      })
+      expect(internalFailures).toHaveLength(0)
+      expect(collateralCloses).toEqual(Array.from({ length: 4 }, () => ({
+        code: CloseCodes.restarting,
+        reason: 'restarting',
+      })))
+      expect(processingSocketIds.length).toBeLessThanOrEqual(5)
+      expect(new Set(processingSocketIds).size).toBe(processingSocketIds.length)
+      expect(api.persisted).toHaveLength(1)
+    } finally {
+      persistence.resolve({ duplicate: false, persistedSequence: 1, sequence: 1 })
+      for (const socket of sockets) {
+        if (socket.readyState === WebSocket.OPEN) socket.close()
+      }
+      consoleError.mockRestore()
+      document.destroy()
+      await sidecar.stop()
+    }
   })
 
   it.each([
@@ -679,6 +1258,7 @@ function validLease(
     generation: 1,
     leaseId: 'lease-1',
     permission: 'edit',
+    policyCursor: 0,
     protocolVersion: configured.protocolVersion,
     schemaHash,
     schemaVersion: configured.schemaVersion,
@@ -736,6 +1316,21 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
 
 function authFrame(room: string, token: string): Uint8Array {
   return protocolFrame(room, 2, concat(varUint(0), varString(token)))
+}
+
+function awarenessFrame(
+  room: string,
+  clientId: number,
+  clock: number,
+  state: Record<string, unknown>,
+): Uint8Array {
+  const update = concat(
+    varUint(1),
+    varUint(clientId),
+    varUint(clock),
+    varString(JSON.stringify(state)),
+  )
+  return protocolFrame(room, 1, varBytes(update))
 }
 
 function syncFrame(room: string, type: number, update: Uint8Array): Uint8Array {
@@ -860,6 +1455,66 @@ type OutboundHarness = {
   ): void
 }
 
+type CommentPolicyHarness = {
+  hocuspocus: {
+    documents: Map<string, {
+      getConnections(): Array<{
+        context: {
+          documentId: string
+          expiresAt: number
+          generation: number
+          leaseId: string
+          policyCursor: number
+          tenantId: string
+          user: { id: string }
+        }
+        sendStateless(payload: string): void
+      }>
+      name: string
+    }>
+  }
+  policyPollInFlight: Promise<void> | null
+  pollPolicyEvents(): Promise<void>
+}
+
+type GuestPolicyConnection = {
+  close: ReturnType<typeof vi.fn>
+  context: {
+    documentId: string
+    expiresAt: number
+    generation: number
+    leaseId: string
+    policyCursor: number
+    tenantId: string
+    user: { id: string; kind: 'guest' | 'user' }
+  }
+  requestToken: ReturnType<typeof vi.fn>
+  socketId: string
+}
+
+type GuestPolicyHarness = {
+  hocuspocus: {
+    documents: Map<string, {
+      getConnections(): GuestPolicyConnection[]
+      name: string
+    }>
+  }
+  policyPollInFlight: Promise<void> | null
+  pollPolicyEvents(): Promise<void>
+}
+
+type TokenRenewalHarness = {
+  authenticator: {
+    renew: ReturnType<typeof vi.fn>
+  }
+  renewConnectionToken(
+    connection: GuestPolicyConnection,
+    context: GuestPolicyConnection['context'],
+    documentName: string,
+    token: string,
+  ): Promise<unknown>
+}
+
 type ShutdownHarness = {
   sockets: Map<string, WebSocket>
 }
@@ -869,6 +1524,33 @@ type StartupHarness = {
   listenHttpServer(): Promise<void>
   maintenanceTimer: ReturnType<typeof setInterval> | null
   policyTimer: ReturnType<typeof setInterval> | null
+}
+
+function policyConnection({
+  id,
+  kind,
+  policyCursor = 0,
+  socketId,
+}: {
+  id: string
+  kind: 'guest' | 'user'
+  policyCursor?: number
+  socketId: string
+}): GuestPolicyConnection {
+  return {
+    close: vi.fn(),
+    context: {
+      documentId: DOCUMENT_ID,
+      expiresAt: Date.now() / 1_000 + 60,
+      generation: 1,
+      leaseId: `lease-${socketId}`,
+      policyCursor,
+      tenantId: 'tenant-1',
+      user: { id, kind },
+    },
+    requestToken: vi.fn(),
+    socketId,
+  }
 }
 
 function fakeOutboundSocket(drainImmediately: boolean): {

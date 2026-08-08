@@ -28,6 +28,7 @@ import {
   saveVectorIndex,
 } from '@/api/inqtrixClient'
 import {
+  autosaveDelayForVectorIndexes,
   serverVectorIndexPayload,
   vectorIndexChanged,
   vectorIndexFingerprint,
@@ -63,6 +64,10 @@ type UseVectorIndexHistoryApiOptions = {
 }
 
 export type VectorIndexHistoryApiHandle = {
+  /** Forget a record whose durable aggregate deletion already completed.
+   * The following local reducer removal must not make generic autosave issue
+   * a second DELETE for the same user action. */
+  acknowledgeServerDeletion: (indexId: string) => void
   error: string | null
 }
 
@@ -77,6 +82,8 @@ export function useVectorIndexHistoryApi({
   const [error, setError] = useState<string | null>(null)
   const [hydrated, setHydrated] = useState(false)
 
+  // Previous render's records for the membership-growth delay override.
+  const autosavePrevIndexesRef = useRef(vectorIndexes)
   const indexesRef = useRef(vectorIndexes)
   indexesRef.current = vectorIndexes
   const optionsRef = useRef({ apiKey, workspaceId })
@@ -91,6 +98,10 @@ export function useVectorIndexHistoryApi({
 
   const pushIndex = useCallback(async (index: VectorIndexRecord) => {
     await saveVectorIndex(index.id, serverVectorIndexPayload(index), optionsRef.current)
+  }, [])
+
+  const acknowledgeServerDeletion = useCallback((indexId: string) => {
+    syncedRef.current.delete(indexId)
   }, [])
 
   const flush = useCallback(async () => {
@@ -109,7 +120,7 @@ export function useVectorIndexHistoryApi({
         pushOne: pushIndex,
         deleteOne: (id) =>
           deleteTolerant404(
-            () => deleteVectorIndex(id, optionsRef.current),
+            async () => { await deleteVectorIndex(id, optionsRef.current) },
           ),
       })
       setError(null)
@@ -174,12 +185,14 @@ export function useVectorIndexHistoryApi({
   // -- debounced autosave trigger --------------------------------------- #
 
   useEffect(() => {
+    const previous = autosavePrevIndexesRef.current
+    autosavePrevIndexesRef.current = vectorIndexes
     if (!syncActive || !hydrated) return
     const timer = setTimeout(() => {
       void flush()
-    }, AUTOSAVE_DEBOUNCE_MS)
+    }, autosaveDelayForVectorIndexes(previous, vectorIndexes, AUTOSAVE_DEBOUNCE_MS))
     return () => clearTimeout(timer)
   }, [vectorIndexes, syncActive, hydrated, flush])
 
-  return { error }
+  return { acknowledgeServerDeletion, error }
 }

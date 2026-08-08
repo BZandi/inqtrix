@@ -73,7 +73,7 @@ def test_web_policy_per_tier_matches_the_table():
     assert tief.max_profile == "deep"
 
 
-def test_web_policy_without_tier_is_byte_identical_to_legacy():
+def test_web_policy_without_tier_keeps_depth_profiles():
     assert derive_web_research_policy(depth="deep") == (
         derive_web_research_policy(depth="deep", tier=None)
     )
@@ -81,8 +81,9 @@ def test_web_policy_without_tier_is_byte_identical_to_legacy():
     assert legacy.allowed is True
     assert legacy.profile == "compact"
     assert legacy.max_profile is None
-    denied = derive_web_research_policy(depth="normal")
-    assert denied.allowed is False
+    normal = derive_web_research_policy(depth="normal")
+    assert normal.allowed is True
+    assert normal.profile == "compact"
 
 
 def test_validate_plan_enforces_the_tier_ceiling():

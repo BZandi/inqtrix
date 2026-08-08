@@ -102,15 +102,25 @@ class ChatService:
 
         async with semaphore:
             loop = asyncio.get_running_loop()
+            # Root span for the chat request, opened INSIDE the executor
+            # thread (run_in_executor copies no contextvars) so every
+            # provider span of this turn nests under it. Shared with the
+            # OpenAI-compatible streaming mouth — ONE definition.
+            from inqtrix.observability.otel import chat_thread_call
+
             try:
                 agent_result = await asyncio.wait_for(
                     loop.run_in_executor(
                         None,
-                        partial(
-                            algorithm.run,
-                            run_request,
-                            runtime=self._runtime,
-                            context=run_context,
+                        chat_thread_call(
+                            partial(
+                                algorithm.run,
+                                run_request,
+                                runtime=self._runtime,
+                                context=run_context,
+                            ),
+                            mode=resolved.mode,
+                            principal=principal,
                         ),
                     ),
                     timeout=request_timeout_seconds(chat_agent_settings),
@@ -124,7 +134,10 @@ class ChatService:
                     }},
                 )
             except Exception as exc:  # noqa: BLE001 — agent failures map to 502
-                log.error("Agent-Fehler: %s", exc)
+                log.error(
+                    "Agent-Fehler (error_type=%s)",
+                    type(exc).__name__,
+                )
                 return JSONResponse(
                     status_code=502,
                     content={"error": {
@@ -138,6 +151,26 @@ class ChatService:
             prompt_tokens = usage.get("prompt_tokens", 0)
             completion_tokens = usage.get("completion_tokens", 0)
             result_state = result.get("result_state", {}) or {}
+            terminal_failure = agent_result.terminal_failure
+            if terminal_failure is not None:
+                # The algorithm deliberately returned usage plus a safe
+                # diagnostic, not a successful completion.  Do not package it
+                # as choices[0]/finish_reason=stop: that would erase the shared
+                # native-run failure contract on the chat surface.
+                response = JSONResponse(
+                    status_code=502,
+                    content={
+                        "error": {
+                            "message": terminal_failure.message,
+                            "type": terminal_failure.type,
+                        }
+                    },
+                )
+                # The route owns quota recording for non-streaming calls.  A
+                # typed private projection preserves consumed usage without
+                # leaking it into the public error envelope.
+                response.inqtrix_usage = dict(usage)  # type: ignore[attr-defined]
+                return response
             model_resolution = (
                 result_state
                 .get("node_model_resolutions", {})

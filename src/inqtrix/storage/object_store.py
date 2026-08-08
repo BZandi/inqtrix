@@ -92,6 +92,17 @@ class ObjectStore(ABC):
         """Store the file at *source_path* under *key* (overwrite)."""
 
     @abstractmethod
+    def exists(self, key: str) -> bool:
+        """Return whether a complete object exists under *key*.
+
+        Upload recovery uses this only with server-generated, operation-bound
+        keys.  Implementations must not treat a partially written object as
+        present and must distinguish absence (``False``) from an unavailable
+        backing service (``ObjectStoreError``).  Treating every read failure as
+        absence would turn an outage into a misleading request for re-upload.
+        """
+
+    @abstractmethod
     def stream(self, key: str) -> Iterator[bytes]:
         """Return a chunk iterator over the blob's bytes.
 
@@ -132,9 +143,8 @@ def _iter_s3_body(body, *, key: str) -> Iterator[bytes]:
             body.close()
         except Exception as exc:
             log.warning(
-                "S3 response-body close failed for key %s: %s",
-                sanitize_log_message(key),
-                sanitize_log_message(exc),
+                "S3 response-body close failed (error_type=%s)",
+                type(exc).__name__,
             )
 
 
@@ -173,15 +183,18 @@ class LocalFSObjectStore(ObjectStore):
         shutil.copyfile(source_path, staging)
         staging.replace(target)
 
+    def exists(self, key: str) -> bool:
+        """Return whether the atomically published local object exists."""
+
+        return self._path(key).is_file()
+
     def stream(self, key: str) -> Iterator[bytes]:
         """Open the blob eagerly, then return the chunk iterator."""
         path = self._path(key)
         try:
             handle = path.open("rb")
         except OSError as exc:
-            raise ObjectStoreError(
-                f"blob not found in local store: {key!r}"
-            ) from exc
+            raise ObjectStoreError(f"blob not found in local store: {key!r}") from exc
         return _iter_file(handle)
 
     def delete(self, key: str) -> None:
@@ -336,9 +349,8 @@ class S3ObjectStore(ObjectStore):
                 return
             self._last_probe_warning = now
         log.warning(
-            "S3 availability probe failed for bucket %s: %s",
-            sanitize_log_message(self._bucket),
-            sanitize_log_message(cause),
+            "S3 availability probe failed (error_type=%s)",
+            type(cause).__name__,
         )
 
     def is_available(self) -> bool:
@@ -410,8 +422,7 @@ class S3ObjectStore(ObjectStore):
                         cause=exc,
                     ) from exc
                 log.warning(
-                    "object store bucket %s missing; creating it",
-                    self._bucket,
+                    "object store bucket missing; creating it",
                 )
             except Exception as exc:
                 raise _s3_operation_error(
@@ -482,6 +493,26 @@ class S3ObjectStore(ObjectStore):
         except Exception as exc:
             raise _s3_operation_error(
                 "upload", target=f"key {key!r}", cause=exc
+            ) from exc
+
+    def exists(self, key: str) -> bool:
+        """Probe one object without downloading its body."""
+
+        try:
+            self._s3().head_object(Bucket=self._bucket, Key=key)
+            return True
+        except Exception as exc:
+            try:
+                from botocore.exceptions import ClientError
+
+                if isinstance(exc, ClientError) and str(
+                    exc.response.get("Error", {}).get("Code", "")
+                ) in {"404", "NoSuchKey", "NotFound"}:
+                    return False
+            except ImportError:  # pragma: no cover - constructor needs boto3
+                pass
+            raise _s3_operation_error(
+                "head_object", target=f"key {key!r}", cause=exc
             ) from exc
 
     def stream(self, key: str) -> Iterator[bytes]:

@@ -1,20 +1,30 @@
 import {
+  INQTRIX_STRUCTURE_SUGGESTION_ATTR,
+  createSecureUuid,
   createEditorSchemaExtensions,
+  isStructureSuggestionData,
   isRemoteYjsTransaction,
   normalizeEditorMarkdown,
   sanitizeSerializedEditorMarkdown,
   serializeEditorJson,
   SUGGESTION_MARK_NAMES,
+  suggestionDescriptors,
   transformToInqtrixSuggestionTransaction,
-  type SuggestionKind,
   type SuggestionMetadata,
 } from '@inqtrix/editor-schema'
+import type { HocuspocusProvider } from '@hocuspocus/provider'
 import { Extension, getMarkRange, type Editor, type Extensions } from '@tiptap/core'
 import { Placeholder } from '@tiptap/extensions'
 import { type Mark, type Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { type EditorState, Plugin, PluginKey, TextSelection, type Transaction } from '@tiptap/pm/state'
 import { Decoration, DecorationSet, type DecorationAttrs, type EditorView } from '@tiptap/pm/view'
 import { ReactRenderer } from '@tiptap/react'
+import {
+  redo as yjsRedo,
+  undo as yjsUndo,
+  yCursorPlugin,
+  yUndoPluginKey,
+} from '@tiptap/y-tiptap'
 import { EditorSuggestionBlockCard, type EditorSuggestionBlockCardProps } from './EditorSuggestionBlockCard'
 import { SlashCommandExtension, type SlashCommandConfig } from './slashCommand'
 
@@ -39,6 +49,8 @@ type CommentDecorationOptions = {
   placeholderEmpty?: string
   /** Placeholder shown on an empty heading (e.g. "Heading"). */
   placeholderHeading?: string
+  /** Localized singular label for a shared comment marker. */
+  teamCommentLabel?: string
   /** Localized config for the `/` slash command menu. Omit to disable the menu. */
   slash?: SlashCommandConfig
 }
@@ -53,21 +65,24 @@ export type CollaborationReviewOverlayUpdate = {
   selectedSuggestionIds?: readonly string[]
   visibleSuggestionIds?: readonly string[]
   writeAuthorId?: string | null
-  writeMode?: 'edit' | 'suggest' | 'view'
+  writeMode?: 'comment' | 'edit' | 'suggest' | 'view'
 }
 
 type CollaborationReviewExtensionOptions = {
   initialPolicy?: CollaborationReviewOverlayUpdate
+  onSuggestionUndo?: (patchId: string) => Promise<void>
 }
 
 type CollaborationReviewExtensionStorage = {
   grouping: CollaborationSuggestionGroupingCoordinator
+  suggestionUndoHistory: CollaborationSuggestionUndoHistory
+  writeMode: 'comment' | 'edit' | 'suggest' | 'view'
 }
 
 export type CommentDecorationItem = {
   from: number
   id: string
-  kind: 'collect' | 'inline_edit' | 'evidence_review'
+  kind: 'collect' | 'inline_edit' | 'evidence_review' | 'team'
   selected: boolean
   status: 'open' | 'resolved' | 'stale'
   to: number
@@ -79,25 +94,105 @@ type CommentDecorationState = {
 
 export const commentDecorationPluginKey = new PluginKey<CommentDecorationState>('inqtrixCommentDecorations')
 
-function buildCommentDecorations(doc: ProseMirrorNode, items: CommentDecorationItem[]): DecorationSet {
+export type TeamCommentMarkerGroup = {
+  count: number
+  representativeId: string
+  selected: boolean
+  to: number
+}
+
+/**
+ * A document can contain many threads on the same passage. Rendering one
+ * widget for every thread turns a single line into a wall of dots, so markers
+ * that end at the same document position share one count badge. The selected
+ * thread becomes the representative, which keeps editor/inspector scrolling
+ * and activation deterministic.
+ */
+export function groupTeamCommentMarkers(
+  items: readonly CommentDecorationItem[],
+): TeamCommentMarkerGroup[] {
+  const groups = new Map<number, CommentDecorationItem[]>()
+  for (const item of items) {
+    if (item.kind !== 'team') continue
+    const group = groups.get(item.to)
+    if (group) group.push(item)
+    else groups.set(item.to, [item])
+  }
+  return [...groups.entries()].map(([to, group]) => {
+    const representative = group.find((item) => item.selected) ?? group[0]!
+    return {
+      count: group.length,
+      representativeId: representative.id,
+      selected: group.some((item) => item.selected),
+      to,
+    }
+  })
+}
+
+function buildCommentDecorations(
+  doc: ProseMirrorNode,
+  items: CommentDecorationItem[],
+  onClick: ((commentId: string) => void) | undefined,
+  teamCommentLabel: string,
+): DecorationSet {
   const maxPos = doc.content.size
-  const decorations = items.flatMap((item) => {
+  const normalizedItems = items.map((item) => {
     const from = Math.max(0, Math.min(item.from, maxPos))
     const to = Math.max(from, Math.min(item.to, maxPos))
-    if (from >= to) return []
-    return [Decoration.inline(
-      from,
-      to,
-      {
-        class: 'editor-comment-anchor',
-        'data-editor-comment-anchor': item.id,
-        'data-editor-comment-kind': item.kind,
-        'data-editor-comment-status': item.status,
-        ...(item.selected ? { 'data-editor-comment-selected': 'true' } : {}),
-      },
-      { commentId: item.id },
-    )]
+    return { ...item, from, to }
   })
+  const decorations = normalizedItems.flatMap((item) => {
+    const attributes = {
+      class: 'editor-comment-anchor',
+      'data-editor-comment-anchor': item.id,
+      'data-editor-comment-kind': item.kind,
+      'data-editor-comment-status': item.status,
+      ...(item.selected ? { 'data-editor-comment-selected': 'true' } : {}),
+    }
+    const itemDecorations: Decoration[] = []
+    if (item.from < item.to) {
+      itemDecorations.push(
+        Decoration.inline(item.from, item.to, attributes, { commentId: item.id }),
+      )
+    }
+    return itemDecorations
+  })
+  for (const group of groupTeamCommentMarkers(normalizedItems)) {
+    decorations.push(
+      Decoration.widget(group.to, () => {
+        const marker = document.createElement('span')
+        const visibleCount = group.count > 99 ? '99+' : String(group.count)
+        const accessibleLabel = group.count > 1
+          ? `${teamCommentLabel}: ${group.count}`
+          : teamCommentLabel
+        marker.className = 'editor-team-comment-marker'
+        marker.dataset.editorCommentAnchor = group.representativeId
+        marker.dataset.editorCommentCount = String(group.count)
+        marker.dataset.editorCommentSelected = String(group.selected)
+        marker.setAttribute('aria-label', accessibleLabel)
+        marker.setAttribute('role', 'button')
+        marker.setAttribute('title', accessibleLabel)
+        marker.tabIndex = 0
+        marker.textContent = group.count > 1 ? visibleCount : '●'
+        if (onClick) {
+          const activate = (event: Event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            onClick(group.representativeId)
+          }
+          marker.addEventListener('click', activate)
+          marker.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') activate(event)
+          })
+        }
+        return marker
+      }, {
+        commentId: group.representativeId,
+        key: `team-comments-${group.to}-${group.count}-${group.representativeId}-${group.selected}`,
+        side: 1,
+      }),
+    )
+  }
   return DecorationSet.create(doc, decorations)
 }
 
@@ -112,6 +207,7 @@ export const CommentDecorationExtension = Extension.create<CommentDecorationOpti
 
   addProseMirrorPlugins() {
     const onClick = this.options.onClick
+    const teamCommentLabel = this.options.teamCommentLabel ?? 'Team comment'
     return [
       new Plugin<CommentDecorationState>({
         key: commentDecorationPluginKey,
@@ -120,7 +216,14 @@ export const CommentDecorationExtension = Extension.create<CommentDecorationOpti
           apply(tr, value) {
             const meta = tr.getMeta(commentDecorationPluginKey) as { items: CommentDecorationItem[] } | undefined
             if (meta) {
-              return { decorations: buildCommentDecorations(tr.doc, meta.items) }
+              return {
+                decorations: buildCommentDecorations(
+                  tr.doc,
+                  meta.items,
+                  onClick,
+                  teamCommentLabel,
+                ),
+              }
             }
             if (tr.docChanged) {
               return { decorations: value.decorations.map(tr.mapping, tr.doc) }
@@ -383,7 +486,7 @@ type CollaborationReviewOverlayState = {
   selectedSuggestionIds: ReadonlySet<string>
   visibleSuggestionIds: ReadonlySet<string> | null
   writeAuthorId: string | null
-  writeMode: 'edit' | 'suggest' | 'view'
+  writeMode: 'comment' | 'edit' | 'suggest' | 'view'
 }
 
 const DEFAULT_COLLABORATION_REVIEW_STATE: CollaborationReviewOverlayState = {
@@ -415,7 +518,7 @@ export const COLLABORATION_SUGGESTION_GROUP_IDLE_MS = 5_000
 type SuggestionGroupingContext = {
   authorId: string | null
   documentId: string | null
-  writeMode: 'edit' | 'suggest' | 'view'
+  writeMode: 'comment' | 'edit' | 'suggest' | 'view'
 }
 
 type SuggestionGroupingCoordinatorOptions = {
@@ -437,7 +540,7 @@ export class CollaborationSuggestionGroupingCoordinator {
   private group: (SuggestionMetadata & { lastActivityAt: number }) | null = null
 
   constructor(options: SuggestionGroupingCoordinatorOptions = {}) {
-    this.createPatchId = options.createPatchId ?? (() => crypto.randomUUID())
+    this.createPatchId = options.createPatchId ?? createSecureUuid
     this.now = options.now ?? (() => Date.now())
   }
 
@@ -477,6 +580,53 @@ export class CollaborationSuggestionGroupingCoordinator {
 
   reset(): void {
     this.group = null
+  }
+}
+
+/**
+ * Suggest-mode undo is a durable review decision, not a raw Yjs reversal.
+ *
+ * The stack is intentionally session-local: it contains only patches created
+ * by this editor instance. Existing or reloaded suggestions remain reviewable
+ * through the Changes inspector and can never be rejected accidentally by a
+ * stale browser history entry.
+ */
+export class CollaborationSuggestionUndoHistory {
+  private patchIds: string[] = []
+  private pendingPatchId: string | null = null
+
+  record(patchId: string): void {
+    if (!patchId || this.patchIds.at(-1) === patchId) return
+    this.patchIds.push(patchId)
+  }
+
+  current(openPatchIds: ReadonlySet<string>): string | null {
+    if (this.pendingPatchId !== null) return null
+    for (let index = this.patchIds.length - 1; index >= 0; index -= 1) {
+      const patchId = this.patchIds[index]
+      if (patchId && openPatchIds.has(patchId)) return patchId
+    }
+    return null
+  }
+
+  begin(patchId: string, openPatchIds: ReadonlySet<string>): boolean {
+    if (this.current(openPatchIds) !== patchId) return false
+    this.pendingPatchId = patchId
+    return true
+  }
+
+  fail(patchId: string): void {
+    if (this.pendingPatchId === patchId) this.pendingPatchId = null
+  }
+
+  reconcile(openPatchIds: ReadonlySet<string>): void {
+    this.patchIds = this.patchIds.filter((patchId) => openPatchIds.has(patchId))
+    if (
+      this.pendingPatchId !== null
+      && !openPatchIds.has(this.pendingPatchId)
+    ) {
+      this.pendingPatchId = null
+    }
   }
 }
 
@@ -538,9 +688,23 @@ function collaborationReviewDecorations(
   if (!state.enabled) return DecorationSet.empty
   const decorations: Decoration[] = []
   doc.descendants((node, position) => {
+    const structure = node.attrs[INQTRIX_STRUCTURE_SUGGESTION_ATTR]
+    if (isStructureSuggestionData(structure)) {
+      const active = state.selectedSuggestionIds.has(structure.suggestionId)
+      const visible = state.visibleSuggestionIds?.has(structure.suggestionId) ?? true
+      const effectiveDisplay = visible ? state.display : 'final'
+      decorations.push(Decoration.node(position, position + node.nodeSize, {
+        class: cnReviewStructureClass(active, effectiveDisplay),
+        'data-review-active': active ? 'true' : 'false',
+        'data-review-display': effectiveDisplay,
+        'data-review-overlay': 'structure',
+        'data-review-structure-action': structure.action,
+        'data-review-suggestion-id': structure.suggestionId,
+      }))
+    }
     if (!node.isText || node.nodeSize === 0) return true
     for (const mark of node.marks) {
-      if (!SUGGESTION_MARK_NAMES.has(mark.type.name as SuggestionKind)) continue
+      if (!SUGGESTION_MARK_NAMES.has(mark.type.name)) continue
       const suggestionId = mark.attrs.suggestionId
       if (typeof suggestionId !== 'string' || !suggestionId) continue
       const kind = mark.type.name as CollaborationReviewMarkKind
@@ -566,6 +730,17 @@ function collaborationReviewDecorations(
   return DecorationSet.create(doc, decorations)
 }
 
+function cnReviewStructureClass(
+  active: boolean,
+  display: CollaborationReviewDisplay,
+): string {
+  return [
+    'inqtrix-review-structure',
+    `inqtrix-review-structure-${display}`,
+    ...(active ? ['inqtrix-review-structure-active'] : []),
+  ].join(' ')
+}
+
 function withCollaborationReviewDecorations(
   doc: ProseMirrorNode,
   state: CollaborationReviewOverlayState,
@@ -576,33 +751,190 @@ function withCollaborationReviewDecorations(
   }
 }
 
-function enforceCaretOnlyPresence(root: HTMLElement): void {
-  for (const caret of root.querySelectorAll<HTMLElement>('.collaboration-carets__caret')) {
-    if (caret.dataset.collaborationCaret === 'text') continue
-    const label = caret.querySelector<HTMLElement>('.collaboration-carets__label')
-    const color = caret.style.borderColor || label?.style.backgroundColor || 'var(--brand)'
+const COLLABORATION_CARET_LABEL_MAX_WIDTH_PX = 192
+const COLLABORATION_CARET_LABEL_MAX_BOUNDARY_RATIO = 0.7
+const COLLABORATION_CARET_LABEL_VIEWPORT_GUTTER_PX = 8
+
+type CollaborationCaretLabelLayoutInput = {
+  boundaryLeft: number
+  boundaryRight: number
+  caretLeft: number
+  caretRight: number
+  labelWidth: number
+}
+
+export type CollaborationCaretLabelLayout = {
+  maxWidth: number
+  shiftX: number
+  side: 'left' | 'right'
+}
+
+function collaborationCaretLabelMaxWidth(availableWidth: number): number {
+  return Math.min(
+    COLLABORATION_CARET_LABEL_MAX_WIDTH_PX,
+    Math.floor(Math.max(0, availableWidth) * COLLABORATION_CARET_LABEL_MAX_BOUNDARY_RATIO),
+  )
+}
+
+export function collaborationCaretLabelLayout({
+  boundaryLeft,
+  boundaryRight,
+  caretLeft,
+  caretRight,
+  labelWidth,
+}: CollaborationCaretLabelLayoutInput): CollaborationCaretLabelLayout {
+  const availableWidth = Math.max(0, boundaryRight - boundaryLeft)
+  const maxWidth = collaborationCaretLabelMaxWidth(availableWidth)
+  const renderedWidth = Math.min(Math.max(0, labelWidth), maxWidth)
+  const leftStart = caretLeft
+  const rightStart = caretRight - renderedWidth
+  const overflow = (start: number) => (
+    Math.max(0, boundaryLeft - start)
+    + Math.max(0, start + renderedWidth - boundaryRight)
+  )
+  const side = overflow(leftStart) <= overflow(rightStart) ? 'left' : 'right'
+  const preferredStart = side === 'left' ? leftStart : rightStart
+  const maximumStart = Math.max(boundaryLeft, boundaryRight - renderedWidth)
+  const boundedStart = Math.min(Math.max(preferredStart, boundaryLeft), maximumStart)
+  return {
+    maxWidth,
+    shiftX: boundedStart - preferredStart,
+    side,
+  }
+}
+
+function setStylePropertyIfChanged(
+  element: HTMLElement,
+  property: string,
+  value: string,
+  priority = '',
+): void {
+  if (
+    element.style.getPropertyValue(property) === value
+    && element.style.getPropertyPriority(property) === priority
+  ) return
+  element.style.setProperty(property, value, priority)
+}
+
+function prepareCollaborationCaretLabel(
+  caret: HTMLElement,
+  label: HTMLElement,
+  color: string,
+): void {
+  if (caret.dataset.collaborationCaret !== 'text') {
     caret.dataset.collaborationCaret = 'text'
-    caret.classList.add('inqtrix-collaboration-caret')
-    caret.style.setProperty('border-left', `2px solid ${color}`)
-    caret.style.setProperty('border-right', '0')
-    caret.style.setProperty('height', '1.2em')
-    caret.style.setProperty('margin-left', '-1px')
-    caret.style.setProperty('margin-right', '-1px')
-    caret.style.setProperty('pointer-events', 'none')
-    caret.style.setProperty('position', 'relative')
+  }
+  caret.classList.add('inqtrix-collaboration-caret')
+  setStylePropertyIfChanged(caret, 'border-left', `2px solid ${color}`)
+  setStylePropertyIfChanged(caret, 'border-right', '0px')
+  setStylePropertyIfChanged(caret, 'height', '1.2em')
+  setStylePropertyIfChanged(caret, 'margin-left', '-1px')
+  setStylePropertyIfChanged(caret, 'margin-right', '-1px')
+  setStylePropertyIfChanged(caret, 'pointer-events', 'none')
+  setStylePropertyIfChanged(caret, 'position', 'relative')
+
+  label.classList.add(
+    'inqtrix-collaboration-caret-label',
+    't-meta-sm',
+    'absolute',
+    'bottom-full',
+    'z-20',
+    'whitespace-nowrap',
+    'rounded-sm',
+    'px-1',
+    'py-0.5',
+    'shadow-sm',
+  )
+  setStylePropertyIfChanged(label, 'background-color', color)
+  setStylePropertyIfChanged(label, 'bottom', '100%')
+  setStylePropertyIfChanged(label, 'box-sizing', 'border-box')
+  setStylePropertyIfChanged(label, 'color', collaborationCaretLabelColor(color))
+  setStylePropertyIfChanged(label, 'display', 'block')
+  setStylePropertyIfChanged(label, 'max-width', 'min(12rem, 70vw)')
+  setStylePropertyIfChanged(label, 'overflow', 'hidden')
+  setStylePropertyIfChanged(label, 'position', 'absolute')
+  setStylePropertyIfChanged(label, 'text-overflow', 'ellipsis')
+  setStylePropertyIfChanged(label, 'top', 'auto')
+  setStylePropertyIfChanged(label, 'user-select', 'none')
+  setStylePropertyIfChanged(label, 'white-space', 'nowrap')
+}
+
+function positionCollaborationCaretLabel(
+  root: HTMLElement,
+  caret: HTMLElement,
+  label: HTMLElement,
+): void {
+  const rootRect = root.getBoundingClientRect()
+  const viewportWidth = root.ownerDocument.defaultView?.innerWidth ?? rootRect.right
+  const boundaryLeft = Math.max(
+    rootRect.left,
+    COLLABORATION_CARET_LABEL_VIEWPORT_GUTTER_PX,
+  )
+  const boundaryRight = Math.min(
+    rootRect.right,
+    viewportWidth - COLLABORATION_CARET_LABEL_VIEWPORT_GUTTER_PX,
+  )
+  if (boundaryRight <= boundaryLeft) return
+
+  const availableWidth = boundaryRight - boundaryLeft
+  setStylePropertyIfChanged(
+    label,
+    'max-width',
+    `${collaborationCaretLabelMaxWidth(availableWidth)}px`,
+  )
+  const caretRect = caret.getBoundingClientRect()
+  const labelRect = label.getBoundingClientRect()
+  const layout = collaborationCaretLabelLayout({
+    boundaryLeft,
+    boundaryRight,
+    caretLeft: caretRect.left,
+    caretRight: caretRect.right,
+    labelWidth: labelRect.width,
+  })
+  if (label.dataset.collaborationLabelSide !== layout.side) {
+    label.dataset.collaborationLabelSide = layout.side
+  }
+  if (layout.side === 'right') {
+    setStylePropertyIfChanged(label, 'left', 'auto')
+    setStylePropertyIfChanged(label, 'right', '0px')
+  } else {
+    setStylePropertyIfChanged(label, 'left', '0px')
+    setStylePropertyIfChanged(label, 'right', 'auto')
+  }
+  const currentShiftX = Number.parseFloat(
+    label.dataset.collaborationLabelShiftX ?? '0',
+  ) || 0
+  const positionedRect = label.getBoundingClientRect()
+  const unshiftedLeft = positionedRect.left - currentShiftX
+  const unshiftedRight = positionedRect.right - currentShiftX
+  let exactShiftX = 0
+  if (unshiftedLeft < boundaryLeft) exactShiftX = boundaryLeft - unshiftedLeft
+  if (unshiftedRight + exactShiftX > boundaryRight) {
+    exactShiftX += boundaryRight - (unshiftedRight + exactShiftX)
+  }
+  const shiftX = Math.round(exactShiftX * 1_000) / 1_000
+  const serializedShiftX = String(shiftX)
+  if (label.dataset.collaborationLabelShiftX !== serializedShiftX) {
+    label.dataset.collaborationLabelShiftX = serializedShiftX
+  }
+  setStylePropertyIfChanged(
+    label,
+    'transform',
+    shiftX === 0 ? 'none' : `translateX(${shiftX}px)`,
+  )
+}
+
+function enforceCaretOnlyPresence(root: HTMLElement): void {
+  for (const caret of root.querySelectorAll<HTMLElement>(
+    '.collaboration-carets__caret, .inqtrix-collaboration-caret',
+  )) {
+    const label = caret.querySelector<HTMLElement>(
+      '.collaboration-carets__label, .inqtrix-collaboration-caret-label',
+    )
+    const color = caret.style.borderColor || label?.style.backgroundColor || 'var(--brand)'
     if (label) {
-      label.classList.add(
-        'inqtrix-collaboration-caret-label',
-        't-meta-sm',
-        'whitespace-nowrap',
-      )
-      label.style.setProperty('background-color', color)
-      label.style.setProperty('color', collaborationCaretLabelColor(color))
-      label.style.setProperty('left', '-1px')
-      label.style.setProperty('padding', '0.125rem 0.25rem')
-      label.style.setProperty('position', 'absolute')
-      label.style.setProperty('top', '-1.55rem')
-      label.style.setProperty('user-select', 'none')
+      prepareCollaborationCaretLabel(caret, label, color)
+      positionCollaborationCaretLabel(root, caret, label)
     }
   }
   for (const selection of root.querySelectorAll<HTMLElement>('.collaboration-carets__selection')) {
@@ -671,23 +1003,35 @@ function foreignSuggestionInRange(
   authorId: string,
 ): CollaborationSuggestionCollision | null {
   const marks: Mark[] = []
+  const structures: Array<{
+    authorId: string
+    patchId: string
+    suggestionId: string
+  }> = []
+  const inspectStructure = (node: ProseMirrorNode) => {
+    const structure = node.attrs[INQTRIX_STRUCTURE_SUGGESTION_ATTR]
+    if (isStructureSuggestionData(structure)) structures.push(structure)
+  }
   const maxPosition = document.content.size
   const safeFrom = Math.max(0, Math.min(from, maxPosition))
   const safeTo = Math.max(safeFrom, Math.min(to, maxPosition))
   if (safeFrom < safeTo) {
     document.nodesBetween(safeFrom, safeTo, (node) => {
       marks.push(...node.marks)
+      inspectStructure(node)
       return true
     })
   } else {
     const position = document.resolve(safeFrom)
     marks.push(...position.marks())
     for (let depth = 0; depth <= position.depth; depth += 1) {
-      marks.push(...position.node(depth).marks)
+      const node = position.node(depth)
+      marks.push(...node.marks)
+      inspectStructure(node)
     }
   }
   for (const mark of marks) {
-    if (!SUGGESTION_MARK_NAMES.has(mark.type.name as SuggestionKind)) continue
+    if (!SUGGESTION_MARK_NAMES.has(mark.type.name)) continue
     const markAuthorId = mark.attrs.authorId
     const patchId = mark.attrs.patchId
     const suggestionId = mark.attrs.suggestionId
@@ -702,6 +1046,13 @@ function foreignSuggestionInRange(
       return { patchId, suggestionId }
     }
   }
+  const structure = structures.find((item) => item.authorId !== authorId)
+  if (structure) {
+    return {
+      patchId: structure.patchId,
+      suggestionId: structure.suggestionId,
+    }
+  }
   return null
 }
 
@@ -709,8 +1060,9 @@ function collaborationDispatchTransaction(
   view: EditorView,
   baseDispatch: (transaction: Transaction) => void,
   transaction: Transaction,
-  grouping: CollaborationSuggestionGroupingCoordinator,
+  storage: CollaborationReviewExtensionStorage,
 ): void {
+  const { grouping, suggestionUndoHistory } = storage
   const state = collaborationReviewPluginKey.getState(view.state)
     ?? DEFAULT_COLLABORATION_REVIEW_STATE
   grouping.observeContext({
@@ -725,6 +1077,8 @@ function collaborationDispatchTransaction(
   if (isRemoteYjsTransaction(transaction)) {
     grouping.reset()
     baseDispatch(transaction)
+    const openPatchIds = openSuggestionPatchIds(view.state.doc)
+    if (openPatchIds) suggestionUndoHistory.reconcile(openPatchIds)
     return
   }
   if (!transaction.docChanged) {
@@ -732,7 +1086,10 @@ function collaborationDispatchTransaction(
     baseDispatch(transaction)
     return
   }
-  if (state.writeMode === 'view') return
+  if (state.writeMode === 'view' || state.writeMode === 'comment') {
+    baseDispatch(transaction)
+    return
+  }
   if (!state.writeAuthorId) {
     clearSuggestionCollision(view)
     emitSuggestionTransformError(view, new Error('Suggestion mode requires a verified collaborator.'))
@@ -756,17 +1113,52 @@ function collaborationDispatchTransaction(
     return
   }
   try {
+    const metadata = grouping.metadata()
     const transformed = transformToInqtrixSuggestionTransaction(
       transaction,
       view.state,
-      grouping.metadata(),
+      metadata,
     )
+    // A suggestion is undone through the durable patch-decision endpoint.
+    // Keeping it out of Yjs history prevents Cmd/Ctrl+Z from first mutating
+    // local state into a form the collaboration policy must reject.
+    transformed.setMeta('addToHistory', false)
     baseDispatch(transformed)
+    if (openSuggestionPatchIds(view.state.doc)?.has(metadata.patchId)) {
+      suggestionUndoHistory.record(metadata.patchId)
+    }
     emitSuggestionTransformSuccess(view)
   } catch (error) {
     grouping.reset()
     emitSuggestionTransformError(view, error)
   }
+}
+
+function openSuggestionPatchIds(document: ProseMirrorNode): Set<string> | null {
+  try {
+    return new Set(suggestionDescriptors(document).map((item) => item.patchId))
+  } catch {
+    return null
+  }
+}
+
+export function collaborationReviewAllowsTransaction({
+  collaboration,
+  docChanged,
+  remote,
+  writeMode,
+}: {
+  collaboration: boolean
+  docChanged: boolean
+  remote: boolean
+  writeMode: 'comment' | 'edit' | 'suggest' | 'view'
+}): boolean {
+  return (
+    !collaboration
+    || !docChanged
+    || remote
+    || (writeMode !== 'view' && writeMode !== 'comment')
+  )
 }
 
 function collaborationReviewStateFromUpdate(
@@ -797,27 +1189,110 @@ export const CollaborationReviewExtension = Extension.create<
   name: 'collaborationReview',
 
   addOptions() {
-    return { initialPolicy: undefined }
+    return {
+      initialPolicy: undefined,
+      onSuggestionUndo: undefined,
+    }
   },
 
   addStorage() {
-    return { grouping: new CollaborationSuggestionGroupingCoordinator() }
+    return {
+      grouping: new CollaborationSuggestionGroupingCoordinator(),
+      suggestionUndoHistory: new CollaborationSuggestionUndoHistory(),
+      writeMode: this.options.initialPolicy?.writeMode ?? 'edit',
+    }
   },
 
   dispatchTransaction({ transaction, next }) {
-    collaborationDispatchTransaction(this.editor.view, next, transaction, this.storage.grouping)
+    collaborationDispatchTransaction(this.editor.view, next, transaction, this.storage)
+  },
+
+  addCommands() {
+    if (!this.options.onSuggestionUndo) return {}
+    return {
+      undo:
+        () =>
+        ({ dispatch, state, tr }) => {
+          const policy = collaborationReviewPluginKey.getState(state)
+            ?? DEFAULT_COLLABORATION_REVIEW_STATE
+          if (policy.collaboration && policy.writeMode === 'suggest') {
+            const openPatchIds = openSuggestionPatchIds(state.doc) ?? new Set<string>()
+            const patchId = this.storage.suggestionUndoHistory.current(openPatchIds)
+            if (!dispatch) return patchId !== null
+            tr.setMeta('preventDispatch', true)
+            // Consume the native contenteditable shortcut even when the
+            // semantic history is empty; otherwise the browser can bypass the
+            // collaboration command path.
+            if (
+              !patchId
+              || !this.storage.suggestionUndoHistory.begin(patchId, openPatchIds)
+            ) return true
+            emitSuggestionTransformSuccess(this.editor.view)
+            let request: Promise<void>
+            try {
+              request = this.options.onSuggestionUndo!(patchId)
+            } catch (error) {
+              this.storage.suggestionUndoHistory.fail(patchId)
+              emitSuggestionTransformError(this.editor.view, error)
+              return true
+            }
+            void request.catch((error: unknown) => {
+              this.storage.suggestionUndoHistory.fail(patchId)
+              if (!this.editor.isDestroyed) {
+                emitSuggestionTransformError(this.editor.view, error)
+              }
+            })
+            return true
+          }
+
+          const undoManager = yUndoPluginKey.getState(state)?.undoManager
+          if (!undoManager || undoManager.undoStack.length === 0) return false
+          if (!dispatch) return true
+          tr.setMeta('preventDispatch', true)
+          return yjsUndo(state) ?? false
+        },
+      redo:
+        () =>
+        ({ dispatch, state, tr }) => {
+          const policy = collaborationReviewPluginKey.getState(state)
+            ?? DEFAULT_COLLABORATION_REVIEW_STATE
+          if (policy.collaboration && policy.writeMode === 'suggest') {
+            if (!dispatch) return false
+            tr.setMeta('preventDispatch', true)
+            return true
+          }
+
+          const undoManager = yUndoPluginKey.getState(state)?.undoManager
+          if (!undoManager || undoManager.redoStack.length === 0) return false
+          if (!dispatch) return true
+          tr.setMeta('preventDispatch', true)
+          return yjsRedo(state) ?? false
+        },
+    }
   },
 
   addProseMirrorPlugins() {
+    const storage = this.storage
     const initialState = this.options.initialPolicy
       ? collaborationReviewStateFromUpdate(
           DEFAULT_COLLABORATION_REVIEW_STATE,
           this.options.initialPolicy,
         )
       : DEFAULT_COLLABORATION_REVIEW_STATE
+    storage.writeMode = initialState.writeMode
     return [
       new Plugin<CollaborationReviewOverlayState>({
         key: collaborationReviewPluginKey,
+        filterTransaction(transaction, state) {
+          const policy = collaborationReviewPluginKey.getState(state)
+            ?? DEFAULT_COLLABORATION_REVIEW_STATE
+          return collaborationReviewAllowsTransaction({
+            collaboration: policy.collaboration,
+            docChanged: transaction.docChanged,
+            remote: isRemoteYjsTransaction(transaction),
+            writeMode: policy.writeMode,
+          })
+        },
         state: {
           init: (_config, state) => withCollaborationReviewDecorations(state.doc, initialState),
           apply(transaction, value) {
@@ -828,6 +1303,7 @@ export const CollaborationReviewExtension = Extension.create<
             const nextState = update
               ? collaborationReviewStateFromUpdate(value, update)
               : value
+            storage.writeMode = nextState.writeMode
             return withCollaborationReviewDecorations(transaction.doc, nextState)
           },
         },
@@ -839,21 +1315,35 @@ export const CollaborationReviewExtension = Extension.create<
         },
         view(view) {
           enforceCaretOnlyPresence(view.dom)
-          const presenceObserver = new MutationObserver(() => {
-            enforceCaretOnlyPresence(view.dom)
-          })
+          let animationFrame: number | null = null
+          const schedulePresenceLayout = () => {
+            if (animationFrame !== null) return
+            animationFrame = requestAnimationFrame(() => {
+              animationFrame = null
+              enforceCaretOnlyPresence(view.dom)
+            })
+          }
+          const presenceObserver = new MutationObserver(schedulePresenceLayout)
           presenceObserver.observe(view.dom, {
             attributeFilter: ['style'],
             attributes: true,
             childList: true,
             subtree: true,
           })
+          const presenceResizeObserver = new ResizeObserver(schedulePresenceLayout)
+          presenceResizeObserver.observe(view.dom)
+          window.addEventListener('resize', schedulePresenceLayout, { passive: true })
+          schedulePresenceLayout()
           return {
             destroy() {
+              if (animationFrame !== null) cancelAnimationFrame(animationFrame)
               presenceObserver.disconnect()
+              presenceResizeObserver.disconnect()
+              window.removeEventListener('resize', schedulePresenceLayout)
             },
             update(nextView) {
               enforceCaretOnlyPresence(nextView.dom)
+              schedulePresenceLayout()
             },
           }
         },
@@ -882,14 +1372,12 @@ export function renderCollaborationCaret(user: Record<string, unknown>): HTMLEle
   const caret = document.createElement('span')
   caret.className = 'inqtrix-collaboration-caret pointer-events-none relative inline-block align-text-bottom'
   caret.setAttribute('aria-hidden', 'true')
-  caret.style.cssText = `border-left: 2px solid ${color}; height: 1.2em; margin-left: -1px; margin-right: -1px;`
 
   const label = document.createElement('span')
-  label.className = 'inqtrix-collaboration-caret-label t-meta-sm absolute bottom-full left-0 z-20 whitespace-nowrap rounded-sm px-1 py-0.5 shadow-sm'
-  label.style.backgroundColor = color
-  label.style.color = collaborationCaretLabelColor(color)
+  label.className = 'inqtrix-collaboration-caret-label'
   label.textContent = name
   caret.append(label)
+  prepareCollaborationCaretLabel(caret, label, color)
   return caret
 }
 
@@ -906,6 +1394,66 @@ export const collaborationCaretOptions = {
   render: renderCollaborationCaret,
   selectionRender: caretOnlySelectionRender,
 }
+
+type InqtrixCollaborationCaretOptions = {
+  provider: HocuspocusProvider | null
+  user: CollaborationPresenceUser | null
+}
+
+export function shouldRenderCollaborationAwarenessState(
+  localUserId: string,
+  localAwarenessClientId: number,
+  candidateClientId: number,
+  state: unknown,
+): boolean {
+  if (candidateClientId === localAwarenessClientId) return false
+  if (!state || typeof state !== 'object') return true
+  const user = Reflect.get(state, 'user')
+  if (!user || typeof user !== 'object') return true
+  return Reflect.get(user, 'id') !== localUserId
+}
+
+/**
+ * The provider deliberately uses a transport Y.Doc while the editor binds a
+ * separate authoritative Y.Doc. yCursorPlugin's default filter compares an
+ * awareness client id with the editor document client id, so it mistakes the
+ * local transport state for a remote collaborator. Besides showing a duplicate
+ * self-caret, that widget can occupy position zero in an empty code block and
+ * swallow the first typed character. Filter against the provider's awareness
+ * client id and the stable user identity instead.
+ */
+export const InqtrixCollaborationCaret = Extension.create<InqtrixCollaborationCaretOptions>({
+  name: 'collaborationCaret',
+
+  addOptions() {
+    return {
+      provider: null,
+      user: null,
+    }
+  },
+
+  addProseMirrorPlugins() {
+    const { provider, user } = this.options
+    const awareness = provider?.awareness
+    if (!awareness || !user) return []
+    awareness.setLocalStateField('user', user)
+    const localAwarenessClientId = awareness.clientID
+    return [
+      yCursorPlugin(awareness, {
+        awarenessStateFilter: (_editorClientId, candidateClientId, state) => (
+          shouldRenderCollaborationAwarenessState(
+            user.id,
+            localAwarenessClientId,
+            Number(candidateClientId),
+            state,
+          )
+        ),
+        cursorBuilder: collaborationCaretOptions.render,
+        selectionBuilder: collaborationCaretOptions.selectionRender,
+      }),
+    ]
+  },
+})
 
 // ----- Syntax marker reveal (Obsidian Live Preview style) -----
 // Tiptap's document has no literal markdown markers (bold is a mark, not `**`).
@@ -1215,11 +1763,15 @@ export const SyntaxMarkerRevealExtension = Extension.create<SyntaxMarkerRevealOp
 export function createEditorExtensions(
   options: CommentDecorationOptions & {
     collaborationReview?: CollaborationReviewOverlayUpdate
+    onCollaborationSuggestionUndo?: (patchId: string) => Promise<void>
   } = {},
 ): Extensions {
   return [
     ...createEditorSchemaExtensions({ resizableTables: true }),
-    CollaborationReviewExtension.configure({ initialPolicy: options.collaborationReview }),
+    CollaborationReviewExtension.configure({
+      initialPolicy: options.collaborationReview,
+      onSuggestionUndo: options.onCollaborationSuggestionUndo,
+    }),
     Placeholder.configure({
       showOnlyCurrent: true,
       placeholder: ({ node }) =>

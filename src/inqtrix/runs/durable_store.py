@@ -77,7 +77,9 @@ class PollingJobSubscription:
     are constructor arguments — the seam :class:`StreamJobQueue` uses.
 
     The backing store must expose
-    ``_events_after(entity_id, tenant_id, after_sequence) -> list[dict]``.
+    ``_events_after(entity_id, tenant_id, after_sequence) -> list[dict]``
+    and atomically register/start the poller through
+    ``_start_subscription(subscription, thread)``.
     """
 
     def __init__(
@@ -87,6 +89,7 @@ class PollingJobSubscription:
         tenant_id: str,
         replay: list[dict[str, Any]],
         *,
+        after_sequence: int = 0,
         terminal_events: frozenset[str],
         thread_label: str,
     ) -> None:
@@ -97,7 +100,12 @@ class PollingJobSubscription:
         self._tenant_id = tenant_id
         self._terminal_events = terminal_events
         self._stop = threading.Event()
-        last_seq = replay[-1]["sequence"] if replay else 0
+        self._thread: threading.Thread | None = None
+        last_seq = (
+            replay[-1]["sequence"]
+            if replay
+            else max(0, int(after_sequence))
+        )
         replay_is_terminal = bool(
             replay and replay[-1]["type"] in terminal_events
         )
@@ -108,40 +116,61 @@ class PollingJobSubscription:
                 name=f"{thread_label}-{entity_id}",
                 daemon=True,
             )
-            self._thread.start()
+            self._store._start_subscription(self, self._thread)
 
     def _poll(self, last_seq: int) -> None:
         failures = 0
-        while not self._stop.is_set():
-            try:
-                events = self._store._events_after(
-                    self.entity_id, self._tenant_id, last_seq
-                )
-                failures = 0
-            except Exception:  # noqa: BLE001 — retry transient outages
-                failures += 1
-                log.warning(
-                    "Event-Poller fuer %s: Datenbankfehler (Versuch %d) — "
-                    "naechster Versuch folgt.",
-                    self.entity_id,
-                    failures,
-                    exc_info=failures == 1,
-                )
-                # A transient blip must not freeze the SSE stream for
-                # good; back off and keep polling until the client
-                # disconnects (close()) or the job ends.
-                self._stop.wait(min(5.0, failures))
-                continue
-            for event in events:
-                last_seq = event["sequence"]
-                self.queue.put(event)
-                if event["type"] in self._terminal_events:
+        try:
+            while not self._stop.is_set():
+                try:
+                    events = self._store._events_after(
+                        self.entity_id, self._tenant_id, last_seq
+                    )
+                    failures = 0
+                except Exception:  # noqa: BLE001 — retry transient outages
+                    failures += 1
+                    log.warning(
+                        "Event-Poller fuer %s: Datenbankfehler (Versuch %d) — "
+                        "naechster Versuch folgt.",
+                        self.entity_id,
+                        failures,
+                        exc_info=failures == 1,
+                    )
+                    # A transient blip must not freeze the SSE stream for
+                    # good; back off and keep polling until the client
+                    # disconnects (close()) or the job ends.
+                    self._stop.wait(min(5.0, failures))
+                    continue
+                if self._stop.is_set():
                     return
-            self._stop.wait(_SUBSCRIPTION_POLL_SECONDS)
+                for event in events:
+                    last_seq = event["sequence"]
+                    self.queue.put(event)
+                    if event["type"] in self._terminal_events:
+                        return
+                self._stop.wait(_SUBSCRIPTION_POLL_SECONDS)
+        finally:
+            self._store._unregister_subscription(self)
 
     def close(self) -> None:
-        """Stop the poller; idempotent."""
+        """Request poller shutdown without blocking the SSE event loop.
+
+        Request routes call this method from an async-generator ``finally``
+        block.  Joining there would turn a slow database read into a global
+        API event-loop stall.  The poller remains registered until its
+        ``finally`` block runs, so a simultaneous store shutdown still finds
+        and drains it before disposing the engine.
+        """
         self._stop.set()
+
+    def _drain_for_store_close(self) -> None:
+        """Stop and join this poller before its store disposes the engine."""
+
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
+        self._store._unregister_subscription(self)
 
 
 def resolve_orphan_sweep(queue: Any, recover_orphans: bool | None) -> bool:
@@ -193,9 +222,14 @@ class DurableJobStoreBase:
         self._queue = queue
         self._max_concurrent = max_concurrent
         self._lock = threading.RLock()
+        self._close_lock = threading.Lock()
         self._local: dict[str, _LocalJob] = {}
         self._pending: deque[str] = deque()
         self._running_count = 0
+        self._worker_threads: set[threading.Thread] = set()
+        self._subscriptions: set[PollingJobSubscription] = set()
+        self._closing = False
+        self._closed = False
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(
             target=self._loop.run_forever,
@@ -226,16 +260,93 @@ class DurableJobStoreBase:
 
     def _call(self, coro: Coroutine[Any, Any, Any]) -> Any:
         """Run one coroutine on the store's loop and wait for it."""
+        if self._loop.is_closed() or not self._loop_thread.is_alive():
+            coro.close()
+            raise RuntimeError(f"{self._job_kind} store is closed")
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
 
     def close(self) -> None:
-        """Dispose the engine and stop the background loop; idempotent."""
-        if not self._loop.is_closed() and self._loop_thread.is_alive():
-            self._call(self._engine.dispose())
-            self._loop.call_soon_threadsafe(self._loop.stop)
-            self._loop_thread.join(timeout=5)
-            if not self._loop_thread.is_alive():
+        """Drain local workers before disposing their database event loop.
+
+        A no-queue store executes work on threads that synchronously bridge
+        back into this store's private event loop for every checkpoint and
+        terminal write. Stopping that loop while a worker is still alive
+        strands its durable write and can leave the checked-out transaction
+        blocking unrelated cleanup. Shutdown therefore fences new local
+        dispatch, requests cooperative cancellation, and waits for every
+        already-running worker before disposing the engine. There is no
+        hidden drain timeout: an uncooperative dependency remains an explicit
+        shutdown failure instead of being reported as safely closed.
+        """
+        with self._close_lock:
+            if self._closed:
+                return
+            current = threading.current_thread()
+            with self._lock:
+                if current in self._worker_threads:
+                    raise RuntimeError(
+                        f"{self._job_kind} store cannot close from its worker thread"
+                    )
+                self._closing = True
+                for local in self._local.values():
+                    local.cancel_event.set()
+                subscriptions = tuple(self._subscriptions)
+
+            # Stop database pollers while the event loop and engine are still
+            # alive. Otherwise an unclosed SSE subscription can retain an
+            # idle transaction that blocks schema maintenance indefinitely.
+            for subscription in subscriptions:
+                subscription._drain_for_store_close()
+
+            while True:
+                with self._lock:
+                    workers = tuple(self._worker_threads)
+                if not workers:
+                    break
+                for worker in workers:
+                    worker.join()
+
+            if not self._loop.is_closed() and self._loop_thread.is_alive():
+                self._call(self._engine.dispose())
+                self._loop.call_soon_threadsafe(self._loop.stop)
+                self._loop_thread.join(timeout=5)
+                if self._loop_thread.is_alive():
+                    raise RuntimeError(
+                        f"{self._job_kind} database event loop did not stop"
+                    )
                 self._loop.close()
+            self._closed = True
+
+    def _start_subscription(
+        self,
+        subscription: PollingJobSubscription,
+        thread: threading.Thread,
+    ) -> None:
+        """Atomically track and start a database event poller.
+
+        Registration and ``Thread.start`` share the lifecycle lock with the
+        subscription snapshot in :meth:`close`.  Without that boundary,
+        shutdown can observe a registered subscription after its thread
+        object has been assigned but before it has been started; joining that
+        object raises ``RuntimeError`` and leaves the store half-closed.
+        """
+        with self._lock:
+            if self._closing or self._closed:
+                raise RuntimeError(f"{self._job_kind} store is closing")
+            self._subscriptions.add(subscription)
+            try:
+                thread.start()
+            except BaseException:
+                self._subscriptions.discard(subscription)
+                raise
+
+    def _unregister_subscription(
+        self, subscription: PollingJobSubscription
+    ) -> None:
+        """Forget a terminal or explicitly closed poller."""
+
+        with self._lock:
+            self._subscriptions.discard(subscription)
 
     def _session(self, tenant_id: str):
         return tenant_session(
@@ -247,6 +358,8 @@ class DurableJobStoreBase:
     # -- in-process execution (no-queue mode) ----------------------------- #
 
     def _dispatch_locked(self) -> None:
+        if self._closing:
+            return
         while self._running_count < self._max_concurrent and self._pending:
             entity_id = self._pending.popleft()
             local = self._local.get(entity_id)
@@ -261,18 +374,52 @@ class DurableJobStoreBase:
             self._running_count += 1
             thread = threading.Thread(
                 target=self._run_worker,
-                args=(entity_id, local.work, local.cancel_event),
+                args=(entity_id, local.work, local.cancel_event, claimed),
                 name=f"{self._dispatch_thread_prefix}-{entity_id}",
                 daemon=True,
             )
-            thread.start()
+            self._worker_threads.add(thread)
+            try:
+                thread.start()
+            except BaseException:
+                self._worker_threads.discard(thread)
+                self._running_count = max(0, self._running_count - 1)
+                raise
+
+    def _enter_execution_telemetry(
+        self, stack: Any, entity_id: str, claimed: Any
+    ) -> None:
+        """Open root span/log context for one no-queue execution.
+
+        No-op by default; job stores whose executions should appear as
+        traces (the run store) override this. Implementations register
+        all teardown on ``stack`` — the worker closes it in its finally.
+        """
 
     def _run_worker(
-        self, entity_id: str, work: Any, cancel_event: threading.Event
+        self,
+        entity_id: str,
+        work: Any,
+        cancel_event: threading.Event,
+        claimed: Any,
     ) -> None:
-        handle = self._make_handle(entity_id, cancel_event)
+        from contextlib import ExitStack
+
+        handle = self._make_claimed_handle(entity_id, cancel_event, claimed)
         crashed = False
+        telemetry_stack = ExitStack()
         try:
+            try:
+                self._enter_execution_telemetry(
+                    telemetry_stack, entity_id, claimed
+                )
+            except Exception:  # noqa: BLE001 — telemetry never blocks a run
+                log.warning(
+                    "Telemetrie-Setup fuer %s %s fehlgeschlagen.",
+                    self._job_kind,
+                    entity_id,
+                    exc_info=True,
+                )
             work(handle)
             # Auto-complete safety net: the work body normally completes
             # the job itself, so this is usually a no-op (suppressed
@@ -288,10 +435,30 @@ class DurableJobStoreBase:
             log.exception("%s %s failed", self._job_kind, entity_id)
             self._terminate_work_exception(handle, entity_id, exc)
         finally:
-            # The park handoff completes HERE: only after this unwind
-            # may the retained closure be dispatched again (a resume
-            # that arrived earlier parked its request in
-            # ``resume_requested`` and is honored now).
+            # Telemetry teardown FIRST (the span must close inside this
+            # thread), then the park handoff: only after this unwind may
+            # the retained closure be dispatched again (a resume that
+            # arrived earlier parked its request in ``resume_requested``
+            # and is honored now).
+            from inqtrix.observability.context import (
+                clear_feature,
+                clear_usage_subject,
+            )
+
+            # The segment bound both (execute_run_request); this thread
+            # may be reused, and a stale ledger subject would book the
+            # next segment's provider calls to the previous user.
+            clear_feature()
+            clear_usage_subject()
+            try:
+                telemetry_stack.close()
+            except Exception:  # noqa: BLE001 — never skip the lock block
+                log.warning(
+                    "Telemetrie-Teardown fuer %s %s fehlgeschlagen.",
+                    self._job_kind,
+                    entity_id,
+                    exc_info=True,
+                )
             with self._lock:
                 local = self._local.get(entity_id)
                 if local is not None and local.parked and not crashed:
@@ -305,6 +472,7 @@ class DurableJobStoreBase:
                     if local is not None:
                         local.work = None
                 self._running_count = max(0, self._running_count - 1)
+                self._worker_threads.discard(threading.current_thread())
                 self._dispatch_locked()
 
     # -- schema-bearing hooks (subclasses implement) ---------------------- #
@@ -328,6 +496,22 @@ class DurableJobStoreBase:
     def _make_handle(self, entity_id: str, cancel_event: threading.Event) -> Any:
         """Build the in-process (non-fenced) job handle."""
         raise NotImplementedError
+
+    def _make_claimed_handle(
+        self,
+        entity_id: str,
+        cancel_event: threading.Event,
+        claimed: Any,
+    ) -> Any:
+        """Build an in-process handle with access to the durable claim.
+
+        Most durable domains retain their historical handle. Indexing
+        overrides this seam because publication itself must carry the exact
+        attempt acquired by ``_claim_db`` even without an external queue.
+        """
+
+        del claimed
+        return self._make_handle(entity_id, cancel_event)
 
     def _auto_complete(self, entity_id: str) -> None:
         """Terminal-on-success write with the no-op warning suppressed."""

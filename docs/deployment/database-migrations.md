@@ -5,8 +5,10 @@
 This page defines the production contract for schema upgrades on bundled and
 managed PostgreSQL. Inqtrix uses tenant row-level security (RLS), including
 `FORCE ROW LEVEL SECURITY`, so a generic application login is not sufficient
-for data-moving migrations. The migration credential and the runtime
-credential are deliberately separate.
+for data-moving migrations. Managed/external production databases deliberately
+separate the privileged migration credential from the runtime credential. The
+bundled PostgreSQL compatibility path instead derives a direct migration DSN
+from the same config/secrets pair and does not require a third file.
 
 Inqtrix schema revision 0049 requires PostgreSQL 15 or newer. The migration
 preflight checks the server version before taking locks or changing schema
@@ -28,10 +30,16 @@ Use two database identities in production:
 | Runtime login | API and worker only | Can `SET ROLE inqtrix_app`; the effective `inqtrix_app` role is `NOLOGIN NOSUPERUSER NOBYPASSRLS`, has schema `USAGE` without database/schema `CREATE`, cannot own, inherit or assume an object-owner/BYPASS role, and is always tenant-scoped. |
 | Migration login | One-shot migration job only | A direct PostgreSQL connection and either the `bypass` or `owner` authority described below. Never expose it through API/worker env, Collaboration, PgBouncer transaction pooling, or the browser. |
 
-`INQTRIX_MIGRATION_DATABASE_URL` supplies the migration-only connection. It
-falls back to `INQTRIX_DATABASE_URL` for backwards compatibility with bundled
-Compose/Helm installations, but a managed production database should always
-use a separate Secret.
+This two-login split is mandatory for managed/external production databases.
+The official bundled PostgreSQL service retains its documented
+`bundled_legacy` compatibility identity, but the one-shot migration still uses
+a direct `postgres:5432` DSN and never the optional PgBouncer runtime target.
+
+When set, `INQTRIX_MIGRATION_DATABASE_URL` supplies the migration-only
+connection. Otherwise the migrator uses `INQTRIX_DATABASE_URL`; bundled
+Compose/Helm installations deliberately provide a direct database value on
+that path. A managed production database must always supply the separate
+migration Secret.
 
 `INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY=restricted` is the managed-production
 default. A representative role split, executed by the database administrator,
@@ -84,7 +92,14 @@ Set `INQTRIX_MIGRATION_RLS_MODE` to one of:
 |---|---|---|
 | `auto` | Existing bundled/dev installations | Accepts only a superuser or `BYPASSRLS` login and emits a visible compatibility warning. It never silently enters owner maintenance. |
 | `bypass` | Preferred when the managed service permits it | Requires a dedicated `NOSUPERUSER BYPASSRLS` migration login. Runtime workloads still switch to the restricted `inqtrix_app` role. |
-| `owner` | Managed services that do not grant `BYPASSRLS` | Requires ownership and DDL/grant authority over every managed Inqtrix table, function and sequence. For an existing schema, API, worker and Collaboration must be stopped and `INQTRIX_MIGRATION_SERVICES_QUIESCED=true` must explicitly confirm that maintenance boundary. |
+| `owner` | Managed services that do not grant `BYPASSRLS` | Requires ownership and DDL/grant authority over every managed Inqtrix table, function and sequence. |
+
+RLS mode selects migration authority; it never makes a live schema change
+safe. Every actual revision change on an installed schema requires API,
+worker, Collaboration and every connection pooler to be stopped, all database
+client sessions to be drained, and
+`INQTRIX_MIGRATION_SERVICES_QUIESCED=true`. A no-op invocation at the already
+installed target does not require a maintenance window.
 
 If the provider grants neither `BYPASSRLS` nor ownership/DDL authority over all
 managed schema objects, schema-changing upgrades are not technically possible.
@@ -98,13 +113,18 @@ roles, superuser/BYPASS properties, ownership of the revision table, tenant
 tables, policy function and identity sequences, required DDL/grant rights and
 the selected RLS mode.
 
-Owner mode then performs one atomic PostgreSQL transaction:
+Every installed-schema transition performs one atomic PostgreSQL transaction:
 
-1. Acquire the global Inqtrix transaction-level advisory lock.
-2. Acquire `ACCESS EXCLUSIVE NOWAIT` locks on `alembic_version` and every
-   tenant table present at the source revision. A live workload or competing
-   migrator makes the job fail immediately instead of racing an upgrade.
-3. Change only those owner-controlled tables to `NO FORCE ROW LEVEL SECURITY`.
+1. Verify the explicit quiescence assertion and require the migration
+   connection to be the database's only client backend.
+2. Set a transaction-local ten-second `lock_timeout`, then acquire the global
+   Inqtrix transaction-level advisory lock and `ACCESS EXCLUSIVE` locks on
+   `alembic_version` and every tenant table present at the source revision.
+   The timeout bounds only lock acquisition; it is not a data-processing or
+   migration deadline. A timeout rolls back the transaction and reports that
+   no schema transition was published.
+3. In owner mode only, change those owner-controlled tables to
+   `NO FORCE ROW LEVEL SECURITY`.
    After each Alembic revision, newly created or recreated tenant tables are
    locked and changed the same way before the next revision runs. RLS remains
    enabled; `DISABLE ROW LEVEL SECURITY` is never used.
@@ -115,7 +135,7 @@ Owner mode then performs one atomic PostgreSQL transaction:
 Any failure rolls back schema changes, data backfills, Alembic revision and RLS
 state together. `SET LOCAL row_security=off` is retained only as a fail-closed
 detector for an unexpected tenant table. PostgreSQL holds explicit locks to the
-end of the transaction; `NOWAIT` avoids an unbounded maintenance wait. See
+end of the transaction. See
 [explicit locking](https://www.postgresql.org/docs/current/explicit-locking.html)
 and [transaction advisory locks](https://www.postgresql.org/docs/current/functions-admin.html#FUNCTIONS-ADVISORY-LOCKS).
 
@@ -124,20 +144,35 @@ and [transaction advisory locks](https://www.postgresql.org/docs/current/functio
 ### Compose
 
 Compose starts `migrate` automatically and starts API/worker only after that
-one-shot service exits successfully. The job does not load the shared runtime
-env file. To use a managed database:
+one-shot service exits successfully. With bundled PostgreSQL, the job receives
+a transparent direct `postgres:5432` DSN assembled from the same
+config/secrets pair—even when API and worker use optional PgBouncer. There is
+no third file in bundled mode.
 
-1. Copy `deploy/.env.migrate.example` to an uncommitted migration env file.
-2. Put only `INQTRIX_MIGRATION_DATABASE_URL` in it.
-3. Set `INQTRIX_MIGRATION_ENV_FILE` and the non-secret RLS mode in the shared
-   stack env.
+For a managed/external database:
+
+1. Copy `deploy/.env.migrate.secrets.example` to a named, uncommitted file such
+   as `deploy/.env.migrate.secrets.azure` and set mode `0600`.
+2. Put only the direct privileged `INQTRIX_MIGRATION_DATABASE_URL` in it.
+3. Set the root-relative pointer and non-secret RLS mode in the selected stack
+   config:
+
+   ```dotenv
+   INQTRIX_MIGRATION_ENV_FILE=deploy/.env.migrate.secrets.azure
+   INQTRIX_MIGRATION_RLS_MODE=bypass
+   ```
+
 4. Choose exactly one update path:
-   - For bundled/`auto` or `bypass`, start or update the stack normally with
-     `docker compose ... up -d --build`.
-   - For `owner`, run `deploy/scripts/compose-owner-upgrade.sh` instead of a
-     preceding `compose up`. The wrapper records the active workloads, builds
+   - For every RLS mode, use the raw-Compose maintenance sequence below:
+     build first, stop ingress and every database client, run the one-shot
+     migration with the quiescence assertion, verify head, then recreate the
+     recorded workloads.
+   - For external `owner`, the optional CLI can run
+     `inqtrix-deploy ... owner-upgrade` instead of a
+     preceding `compose up`. The command records the active workloads, builds
      the new migration and workload images while the old release is still
-     serving, stops the active database clients, runs the one-shot migration,
+     serving, stops the active web ingress and database clients, runs the
+     one-shot migration,
      and recreates the previously active API, worker, Collaboration and web
      services from the new images. A failure before the migration attempt
      restarts stopped old containers. Once the attempt begins, any non-zero or
@@ -146,25 +181,66 @@ env file. To use a managed database:
      live migration session. Verify the migration job and database revision
      before deliberately resuming or rolling back.
 
-The owner wrapper defaults to the repository Compose file and
-`deploy/.env.stack`. Non-default locations are explicit operator inputs:
+The following command is suitable for a fresh external bypass installation or
+an already-at-head restart. It is not an installed-schema upgrade procedure:
 
 ```bash
-INQTRIX_COMPOSE_FILE=/srv/inqtrix/compose.stack.yaml \
-INQTRIX_STACK_ENV_FILE=/srv/inqtrix/inqtrix.stack.env \
-  deploy/scripts/compose-owner-upgrade.sh
+inqtrix-deploy \
+  --external-db \
+  --migration-env-file deploy/.env.migrate.secrets.azure \
+  --secrets-file deploy/.env.stack.secrets.azure \
+  --env-file deploy/.env.stack.azure \
+  up --detach --build
 ```
 
-The wrapper updates only workloads that were running when it started. It does
-not update optional infrastructure images such as PostgreSQL, Valkey or
-SeaweedFS.
+The exact raw Compose counterpart consumes the same pair and the config-side
+migration pointer. On an installed schema it is used only after the manual
+maintenance migration has reached head:
 
-Do not run a separate manual migration during a normal Compose update.
+```bash
+docker compose \
+  -f deploy/compose/compose.stack.yaml \
+  -f deploy/compose/compose.external-db.yaml \
+  --env-file deploy/.env.stack.secrets.azure \
+  --env-file deploy/.env.stack.azure \
+  up -d --build
+```
 
-When no migration env file is configured, Compose passes the runtime
-`INQTRIX_DATABASE_URL` into the migration job as the compatibility fallback;
-it never substitutes a different bundled database. If the runtime URL points
-to PgBouncer, a migration env file with a direct PostgreSQL URL is mandatory.
+For owner mode, the guarded command additionally requires explicit project
+confirmation:
+
+```bash
+inqtrix-deploy \
+  --external-db \
+  --migration-env-file deploy/.env.migrate.secrets.azure \
+  --secrets-file deploy/.env.stack.secrets.azure \
+  --env-file deploy/.env.stack.azure \
+  owner-upgrade --confirm-project inqtrix
+```
+
+The canonical raw-Compose upgrade sequence is: record
+`compose ps --services --filter status=running`; build the new `migrate` plus
+those workload images; stop `web`, `api`, and every running worker,
+Collaboration, and pooler; run exactly one
+`compose run --rm --no-deps -e INQTRIX_MIGRATION_SERVICES_QUIESCED=true
+migrate`; verify Alembic head; then force-recreate only the workloads recorded
+at the start. The migrator additionally refuses to start while another
+database client session remains. External/operator-managed poolers cannot be
+scaled by Inqtrix and must be drained by the operator. If the migration command
+is interrupted or its commit outcome is
+unknown, keep all clients stopped. The CLI automates these safety conditions;
+the raw sequence is intentionally not hidden in another shell script.
+
+Do not start new workload containers before this sequence completes. Fresh
+installs and already-at-head restarts retain the normal Compose dependency on
+the one-shot `migrate` service.
+
+The base Compose stack always gives the migration job a direct
+`postgres:5432` DSN derived from the bundled config/secrets pair. This remains
+true when the API and worker runtime DSN points to optional PgBouncer, so
+bundled mode never needs a migration env file. Only the external-database
+override requires `INQTRIX_MIGRATION_ENV_FILE`; that file supplies the
+privileged direct external DSN and is mounted only into the one-shot job.
 
 To run the Compose stack against an external PostgreSQL, add the
 `deploy/compose/compose.external-db.yaml` override (it deactivates the
@@ -187,13 +263,14 @@ migrations:
     name: inqtrix-migration-database
     key: INQTRIX_MIGRATION_DATABASE_URL
   rlsMode: bypass
-  ownerMaintenanceConfirmed: false
+  maintenanceConfirmed: false
 ```
 
 The Secret is injected only into the hook Job. Helm blocks the release when the
-job fails. On an owner-mode upgrade, `ownerMaintenanceConfirmed: true`
-authorizes a chart-owned pre-upgrade hook to remove the API HPA, scale API,
-worker and Collaboration to zero, and wait until their pods have terminated.
+job fails. On every upgrade, `maintenanceConfirmed: true` authorizes a
+chart-owned pre-upgrade hook to remove the API HPA, scale API, worker,
+Collaboration and the chart-owned PgBouncer to zero, and wait until their pods
+have terminated.
 The hook revokes its own temporary RoleBinding before exit. The migration hook
 runs only after that bounded quiesce job succeeds; after migration, the normal
 release apply writes a positive API `minReplicas` once to reactivate an HPA from
@@ -207,10 +284,10 @@ workload templates defensively blank
 `INQTRIX_MIGRATION_DATABASE_URL` in API/worker even when an externally managed
 runtime Secret contains the key by mistake.
 
-For owner mode, the production sequence is:
+For every RLS mode, the production sequence is:
 
 1. Back up PostgreSQL and verify the restore procedure.
-2. Set `ownerMaintenanceConfirmed: true` to authorize the narrow maintenance
+2. Set `maintenanceConfirmed: true` to authorize the narrow maintenance
    ServiceAccount and quiesce hook.
 3. Run the Helm upgrade; the hook scales database clients to zero and drains
    their pools before the migration job starts.
@@ -222,10 +299,14 @@ quiesced instead of starting an image whose schema contract is unknown. Correct
 the migration authority or roll back, rerun the release, and only then restore
 traffic. The successful Helm apply recreates the desired replicas and HPA.
 
+An external/operator-managed pooler is outside the chart's RBAC scope. Drain it
+before starting the Helm upgrade; the migration job verifies that no residual
+database client session remains.
+
 ### Custom charts
 
 A custom Kubernetes/OpenShift deployment must preserve the same dependency
-graph: stop workloads when owner mode requires it, run exactly one direct
+graph: stop workloads for every installed-schema change, run exactly one direct
 migration Job, wait for successful completion, then start the new API and
 workers. Do not use a post-start hook or allow new images to serve against an
 old schema. Copying only the Deployment objects from the supplied chart omits
@@ -252,7 +333,7 @@ Concretely, a bring-your-own-manifests deployment needs three mechanics:
                - name: INQTRIX_MIGRATION_RLS_MODE
                  value: "bypass"        # or "owner", see the mode table
                - name: INQTRIX_MIGRATION_SERVICES_QUIESCED
-                 value: "false"         # "true" only for owner-mode upgrades
+                 value: "true"          # required for installed-schema changes
                - name: INQTRIX_MIGRATION_DATABASE_URL
                  valueFrom:
                    secretKeyRef:
@@ -272,16 +353,46 @@ Concretely, a bring-your-own-manifests deployment needs three mechanics:
    `INQTRIX_MIGRATION_DATABASE_URL: ""` on API/worker containers so a
    mistakenly shared Secret cannot leak migration authority into runtime
    pods (the supplied chart does both).
-3. **Owner-mode quiesce**, when the database offers no BYPASSRLS login:
-   before the Job runs, scale API, worker and Collaboration to zero and wait
-   for pod termination (the supplied chart automates this in
-   `job-owner-maintenance.yaml`), set
+3. **Schema-maintenance quiesce**, independent of RLS authority: before the
+   Job runs, scale API, worker, Collaboration and owned poolers to zero and
+   wait for pod termination (the supplied chart automates this in its
+   schema-maintenance hook), set
    `INQTRIX_MIGRATION_SERVICES_QUIESCED=true`, and restore replicas only
    after the Job succeeded.
 
 The PostgreSQL requirements are unchanged from the top of this page:
 version 15+, no extensions (a pgvector-enabled image is fine, the extension
 stays unused), and the two-role split.
+
+## Data-moving integrity contracts
+
+Legacy Knowledge metadata is never trusted to mint an asset identity. The
+migration resolves `source_id`, `fileId` and `file_id` only against canonical
+same-tenant asset/file rows. Every supplied hint must resolve to one asset and
+the collection must contain only one document claiming it; dangling,
+contradictory or duplicate claims remain stored but are quarantined and cannot
+become active evidence.
+
+Every reconciled Knowledge document also receives a server-owned
+tenant/owner/workspace source binding. Canonical asset rows are authoritative;
+one unambiguous retained source-lifecycle tombstone is the recovery source
+after asset metadata has already been removed. A row whose scope cannot be
+proved stays quarantined. This binding is what keeps aggregate cleanup local
+when equal `source_id` values exist in different owner or workspace scopes.
+
+Ledger relationships include `tenant_id` in their database foreign keys, not
+only in row-level-security predicates. Upload, deletion, document-revision and
+index-generation children therefore cannot reference a known parent identifier
+from another tenant. Stored-byte migration validates both the aggregate quota
+counter against the file registry and each non-tombstoned file stock row
+against its canonical bound file before the transaction commits.
+
+Lifecycle fencing, deletion receipts, immutable Knowledge history and release
+integrity reconciliation cannot be represented truthfully by older schemas.
+Their migrations reject schema downgrade instead of deleting or relabelling
+state. Production rollback follows the established contract: stop new
+binaries, restore the verified pre-upgrade database backup, then start the
+matching old binaries.
 
 ## Readiness and incident diagnosis
 
@@ -322,6 +433,12 @@ orchestrated rollout after correcting the Secret or maintenance boundary.
 Manual `inqtrix-migrate` execution is a break-glass action only. Stop all
 workloads, use the same migration-only environment as the job, capture the
 preflight output and take a backup first.
+
+Alembic `--sql`/offline rendering is intentionally unsupported. The migration
+chain performs data-dependent reconciliation and postcondition checks that
+cannot be represented truthfully without the target database. Use only the
+managed online runner so locks, data changes, revision stamping and validation
+share one transaction.
 
 ## Related docs
 

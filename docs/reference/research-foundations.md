@@ -21,7 +21,7 @@ Each row maps a published work to the specific Inqtrix component it influenced.
 | Work | Full title | Relevant idea | Inqtrix component |
 |------|-----------|---------------|-------------------|
 | Self-RAG | *Learning to Retrieve, Generate, and Critique through Self-Reflection* | Retrieve-critique-generate loops with self-assessment | Evaluate node's LLM self-assessment of confidence, gaps, and contradictions |
-| CRAG | *Corrective Retrieval Augmented Generation* | Corrective retrieval and retrieval-quality checks | Source tiering and per-claim verification gate low-quality evidence out of the report instead of mid-run block dropping |
+| CRAG | *Corrective Retrieval Augmented Generation* | Corrective retrieval and retrieval-quality checks | Discovery-quality signals guide further retrieval and confidence without silently dropping unknown domains |
 | STORM | *Assisting in Writing Wikipedia-like Articles From Scratch with Large Language Models* | Multi-perspective search planning | Perspective-diversity instruction in the plan node (round 1+), stakeholder viewpoint rotation |
 | TCR | *Seeing through the Conflict: Transparent Knowledge Conflict Handling in RAG* | Explicit conflict and consistency signals | `check_contradictions()` and `extract_competing_events()` — structured conflict detection with severity grading |
 | FVA-RAG | *Falsification-Verification Alignment for Mitigating Sycophantic Hallucinations* | Deliberate falsification and anti-sycophancy retrieval | Falsification mode: after 2+ rounds with low confidence, generate debunk-style queries that actively seek to disprove the premise |

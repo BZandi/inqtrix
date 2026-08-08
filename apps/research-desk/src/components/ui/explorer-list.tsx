@@ -260,14 +260,69 @@ export type ExplorerHistoryAction = {
   /** Overrides `label` as the accessible name, e.g. `"Löschen: <title>"`. */
   ariaLabel?: string
   destructive?: boolean
+  disabled?: boolean
   icon: React.ReactNode
   /** Tooltip text and default accessible name. */
   label: string
   onSelect: () => void
 }
 
-/** Last action sits at `right-1`, the one before it at `right-7` (max 2). */
-const EXPLORER_HISTORY_ACTION_OFFSETS = ['right-1', 'right-7']
+/** Trailing hover actions, laid out from the right edge inward: the last
+ * action sits at `right-1` and each earlier one steps 1.5rem further left.
+ * A row may carry at most as many actions as there are offsets — an action
+ * beyond them would lose its offset and fall to the row's leading edge. */
+const EXPLORER_HISTORY_ACTION_OFFSETS = ['right-1', 'right-7', 'right-13']
+
+function ExplorerHistoryActionButton({
+  action,
+  offset,
+}: {
+  action: ExplorerHistoryAction
+  offset: string | undefined
+}) {
+  const [tooltipEnabled, setTooltipEnabled] = React.useState(true)
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        {/* pointer-events follow the visibility: while hidden, the
+            actions sit UNDER the time label, and an invisible destructive
+            button must not catch a touch tap aimed at the timestamp. */}
+        <Button
+          aria-label={action.ariaLabel ?? action.label}
+          className={cn(
+            'pointer-events-none absolute top-1/2 size-6 -translate-y-1/2 text-foreground/55 opacity-0 transition',
+            'focus-visible:pointer-events-auto focus-visible:opacity-100',
+            'group-hover/explorer-item:pointer-events-auto group-hover/explorer-item:opacity-100',
+            offset,
+            action.destructive ? 'hover:text-destructive' : 'hover:text-foreground',
+          )}
+          data-explorer-action
+          disabled={action.disabled}
+          onClick={(event) => {
+            event.stopPropagation()
+            event.currentTarget.focus({ preventScroll: true })
+            // The selected action may hand interaction to a portalled modal.
+            // Removing the content in the same render prevents its exit
+            // animation or a pending provider delay from crossing that
+            // ownership boundary. A later, deliberate interaction restores
+            // the normal tooltip contract.
+            setTooltipEnabled(false)
+            action.onSelect()
+          }}
+          onFocus={() => setTooltipEnabled(true)}
+          onPointerEnter={() => setTooltipEnabled(true)}
+          size="icon"
+          type="button"
+          variant="ghost"
+        >
+          {action.icon}
+        </Button>
+      </TooltipTrigger>
+      {tooltipEnabled ? <TooltipContent>{action.label}</TooltipContent> : null}
+    </Tooltip>
+  )
+}
 
 /**
  * History/session explorer row: two-column grid whose right-aligned relative
@@ -278,6 +333,7 @@ export function ExplorerHistoryRow({
   actions = [],
   active = false,
   dragging = false,
+  disabled = false,
   indicator,
   nested = false,
   onPointerDown,
@@ -291,6 +347,7 @@ export function ExplorerHistoryRow({
   actions?: readonly ExplorerHistoryAction[]
   active?: boolean
   dragging?: boolean
+  disabled?: boolean
   /** Status slot between title and age — running spinner / gate dot. */
   indicator?: React.ReactNode
   nested?: boolean
@@ -313,7 +370,7 @@ export function ExplorerHistoryRow({
         )}
         {indicator}
       </span>
-      <span className="shrink-0 t-hint tabular-nums text-muted-foreground transition-opacity group-hover/explorer-item:opacity-0 group-focus-within/explorer-item:opacity-0">
+      <span className="shrink-0 t-hint tabular-nums text-muted-foreground group-hover/explorer-item:opacity-0 group-focus-within/explorer-item:opacity-0">
         {timeLabel}
       </span>
     </>
@@ -325,6 +382,7 @@ export function ExplorerHistoryRow({
       dragging={dragging}
       nested={nested}
       onPointerDown={onPointerDown}
+      className={disabled ? 'opacity-70' : undefined}
     >
       {renameEditor ? (
         <div
@@ -336,6 +394,7 @@ export function ExplorerHistoryRow({
       ) : (
         <button
           aria-pressed={active}
+          disabled={disabled}
           className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           onClick={onSelect}
           onDoubleClick={onStartRename}
@@ -346,34 +405,11 @@ export function ExplorerHistoryRow({
         </button>
       )}
       {actions.map((action, index) => (
-        <Tooltip key={index}>
-          <TooltipTrigger asChild>
-            {/* pointer-events follow the visibility: while hidden, the
-                actions sit UNDER the time label, and an invisible destructive
-                button must not catch a touch tap aimed at the timestamp. */}
-            <Button
-              aria-label={action.ariaLabel ?? action.label}
-              className={cn(
-                'pointer-events-none absolute top-1/2 size-6 -translate-y-1/2 text-foreground/55 opacity-0 transition',
-                'focus-visible:pointer-events-auto focus-visible:opacity-100',
-                'group-hover/explorer-item:pointer-events-auto group-hover/explorer-item:opacity-100',
-                EXPLORER_HISTORY_ACTION_OFFSETS[actions.length - 1 - index],
-                action.destructive ? 'hover:text-destructive' : 'hover:text-foreground',
-              )}
-              data-explorer-action
-              onClick={(event) => {
-                event.stopPropagation()
-                action.onSelect()
-              }}
-              size="icon"
-              type="button"
-              variant="ghost"
-            >
-              {action.icon}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>{action.label}</TooltipContent>
-        </Tooltip>
+        <ExplorerHistoryActionButton
+          action={action}
+          key={index}
+          offset={EXPLORER_HISTORY_ACTION_OFFSETS[actions.length - 1 - index]}
+        />
       ))}
     </ExplorerItemRow>
   )

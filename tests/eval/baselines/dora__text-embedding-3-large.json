@@ -1,5 +1,6 @@
 {
-  "_established": "2026-01-01 re-keyed after the held-out split: 8 stratified queries moved to golden_dora_holdout, leaving 18 retrieval queries in the tuning tier. Metrics recomputed by subset aggregation from the SAME live artifact as the first baseline (retrieval-text-embedding-3-large-1767225600000.json, qdrant hybrid + Cohere-rerank-v4.0-pro + contextual retrieval) — no second run, no remeasurement drift. The single miss remains d20, the hard vocabulary-mismatch paraphrase ('beauftragte Hacker simulieren echten Angriff' for 'bedrohungsorientierte Penetrationstests', Art. 26) outside top-5: the measured target of the vocabulary bridge (gruendlich/tief profiles). multi_complete 1.0 — all aggregation queries resolve.",
+  "_inqtrix_version": "0.2.0",
+  "_context": "Tuning-tier baseline after 8 stratified queries moved to golden_dora_holdout, leaving 18 retrieval queries. Metrics were recomputed by subset aggregation from the same captured qdrant hybrid + Cohere-rerank-v4.0-pro + contextual-retrieval result, avoiding a second run and remeasurement drift. The single miss remains d20, the hard vocabulary-mismatch paraphrase ('beauftragte Hacker simulieren echten Angriff' for 'bedrohungsorientierte Penetrationstests', Art. 26) outside top-5: the measured target of the vocabulary bridge (gruendlich/tief profiles). multi_complete is 1.0 because all aggregation queries resolve.",
   "recall_at_1": 0.9444,
   "recall_at_3": 0.9444,
   "recall_at_5": 0.9444,

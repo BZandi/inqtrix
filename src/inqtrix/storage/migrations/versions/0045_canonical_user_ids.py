@@ -2,7 +2,6 @@
 
 Revision ID: 0045_canonical_user_ids
 Revises: 0044_agent_task_cancellation
-Create Date: 2026-07-14
 
 This is the irreversible v0.2 identity cut. Login provenance remains on
 ``users`` and the login/session bindings, but authorization, ownership, quota,

@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState, type Dispatch } from 'react'
 import {
   createEditorSchemaExtensions,
   createRelativePositionAdapter,
+  createSecurePrefixedId,
+  createSecureUuid,
   parseEditorMarkdown,
   serializeEditorJson,
   type EditorRelativePositionAdapter,
@@ -12,9 +14,15 @@ import { ySyncPluginKey } from '@tiptap/y-tiptap'
 import type { Editor } from '@tiptap/react'
 import type * as Y from 'yjs'
 import {
+  deleteEditorCommentSuggestionDraft,
+  hasHttpStatus,
   publishEditorCollaborationSuggestion,
+  saveEditorComments,
+  saveEditorCommentSuggestionDraft,
   type ClientOptions,
   type EditorCollaborationSuggestionPublishResponse,
+  type EditorSuggestionDraftCreateWire,
+  type EditorSuggestionDraftRevisionRequestWire,
 } from '@/api/inqtrixClient'
 import type { ChatModelTier, InqtrixCapabilities } from '@/features/researchRuns/types'
 import { deriveEditorAbortMs } from '@/features/researchRuns/clientTimeouts'
@@ -30,7 +38,11 @@ import type {
   EditorSuggestionRecord,
   ProjectState,
 } from '@/features/project/types'
-import { assetIdsFromChatRefs, referenceDocsFromRefs } from '@/features/project/selectors'
+import {
+  assetIdsFromChatRefs,
+  attachmentContextReadiness,
+  referenceDocsFromRefs,
+} from '@/features/project/selectors'
 import { renderChatRuleAttachmentContent } from '@/features/project/chatRuleRendering'
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
 import {
@@ -78,6 +90,10 @@ import {
   type CollaborationAuthorityRequirement,
 } from './collaborationAuthority'
 import type { CollaborationDocumentHandle } from './useCollaborationDocument'
+import {
+  privateSuggestionDraftRecordFromServer,
+  serverCommentPayload,
+} from './editorSync'
 
 export type UseEditorSuggestionsArgs = {
   activeDocument: EditorDocumentRecord | null
@@ -113,13 +129,13 @@ export type EditorSuggestionController = {
   documentSuggestions: EditorSuggestionRecord[]
   handleAcceptSuggestionGroup: (groupId: string) => Promise<void>
   handleAcceptSuggestion: (suggestion: EditorSuggestionRecord) => Promise<void>
-  handleEditSuggestionProposal: (suggestionId: string, proposedText: string) => void
+  handleEditSuggestionProposal: (suggestionId: string, proposedText: string) => Promise<void>
   handleGlobalRun: (globalInstruction: string) => Promise<void>
   handleInstructionRun: (instruction: string) => Promise<void>
   handleMarkSuggestionStale: (suggestionId: string) => void
   handleRefineSuggestion: (suggestionId: string, instruction: string) => Promise<void>
-  handleRejectSuggestion: (suggestionId: string) => void
-  handleRejectSuggestionGroup: (groupId: string) => void
+  handleRejectSuggestion: (suggestionId: string) => Promise<void>
+  handleRejectSuggestionGroup: (groupId: string) => Promise<void>
   handleRunComment: (comment: EditorCommentThreadRecord) => Promise<void>
   handleStopRun: () => void
   handleStopSuggestionRun: (suggestionId: string) => void
@@ -127,6 +143,7 @@ export type EditorSuggestionController = {
   isGlobalRunning: boolean
   runErrors: Record<string, string>
   runningCommentIds: readonly string[]
+  savingCommentDraftIds: readonly string[]
   runningSuggestionIds: readonly string[]
   suggestionPublishDisabledReason: string | null
   suggestionErrors: Record<string, string>
@@ -146,11 +163,27 @@ export type EditorAiDocumentContext = {
   sequence: number | null
 }
 
+type PrivateSuggestionPublicationAttempt = {
+  commandId: string
+  expectedSequence: number
+  patchId: string
+  targetMarkdown: string
+}
+
+export function tryAcquireEditorRunLatch(
+  latch: { current: boolean },
+): boolean {
+  if (latch.current) return false
+  latch.current = true
+  return true
+}
+
 export function editorAiReadOnlyReason(
   document: EditorDocumentRecord | null,
   collaborationAccess: CollaborationDocumentHandle['access'],
   locale: 'de' | 'en',
 ): string | null {
+  if (document?.recovery) return editorRecoveryAiDisabledMessage(locale)
   if (document?.contentMode !== 'collaboration') return null
   const access = collaborationAccess ?? document.access?.permission ?? null
   if (access !== 'view') return null
@@ -180,6 +213,7 @@ export function editorCollaborationActionDisabledReason(
   requirement: CollaborationAuthorityRequirement,
   locale: 'de' | 'en',
 ): string | null {
+  if (document?.recovery) return editorRecoveryAiDisabledMessage(locale)
   if (document?.contentMode !== 'collaboration') return null
   const identity = collaborationIdentity(document)
   if (!identity) return collaborationPublishForbiddenMessage(locale)
@@ -191,6 +225,11 @@ export function privateSuggestionPublishDisabledReason(
   collaboration: CollaborationDocumentHandle,
   locale: 'de' | 'en',
 ): string | null {
+  // A recovery copy is a local legacy document. Its preserved local
+  // suggestions may still be accepted or rejected, but there is no
+  // collaboration publication surface until the copy is deliberately
+  // promoted to a new document.
+  if (document?.recovery) return null
   return editorCollaborationActionDisabledReason(document, collaboration, 'write', locale)
 }
 
@@ -345,10 +384,39 @@ export function useEditorSuggestions({
     authorityGuard: CollaborationAuthorityGuard | null = null,
   ) => {
     authorityGuard?.assertCurrent()
+    const metadataReadiness = attachmentContextReadiness(state, attachedRefs)
+    if (metadataReadiness.status !== 'ready') {
+      throw new Error(
+        metadataReadiness.error
+        ?? (
+          metadataReadiness.status === 'pending'
+            ? locale === 'de'
+              ? 'Die angehängte Datei wird noch hochgeladen oder verarbeitet.'
+              : 'The attached file is still uploading or being processed.'
+            : locale === 'de'
+              ? 'Die angehängte Datei ist nicht als verwendbare Serverquelle verfügbar.'
+              : 'The attached file is not available as a usable server source.'
+        ),
+      )
+    }
     const bodies = ensureAssetBodiesLoaded
       ? await ensureAssetBodiesLoaded(assetIdsFromChatRefs(state, attachedRefs))
       : undefined
     authorityGuard?.assertCurrent()
+    const contentReadiness = attachmentContextReadiness(state, attachedRefs, {
+      assetBodyOverride: bodies,
+      requireContent: true,
+    })
+    if (contentReadiness.status !== 'ready') {
+      throw new Error(
+        contentReadiness.error
+        ?? (
+          locale === 'de'
+            ? 'Die angehängte Datei enthält keinen verwendbaren extrahierten Inhalt.'
+            : 'The attached file contains no usable extracted content.'
+        ),
+      )
+    }
     return {
       attachments: referenceDocsFromRefs(state, attachedRefs, bodies),
       ruleSnippet: buildRuleSnippet(bodies),
@@ -376,6 +444,7 @@ export function useEditorSuggestions({
 
   const [commentRuns, setCommentRuns] = useState<EditorRunStateMap>({})
   const [suggestionRuns, setSuggestionRuns] = useState<EditorRunStateMap>({})
+  const [savingCommentDraftIds, setSavingCommentDraftIds] = useState<string[]>([])
   const runningCommentIds = useMemo(() => runningIdsOf(commentRuns), [commentRuns])
   const runningSuggestionIds = useMemo(() => runningIdsOf(suggestionRuns), [suggestionRuns])
   const runErrors = useMemo(() => runErrorsOf(commentRuns), [commentRuns])
@@ -383,11 +452,53 @@ export function useEditorSuggestions({
   const [isGlobalRunning, setIsGlobalRunning] = useState(false)
   const [instructionFeedback, setInstructionFeedback] = useState<EditorInstructionFeedback | null>(null)
   const runAbortRef = useRef<AbortController | null>(null)
+  const editorRunInFlightRef = useRef(false)
   const publicationInFlightRef = useRef(new Set<string>())
+  const publicationAttemptRef = useRef(
+    new Map<string, PrivateSuggestionPublicationAttempt>(),
+  )
   const mountedRef = useRef(true)
   const selectedModelTierRef = useRef(selectedModelTier)
   const selectedModelRef = useRef(state.ui.selectedChatModel)
   const selectedEffortRef = useRef(state.ui.selectedChatEffort)
+
+  async function persistPrivateCommentSuggestion(
+    comment: EditorCommentThreadRecord,
+    suggestion: EditorSuggestionRecord,
+    authorityGuard: CollaborationAuthorityGuard | null,
+    revisionInstruction?: string,
+    revisionSource: EditorSuggestionDraftRevisionRequestWire['revision_source'] = 'llm_refine',
+  ) {
+    if (!activeDocument || activeDocument.contentMode !== 'collaboration') {
+      throw new Error(collaborationEditorUnavailableMessage(locale))
+    }
+    const expectedRevision = comment.suggestionDraft?.revision ?? 0
+    setSavingCommentDraftIds((ids) => (
+      ids.includes(comment.id) ? ids : [...ids, comment.id]
+    ))
+    try {
+      authorityGuard?.assertCurrent()
+      const response = await saveEditorCommentSuggestionDraft(
+        activeDocument.id,
+        comment.id,
+        {
+          draft: expectedRevision === 0
+            ? privateSuggestionDraftCreatePayload(suggestion)
+            : privateSuggestionDraftRevisionPayload(
+                suggestion,
+                revisionSource,
+                revisionInstruction,
+              ),
+          expected_revision: expectedRevision,
+        },
+        { apiKey, workspaceId: state.workspaceId },
+      )
+      authorityGuard?.assertCurrent()
+      return privateSuggestionDraftRecordFromServer(response.suggestion_draft)
+    } finally {
+      setSavingCommentDraftIds((ids) => ids.filter((id) => id !== comment.id))
+    }
+  }
 
   useEffect(() => {
     selectedModelTierRef.current = selectedModelTier
@@ -425,6 +536,15 @@ export function useEditorSuggestions({
   )
 
   async function handleRunComment(comment: EditorCommentThreadRecord) {
+    if (!activeDocument || !tryAcquireEditorRunLatch(editorRunInFlightRef)) return
+    try {
+      await executeCommentRun(comment)
+    } finally {
+      editorRunInFlightRef.current = false
+    }
+  }
+
+  async function executeCommentRun(comment: EditorCommentThreadRecord) {
     if (!activeDocument) return
     let authorityGuard: CollaborationAuthorityGuard | null
     try {
@@ -473,6 +593,15 @@ export function useEditorSuggestions({
         dispatch({ commentId: comment.id, status: 'stale', type: 'setEditorCommentStatus' })
         throw new Error(staleAnchorMessage(locale))
       }
+      if (requireRelative) {
+        authorityGuard?.assertCurrent()
+        await saveEditorComments(
+          activeDocument.id,
+          [serverCommentPayload(liveComment)],
+          { apiKey, workspaceId: state.workspaceId },
+        )
+        authorityGuard?.assertCurrent()
+      }
       const modelTier = selectedModelTierRef.current
       const model = selectedModelRef.current
       const effort = selectedEffortRef.current
@@ -497,14 +626,43 @@ export function useEditorSuggestions({
         authorityGuard,
       )
       const now = new Date().toISOString()
-      const groupId = createLocalId('editor-suggestion-group')
+      const groupId = comment.suggestionDraft?.groupId
+        ?? createLocalId('editor-suggestion-group')
       const group: EditorSuggestionGroupRecord = { createdAt: now, documentId: comment.documentId, id: groupId, origin }
       authorityGuard?.assertCurrent()
-      dispatch({
-        group,
-        suggestions: [createSuggestionRecord({ comment: liveComment, groupId, now, origin, proposal })],
-        type: 'createEditorSuggestionGroup',
+      const suggestion = createSuggestionRecord({
+        comment: liveComment,
+        groupId,
+        now,
+        origin,
+        proposal,
       })
+      if (requireRelative) {
+        const privateSuggestion = preparePrivateSuggestionRecord(
+          suggestion,
+          comment.suggestionDraft,
+          locale,
+        )
+        const draft = await persistPrivateCommentSuggestion(
+          comment,
+          privateSuggestion,
+          authorityGuard,
+          comment.commentMarkdown,
+        )
+        authorityGuard?.assertCurrent()
+        dispatch({
+          anchor: liveComment.anchor,
+          commentId: comment.id,
+          suggestionDraft: draft,
+          type: 'adoptEditorCommentSuggestionDraft',
+        })
+      } else {
+        dispatch({
+          group,
+          suggestions: [suggestion],
+          type: 'createEditorSuggestionGroup',
+        })
+      }
     } catch (error) {
       if (controller.signal.aborted) return
       setCommentRuns((map) => markError(map, comment.id, messageFromError(error)))
@@ -533,7 +691,9 @@ export function useEditorSuggestions({
       anchorAdapter,
     )
     if (activeDocument?.contentMode === 'collaboration') {
-      await publishCollaborationSuggestionBatch(groupSuggestions)
+      for (const suggestion of groupSuggestions) {
+        await publishCollaborationSuggestionBatch([suggestion])
+      }
       return
     }
     for (const suggestion of groupSuggestions) {
@@ -588,55 +748,64 @@ export function useEditorSuggestions({
 
     setSuggestionRuns((map) => markManyRunning(map, suggestionIds))
     try {
+      const suggestion = suggestions[0]
       const publication = await invokePrivateSuggestionPublication(
         activeDocument,
         collaboration,
         locale,
         async () => {
-          const documentContext = await resolveDocumentContext(undefined, authorityGuard)
-          if (documentContext.sequence === null) {
-            throw new Error(collaborationProjectionInvalidMessage(locale))
+          let attempt = publicationAttemptRef.current.get(suggestion.id)
+          if (!attempt) {
+            const documentContext = await resolveDocumentContext(undefined, authorityGuard)
+            if (documentContext.sequence === null) {
+              throw new Error(collaborationProjectionInvalidMessage(locale))
+            }
+            const prepared = prepareCollaborationSuggestionBatch(
+              activeEditor,
+              [suggestion],
+              privateSuggestionAnchorAdapter(activeEditor),
+              locale,
+            )
+            if (Object.keys(prepared.errors).length > 0) {
+              authorityGuard?.assertCurrent()
+              setSuggestionRuns((map) => markErrors(map, prepared.errors))
+              return null
+            }
+            const identity = privateSuggestionPublicationIdentity(suggestion, locale)
+            attempt = {
+              ...identity,
+              expectedSequence: documentContext.sequence,
+              targetMarkdown: buildCollaborationSuggestionTargetMarkdown(
+                documentContext.markdown,
+                prepared.suggestions,
+                locale,
+              ),
+            }
+            publicationAttemptRef.current.set(suggestion.id, attempt)
           }
-          const prepared = prepareCollaborationSuggestionBatch(
-            activeEditor,
-            suggestions,
-            privateSuggestionAnchorAdapter(activeEditor),
-            locale,
-          )
-          if (Object.keys(prepared.errors).length > 0) {
-            authorityGuard?.assertCurrent()
-            setSuggestionRuns((map) => markErrors(map, prepared.errors))
-            return null
-          }
-          const targetMarkdown = buildCollaborationSuggestionTargetMarkdown(
-            documentContext.markdown,
-            prepared.suggestions,
-            locale,
-          )
-          const commandId = requiredRandomUuid(locale)
-          const patchId = requiredRandomUuid(locale)
           authorityGuard?.assertCurrent()
           const response = await publishEditorCollaborationSuggestion(
             activeDocument.id,
             {
               actor_kind: 'assistant',
-              command_id: commandId,
-              expected_sequence: documentContext.sequence,
-              patch_id: patchId,
-              target_markdown: targetMarkdown,
+              command_id: attempt.commandId,
+              expected_sequence: attempt.expectedSequence,
+              patch_id: attempt.patchId,
+              target_markdown: attempt.targetMarkdown,
             },
             { apiKey, workspaceId: state.workspaceId },
           )
           authorityGuard?.assertCurrent()
           return collaborationPublicationFromResponse(
             response,
-            { commandId, expectedSequence: documentContext.sequence, patchId },
+            attempt,
             locale,
           )
         },
         authorityGuard,
       )
       if (!publication) return
+      publicationAttemptRef.current.delete(suggestion.id)
       authorityGuard?.assertCurrent()
       setAuthoritativeCollaborationSequence(
         collaborationProjectionController(collaboration),
@@ -653,6 +822,9 @@ export function useEditorSuggestions({
         })
       }
     } catch (error) {
+      if ([400, 401, 403, 404, 409, 413].some((status) => hasHttpStatus(error, status))) {
+        for (const id of suggestionIds) publicationAttemptRef.current.delete(id)
+      }
       const message = messageFromError(error)
       setSuggestionRuns((map) => markErrors(
         map,
@@ -664,48 +836,104 @@ export function useEditorSuggestions({
     }
   }
 
-  function handleRejectSuggestion(suggestionId: string) {
+  async function handleRejectSuggestion(suggestionId: string) {
+    const suggestion = documentSuggestions.find((item) => item.id === suggestionId)
+    if (!suggestion || suggestion.status !== 'pending') return
     if (activeDocument?.contentMode === 'collaboration') {
+      let authorityGuard: CollaborationAuthorityGuard | null
       try {
-        beginEditorCollaborationAuthorityGuard(
+        authorityGuard = beginEditorCollaborationAuthorityGuard(
           activeDocument,
           collaboration,
           'write',
           locale,
-        )?.assertCurrent()
+        )
       } catch (error) {
         setSuggestionRuns((map) => markError(map, suggestionId, messageFromError(error)))
         return
+      }
+      const commentId = suggestion.origin.commentId
+      if (suggestion.privateDraft && commentId) {
+        setSuggestionRuns((map) => markRunning(map, suggestionId))
+        try {
+          authorityGuard?.assertCurrent()
+          await deleteEditorCommentSuggestionDraft(
+            activeDocument.id,
+            commentId,
+            {
+              expected_revision: suggestion.privateDraft.revision,
+              patch_id: suggestion.privateDraft.patchId,
+            },
+            { apiKey, workspaceId: state.workspaceId },
+          )
+          authorityGuard?.assertCurrent()
+        } catch (error) {
+          setSuggestionRuns((map) => markError(map, suggestionId, messageFromError(error)))
+          return
+        } finally {
+          setSuggestionRuns((map) => clearRunning(map, [suggestionId]))
+        }
       }
     }
     dispatch({ suggestionId, type: 'rejectEditorSuggestion' })
   }
 
-  function handleRejectSuggestionGroup(groupId: string) {
+  async function handleRejectSuggestionGroup(groupId: string) {
+    const groupSuggestions = documentSuggestions
+      .filter((suggestion) => suggestion.groupId === groupId && suggestion.status === 'pending')
     if (activeDocument?.contentMode === 'collaboration') {
-      const groupSuggestionIds = documentSuggestions
-        .filter((suggestion) => suggestion.groupId === groupId && suggestion.status === 'pending')
-        .map((suggestion) => suggestion.id)
-      try {
-        beginEditorCollaborationAuthorityGuard(
-          activeDocument,
-          collaboration,
-          'write',
-          locale,
-        )?.assertCurrent()
-      } catch (error) {
-        const message = messageFromError(error)
-        setSuggestionRuns((map) => markErrors(
-          map,
-          Object.fromEntries(groupSuggestionIds.map((id) => [id, message])),
-        ))
-        return
+      for (const suggestion of groupSuggestions) {
+        await handleRejectSuggestion(suggestion.id)
       }
+      return
     }
     dispatch({ groupId, type: 'rejectEditorSuggestionGroup' })
   }
 
-  function handleEditSuggestionProposal(suggestionId: string, proposedText: string) {
+  async function handleEditSuggestionProposal(suggestionId: string, proposedText: string) {
+    const suggestion = documentSuggestions.find((item) => item.id === suggestionId)
+    if (!suggestion || suggestion.status !== 'pending' || !proposedText.trim()) return
+    const updatedSuggestion = { ...suggestion, proposedText }
+    const commentId = suggestion.origin.commentId
+    if (
+      activeDocument?.contentMode === 'collaboration'
+      && suggestion.privateDraft
+      && commentId
+    ) {
+      let authorityGuard: CollaborationAuthorityGuard | null
+      try {
+        authorityGuard = beginEditorCollaborationAuthorityGuard(
+          activeDocument,
+          collaboration,
+          'write',
+          locale,
+        )
+        const comment = state.editorComments[commentId]
+        if (!comment) throw new Error(staleAnchorMessage(locale))
+        setSuggestionRuns((map) => markRunning(map, suggestionId))
+        const draft = await persistPrivateCommentSuggestion(
+          comment,
+          updatedSuggestion,
+          authorityGuard,
+          undefined,
+          'manual_edit',
+        )
+        authorityGuard?.assertCurrent()
+        dispatch({
+          anchor: comment.anchor,
+          commentId,
+          suggestionDraft: draft,
+          type: 'adoptEditorCommentSuggestionDraft',
+        })
+        setSuggestionRuns((map) => clearRuns(map, [suggestionId]))
+        return
+      } catch (error) {
+        setSuggestionRuns((map) => markError(map, suggestionId, messageFromError(error)))
+        return
+      } finally {
+        setSuggestionRuns((map) => clearRunning(map, [suggestionId]))
+      }
+    }
     dispatch({
       proposedText,
       source: 'manual_edit',
@@ -717,6 +945,23 @@ export function useEditorSuggestions({
 
   async function handleRefineSuggestion(suggestionId: string, instruction: string) {
     if (!activeDocument || isGlobalRunning || runningSuggestionIds.includes(suggestionId)) return
+    const trimmedInstruction = instruction.trim()
+    const suggestion = documentSuggestions.find((item) => item.id === suggestionId)
+    if (!suggestion || suggestion.status !== 'pending' || !trimmedInstruction) return
+    if (!tryAcquireEditorRunLatch(editorRunInFlightRef)) return
+    try {
+      await executeRefineSuggestion(suggestion, trimmedInstruction)
+    } finally {
+      editorRunInFlightRef.current = false
+    }
+  }
+
+  async function executeRefineSuggestion(
+    suggestion: EditorSuggestionRecord,
+    trimmedInstruction: string,
+  ) {
+    if (!activeDocument) return
+    const suggestionId = suggestion.id
     let authorityGuard: CollaborationAuthorityGuard | null
     try {
       authorityGuard = beginEditorCollaborationAuthorityGuard(
@@ -729,9 +974,6 @@ export function useEditorSuggestions({
       setSuggestionRuns((map) => markError(map, suggestionId, messageFromError(error)))
       return
     }
-    const trimmedInstruction = instruction.trim()
-    const suggestion = documentSuggestions.find((item) => item.id === suggestionId)
-    if (!suggestion || suggestion.status !== 'pending' || !trimmedInstruction) return
     runAbortRef.current?.abort()
     const controller = new AbortController()
     runAbortRef.current = controller
@@ -768,6 +1010,35 @@ export function useEditorSuggestions({
       )
       if (controller.signal.aborted) return
       authorityGuard?.assertCurrent()
+      const revisedSuggestion: EditorSuggestionRecord = {
+        ...suggestion,
+        changeSummary: proposal.changeSummary,
+        proposedText: proposal.proposedText,
+        warnings: proposal.warnings,
+      }
+      const commentId = suggestion.origin.commentId
+      if (
+        activeDocument.contentMode === 'collaboration'
+        && suggestion.privateDraft
+        && commentId
+      ) {
+        const comment = state.editorComments[commentId]
+        if (!comment) throw new Error(staleAnchorMessage(locale))
+        const draft = await persistPrivateCommentSuggestion(
+          comment,
+          revisedSuggestion,
+          authorityGuard,
+          trimmedInstruction,
+        )
+        authorityGuard?.assertCurrent()
+        dispatch({
+          anchor: comment.anchor,
+          commentId,
+          suggestionDraft: draft,
+          type: 'adoptEditorCommentSuggestionDraft',
+        })
+        return
+      }
       dispatch({
         changeSummary: proposal.changeSummary,
         instruction: trimmedInstruction,
@@ -829,6 +1100,20 @@ export function useEditorSuggestions({
   }
 
   async function handleGlobalRun(globalInstruction: string) {
+    if (!activeDocument || isGlobalRunning) return
+    const hasTargets = comments.some((comment) =>
+      comment.status === 'open'
+      && comment.kind === 'collect'
+      && attachedCommentIds.includes(comment.id))
+    if (!hasTargets || !tryAcquireEditorRunLatch(editorRunInFlightRef)) return
+    try {
+      await executeGlobalRun(globalInstruction)
+    } finally {
+      editorRunInFlightRef.current = false
+    }
+  }
+
+  async function executeGlobalRun(globalInstruction: string) {
     if (!activeDocument || isGlobalRunning) return
     const targets = comments.filter((comment) =>
       comment.status === 'open' && comment.kind === 'collect' && attachedCommentIds.includes(comment.id))
@@ -938,6 +1223,15 @@ export function useEditorSuggestions({
       }
       const liveComment = prepared?.comment
       if (!liveComment) throw new Error(staleAnchorMessage(locale))
+      if (activeDocument.contentMode === 'collaboration') {
+        authorityGuard?.assertCurrent()
+        await saveEditorComments(
+          activeDocument.id,
+          [serverCommentPayload(liveComment)],
+          { apiKey, workspaceId: state.workspaceId },
+        )
+        authorityGuard?.assertCurrent()
+      }
       const origin: EditorSuggestionOrigin = { commentId: comment.id, kind: 'global_run' }
       const proposal = await invokeEditorAiProvider(
         activeDocument,
@@ -961,10 +1255,43 @@ export function useEditorSuggestions({
         }),
         authorityGuard,
       )
-      return { comment: liveComment, origin, proposal }
+      const suggestion = createSuggestionRecord({
+        comment: liveComment,
+        documentId,
+        groupId,
+        now,
+        origin,
+        proposal,
+      })
+      if (activeDocument.contentMode !== 'collaboration') {
+        return { comment: liveComment, origin, proposal, suggestion }
+      }
+      const privateSuggestion = preparePrivateSuggestionRecord(
+        suggestion,
+        comment.suggestionDraft,
+        locale,
+      )
+      const suggestionDraft = await persistPrivateCommentSuggestion(
+        comment,
+        privateSuggestion,
+        authorityGuard,
+        draftInstruction || comment.commentMarkdown,
+      )
+      return {
+        comment: liveComment,
+        origin,
+        proposal,
+        suggestion: privateSuggestion,
+        suggestionDraft,
+      }
     }
 
     const suggestions: EditorSuggestionRecord[] = []
+    const savedDrafts: Array<{
+      anchor: EditorCommentThreadRecord['anchor']
+      commentId: string
+      suggestionDraft: NonNullable<EditorCommentThreadRecord['suggestionDraft']>
+    }> = []
     const errors: Record<string, string> = {}
     const poolSize = 4
     let authorityFailure: string | null = null
@@ -980,15 +1307,14 @@ export function useEditorSuggestions({
       settled.forEach((outcome, offset) => {
         const comment = batch[offset]
         if (outcome.status === 'fulfilled') {
-          const { comment: liveComment, origin, proposal } = outcome.value
-          suggestions.push(createSuggestionRecord({
-            comment: liveComment,
-            documentId,
-            groupId,
-            now,
-            origin,
-            proposal,
-          }))
+          suggestions.push(outcome.value.suggestion)
+          if (outcome.value.suggestionDraft) {
+            savedDrafts.push({
+              anchor: outcome.value.comment.anchor,
+              commentId: comment.id,
+              suggestionDraft: outcome.value.suggestionDraft,
+            })
+          }
         } else if (!controller.signal.aborted) {
           errors[comment.id] = messageFromError(outcome.reason)
         }
@@ -1019,16 +1345,28 @@ export function useEditorSuggestions({
     }
     if (suggestions.length > 0) {
       authorityGuard?.assertCurrent()
-      dispatch({
-        group: {
-          createdAt: now,
-          documentId,
-          id: groupId,
-          origin: { kind: 'global_run' },
-        },
-        suggestions,
-        type: 'createEditorSuggestionGroup',
-      })
+      if (activeDocument.contentMode === 'collaboration') {
+        for (const saved of savedDrafts) {
+          authorityGuard?.assertCurrent()
+          dispatch({
+            anchor: saved.anchor,
+            commentId: saved.commentId,
+            suggestionDraft: saved.suggestionDraft,
+            type: 'adoptEditorCommentSuggestionDraft',
+          })
+        }
+      } else {
+        dispatch({
+          group: {
+            createdAt: now,
+            documentId,
+            id: groupId,
+            origin: { kind: 'global_run' },
+          },
+          suggestions,
+          type: 'createEditorSuggestionGroup',
+        })
+      }
       const firstCommentId = suggestions[0]?.origin.commentId
       if (firstCommentId) {
         authorityGuard?.assertCurrent()
@@ -1049,6 +1387,16 @@ export function useEditorSuggestions({
   }
 
   async function handleInstructionRun(instruction: string) {
+    if (!activeDocument || isGlobalRunning || !instruction.trim()) return
+    if (!tryAcquireEditorRunLatch(editorRunInFlightRef)) return
+    try {
+      await executeInstructionRun(instruction)
+    } finally {
+      editorRunInFlightRef.current = false
+    }
+  }
+
+  async function executeInstructionRun(instruction: string) {
     if (!activeDocument || isGlobalRunning) return
     const draftInstruction = instruction.trim()
     if (!draftInstruction) return
@@ -1175,6 +1523,7 @@ export function useEditorSuggestions({
     isGlobalRunning,
     runErrors,
     runningCommentIds,
+    savingCommentDraftIds,
     runningSuggestionIds,
     suggestionPublishDisabledReason,
     suggestionErrors,
@@ -1193,6 +1542,55 @@ type SuggestionRecordArgs = {
     proposedText: string
     warnings?: string[]
   }
+}
+
+export function privateSuggestionDraftCreatePayload(
+  suggestion: EditorSuggestionRecord,
+): EditorSuggestionDraftCreateWire {
+  if (!suggestion.privateDraft) {
+    throw new Error('Private suggestion draft identity is missing.')
+  }
+  return {
+    anchor_version: 1,
+    change_summary: suggestion.changeSummary ?? [],
+    evidence: suggestion.evidence ?? null,
+    group_id: suggestion.groupId,
+    patch_id: suggestion.privateDraft.patchId,
+    proposed_text: suggestion.proposedText,
+    publication_command_id: suggestion.privateDraft.publicationCommandId,
+    suggestion_id: suggestion.id,
+    warnings: suggestion.warnings ?? [],
+  }
+}
+
+export function privateSuggestionDraftRevisionPayload(
+  suggestion: EditorSuggestionRecord,
+  source: EditorSuggestionDraftRevisionRequestWire['revision_source'],
+  instruction?: string,
+): EditorSuggestionDraftRevisionRequestWire {
+  return {
+    change_summary: suggestion.changeSummary ?? [],
+    evidence: suggestion.evidence ?? null,
+    ...(instruction ? { instruction } : {}),
+    proposed_text: suggestion.proposedText,
+    revision_source: source,
+    warnings: suggestion.warnings ?? [],
+  }
+}
+
+export function privateSuggestionPublicationIdentity(
+  suggestion: EditorSuggestionRecord,
+  locale: 'de' | 'en',
+): { commandId: string; patchId: string } {
+  return suggestion.privateDraft
+    ? {
+        commandId: suggestion.privateDraft.publicationCommandId,
+        patchId: suggestion.privateDraft.patchId,
+      }
+    : {
+        commandId: requiredRandomUuid(locale),
+        patchId: requiredRandomUuid(locale),
+      }
 }
 
 type InstructionRecordArgs = {
@@ -1243,6 +1641,26 @@ function createSuggestionRecord({
     ...(proposal.changeSummary?.length ? { changeSummary: proposal.changeSummary } : {}),
     ...(proposal.evidence ? { evidence: proposal.evidence } : {}),
     ...(proposal.warnings?.length ? { warnings: proposal.warnings } : {}),
+  }
+}
+
+function preparePrivateSuggestionRecord(
+  suggestion: EditorSuggestionRecord,
+  existingDraft: EditorCommentThreadRecord['suggestionDraft'],
+  locale: 'de' | 'en',
+): EditorSuggestionRecord {
+  const publicationCommandId = existingDraft?.publicationCommandId
+    ?? requiredRandomUuid(locale)
+  const patchId = existingDraft?.patchId ?? requiredRandomUuid(locale)
+  return {
+    ...suggestion,
+    groupId: existingDraft?.groupId ?? suggestion.groupId,
+    id: existingDraft?.suggestionId ?? suggestion.id,
+    privateDraft: {
+      patchId,
+      publicationCommandId,
+      revision: existingDraft?.revision ?? 0,
+    },
   }
 }
 
@@ -1576,10 +1994,13 @@ export function collaborationPublicationFromResponse(
 }
 
 function requiredRandomUuid(locale: 'de' | 'en'): string {
-  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID()
-  throw new Error(locale === 'de'
-    ? 'Der Collaboration-Auftrag konnte nicht sicher identifiziert werden.'
-    : 'The collaboration command could not be identified safely.')
+  try {
+    return createSecureUuid()
+  } catch {
+    throw new Error(locale === 'de'
+      ? 'Der Collaboration-Auftrag konnte nicht sicher identifiziert werden.'
+      : 'The collaboration command could not be identified safely.')
+  }
 }
 
 function messageFromError(error: unknown): string {
@@ -1597,6 +2018,12 @@ function editorTimeoutMessage(locale: 'de' | 'en'): string {
     return 'Keine Modellantwort innerhalb der Zeitgrenze. Der Lauf wurde abgebrochen; bitte erneut versuchen oder ein schnelleres Modell wählen.'
   }
   return 'No model response within the time limit. The run was cancelled; retry or choose a faster model.'
+}
+
+function editorRecoveryAiDisabledMessage(locale: 'de' | 'en'): string {
+  return locale === 'de'
+    ? 'Speichern Sie die lokale Recovery-Kopie zuerst als neues Dokument, bevor Sie KI-Funktionen verwenden.'
+    : 'Save the local recovery copy as a new document before using AI features.'
 }
 
 function defaultInstructionResultMessage(locale: 'de' | 'en', editCount: number): string {
@@ -1675,6 +2102,5 @@ function collaborationIdentity(
 }
 
 function createLocalId(prefix: string): string {
-  if (globalThis.crypto?.randomUUID) return `${prefix}-${globalThis.crypto.randomUUID()}`
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  return createSecurePrefixedId(prefix)
 }

@@ -9,27 +9,26 @@
  * The one structural difference from the editor: an asset's heavy
  * ``extractedText`` has no per-asset "open" event to hang a load on (the
  * library has no document viewer). Instead the body loads ON USE via the
- * exposed ``ensureAssetBodiesLoaded`` primitive: the chat composer prefetches
- * it when a file chip is attached and awaits it before send, so a freshly
- * hydrated (body-less) asset never produces an empty attachment. The same
- * primitive backs the autosave's body-guard (never PUT a body="" over a real
- * server body) — exactly the editor's content_markdown lesson.
+ * exposed ``ensureAssetBodiesLoaded`` primitive: connected Chat and Editor
+ * receive only the operation-fenced ``prepared_text`` while autosave still
+ * preserves the separately editable ``extracted_text``. Incognito is the sole
+ * local-body exception.
  *
  * It does NOT own the import button: the explicit opt-in push is the
  * project-level useProjectServerImport. This hook only hydrates + autosaves
  * once the project is opted in (syncActive), seeding its synced fingerprint
  * to WHAT THE SERVER HOLDS so a local-newer entity is pushed up rather than
- * stranded (the M6a P1 lesson).
+ * stranded.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Dispatch } from 'react'
 
 import {
-  deleteAsset,
-  deleteAssetGroup,
-  deleteAssetSection,
+  ensureDefaultAssetSections,
   getAsset,
+  listUploadOperations,
+  retryUploadOperation,
   listAssetGroups,
   listAssetSections,
   listAssets,
@@ -38,36 +37,39 @@ import {
   saveAssetSection,
 } from '@/api/inqtrixClient'
 import {
+  assetAutosaveFingerprint,
   assetRecordFromServer,
   groupRecordFromServer,
+  isAssetSettledForSync,
   sectionRecordFromServer,
   serverAssetPayload,
   serverGroupPayload,
   serverSectionPayload,
+  visibleServerAssetSections,
 } from '@/features/fileLibrary/assetSync'
 import type {
+  FileAssetBodyLoadState,
   FileAssetRecord,
   FileGroupRecord,
   FileLibrarySectionRecord,
 } from '@/features/project/types'
-import { deleteTolerant404, syncCollection } from '@/features/project/syncCollection'
+import { syncCollection } from '@/features/project/syncCollection'
 import {
   useProjectSyncLifecycle,
   type SyncLifecycleToken,
 } from '@/features/project/useProjectSyncLifecycle'
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
-import { legacyFileSectionIdReplacements } from '@/features/files/sections'
+import {
+  defaultFileSectionIdReplacements,
+  legacyFileSectionIdReplacements,
+} from '@/features/files/sections'
 
 const AUTOSAVE_DEBOUNCE_MS = 1_500
 const PAGE_LIMIT = 200
+const UPLOAD_POLL_INTERVAL_MS = 1_500
 
 function messageFromError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-/** Swallow a 404 on delete (the section-cascade case): see deleteTolerant404. */
-function deleteTolerant(run: () => Promise<void>): Promise<void> {
-  return deleteTolerant404(run)
 }
 
 type UseAssetHistoryApiOptions = {
@@ -86,13 +88,32 @@ type UseAssetHistoryApiOptions = {
 }
 
 export type AssetHistoryApiHandle = {
+  /** Truthful load-on-use projection for metadata-only server assets. */
+  bodyLoadStates: Readonly<Record<string, FileAssetBodyLoadState>>
   error: string | null
-  /** Resolve the extractedText of the given assets, fetching server-only
-   * bodies on demand (deduped), and return them keyed by id. Dispatches each
-   * fetched body into state too, so later reads see it. Call it fire-and-
-   * forget to prefetch (chip attach) and awaited to guarantee presence before
-   * a synchronous body consumer (chat send, index build). */
+  /** Resolve canonical server-prepared bodies on demand (deduped), keyed by
+   * asset id. Local-only rows return extractedText solely so the caller's
+   * explicit incognito policy can admit them. */
   ensureAssetBodiesLoaded: (assetIds: readonly string[]) => Promise<Map<string, string>>
+  /** Record that the server just created/refreshed this asset OUTSIDE the
+   * autosave (a bound upload's 201 carried the asset object). Seeds the
+   * synced fingerprint so the regular diff owns the record from here on:
+   * a later local delete issues the server DELETE (even if the row never
+   * settled), a later settle pushes the changed record. Without this, a row
+   * deleted mid-flight would resurrect from the server on the next hydrate. */
+  noteServerAssetRecord: (assetId: string) => void
+  /** Resume a durable dependency failure without resending bytes. If the
+   * operation requires browser bytes, the typed API error is left intact so
+   * the caller can ask the user to reselect the file. */
+  retryUpload: (assetId: string) => Promise<void>
+}
+
+type LoadedAssetBodies = {
+  extractedText: string
+  preparedAt: string | null
+  preparedContentHash: string | null
+  preparedParserId: string | null
+  preparedText: string
 }
 
 export function useAssetHistoryApi({
@@ -106,6 +127,8 @@ export function useAssetHistoryApi({
   workspaceId,
 }: UseAssetHistoryApiOptions): AssetHistoryApiHandle {
   const [error, setError] = useState<string | null>(null)
+  const [uploadObservationError, setUploadObservationError] = useState<string | null>(null)
+  const [bodyLoadStates, setBodyLoadStates] = useState<Record<string, FileAssetBodyLoadState>>({})
   const [hydrated, setHydrated] = useState(false)
 
   const assetsRef = useRef(fileAssets)
@@ -124,9 +147,13 @@ export function useAssetHistoryApi({
   // locally-present at hydrate, or just pushed) — never to be overwritten on
   // a later body fetch, and safe to PUT without first reading the server body.
   const loadedAssetsRef = useRef(new Set<string>())
+  // Canonical prepared bodies are independently cached against their
+  // server-owned content hash. A locally editable/extracted body never
+  // satisfies this provenance boundary.
+  const loadedPreparedAssetsRef = useRef(new Map<string, string>())
   // De-dupe concurrent body fetches per asset id (prefetch + send-await +
   // autosave guard can all want the same body at once).
-  const inFlightBodyRef = useRef(new Map<string, Promise<string>>())
+  const inFlightBodyRef = useRef(new Map<string, Promise<LoadedAssetBodies>>())
   const hydratedRef = useRef(false)
   const flushingRef = useRef(false)
   const flushPendingRef = useRef(false)
@@ -135,15 +162,58 @@ export function useAssetHistoryApi({
 
   // -- body load-on-use (deduped) --------------------------------------- #
 
-  const loadBody = useCallback((assetId: string): Promise<string> => {
+  const loadBody = useCallback((assetId: string): Promise<LoadedAssetBodies> => {
     const existing = inFlightBodyRef.current.get(assetId)
     if (existing) return existing
+    setBodyLoadStates((current) => ({
+      ...current,
+      [assetId]: { error: null, status: 'loading' },
+    }))
     const promise = (async () => {
-      const detail = await getAsset(assetId, optionsRef.current)
-      const extractedText = detail.extracted_text ?? ''
-      dispatch({ assetId, extractedText, type: 'setServerAssetBody' })
-      loadedAssetsRef.current.add(assetId)
-      return extractedText
+      try {
+        const detail = await getAsset(assetId, optionsRef.current)
+        const record = assetRecordFromServer(detail)
+        const bodies: LoadedAssetBodies = {
+          extractedText: record.extractedText,
+          preparedAt: record.preparedAt ?? null,
+          preparedContentHash: record.preparedContentHash ?? null,
+          preparedParserId: record.preparedParserId ?? null,
+          preparedText: record.preparedText ?? '',
+        }
+        dispatch({ assetId, ...bodies, type: 'setServerAssetBody' })
+        loadedAssetsRef.current.add(assetId)
+        const hasPreparedProvenance = Boolean(
+          bodies.preparedAt
+          && bodies.preparedContentHash
+          && bodies.preparedParserId,
+        )
+        if (hasPreparedProvenance && bodies.preparedContentHash) {
+          loadedPreparedAssetsRef.current.set(
+            assetId,
+            bodies.preparedContentHash,
+          )
+        } else {
+          loadedPreparedAssetsRef.current.delete(assetId)
+        }
+        setBodyLoadStates((current) => ({
+          ...current,
+          [assetId]: hasPreparedProvenance && bodies.preparedText.trim()
+            ? { error: null, status: 'ready' }
+            : {
+                error: hasPreparedProvenance
+                  ? 'Die serverseitig vorbereitete Dokumentquelle ist leer.'
+                  : 'Die serverseitig vorbereitete Dokumentquelle ist nicht verfügbar.',
+                status: 'failed',
+              },
+        }))
+        return bodies
+      } catch (error) {
+        setBodyLoadStates((current) => ({
+          ...current,
+          [assetId]: { error: messageFromError(error), status: 'failed' },
+        }))
+        throw error
+      }
     })()
     inFlightBodyRef.current.set(assetId, promise)
     void promise.finally(() => {
@@ -161,13 +231,29 @@ export function useAssetHistoryApi({
         [...new Set(assetIds)].map(async (id) => {
           const asset = assetsRef.current[id]
           if (!asset) return
-          // A body is authoritative locally when the server does not know the
-          // asset (locally created), or it was already loaded — no fetch.
-          if (!syncedAssetsRef.current.has(id) || loadedAssetsRef.current.has(id)) {
+          // Local-only content is admitted only by the caller's explicit
+          // incognito policy. For a server asset, only a prepared body loaded
+          // under the current canonical hash can satisfy this method.
+          if (!syncedAssetsRef.current.has(id)) {
             result.set(id, asset.extractedText)
+            setBodyLoadStates((current) => ({
+              ...current,
+              [id]: asset.extractedText.trim()
+                ? { error: null, status: 'ready' }
+                : { error: null, status: 'failed' },
+            }))
             return
           }
-          result.set(id, await loadBody(id))
+          if (
+            asset.preparedContentHash
+            && loadedPreparedAssetsRef.current.get(id)
+              === asset.preparedContentHash
+          ) {
+            result.set(id, asset.preparedText ?? '')
+            return
+          }
+          const bodies = await loadBody(id)
+          result.set(id, bodies.preparedText)
         }),
       )
       return result
@@ -188,20 +274,23 @@ export function useAssetHistoryApi({
       // loaded (still ""). The PUT is a full-record upsert, so sending
       // extractedText="" would ERASE the server body. Fetch it first and push
       // the merged record (new metadata + kept body).
-      const extractedText = await loadBody(asset.id)
-      record = { ...asset, extractedText }
+      const bodies = await loadBody(asset.id)
+      record = { ...asset, extractedText: bodies.extractedText }
     }
     await saveAsset(record.id, serverAssetPayload(record), optionsRef.current)
+    dispatch({ assetId: record.id, type: 'markFileAssetServerSynced' })
     loadedAssetsRef.current.add(record.id)
-  }, [loadBody])
+  }, [dispatch, loadBody])
 
   const pushSection = useCallback(async (section: FileLibrarySectionRecord) => {
     await saveAssetSection(section.id, serverSectionPayload(section), optionsRef.current)
-  }, [])
+    dispatch({ sectionId: section.id, type: 'markFileLibrarySectionServerSynced' })
+  }, [dispatch])
 
   const pushGroup = useCallback(async (group: FileGroupRecord) => {
     await saveAssetGroup(group.id, serverGroupPayload(group), optionsRef.current)
-  }, [])
+    dispatch({ groupId: group.id, type: 'markFileGroupServerSynced' })
+  }, [dispatch])
 
   // -- autosave flush (debounced, serialized) --------------------------- #
 
@@ -223,8 +312,9 @@ export function useAssetHistoryApi({
         fingerprintOf: (section) => section.updatedAt,
         changed: (previous, current) => previous !== current,
         pushOne: pushSection,
-        deleteOne: (id) =>
-          deleteTolerant(() => deleteAssetSection(id, optionsRef.current)),
+        // Destructive section cleanup is an explicit durable operation. A
+        // local diff is not authority to launch it after the UI row vanished.
+        deleteOne: async () => undefined,
       })
       await syncCollection<FileGroupRecord, string>({
         current: groupsRef.current,
@@ -232,18 +322,41 @@ export function useAssetHistoryApi({
         fingerprintOf: (group) => group.updatedAt,
         changed: (previous, current) => previous !== current,
         pushOne: pushGroup,
-        deleteOne: (id) =>
-          deleteTolerant(() => deleteAssetGroup(id, optionsRef.current)),
+        // Group removal is an explicit durable deletion operation. The row
+        // remains addressable until the operation feed confirms `deleted`.
+        deleteOne: async () => undefined,
       })
       await syncCollection<FileAssetRecord, string>({
-        current: assetsRef.current,
+        // NEW, still-unsettled rows (mid-upload/mid-parse, unknown to the
+        // synced map) stay out of the diff: their server state is owned by
+        // the bound upload + settle actions, and a premature PUT would race
+        // the pre-flight/binding with an empty body. An id the synced map
+        // ALREADY knows must stay in `current` even while transiently
+        // pending again (retry, hydrate-mid-batch, bound upload) — dropping
+        // it would read as a local delete and trigger a real server DELETE.
+        // Its fingerprint remains at the confirmed server value until both
+        // transient flags clear, so retaining it for presence cannot also
+        // authorize a half-built full-record PUT. The kept invariant: an id
+        // filtered out here is never in `synced`, so the delete loop cannot
+        // see it.
+        current: Object.fromEntries(
+          Object.entries(assetsRef.current).filter(
+            ([, asset]) => isAssetSettledForSync(asset) || syncedAssetsRef.current.has(asset.id),
+          ),
+        ),
         synced: syncedAssetsRef.current,
-        fingerprintOf: (asset) => asset.updatedAt,
+        fingerprintOf: (asset) => assetAutosaveFingerprint(
+          asset,
+          syncedAssetsRef.current.get(asset.id),
+        ),
         changed: (previous, current) => previous !== current,
         pushOne: pushAsset,
+        // The explicit deletion coordinator removes server aggregates first;
+        // this callback only retires local hydration caches after terminal
+        // confirmation. Absence from client state is never deletion authority.
         deleteOne: async (id) => {
-          await deleteTolerant(() => deleteAsset(id, optionsRef.current))
           loadedAssetsRef.current.delete(id)
+          loadedPreparedAssetsRef.current.delete(id)
           inFlightBodyRef.current.delete(id)
         },
       })
@@ -264,18 +377,49 @@ export function useAssetHistoryApi({
   const reset = useCallback(() => {
     hydratedRef.current = false
     setHydrated(false)
+    setUploadObservationError(null)
     syncedSectionsRef.current.clear()
     syncedGroupsRef.current.clear()
     syncedAssetsRef.current.clear()
     loadedAssetsRef.current.clear()
+    loadedPreparedAssetsRef.current.clear()
     inFlightBodyRef.current.clear()
+    setBodyLoadStates({})
   }, [])
 
   const hydrate = useCallback((token: SyncLifecycleToken) => {
     void (async () => {
       try {
         const options = optionsRef.current
-        const sectionRecords = (await listAssetSections(options)).map(sectionRecordFromServer)
+        // This server-owned idempotency point runs before the generic list.
+        // Concurrent first tabs receive the same role IDs instead of
+        // autosaving their independent opaque bootstrap IDs.
+        let sectionRecords: FileLibrarySectionRecord[] = []
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          await ensureDefaultAssetSections(options)
+          sectionRecords = (await listAssetSections(options)).map(sectionRecordFromServer)
+          const observedRoles = new Set(
+            sectionRecords.map((record) => record.semanticRole),
+          )
+          if (
+            observedRoles.has('temporary')
+            && observedRoles.has('library')
+            && observedRoles.has('project_sources')
+          ) break
+          if (attempt === 1) {
+            throw new Error(
+              'Die vorbereiteten Dateibereiche konnten nicht konsistent geladen werden.',
+            )
+          }
+        }
+        // Use only the later list observation for rekeying. The ensure
+        // response could already be stale if another tab renamed (and thereby
+        // released) a prepared role between the two requests.
+        const canonicalSectionRecords = sectionRecords.filter(
+          (record) => record.semanticRole === 'temporary'
+            || record.semanticRole === 'library'
+            || record.semanticRole === 'project_sources',
+        )
         const groupRecords = (await listAssetGroups(options)).map(groupRecordFromServer)
         const assetRecords: FileAssetRecord[] = []
         let cursor: string | undefined
@@ -287,19 +431,50 @@ export function useAssetHistoryApi({
           cursor = page.next_cursor ?? undefined
         } while (cursor)
         if (token.cancelled) return
-        const sectionReplacements = legacyFileSectionIdReplacements(
-          sectionsRef.current,
-          new Set(sectionRecords.map((record) => record.id)),
+        const visibleSectionRecords = visibleServerAssetSections(
+          sectionRecords,
+          groupRecords,
+          assetRecords,
         )
+        const visibleSectionIds = new Set(
+          visibleSectionRecords.map((record) => record.id),
+        )
+        const hiddenServerIds = sectionRecords
+          .filter((record) => !visibleSectionIds.has(record.id))
+          .map((record) => record.id)
+        const sectionReplacements = {
+          ...legacyFileSectionIdReplacements(
+            sectionsRef.current,
+            new Set(sectionRecords.map((record) => record.id)),
+          ),
+          ...defaultFileSectionIdReplacements(
+            sectionsRef.current,
+            canonicalSectionRecords,
+          ),
+        }
         if (Object.keys(sectionReplacements).length > 0) {
           dispatch({ replacements: sectionReplacements, type: 'rekeyFileLibrarySectionIds' })
         }
         // Assets already in the local project carry an authoritative body
         // (loaded from the markdown). Captured BEFORE the merge dispatch so a
         // server-only asset (hydrated with extractedText="") is distinguishable.
-        const locallyPresentIds = new Set(Object.keys(assetsRef.current))
+        const localAssetsBeforeHydrate = assetsRef.current
+        const locallyPresentIds = new Set(Object.keys(localAssetsBeforeHydrate))
+        if (visibleSectionRecords.length > 0) {
+          dispatch({
+            sections: visibleSectionRecords,
+            type: 'upsertServerAssetSections',
+          })
+        }
         if (sectionRecords.length > 0) {
-          dispatch({ sections: sectionRecords, type: 'upsertServerAssetSections' })
+          dispatch({
+            hiddenServerIds,
+            serverHasTemporarySection: sectionRecords.some(
+              (record) => record.kind === 'temporary',
+            ),
+            serverIds: sectionRecords.map((record) => record.id),
+            type: 'pruneLocalBootstrapFileSections',
+          })
         }
         if (groupRecords.length > 0) {
           dispatch({ groups: groupRecords, type: 'upsertServerAssetGroups' })
@@ -309,7 +484,13 @@ export function useAssetHistoryApi({
         }
         // Seed each fingerprint to WHAT THE SERVER HOLDS (its updatedAt); a
         // local-newer entity then differs and the first autosave pushes it.
-        for (const record of sectionRecords) {
+        // Intentionally track only the visible projection. Historical,
+        // unreferenced bootstrap duplicates are absent from both ProjectState
+        // and this synced map, so the generic diff neither PUTs nor DELETEs
+        // them. A browser-side delete would race another client and the
+        // endpoint cascades children; persisted cleanup therefore needs a
+        // future atomic server-side "delete only while still empty" operation.
+        for (const record of visibleSectionRecords) {
           syncedSectionsRef.current.set(record.id, record.updatedAt)
         }
         for (const record of groupRecords) {
@@ -321,6 +502,17 @@ export function useAssetHistoryApi({
             // Its body is authoritative locally: never overwrite it on a later
             // fetch, and it may be pushed without first reading the server body.
             loadedAssetsRef.current.add(record.id)
+            const local = localAssetsBeforeHydrate[record.id]
+            if (
+              record.preparedContentHash
+              && local?.preparedContentHash === record.preparedContentHash
+              && local.preparedText !== undefined
+            ) {
+              loadedPreparedAssetsRef.current.set(
+                record.id,
+                record.preparedContentHash,
+              )
+            }
           }
         }
         hydratedRef.current = true
@@ -339,15 +531,189 @@ export function useAssetHistoryApi({
     hydrate,
   })
 
+  // -- durable upload convergence -------------------------------------- #
+
+  const uploadPollKey = Object.values(fileAssets)
+    .filter((asset) => asset.serverSynced === true && (
+      asset.uploadPending
+      || asset.uploadStatus === 'awaiting_upload'
+      || asset.uploadStatus === 'retrying'
+      || asset.uploadStatus === 'parsing'
+      || asset.uploadStatus === 'finalizing'
+    ))
+    .map((asset) => `${asset.id}:${asset.uploadOperationId ?? ''}:${asset.uploadStatus ?? ''}`)
+    .sort()
+    .join('|')
+
+  useEffect(() => {
+    if (!syncActive || !hydrated) return
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let polling = false
+
+    const poll = async () => {
+      if (polling || controller.signal.aborted) return
+      polling = true
+      try {
+        const options = { ...optionsRef.current, signal: controller.signal }
+        const feed = await listUploadOperations(options)
+        if (controller.signal.aborted) return
+        const local = assetsRef.current
+        const ids = new Set<string>()
+        for (const asset of Object.values(local)) {
+          if (asset.serverSynced === true && asset.uploadPending) ids.add(asset.id)
+        }
+        for (const operation of feed.data) {
+          if (local[operation.asset_id]) ids.add(operation.asset_id)
+        }
+        const settled = await Promise.allSettled(
+          [...ids].map((id) => getAsset(id, options)),
+        )
+        if (controller.signal.aborted) return
+        const records = settled.flatMap((result) => (
+          result.status === 'fulfilled' ? [assetRecordFromServer(result.value)] : []
+        ))
+        if (records.length > 0) {
+          dispatch({ assets: records, type: 'upsertServerAssetMetadata' })
+          for (const record of records) {
+            const preparedAt = record.preparedAt ?? null
+            const preparedContentHash = record.preparedContentHash ?? null
+            const preparedParserId = record.preparedParserId ?? null
+            const preparedText = record.preparedText ?? ''
+            dispatch({
+              assetId: record.id,
+              extractedText: record.extractedText,
+              preparedAt,
+              preparedContentHash,
+              preparedParserId,
+              preparedText,
+              type: 'setServerAssetBody',
+            })
+            loadedAssetsRef.current.add(record.id)
+            const hasPreparedProvenance = Boolean(
+              preparedAt && preparedContentHash && preparedParserId,
+            )
+            if (hasPreparedProvenance && preparedContentHash) {
+              loadedPreparedAssetsRef.current.set(
+                record.id,
+                preparedContentHash,
+              )
+            } else {
+              loadedPreparedAssetsRef.current.delete(record.id)
+            }
+            setBodyLoadStates((current) => ({
+              ...current,
+              [record.id]: hasPreparedProvenance && preparedText.trim()
+                ? { error: null, status: 'ready' }
+                : {
+                    error: hasPreparedProvenance
+                      ? 'Die serverseitig vorbereitete Dokumentquelle ist leer.'
+                      : 'Die serverseitig vorbereitete Dokumentquelle ist nicht verfügbar.',
+                    status: 'failed',
+                  },
+            }))
+            if (
+              record.uploadStatus === 'ready'
+              && hasPreparedProvenance
+            ) {
+              dispatch({
+                assetId: record.id,
+                pending: false,
+                type: 'setFileAssetParsePending',
+              })
+            }
+          }
+        }
+        const stillRunning = records.some((record) => (
+          record.uploadPending && record.uploadStatus !== 'awaiting_upload'
+        ))
+          || feed.data.some((operation) => (
+            Boolean(local[operation.asset_id])
+            && (operation.status === 'running' || operation.status === 'queued')
+          ))
+        setUploadObservationError(null)
+        if (stillRunning && !controller.signal.aborted) {
+          timer = setTimeout(() => void poll(), UPLOAD_POLL_INTERVAL_MS)
+        }
+      } catch (caught) {
+        if (controller.signal.aborted) return
+        setUploadObservationError(messageFromError(caught))
+        // A failed status read is not an upload failure. Keep the operation
+        // visible and retry observation; never rewrite it to a local success.
+        timer = setTimeout(() => void poll(), UPLOAD_POLL_INTERVAL_MS)
+      } finally {
+        polling = false
+      }
+    }
+
+    void poll()
+    return () => {
+      controller.abort()
+      if (timer !== null) clearTimeout(timer)
+    }
+  }, [dispatch, hydrated, projectEpoch, syncActive, uploadPollKey])
+
+  // -- bound-upload bookkeeping ------------------------------------------ #
+
+  const noteServerAssetRecord = useCallback((assetId: string) => {
+    const asset = assetsRef.current[assetId]
+    if (asset) {
+      // The server record mirrors the local placeholder (the binding carried
+      // its timestamps, the body is empty on both sides): seed the synced
+      // fingerprint to the local updatedAt so nothing re-pushes until a real
+      // change, and mark the body authoritative locally.
+      syncedAssetsRef.current.set(assetId, asset.updatedAt)
+      loadedAssetsRef.current.add(assetId)
+      return
+    }
+    // The row was deleted while its upload was in flight: the server now
+    // holds a record the user already removed. Seeding an impossible
+    // fingerprint puts the id into the delete diff — the next flush issues
+    // the compensating server DELETE.
+    syncedAssetsRef.current.set(assetId, 'bound-upload-orphan')
+    void flush()
+  }, [flush])
+
+  const retryUpload = useCallback(async (assetId: string) => {
+    const asset = assetsRef.current[assetId]
+    if (!asset?.uploadOperationId) {
+      throw new Error('Für diesen Upload ist keine fortsetzbare Serveroperation vorhanden.')
+    }
+    const operation = await retryUploadOperation(
+      asset.uploadOperationId,
+      optionsRef.current,
+    )
+    dispatch({
+      assetId,
+      error: operation.error?.message ?? null,
+      operationId: operation.operation_id,
+      serverFileId: asset.serverFileId ?? null,
+      status: operation.status === 'ready' ? 'ready' : 'retrying',
+      type: 'adoptFileAssetUploadLifecycle',
+    })
+  }, [dispatch])
+
   // -- debounced autosave trigger --------------------------------------- #
 
   useEffect(() => {
     if (!syncActive || !hydrated) return
+    // A just-settled, never-synced asset (fresh upload whose parse landed)
+    // flushes immediately: its body should reach the server promptly rather
+    // than wait out a debounce that every pipeline dispatch keeps resetting.
+    const hasFreshSettledAsset = Object.values(fileAssets).some(
+      (asset) => isAssetSettledForSync(asset) && !syncedAssetsRef.current.has(asset.id),
+    )
     const timer = setTimeout(() => {
       void flush()
-    }, AUTOSAVE_DEBOUNCE_MS)
+    }, hasFreshSettledAsset ? 0 : AUTOSAVE_DEBOUNCE_MS)
     return () => clearTimeout(timer)
   }, [fileLibrarySections, fileGroups, fileAssets, syncActive, hydrated, flush])
 
-  return { error, ensureAssetBodiesLoaded }
+  return {
+    bodyLoadStates,
+    error: uploadObservationError ?? error,
+    ensureAssetBodiesLoaded,
+    noteServerAssetRecord,
+    retryUpload,
+  }
 }

@@ -6,14 +6,25 @@
 
 Day-to-day lifecycle commands for the Stack mode compose stack: start, stop, restart, update, backup, restore, reset. Set up the stack first with [Stack quickstart](../getting-started/stack-quickstart.md).
 
-All commands assume the compose file path in a shell variable:
+Raw Compose is the canonical interface. The following temporary shell function
+only keeps the examples readable; it contains the full contract and stores no
+state:
 
 ```bash
-# Both flags every time: -f selects the file, --env-file supplies the values
-# Compose needs while reading it (Postgres password, ports, the required-var
-# guards). Compose does not auto-load a file named .env.stack.
-CF="-f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack"
+inqtrix_compose() {
+  docker compose \
+    -f deploy/compose/compose.stack.yaml \
+    --env-file deploy/.env.stack.secrets \
+    --env-file deploy/.env.stack \
+    "$@"
+}
 ```
+
+Replace `docker` with `podman` when required. For a named setup, replace both
+env paths together and make their `INQTRIX_ENV_FILE` /
+`INQTRIX_SECRETS_FILE` pointers match. The optional `inqtrix-deploy` CLI emits
+this same Compose argv; it does not maintain another config or infer a cloud
+provider.
 
 Volumes are project-prefixed because the compose project is named `inqtrix`: `inqtrix_pgdata`, `inqtrix_objectstore`, `inqtrix_qdrant_storage`, `inqtrix_valkey_data`, `inqtrix_seaweedfs_data` (and `inqtrix_dex_data` with the `oidc` profile).
 
@@ -21,91 +32,213 @@ Volumes are project-prefixed because the compose project is named `inqtrix`: `in
 
 ```bash
 # Default stack: postgres + migrate + api + web
-docker compose $CF up -d --build
+inqtrix_compose up -d --build
 
 # With optional profiles (mix as needed)
-docker compose $CF --profile knowledge --profile workers up -d --build
+inqtrix_compose --profile knowledge --profile workers up -d --build
 
 # Live editor collaboration (requires matching env settings and cookie auth)
-docker compose $CF --profile collaboration up -d --build
+inqtrix_compose --profile collaboration up -d --build
 
-# A specific setup: point --env-file at its own file instead
-docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/env/azure.env up -d
+# A named setup: pass the entire pair
+docker compose -f deploy/compose/compose.stack.yaml \
+  --env-file deploy/.env.stack.secrets.azure \
+  --env-file deploy/.env.stack.azure \
+  up -d --build
 ```
+
+Optional CLI, with the environment selected explicitly:
+
+```bash
+# uv
+uv run inqtrix-deploy \
+  --engine docker \
+  --secrets-file deploy/.env.stack.secrets.azure \
+  --env-file deploy/.env.stack.azure \
+  up --build --detach
+
+# Standard Python/pip
+python -m pip install -e .
+python -m inqtrix.deploy \
+  --engine docker \
+  --secrets-file deploy/.env.stack.secrets.azure \
+  --env-file deploy/.env.stack.azure \
+  up --build --detach
+```
+
+PgBouncer remains opt-in. It starts only when the operator supplies
+`--profile pgbouncer` and changes the visible runtime DSN to the
+`pgbouncer:6432` form. Neither raw Compose nor the CLI activates it
+automatically.
 
 ## Status & logs
 
 ```bash
-docker compose $CF ps                 # wait for healthy
-docker compose $CF logs -f api        # follow the API (startup config errors land here)
-docker compose $CF logs migrate       # one-shot migration output
-docker compose $CF logs -f collaboration # fencing/readiness/persistence status
+inqtrix_compose ps                       # wait for healthy
+inqtrix_compose logs -f api              # startup/config errors
+inqtrix_compose logs migrate             # one-shot migration output
+inqtrix_compose logs -f collaboration    # fencing/readiness/persistence
+```
+
+The CLI equivalents address the same project and pair:
+
+```bash
+inqtrix-deploy status
+inqtrix-deploy logs api --follow --tail 200
 ```
 
 ## Stop / restart
 
 ```bash
-docker compose $CF down               # stop, KEEP volumes/data
-docker compose $CF restart api web    # restart without rebuilding
-docker compose $CF restart api collaboration web # collaboration-enabled stack
+inqtrix_compose down
+inqtrix_compose restart api web
+inqtrix_compose restart api collaboration web
+```
+
+Equivalent optional CLI:
+
+```bash
+inqtrix-deploy down
+inqtrix-deploy restart api web
 ```
 
 ## Update
 
 Pull the new code, then choose the update path that matches the configured
-migration RLS mode. Bundled/`auto` and dedicated `bypass` installations use
-normal Compose orchestration:
+migration authority. Every installed-schema revision change requires the same
+maintenance boundary, including bundled/`auto` and dedicated `bypass`: build
+the new images, record active profiles, stop ingress plus API, worker,
+Collaboration and all poolers, run the one-shot migration with
+`INQTRIX_MIGRATION_SERVICES_QUIESCED=true`, verify head, then recreate only the
+recorded workloads. The exact raw-Compose sequence is documented in
+[Database migrations](database-migrations.md).
+
+Normal Compose orchestration remains valid for a fresh install or a restart
+whose database is already at the packaged head:
 
 ```bash
 git pull
-docker compose $CF up -d --build
+inqtrix_compose up -d --build
 
 # Preserve active profiles in the same orchestrated update
-docker compose $CF --profile collaboration up -d --build
+inqtrix_compose --profile collaboration up -d --build
 ```
 
-Managed PostgreSQL `owner` mode uses the maintenance wrapper instead; do not
-run `compose up` first:
+Managed PostgreSQL `owner` mode may use the guarded CLI operation; do not run
+`compose up` first:
 
 ```bash
 git pull
-deploy/scripts/compose-owner-upgrade.sh
+inqtrix-deploy \
+  --external-db \
+  --migration-env-file deploy/.env.migrate.secrets.azure \
+  --secrets-file deploy/.env.stack.secrets.azure \
+  --env-file deploy/.env.stack.azure \
+  owner-upgrade --confirm-project inqtrix
 ```
 
-The wrapper builds the new images before draining active database clients,
+The command builds the new images before draining active database clients,
 runs the one-shot migration, then rolls the previously active API, worker,
 Collaboration and web services to those images. A failure before the migration
 attempt restores old containers; an interrupted or failed attempt leaves all
 database clients stopped because its commit state is not safe to infer from a
-CLI exit code. Verify the job and database revision before recovery. Set
-`INQTRIX_COMPOSE_FILE` and `INQTRIX_STACK_ENV_FILE` when the Compose file or
-stack env lives outside the repository defaults.
+CLI exit code. Verify the job and database revision before recovery. The exact
+manual Compose sequence is documented as the canonical counterpart in
+[Database migrations](database-migrations.md).
 
-Do not run `inqtrix-migrate` manually during a normal update. Managed
-PostgreSQL uses a separate migration env file and explicit RLS mode. See
-[Database migrations](database-migrations.md). A manual command is break-glass
-only after a verified backup and full workload drain.
+Do not run `inqtrix-migrate` while any workload or pooler session remains.
+Managed PostgreSQL uses a separate migration env file and explicit RLS mode.
+See [Database migrations](database-migrations.md). A direct command is allowed
+only inside the documented maintenance window after a verified backup and full
+database-client drain.
+
+## Rotate the bundled PostgreSQL password
+
+Changing `INQTRIX_PG_PASSWORD` in a file does not alter an initialized
+PostgreSQL role. Generate a URL-safe value, stage it in the selected mode-`0600`
+secret file, then let the guarded operation quiesce clients, apply `ALTER ROLE`
+over stdin, and recreate the affected services:
+
+```bash
+inqtrix-deploy \
+  --engine docker \
+  --secrets-file deploy/.env.stack.secrets.azure \
+  --env-file deploy/.env.stack.azure \
+  db rotate-password --confirm-project inqtrix
+```
+
+The value is read only from the selected secret file. It is not accepted as a
+CLI argument and is never printed. The visible DSN must continue to reference
+`${INQTRIX_PG_PASSWORD}`. This operation deliberately rejects external
+databases; use the provider's rotation procedure there.
+
+The raw administrative counterpart is intentionally interactive so the new
+password is not exposed in process arguments. First record exactly which
+database clients are running; keep this shell and its captured positional
+arguments until recovery is complete:
+
+```bash
+set -- $(
+  inqtrix_compose ps --services --filter status=running |
+    awk '/^(api|worker|collaboration|pgbouncer)$/'
+)
+printf 'Database clients to restore: %s\n' "$*"
+if [ "$#" -gt 0 ]; then
+  inqtrix_compose stop "$@"
+fi
+inqtrix_compose exec postgres psql -U inqtrix -d inqtrix
+```
+
+At the `psql` prompt run `\password inqtrix`, enter the exact staged value
+twice, then `\q`. Recreate PostgreSQL and exactly the clients captured above:
+
+```bash
+inqtrix_compose up -d --wait --no-deps --force-recreate postgres
+if [ "$#" -gt 0 ]; then
+  inqtrix_compose up -d --wait --no-deps --force-recreate "$@"
+fi
+```
+
+This deliberately does not infer profiles or start an optional worker,
+Collaboration service, or PgBouncer that was inactive. Verify health and the
+selected runtime DSN before reopening traffic.
 
 ## Local development (changing the code)
 
 The Stack-mode images serve a **built** bundle — editing source does **not** hot-reload. After a code change, rebuild the affected image:
 
 ```bash
-docker compose $CF up -d --build web    # after a frontend change
-docker compose $CF up -d --build api    # after a backend change
+inqtrix_compose up -d --build web    # after a frontend change
+inqtrix_compose up -d --build api    # after a backend change
 ```
 
 For active development with **hot reload**, do not use the Stack-mode images. Run the frontend dev server (and optionally the backend) on the host:
 
 ```bash
 # 1. Backing services + API only (Postgres + migrate + API, no web container):
-docker compose $CF up -d postgres migrate api
+inqtrix_compose up -d postgres migrate api
 
 # 2. Frontend with hot reload (Vite, http://127.0.0.1:5173, proxies /api /v1 /health to the API):
-pnpm run ui:dev
+npm run ui:dev
 ```
 
-Edit files under `apps/research-desk/` and the browser updates instantly. To also iterate on the **backend** with a fast restart, run it on the host instead of the `api` container (`uv run python -m inqtrix`) against the same Postgres — see the manual/host setup in [Platform components](../getting-started/platform-components.md#manual--host-platform-framework-mode) and the UI paths in [First research run](../getting-started/first-research-run.md). Point the Vite proxy at a non-default backend with `VITE_INQTRIX_API_BASE_URL`.
+Edit files under `apps/research-desk/` and the browser updates instantly. To
+also iterate on the **backend** with a fast restart, run it on the host instead
+of the `api` container against the same Postgres:
+
+```bash
+# uv installation:
+uv run python -m inqtrix
+
+# or after `python -m pip install -e .` in an active venv:
+python -m inqtrix
+```
+
+See the manual/host setup in
+[Platform components](../getting-started/platform-components.md#manual--host-platform-framework-mode)
+and the UI paths in
+[First research run](../getting-started/first-research-run.md). Point the Vite
+proxy at a non-default backend with `VITE_INQTRIX_API_BASE_URL`.
 
 ## Backup
 
@@ -113,7 +246,7 @@ Capture **both** the Postgres database and the object-store volume - uploaded bl
 
 ```bash
 # Postgres dump
-docker compose $CF exec -T postgres pg_dump -U inqtrix inqtrix > backup-$(date +%F).sql
+inqtrix_compose exec -T postgres pg_dump -U inqtrix inqtrix > backup-$(date +%F).sql
 
 # Object-store volume (local backend)
 docker run --rm -v inqtrix_objectstore:/data -v "$PWD:/out" \
@@ -132,7 +265,7 @@ alone. See [Deploy editor collaboration](editor-collaboration.md#backup-and-rest
 
 ```bash
 # Postgres (into a fresh, migrated database)
-cat backup-YYYY-MM-DD.sql | docker compose $CF exec -T postgres psql -U inqtrix inqtrix
+cat backup-YYYY-MM-DD.sql | inqtrix_compose exec -T postgres psql -U inqtrix inqtrix
 
 # Object-store volume
 docker run --rm -v inqtrix_objectstore:/data -v "$PWD:/in" \
@@ -142,9 +275,10 @@ docker run --rm -v inqtrix_objectstore:/data -v "$PWD:/in" \
 ## Reset (destroy all data)
 
 ```bash
-docker compose $CF down -v            # removes containers AND named volumes
+inqtrix_compose down --volumes        # removes containers AND named volumes
 ```
 
+The CLI requires its explicit destructive confirmation for the same operation.
 Re-running `up -d --build` then re-migrates a clean database.
 
 ## Collaboration kill switch

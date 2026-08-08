@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { CollaborationFixtureControlClient, parseOperationState } from './control.ts'
+import {
+  CollaborationFixtureControlClient,
+  controlRequestTimeoutMs,
+  parseOperationState,
+} from './control.ts'
 import type { CollaborationControlFixture } from './config.ts'
 
 const fixture: CollaborationControlFixture = {
@@ -15,9 +19,17 @@ const fixture: CollaborationControlFixture = {
     restart: '/restart',
     restore: '/restore',
   },
+  runId: 'inqv-control-client-test-01',
 }
 
 describe('collaboration fixture controls', () => {
+  test('allows recovery controls to wait for container health without widening fast controls', () => {
+    assert.equal(controlRequestTimeoutMs('restore'), 45_000)
+    assert.equal(controlRequestTimeoutMs('restart'), 45_000)
+    assert.equal(controlRequestTimeoutMs('armLostAck'), 5_000)
+    assert.equal(controlRequestTimeoutMs('operationStatus'), 5_000)
+  })
+
   test('parses the observable fault state without dropping sequence fields', () => {
     assert.deepEqual(parseOperationState({
       close_code: 4503,
@@ -101,12 +113,16 @@ describe('collaboration fixture controls', () => {
   test('uses a distinct authenticated control path for the FastAPI gateway outage', async () => {
     let observedUrl = ''
     let observedBody: unknown = null
+    let observedRunId = ''
     const client = new CollaborationFixtureControlClient(
       fixture,
       { INQTRIX_E2E_CONTROL_TOKEN: 'test-control-token' },
       async (input, init) => {
         observedUrl = String(input)
         observedBody = JSON.parse(String(init?.body))
+        observedRunId = new Headers(init?.headers).get(
+          'X-Inqtrix-Verification-Run-Id',
+        ) ?? ''
         return new Response(JSON.stringify({
           operation_id: 'gateway-operation',
           outage_layer: 'fastapi_gateway',
@@ -122,6 +138,7 @@ describe('collaboration fixture controls', () => {
 
     assert.equal(observedUrl, 'https://control.example.test/gateway-outage:arm')
     assert.deepEqual(observedBody, { document_id: 'document-id', user_id: 'user-id' })
+    assert.equal(observedRunId, fixture.runId)
     assert.equal(operation.outageLayer, 'fastapi_gateway')
   })
 

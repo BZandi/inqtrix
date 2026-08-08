@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from typing import Final
 
-SCHEMA_HEAD_REVISION: Final = "0049_tenant_integrity"
+SCHEMA_HEAD_REVISION: Final = "0078_chat_thread_model_selection"
 """Single Alembic head shipped by this source tree."""
 
 TENANT_RLS_POLICY: Final = "tenant_isolation"
@@ -38,11 +38,20 @@ TENANT_RLS_TABLES: Final[tuple[str, ...]] = (
     "chat_messages",
     "chat_thread_groups",
     "chat_threads",
+    "contextualization_provider_circuits",
+    "deletion_operation_assets",
+    "deletion_operation_events",
+    "deletion_operations",
+    "editor_collaboration_comment_messages",
+    "editor_collaboration_comment_reads",
+    "editor_collaboration_comment_threads",
     "editor_collaboration_instances",
     "editor_collaboration_leases",
     "editor_collaboration_snapshots",
     "editor_collaboration_updates",
     "editor_comments",
+    "editor_document_guest_identities",
+    "editor_document_share_links",
     "editor_documents",
     "editor_folders",
     "editor_patches",
@@ -52,13 +61,18 @@ TENANT_RLS_TABLES: Final[tuple[str, ...]] = (
     "invitations",
     "knowledge_chunks",
     "knowledge_collections",
+    "knowledge_document_revisions",
     "knowledge_documents",
+    "knowledge_index_generations",
     "knowledge_session_groups",
     "knowledge_sessions",
+    "llm_usage",
     "local_credentials",
     "personal_access_tokens",
     "prompt_templates",
     "quota_limits",
+    "quota_stock_lifecycles",
+    "quota_usage_adjustments",
     "quota_usage_counters",
     "resource_shares",
     "run_approvals",
@@ -70,7 +84,11 @@ TENANT_RLS_TABLES: Final[tuple[str, ...]] = (
     "run_plans",
     "runs",
     "skill_templates",
+    "source_lifecycles",
     "tenant_security_state",
+    "upload_operation_events",
+    "upload_operation_outbox",
+    "upload_operations",
     "user_events",
     "users",
     "vector_index_history",
@@ -205,13 +223,30 @@ def postgres_direct_relation_acl_sql(
     )"""
 
 
+WORM_TENANT_TABLES: Final = ("audit_log", "llm_usage")
+"""Append-only tenant tables: the app role holds INSERT/SELECT only.
+
+Deletion runs exclusively through their SECURITY DEFINER prune doors
+(``audit_prune``, ``llm_usage_prune``). EVERY privilege assertion —
+migration postconditions AND the runtime contract — must derive its
+WORM expectation from this ONE tuple; a second hard-coded table name
+is how a new append-only table silently fails its readiness probe.
+"""
+
+
+def worm_relname_sql(relation_alias: str) -> str:
+    """SQL predicate matching the append-only tenant tables."""
+    names = ", ".join(f"'{name}'" for name in WORM_TENANT_TABLES)
+    return f"{relation_alias}.relname IN ({names})"
+
+
 def postgres_tenant_table_acl_sql(
     relation_alias: str,
     grantee_oid_expression: str,
 ) -> str:
     """Build the canonical direct ACL predicate for a tenant table."""
     expected = (
-        f"CASE WHEN {relation_alias}.relname = 'audit_log' "
+        f"CASE WHEN {worm_relname_sql(relation_alias)} "
         "THEN ARRAY['INSERT', 'SELECT']::text[] "
         "ELSE ARRAY['DELETE', 'INSERT', 'SELECT', 'UPDATE']::text[] END"
     )

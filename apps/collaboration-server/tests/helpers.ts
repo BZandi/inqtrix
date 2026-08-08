@@ -49,7 +49,7 @@ export function settings(
     reconcileMaxHashes: 256,
     reconcileRateLimit: 10,
     reconcileRateWindowMs: 10_000,
-    schemaVersion: 1,
+    schemaVersion: 2,
     secret: '0123456789abcdef0123456789abcdef',
     snapshotIdleMs: 5_000,
     snapshotMaxUpdates: 256,
@@ -77,7 +77,7 @@ export async function documentState(
     generation,
     persistedSequence: sequence,
     schemaHash: await getEditorSchemaFingerprint(),
-    schemaVersion: 1,
+    schemaVersion: 2,
     snapshot: {
       coveredSequence: sequence,
       stateHash: hashBytes(stateUpdate),

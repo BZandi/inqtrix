@@ -58,9 +58,9 @@ EVAL_API_KEY = os.environ.get("INQTRIX_EVAL_EMBEDDING_API_KEY", "")
 EVAL_MODEL = os.environ.get(
     "INQTRIX_EVAL_EMBEDDING_MODEL", "text-embedding-3-small"
 )
-# Azure path: reuse the deployment's established variables (run via
-# `uv run --env-file .env ...`) — same fallback chain as the settings
-# bridge.
+# Azure path: reuse the deployment's established variables (load `.env`
+# through uv or export it in a standard pip/plain-Python environment) — same
+# fallback chain as the settings bridge.
 EVAL_AZURE_ENDPOINT = (
     os.environ.get("INQTRIX_EVAL_AZURE_ENDPOINT", "")
     or os.environ.get("AZURE_AI_PROJECT_ENDPOINT", "")

@@ -1,9 +1,10 @@
 import type { HocuspocusProvider } from '@hocuspocus/provider'
 import {
+  INQTRIX_STRUCTURE_SUGGESTION_ATTR,
   SUGGESTION_MARK_NAMES,
+  isStructureSuggestionData,
   suggestionDescriptors,
   type CollaborationChangeKind,
-  type SuggestionKind,
 } from '@inqtrix/editor-schema'
 import type { Editor } from '@tiptap/react'
 import type { Transaction } from '@tiptap/pm/state'
@@ -39,6 +40,27 @@ type AwarenessAdapter = {
   off?: (event: 'change' | 'update', listener: () => void) => void
   on?: (event: 'change' | 'update', listener: () => void) => void
   states?: Map<number, unknown>
+}
+
+export function bindInspectorSuggestionEvents(
+  editor: Editor,
+  handlers: {
+    onCollision: (event: Event) => void
+    onError: (event: Event) => void
+  },
+): (() => void) | null {
+  if (editor.isDestroyed) return null
+  // Tiptap destroys the legacy editor while React is still cleaning up the
+  // inspector effect during the one-way Markdown -> collaboration remount.
+  // Capture the mounted DOM node once; resolving `editor.view` again in the
+  // cleanup throws after the editor has been destroyed.
+  const viewDom = editor.view.dom
+  viewDom.addEventListener(collaborationSuggestionErrorEvent, handlers.onError)
+  viewDom.addEventListener(collaborationSuggestionCollisionEvent, handlers.onCollision)
+  return () => {
+    viewDom.removeEventListener(collaborationSuggestionErrorEvent, handlers.onError)
+    viewDom.removeEventListener(collaborationSuggestionCollisionEvent, handlers.onCollision)
+  }
 }
 
 export type InspectorCollaborationSnapshot = {
@@ -83,18 +105,10 @@ export function useInspectorCollaborationSnapshot(
       const detail = (event as CustomEvent<CollaborationSuggestionCollision | null>).detail
       setCollision(detail?.patchId && detail.suggestionId ? detail : null)
     }
-    editor.view.dom.addEventListener(collaborationSuggestionErrorEvent, handleSuggestionError)
-    editor.view.dom.addEventListener(
-      collaborationSuggestionCollisionEvent,
-      handleSuggestionCollision,
-    )
-    return () => {
-      editor.view.dom.removeEventListener(collaborationSuggestionErrorEvent, handleSuggestionError)
-      editor.view.dom.removeEventListener(
-        collaborationSuggestionCollisionEvent,
-        handleSuggestionCollision,
-      )
-    }
+    return bindInspectorSuggestionEvents(editor, {
+      onCollision: handleSuggestionCollision,
+      onError: handleSuggestionError,
+    }) ?? undefined
   }, [editor])
 
   useEffect(() => {
@@ -228,7 +242,7 @@ export function suggestionExcerpts(editor: Editor): Map<string, InspectorSuggest
   const excerpts = new Map<string, InspectorSuggestionExcerpt>()
   editor.state.doc.descendants((node, position) => {
     for (const mark of node.marks) {
-      if (!SUGGESTION_MARK_NAMES.has(mark.type.name as SuggestionKind)) continue
+      if (!SUGGESTION_MARK_NAMES.has(mark.type.name)) continue
       const suggestionId = mark.attrs.suggestionId
       if (typeof suggestionId !== 'string' || !suggestionId) continue
       const existing = excerpts.get(suggestionId) ?? {
@@ -246,9 +260,39 @@ export function suggestionExcerpts(editor: Editor): Map<string, InspectorSuggest
       existing.position = Math.min(existing.position, position)
       excerpts.set(suggestionId, existing)
     }
+    const structure = node.attrs[INQTRIX_STRUCTURE_SUGGESTION_ATTR]
+    if (isStructureSuggestionData(structure)) {
+      excerpts.set(structure.suggestionId, {
+        deletionText: structureSourceLabel(node.type.name, node.attrs.level),
+        insertionText: structureActionLabel(structure.action),
+        modificationText: node.textContent,
+        position,
+      })
+    }
     return true
   })
   return excerpts
+}
+
+function structureSourceLabel(type: string, level: unknown): string {
+  if (type === 'heading') return `H${String(level ?? '')}`
+  if (type === 'codeBlock') return 'Code'
+  return '¶'
+}
+
+function structureActionLabel(action: string): string {
+  const labels: Record<string, string> = {
+    blockquote: '❝ Quote',
+    bulletList: '• List',
+    codeBlock: 'Code',
+    heading1: 'H1',
+    heading2: 'H2',
+    heading3: 'H3',
+    orderedList: '1. List',
+    paragraph: '¶',
+    taskList: '☐ List',
+  }
+  return labels[action] ?? action
 }
 
 type UseInspectorActivityOptions = {
@@ -549,12 +593,17 @@ export function normalizeActivity(
       actor: activityActor(item),
       actorKind: item.actor_kind,
       commandId: item.command_id,
+      commentAction: item.comment_action,
       createdAt: item.created_at * 1_000,
       fromSequence: item.from_sequence,
       id: `${item.from_sequence}:${item.to_sequence}:${item.command_id ?? item.type}`,
+      omittedEditCount: item.summary?.omitted_edit_count ?? 0,
+      outcome: item.outcome ?? null,
+      summary: item.summary?.edits ?? [],
       suggestionIds: item.suggestion_ids,
       toSequence: item.to_sequence,
       type: item.type,
+      updateCount: item.update_count ?? 1,
     }
   })
 }
@@ -607,7 +656,7 @@ function actorColor(kind: EditorCollaborationActivity['actor_kind']): string {
 
 export function collaborationChangeKinds(
   entries: readonly InspectorHistoryEntry[],
-): CollaborationChangeKind[] {
+): Array<CollaborationChangeKind | 'comment'> {
   return [...new Set(entries.map((entry) => entry.type))]
 }
 

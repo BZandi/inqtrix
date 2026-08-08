@@ -8,6 +8,7 @@ export type CommandMenuItem = {
   id: string
   label: string
   description?: string
+  disabled?: boolean
   icon: LucideIcon
   /** Group header label; consecutive equal values render under one header. */
   group: string
@@ -58,7 +59,10 @@ export function CommandMenu({
   }, [activeIndex])
 
   return (
-    <div className="w-max min-w-[15rem] max-w-sm overflow-hidden rounded-xl border border-border bg-popover shadow-lg animate-in fade-in zoom-in-95 motion-reduce:animate-none">
+    <div
+      className="w-max min-w-[15rem] max-w-sm overflow-hidden rounded-xl border border-border bg-popover shadow-lg animate-in fade-in zoom-in-95 motion-reduce:animate-none"
+      data-editor-command-menu
+    >
       <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-1.5">
         <span className="text-[11px] font-medium text-muted-foreground">{title}</span>
         <span className="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground/50">{items.length}</span>
@@ -78,28 +82,46 @@ export function CommandMenu({
                 const active = index === activeIndex
                 return (
                   <button
+                    aria-disabled={item.disabled || undefined}
                     className={cn(
                       'relative flex w-full min-w-0 items-center gap-2.5 px-2.5 py-1.5 text-left transition-colors',
-                      active ? 'bg-accent' : 'hover:bg-accent/50',
+                      item.disabled
+                        ? 'cursor-not-allowed text-muted-foreground/55'
+                        : active
+                          ? 'bg-accent'
+                          : 'hover:bg-accent/50',
                     )}
+                    disabled={item.disabled}
                     key={item.id}
                     onMouseDown={(event) => {
                       event.preventDefault()
-                      onSelect(index)
+                      if (!item.disabled) onSelect(index)
                     }}
-                    onMouseEnter={() => onHover(index)}
+                    onMouseEnter={() => {
+                      if (!item.disabled) onHover(index)
+                    }}
                     ref={active ? activeRef : undefined}
                     type="button"
                   >
-                    {active ? <span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-brand" /> : null}
-                    <Icon className={cn('size-4 shrink-0', active ? 'text-brand' : 'text-muted-foreground/70')} />
+                    {active && !item.disabled ? <span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-brand" /> : null}
+                    <Icon className={cn(
+                      'size-4 shrink-0',
+                      item.disabled
+                        ? 'text-muted-foreground/35'
+                        : active
+                          ? 'text-brand'
+                          : 'text-muted-foreground/70',
+                    )} />
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[13px] font-semibold text-foreground">{item.label}</span>
+                      <span className={cn(
+                        'block truncate text-[13px] font-semibold',
+                        item.disabled ? 'text-muted-foreground/55' : 'text-foreground',
+                      )}>{item.label}</span>
                       {item.description ? (
                         <span className="block truncate text-[11px] text-muted-foreground">{item.description}</span>
                       ) : null}
                     </span>
-                    {active ? <Kbd>↵</Kbd> : null}
+                    {active && !item.disabled ? <Kbd>↵</Kbd> : null}
                   </button>
                 )
               })}

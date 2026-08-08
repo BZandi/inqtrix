@@ -23,20 +23,219 @@ export const SYNC_STEP_ONE = 0
 export const SYNC_STEP_TWO = 1
 export const SYNC_UPDATE = 2
 export const PROVIDER_VERSION = '4.3.0'
-export const RELEASE_CONNECTIONS = 1_000
-export const RELEASE_WRITERS = 100
-export const RELEASE_VISIBLE_P95_MS = 250
-export const RELEASE_DURABLE_P95_MS = 500
-export const RELEASE_OBSERVER_COHORT = 20
-export const RELEASE_MIN_DURATION_MS = 30_000
-export const RELEASE_MIN_ACK_ROUNDS_PER_WRITER = 10
+const COLLABORATION_ROOM_PATTERN = /^inqtrix-editor-v1:([A-Za-z0-9_-]{1,160}):g[1-9][0-9]*$/
+export const CAPACITY_CONNECTIONS = 1_000
+export const CAPACITY_WRITERS = 100
+export const CAPACITY_VISIBLE_P95_MS = 250
+export const CAPACITY_DURABLE_P95_MS = 500
+export const CAPACITY_OBSERVER_COHORT = 20
+export const CAPACITY_MIN_DURATION_MS = 30_000
+export const CAPACITY_MIN_ACK_ROUNDS_PER_WRITER = 10
+export const SMOKE_VISIBLE_WARNING_P95_MS = 300
+// Sustained-load profiles (soak, ramp) carry the EXPLICITLY ACCEPTED
+// CARRY-F-33 risk: the visible p95 is known to sit above the 250ms
+// target under long or wide load, and that finding is tracked in its own
+// architecture programme. Reporting an accepted risk as a hard failure
+// adds no information and would keep every run permanently red.
+//
+// The band is deliberately NOT unbounded. Above this ceiling an update
+// takes seconds to become visible, which is a functional defect rather
+// than a latency nuance — and it stays a hard failure. The production
+// `capacity` gate never enters this band; its budget stays absolute.
+export const ACCEPTED_LATENCY_CEILING_P95_MS = 2_000
 export const API_DEGRADATION_LIMIT_PERCENT = 20
+export const API_P95_LIMIT_MS = 50
 export const API_PROBE_SAMPLES = 20
+export const API_RELATIVE_GATE_MIN_BASELINE_MS = 10
 export const API_PROBE_CONTRACT = 'inqtrix-health-v1'
 export const INSTANCE_PROBE_CONTRACT = 'inqtrix-collaboration-instance-v1'
 export const INSTANCE_PROBE_PATH = '/collaboration/instance'
 export const SESSION_REISSUE_CONTRACT = 'inqtrix-collaboration-session-reissue-v1'
-export const RELEASE_LEASE_TTL_SECONDS = 60
+export const LOAD_NETWORK_CONTROL_CONTRACT = 'inqtrix-load-network-control-v1'
+export const CAPACITY_LEASE_TTL_SECONDS = 60
+// -- local capacity ramp ------------------------------------------------ #
+//
+// DELIBERATELY NOT the `capacity` gate. Capacity is the production-like
+// proof: it demands an operator-prepared fixture with its own identities
+// plus an HTTPS control plane (restart + session reissue). This ramp is
+// the LOCAL, self-provisioning fan-out proof — every socket is issued to
+// one of at most RAMP_MAX_IDENTITIES real accounts, so it measures socket
+// and room fan-out, NOT tenant or identity scale. A completed ramp
+// therefore never discharges the production capacity gate; the summary
+// keeps `productionProofOutstanding` true by construction.
+export const RAMP_STAGES = Object.freeze([20, 100, 250, 500, 1_000])
+export const RAMP_MAX_IDENTITIES = 24
+// The product caps concurrent collaboration sessions per user and
+// document (INQTRIX_COLLABORATION_MAX_SESSIONS_PER_USER_DOCUMENT,
+// default 5). That is an abuse guard, so the ramp OBEYS it instead of
+// asking for it to be widened — a rung that would need a weakened
+// security control is not a rung this harness may claim.
+export const RAMP_SESSIONS_PER_IDENTITY = 5
+export const RAMP_WRITER_SHARE = 0.25
+export const RAMP_MAX_WRITERS = 100
+export const RAMP_OBSERVER_SHARE = 0.05
+export const RAMP_MAX_OBSERVERS = 20
+
+/** The socket ceiling this host may legitimately reach: identities times
+ * the product's own per-user session cap. Nothing above it is attemptable
+ * without weakening a security control, so nothing above it is planned. */
+export function rampSocketCeiling(
+  identities = RAMP_MAX_IDENTITIES,
+  sessionsPerIdentity = RAMP_SESSIONS_PER_IDENTITY,
+) {
+  return identities * sessionsPerIdentity
+}
+
+/** Split the ladder into the rungs the product contract permits locally
+ * and the rungs it does not. The second list is not a failure — it is the
+ * visible, unproven remainder that only a production-scale environment
+ * with many real identities can discharge. */
+export function partitionRampStages(
+  stages = RAMP_STAGES,
+  ceiling = rampSocketCeiling(),
+) {
+  return {
+    ceiling,
+    reachable: stages.filter((connections) => connections <= ceiling),
+    unreachable: stages.filter((connections) => connections > ceiling),
+  }
+}
+
+/** The stage ladder with its per-stage workload shape. Pure arithmetic:
+ * the engine executes it, the reporter prints it, and the tests pin it. */
+export function planRampStages(stages = RAMP_STAGES) {
+  let previousWriters = 0
+  return stages.map((connections) => {
+    const writers = Math.min(
+      RAMP_MAX_WRITERS,
+      Math.max(previousWriters, Math.ceil(connections * RAMP_WRITER_SHARE)),
+    )
+    previousWriters = writers
+    return {
+      connections,
+      observers: Math.min(
+        RAMP_MAX_OBSERVERS,
+        Math.max(1, Math.ceil(connections * RAMP_OBSERVER_SHARE)),
+      ),
+      sessionsPerIdentity: Math.ceil(connections / RAMP_MAX_IDENTITIES),
+      writers,
+    }
+  })
+}
+
+/** Collapse executed stages into one verdict.
+ *
+ * The two stop kinds are deliberately NOT equivalent:
+ *   - `integrity`  -> red. A lost or duplicated mutation, an authorization
+ *                     break, or an OOM/restart is a product failure at any
+ *                     scale.
+ *   - `budget`     -> a controlled stop, not a failure. The host ran out of
+ *                     headroom or latency budget; the highest passed rung
+ *                     is the honest local result and the remaining rungs
+ *                     stay visibly unproven.
+ * Silence is never a pass: an empty ramp is `failed`.
+ */
+export function summarizeRamp(results, stages = RAMP_STAGES) {
+  const executed = Array.isArray(results) ? results : []
+  const passed = []
+  let stopKind = null
+  let reason = null
+  for (const result of executed) {
+    if (result.integrityPassed === false) {
+      stopKind = 'integrity'
+      reason = result.reason ?? `integrity failed at ${result.connections} sockets`
+      break
+    }
+    if (result.latencyPassed === false) {
+      stopKind = 'budget'
+      reason = result.reason ?? `budget exceeded at ${result.connections} sockets`
+      break
+    }
+    passed.push(result.connections)
+  }
+  const highestPassedConnections = passed.length > 0 ? Math.max(...passed) : 0
+  const unreachedConnections = stages.filter(
+    (connections) => !passed.includes(connections),
+  )
+  if (executed.length === 0) {
+    return {
+      highestPassedConnections: 0,
+      identityCeiling: RAMP_MAX_IDENTITIES,
+      productionProofOutstanding: true,
+      reason: 'The ramp executed no stage.',
+      status: 'failed',
+      stopKind: 'integrity',
+      unreachedConnections: [...stages],
+    }
+  }
+  return {
+    highestPassedConnections,
+    identityCeiling: RAMP_MAX_IDENTITIES,
+    // Fan-out from a capped identity pool never replaces the external
+    // production-scale proof, not even on a complete ladder.
+    productionProofOutstanding: true,
+    reason,
+    status: stopKind === 'integrity'
+      ? 'failed'
+      : stopKind === 'budget'
+        ? 'stopped'
+        : 'passed',
+    stopKind,
+    unreachedConnections,
+  }
+}
+
+export const SOAK_CONNECTIONS = 25
+export const SOAK_WRITERS = 5
+export const SOAK_OBSERVER_COHORT = 10
+export const SOAK_PHASE_DURATION_MS = 5 * 60 * 1_000
+export const SOAK_MIN_DURATION_MS = 6 * SOAK_PHASE_DURATION_MS
+export const SOAK_MIN_ACK_ROUNDS_PER_WRITER = 60
+export const SOAK_WRITER_INTERVAL_MS = 5_000
+export const SOAK_NETWORK_PHASES = Object.freeze([
+  Object.freeze({
+    durableAckP95Ms: 500,
+    durationMs: SOAK_PHASE_DURATION_MS,
+    id: 'normal',
+    network: Object.freeze({ kind: 'normal' }),
+    visibleUpdateP95Ms: 250,
+  }),
+  Object.freeze({
+    durableAckP95Ms: 750,
+    durationMs: SOAK_PHASE_DURATION_MS,
+    id: 'latency-100ms',
+    network: Object.freeze({ delayMs: 100, kind: 'delay' }),
+    visibleUpdateP95Ms: 500,
+  }),
+  Object.freeze({
+    durableAckP95Ms: 1_200,
+    durationMs: SOAK_PHASE_DURATION_MS,
+    id: 'latency-300ms',
+    network: Object.freeze({ delayMs: 300, kind: 'delay' }),
+    visibleUpdateP95Ms: 900,
+  }),
+  Object.freeze({
+    durableAckP95Ms: 1_000,
+    durationMs: SOAK_PHASE_DURATION_MS,
+    id: 'bandwidth-2mbit',
+    network: Object.freeze({ kind: 'rate', rate: '2mbit' }),
+    visibleUpdateP95Ms: 750,
+  }),
+  Object.freeze({
+    durableAckP95Ms: 1_500,
+    durationMs: SOAK_PHASE_DURATION_MS,
+    id: 'packet-loss-1pct',
+    network: Object.freeze({ kind: 'loss', percent: 1 }),
+    visibleUpdateP95Ms: 1_000,
+  }),
+  Object.freeze({
+    durableAckP95Ms: 500,
+    durationMs: SOAK_PHASE_DURATION_MS,
+    id: 'normalized',
+    network: Object.freeze({ kind: 'normal' }),
+    visibleUpdateP95Ms: 250,
+  }),
+])
 
 const API_PROBE_TIMEOUT_MS = 5_000
 const SESSION_REISSUE_BATCH_SIZE = 100
@@ -44,9 +243,10 @@ const SESSION_REISSUE_TIMEOUT_MS = 30_000
 const REISSUED_LEASE_MIN_REMAINING_SECONDS = 45
 const REISSUED_LEASE_CLOCK_SKEW_SECONDS = 5
 const LEASE_REFRESH_SAFETY_MS = 1_000
+const VERIFICATION_RUN_ID_PATTERN = /^inqv-[a-z0-9][a-z0-9-]{7,75}$/
 const LOCAL_ORIGIN = Object.freeze({ kind: 'load-test-local-update' })
 const REMOTE_ORIGIN = Object.freeze({ kind: 'load-test-remote-update' })
-const RELEASE_FIXED_FLAGS = new Set([
+const FIXED_WORKLOAD_FLAGS = new Set([
   '--connections',
   '--writers',
   '--visible-p95-ms',
@@ -55,29 +255,51 @@ const RELEASE_FIXED_FLAGS = new Set([
   '--min-duration-ms',
   '--observers',
   '--post-sample-quiet-ms',
+  '--writer-interval-ms',
 ])
 
 export function parseArguments(args, environment = process.env) {
   const mode = requestedMode(args)
   const options = {
     allowInsecureTls: false,
-    connectConcurrency: mode === 'release' ? 100 : 20,
-    connections: mode === 'release' ? RELEASE_CONNECTIONS : 20,
+    connectConcurrency: mode === 'capacity' ? 100 : 20,
+    connections: mode === 'capacity'
+      ? CAPACITY_CONNECTIONS
+      : mode === 'soak'
+        ? SOAK_CONNECTIONS
+        : 20,
     connectTimeoutMs: 30_000,
-    durableAckP95Ms: RELEASE_DURABLE_P95_MS,
+    durableAckP95Ms: CAPACITY_DURABLE_P95_MS,
     fixturePath: environment.INQTRIX_LOAD_SESSION_FIXTURE ?? null,
     help: false,
     json: false,
-    minAckRoundsPerWriter: mode === 'release' ? RELEASE_MIN_ACK_ROUNDS_PER_WRITER : 2,
-    minDurationMs: mode === 'release' ? RELEASE_MIN_DURATION_MS : 1_000,
+    minAckRoundsPerWriter: mode === 'capacity'
+      ? CAPACITY_MIN_ACK_ROUNDS_PER_WRITER
+      : mode === 'soak'
+        ? SOAK_MIN_ACK_ROUNDS_PER_WRITER
+        : 2,
+    minDurationMs: mode === 'capacity'
+      ? CAPACITY_MIN_DURATION_MS
+      : mode === 'soak'
+        ? SOAK_MIN_DURATION_MS
+        : 1_000,
     mode,
-    observers: mode === 'release' ? RELEASE_OBSERVER_COHORT : 3,
-    postSampleQuietMs: mode === 'release' ? 1_000 : 250,
+    observers: mode === 'capacity'
+      ? CAPACITY_OBSERVER_COHORT
+      : mode === 'soak'
+        ? SOAK_OBSERVER_COHORT
+        : 3,
+    postSampleQuietMs: mode === 'capacity' ? 1_000 : 250,
     sampleTimeoutMs: 30_000,
     skipApiProbe: false,
     suppliedFlags: new Set(),
-    visibleUpdateP95Ms: RELEASE_VISIBLE_P95_MS,
-    writers: mode === 'release' ? RELEASE_WRITERS : 5,
+    visibleUpdateP95Ms: CAPACITY_VISIBLE_P95_MS,
+    writerIntervalMs: mode === 'soak' ? SOAK_WRITER_INTERVAL_MS : 0,
+    writers: mode === 'capacity'
+      ? CAPACITY_WRITERS
+      : mode === 'soak'
+        ? SOAK_WRITERS
+        : 5,
   }
 
   for (let index = 0; index < args.length; index += 1) {
@@ -120,47 +342,74 @@ export function parseArguments(args, environment = process.env) {
     } else if (argument === '--durable-p95-ms') {
       options.suppliedFlags.add(argument)
       options.durableAckP95Ms = positiveInteger(args, ++index, argument)
+    } else if (argument === '--writer-interval-ms') {
+      options.suppliedFlags.add(argument)
+      options.writerIntervalMs = nonNegativeInteger(args, ++index, argument)
     } else {
       throw new Error(`Unknown argument: ${argument}`)
     }
   }
 
-  if (options.mode === 'release' && options.help) {
+  if (options.mode === 'capacity' && options.help) {
     throw new Error(
-      'Release mode forbids --help; use load:collaboration:dev -- --help for help.',
+      'Capacity mode forbids --help; use the load-smoke profile for discovery.',
     )
   }
   if (options.writers + options.observers > options.connections) {
     throw new Error('--writers plus --observers must not exceed --connections.')
   }
-  enforceReleaseOptions(options)
+  enforceCapacityOptions(options)
+  enforceSoakOptions(options)
   return options
 }
 
-export function enforceReleaseOptions(options) {
-  if (options.mode !== 'release') return
+export function enforceCapacityOptions(options) {
+  if (options.mode !== 'capacity') return
   if (options.allowInsecureTls) {
-    throw new Error('--allow-insecure-tls is forbidden in release mode.')
+    throw new Error('--allow-insecure-tls is forbidden in capacity mode.')
   }
   if (options.skipApiProbe) {
-    throw new Error('--skip-api-probe is forbidden in release mode.')
+    throw new Error('--skip-api-probe is forbidden in capacity mode.')
   }
-  const overridden = [...options.suppliedFlags].filter((flag) => RELEASE_FIXED_FLAGS.has(flag))
+  const overridden = [...options.suppliedFlags].filter((flag) => FIXED_WORKLOAD_FLAGS.has(flag))
   if (overridden.length > 0) {
     throw new Error(
-      `Release mode fixes capacity, latency gates, and the post-sample window; remove ${overridden.join(', ')}.`,
+      `Capacity mode fixes capacity, latency gates, and the post-sample window; remove ${overridden.join(', ')}.`,
     )
   }
   if (
-    options.connections !== RELEASE_CONNECTIONS
-    || options.writers !== RELEASE_WRITERS
-    || options.observers !== RELEASE_OBSERVER_COHORT
-    || options.minDurationMs !== RELEASE_MIN_DURATION_MS
-    || options.minAckRoundsPerWriter !== RELEASE_MIN_ACK_ROUNDS_PER_WRITER
-    || options.visibleUpdateP95Ms !== RELEASE_VISIBLE_P95_MS
-    || options.durableAckP95Ms !== RELEASE_DURABLE_P95_MS
+    options.connections !== CAPACITY_CONNECTIONS
+    || options.writers !== CAPACITY_WRITERS
+    || options.observers !== CAPACITY_OBSERVER_COHORT
+    || options.minDurationMs !== CAPACITY_MIN_DURATION_MS
+    || options.minAckRoundsPerWriter !== CAPACITY_MIN_ACK_ROUNDS_PER_WRITER
+    || options.visibleUpdateP95Ms !== CAPACITY_VISIBLE_P95_MS
+    || options.durableAckP95Ms !== CAPACITY_DURABLE_P95_MS
   ) {
-    throw new Error('Release load options do not match the architecture constants.')
+    throw new Error('Capacity load options do not match the architecture constants.')
+  }
+}
+
+export function enforceSoakOptions(options) {
+  if (options.mode !== 'soak') return
+  if (options.skipApiProbe) {
+    throw new Error('--skip-api-probe is forbidden in soak mode.')
+  }
+  const overridden = [...options.suppliedFlags].filter((flag) => FIXED_WORKLOAD_FLAGS.has(flag))
+  if (overridden.length > 0) {
+    throw new Error(
+      `Soak mode fixes identity count, duration, pacing, observers, and latency gates; remove ${overridden.join(', ')}.`,
+    )
+  }
+  if (
+    options.connections !== SOAK_CONNECTIONS
+    || options.writers !== SOAK_WRITERS
+    || options.observers !== SOAK_OBSERVER_COHORT
+    || options.minDurationMs !== SOAK_MIN_DURATION_MS
+    || options.minAckRoundsPerWriter !== SOAK_MIN_ACK_ROUNDS_PER_WRITER
+    || options.writerIntervalMs !== SOAK_WRITER_INTERVAL_MS
+  ) {
+    throw new Error('Soak load options do not match the fixed local release contract.')
   }
 }
 
@@ -188,6 +437,7 @@ export function prepareSessions(fixture, options, nowSeconds = Date.now() / 1_00
     if (!isRecord(raw)) throw new Error(`sessions[${index}] must be an object.`)
     const leaseToken = requiredString(raw.lease_token, `sessions[${index}].lease_token`)
     const room = requiredString(raw.room, `sessions[${index}].room`)
+    collaborationDocumentId(room, `sessions[${index}].room`)
     const access = requiredString(raw.access, `sessions[${index}].access`)
     if (!['edit', 'suggest', 'view'].includes(access)) {
       throw new Error(`sessions[${index}].access must be edit, suggest, or view.`)
@@ -249,9 +499,9 @@ export function resolveApiProbe(fixture, options) {
   const raw = fixture.api_probe
   if (!isRecord(raw)) {
     throw new Error(
-      options.mode === 'release'
-        ? 'Release mode requires fixture.api_probe.'
-        : 'Developer mode requires fixture.api_probe or explicit --skip-api-probe.',
+      options.mode === 'capacity'
+        ? 'Capacity mode requires fixture.api_probe.'
+        : 'Smoke mode requires fixture.api_probe or explicit --skip-api-probe.',
     )
   }
   const configured = requiredString(raw.url, 'fixture.api_probe.url')
@@ -273,8 +523,8 @@ export function resolveApiProbe(fixture, options) {
 export function resolveInstanceProbe(fixture, options) {
   const raw = fixture.instance_probe
   if (!isRecord(raw)) {
-    if (options.mode === 'release') {
-      throw new Error('Release mode requires fixture.instance_probe.')
+    if (options.mode === 'capacity') {
+      throw new Error('Capacity mode requires fixture.instance_probe.')
     }
     return null
   }
@@ -368,11 +618,55 @@ export function resolveSessionReissueControl(fixture, options, environment = pro
     authorization: `Bearer ${token}`,
     contract,
     leaseTtlSeconds,
+    runId: optionalRunId(raw.run_id, 'fixture.session_reissue.run_id'),
     url,
   }
 }
 
-export function assertReleasePreflight(
+export function resolveNetworkControl(fixture, options, environment = process.env) {
+  const raw = fixture.network_control
+  if (raw === undefined || raw === null) return null
+  if (!isRecord(raw)) throw new Error('fixture.network_control must be an object.')
+  const authorizationEnv = requiredString(
+    raw.authorization_env,
+    'fixture.network_control.authorization_env',
+  )
+  if (!/^[A-Z][A-Z0-9_]*$/.test(authorizationEnv)) {
+    throw new Error('fixture.network_control.authorization_env must name an uppercase environment variable.')
+  }
+  const contract = requiredString(raw.contract, 'fixture.network_control.contract')
+  if (contract !== LOAD_NETWORK_CONTROL_CONTRACT) {
+    throw new Error(`fixture.network_control.contract must equal ${LOAD_NETWORK_CONTROL_CONTRACT}.`)
+  }
+  const runId = optionalRunId(raw.run_id, 'fixture.network_control.run_id')
+  if (!runId) throw new Error('fixture.network_control.run_id is required.')
+  let url
+  try {
+    url = new URL(requiredString(raw.url, 'fixture.network_control.url'))
+  } catch {
+    throw new Error('fixture.network_control.url must be an HTTP(S) loopback URL.')
+  }
+  if (
+    !['http:', 'https:'].includes(url.protocol)
+    || !['127.0.0.1', '[::1]', '::1'].includes(url.hostname)
+    || url.username
+    || url.password
+    || url.search
+    || url.hash
+  ) {
+    throw new Error('fixture.network_control.url must be an uncredentialed loopback URL.')
+  }
+  const token = environment[authorizationEnv]?.trim()
+  if (!token) throw new Error(`${authorizationEnv} is required for network control authorization.`)
+  return {
+    authorization: `Bearer ${token}`,
+    contract,
+    runId,
+    url,
+  }
+}
+
+export function assertCapacityPreflight(
   options,
   sessions,
   apiProbe,
@@ -380,35 +674,35 @@ export function assertReleasePreflight(
   instanceProbe,
   sessionReissueControl,
 ) {
-  if (options.mode !== 'release') return
-  enforceReleaseOptions(options)
-  if (!apiProbe) throw new Error('Release mode requires the API latency probe.')
+  if (options.mode !== 'capacity') return
+  enforceCapacityOptions(options)
+  if (!apiProbe) throw new Error('Capacity mode requires the API latency probe.')
   if (!restartControl) {
-    throw new Error('Release mode requires fixture.restart_control for reconstruction after restart.')
+    throw new Error('Capacity mode requires fixture.restart_control for reconstruction after restart.')
   }
   if (!instanceProbe) {
-    throw new Error('Release mode requires fixture.instance_probe for independent restart identity.')
+    throw new Error('Capacity mode requires fixture.instance_probe for independent restart identity.')
   }
   if (!sessionReissueControl) {
-    throw new Error('Release mode requires fixture.session_reissue for 60-second lease rotation.')
+    throw new Error('Capacity mode requires fixture.session_reissue for 60-second lease rotation.')
   }
   if (restartControl.url.protocol !== 'https:') {
-    throw new Error('Release restart control must use HTTPS.')
+    throw new Error('Capacity restart control must use HTTPS.')
   }
   if (
     sessionReissueControl.url.protocol !== 'https:'
     || sessionReissueControl.contract !== SESSION_REISSUE_CONTRACT
-    || sessionReissueControl.leaseTtlSeconds !== RELEASE_LEASE_TTL_SECONDS
+    || sessionReissueControl.leaseTtlSeconds !== CAPACITY_LEASE_TTL_SECONDS
   ) {
     throw new Error(
-      `Release session reissue must use HTTPS, contract ${SESSION_REISSUE_CONTRACT}, and ${RELEASE_LEASE_TTL_SECONDS}-second leases.`,
+      `Capacity session reissue must use HTTPS, contract ${SESSION_REISSUE_CONTRACT}, and ${CAPACITY_LEASE_TTL_SECONDS}-second leases.`,
     )
   }
   if (apiProbe.contract !== API_PROBE_CONTRACT) {
-    throw new Error(`Release API probe contract must equal ${API_PROBE_CONTRACT}.`)
+    throw new Error(`Capacity API probe contract must equal ${API_PROBE_CONTRACT}.`)
   }
   if (apiProbe.url.protocol !== 'https:' || apiProbe.url.pathname !== '/health') {
-    throw new Error('Release API probe must use HTTPS and the exact FastAPI /health path.')
+    throw new Error('Capacity API probe must use HTTPS and the exact FastAPI /health path.')
   }
   const apiOrigin = apiProbe.url.origin
   if (
@@ -418,26 +712,62 @@ export function assertReleasePreflight(
     || instanceProbe.url.pathname !== INSTANCE_PROBE_PATH
   ) {
     throw new Error(
-      `Release instance probe must use HTTPS at ${INSTANCE_PROBE_PATH} on the public API/WebSocket origin.`,
+      `Capacity instance probe must use HTTPS at ${INSTANCE_PROBE_PATH} on the public API/WebSocket origin.`,
     )
   }
   for (const [index, session] of sessions.entries()) {
     const websocketUrl = new URL(session.websocketUrl)
     if (websocketUrl.protocol !== 'wss:' || websocketUrl.pathname !== '/collaboration') {
       throw new Error(
-        `Release sessions[${index}] must use WSS and the exact public /collaboration path.`,
+        `Capacity sessions[${index}] must use WSS and the exact public /collaboration path.`,
       )
     }
     if (webSocketHttpOrigin(websocketUrl) !== apiOrigin) {
       throw new Error(
-        `Release sessions[${index}] WebSocket and API probe must use the same origin including effective port.`,
+        `Capacity sessions[${index}] WebSocket and API probe must use the same origin including effective port.`,
       )
     }
     if (session.origin !== apiOrigin) {
       throw new Error(
-        `Release sessions[${index}] Origin header must exactly match the public API/WebSocket origin.`,
+        `Capacity sessions[${index}] Origin header must exactly match the public API/WebSocket origin.`,
       )
     }
+  }
+}
+
+export function assertSoakPreflight(
+  options,
+  sessions,
+  apiProbe,
+  networkControl,
+  sessionReissueControl,
+) {
+  if (options.mode !== 'soak') return
+  enforceSoakOptions(options)
+  if (!apiProbe) throw new Error('Soak mode requires the API latency probe.')
+  if (!networkControl) throw new Error('Soak mode requires fixture.network_control.')
+  if (!sessionReissueControl) {
+    throw new Error('Soak mode requires fixture.session_reissue for the 30-minute lease lifecycle.')
+  }
+  if (
+    networkControl.runId === null
+    || sessionReissueControl.runId !== networkControl.runId
+  ) {
+    throw new Error('Soak controls must share one explicit verification Run ID.')
+  }
+  if (
+    sessions.length !== SOAK_CONNECTIONS
+    || new Set(sessions.map((session) => session.userId)).size !== SOAK_CONNECTIONS
+  ) {
+    throw new Error('Soak mode requires exactly 25 distinct collaboration identities.')
+  }
+  const expectedAccess = [
+    ...Array.from({ length: SOAK_WRITERS }, () => 'edit'),
+    ...Array.from({ length: 5 }, () => 'suggest'),
+    ...Array.from({ length: 15 }, () => 'view'),
+  ]
+  if (sessions.some((session, index) => session.access !== expectedAccess[index])) {
+    throw new Error('Soak sessions must be ordered as 5 edit, 5 suggest, and 15 view identities.')
   }
 }
 
@@ -625,6 +955,9 @@ export async function reissueSessions(
           Accept: 'application/json',
           Authorization: control.authorization,
           'Content-Type': 'application/json',
+          ...(control.runId
+            ? { 'X-Inqtrix-Verification-Run-Id': control.runId }
+            : {}),
         },
         method: 'POST',
         redirect: 'error',
@@ -708,6 +1041,58 @@ export async function reissueSessions(
   return replacements
 }
 
+export async function applyNetworkPhase(
+  control,
+  phaseId,
+  fetchImplementation = fetch,
+) {
+  if (!control || control.contract !== LOAD_NETWORK_CONTROL_CONTRACT) {
+    throw new Error('Load network control is invalid.')
+  }
+  if (!SOAK_NETWORK_PHASES.some((phase) => phase.id === phaseId)) {
+    throw new Error('Load network phase is not allowlisted.')
+  }
+  let response
+  try {
+    response = await fetchImplementation(control.url, {
+      body: JSON.stringify({
+        contract: LOAD_NETWORK_CONTROL_CONTRACT,
+        phase_id: phaseId,
+      }),
+      headers: {
+        Accept: 'application/json',
+        Authorization: control.authorization,
+        'Content-Type': 'application/json',
+        'X-Inqtrix-Verification-Run-Id': control.runId,
+      },
+      method: 'POST',
+      redirect: 'error',
+      signal: AbortSignal.timeout(30_000),
+    })
+  } catch {
+    throw new Error('Load network control failed before receiving a response.')
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {})
+    throw new Error(`Load network control returned HTTP ${response.status}.`)
+  }
+  let payload
+  try {
+    payload = await response.json()
+  } catch {
+    throw new Error('Load network control returned invalid JSON.')
+  }
+  if (
+    !isRecord(payload)
+    || payload.contract !== LOAD_NETWORK_CONTROL_CONTRACT
+    || payload.phase_id !== phaseId
+    || payload.state !== 'applied'
+  ) {
+    throw new Error('Load network control acknowledgement is invalid.')
+  }
+  return { phaseId, state: 'applied' }
+}
+
 export function parseRestartAcknowledgement(payload) {
   if (!isRecord(payload) || payload.state !== 'ready') {
     throw new Error('Collaboration restart control did not report state="ready".')
@@ -751,6 +1136,17 @@ export class FatalSocketState {
   }
 }
 
+class CollaborationCloseFrameError extends Error {
+  constructor(index, reason) {
+    super(
+      `Connection ${index} received a collaboration close frame: ${
+        reason || 'no reason provided'
+      }.`,
+    )
+    this.name = 'CollaborationCloseFrameError'
+  }
+}
+
 export class RawCollaborationClient {
   constructor({ allowInsecureTls = false, index, onFatal, session }) {
     this.allowInsecureTls = allowInsecureTls
@@ -759,9 +1155,12 @@ export class RawCollaborationClient {
     this.authenticationDeniedReason = null
     this.closeFrameReason = null
     this.closedByTest = false
+    this.commentEventCount = 0
     this.document = new Y.Doc()
+    this.documentId = collaborationDocumentId(session.room, 'collaboration session room')
     this.index = index
     this.lastSyncSaved = null
+    this.onCommentEvent = () => {}
     this.onDurableAck = () => {}
     this.onFatal = onFatal
     this.onVisibleUpdate = () => {}
@@ -811,17 +1210,7 @@ export class RawCollaborationClient {
             : new Error(`Connection ${this.index} could not authenticate.`))
         }
       })
-      this.socket.on('message', (data, isBinary) => {
-        if (!isBinary) {
-          this.fail(new Error(`Connection ${this.index} received a non-binary collaboration frame.`))
-          return
-        }
-        try {
-          this.handleMessage(toUint8Array(data))
-        } catch {
-          this.fail(new Error(`Connection ${this.index} received an invalid collaboration frame.`))
-        }
-      })
+      this.socket.on('message', (data, isBinary) => this.handleSocketMessage(data, isBinary))
       this.socket.on('error', () => {
         if (this.restartExpectation) {
           this.restartExpectation.transportError = true
@@ -842,6 +1231,27 @@ export class RawCollaborationClient {
         }
       })
     })
+  }
+
+  handleSocketMessage(data, isBinary) {
+    if (!isBinary) {
+      this.fail(new Error(`Connection ${this.index} received a non-binary collaboration frame.`))
+      return
+    }
+    try {
+      this.handleMessage(toUint8Array(data))
+    } catch (error) {
+      if (error instanceof CollaborationCloseFrameError) {
+        this.fail(error)
+        return
+      }
+      const reason = error instanceof Error
+        ? error.message
+        : 'Collaboration frame parsing failed for an unknown reason.'
+      this.fail(new Error(
+        `Connection ${this.index} received an invalid collaboration frame: ${reason}`,
+      ))
+    }
   }
 
   handleMessage(bytes) {
@@ -872,7 +1282,7 @@ export class RawCollaborationClient {
     } else if (type === MESSAGE_CLOSE) {
       this.closeFrameReason = decoder.remaining > 0 ? decoder.readString() : ''
       decoder.assertDone()
-      throw new Error(`Connection ${this.index} received a collaboration close frame.`)
+      throw new CollaborationCloseFrameError(this.index, this.closeFrameReason)
     } else {
       throw new Error(`Connection ${this.index} received unsupported message type ${type}.`)
     }
@@ -905,7 +1315,6 @@ export class RawCollaborationClient {
     this.authenticatedScope = scope
     this.authenticated = true
     this.maybeReady()
-    this.resolveRotation()
   }
 
   handleSync(decoder) {
@@ -924,10 +1333,12 @@ export class RawCollaborationClient {
       throw new Error(`Connection ${this.index} received an unknown Yjs sync message.`)
     }
     const update = decoder.readBytes()
+    decoder.assertDone()
     Y.applyUpdate(this.document, update, REMOTE_ORIGIN)
     if (syncType === SYNC_STEP_TWO) {
       this.syncStepTwoReceived = true
       this.maybeReady()
+      this.resolveRotation()
     } else {
       this.onVisibleUpdate(sha256(update))
     }
@@ -941,21 +1352,52 @@ export class RawCollaborationClient {
     } catch {
       throw new Error('Collaboration stateless payload is not valid JSON.')
     }
-    if (
-      !isRecord(message)
-      || message.type !== 'durable_ack'
-      || typeof message.hash !== 'string'
-      || !/^[a-f0-9]{64}$/.test(message.hash)
-      || !Number.isSafeInteger(message.sequence)
-      || message.sequence < 1
-    ) {
-      throw new Error('Collaboration stateless payload is not a durable acknowledgement.')
+    if (!isRecord(message)) {
+      throw new Error('Collaboration stateless payload must be an object.')
     }
-    this.onDurableAck({
-      hash: message.hash,
-      sequence: message.sequence,
-      type: message.type,
-    })
+    if (message.type === 'durable_ack') {
+      if (
+        typeof message.hash !== 'string'
+        || !/^[a-f0-9]{64}$/.test(message.hash)
+        || !Number.isSafeInteger(message.sequence)
+        || message.sequence < 1
+      ) {
+        throw new Error('Collaboration stateless payload is not a durable acknowledgement.')
+      }
+      this.onDurableAck({
+        hash: message.hash,
+        sequence: message.sequence,
+        type: message.type,
+      })
+      return
+    }
+    if (
+      message.type === 'collaboration_comment_changed'
+      || message.type === 'collaboration_comment_mentioned'
+    ) {
+      const keys = Object.keys(message)
+      if (
+        keys.length !== 2
+        || !Object.hasOwn(message, 'document_id')
+        || !Object.hasOwn(message, 'type')
+      ) {
+        throw new Error('Collaboration comment event has an invalid payload shape.')
+      }
+      if (message.document_id !== this.documentId) {
+        throw new Error('Collaboration comment event targets another document.')
+      }
+      const event = {
+        documentId: message.document_id,
+        type: message.type,
+      }
+      this.commentEventCount += 1
+      this.onCommentEvent(event)
+      return
+    }
+    if (message.type === 'durable_rejection') {
+      throw new Error('Collaboration durability rejection is fatal during load verification.')
+    }
+    throw new Error('Collaboration stateless payload type is unsupported.')
   }
 
   createParagraphUpdate(text) {
@@ -1010,7 +1452,7 @@ export class RawCollaborationClient {
     }
     let resolve
     let reject
-    const authenticated = new Promise((done, failed) => {
+    const confirmed = new Promise((done, failed) => {
       resolve = done
       reject = failed
     })
@@ -1023,16 +1465,15 @@ export class RawCollaborationClient {
       if (this.rotationExpectation !== expectation) return
       this.rotationExpectation = null
       reject(new Error(
-        `Connection ${this.index} did not authenticate its rotated lease within ${timeoutMs}ms.`,
+        `Connection ${this.index} did not confirm its rotated lease through server sync within ${timeoutMs}ms.`,
       ))
     }, timeoutMs)
     this.rotationExpectation = expectation
     this.session = session
-    this.authenticated = false
-    this.authenticatedScope = null
     try {
       this.sendAuthentication(nowMilliseconds)
-      await authenticated
+      this.sendSyncStepOne()
+      await confirmed
     } catch (error) {
       if (this.rotationExpectation === expectation) {
         clearTimeout(expectation.timer)
@@ -1190,31 +1631,31 @@ export class SessionRotationSupervisor {
     try {
       for (let start = 0; start < clients.length; start += this.concurrency) {
         const batch = clients.slice(start, start + this.concurrency)
-        const replacements = await this.reissue(
-          this.control,
-          batch.map((client) => client.session),
-          purpose,
-        )
-        if (replacements.length !== batch.length) {
-          throw new Error('Collaboration session reissue returned an incomplete client cohort.')
-        }
-        const checkedAfterResponseAt = this.now()
-        for (const client of batch) {
+        await Promise.all(batch.map(async (client) => {
+          const replacements = await this.reissue(
+            this.control,
+            [client.session],
+            purpose,
+          )
+          if (replacements.length !== 1) {
+            throw new Error(
+              'Collaboration session reissue must return exactly one replacement per client.',
+            )
+          }
+          const checkedAfterResponseAt = this.now()
           assertCurrentLeaseUnexpired(
             client.session,
             checkedAfterResponseAt,
             'after the session reissue response',
           )
-        }
-        await Promise.all(batch.map((client, index) => {
           const checkedBeforeReauthenticationAt = this.now()
           assertCurrentLeaseUnexpired(
             client.session,
             checkedBeforeReauthenticationAt,
             'immediately before socket reauthentication',
           )
-          return client.rotateSession(
-            replacements[index],
+          await client.rotateSession(
+            replacements[0],
             this.timeoutMs,
             checkedBeforeReauthenticationAt,
           )
@@ -1331,12 +1772,14 @@ export async function runSustainedWriterLoad({
   fatal,
   minAckRoundsPerWriter,
   minDurationMs,
+  markerTag = null,
   observers,
+  runId = randomUUID(),
   sampleTimeoutMs,
+  writerIntervalMs = 0,
   writers,
 }) {
   const records = new Map()
-  const runId = randomUUID()
   const startedAt = performance.now()
   let stopWriting = false
 
@@ -1365,7 +1808,9 @@ export async function runSustainedWriterLoad({
     let round = 0
     do {
       fatal.throwIfSet()
-      const marker = `inqtrix-load-${runId}-${writerIndex}-${round}`
+      const marker = `inqtrix-load-${runId}-${
+        markerTag ? `${markerTag}-` : ''
+      }${writerIndex}-${round}`
       const update = writer.createParagraphUpdate(marker)
       const hash = sha256(update)
       const record = {
@@ -1381,6 +1826,10 @@ export async function runSustainedWriterLoad({
       await waitForRecord(record, sampleTimeoutMs, fatal, observers.length)
       round += 1
       roundsPerWriter[writerIndex] = round
+      if (writerIntervalMs > 0 && !stopWriting) {
+        const elapsedMs = performance.now() - record.sentAt
+        if (elapsedMs < writerIntervalMs) await delay(writerIntervalMs - elapsedMs)
+      }
     } while (!stopWriting || round < minAckRoundsPerWriter)
   })
   let writerError = null
@@ -1448,9 +1897,137 @@ export async function runSustainedWriterLoad({
   }
 }
 
+export async function runSoakPhases({
+  apiProbe,
+  applyPhase = applyNetworkPhase,
+  baselineApiMeasurement,
+  fatal,
+  networkControl,
+  observers,
+  phases = SOAK_NETWORK_PHASES,
+  runId = randomUUID(),
+  runWriterLoad = runSustainedWriterLoad,
+  sampleTimeoutMs,
+  writerIntervalMs = SOAK_WRITER_INTERVAL_MS,
+  writers,
+}) {
+  if (!Array.isArray(phases) || phases.length === 0) {
+    throw new Error('Soak requires at least one explicit network phase.')
+  }
+  const phaseResults = []
+  const markers = []
+  const durableLatencies = []
+  const visibleLatencies = []
+  const roundsPerWriter = Array.from({ length: writers.length }, () => 0)
+  const minimumRoundsPerPhase = Math.ceil(
+    SOAK_MIN_ACK_ROUNDS_PER_WRITER / SOAK_NETWORK_PHASES.length,
+  )
+  let durationMs = 0
+  let loadedApiSampleSpanMs = 0
+  for (const phase of phases) {
+    await applyPhase(networkControl, phase.id)
+    const load = await runWriterLoad({
+      apiProbe,
+      fatal,
+      markerTag: phase.id,
+      minAckRoundsPerWriter: minimumRoundsPerPhase,
+      minDurationMs: phase.durationMs,
+      observers,
+      runId,
+      sampleTimeoutMs,
+      writerIntervalMs,
+      writers,
+    })
+    const apiSummary = summarizeApiProbe(
+      baselineApiMeasurement?.latencies ?? null,
+      load.loadedApiLatencies,
+    )
+    const gates = evaluateGates(
+      load.visibleLatencies,
+      load.durableLatencies,
+      apiSummary,
+      {
+        durableAckP95Ms: phase.durableAckP95Ms,
+        minAckRoundsPerWriter: minimumRoundsPerPhase,
+        minDurationMs: phase.durationMs,
+        observers: observers.length,
+        visibleUpdateP95Ms: phase.visibleUpdateP95Ms,
+        writers: writers.length,
+      },
+      load,
+    )
+    const passed = phaseGatesPassed(gates)
+    phaseResults.push({
+      apiProbe: apiSummary,
+      durableAckMs: summarize(load.durableLatencies),
+      gates,
+      id: phase.id,
+      passed,
+      visibleUpdateMs: summarize(load.visibleLatencies),
+      writeSamples: load.markers.length,
+    })
+    markers.push(...load.markers)
+    durableLatencies.push(...load.durableLatencies)
+    visibleLatencies.push(...load.visibleLatencies)
+    durationMs += load.durationMs
+    loadedApiSampleSpanMs += load.loadedApiSampleSpanMs ?? 0
+    for (const [index, rounds] of load.roundsPerWriter.entries()) {
+      roundsPerWriter[index] += rounds
+    }
+  }
+  const passed = phaseResults.every((phase) => phase.passed)
+  const apiLatencyStatus = phaseResults.some((phase) => phase.apiProbe.status === 'failed')
+    ? 'failed'
+    : phaseResults.some((phase) => phase.apiProbe.status === 'warning')
+      ? 'warning'
+      : phaseResults.every((phase) => phase.apiProbe.status === 'skipped')
+        ? 'skipped'
+        : 'passed'
+  return {
+    durationMs,
+    durableLatencies,
+    gates: {
+      apiLatencyAbsoluteLimitMs: API_P95_LIMIT_MS,
+      apiLatencyDegradationLimitPercent: API_DEGRADATION_LIMIT_PERCENT,
+      apiLatencyPassed: apiLatencyStatus !== 'failed',
+      apiLatencyRelativeGateApplied: phaseResults.every(
+        (phase) => phase.apiProbe.relativeGateApplied === true,
+      ),
+      apiLatencyRelativeGateMinBaselineMs: API_RELATIVE_GATE_MIN_BASELINE_MS,
+      apiLatencyStatus,
+      apiSampleSpanPassed: phaseResults.every(
+        (phase) => phase.gates.apiSampleSpanPassed === true,
+      ),
+      durableAckPassed: phaseResults.every((phase) => phase.gates.durableAckPassed),
+      minimumAckRoundsPassed: roundsPerWriter.every(
+        (rounds) => rounds >= SOAK_MIN_ACK_ROUNDS_PER_WRITER,
+      ),
+      minimumDurationPassed: durationMs >= phases.reduce(
+        (total, phase) => total + phase.durationMs,
+        0,
+      ),
+      observerCohortPassed: phaseResults.every(
+        (phase) => phase.gates.observerCohortPassed,
+      ),
+      phaseResultsPassed: passed,
+      visibleUpdatePassed: phaseResults.every((phase) => phase.gates.visibleUpdatePassed),
+    },
+    loadedApiLatencies: phaseResults.flatMap((phase) => phase.apiProbe.loadedP95Ms === null
+      ? []
+      : [phase.apiProbe.loadedP95Ms]),
+    loadedApiSampleSpanMs,
+    markers,
+    observerCount: observers.length,
+    phases: phaseResults,
+    roundsPerWriter,
+    runId,
+    visibleLatencies,
+  }
+}
+
 export function verifyReconstructedMarkers(client, markers, runId) {
   const expected = new Set(markers)
-  const pattern = new RegExp(`inqtrix-load-${escapeRegExp(runId)}-\\d+-\\d+`, 'g')
+  const pattern = new RegExp(`inqtrix-load-${escapeRegExp(runId)}-[a-z0-9-]+`, 'g')
   const observed = client.documentText().match(pattern) ?? []
   const counts = new Map()
   for (const marker of observed) counts.set(marker, (counts.get(marker) ?? 0) + 1)
@@ -1467,6 +2044,18 @@ export function verifyReconstructedMarkers(client, markers, runId) {
     passed: missing === 0 && duplicates === 0 && unexpected === 0,
     unexpected,
   }
+}
+
+function phaseGatesPassed(gates) {
+  return (
+    gates.visibleUpdatePassed
+    && gates.durableAckPassed
+    && gates.apiLatencyStatus !== 'failed'
+    && gates.apiSampleSpanPassed !== false
+    && gates.minimumAckRoundsPassed
+    && gates.minimumDurationPassed
+    && gates.observerCohortPassed
+  )
 }
 
 export function verifyObserverCohort(clients, markers, runId) {
@@ -1486,10 +2075,16 @@ export function verifyObserverCohort(clients, markers, runId) {
 export function summarizeApiProbe(baseline, loaded) {
   if (baseline === null && loaded === null) {
     return {
+      absoluteLimitMs: API_P95_LIMIT_MS,
+      absolutePassed: null,
       baselineP95Ms: null,
       degradationPercent: null,
       loadedP95Ms: null,
-      reason: 'explicit_developer_protocol_smoke_opt_out',
+      reason: 'explicit_load_smoke_api_probe_opt_out',
+      relativeGateApplied: null,
+      relativeGateMinBaselineMs: API_RELATIVE_GATE_MIN_BASELINE_MS,
+      relativeLimitPercent: API_DEGRADATION_LIMIT_PERCENT,
+      relativePassed: null,
       samplesPerPhase: 0,
       status: 'skipped',
     }
@@ -1499,13 +2094,34 @@ export function summarizeApiProbe(baseline, loaded) {
   const loadedP95Ms = percentile(loaded, 0.95)
   if (baselineP95Ms <= 0) throw new Error('API probe baseline p95 must be greater than zero.')
   const degradationPercent = ((loadedP95Ms / baselineP95Ms) - 1) * 100
+  const absolutePassed = loadedP95Ms <= API_P95_LIMIT_MS
+  const relativeGateApplied = baselineP95Ms >= API_RELATIVE_GATE_MIN_BASELINE_MS
+  const relativePassed = degradationPercent <= API_DEGRADATION_LIMIT_PERCENT
+  let reason = null
+  let status = 'passed'
+  if (!absolutePassed) {
+    reason = 'absolute_p95_above_limit'
+    status = 'failed'
+  } else if (relativeGateApplied && !relativePassed) {
+    reason = 'relative_degradation_above_limit'
+    status = 'failed'
+  } else if (!relativeGateApplied && !relativePassed) {
+    reason = 'relative_degradation_above_limit_below_stable_baseline'
+    status = 'warning'
+  }
   return {
+    absoluteLimitMs: API_P95_LIMIT_MS,
+    absolutePassed,
     baselineP95Ms,
     degradationPercent,
     loadedP95Ms,
-    reason: null,
+    reason,
+    relativeGateApplied,
+    relativeGateMinBaselineMs: API_RELATIVE_GATE_MIN_BASELINE_MS,
+    relativeLimitPercent: API_DEGRADATION_LIMIT_PERCENT,
+    relativePassed,
     samplesPerPhase: API_PROBE_SAMPLES,
-    status: degradationPercent <= API_DEGRADATION_LIMIT_PERCENT ? 'passed' : 'failed',
+    status,
   }
 }
 
@@ -1513,9 +2129,41 @@ export function evaluateGates(visibleLatencies, durableLatencies, apiProbe, opti
   const visibleP95 = percentile(visibleLatencies, 0.95)
   const durableP95 = percentile(durableLatencies, 0.95)
   const minimumRounds = Math.min(...load.roundsPerWriter)
+  const visibleUpdateTargetP95Ms = options.visibleUpdateP95Ms
+  const smokeWarningEnabled = (
+    options.mode === 'smoke'
+    && visibleUpdateTargetP95Ms === CAPACITY_VISIBLE_P95_MS
+  )
+  // Sustained-load profiles carry the accepted CARRY-F-33 risk; the
+  // production `capacity` gate deliberately does not.
+  const acceptedLatencyBandEnabled = (
+    options.mode === 'soak' || options.mode === 'ramp'
+  )
+  const visibleUpdateWarningEnabled = smokeWarningEnabled || acceptedLatencyBandEnabled
+  const visibleUpdateHardLimitP95Ms = smokeWarningEnabled
+    ? SMOKE_VISIBLE_WARNING_P95_MS
+    : acceptedLatencyBandEnabled
+      ? ACCEPTED_LATENCY_CEILING_P95_MS
+      : visibleUpdateTargetP95Ms
+  let visibleUpdateReason = null
+  let visibleUpdateStatus = 'passed'
+  if (visibleP95 >= visibleUpdateTargetP95Ms) {
+    if (visibleUpdateWarningEnabled && visibleP95 <= visibleUpdateHardLimitP95Ms) {
+      visibleUpdateReason = smokeWarningEnabled
+        ? 'visible_update_above_target_within_smoke_limit'
+        : 'visible_update_above_accepted_target'
+      visibleUpdateStatus = 'warning'
+    } else {
+      visibleUpdateReason = 'visible_update_above_limit'
+      visibleUpdateStatus = 'failed'
+    }
+  }
   return {
+    apiLatencyAbsoluteLimitMs: API_P95_LIMIT_MS,
     apiLatencyDegradationLimitPercent: API_DEGRADATION_LIMIT_PERCENT,
-    apiLatencyPassed: apiProbe.status === 'skipped' ? null : apiProbe.status === 'passed',
+    apiLatencyPassed: apiProbe.status === 'skipped' ? null : apiProbe.status !== 'failed',
+    apiLatencyRelativeGateApplied: apiProbe.relativeGateApplied,
+    apiLatencyRelativeGateMinBaselineMs: API_RELATIVE_GATE_MIN_BASELINE_MS,
     apiLatencyStatus: apiProbe.status,
     apiSampleSpanPassed: apiProbe.status === 'skipped'
       ? null
@@ -1531,8 +2179,13 @@ export function evaluateGates(visibleLatencies, durableLatencies, apiProbe, opti
     minimumDurationPassed: load.durationMs >= options.minDurationMs,
     observerCohort: options.observers,
     observerCohortPassed: load.observerCount >= options.observers,
-    visibleUpdateP95Ms: options.visibleUpdateP95Ms,
-    visibleUpdatePassed: visibleP95 < options.visibleUpdateP95Ms,
+    visibleUpdateHardLimitP95Ms,
+    visibleUpdateP95Ms: visibleUpdateTargetP95Ms,
+    visibleUpdatePassed: visibleUpdateStatus !== 'failed',
+    visibleUpdateReason,
+    visibleUpdateStatus,
+    visibleUpdateTargetP95Ms,
+    visibleUpdateWarningEnabled,
   }
 }
 
@@ -1659,8 +2312,10 @@ function requestedMode(args) {
     if (args[index] === '--mode') values.push(nextArgument(args, index + 1, '--mode'))
   }
   if (values.length > 1) throw new Error('--mode may be supplied only once.')
-  const mode = values[0] ?? 'dev'
-  if (mode !== 'dev' && mode !== 'release') throw new Error('--mode must be dev or release.')
+  const mode = values[0] ?? 'smoke'
+  if (mode !== 'smoke' && mode !== 'soak' && mode !== 'capacity' && mode !== 'ramp') {
+    throw new Error('--mode must be smoke, soak, capacity, or ramp.')
+  }
   return mode
 }
 
@@ -1772,6 +2427,14 @@ function positiveInteger(args, index, name) {
   return value
 }
 
+function nonNegativeInteger(args, index, name) {
+  const value = Number(nextArgument(args, index, name))
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${name} requires a non-negative integer.`)
+  }
+  return value
+}
+
 function positiveSafeInteger(value, field) {
   const parsed = Number(value)
   if (!Number.isSafeInteger(parsed) || parsed < 1) {
@@ -1783,6 +2446,14 @@ function positiveSafeInteger(value, field) {
 function sessionUserId(value, field) {
   if (!isRecord(value)) throw new Error(`${field} must be an object.`)
   return requiredString(value.id, `${field}.id`)
+}
+
+function collaborationDocumentId(room, field) {
+  const match = COLLABORATION_ROOM_PATTERN.exec(room)
+  if (!match) {
+    throw new Error(`${field} must match the editor collaboration room contract.`)
+  }
+  return match[1]
 }
 
 function parseReissuedSession(raw, expected, control, nowSeconds, field) {
@@ -1812,7 +2483,7 @@ function parseReissuedSession(raw, expected, control, nowSeconds, field) {
   const remainingSeconds = expiresAt - nowSeconds
   const minimumRemainingSeconds = Math.max(
     1,
-    control.leaseTtlSeconds * (REISSUED_LEASE_MIN_REMAINING_SECONDS / RELEASE_LEASE_TTL_SECONDS),
+    control.leaseTtlSeconds * (REISSUED_LEASE_MIN_REMAINING_SECONDS / CAPACITY_LEASE_TTL_SECONDS),
   )
   if (
     !Number.isFinite(expiresAt)
@@ -1895,6 +2566,15 @@ function assertCurrentLeaseUnexpired(session, nowMilliseconds, phase) {
 function requiredString(value, field) {
   const parsed = optionalString(value)
   if (!parsed) throw new Error(`${field} must be a non-empty string.`)
+  return parsed
+}
+
+function optionalRunId(value, field) {
+  if (value === undefined || value === null) return null
+  const parsed = requiredString(value, field)
+  if (!VERIFICATION_RUN_ID_PATTERN.test(parsed)) {
+    throw new Error(`${field} must be a verification Run ID.`)
+  }
   return parsed
 }
 

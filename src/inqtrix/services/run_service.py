@@ -16,23 +16,23 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from inqtrix.core.context import RunContext, RuntimeContext
 from inqtrix.core.results import RunRequest, SourcePolicy, WebRecency
-from inqtrix.execution_failures import RunExecutionFailure
 from inqtrix.execution_authority import AuthorizationRevoked, guard_provider_context
+from inqtrix.execution_failures import RunExecutionFailure
 from inqtrix.quota.models import QuotaDimension, QuotaSubject, consumed_tokens
 from inqtrix.result import ResearchResult
+from inqtrix.services.agent_answer_publisher import AgentAnswerPublisher
 from inqtrix.services.agent_context import ResolvedAgentContext
 from inqtrix.state import build_run_snapshot
-from inqtrix.sync_bridge import run_coro_sync
 
 if TYPE_CHECKING:
+    from inqtrix.agents.control_ports import AgentControlStore
     from inqtrix.auth.principal import Principal
-    from inqtrix.auth.directory import UserDirectory
     from inqtrix.core.algorithms import AgentAlgorithm, AlgorithmRegistry
     from inqtrix.server.runs import RunHandle, RunStore
-    from inqtrix.services.quota_service import QuotaService
     from inqtrix.services.execution_dependency_authority import (
         ExecutionDependencyAuthorizer,
     )
+    from inqtrix.services.quota_service import QuotaService
 
 
 def execute_run_request(
@@ -48,6 +48,7 @@ def execute_run_request(
     token_budget: int | None = None,
     workspace_id: str | None = None,
     authority_check: Callable[[], None] | None = None,
+    answer_publisher: AgentAnswerPublisher | None = None,
 ) -> None:
     """Execute one resolved run request against its algorithm.
 
@@ -81,13 +82,71 @@ def execute_run_request(
         workspace_id: Persisted project namespace of the native run. Agent
             algorithms pass it unchanged to delegated children; it is not an
             authorization decision.
+        answer_publisher: Shared durable publisher for native Agent Desk
+            modes.  Those modes fail loudly when it is absent; other modes
+            retain the event-only answer lifecycle.
     """
     t0 = time.monotonic()
 
-    def _event_sink(event_type: str, payload: dict[str, Any]) -> None:
-        if authority_check is not None:
-            authority_check()
-        handle.emit(event_type, payload)
+    # Enrich the run root span (opened by the execution boundary —
+    # worker _execute or in-process _run_worker) with the Langfuse trace
+    # fields: explicit langfuse.* keys are REQUIRED because this span is
+    # a child of the submitter's context, and Langfuse takes trace-level
+    # fields only from the root span or these keys.
+    from inqtrix.auth.log_redaction import stable_pseudonym
+    from inqtrix.observability import semconv
+    from inqtrix.observability.otel import (
+        current_trace_id_hex,
+        enrich_current_span,
+        mark_current_span_error,
+    )
+
+    subject_user_id = (
+        getattr(principal, "user_id", None)
+        or getattr(quota_subject, "user_id", None)
+    )
+    # getattr throughout: telemetry must never impose fields on the
+    # request/handle doubles embedded callers and tests pass in.
+    run_mode = str(getattr(run_request, "mode", "") or "")
+    # Metrics feature label + ledger subject for every provider call
+    # inside this segment (token counters per product feature; raw
+    # booking identity for llm_usage rows). The executing loop clears
+    # both vars in its finally — worker threads are reused.
+    from inqtrix.observability.context import (
+        bind_feature,
+        bind_usage_subject,
+    )
+
+    bind_feature(run_mode)
+    bind_usage_subject(
+        getattr(principal, "tenant_id", None)
+        or getattr(quota_subject, "tenant_id", None),
+        subject_user_id,
+        workspace_id,
+    )
+    enrich_current_span(
+        {
+            semconv.LANGFUSE_TRACE_NAME: f"run:{run_mode}",
+            semconv.LANGFUSE_USER_ID: (
+                stable_pseudonym("usr", subject_user_id)
+                if subject_user_id is not None
+                else ""
+            ),
+            semconv.LANGFUSE_SESSION_ID: (
+                getattr(run_request, "session_id", "") or ""
+            ),
+            semconv.INQTRIX_WORKSPACE: workspace_id or "",
+            "inqtrix.mode": run_mode,
+            "inqtrix.stack": getattr(resolved, "stack_name", "") or "",
+        }
+    )
+    # Persist the trace id as a durable run event so the admin surface
+    # and the trace-export API can find the trace WITHOUT a lookup —
+    # emitted once per execution segment (retries overwrite by recency).
+    trace_id_hex = current_trace_id_hex()
+    emit_event = getattr(handle, "emit", None)
+    if trace_id_hex is not None and callable(emit_event):
+        emit_event("inqtrix.run.trace", {"trace_id": trace_id_hex})
 
     providers = resolved.providers
     if authority_check is not None:
@@ -102,7 +161,7 @@ def execute_run_request(
         run_id=handle.run_id,
         workspace_id=workspace_id,
         cancel_token=handle.cancel_event,
-        event_sink=_event_sink,
+        event_sink=handle.emit,
         # Opt-in hard per-run token cap (0 = off). Independent of the
         # monthly token quota: it bounds a single run, the quota blocks
         # the next one. The optional narrowing comes only from trusted
@@ -112,6 +171,9 @@ def execute_run_request(
         ),
         park=handle.wait,
         authority_check=authority_check,
+        # Children inherit the parent's provider stack through the
+        # resolver (F7c) — same inheritance rule as workspace_id.
+        stack_name=getattr(resolved, "stack_name", "") or "",
     )
     agent_result = algorithm.run(
         run_request,
@@ -120,6 +182,25 @@ def execute_run_request(
     )
     result = agent_result.raw
     result_state = result.get("result_state", {}) or {}
+    run_usage = result.get("usage", {}) or {}
+    enrich_current_span(
+        {
+            semconv.GEN_AI_USAGE_INPUT_TOKENS: int(
+                run_usage.get("prompt_tokens", 0) or 0
+            ),
+            semconv.GEN_AI_USAGE_OUTPUT_TOKENS: int(
+                run_usage.get("completion_tokens", 0) or 0
+            ),
+            "inqtrix.outcome": (
+                "cancelled"
+                if (
+                    agent_result.cancelled
+                    or handle.cancel_event.is_set()
+                )
+                else ("parked" if handle.parked else "completed")
+            ),
+        }
+    )
     # Book the LLM tokens this run actually consumed before any early
     # return: a budget-cancelled, client-cancelled, or PARKED run still
     # spent what it spent, and that spend must count toward the monthly
@@ -149,6 +230,8 @@ def execute_run_request(
                 "Der Lauf hat das serverseitige Tokenbudget erreicht.",
                 error_type="token_budget_exceeded",
             )
+            mark_current_span_error("token_budget_exceeded")
+            enrich_current_span({"inqtrix.outcome": "failed"})
         else:
             handle.cancel(
                 agent_result.cancel_reason or "client_requested_cancel"
@@ -166,7 +249,18 @@ def execute_run_request(
         )
 
     research_result = ResearchResult.from_raw(result)
-    research_result.metrics.elapsed_seconds = round(time.monotonic() - t0, 2)
+    segment_elapsed = round(time.monotonic() - t0, 2)
+    total_elapsed_reader = getattr(handle, "total_elapsed_seconds", None)
+    total_elapsed = (
+        round(float(total_elapsed_reader()), 2)
+        if callable(total_elapsed_reader)
+        else segment_elapsed
+    )
+    # The durable store starts the timer before dispatch and never resets it
+    # on resume. It therefore includes queued-visible execution and explicit
+    # waiting segments. The monotonic segment value remains a lower bound for
+    # custom non-store handles used by embedded callers and tests.
+    research_result.metrics.elapsed_seconds = max(segment_elapsed, total_elapsed)
     answer = research_result.answer
     payload = research_result.to_export_payload()
     usage = result.get("usage", {})
@@ -180,7 +274,27 @@ def execute_run_request(
     }
     if authority_check is not None:
         authority_check()
-    handle.emit_answer(answer)
+    mode = str(getattr(run_request, "mode", "") or "")
+    if mode in {"agent_kernel", "workspace_agent"}:
+        if answer_publisher is None:
+            raise RunExecutionFailure(
+                "answer_publication_unavailable",
+                "Die persistente Agent-Antwortpublikation ist nicht verfuegbar.",
+            )
+        exported_references = payload.get("references", [])
+        if not isinstance(exported_references, list):
+            raise RunExecutionFailure(
+                "answer_publication_invalid_references",
+                "Die exportierten Antwortreferenzen sind nicht serialisierbar.",
+            )
+        answer_publisher.publish(
+            handle,
+            answer,
+            references=exported_references,
+            question=run_request.question,
+        )
+    else:
+        handle.emit_answer(answer)
     if authority_check is not None:
         authority_check()
     current_node = str(algorithm.capabilities().get("terminal_node", "answer"))
@@ -213,6 +327,14 @@ class RunService:
             algorithm.
         run_store: The in-memory run registry/queue that owns
             dispatch, events, and retention.
+        dependency_authorizer: Safepoint checker for the segment actor
+            and every dependency pinned into the request. Required for a
+            scoped actor — execution fails closed without it. It owns the
+            actor directory, so the run thread never reaches the HTTP
+            loop's pooled identity engine.
+        answer_artifact_store: Authoritative agent-control store used by the
+            shared answer publisher. Native Agent Desk modes fail loudly when
+            this dependency is absent.
     """
 
     def __init__(
@@ -222,15 +344,19 @@ class RunService:
         runtime: RuntimeContext,
         run_store: "RunStore",
         quota_service: "QuotaService | None" = None,
-        user_lookup: "UserDirectory | None" = None,
         dependency_authorizer: "ExecutionDependencyAuthorizer | None" = None,
+        answer_artifact_store: "AgentControlStore | None" = None,
     ) -> None:
         self._registry = registry
         self._runtime = runtime
         self._run_store = run_store
         self._quota_service = quota_service
-        self._user_lookup = user_lookup
         self._dependency_authorizer = dependency_authorizer
+        self._answer_publisher = (
+            AgentAnswerPublisher(answer_artifact_store)
+            if answer_artifact_store is not None
+            else None
+        )
 
     @property
     def dependency_authorizer(self) -> "ExecutionDependencyAuthorizer | None":
@@ -241,6 +367,11 @@ class RunService:
     def run_store(self) -> "RunStore":
         """The underlying run store (read-side surface for the router)."""
         return self._run_store
+
+    @property
+    def answer_publisher(self) -> AgentAnswerPublisher | None:
+        """Shared native Agent Desk answer publisher, when configured."""
+        return self._answer_publisher
 
     def submit(
         self,
@@ -288,15 +419,15 @@ class RunService:
             root_run_id: Tree root (equals ``parent_run_id`` for depth-1
                 trees); lets deep descendants resolve their root run
                 without walking parents.
-            session_id: Agent-desk session grouping the run belongs to.
-            autonomy: Workspace-agent permission mode (E16), carried on
+            session_id: Saved Agent or Knowledge session grouping the run.
+            autonomy: Workspace-agent permission mode, carried on
                 the run request and the worker replay payload; empty for
                 non-agent modes.
             document_id: Target editor document of a workspace-agent
-                patch assignment (M7); empty when the run has no edit
+                patch assignment; empty when the run has no edit
                 target. Carried like ``autonomy``.
             response_form: Workspace-agent output-form override
-                (plan M1, ``chat``/``canvas``); empty delegates to the
+                (``chat``/``canvas``); empty delegates to the
                 intake profile. Carried like ``autonomy``.
             token_budget: Optional trusted per-run LLM-token ceiling that
                 narrows the deployment cap. Planner-authored task budgets
@@ -305,12 +436,12 @@ class RunService:
                 mission plan-task attempt. Persisted in the replay body and
                 exposed on child summaries so checkpoint re-execution finds
                 the already-submitted run. Empty for every other caller.
-            skill_ids: Router-ADMITTED skill ids (plan M3) — visibility
+            skill_ids: Router-admitted skill ids; visibility
                 and count cap already enforced; carried on the request
                 and the worker replay payload.
             skill_revisions: Admission-time integer revision for each
                 attached skill; runtime loading fails closed on drift.
-            tool_directives: Whitelisted composer tool hints (plan M3),
+            tool_directives: Whitelisted composer tool hints,
                 carried like ``skill_ids``.
             source_policy: Availability of web and project-knowledge tools.
                 ``None`` preserves the historical both-available surface.
@@ -384,36 +515,25 @@ class RunService:
 
         def _work(handle: "RunHandle") -> None:
             effective_principal = handle.effective_principal(principal)
-
-            def _check_authority() -> None:
-                if effective_principal is not None:
-                    if self._user_lookup is None:
-                        raise AuthorizationRevoked(
-                            "run execution has no live user lookup"
-                        )
-                    user = run_coro_sync(
-                        self._user_lookup.find_by_user_id(
-                            tenant_id=effective_principal.tenant_id,
-                            user_id=effective_principal.user_id,
-                        )
-                    )
-                    if user is None or user.disabled_at is not None:
-                        raise AuthorizationRevoked(
-                            "effective actor is missing or disabled"
-                        )
-                self._run_store.check_execution_authority(handle.run_id)
-                if self._dependency_authorizer is not None:
-                    self._dependency_authorizer.check(
-                        run_request,
-                        effective_principal,
-                    )
-
             has_scoped_actor = (
                 effective_principal is not None
                 and effective_principal.user_id is not None
             )
-            if has_scoped_actor:
-                handle.bind_authority_check(_check_authority)
+
+            def _check_authority() -> None:
+                self._run_store.check_execution_authority(handle.run_id)
+                if self._dependency_authorizer is None:
+                    # Only reachable for a scoped actor (see the gate
+                    # below): silently skipping the actor and pinned
+                    # dependency probes would be a fallback, not a check.
+                    raise AuthorizationRevoked(
+                        "run execution has no dependency authorizer"
+                    )
+                self._dependency_authorizer.check(
+                    run_request,
+                    effective_principal,
+                )
+
             execute_run_request(
                 handle,
                 algorithm=algorithm,
@@ -427,6 +547,7 @@ class RunService:
                 authority_check=(
                     _check_authority if has_scoped_actor else None
                 ),
+                answer_publisher=self._answer_publisher,
             )
 
         # Everything a worker process needs to re-resolve and execute

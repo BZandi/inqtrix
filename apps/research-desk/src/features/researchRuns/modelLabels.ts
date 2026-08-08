@@ -3,6 +3,22 @@ import type { ChatModelTier, NodeModelResolution } from './types'
 
 type ChatCopy = TranslationDictionary['chat']
 
+/** What the catalog picker is actually going to send.
+ *
+ * The catalog branch only ever knew about explicit model ids, so a tier
+ * arriving from the account preference looked identical to "nothing selected"
+ * — the picker said server default while the request carried the tier. Naming
+ * the three states keeps that difference visible.
+ */
+export function catalogSelectionKind(
+  selectedModel: string | null | undefined,
+  selectedTier: string | null | undefined,
+): 'model' | 'tier' | 'server-default' {
+  if (selectedModel != null) return 'model'
+  if (selectedTier != null && selectedTier !== '') return 'tier'
+  return 'server-default'
+}
+
 export function modelNameLabel(
   option: Pick<NodeModelResolution, 'model'> | null | undefined,
   fallback: string,

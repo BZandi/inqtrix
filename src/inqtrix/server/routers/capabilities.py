@@ -1,7 +1,7 @@
 """Capability manifest endpoint: clients discover features, never hardcode.
 
 Unauthenticated by design, like ``/health``, ``/v1/models``, and
-``/v1/stacks`` (ADR-MS-3 reasoning): the UI needs the manifest before
+``/v1/stacks``: the UI needs the manifest before
 any credential prompt, and the payload exposes only feature/algorithm
 identity — no secrets, no per-deployment internals beyond what
 ``/health`` already reveals.
@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter
 
+from inqtrix.agents.kernel.algorithm import configured_kernel_limits
+from inqtrix.agents.limit_contract import QUICK_WEB_SEARCH_LIMIT
 from inqtrix.agents.tier_policy import (
     DEFAULT_AGENT_TIER,
     tier_capabilities_payload,
@@ -70,13 +72,22 @@ def _permission_mode_entry(mode: str) -> dict[str, object]:
             autonomy=mode, new_tasks=[web_probe]
         ),
         "patch_gate": True,
+        # Classification keys on ``user_conditional`` (set by the policy),
+        # NOT the mere presence of a ``when`` predicate: a child-tool gate
+        # carries an internal single-dispatch predicate but gates every
+        # real delegation, so it belongs in ``kernel_gated_tools``. Only a
+        # gate that leaves a user-triggerable path ungated (scoped
+        # knowledge search) is ``conditional``.
         "kernel_gated_tools": sorted(
             name
             for name, entry in config.items()
-            if name not in ALWAYS_GATED_TOOLS and "when" not in entry
+            if name not in ALWAYS_GATED_TOOLS
+            and not entry.get("user_conditional")
         ),
         "kernel_conditional_tools": sorted(
-            name for name, entry in config.items() if "when" in entry
+            name
+            for name, entry in config.items()
+            if entry.get("user_conditional")
         ),
         "kernel_always_gated": list(ALWAYS_GATED_TOOLS),
     }
@@ -104,10 +115,117 @@ def build_router(container: "AppContainer") -> APIRouter:
         web_source_available = "web.search.instant" in capability_ids
         knowledge_source_available = "knowledge.search" in capability_ids
         collaboration_service = container.editor_collaboration_service
+        sharing_settings = getattr(settings, "sharing", None)
+        guest_link_settings = getattr(settings, "editor_guest_links", None)
+        sharing_available = bool(container.share_service is not None)
+        sharing_configured = bool(
+            getattr(sharing_settings, "enabled", sharing_available)
+        )
+        collaboration_configured = bool(
+            getattr(
+                settings.collaboration,
+                "enabled",
+                collaboration_service is not None,
+            )
+        )
         collaboration_available = bool(
             collaboration_service is not None
             and await collaboration_service.service_available()
         )
+        guest_links_configured = bool(
+            getattr(guest_link_settings, "enabled", False)
+        )
+        guest_links_available = bool(
+            getattr(container, "editor_guest_link_service", None) is not None
+            and sharing_available
+            and collaboration_available
+        )
+
+        def feature_status(
+            *,
+            configured: bool,
+            available: bool,
+            unavailable_reason: str,
+        ) -> dict[str, object]:
+            if available:
+                return {
+                    "configured": True,
+                    "available": True,
+                    "state": "enabled",
+                    "reason_code": None,
+                }
+            return {
+                "configured": configured,
+                "available": False,
+                "state": "degraded" if configured else "disabled",
+                "reason_code": (
+                    unavailable_reason if configured else "operator_disabled"
+                ),
+            }
+
+        sharing_reason = (
+            "auth_mode_unsupported"
+            if getattr(
+                getattr(container, "auth_provider", None),
+                "mode",
+                "none",
+            )
+            not in {"oidc", "local", "ldap"}
+            else "postgres_required"
+            if settings.storage.backend != "postgres"
+            else "service_unreachable"
+        )
+        collaboration_reason = (
+            "postgres_required"
+            if settings.storage.backend != "postgres"
+            else "auth_mode_unsupported"
+            if getattr(
+                getattr(container, "auth_provider", None),
+                "mode",
+                "none",
+            )
+            not in {"oidc", "local", "ldap"}
+            else "service_unreachable"
+        )
+        guest_links_reason = (
+            "sharing_required"
+            if not sharing_available
+            else "collaboration_required"
+            if not collaboration_available
+            else "https_required"
+            if (
+                not str(
+                    getattr(settings.server, "public_base_url", "")
+                ).lower().startswith("https://")
+                # The explicit insecure-HTTP opt-in serves guest links
+                # over http — reporting https_required then would make
+                # the FE hide a feature the server actually provides.
+                and not settings.editor_guest_links.allow_insecure_http
+            )
+            else "service_unreachable"
+        )
+        kernel_limit_values = {
+            "schnell": configured_kernel_limits(
+                settings.agent_platform, depth="normal", tier="schnell"
+            ),
+            "normal": configured_kernel_limits(
+                settings.agent_platform, depth="normal", tier="gruendlich"
+            ),
+            "deep": configured_kernel_limits(
+                settings.agent_platform, depth="deep", tier="tief"
+            ),
+        }
+
+        def kernel_limit_payload(
+            values: tuple[int, int, int, int],
+        ) -> dict[str, int]:
+            tool_calls, tool_ceiling, steps, step_ceiling = values
+            return {
+                "tool_calls": tool_calls,
+                "tool_calls_ceiling": tool_ceiling,
+                "steps": steps,
+                "steps_ceiling": step_ceiling,
+            }
         payload = {
             "algorithms": registry.manifest(),
             "features": {
@@ -116,6 +234,11 @@ def build_router(container: "AppContainer") -> APIRouter:
                     "embedding_provider", knowledge_enabled
                 ),
                 "openapi": settings.server.enable_openapi,
+                # Whether GET /v1/stacks exists. Only the multi-stack factory
+                # mounts it, so a browser that probes blindly guarantees one
+                # 404 per page load in every single-stack deployment — and a
+                # console with a guaranteed error in it stops being read.
+                "multi_stack": getattr(container, "stacks", None) is not None,
                 "files": files_enabled,
                 # Server-side document parsing is pure MarkItDown CPU work with
                 # no vector-store dependency, so it is advertised at the top
@@ -123,7 +246,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 # a transient vector-store outage. The browser gates its upload
                 # parse on this; the GET /v1/files/{id}/text endpoint mirrors it.
                 "document_parser": feature_overrides.get("document_parser", False),
-                "sharing": container.share_service is not None,
+                "sharing": sharing_available,
                 # Browsers sync rules against this surface — only a
                 # DURABLE store may advertise it (a volatile store
                 # reads as "everything deleted" after a restart).
@@ -131,7 +254,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                     container.prompt_template_service is not None
                     and container.prompt_template_service.durable
                 ),
-                # Skills follow the same durable-store rule (plan M3).
+                # Skills follow the same durable-store rule.
                 "skills": (
                     container.skill_service is not None
                     and container.skill_service.durable
@@ -149,9 +272,14 @@ def build_router(container: "AppContainer") -> APIRouter:
                     and container.chat_history_service.durable
                 ),
                 "collaboration": collaboration_available,
-                # Wave-1 agent capability tools are registered — the same
-                # curated registry the (later) deepagents and MCP adapters
-                # consume. On when at least one capability is wired.
+                "editor_guest_links": guest_links_available,
+                "editor_guest_link_stats": bool(
+                    guest_links_available
+                    and bool(getattr(guest_link_settings, "stats_enabled", False))
+                ),
+                # Agent capability tools are registered in the same curated
+                # registry consumed by deepagents and MCP adapters. This is on
+                # when at least one capability is wired.
                 "agent_tools": bool(
                     container.capability_registry is not None
                     and container.capability_registry.ids()
@@ -162,27 +290,63 @@ def build_router(container: "AppContainer") -> APIRouter:
                     "workspace_agent" in container.registry.ids()
                     and settings.storage.backend == "postgres"
                 ),
-                # Cognitive kernel (plan M2): True only when the
-                # registration gate passed (rollout switch AND
+                # The cognitive kernel is true only when the registration
+                # gate passed (rollout switch AND
                 # checkpointer AND native tool calling) — frontends
                 # feature-detect mode=agent_kernel through this flag.
                 "agent_kernel": "agent_kernel" in container.registry.ids(),
             },
             "collaboration": {
-                "configured": collaboration_service is not None,
+                "configured": collaboration_configured,
                 "service_available": collaboration_available,
                 "transport_path": "/collaboration",
                 "protocol_version": settings.collaboration.protocol_version,
                 "schema_version": settings.collaboration.schema_version,
                 "mode": "single_replica",
             },
-            # Workspace-agent limits + vocabulary (M5): the desk reads
-            # these instead of hardcoding, decision E16/E8.
+            "feature_status": {
+                "sharing": feature_status(
+                    configured=sharing_configured,
+                    available=sharing_available,
+                    unavailable_reason=sharing_reason,
+                ),
+                "collaboration": feature_status(
+                    configured=collaboration_configured,
+                    available=collaboration_available,
+                    unavailable_reason=collaboration_reason,
+                ),
+                "editor_guest_links": feature_status(
+                    configured=guest_links_configured,
+                    available=guest_links_available,
+                    unavailable_reason=guest_links_reason,
+                ),
+                "editor_guest_link_stats": feature_status(
+                    configured=(
+                        guest_links_configured
+                        and bool(
+                            getattr(guest_link_settings, "stats_enabled", False)
+                        )
+                    ),
+                    available=bool(
+                        guest_links_available
+                        and bool(
+                            getattr(guest_link_settings, "stats_enabled", False)
+                        )
+                    ),
+                    unavailable_reason=(
+                        "guest_links_required"
+                        if not guest_links_available
+                        else "operator_disabled"
+                    ),
+                ),
+            },
+            # The desk reads workspace-agent limits and vocabulary from
+            # this contract instead of hardcoding them.
             "agent": {
                 "autonomy_modes": ["strict", "balanced", "autonomous"],
                 "default_autonomy": settings.agent_platform.default_autonomy,
-                # The EFFECTIVE desk default (plan M2 rollout): the
-                # configured kernel default only publishes once the
+                # The effective desk default publishes the configured
+                # kernel default only once the
                 # kernel actually registered — the frontend never
                 # submits an unregistered mode.
                 "default_mode": (
@@ -192,16 +356,16 @@ def build_router(container: "AppContainer") -> APIRouter:
                     and "agent_kernel" in container.registry.ids()
                     else "workspace_agent"
                 ),
-                # Two-mode UI presets (plan M1 S7, the Cowork pattern):
-                # the composer renders Standard/Auto and maps onto the
+                # The composer renders the two-mode Standard/Auto presets
+                # and maps them onto the
                 # UNCHANGED wire vocabulary above. advanced_autonomy=True
                 # republishes the legacy three-way control instead.
                 "mode_presets": [
                     {"id": "standard", "autonomy": "balanced"},
                     {"id": "auto", "autonomy": "autonomous"},
                 ],
-                # Thoroughness (plan M4): orthogonal to the permission
-                # mode; the composer renders the toggle only when the
+                # Thoroughness is orthogonal to the permission mode; the
+                # composer renders the toggle only when the
                 # server publishes it (feature detection, no hardcoded
                 # claim).
                 "depth_modes": [
@@ -242,6 +406,35 @@ def build_router(container: "AppContainer") -> APIRouter:
                     settings.agent_platform.discovery_max_tool_calls
                 ),
                 "max_plan_tasks": settings.agent_platform.max_plan_tasks,
+                "limits": {
+                    "tokens": {
+                        "enabled": settings.quota.max_tokens_per_run > 0,
+                        "limit": max(0, settings.quota.max_tokens_per_run),
+                        "ceiling": max(0, settings.quota.max_tokens_per_run),
+                        "recoverable": False,
+                        "extendable": False,
+                        "reason": "operator_ceiling_exactly_once_required",
+                    },
+                    "kernel": {
+                        key: kernel_limit_payload(values)
+                        for key, values in kernel_limit_values.items()
+                    },
+                    "directives": {
+                        "quick_web": {
+                            "web_searches": QUICK_WEB_SEARCH_LIMIT,
+                        },
+                    },
+                    "mission": {
+                        "discovery_tool_calls": settings.agent_platform.discovery_max_tool_calls,
+                        "plan_tasks": settings.agent_platform.max_plan_tasks,
+                        "replan_rounds": settings.agent_platform.max_replan_rounds,
+                        "clarification_rounds": settings.agent_platform.max_clarification_rounds,
+                        "parallel_children": settings.agent_platform.max_parallel_children,
+                    },
+                    "research": {
+                        "rounds": settings.agent.max_rounds,
+                    },
+                },
                 "durable": settings.storage.backend == "postgres",
                 "tools": (
                     container.capability_registry.manifest()
@@ -249,15 +442,15 @@ def build_router(container: "AppContainer") -> APIRouter:
                     else []
                 ),
                 # What each permission mode actually gates — generated
-                # from THE enforcing sources (kernel policy config +
-                # the E16 replan rule), so published == enforced and
+                # from the enforcing sources (kernel policy config and
+                # replan authorization rule), so published == enforced and
                 # the composer's run overview cannot drift from the
                 # runtime (Designprinzip 5).
                 "permission_modes": {
                     mode: _permission_mode_entry(mode)
                     for mode in ("strict", "balanced", "autonomous")
                 },
-                # Skill LIMITS only (plan M3): the skill list itself
+                # Only skill limits are exposed here. The skill list itself
                 # comes from the authenticated GET /v1/skills — this
                 # endpoint is unauthenticated and must never leak
                 # titles or labels.

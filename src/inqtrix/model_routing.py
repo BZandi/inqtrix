@@ -48,16 +48,16 @@ NODE_TIER_ASSIGNMENT: dict[str, str] = {
     "knowledge_contextualize": "fast",
     "knowledge_decompose": "fast",
     "knowledge_rerank": "fast",
-    # Workspace-agent phases (M5, §4 tiering table): cheap for the
-    # assembly-line steps, expensive only where the leverage is.
+    # Workspace-agent phases use inexpensive models for assembly-line
+    # steps and stronger models only where the leverage is material.
     "agent_intake": "fast",
     "agent_discovery_analyst": "mid",
     "agent_plan": "high",
     "agent_contradiction": "mid",
     "agent_sufficiency": "fast",
     "agent_synthesis": "high",
-    # Chat-form answer (plan M1 S3): the user-facing deliverable stays
-    # on the high tier; the LIGHT variant is the R1 auto-downgrade the
+    # The user-facing chat deliverable stays on the high tier; the LIGHT
+    # variant is the deterministic auto-downgrade the
     # algorithm picks DETERMINISTICALLY when no web evidence is in play
     # (purely internal conversational answers) — auditable per run via
     # the model_resolution events.
@@ -66,16 +66,16 @@ NODE_TIER_ASSIGNMENT: dict[str, str] = {
     "agent_critic": "fast",
     "agent_file_analysis": "mid",
     "agent_patch": "mid",
-    # Cognitive kernel (plan M2, R2): ONE node id for the tool loop —
-    # the kernel is the brain, intelligence lives here. Tool/child calls
+    # The cognitive kernel has ONE node id for the tool loop: the kernel
+    # is the brain and intelligence lives here. Tool/child calls
     # keep their own node tiers; the kernel never inherits downward.
     "agent_kernel": "high",
-    # Deep verification pass (plan M4 `4.1.4`): a rubric check, not the
-    # brain — mid keeps it cheap; the ONE revision reuses the kernel
+    # The deep verification pass is a rubric check, not the brain. The
+    # mid tier keeps it cheap; the ONE revision reuses the kernel
     # node's own resolution.
     "agent_deep_review": "mid",
-    # Skill clarification point check (plan M3 `3.4`): a cheap
-    # extraction call per attached skill at intake.
+    # Skill clarification-point checks use one inexpensive extraction
+    # call per attached skill at intake.
     "agent_skill_point_check": "fast",
 }
 """Maps each LLM call site to its default tier.

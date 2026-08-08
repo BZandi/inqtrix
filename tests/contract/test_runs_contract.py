@@ -85,7 +85,7 @@ def test_response_form_is_rejected_outside_agent_modes() -> None:
     assert "response_form" in response.json()["error"]["message"]
 
 
-def test_session_id_is_rejected_outside_agent_modes() -> None:
+def test_session_id_is_rejected_outside_saved_session_modes() -> None:
     with make_contract_client() as client:
         response = client.post(
             "/v1/runs",
@@ -278,6 +278,19 @@ def test_completed_result_payload_injects_run_id_status_and_usage(monkeypatch):
             "title": None, "document_id": None, "chunk_index": None,
             "excerpt": None, "source_text": None,
             "grounded_support": None, "page_number": None,
+            "provider_snippet": None,
+            "reference_id": None,
+            "source_id": None,
+            "query_id": None,
+            "query_ids": [],
+            "citation_id": None,
+            "citation_ids": [],
+            "source_run_id": None,
+            "source_run_ids": [],
+            "source_span": None,
+            "revision_id": None,
+            "generation_id": None,
+            "provenance_status": None,
         }
     ]
     assert payload["usage"] == {

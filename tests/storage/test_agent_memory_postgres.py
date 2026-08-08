@@ -1,15 +1,9 @@
-"""P1 safety net: agent-memory tables work under the app's tenant GUC + RLS.
+"""Agent-memory persistence under canonical-user and tenant RLS contracts.
 
-Migrations 0033/0034 created the ``tenant_isolation`` policy on the WRONG GUC
-(``app.tenant_id``, which the app never sets), so under FORCE ROW LEVEL
-SECURITY and the NOBYPASSRLS ``inqtrix_app`` role, WITH CHECK rejected every
-insert and USING hid every row — ``agent_memory_candidates`` / ``agent_feedback``
-were silently dead on Postgres. Migration 0036 repaired the policy to
-``inqtrix_current_tenant_id()`` (the GUC the app actually sets, DEFAULT_TENANT
-per session). These round-trips fail/return empty against the pre-0036 policy
-and pass against it — the regression guard the P1 plan promised.
-
-Live Postgres only (RLS never bites the in-memory store); skipped offline.
+The restricted application role must be able to round-trip candidates and
+feedback for an active canonical user while FORCE ROW LEVEL SECURITY scopes
+every operation to the transaction-local tenant GUC. Live Postgres only; the
+suite is skipped offline.
 """
 
 from __future__ import annotations
@@ -27,15 +21,17 @@ from inqtrix.storage.agent_memory_postgres import (
 )
 from inqtrix.storage.db import build_engine, build_session_factory
 from inqtrix.storage.migrate import run_migrations
+from tests.storage._canonical_users import (
+    canonical_user_id,
+    ensure_canonical_users,
+)
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
 APP_ROLE = "inqtrix_app"
+USER_ID = canonical_user_id("agent-memory-user")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -66,8 +62,18 @@ async def wiped():
                 )
             await session.execute(text("DELETE FROM agent_memory_candidates"))
             await session.execute(text("DELETE FROM agent_feedback"))
+            await ensure_canonical_users(session, (USER_ID,))
     await engine.dispose()
     yield
+    cleanup_engine = build_engine(TEST_DATABASE_URL)
+    cleanup_factory = build_session_factory(cleanup_engine)
+    try:
+        async with cleanup_factory() as session:
+            async with session.begin():
+                await session.execute(text("DELETE FROM agent_memory_candidates"))
+                await session.execute(text("DELETE FROM agent_feedback"))
+    finally:
+        await cleanup_engine.dispose()
 
 
 @pytest_asyncio.fixture()
@@ -92,13 +98,11 @@ async def feedback_store(wiped):
 async def test_memory_candidate_round_trips_under_the_app_tenant_guc(
     candidate_store,
 ):
-    """A candidate inserted then listed under the restricted role + FORCE RLS
-    survives — the exact path the wrong ``app.tenant_id`` GUC broke (WITH CHECK
-    reject on insert, USING hide on read) before migration 0036."""
+    """Candidates remain visible under the same canonical user and tenant."""
     candidate = AgentMemoryCandidate(
         candidate_id="cand-1",
         tenant_id="default",
-        sub="user-a",
+        user_id=USER_ID,
         scope="user",
         category="preference",
         content="prefers concise answers",
@@ -111,7 +115,7 @@ async def test_memory_candidate_round_trips_under_the_app_tenant_guc(
     assert created.candidate_id == "cand-1"
 
     listed = await candidate_store.list_candidates(
-        tenant_id="default", sub="user-a"
+        tenant_id="default", user_id=USER_ID
     )
     assert [c.candidate_id for c in listed] == ["cand-1"]
     assert listed[0].content == "prefers concise answers"
@@ -119,12 +123,11 @@ async def test_memory_candidate_round_trips_under_the_app_tenant_guc(
 
 @pytest.mark.asyncio
 async def test_feedback_round_trips_under_the_app_tenant_guc(feedback_store):
-    """The sibling ``agent_feedback`` table (same 0034 wrong-GUC bug) is also
-    readable/writable under the correct GUC after 0036."""
+    """Feedback remains visible under the same canonical user and tenant."""
     record = AgentFeedbackRecord(
         feedback_id="fb-1",
         tenant_id="default",
-        sub="user-a",
+        user_id=USER_ID,
         run_id="run-1",
         feedback="positive",
         reason="clear answer",
@@ -133,5 +136,7 @@ async def test_feedback_round_trips_under_the_app_tenant_guc(feedback_store):
     created = await feedback_store.create_feedback(record)
     assert created.feedback_id == "fb-1"
 
-    listed = await feedback_store.list_feedback(tenant_id="default", sub="user-a")
+    listed = await feedback_store.list_feedback(
+        tenant_id="default", user_id=USER_ID
+    )
     assert [f.feedback_id for f in listed] == ["fb-1"]

@@ -5,7 +5,7 @@
  * (the Topbar import button is shown iff ``canPersistProject && !serverSyncEnabled``).
  * For an authenticated cookie-session user (local/oidc/ldap) server sync is
  * AUTOMATIC — ResearchDesk derives ``serverSyncEnabled`` from the live session
- * (P1), so the project hydrates + autosaves with no button and this import is
+ * so the project hydrates and autosaves without a separate button; this import is
  * never reached. The two paths share the same machinery; only the trigger
  * differs (session-derived vs. button).
  *

@@ -99,6 +99,7 @@ async function reconciliationFixture(
     expiresAt: Date.now() / 1_000 + 60,
     generation: 1,
     leaseId: 'lease-1',
+    policyCursor: 0,
     protocolVersion: configured.protocolVersion,
     schemaHash: await getEditorSchemaFingerprint(),
     schemaVersion: configured.schemaVersion,

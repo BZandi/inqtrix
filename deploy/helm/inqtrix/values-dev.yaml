@@ -1,0 +1,21 @@
+# Smallest value set that renders the chart, for lint and template checks.
+#
+# The chart fails closed on three things that a release must supply and a
+# render check must not invent: an image digest, a database, and a bundled
+# database password. This file answers exactly those three so the documented
+# gate command runs green.
+#
+# Not a deployment configuration. It allows unpinned images and carries a
+# throwaway credential, so it must never be passed to `helm install`.
+
+image:
+  allowUnpinned: true
+
+postgres:
+  enabled: true
+  auth:
+    password: render-check-only
+
+secret:
+  data:
+    INQTRIX_SESSION_SECRET: render-check-only-0123456789abcdef0123456789abcdef

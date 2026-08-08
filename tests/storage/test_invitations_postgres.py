@@ -38,10 +38,7 @@ from tests.storage._canonical_users import (
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
 APP_ROLE = "inqtrix_app"
 ISSUER = "http://idp.example"
@@ -272,7 +269,7 @@ async def test_disable_cascade_is_atomic(factory):
     await sessions.create(
         AuthSession(
             id="sess-1",
-            user_id=user.id,
+            user_id=user.user_id,
             issuer=ISSUER,
             subject=subject,
             email="alice@example.com",
@@ -287,7 +284,7 @@ async def test_disable_cascade_is_atomic(factory):
         PersonalAccessToken(
             token_id="tok1",
             tenant_id="default",
-            owner_user_id=user.id,
+            owner_user_id=user.user_id,
             name="ci",
             secret_hmac="ab" * 32,
             created_at=time.time(),
@@ -297,14 +294,15 @@ async def test_disable_cascade_is_atomic(factory):
         )
     )
     assert await directory.disable_user(
-        tenant_id="default", user_id=user.id, now=time.time()
+        tenant_id="default", user_id=user.user_id, now=time.time()
     )
     found = await directory.find_by_user_id(
-        tenant_id="default", user_id=user.id
+        tenant_id="default", user_id=user.user_id
     )
     assert found is not None and found.disabled_at is not None
+    assert await sessions.get("sess-1") is None
     assert (await pat_store.get("tok1")).revoked_at is not None
     # Second disable is a guarded no-op.
     assert not await directory.disable_user(
-        tenant_id="default", user_id=user.id, now=time.time()
+        tenant_id="default", user_id=user.user_id, now=time.time()
     )

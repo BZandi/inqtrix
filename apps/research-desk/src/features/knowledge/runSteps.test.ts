@@ -100,6 +100,81 @@ describe('applyKnowledgeRunEvent', () => {
     expect(progress.steps.some((step) => step.kind === 'answer')).toBe(false)
   })
 
+  it('retains and deduplicates technical retrieval degradation events', () => {
+    const completeDegradation = {
+      candidate_cap: 64,
+      final_evidence_complete: true,
+      final_top_k: 4,
+      reason: 'vector_overfetch_cap',
+      requested_candidate_pool: 40,
+      requested_top_k: 4,
+      retrieval_mode: 'hybrid',
+      returned_candidate_pool: 8,
+      returned_hits: 4,
+      stage: 'vector_candidate_pool',
+    }
+    const incompleteDegradation = {
+      candidate_cap: null,
+      final_evidence_complete: false,
+      final_top_k: 8,
+      reason: 'vector_candidate_stalled',
+      requested_candidate_pool: 40,
+      requested_top_k: 8,
+      retrieval_mode: 'hybrid',
+      returned_candidate_pool: 7,
+      returned_hits: 3,
+      stage: 'vector_candidate_pool',
+    }
+    const progress = reduceEvents([
+      profileResolved,
+      event('inqtrix.knowledge.retrieval.degraded', completeDegradation),
+      event('inqtrix.knowledge.retrieval.degraded', incompleteDegradation),
+      event('inqtrix.knowledge.retrieval.completed', {
+        candidate_count: 3,
+        degradations: [completeDegradation, incompleteDegradation],
+        final_k: 8,
+        top_k: 8,
+      }),
+    ])
+
+    expect(progress.steps.find((step) => step.id === 'retrieval')).toMatchObject({
+      facts: {
+        retrievalDegradations: [completeDegradation, incompleteDegradation],
+      },
+      status: 'done',
+    })
+  })
+
+  it('retains cumulative source-integrity warnings from completion and live events', () => {
+    const initial = {
+      code: 'chunks_require_reindex',
+      count: 1,
+      message: 'server fallback',
+      reason: 'source_unverified',
+      recommended_action: 'reindex',
+      stage: 'canonical_hydration',
+    }
+    const progress = reduceEvents([
+      profileResolved,
+      event('inqtrix.knowledge.retrieval.completed', {
+        candidate_count: 3,
+        top_k: 8,
+        warnings: [initial],
+      }),
+      event('inqtrix.knowledge.retrieval.warning', {
+        ...initial,
+        count: 4,
+      }),
+    ])
+
+    expect(progress.steps.find((step) => step.id === 'retrieval')).toMatchObject({
+      facts: {
+        retrievalWarnings: [{ ...initial, count: 4 }],
+      },
+      status: 'done',
+    })
+  })
+
   it('appends the answer step directly after retrieval when no gate is planned', () => {
     const noGateProfile = event('inqtrix.knowledge.profile.resolved', {
       auto_selected: false,
@@ -138,8 +213,8 @@ describe('applyKnowledgeRunEvent', () => {
     const gates = progress.steps.filter((step) => step.kind === 'gate')
     expect(gates).toHaveLength(2)
     // round 0 = first judgement; total = rewrites (2) + initial = 3.
-    expect(gates[0].facts).toMatchObject({ rewritten: true, round: 1, roundsTotal: 3, sufficient: false })
-    expect(gates[1].facts).toMatchObject({ round: 2, roundsTotal: 3, sufficient: true })
+    expect(gates[0].facts).toMatchObject({ gateMarker: 'm', rewritten: true, round: 1, roundsTotal: 3, sufficient: false })
+    expect(gates[1].facts).toMatchObject({ gateMarker: 'm', round: 2, roundsTotal: 3, sufficient: true })
     expect(progress.steps.at(-1)).toMatchObject({ kind: 'answer', status: 'running' })
   })
 
@@ -301,6 +376,24 @@ describe('applyKnowledgeRunEvent', () => {
     ])
 
     expect(progress.steps.every((step) => step.status === 'done')).toBe(true)
+  })
+
+  it('retains the grounding fallback marker even when no quote row exists', () => {
+    const progress = reduceEvents([
+      profileResolved,
+      event('inqtrix.knowledge.grounding.checked', {
+        marker: '_knowledge_grounding_fallback',
+        quotes_total: 0,
+        quotes_verified: 0,
+      }),
+    ])
+
+    expect(progress.steps.find((step) => step.kind === 'grounding')?.facts)
+      .toMatchObject({
+        groundingMarker: '_knowledge_grounding_fallback',
+        quotesTotal: 0,
+        quotesVerified: 0,
+      })
   })
 
   it('ignores unrelated event types', () => {

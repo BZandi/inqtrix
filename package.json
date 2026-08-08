@@ -2,15 +2,13 @@
   "name": "inqtrix",
   "private": true,
   "license": "AGPL-3.0-only",
-  "packageManager": "pnpm@11.1.1",
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
   "engines": {
     "node": ">=22.12.0",
-    "npm": ">=10.9.0",
-    "pnpm": ">=11.1.1"
+    "npm": ">=10.9.0"
   },
   "overrides": {
     "@tiptap/core": "3.27.1",
@@ -65,28 +63,32 @@
     "yjs": "13.6.31"
   },
   "scripts": {
-    "e2e:dev": "INQTRIX_E2E_MODE=dev playwright test",
-    "e2e:list": "INQTRIX_E2E_MODE=dev playwright test --list",
-    "e2e:release": "pnpm run e2e:typecheck && pnpm run e2e:tooling:test && node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types e2e/release-command.ts",
-    "e2e:test": "pnpm run e2e:dev",
-    "e2e:tooling:test": "INQTRIX_E2E_MODE=dev node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test --experimental-strip-types e2e/browser-observer.test.ts e2e/config.test.ts e2e/control.test.ts e2e/layout.test.ts e2e/protocol-session.test.ts e2e/release-command.test.ts e2e/release-reporter.test.ts e2e/transport-fingerprint.test.ts",
-    "e2e:typecheck": "tsc -p e2e/tsconfig.json --noEmit",
-    "load:collaboration": "pnpm run load:collaboration:dev",
-    "load:collaboration:check": "node --check tests/load/collaboration-load.mjs && node --check tests/load/collaboration-load-lib.mjs",
-    "load:collaboration:dev": "node tests/load/collaboration-load.mjs --mode dev",
-    "load:collaboration:release": "pnpm run load:collaboration:check && pnpm run load:collaboration:test && node tests/load/collaboration-load.mjs --mode release",
-    "load:collaboration:test": "node --test tests/load/collaboration-load.test.mjs",
-    "ui:dev": "node scripts/run_research_desk_ui.mjs dev",
-    "ui:build": "node scripts/run_research_desk_ui.mjs build",
-    "ui:lint": "node scripts/run_research_desk_ui.mjs lint",
-    "ui:test": "node scripts/run_research_desk_ui.mjs test",
-    "ui:typecheck": "node scripts/run_research_desk_ui.mjs typecheck",
-    "ui:preview": "node scripts/run_research_desk_ui.mjs preview",
-    "ui:prod": "node scripts/run_research_desk_ui.mjs build && node scripts/run_research_desk_ui.mjs preview"
+    "verify:orchestrator": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types tests/verification/cli.ts",
+    "verify:list": "npm run verify:orchestrator -- --list",
+    "verify:tooling": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test --experimental-strip-types tests/verification/orchestrator.test.ts tests/verification/container-engine.test.ts tests/verification/repository-hygiene.test.ts tests/verification/fixtures/accounts.test.mjs tests/verification/fixtures/container-resource-monitor.test.mjs tests/verification/fixtures/fault-control-server.test.mjs tests/verification/fixtures/load-control-server.test.mjs tests/verification/fixtures/load-soak-activity.test.mjs tests/verification/fixtures/network-shaping.test.mjs e2e/browser-observer.test.ts e2e/config.test.ts e2e/control.test.ts e2e/layout.test.ts e2e/protocol-session.test.ts e2e/scenario-reporter.test.ts e2e/transport-fingerprint.test.ts && node --test tests/load/collaboration-load.test.mjs && tsc -p e2e/tsconfig.json --noEmit",
+    "verify:ui-fixture": "npm run verify:orchestrator -- --profile ui-fixture",
+    "verify:owner-setup": "npm run verify:orchestrator -- --profile owner-setup",
+    "verify:system-smoke": "npm run verify:orchestrator -- --profile system-smoke",
+    "verify:agent-desk": "npm run verify:orchestrator -- --profile agent-desk",
+    "verify:chat-prompt": "npm run verify:orchestrator -- --profile chat-prompt",
+    "verify:fault-injection": "npm run verify:orchestrator -- --profile fault-injection",
+    "verify:load-smoke": "npm run verify:orchestrator -- --profile load-smoke",
+    "verify:load-soak": "npm run verify:orchestrator -- --profile load-soak --container-engine podman",
+    "verify:load-ramp": "npm run verify:orchestrator -- --profile load-ramp --container-engine podman",
+    "verify:load-capacity": "npm run verify:orchestrator -- --profile load-capacity",
+    "verify:edge": "npm run verify:orchestrator -- --profile edge-conformance",
+    "ui:dev": "npm --workspace @inqtrix/research-desk run dev",
+    "ui:build": "npm --workspace @inqtrix/research-desk run build",
+    "ui:lint": "npm --workspace @inqtrix/research-desk run lint",
+    "ui:test": "npm --workspace @inqtrix/research-desk run test",
+    "ui:typecheck": "npm --workspace @inqtrix/research-desk run typecheck",
+    "ui:preview": "npm --workspace @inqtrix/research-desk run preview",
+    "ui:prod": "npm run ui:build && npm run ui:preview"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",
     "@types/node": "24.12.4",
+    "axe-core": "4.12.1",
     "typescript": "6.0.3",
     "ws": "8.21.0",
     "yjs": "13.6.31"

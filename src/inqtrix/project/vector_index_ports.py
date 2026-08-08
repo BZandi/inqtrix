@@ -26,6 +26,10 @@ class VectorIndexNotFound(KeyError):
     """Raised when an index id is unknown to the store (HTTP 404)."""
 
 
+class VectorIndexMemberUnavailable(RuntimeError):
+    """A requested member is absent, out of scope, or no longer active."""
+
+
 @dataclass(frozen=True)
 class VectorIndexMember:
     """One document referenced by an index.
@@ -38,7 +42,8 @@ class VectorIndexMember:
             ingested as, once known; ``None`` when ingested before this was
             tracked (offline / older index). Lets "remove from index" delete the
             exact document without a full rebuild; persisted so it survives a
-            reload (else removal degrades to local-only).
+            reload. Missing ids are reconciled through stable source identity;
+            a server-backed member is never removed locally while unresolved.
     """
 
     file_id: str
@@ -153,5 +158,32 @@ class VectorIndexStore(Protocol):
     async def delete_index(
         self, index_id: str, *, scope: ResourceScope
     ) -> None: ...
+
+    async def set_deletion_state(
+        self,
+        index_id: str,
+        *,
+        scope: ResourceScope,
+        status: str,
+        error: str | None,
+    ) -> None:
+        """Persist the server-owned deleting/delete-failed projection."""
+        ...
+
+    async def count_index(self, index_id: str, *, scope: ResourceScope) -> int:
+        """Count the exact scoped record for terminal residual verification."""
+        ...
+
+    async def remove_asset_memberships(
+        self, file_id: str, *, scope: ResourceScope
+    ) -> int:
+        """Detach one asset from every vector index in the same scope."""
+        ...
+
+    async def count_asset_memberships(
+        self, file_id: str, *, scope: ResourceScope
+    ) -> int:
+        """Return residual memberships for zero-residual verification."""
+        ...
 
     async def aclose(self) -> None: ...

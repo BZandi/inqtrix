@@ -175,6 +175,55 @@ describe('editor document autosave planning', () => {
     ))).toEqual(['owner-comment', 'shared-comment'])
   })
 
+  it('keeps recovery copies and synchronously retired ids outside every autosave collection', () => {
+    const ownerDocument = {
+      ...BASE_DOCUMENT,
+      id: 'owner-document',
+    }
+    const recoveryDocument = {
+      ...BASE_DOCUMENT,
+      id: 'recovery-document',
+      recovery: {
+        capturedAt: '2026-07-15T08:02:00.000Z',
+        originalDocumentId: 'retired-document',
+        reason: 'remote_deleted' as const,
+      },
+      revision: 0,
+    }
+    const retiredDocument = {
+      ...BASE_DOCUMENT,
+      id: 'retired-document',
+      serverSynced: true,
+    }
+    const documents = {
+      [ownerDocument.id]: ownerDocument,
+      [recoveryDocument.id]: recoveryDocument,
+      [retiredDocument.id]: retiredDocument,
+    }
+    const comments = Object.fromEntries(
+      Object.values(documents).map((document) => {
+        const record = {
+          ...comment(`comment-${document.id}`),
+          documentId: document.id,
+        }
+        return [record.id, record]
+      }),
+    )
+    const retiredIds = new Set([retiredDocument.id])
+
+    expect(Object.keys(editorDocumentsForAutosave(
+      documents,
+      undefined,
+      retiredIds,
+    ))).toEqual([ownerDocument.id])
+    expect(Object.values(editorCommentsForAutosave(
+      comments,
+      documents,
+      undefined,
+      retiredIds,
+    )).map((item) => item.documentId)).toEqual([ownerDocument.id])
+  })
+
   it('keeps view-only and legacy shared comments out of the write collection', () => {
     expect(canPersistEditorCommentsForDocument({
       ...BASE_DOCUMENT,

@@ -64,6 +64,7 @@ def visible_resource_select(
     tenant_id: str,
     actor_user_id: uuid.UUID | None,
     restrict_to_workspace_members: bool,
+    sharing_enabled: bool = True,
 ) -> Any:
     """Build one authoritative owned-or-accepted-shared list query.
 
@@ -81,6 +82,16 @@ def visible_resource_select(
             resource_table.c.tenant_id == tenant_id,
             *live_filters,
             owner_column.is_(None),
+        )
+
+    if not sharing_enabled:
+        return select(
+            resource_table,
+            literal(None).label(VISIBLE_SHARE_PERMISSION),
+        ).where(
+            resource_table.c.tenant_id == tenant_id,
+            *live_filters,
+            owner_column == actor_user_id,
         )
 
     share = resource_shares.alias(f"visible_{resource_type}_share")
@@ -176,7 +187,15 @@ async def lock_active_users(
     tenant_id: str,
     user_ids: Sequence[uuid.UUID],
 ) -> bool:
-    """Lock canonical users in UUID order and require all to be active."""
+    """Share-lock canonical users in UUID order and require all to be active.
+
+    ``FOR SHARE`` still prevents a concurrent disable or delete from changing
+    the authorization decision before this transaction commits.  Unlike
+    ``FOR UPDATE``, it is compatible with the key-share lock PostgreSQL takes
+    when transactional outbox rows reference ``users``.  That compatibility
+    is important for collaboration mutations: they lock a document and then
+    append user events while other actors authorize against the same document.
+    """
     expected = tuple(sorted(set(user_ids), key=str))
     if not expected:
         return True
@@ -189,7 +208,7 @@ async def lock_active_users(
                 users.c.disabled_at.is_(None),
             )
             .order_by(users.c.id)
-            .with_for_update()
+            .with_for_update(read=True)
         )
     ).scalars()
     return set(rows) == set(expected)
@@ -238,6 +257,7 @@ async def lock_resource_access(
     owner_column: "Column[Any]",
     minimum: SharePermission,
     restrict_to_workspace_members: bool,
+    sharing_enabled: bool = True,
     owner_only: bool = False,
 ) -> LockedResourceAccess | None:
     """Lock a resource and its applicable share, returning its owner.
@@ -311,7 +331,7 @@ async def lock_resource_access(
         )
     if locked_owner == actor_user_id:
         return LockedResourceAccess(owner_user_id=locked_owner)
-    if owner_only:
+    if owner_only or not sharing_enabled:
         return None
 
     allowed_permissions = tuple(
@@ -345,6 +365,68 @@ async def lock_resource_access(
     )
 
 
+async def append_audit_row(
+    session: "AsyncSession",
+    *,
+    tenant_id: str,
+    actor_user_id: uuid.UUID | None,
+    action: str,
+    resource_type: str,
+    resource_id: str,
+    actor_type: str = "user",
+    detail: dict[str, object] | None = None,
+    outcome: str = "success",
+    correlation: dict[str, str] | None = None,
+    origin: dict[str, str] | None = None,
+    workspace_id: uuid.UUID | None = None,
+) -> None:
+    """One audit row in the caller transaction — WITHOUT invalidations.
+
+    The in-tx twin of the sink write, for index rows (service starts,
+    terminals) that must land atomically with their state change but
+    have no share-cache side effects. Keeps this module the single
+    owner of in-transaction audit inserts.
+
+    The envelope (actor pseudonym, request origin, correlation join keys)
+    is derived from the ambient context here, exactly as
+    :func:`~inqtrix.services.audit_service.build_audit_entry` derives it for
+    the sink path. Two entry points that computed different envelopes left
+    whole action families unfilterable in the admin panel depending on which
+    one happened to write them.
+    """
+    from inqtrix.auth.log_redaction import stable_pseudonym
+    from inqtrix.services.audit_service import ambient_audit_envelope
+
+    ambient_origin, ambient_correlation = ambient_audit_envelope()
+    if correlation:
+        ambient_correlation.update(
+            {k: str(v) for k, v in correlation.items() if v}
+        )
+    if origin:
+        ambient_origin.update({k: str(v) for k, v in origin.items() if v})
+
+    await session.execute(
+        insert(audit_log).values(
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            actor_type=actor_type,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            detail=detail or {},
+            outcome=outcome,
+            origin=ambient_origin,
+            correlation=ambient_correlation,
+            actor_pseudonym=(
+                stable_pseudonym("usr", actor_user_id)
+                if actor_user_id is not None
+                else None
+            ),
+            workspace_id=workspace_id,
+        )
+    )
+
+
 async def append_resource_effects(
     session: "AsyncSession",
     *,
@@ -356,17 +438,28 @@ async def append_resource_effects(
     resource_id: str,
     scope: str,
     additional_targets: Sequence[uuid.UUID] = (),
+    actor_type: str = "user",
+    detail: dict[str, object] | None = None,
+    outcome: str = "success",
+    correlation: dict[str, str] | None = None,
 ) -> None:
-    """Append audit and content-free invalidations in the caller transaction."""
-    await session.execute(
-        insert(audit_log).values(
-            tenant_id=tenant_id,
-            actor_user_id=actor_user_id,
-            action=action,
-            resource_type=resource_type,
-            resource_id=resource_id,
-            detail={},
-        )
+    """Append audit and content-free invalidations in the caller transaction.
+
+    ``outcome``/``correlation`` fill the 0072 read-model columns; the
+    actor pseudonym is stamped here so every row in the admin panel
+    carries the same ``usr_<hex16>`` reference the logs and traces use.
+    """
+    await append_audit_row(
+        session,
+        tenant_id=tenant_id,
+        actor_user_id=actor_user_id,
+        actor_type=actor_type,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        detail=detail,
+        outcome=outcome,
+        correlation=correlation,
     )
     recipients = (
         await session.execute(

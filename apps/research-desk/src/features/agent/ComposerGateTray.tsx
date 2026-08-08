@@ -368,7 +368,7 @@ function PlanGate({
     .replace('{internal}', String(counts.internal))
     .replace('{web}', String(counts.web))
     .replace('{synthesis}', String(counts.synthesis))
-  // Informed web consent (E16 amendment, plan M1 S7): the approved plan
+  // Informed web consent: the approved plan
   // is the ONLY surface where Standard mode consents to web searches —
   // the concrete queries therefore show INLINE, not just behind "Plan
   // ansehen".
@@ -543,9 +543,23 @@ function ToolGate({
   t: TranslationDictionary
 }) {
   const [submitting, setSubmitting] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState<Record<string, string>>({})
   const proposed = Array.isArray(approval.payload.actions)
     ? (approval.payload.actions as Record<string, unknown>[])
     : []
+  // Editable only when the gate proposes exactly ONE action (backend
+  // constraint: _validated_tool_edit rejects multi-action edits and cannot
+  // swap the tool); v1 edits string-valued args — the web query is the case
+  // that matters — and passes non-string args through unchanged.
+  const single = proposed.length === 1 ? proposed[0] : null
+  const singleArgs =
+    (single?.args as Record<string, unknown> | undefined) ?? {}
+  const editableKeys = Object.keys(singleArgs).filter(
+    (key) => typeof singleArgs[key] === 'string',
+  )
+  const canEditArgs = Boolean(single) && canEdit && editableKeys.length > 0
+
   const decide = (decision: 'approve' | 'reject') => {
     if (!canEdit || submitting) return
     setSubmitting(true)
@@ -553,54 +567,157 @@ function ToolGate({
       .decideApproval(run.runId, approval.approvalId, { decision })
       .finally(() => setSubmitting(false))
   }
+  const submitEdit = () => {
+    if (!single || !canEdit || submitting) return
+    setSubmitting(true)
+    const args: Record<string, unknown> = { ...singleArgs }
+    for (const key of editableKeys) {
+      if (key in draft) args[key] = draft[key]
+    }
+    void actions
+      .decideApproval(run.runId, approval.approvalId, {
+        decision: 'edit',
+        actions: [{ tool: String(single.tool ?? ''), args }],
+      })
+      .finally(() => setSubmitting(false))
+  }
+  const startEditing = () => {
+    setDraft(
+      Object.fromEntries(
+        editableKeys.map((key) => [key, String(singleArgs[key] ?? '')]),
+      ),
+    )
+    setEditing(true)
+  }
   return (
     <div>
       <GateTitle pulse title={t.agent.timeline.waitingApprovalTitle} tone="warning" />
       <p className="mt-1 t-meta text-muted-foreground">
         {t.agent.timeline.toolApprovalHint}
       </p>
-      <ul className="mt-1.5 space-y-0.5">
-        {proposed.map((action, index) => (
-          <li
-            className="flex items-start gap-1.5 t-meta text-foreground/85"
-            key={index}
-          >
-            <Search className="mt-0.5 icon-xs shrink-0 text-muted-foreground" />
-            <span className="min-w-0 break-words">
-              <span className="font-medium">
-                {String(action.tool ?? '')}
-              </span>
-              {(() => {
-                const args = action.args as Record<string, unknown> | undefined
-                const query = args && typeof args.query === 'string'
-                  ? args.query
-                  : ''
-                return query ? ` · ${query}` : ''
-              })()}
-            </span>
-          </li>
-        ))}
-      </ul>
+      {editing && single ? (
+        <div className="mt-1.5 space-y-1.5">
+          <p className="t-meta font-medium text-foreground/85">
+            {String(single.tool ?? '')}
+          </p>
+          {editableKeys.map((key) => (
+            <label className="block" key={key}>
+              <span className="t-hint text-muted-foreground">{key}</span>
+              <Input
+                className="mt-0.5 h-7 text-xs"
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    [key]: event.target.value,
+                  }))}
+                value={draft[key] ?? ''}
+              />
+            </label>
+          ))}
+        </div>
+      ) : (
+        <ul className="mt-1.5 space-y-0.5">
+          {proposed.map((action, index) => {
+            const args = action.args as Record<string, unknown> | undefined
+            const query = args && typeof args.query === 'string'
+              ? args.query
+              : ''
+            // delegate_batch proposes a LIST of assignments — each
+            // objective renders as its own sub-line so the user sees
+            // every child task verbatim before approving the batch.
+            const assignments = Array.isArray(args?.assignments)
+              ? (args.assignments as Record<string, unknown>[])
+              : []
+            return (
+              <li
+                className="flex items-start gap-1.5 t-meta text-foreground/85"
+                key={index}
+              >
+                <Search className="mt-0.5 icon-xs shrink-0 text-muted-foreground" />
+                <span className="min-w-0 break-words">
+                  <span className="font-medium">
+                    {String(action.tool ?? '')}
+                  </span>
+                  {query ? ` · ${query}` : ''}
+                  {assignments.length > 0 && (
+                    <span className="mt-0.5 block space-y-0.5">
+                      {assignments.map((assignment, itemIndex) => (
+                        <span
+                          className="block text-muted-foreground"
+                          key={itemIndex}
+                        >
+                          {itemIndex + 1}. {String(assignment.objective ?? '')}
+                          {assignment.mode
+                            ? ` (${String(assignment.mode)})`
+                            : ''}
+                        </span>
+                      ))}
+                    </span>
+                  )}
+                </span>
+              </li>
+            )
+          })}
+        </ul>
+      )}
       <div className="mt-2 flex items-center gap-1.5">
-        <Button
-          className="h-7 bg-brand px-2.5 text-xs text-brand-foreground hover:bg-brand/90"
-          disabled={!canEdit || submitting}
-          onClick={() => decide('approve')}
-          size="sm"
-          type="button"
-        >
-          {t.agent.timeline.approve}
-        </Button>
-        <Button
-          className="h-7 px-2.5 text-xs"
-          disabled={!canEdit || submitting}
-          onClick={() => decide('reject')}
-          size="sm"
-          type="button"
-          variant="outline"
-        >
-          {t.agent.timeline.reject}
-        </Button>
+        {editing ? (
+          <>
+            <Button
+              className="h-7 bg-brand px-2.5 text-xs text-brand-foreground hover:bg-brand/90"
+              disabled={!canEdit || submitting}
+              onClick={submitEdit}
+              size="sm"
+              type="button"
+            >
+              {t.agent.tray.toolEditSubmit}
+            </Button>
+            <Button
+              className="h-7 px-2.5 text-xs"
+              disabled={submitting}
+              onClick={() => setEditing(false)}
+              size="sm"
+              type="button"
+              variant="ghost"
+            >
+              {t.agent.tray.toolEditCancel}
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button
+              className="h-7 bg-brand px-2.5 text-xs text-brand-foreground hover:bg-brand/90"
+              disabled={!canEdit || submitting}
+              onClick={() => decide('approve')}
+              size="sm"
+              type="button"
+            >
+              {t.agent.timeline.approve}
+            </Button>
+            <Button
+              className="h-7 px-2.5 text-xs"
+              disabled={!canEdit || submitting}
+              onClick={() => decide('reject')}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              {t.agent.timeline.reject}
+            </Button>
+            {canEditArgs ? (
+              <Button
+                className="h-7 px-2.5 text-xs"
+                disabled={submitting}
+                onClick={startEditing}
+                size="sm"
+                type="button"
+                variant="ghost"
+              >
+                {t.agent.tray.toolEdit}
+              </Button>
+            ) : null}
+          </>
+        )}
       </div>
     </div>
   )

@@ -70,7 +70,8 @@ latency note. This is the reference; the prose above explains the *why*.
 | Knowledge sessions | Postgres | metadata eager, items load-on-open | client | list/get include `group_id`; `items_json` excluded from list |
 | Editor documents (Markdown mode) | **Postgres TEXT** | **load-on-open** | client | revision-CAS debounced autosave; body excluded from the list |
 | Editor documents (collaboration mode) | **Postgres Yjs updates + verified snapshots** | WebSocket join; Markdown projection for read-only/fallback consumers | active Y.Doc | binary state is truth; durable ack follows commit; Node has no persistence volume |
-| Editor comments | Postgres (idx `document_id`) | lazy (on open) | client | composite PK `(document_id, id)`; cascade on doc delete |
+| Private editor AI notes | Postgres (idx `document_id`, creator-scoped API) | lazy (on open) | client | creator-only; never promoted to a team discussion implicitly |
+| Shared editor comments | Postgres threads/messages/read cursors + content-free `user_events` | incremental on document open/reconnect | client + browser draft storage | Yjs-relative anchor with quote fallback; author-only message mutation; tombstones and resolution remain auditable |
 | Editor suggestions | transient for Markdown mode; Postgres patch metadata + Yjs marks for collaboration mode | assistant/changes inspector | active Y.Doc + client | collaboration decisions are idempotent server mutations; AI drafts stay private until publication |
 | File-asset records (+ extracted text) | Postgres (binary in object store) | metadata eager, **body load-on-use** | client | record relational, blob external |
 | Vector-index records (file↔collection) | Postgres (full record) | eager (small) | client | members + capped history travel with the record |
@@ -220,14 +221,15 @@ hide:
   (`ON DELETE SET NULL` in Postgres, explicit orphaning in the memory store).
   The untouched bootstrap placeholder remains local; a renamed or user-created
   empty session is persisted as real user state.
-- **Defer-while-indexing for vector indexes.** A vector-index record carries
-  its members and a capped run history with it (replaced wholesale on upsert).
-  Live reindex progress lives in a separate, **non-serialized** map, so the
-  autosave never fires on a progress tick. The autosave also defers the push
-  while `status === 'indexing'`, so the server only ever holds a terminal
-  status — a second device never sees a frozen spinner, and a crashed run never
-  strands one. A persisted `indexing` status is reconciled to the pre-run
-  status on load (no run survives a reload).
+- **Server-owned index operations.** A vector-index record carries the user's
+  logical membership and capped visible history, while every actual collection
+  generation or document-revision build is a separately persisted indexing
+  job. The client never serializes a guessed `indexing` status into the record:
+  it projects the authoritative job summary and SSE stream, reconnects by job
+  id, and removes that projection only after a terminal event. With Postgres
+  and Valkey the job, checkpoints, cancel request, and worker fencing survive
+  API/browser restarts. A stalled dependency is a visible paused state, not a
+  terminal record repaired locally after reload.
 - **Account preferences follow the user.** Theme / locale / contrast / user
   bubble tone are an
   account tier (one row per `(tenant, user_id)`), not project data, and are
@@ -243,9 +245,10 @@ hide:
 suggestions remain transient and only acceptance/rejection mutates the body.
 Collaboration suggestions are part of the Yjs document and carry durable patch,
 author, sequence, and decision metadata because other users must review the
-same pending change after reconnect or restart. Private AI/comment work remains
+same pending change after reconnect or restart. Private AI-note work remains
 visible only to its creator until the AI result is published as a shared Yjs
-suggestion.
+suggestion. Shared discussion threads are separate durable relational data and
+never enter an AI request unless a user explicitly attaches one.
 
 ## Tenant isolation
 
@@ -268,6 +271,69 @@ The shared lifecycle for the project tier lives in
 `tenant_session`); the policy/GRANT boilerplate is applied uniformly in each
 Alembic migration.
 
+`tenant_session` also owns transaction finalization. Request cancellation is
+allowed to stop application work, but rollback or commit and session close run
+inside a cancellation shield before the cancellation propagates. This keeps
+the tenant GUC transaction-local and returns the connection to its pool even
+when a client navigates away or closes a page during a request.
+
+Cancelled asyncpg work invalidates rather than recycles its driver connection.
+The engine adapter lets that invalidation finish updating the pool record after
+the driver has force-closed the socket; the original request cancellation still
+propagates. A closed handle must never remain eligible for a later checkout or
+trigger pool-wide invalidation through the next pre-ping.
+
+## Engines and event-loop domains
+
+An asyncpg connection belongs to the event loop that created it. A **pooled**
+engine therefore belongs to exactly one loop: the pool caches connections, and a
+cached connection handed to a second loop fails on checkout
+(`Future attached to a different loop`), corrupts asyncpg's protocol state, and
+poisons the pool for every later borrower — including unrelated callers who
+share it.
+
+Inqtrix has two kinds of consumer, and they need different engines:
+
+* **The HTTP request path** runs on uvicorn's one persistent loop. Pooling is
+  correct and valuable here.
+* **Run threads** (`inqtrix-run-*`, `inqtrix-reindex-*`) execute algorithms
+  synchronously and reach async stores through `run_coro_sync` or a bare
+  `asyncio.run` — a fresh, immediately closed loop *per call*. Only a
+  `NullPool` engine, which caches nothing, is safe there.
+
+That is why a single API process holds more than one engine, and why merging
+them would be a regression rather than a cleanup:
+
+| Engine | Pool | Loop domain |
+|---|---|---|
+| Platform bundle (identity, files, skills) | pooled | HTTP loop |
+| Auth bundle (sessions, users, PATs) | pooled | HTTP loop |
+| Run store, indexing store | pooled | each pinned to its OWN dedicated loop (`DurableJobStoreBase`) |
+| **Run-thread lane** (`build_run_thread_persistence`) | **NullPool** | any per-call loop |
+| Knowledge, quota, control, editor stores | NullPool | any per-call loop |
+
+Two ways to make a pooled engine safe are in use: pin it to one long-lived loop
+and marshal every call onto it (the job stores), or give the off-loop consumer
+its own NullPool engine (everything else). The run-thread lane is the second:
+the API keeps its pooled bundle for requests and hands run threads a NullPool
+twin. On the worker the whole bundle is already NullPool, so the lane *is* that
+bundle — no third engine.
+
+Enforcement is deliberate, because this rule was documented in four places and
+broken anyway (v0.2.0.4 wired the pooled auth directory into the run thread's
+actor probe, and nothing caught it):
+
+* `tenant_session` warns once per engine when a pooled engine is reached from a
+  second loop. It is the one chokepoint every tenant-scoped statement passes,
+  so it sees callers that never touch `sync_bridge`.
+* `tests/test_enterprise_seams.py` asserts the pool class on the engines reached
+  through the real container — offline, with a dummy URL, since
+  `create_async_engine` is lazy.
+
+NullPool costs a connect per operation. That is affordable only because
+authority checks fire at safepoints (see `agent-platform.md`), not per emitted
+event; a per-event check on a NullPool engine would be a connection storm.
+
 ## Durable jobs and concurrency
 
 Runs and indexing jobs are durable Postgres rows claimed with
@@ -278,24 +344,38 @@ onto Valkey / Redis Streams (Postgres still owning the durable rows) before
 reaching for a dedicated broker. The reindex tier is low-concurrency, so this
 is a documented operating regime, not a current divergence.
 
-### Collection maintenance during reindex
+### Collection maintenance during generation builds
 
-An active reindex job is the collection's serialized maintenance state. Job
-submission locks the collection and refuses a second active job. Document
-ingest/update/delete and collection deletion lock the same collection boundary
-and return HTTP 409 `collection_maintenance` while the job is queued, running,
-or `cancelling`. Cancellation keeps writes blocked until the worker confirms a
-terminal state; there is no mutation queue or post-hoc reconcile algorithm.
+One collection-generation build is serialized per collection. It never
+rewrites the active generation in place: the worker snapshots the active
+revision manifest, writes chunks and derived vectors under a new
+`generation_id`, validates counts, dimensions, source spans, and manifest
+identity, then changes the active-generation pointer in one transaction.
+Search reads that pointer once and admits only matching active revisions and
+generation points; stale Qdrant candidates are over-fetched and discarded
+until asynchronous cleanup completes.
 
-Reads remain available during the in-place rebuild. The worker reloads each
-canonical document immediately before embedding, checks the requester's current
-account and `edit` access before and after the external vector write, and ends
-as `authorization_revoked` if that authority disappears. Job visibility follows
-the parent collection: current `view` can list/read/events; current `edit` can
-cancel. `requested_by_user_id` is attribution for audit and quota, not a private
-job owner. A backend without transactional collection metadata returns 501 for
-sharing/reindex rather than presenting process-local state as a security
-boundary.
+The old generation therefore remains readable throughout the build and remains
+available for the configured rollback window after publication. Expiry is
+handled by the indexing worker's existing reconciliation cadence: the ledger
+leaves `rollback_available` before any external vector delete, retries
+`deleting`/`cleanup_failed` rows idempotently, verifies zero vector residuals,
+and only then removes chunk rows and marks the generation `deleted`. Normal
+document revisions may continue while a generation is staged. Before the
+pointer switch, the worker compares the staged manifest with the current active
+revision set, releases its short publication lock when a delta is needed,
+builds that delta, and validates again. A stale document worker publishes only
+through its own desired-revision compare-and-swap and ends `superseded` when a
+newer intent won.
+
+Collection deletion is the exception: its durable deletion operation fences
+active indexing jobs and tombstones the collection out of reads before
+physical cleanup. The worker checks the requester's current account and
+required access before and after external vector writes and ends as
+`authorization_revoked` if authority disappears. Current `view` can inspect
+job summaries/events; current `edit` can resume, explicitly choose a raw build,
+or cancel. A backend without transactional collection metadata returns 501
+rather than presenting process-local state as a security boundary.
 
 ## List loading and pagination contract
 

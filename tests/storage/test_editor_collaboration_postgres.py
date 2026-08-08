@@ -74,10 +74,7 @@ from tests.storage._canonical_users import (
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
 APP_ROLE = "inqtrix_app"
 TENANT_A = "collaboration-postgres-a"
@@ -183,6 +180,48 @@ async def database() -> AsyncIterator[_DatabaseHarness]:
 def _sha256(payload: bytes) -> str:
     """Return the lowercase digest used by collaboration persistence."""
     return hashlib.sha256(payload).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_current_policy_cursor_is_tenant_scoped(
+    database: _DatabaseHarness,
+) -> None:
+    """Each tenant sees only its greatest committed content-free event ID."""
+    async with database.session_factory() as session:
+        async with session.begin():
+            tenant_b_cursor = (
+                await session.execute(
+                    insert(user_events)
+                    .values(
+                        tenant_id=TENANT_B,
+                        target_user_id=OWNER_B,
+                        scope="share:accepted",
+                        resource_type="editor_document",
+                        resource_id="ed_policy_b",
+                    )
+                    .returning(user_events.c.id)
+                )
+            ).scalar_one()
+            tenant_a_cursor = (
+                await session.execute(
+                    insert(user_events)
+                    .values(
+                        tenant_id=TENANT_A,
+                        target_user_id=OWNER_A,
+                        scope="share:accepted",
+                        resource_type="editor_document",
+                        resource_id="ed_policy_a",
+                    )
+                    .returning(user_events.c.id)
+                )
+            ).scalar_one()
+
+    assert await database.store.current_policy_cursor(
+        tenant_id=TENANT_A
+    ) == int(tenant_a_cursor)
+    assert await database.store.current_policy_cursor(
+        tenant_id=TENANT_B
+    ) == int(tenant_b_cursor)
 
 
 def _snapshot(
@@ -418,6 +457,42 @@ def _suggestion_update(
     )
 
 
+def _assistant_suggestion_update(
+    *,
+    tenant_id: str,
+    document_id: str,
+    actor_user_id: uuid.UUID,
+    instance: CollaborationInstanceLease,
+    payload: bytes,
+    suggestions: tuple[CollaborationSuggestion, ...],
+    patches: tuple[CollaborationPatchState, ...],
+    command_id: uuid.UUID,
+    now: float,
+    expected_sequence: int | None = None,
+) -> PersistCollaborationUpdate:
+    """Build one server-side assistant publish without a browser lease."""
+    return PersistCollaborationUpdate(
+        tenant_id=tenant_id,
+        document_id=document_id,
+        generation=1,
+        instance_id=instance.instance_id,
+        instance_epoch=instance.epoch,
+        lease_id=None,
+        actor_user_id=actor_user_id,
+        update_hash=_sha256(payload),
+        update_bytes=payload,
+        actor_kind="assistant",
+        change_kind="suggestion",
+        suggestion_ids=tuple(item.suggestion_id for item in suggestions),
+        suggestions=suggestions,
+        patches=patches,
+        command_id=command_id,
+        command_payload_hash=_sha256(f"publish:{command_id}".encode()),
+        expected_sequence=expected_sequence,
+        now=now,
+    )
+
+
 async def _create_human_patch(
     database: _DatabaseHarness,
     *,
@@ -633,6 +708,57 @@ async def test_concurrent_updates_allocate_once_and_replay_is_idempotent(
         )
     assert sequences == [1, 2]
     assert persisted_sequence == 2
+
+
+@pytest.mark.asyncio
+async def test_activity_selects_optional_guest_actor_identity(
+    database: _DatabaseHarness,
+) -> None:
+    """Activity rows expose the additive guest actor column for user edits too."""
+    document_id = "ed_collaboration_activity_actor"
+    await _seed_markdown_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    await _activate_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    instance, lease = await _authorize_writer(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        user_id=OWNER_A,
+    )
+    await database.store.append_update(
+        _direct_update(
+            tenant_id=TENANT_A,
+            document_id=document_id,
+            actor_user_id=OWNER_A,
+            instance=instance,
+            lease=lease,
+            payload=b"activity-actor-update",
+            now=database.now + 1.0,
+        )
+    )
+
+    activity = await database.store.list_activity(
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        generation=1,
+        before_sequence=None,
+        author_user_id=None,
+        change_kind=None,
+        limit=10,
+    )
+
+    assert len(activity) == 1
+    assert activity[0].actor_user_id == OWNER_A
+    assert activity[0].actor_guest_identity_id is None
 
 
 @pytest.mark.asyncio
@@ -962,6 +1088,379 @@ async def test_human_suggestion_co_commits_patch_create_and_membership_update(
 
 
 @pytest.mark.asyncio
+async def test_private_assistant_publish_creates_patch_and_clears_draft_atomically(
+    database: _DatabaseHarness,
+) -> None:
+    """A matching private draft authorizes one atomic shared patch publish."""
+    document_id = "ed_collaboration_private_draft_publish"
+    patch_id = str(uuid.uuid4())
+    command_id = uuid.uuid4()
+    await _seed_markdown_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    await _activate_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    async with database.session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                insert(editor_comments).values(
+                    id="edc_private_ai",
+                    document_id=document_id,
+                    tenant_id=TENANT_A,
+                    created_by_user_id=OWNER_A,
+                    comment_markdown="Private rewrite",
+                    anchor={},
+                    kind="inline_edit",
+                    status="open",
+                    evidence_preset=None,
+                    suggestion_draft={
+                        "anchor_version": 1,
+                        "change_summary": [],
+                        "created_at": database.now,
+                        "evidence": None,
+                        "group_id": "editor-suggestion-group-publish",
+                        "patch_id": patch_id,
+                        "proposed_text": "Private provider output",
+                        "publication_command_id": str(command_id),
+                        "revision": 1,
+                        "revision_history": [],
+                        "suggestion_id": "editor-suggestion-publish",
+                        "updated_at": database.now,
+                        "warnings": [],
+                    },
+                    created_at=database.now,
+                    updated_at=database.now,
+                )
+            )
+    instance, _lease = await _authorize_writer(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        user_id=OWNER_A,
+        permission="suggest",
+    )
+
+    suggestion_id = str(uuid.uuid4())
+    descriptor = CollaborationSuggestion(
+        suggestion_id=suggestion_id,
+        patch_id=patch_id,
+        author_id=OWNER_A,
+        created_at=database.now + 1.0,
+        kind="replacement",
+    )
+    patch_state = CollaborationPatchState(
+        patch_id=patch_id,
+        author_id=OWNER_A,
+        created_at=database.now + 1.0,
+        active_suggestion_ids=(suggestion_id,),
+        kinds=("replacement",),
+    )
+    result = await database.store.append_update(
+        _assistant_suggestion_update(
+            tenant_id=TENANT_A,
+            document_id=document_id,
+            actor_user_id=OWNER_A,
+            instance=instance,
+            payload=b"publish-private-assistant-draft",
+            suggestions=(descriptor,),
+            patches=(patch_state,),
+            command_id=command_id,
+            now=database.now + 1.0,
+            expected_sequence=0,
+        )
+    )
+
+    async with database.session_factory() as session:
+        draft = await session.scalar(
+            select(editor_comments.c.suggestion_draft).where(
+                editor_comments.c.tenant_id == TENANT_A,
+                editor_comments.c.document_id == document_id,
+                editor_comments.c.id == "edc_private_ai",
+            )
+        )
+        patch = (
+            await session.execute(
+                select(editor_patches).where(
+                    editor_patches.c.tenant_id == TENANT_A,
+                    editor_patches.c.patch_id == patch_id,
+                )
+            )
+        ).mappings().one()
+    assert draft is None
+    assert result.sequence == 1
+    assert patch["source"] == "human"
+    assert patch["created_by_user_id"] == OWNER_A
+    assert patch["created_by_guest_identity_id"] is None
+    assert patch["command_id"] == command_id
+    assert patch["suggestion_ids"] == [suggestion_id]
+    assert patch["edits"] == [
+        {
+            "suggestion_id": suggestion_id,
+            "patch_id": patch_id,
+            "author_id": str(OWNER_A),
+            "created_at": database.now + 1.0,
+            "kind": "replacement",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stored_command_id",
+    [None, uuid.UUID("99999999-9999-4999-8999-999999999999")],
+    ids=["missing-draft", "command-mismatch"],
+)
+async def test_private_assistant_publish_requires_matching_creator_draft(
+    database: _DatabaseHarness,
+    stored_command_id: uuid.UUID | None,
+) -> None:
+    """Assistant actor alone or a mismatched command cannot mint a shared patch."""
+    document_id = "ed_collaboration_private_publish_without_draft"
+    patch_id = str(uuid.uuid4())
+    suggestion_id = str(uuid.uuid4())
+    request_command_id = uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    await _seed_markdown_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    await _activate_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    if stored_command_id is not None:
+        async with database.session_factory() as session:
+            async with session.begin():
+                await session.execute(
+                    insert(editor_comments).values(
+                        id="edc_private_ai_mismatch",
+                        document_id=document_id,
+                        tenant_id=TENANT_A,
+                        created_by_user_id=OWNER_A,
+                        comment_markdown="Private command mismatch",
+                        anchor={},
+                        kind="inline_edit",
+                        status="open",
+                        evidence_preset=None,
+                        suggestion_draft={
+                            "anchor_version": 1,
+                            "change_summary": [],
+                            "created_at": database.now,
+                            "evidence": None,
+                            "group_id": "editor-suggestion-group-mismatch",
+                            "patch_id": patch_id,
+                            "proposed_text": "Private provider output",
+                            "publication_command_id": str(stored_command_id),
+                            "revision": 1,
+                            "revision_history": [],
+                            "suggestion_id": "editor-suggestion-mismatch",
+                            "updated_at": database.now,
+                            "warnings": [],
+                        },
+                        created_at=database.now,
+                        updated_at=database.now,
+                    )
+                )
+    instance, _lease = await _authorize_writer(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        user_id=OWNER_A,
+        permission="suggest",
+    )
+    descriptor = CollaborationSuggestion(
+        suggestion_id=suggestion_id,
+        patch_id=patch_id,
+        author_id=OWNER_A,
+        created_at=database.now + 1.0,
+        kind="replacement",
+    )
+    patch_state = CollaborationPatchState(
+        patch_id=patch_id,
+        author_id=OWNER_A,
+        created_at=database.now + 1.0,
+        active_suggestion_ids=(suggestion_id,),
+        kinds=("replacement",),
+    )
+
+    with pytest.raises(CollaborationConflict) as conflict:
+        await database.store.append_update(
+            _assistant_suggestion_update(
+                tenant_id=TENANT_A,
+                document_id=document_id,
+                actor_user_id=OWNER_A,
+                instance=instance,
+                payload=b"publish-without-private-draft",
+                suggestions=(descriptor,),
+                patches=(patch_state,),
+                command_id=request_command_id,
+                now=database.now + 1.0,
+                expected_sequence=0,
+            )
+        )
+
+    assert conflict.value.reason == "patch_not_found"
+    async with database.session_factory() as session:
+        patch_count = await session.scalar(
+            select(func.count()).select_from(editor_patches).where(
+                editor_patches.c.tenant_id == TENANT_A,
+                editor_patches.c.patch_id == patch_id,
+            )
+        )
+        update_count = await session.scalar(
+            select(func.count()).select_from(editor_collaboration_updates).where(
+                editor_collaboration_updates.c.tenant_id == TENANT_A,
+                editor_collaboration_updates.c.document_id == document_id,
+            )
+        )
+        persisted_sequence = await session.scalar(
+            select(editor_documents.c.persisted_sequence).where(
+                editor_documents.c.tenant_id == TENANT_A,
+                editor_documents.c.id == document_id,
+            )
+        )
+        draft_count = await session.scalar(
+            select(func.count()).select_from(editor_comments).where(
+                editor_comments.c.tenant_id == TENANT_A,
+                editor_comments.c.document_id == document_id,
+                editor_comments.c.suggestion_draft.is_not(None),
+            )
+        )
+    assert patch_count == 0
+    assert update_count == 0
+    assert persisted_sequence == 0
+    assert draft_count == (1 if stored_command_id is not None else 0)
+
+
+@pytest.mark.asyncio
+async def test_slash_insertion_can_be_superseded_by_one_structure_suggestion(
+    database: _DatabaseHarness,
+) -> None:
+    """A sidecar-proven slash command may replace its durable patch member."""
+    document_id = "ed_collaboration_slash_structure"
+    await _seed_markdown_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    await _activate_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    instance, lease = await _authorize_writer(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        user_id=OWNER_A,
+        permission="suggest",
+    )
+    patch_id, slash_id = await _create_human_patch(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        actor_user_id=OWNER_A,
+        instance=instance,
+        lease=lease,
+    )
+    structure_id = str(uuid.uuid4())
+    slash_descriptor = CollaborationSuggestion(
+        suggestion_id=slash_id,
+        patch_id=patch_id,
+        author_id=OWNER_A,
+        created_at=database.now + 1.0,
+        kind="insertion",
+    )
+    structure_descriptor = CollaborationSuggestion(
+        suggestion_id=structure_id,
+        patch_id=patch_id,
+        author_id=OWNER_A,
+        created_at=database.now + 1.0,
+        kind="structure",
+    )
+    replacement = CollaborationPatchState(
+        patch_id=patch_id,
+        author_id=OWNER_A,
+        created_at=database.now + 1.0,
+        active_suggestion_ids=(structure_id,),
+        kinds=("structure",),
+        superseded_suggestion_ids=(slash_id,),
+    )
+
+    with pytest.raises(CollaborationConflict) as unproven:
+        await database.store.append_update(
+            _suggestion_update(
+                tenant_id=TENANT_A,
+                document_id=document_id,
+                actor_user_id=OWNER_A,
+                instance=instance,
+                lease=lease,
+                payload=b"unproven-slash-to-structure",
+                suggestions=(slash_descriptor, structure_descriptor),
+                patches=(replace(replacement, superseded_suggestion_ids=()),),
+                now=database.now + 2.0,
+                expected_sequence=1,
+            )
+        )
+    assert unproven.value.reason == "patch_membership_shrink"
+
+    result = await database.store.append_update(
+        _suggestion_update(
+            tenant_id=TENANT_A,
+            document_id=document_id,
+            actor_user_id=OWNER_A,
+            instance=instance,
+            lease=lease,
+            payload=b"slash-to-structure",
+            suggestions=(slash_descriptor, structure_descriptor),
+            patches=(replacement,),
+            now=database.now + 2.0,
+            expected_sequence=1,
+        )
+    )
+
+    assert result.sequence == 2
+    async with database.session_factory() as session:
+        patch = (
+            await session.execute(
+                select(editor_patches).where(editor_patches.c.patch_id == patch_id)
+            )
+        ).mappings().one()
+        update_row = (
+            await session.execute(
+                select(editor_collaboration_updates)
+                .where(
+                    editor_collaboration_updates.c.document_id == document_id,
+                    editor_collaboration_updates.c.sequence == 2,
+                )
+            )
+        ).mappings().one()
+    assert patch["suggestion_ids"] == [structure_id]
+    assert patch["edits"] == [
+        {
+            "suggestion_id": structure_id,
+            "patch_id": patch_id,
+            "author_id": str(OWNER_A),
+            "created_at": database.now + 1.0,
+            "kind": "structure",
+        }
+    ]
+    assert update_row["suggestion_ids"] == [slash_id, structure_id]
+
+
+@pytest.mark.asyncio
 async def test_non_decision_update_cannot_empty_pending_patch_membership(
     database: _DatabaseHarness,
 ) -> None:
@@ -1117,14 +1616,14 @@ async def test_open_patch_preserves_exact_ai_edits_for_preview(
         patch_id=patch_id,
         author_id=OWNER_A,
         created_at=database.now + 1.0,
-        kind="modification",
+        kind="replacement",
     )
     patch_state = CollaborationPatchState(
         patch_id=patch_id,
         author_id=OWNER_A,
         created_at=database.now + 1.0,
         active_suggestion_ids=(suggestion_id,),
-        kinds=("modification",),
+        kinds=("replacement",),
     )
     await database.store.append_update(
         _suggestion_update(
@@ -1147,14 +1646,14 @@ async def test_open_patch_preserves_exact_ai_edits_for_preview(
         generation=1,
         before=None,
         author_user_id=OWNER_A,
-        suggestion_kind="modification",
+        suggestion_kind="replacement",
         limit=50,
     )
     open_patches = open_page.patches
 
     assert len(open_patches) == 1
     assert open_patches[0].suggestion_ids == (suggestion_id,)
-    assert open_patches[0].kinds == ("modification",)
+    assert open_patches[0].kinds == ("replacement",)
     assert open_patches[0].exact_edits == (exact_edit,)
 
 
@@ -1685,6 +2184,389 @@ async def test_rotation_reconstructs_one_replacement_after_a_lost_response(
     assert len(rows) == 2
     assert rows[0].revoked_at == database.now + 1.0
     assert rows[1].rotation_command_id == rotation_command_id
+
+
+@pytest.mark.asyncio
+async def test_update_started_before_rotation_uses_immediate_successor_authority(
+    database: _DatabaseHarness,
+) -> None:
+    """An in-flight update survives an equal-authority lease rotation."""
+    document_id = "ed_collaboration_inflight_rotation"
+    await _seed_markdown_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    await _activate_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    instance, original = await _authorize_writer(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        user_id=OWNER_A,
+    )
+    update_started_before_rotation = _direct_update(
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        actor_user_id=OWNER_A,
+        instance=instance,
+        lease=original,
+        payload=b"inflight-update-across-rotation",
+        now=database.now + 1.5,
+    )
+    rotation_command_id = uuid.uuid4()
+    successor = replace(
+        original,
+        lease_id=uuid.uuid4(),
+        token_hash=_sha256(b"inflight-rotation-successor"),
+        issued_at=database.now + 1.0,
+        expires_at=database.now + 3_601.0,
+        last_validated_at=database.now + 1.0,
+        rotation_command_id=rotation_command_id,
+        rotated_from_lease_id=original.lease_id,
+    )
+    await database.store.rotate_lease(
+        previous_lease_id=original.lease_id,
+        previous_token_hash=original.token_hash,
+        replacement=successor,
+        max_issued_per_window=30,
+        issued_since=database.now - 60.0,
+    )
+
+    persisted = await database.store.append_update(
+        update_started_before_rotation
+    )
+    replayed = await database.store.append_update(
+        update_started_before_rotation
+    )
+
+    assert persisted.sequence == 1
+    assert persisted.persisted_sequence == 1
+    assert persisted.duplicate is False
+    assert replayed.sequence == 1
+    assert replayed.persisted_sequence == 1
+    assert replayed.duplicate is True
+
+
+@pytest.mark.asyncio
+async def test_update_started_before_rotation_obeys_successor_permission(
+    database: _DatabaseHarness,
+) -> None:
+    """A rotated read-only authority cannot complete an earlier edit."""
+    document_id = "ed_collaboration_inflight_rotation_downgrade"
+    await _seed_markdown_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    await _activate_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    instance, original = await _authorize_writer(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        user_id=OWNER_A,
+    )
+    successor = replace(
+        original,
+        lease_id=uuid.uuid4(),
+        token_hash=_sha256(b"inflight-downgraded-successor"),
+        permission="view",
+        issued_at=database.now + 1.0,
+        expires_at=database.now + 3_601.0,
+        last_validated_at=database.now + 1.0,
+        rotation_command_id=uuid.uuid4(),
+        rotated_from_lease_id=original.lease_id,
+    )
+    await database.store.rotate_lease(
+        previous_lease_id=original.lease_id,
+        previous_token_hash=original.token_hash,
+        replacement=successor,
+        max_issued_per_window=30,
+        issued_since=database.now - 60.0,
+    )
+
+    with pytest.raises(CollaborationLeaseInvalid) as denied:
+        await database.store.append_update(
+            _direct_update(
+                tenant_id=TENANT_A,
+                document_id=document_id,
+                actor_user_id=OWNER_A,
+                instance=instance,
+                lease=original,
+                payload=b"inflight-edit-after-downgrade",
+                now=database.now + 1.5,
+            )
+        )
+    assert str(denied.value) == "permission_denied"
+
+
+@pytest.mark.asyncio
+async def test_update_started_before_rotation_does_not_follow_a_lease_chain(
+    database: _DatabaseHarness,
+) -> None:
+    """Only an active direct successor can authorize an in-flight update."""
+    document_id = "ed_collaboration_inflight_rotation_chain"
+    await _seed_markdown_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    await _activate_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    instance, original = await _authorize_writer(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        user_id=OWNER_A,
+    )
+    first_successor = replace(
+        original,
+        lease_id=uuid.uuid4(),
+        token_hash=_sha256(b"inflight-first-successor"),
+        issued_at=database.now + 1.0,
+        expires_at=database.now + 3_601.0,
+        last_validated_at=database.now + 1.0,
+        rotation_command_id=uuid.uuid4(),
+        rotated_from_lease_id=original.lease_id,
+    )
+    await database.store.rotate_lease(
+        previous_lease_id=original.lease_id,
+        previous_token_hash=original.token_hash,
+        replacement=first_successor,
+        max_issued_per_window=30,
+        issued_since=database.now - 60.0,
+    )
+    second_successor = replace(
+        first_successor,
+        lease_id=uuid.uuid4(),
+        token_hash=_sha256(b"inflight-second-successor"),
+        issued_at=database.now + 2.0,
+        expires_at=database.now + 3_602.0,
+        last_validated_at=database.now + 2.0,
+        rotation_command_id=uuid.uuid4(),
+        rotated_from_lease_id=first_successor.lease_id,
+    )
+    await database.store.rotate_lease(
+        previous_lease_id=first_successor.lease_id,
+        previous_token_hash=first_successor.token_hash,
+        replacement=second_successor,
+        max_issued_per_window=30,
+        issued_since=database.now - 60.0,
+    )
+
+    with pytest.raises(CollaborationLeaseInvalid):
+        await database.store.append_update(
+            _direct_update(
+                tenant_id=TENANT_A,
+                document_id=document_id,
+                actor_user_id=OWNER_A,
+                instance=instance,
+                lease=original,
+                payload=b"inflight-update-after-second-rotation",
+                now=database.now + 2.5,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_started_before_rotation_requires_live_original_lifetime(
+    database: _DatabaseHarness,
+) -> None:
+    """A successor cannot extend the lifetime of a stale captured lease."""
+    document_id = "ed_collaboration_inflight_rotation_expired"
+    await _seed_markdown_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    await _activate_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    instance, original = await _authorize_writer(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        user_id=OWNER_A,
+    )
+    successor = replace(
+        original,
+        lease_id=uuid.uuid4(),
+        token_hash=_sha256(b"inflight-expired-original-successor"),
+        issued_at=database.now + 3_599.0,
+        expires_at=database.now + 7_199.0,
+        last_validated_at=database.now + 3_599.0,
+        rotation_command_id=uuid.uuid4(),
+        rotated_from_lease_id=original.lease_id,
+    )
+    await database.store.rotate_lease(
+        previous_lease_id=original.lease_id,
+        previous_token_hash=original.token_hash,
+        replacement=successor,
+        max_issued_per_window=30,
+        issued_since=database.now - 60.0,
+    )
+
+    with pytest.raises(CollaborationLeaseInvalid):
+        await database.store.append_update(
+            _direct_update(
+                tenant_id=TENANT_A,
+                document_id=document_id,
+                actor_user_id=OWNER_A,
+                instance=instance,
+                lease=original,
+                payload=b"inflight-update-after-original-expiry",
+                now=database.now + 3_600.5,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_started_before_rotation_rejects_revoked_successor(
+    database: _DatabaseHarness,
+) -> None:
+    """Explicit revocation still blocks a captured predecessor lease."""
+    document_id = "ed_collaboration_inflight_rotation_revoked"
+    await _seed_markdown_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    await _activate_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    instance, original = await _authorize_writer(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        user_id=OWNER_A,
+    )
+    successor = replace(
+        original,
+        lease_id=uuid.uuid4(),
+        token_hash=_sha256(b"inflight-revoked-successor"),
+        issued_at=database.now + 1.0,
+        expires_at=database.now + 3_601.0,
+        last_validated_at=database.now + 1.0,
+        rotation_command_id=uuid.uuid4(),
+        rotated_from_lease_id=original.lease_id,
+    )
+    await database.store.rotate_lease(
+        previous_lease_id=original.lease_id,
+        previous_token_hash=original.token_hash,
+        replacement=successor,
+        max_issued_per_window=30,
+        issued_since=database.now - 60.0,
+    )
+    assert (
+        await database.store.revoke_leases(
+            tenant_id=TENANT_A,
+            document_id=document_id,
+            user_id=OWNER_A,
+            now=database.now + 1.25,
+        )
+        == 1
+    )
+
+    with pytest.raises(CollaborationLeaseInvalid):
+        await database.store.append_update(
+            _direct_update(
+                tenant_id=TENANT_A,
+                document_id=document_id,
+                actor_user_id=OWNER_A,
+                instance=instance,
+                lease=original,
+                payload=b"inflight-update-after-explicit-revocation",
+                now=database.now + 1.5,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_started_before_rotation_requires_live_session(
+    database: _DatabaseHarness,
+) -> None:
+    """A direct successor never bypasses current account-session checks."""
+    document_id = "ed_collaboration_inflight_rotation_session"
+    await _seed_markdown_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    await _activate_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    instance, original = await _authorize_writer(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        user_id=OWNER_A,
+    )
+    successor = replace(
+        original,
+        lease_id=uuid.uuid4(),
+        token_hash=_sha256(b"inflight-session-successor"),
+        issued_at=database.now + 1.0,
+        expires_at=database.now + 3_601.0,
+        last_validated_at=database.now + 1.0,
+        rotation_command_id=uuid.uuid4(),
+        rotated_from_lease_id=original.lease_id,
+    )
+    await database.store.rotate_lease(
+        previous_lease_id=original.lease_id,
+        previous_token_hash=original.token_hash,
+        replacement=successor,
+        max_issued_per_window=30,
+        issued_since=database.now - 60.0,
+    )
+    async with database.session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(auth_sessions)
+                .where(auth_sessions.c.id == original.session_id)
+                .values(expires_at=database.now + 1.25)
+            )
+
+    with pytest.raises(CollaborationLeaseInvalid) as denied:
+        await database.store.append_update(
+            _direct_update(
+                tenant_id=TENANT_A,
+                document_id=document_id,
+                actor_user_id=OWNER_A,
+                instance=instance,
+                lease=original,
+                payload=b"inflight-update-after-session-expiry",
+                now=database.now + 1.5,
+            )
+        )
+    assert str(denied.value) == "session_invalid"
 
 
 @pytest.mark.asyncio
@@ -2427,7 +3309,7 @@ async def test_open_patch_kind_filter_precedes_keyset_limit(
         generation=1,
         before=None,
         author_user_id=None,
-        suggestion_kind="modification",
+        suggestion_kind="replacement",
         limit=200,
     )
     assert len(first.patches) == 200
@@ -2438,14 +3320,14 @@ async def test_open_patch_kind_filter_precedes_keyset_limit(
         generation=1,
         before=first.next_cursor,
         author_user_id=None,
-        suggestion_kind="modification",
+        suggestion_kind="replacement",
         limit=200,
     )
 
     observed = (*first.patches, *second.patches)
     assert len(second.patches) == 5
     assert second.next_cursor is None
-    assert all("modification" in patch.kinds for patch in observed)
+    assert all("replacement" in patch.kinds for patch in observed)
     assert {patch.patch_id for patch in observed} == set(expected_ids)
 
 

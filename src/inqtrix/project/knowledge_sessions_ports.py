@@ -76,11 +76,32 @@ class KnowledgeSession:
     tenant_id: str = "default"
     created_by_user_id: uuid.UUID | None = None
     workspace_id: str | None = None
+    lifecycle_status: str = "active"
+    deletion_operation_id: str | None = None
+    deletion_stage: str | None = None
+    deletion_error: str | None = None
 
 
 @runtime_checkable
 class KnowledgeSessionStore(Protocol):
     """Persistence port for knowledge sessions."""
+
+    async def claim_session(
+        self,
+        *,
+        id: str,
+        title: str,
+        created_at: float,
+        created_by_user_id: uuid.UUID | None,
+        workspace_id: str | None,
+    ) -> KnowledgeSession:
+        """Insert a session when absent and otherwise return it unchanged.
+
+        The store resolves concurrent claims atomically. A losing claimant
+        receives the row that won without rewriting its ownership or saved
+        items; the service performs the owner check on that returned row.
+        """
+        ...
 
     async def upsert_session(
         self,
@@ -110,6 +131,21 @@ class KnowledgeSessionStore(Protocol):
     async def delete_session(
         self, session_id: str, *, scope: ResourceScope
     ) -> None: ...
+
+    async def set_session_deletion_state(
+        self,
+        session_id: str,
+        *,
+        scope: ResourceScope,
+        lifecycle_status: str,
+        deletion_operation_id: str,
+        deletion_stage: str,
+        deletion_error: str | None,
+    ) -> None: ...
+
+    async def count_session_residuals(
+        self, session_id: str, *, scope: ResourceScope
+    ) -> int: ...
 
     async def upsert_group(
         self,

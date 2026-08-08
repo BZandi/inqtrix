@@ -64,6 +64,7 @@ def _thread_payload(thread: ChatThread) -> dict[str, Any]:
         "group_id": thread.group_id,
         "created_at": thread.created_at,
         "updated_at": thread.updated_at,
+        "model_selection": thread.model_selection,
     }
 
 
@@ -157,6 +158,16 @@ def build_router(container: "AppContainer") -> APIRouter:
                 400, "group_id muss ein String oder null sein",
                 "invalid_request_error",
             )
+        # Absent and null both mean "nothing picked" — str(None) would store
+        # the literal 'None' (the account-preferences lesson).
+        model_selection = body.get("model_selection")
+        if model_selection is None:
+            model_selection = ""
+        if not isinstance(model_selection, str):
+            return error_response(
+                400, "model_selection muss ein String sein",
+                "invalid_request_error",
+            )
         try:
             thread = await service.save_thread(
                 id=thread_id,
@@ -169,6 +180,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 caller_user_id=_caller_user_id(principal),
                 workspace_id=workspace_id_from_request(req),
                 visible_to=visible_to,
+                model_selection=model_selection,
             )
         except ChatValidationError as exc:
             return error_response(400, str(exc), "invalid_request_error")

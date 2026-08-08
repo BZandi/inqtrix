@@ -1,4 +1,4 @@
-"""deepagents contract tests for the kernel seam (plan M2 step 3).
+"""deepagents contract tests for the kernel seam.
 
 These tests ARE the deepagents upgrade gate: they freeze the exact
 behavior the kernel runtime depends on — built-in tool exclusion via the
@@ -110,6 +110,103 @@ def echo_tool(text: str) -> str:
 
 def _user_input(question: str) -> dict:
     return {"messages": [{"role": "user", "content": question}]}
+
+
+def test_supersteps_per_tool_turn_is_pinned():
+    """Derives ``_SUPERSTEPS_PER_TOOL_TURN`` by measuring the compiled graph.
+
+    The kernel prices its recursion ceilings in TOOL TURNS times this
+    constant, so the constant must track the real graph: a deepagents
+    upgrade or a new kernel middleware that adds a node silently shrinks
+    every published turn budget unless this measurement fails first. The
+    probe finds the minimal ``recursion_limit`` that lets a run with N
+    sequential tool calls plus a final answer finish, in the production
+    graph shape (balanced policy variant -> HITL node present, budget and
+    summarization middleware attached — the same slots the kernel's
+    ``_compiled_graph`` fills).
+    """
+    from langgraph.errors import GraphRecursionError
+
+    from inqtrix.agents.kernel.algorithm import (
+        _ANSWER_TURN_SUPERSTEPS,
+        _SCHNELL_TOOL_TURNS,
+        _SUPERSTEPS_PER_TOOL_TURN,
+    )
+    from inqtrix.agents.kernel.policy import interrupt_config_for
+
+    def _min_limit(tool_turns: int) -> int:
+        for limit in range(1, 40):
+            provider = _ScriptedProvider(
+                [
+                    _tool_call_turn(
+                        f"call_step{index}", "echo_tool", {"text": str(index)}
+                    )
+                    for index in range(tool_turns)
+                ]
+                + [_text_turn("Fertig.")]
+            )
+            agent = build_kernel_agent(
+                build_tool_chat_model(provider),
+                tools=[echo_tool],
+                system_prompt="Test.",
+                # echo_tool itself is ungated in balanced — the probe
+                # measures the per-turn node cost, not an interrupt.
+                interrupt_on=interrupt_config_for("balanced"),
+                checkpointer=MemorySaver(),
+                max_tool_calls=30,
+                context_keep_messages=20,
+            )
+            try:
+                agent.invoke(
+                    _user_input("Frage"),
+                    config={
+                        "recursion_limit": limit,
+                        "configurable": {
+                            "thread_id": f"steps-{tool_turns}-{limit}"
+                        },
+                    },
+                )
+            except GraphRecursionError:
+                continue
+            return limit
+        pytest.fail(
+            f"no recursion_limit up to 39 completed {tool_turns} tool turns"
+        )
+
+    answer_only = _min_limit(0)
+    one_call = _min_limit(1)
+    two_calls = _min_limit(2)
+    assert answer_only == _ANSWER_TURN_SUPERSTEPS, (
+        f"the bare answer turn costs {answer_only} super-steps but "
+        f"_ANSWER_TURN_SUPERSTEPS says {_ANSWER_TURN_SUPERSTEPS} — every "
+        "derived ceiling formula is off by the same amount."
+    )
+    measured_per_turn = two_calls - one_call
+    assert measured_per_turn == _SUPERSTEPS_PER_TOOL_TURN, (
+        f"one tool turn costs {measured_per_turn} super-steps but "
+        f"_SUPERSTEPS_PER_TOOL_TURN says {_SUPERSTEPS_PER_TOOL_TURN} — "
+        "a middleware/node change moved the price; update the constant "
+        "(and with it every derived ceiling) deliberately, never guess."
+    )
+    # The schnell clamp must afford the tier's published web call PLUS a
+    # knowledge/todo or failed-call turn plus the answer (its documented
+    # affordance) — not merely the single cheapest happy path.
+    schnell_clamp = (
+        _ANSWER_TURN_SUPERSTEPS
+        + _SUPERSTEPS_PER_TOOL_TURN * _SCHNELL_TOOL_TURNS
+    )
+    assert two_calls <= schnell_clamp, (
+        f"a two-tool-call schnell run needs recursion_limit {two_calls} "
+        f"but the clamp only buys {schnell_clamp} — the tier dies on an "
+        "ordinary knowledge+web trajectory again."
+    )
+    # ...which the pre-recalibration literal clamp (8) provably did not
+    # afford: 8 bought not even the bare answer run.
+    assert one_call > 8, (
+        "a one-tool-call run now fits into recursion_limit 8 — the "
+        "historic schnell clamp bug can no longer be demonstrated; "
+        "re-derive the clamp arithmetic instead of trusting it."
+    )
 
 
 def test_kernel_toolset_is_inqtrix_tools_plus_todos_only():
@@ -383,3 +480,56 @@ def test_resume_reject_skips_tool_and_continues():
     assert executed == []
     final = agent.get_state(config).values["messages"][-1]
     assert final.content == "Verstanden, ohne Tool beantwortet."
+
+
+def test_summarization_replacement_contract():
+    """Upgrade gate: the kernel REPLACES the base-stack summarization.
+
+    Three pinned facts, each of which a deepagents upgrade could silently
+    break: (1) the kernel harness profile excludes the base summarization
+    CLASS (exact-type matching preserves subclasses); (2) the kernel's
+    subclass reports its own ``.name`` — the string alias
+    ``"SummarizationMiddleware"`` must NOT match it, or the profile would
+    strip our replacement too; (3) the subclass keeps the seams the
+    kernel overrides (a rename upstream must fail here, not in
+    production).
+    """
+    from deepagents.middleware.summarization import (
+        _DeepAgentsSummarizationMiddleware,
+    )
+
+    from inqtrix.agents.harness import (
+        _kernel_summarization_middleware_cls,
+        _register_kernel_harness_profile,
+    )
+
+    _register_kernel_harness_profile()
+    from deepagents.profiles.harness.harness_profiles import (
+        _get_harness_profile,
+    )
+
+    from inqtrix.agents.kernel.chat_bridge import (
+        KERNEL_MODEL_IDENTIFIER,
+        KERNEL_MODEL_PROVIDER,
+    )
+
+    profile = _get_harness_profile(
+        f"{KERNEL_MODEL_PROVIDER}:{KERNEL_MODEL_IDENTIFIER}"
+    )
+    assert _DeepAgentsSummarizationMiddleware in profile.excluded_middleware
+
+    cls = _kernel_summarization_middleware_cls()
+    assert issubclass(cls, _DeepAgentsSummarizationMiddleware)
+    # The subclass must not inherit the public alias (string exclusions
+    # match `.name`): deepagents documents the fallback to __name__.
+    assert cls.__name__ == "KernelSummarizationMiddleware"
+    for seam in (
+        "_should_summarize",
+        "_offload_to_backend",
+        "_build_new_messages_with_path",
+        "wrap_model_call",
+    ):
+        assert seam in vars(cls), f"overridden seam {seam} vanished"
+        assert hasattr(_DeepAgentsSummarizationMiddleware, seam), (
+            f"upstream seam {seam} renamed — the kernel override is dead"
+        )

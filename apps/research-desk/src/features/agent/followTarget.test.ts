@@ -43,6 +43,20 @@ function memo(status: 'writing' | 'ready'): AgentArtifactRecord {
   }
 }
 
+function deliverable(status: 'writing' | 'ready'): AgentArtifactRecord {
+  return {
+    artifactId: 'deliverable1',
+    kind: 'deliverable',
+    title: 'Kurz-Memo',
+    status,
+    revision: 1,
+    updatedBy: 'agent',
+    refsCount: 2,
+    createdAt: 1,
+    updatedAt: 2,
+  }
+}
+
 describe('routeAgentRunToView', () => {
   it('routes nothing during intake/discovery (no file target without ids)', () => {
     expect(routeAgentRunToView(run())).toBeNull()
@@ -133,6 +147,33 @@ describe('routeAgentRunToView', () => {
     expect(routeAgentRunToView(record)).toEqual({
       descriptor: { view: 'document', runId: 'run_agent_1', artifactId: 'memo1' },
       urgency: 'auto-open',
+    })
+  })
+
+  it('a completed kernel run targets its deliverable document (no memo)', () => {
+    const record = run({
+      status: 'completed',
+      phase: 'done',
+      station: 'critic',
+      artifactOrder: ['deliverable1'],
+      artifacts: { deliverable1: deliverable('ready') },
+    })
+    expect(routeAgentRunToView(record)).toEqual({
+      descriptor: { view: 'document', runId: 'run_agent_1', artifactId: 'deliverable1' },
+      urgency: 'auto-open',
+    })
+  })
+
+  it('memo precedence: a run with both memo and deliverable targets the memo', () => {
+    const record = run({
+      status: 'completed',
+      phase: 'done',
+      station: 'critic',
+      artifactOrder: ['deliverable1', 'memo1'],
+      artifacts: { deliverable1: deliverable('ready'), memo1: memo('ready') },
+    })
+    expect(routeAgentRunToView(record)?.descriptor).toEqual({
+      view: 'document', runId: 'run_agent_1', artifactId: 'memo1',
     })
   })
 })

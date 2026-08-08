@@ -7,6 +7,7 @@ returns the full row. Process-local, not durable.
 
 from __future__ import annotations
 
+import threading
 import uuid
 from dataclasses import replace
 
@@ -24,8 +25,31 @@ class MemoryKnowledgeSessionStore:
     :class:`~inqtrix.project.knowledge_sessions_ports.KnowledgeSessionStore`."""
 
     def __init__(self) -> None:
+        self._lock = threading.RLock()
         self._sessions: dict[str, KnowledgeSession] = {}
         self._groups: dict[str, KnowledgeSessionGroup] = {}
+
+    async def claim_session(
+        self, *, id: str, title: str, created_at: float,
+        created_by_user_id: uuid.UUID | None, workspace_id: str | None,
+    ) -> KnowledgeSession:
+        with self._lock:
+            existing = self._sessions.get(id)
+            if existing is not None:
+                if existing.lifecycle_status != "active":
+                    raise KnowledgeSessionNotFound(id)
+                return existing
+            session = KnowledgeSession(
+                id=id,
+                title=title,
+                items_json="[]",
+                created_at=created_at,
+                updated_at=created_at,
+                created_by_user_id=created_by_user_id,
+                workspace_id=workspace_id,
+            )
+            self._sessions[id] = session
+            return session
 
     async def upsert_session(
         self, *, id: str, title: str, items_json: str, group_id: str | None,
@@ -34,35 +58,39 @@ class MemoryKnowledgeSessionStore:
         created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> KnowledgeSession:
-        if group_id is not None:
-            require_memory_scope(
-                self._groups.get(group_id),
-                created_by_user_id=created_by_user_id,
-                workspace_id=workspace_id,
-                resource_id=group_id,
-                not_found=KnowledgeSessionGroupNotFound,
-            )
-        existing = self._sessions.get(id)
-        if existing is not None:
-            require_memory_scope(
-                existing,
-                created_by_user_id=created_by_user_id,
-                workspace_id=workspace_id,
-                resource_id=id,
-                not_found=KnowledgeSessionNotFound,
-            )
-            session = replace(
-                existing, title=title, items_json=items_json, group_id=group_id,
-                updated_at=updated_at,
-            )
-        else:
-            session = KnowledgeSession(
-                id=id, title=title, items_json=items_json, created_at=created_at,
-                group_id=group_id, updated_at=updated_at, created_by_user_id=created_by_user_id,
-                workspace_id=workspace_id,
-            )
-        self._sessions[id] = session
-        return session
+        with self._lock:
+            if group_id is not None:
+                require_memory_scope(
+                    self._groups.get(group_id),
+                    created_by_user_id=created_by_user_id,
+                    workspace_id=workspace_id,
+                    resource_id=group_id,
+                    not_found=KnowledgeSessionGroupNotFound,
+                )
+            existing = self._sessions.get(id)
+            if existing is not None:
+                require_memory_scope(
+                    existing,
+                    created_by_user_id=created_by_user_id,
+                    workspace_id=workspace_id,
+                    resource_id=id,
+                    not_found=KnowledgeSessionNotFound,
+                )
+                if existing.lifecycle_status != "active":
+                    raise KnowledgeSessionNotFound(id)
+                session = replace(
+                    existing, title=title, items_json=items_json, group_id=group_id,
+                    updated_at=updated_at,
+                )
+            else:
+                session = KnowledgeSession(
+                    id=id, title=title, items_json=items_json, created_at=created_at,
+                    group_id=group_id, updated_at=updated_at,
+                    created_by_user_id=created_by_user_id,
+                    workspace_id=workspace_id,
+                )
+            self._sessions[id] = session
+            return session
 
     async def list_sessions(
         self, *, created_by_user_id: uuid.UUID | None, workspace_id: str | None
@@ -81,14 +109,59 @@ class MemoryKnowledgeSessionStore:
     async def delete_session(
         self, session_id: str, *, scope: ResourceScope
     ) -> None:
-        require_memory_scope(
-            self._sessions.get(session_id),
-            created_by_user_id=scope.created_by_user_id,
-            workspace_id=scope.workspace_id,
-            resource_id=session_id,
-            not_found=KnowledgeSessionNotFound,
-        )
-        self._sessions.pop(session_id, None)
+        with self._lock:
+            require_memory_scope(
+                self._sessions.get(session_id),
+                created_by_user_id=scope.created_by_user_id,
+                workspace_id=scope.workspace_id,
+                resource_id=session_id,
+                not_found=KnowledgeSessionNotFound,
+            )
+            self._sessions.pop(session_id, None)
+
+    async def set_session_deletion_state(
+        self,
+        session_id: str,
+        *,
+        scope: ResourceScope,
+        lifecycle_status: str,
+        deletion_operation_id: str,
+        deletion_stage: str,
+        deletion_error: str | None,
+    ) -> None:
+        with self._lock:
+            session = require_memory_scope(
+                self._sessions.get(session_id),
+                created_by_user_id=scope.created_by_user_id,
+                workspace_id=scope.workspace_id,
+                resource_id=session_id,
+                not_found=KnowledgeSessionNotFound,
+            )
+            self._sessions[session_id] = replace(
+                session,
+                lifecycle_status=lifecycle_status,
+                deletion_operation_id=deletion_operation_id,
+                deletion_stage=deletion_stage,
+                deletion_error=deletion_error,
+            )
+
+    async def count_session_residuals(
+        self, session_id: str, *, scope: ResourceScope
+    ) -> int:
+        session = self._sessions.get(session_id)
+        if session is None:
+            return 0
+        try:
+            require_memory_scope(
+                session,
+                created_by_user_id=scope.created_by_user_id,
+                workspace_id=scope.workspace_id,
+                resource_id=session_id,
+                not_found=KnowledgeSessionNotFound,
+            )
+        except KnowledgeSessionNotFound:
+            return 0
+        return 1
 
     async def upsert_group(
         self, *, id: str, title: str, created_at: float, updated_at: float,

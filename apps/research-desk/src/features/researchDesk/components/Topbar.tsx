@@ -274,7 +274,7 @@ function ProjectActionsGroup({
           />
           <ProjectActionButton
             disabled={isProjectActionPending}
-            icon={Download}
+            icon={isProjectActionPending ? LoaderCircle : Download}
             label={t.topbar.exportBackup}
             onClick={onExportProject}
           />
@@ -289,7 +289,7 @@ function ProjectActionsGroup({
           />
           <ProjectActionButton
             disabled={isProjectActionPending}
-            icon={Download}
+            icon={isProjectActionPending ? LoaderCircle : Download}
             label={t.topbar.exportProject}
             onClick={onExportProject}
           />

@@ -29,6 +29,8 @@ spec:
       {{- include "inqtrix.selectorLabels" (dict "root" . "component" "valkey") | nindent 6 }}
   template:
     metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
       labels:
         {{- include "inqtrix.labels" (dict "root" . "component" "valkey") | nindent 8 }}
     spec:
@@ -50,7 +52,10 @@ spec:
                 - ALL
           env:
             - name: VALKEY_PASSWORD
-              value: {{ .Values.valkey.password | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "inqtrix.secretName" . }}
+                  key: INQTRIX_BUNDLED_VALKEY_PASSWORD
           # $(VALKEY_PASSWORD) is expanded from the env var above by Kubernetes.
           command:
             - valkey-server
@@ -67,14 +72,14 @@ spec:
               containerPort: 6379
           readinessProbe:
             exec:
-              command: ["sh", "-c", "valkey-cli -a \"$VALKEY_PASSWORD\" ping | grep -q PONG"]
+              command: ["sh", "-c", "REDISCLI_AUTH=\"$VALKEY_PASSWORD\" valkey-cli ping | grep -q PONG"]
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 6
           livenessProbe:
             exec:
-              command: ["sh", "-c", "valkey-cli -a \"$VALKEY_PASSWORD\" ping | grep -q PONG"]
+              command: ["sh", "-c", "REDISCLI_AUTH=\"$VALKEY_PASSWORD\" valkey-cli ping | grep -q PONG"]
             initialDelaySeconds: 20
             periodSeconds: 20
             timeoutSeconds: 5

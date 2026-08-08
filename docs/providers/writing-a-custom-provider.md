@@ -267,7 +267,15 @@ print(f"Rounds: {result.metrics.rounds}")
 Run it with:
 
 ```bash
+# uv
+uv sync --extra dev
 uv run python main.py
+
+# or standard Python/pip
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+python main.py
 ```
 
 For streaming output, replace the last block with a `for chunk in agent.stream(...)` loop.

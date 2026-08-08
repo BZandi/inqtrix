@@ -1,6 +1,12 @@
 export type CollaborationSocketEvent =
   | { kind: 'close'; code: number; order: number; socketId: number }
-  | { kind: 'durable_ack'; order: number; sequence: number; socketId: number }
+  | {
+      kind: 'durable_ack'
+      observedAt: number
+      order: number
+      sequence: number
+      socketId: number
+    }
   | { kind: 'open'; order: number; socketId: number }
   | { kind: 'protocol_error'; order: number; socketId: number }
 
@@ -13,7 +19,7 @@ export function collaborationSocketWindow(
   events: CollaborationSocketEvent[],
   socketId: number,
   afterOrder: number,
-  closeCode: number,
+  closeCode?: number,
 ): {
   close: Extract<CollaborationSocketEvent, { kind: 'close' }>
   durableAcks: Array<Extract<CollaborationSocketEvent, { kind: 'durable_ack' }>>
@@ -26,7 +32,7 @@ export function collaborationSocketWindow(
     event.kind === 'close'
     && event.socketId === socketId
     && event.order > afterOrder
-    && event.code === closeCode
+    && (closeCode === undefined || event.code === closeCode)
   ))
   if (!close) return null
   return {
@@ -56,7 +62,13 @@ export function collaborationSocketWindow(
 export function installCollaborationWebSocketObserver(): void {
   type ObserverEvent =
     | { kind: 'close'; code: number; order: number; socketId: number }
-    | { kind: 'durable_ack'; order: number; sequence: number; socketId: number }
+    | {
+        kind: 'durable_ack'
+        observedAt: number
+        order: number
+        sequence: number
+        socketId: number
+      }
     | { kind: 'open'; order: number; socketId: number }
     | { kind: 'protocol_error'; order: number; socketId: number }
   type ObserverState = {
@@ -140,6 +152,7 @@ export function installCollaborationWebSocketObserver(): void {
       ) throw new Error('invalid durable acknowledgement')
       state.events.push({
         kind: 'durable_ack',
+        observedAt: Date.now(),
         order,
         sequence: Number(message.sequence),
         socketId,

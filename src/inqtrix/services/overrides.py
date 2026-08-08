@@ -45,11 +45,10 @@ five-step recipe:
    new field (range validation + an end-to-end test against a mocked
    ``agent_run``).
 
-The same recipe lives as a convention entry in
-``.cursor/memory/conventions.md`` so future maintainers do not have to
-reverse-engineer the path.
+This versioned module is the canonical recipe so every maintainer can follow
+the path without depending on local editor or agent memory.
 
-Profile-switch semantics (ADR-WS-6, scenarios A/B/C)
+Profile-switch semantics for scenarios A/B/C
 ====================================================
 
 When a caller flips ``report_profile`` per request, the profile preset
@@ -122,7 +121,7 @@ class AgentOverridesRequest(BaseModel):
     """Report style preset (``schnell``, ``compact`` or ``deep``)."""
 
     depth: Literal["normal", "deep"] | None = None
-    """Agent-mode thoroughness (plan M4): ``deep`` = high kernel effort,
+    """Agent-mode thoroughness: ``deep`` = high kernel effort,
     raised iteration ceiling, DEEP child research profile and one
     verification pass. Distinct from ``report_profile``. Legacy knob —
     new clients send ``agent_tier`` instead; sending BOTH is a 400."""

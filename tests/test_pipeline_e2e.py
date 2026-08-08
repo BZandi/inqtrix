@@ -40,7 +40,7 @@ from tests._fake_providers import (
 _FIXTURE_SLUG = "nvidia_quartalszahlen"
 # Real Azure Foundry capture of the SAME question. Absent until a maintainer
 # captures it (no keys here); the Azure scenario skips until it lands so the
-# harness never asserts against an invented shape (ADR-TEST-1).
+# harness never asserts against an invented shape.
 _AZURE_FIXTURE_SLUG = "nvidia_quartalszahlen_azure"
 _QUESTION = "Welche Quartalszahlen hat NVIDIA zuletzt gemeldet?"
 
@@ -86,7 +86,7 @@ def _progress_messages(events: list[tuple[str, str]]) -> list[str]:
 def _load_fixture_or_skip(slug: str) -> "GroundedSearchResult":
     """Load a captured fixture, or skip the test when it is not yet committed.
 
-    The harness drives only REAL captured search shapes (ADR-TEST-1); it never
+    The harness drives only real captured search shapes; it never
     invents one. A provider whose capture a maintainer has not yet produced
     (e.g. Azure Foundry, which needs Azure keys) leaves its fixture absent, so
     the scenario skips with an actionable message instead of failing or being
@@ -225,10 +225,10 @@ def test_clean_contract_from_verified_bound_claim() -> None:
 def test_answer_diagnostics_reflect_routed_model_and_effort() -> None:
     """Answer diagnostics name the routed answer-tier model + effort.
 
-    Fix P2b: ``answer_prompt_inputs.model``, ``answer_section.model`` and the
-    ``node_model_resolution`` event must reflect the model/effort actually
-    routed to the answer node (here a distinct high-tier model with graded
-    effort), not the provider's ``reasoning_model`` default or an empty string.
+    ``answer_prompt_inputs.model``, ``answer_section.model`` and the
+    ``node_model_resolution`` event must reflect the model and effort actually
+    routed to the answer node, not the provider's ``reasoning_model`` default
+    or an empty string.
     """
     fixture = load_search_result_fixture(_FIXTURE_SLUG)
     llm = FakeLLM(
@@ -455,6 +455,23 @@ def test_matched_plus_source_only_binding_stays_clean() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def test_provider_grounded_search_is_preserved_without_page_fetch() -> None:
+    """The provider answer and citations form the durable web-search ledger."""
+
+    fixture = load_search_result_fixture(_FIXTURE_SLUG)
+    raw, _events = _run_scenario(
+        FakeLLM(claim_payload=_CLEAN_CLAIM_PAYLOAD),
+        FakeSearch(fixture),
+    )
+
+    result = ResearchResult.from_raw(raw)
+    assert result.web_search_ledger is not None
+    searches = result.web_search_ledger["searches"]
+    assert searches
+    assert any(search["provider_answer"] for search in searches.values())
+    assert any(search["citations"] for search in searches.values())
+
+
 def test_source_context_only_when_no_claims_extracted() -> None:
     """No extracted claims -> ``source_context_only`` and capped confidence."""
     fixture = load_search_result_fixture(_FIXTURE_SLUG)
@@ -672,7 +689,7 @@ def test_azure_foundry_shape_drives_the_graph() -> None:
     (provenance, evidence assembly, contract) is provider-shape agnostic.
 
     Skips until a sanitized real Azure capture is committed (the harness uses
-    only real captured shapes, never invented ones -- ADR-TEST-1). To enable::
+    only real captured shapes, never invented ones). To enable::
 
         uv run python scripts/debug_search_dataflow.py --provider azure \\
             --query "Welche Quartalszahlen hat NVIDIA zuletzt gemeldet?"

@@ -2,7 +2,6 @@
 
 Revision ID: 0047_resource_sync
 Revises: 0046_execution_authority
-Create Date: 2026-07-14
 
 The event table is a content-free refetch signal, not a patch/outbox payload.
 Prompt and skill revisions replace timestamp-based optional OCC with one

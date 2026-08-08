@@ -6,7 +6,7 @@
  * logic once):
  *  - cookie-session modes share the BFF session/CSRF machinery, so the SPA
  *    probes `/api/auth/session` and gates sharing/quota/admin on a live
- *    session for all three (ADR-AUTH-3);
+ *    session for all three;
  *  - password modes (`local`/`ldap`) render the credential login form and
  *    drive the first-run owner setup gate.
  */

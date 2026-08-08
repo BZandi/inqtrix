@@ -13,7 +13,7 @@ import {
 import type { SkillInfo, SkillPayload } from './skillLibrary'
 
 /**
- * Server-first skill state (plan M3 `3.6`): skills are a NEW vertical
+ * Server-first skill state: skills are a separate vertical
  * with no browser-local legacy, so — unlike chat rules — there is no
  * local/synced dual state to reconcile. The hook loads the visible
  * list once (and after every write), surfaces errors loudly, and in

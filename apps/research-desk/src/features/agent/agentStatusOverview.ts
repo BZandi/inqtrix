@@ -1,4 +1,5 @@
 import type {
+  AgentLimitCapabilities,
   AgentPermissionModeEntry,
   AgentToolManifestEntry,
   InqtrixCapabilities,
@@ -44,6 +45,9 @@ export type AgentOverview = {
    * selected mode is unknown) — the group hides. */
   approvals: ApprovalRow[] | null
   tools: ToolAvailabilityRow[]
+  /** Null on older servers. The UI hides the group instead of inventing
+   * defaults that may disagree with operator policy. */
+  limits: AgentLimitCapabilities | null
 }
 
 export type AgentToolUseCounts = {
@@ -79,6 +83,7 @@ const KERNEL_ROW_BY_TOOL: Record<string, ApprovalRow['id']> = {
   search_project_knowledge: 'knowledge_search',
   run_web_research: 'research',
   run_deep_mission: 'research',
+  delegate_batch: 'research',
   load_skill: 'skill_activation',
   propose_editor_patch: 'editor_patch',
 }
@@ -136,6 +141,7 @@ export type AgentOverviewSource = {
   durable: boolean
   tools: AgentToolManifestEntry[]
   permission_modes?: Record<string, AgentPermissionModeEntry>
+  limits?: AgentLimitCapabilities
   source_controls?: Array<{
     id: 'web' | 'knowledge'
     default: 'available' | 'disabled'
@@ -229,5 +235,6 @@ export function buildAgentOverview({
     durable: agent?.durable === true,
     approvals,
     tools,
+    limits: agent?.limits ?? null,
   }
 }

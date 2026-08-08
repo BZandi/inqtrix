@@ -11,6 +11,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import replace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -21,6 +22,7 @@ from inqtrix.project.editor_ports import (
     DocumentNotFound,
     EditorComment,
     FolderNotFound,
+    SuggestionDraftRevisionConflict,
 )
 from inqtrix.project.scoped_upsert import ResourceScope
 from inqtrix.services.collaboration_client import CollaborationProjection
@@ -488,6 +490,216 @@ async def test_comment_delete_and_document_cascade(service) -> None:
 
 
 @pytest.mark.asyncio
+async def test_private_suggestion_draft_revision_privacy_and_cleanup(service) -> None:
+    """A private AI draft survives reads but never crosses creator scope."""
+    await _save_doc(
+        service,
+        document_id="ed_private_draft",
+        caller_user_id=USER_A,
+        created_at=1.0,
+    )
+    store = service.store
+    document = await store.get_document("ed_private_draft")
+    store._documents[document.id] = replace(  # type: ignore[attr-defined]
+        document,
+        content_mode="collaboration",
+        collaboration_generation=1,
+        collaboration_schema_version=1,
+        collaboration_schema_hash="0" * 64,
+    )
+    await service.save_comments(
+        document.id,
+        comments=[
+            {
+                **_comment("edc_private_ai", created_at=2.0),
+                "kind": "inline_edit",
+            }
+        ],
+        visible_to=_scoped(USER_A),
+    )
+
+    created = await service.save_comment_suggestion_draft(
+        document.id,
+        "edc_private_ai",
+        expected_revision=0,
+        payload={
+            "anchor_version": 1,
+            "change_summary": ["Tighten the wording."],
+            "evidence": None,
+            "group_id": "editor-suggestion-group-test",
+            "patch_id": "66666666-6666-4666-8666-666666666666",
+            "proposed_text": "A clearer private proposal.",
+            "publication_command_id": "55555555-5555-4555-8555-555555555555",
+            "suggestion_id": "editor-suggestion-test",
+            "warnings": [],
+        },
+        visible_to=_scoped(USER_A),
+    )
+    assert created.revision == 1
+    assert created.proposed_text == "A clearer private proposal."
+
+    [owner_comment], _ = await service.list_comments(
+        document.id,
+        limit=50,
+        after=None,
+        visible_to=_scoped(USER_A),
+    )
+    assert owner_comment.suggestion_draft == created
+
+    with pytest.raises(DocumentNotFound):
+        await service.list_comments(
+            document.id,
+            limit=50,
+            after=None,
+            visible_to=_scoped(USER_B),
+        )
+
+    with pytest.raises(SuggestionDraftRevisionConflict) as stale:
+        await service.save_comment_suggestion_draft(
+            document.id,
+            "edc_private_ai",
+            expected_revision=0,
+            payload={
+                "proposed_text": "A stale overwrite.",
+                "revision_source": "manual_edit",
+            },
+            visible_to=_scoped(USER_A),
+        )
+    assert stale.value.current_revision == 1
+
+    revised = await service.save_comment_suggestion_draft(
+        document.id,
+        "edc_private_ai",
+        expected_revision=1,
+        payload={
+            "proposed_text": "The revised private proposal.",
+            "revision_source": "manual_edit",
+        },
+        visible_to=_scoped(USER_A),
+    )
+    assert revised.revision == 2
+    assert revised.revision_history[0].proposed_text == created.proposed_text
+
+    [autosaved] = await service.save_comments(
+        document.id,
+        comments=[
+            {
+                **_comment("edc_private_ai", created_at=2.0),
+                "comment_markdown": "Updated note without draft payload",
+                "kind": "inline_edit",
+                "updated_at": 3.0,
+            }
+        ],
+        visible_to=_scoped(USER_A),
+    )
+    assert autosaved.suggestion_draft == revised
+
+    await service.delete_comment_suggestion_draft(
+        document.id,
+        "edc_private_ai",
+        expected_revision=2,
+        patch_id=revised.patch_id,
+        visible_to=_scoped(USER_A),
+    )
+    [cleared], _ = await service.list_comments(
+        document.id,
+        limit=50,
+        after=None,
+        visible_to=_scoped(USER_A),
+    )
+    assert cleared.suggestion_draft is None
+
+    recreated = await service.save_comment_suggestion_draft(
+        document.id,
+        "edc_private_ai",
+        expected_revision=0,
+        payload={
+            "anchor_version": 1,
+            "change_summary": [],
+            "evidence": None,
+            "group_id": "editor-suggestion-group-cleanup",
+            "patch_id": "77777777-7777-4777-8777-777777777777",
+            "proposed_text": "Removed with its private note.",
+            "publication_command_id": "88888888-8888-4888-8888-888888888888",
+            "suggestion_id": "editor-suggestion-cleanup",
+            "warnings": [],
+        },
+        visible_to=_scoped(USER_A),
+    )
+    assert recreated.revision == 1
+    await service.delete_comment(
+        document.id,
+        "edc_private_ai",
+        visible_to=_scoped(USER_A),
+    )
+    comments, _ = await service.list_comments(
+        document.id,
+        limit=50,
+        after=None,
+        visible_to=_scoped(USER_A),
+    )
+    assert comments == []
+
+
+@pytest.mark.asyncio
+async def test_memory_document_delete_publishes_one_fallback_invalidation() -> None:
+    invalidator = AsyncMock()
+    service = EditorPersistenceService(
+        store=MemoryEditorStore(),
+        durable=False,
+        invalidator=invalidator,
+    )
+    await _save_doc(
+        service,
+        document_id="ed_delete_invalidation",
+        caller_user_id=USER,
+        created_at=1.0,
+    )
+
+    await service.delete_document(
+        "ed_delete_invalidation",
+        visible_to=_scoped(USER),
+    )
+
+    invalidator.revoke_deleted.assert_awaited_once_with(
+        tenant_id="default",
+        owner_user_id=USER,
+        resource_type="editor_document",
+        resource_id="ed_delete_invalidation",
+        scope="editor_documents",
+        actor_user_id=USER,
+    )
+
+
+@pytest.mark.asyncio
+async def test_atomic_document_delete_does_not_publish_fallback_effects() -> None:
+    class AtomicMemoryEditorStore(MemoryEditorStore):
+        @property
+        def atomic_delete_resource_effects(self) -> bool:
+            return True
+
+    invalidator = AsyncMock()
+    service = EditorPersistenceService(
+        store=AtomicMemoryEditorStore(),
+        durable=False,
+        invalidator=invalidator,
+    )
+    await _save_doc(
+        service,
+        document_id="ed_atomic_delete",
+        caller_user_id=USER,
+        created_at=1.0,
+    )
+
+    await service.delete_document(
+        "ed_atomic_delete",
+        visible_to=_scoped(USER),
+    )
+
+    invalidator.revoke_deleted.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_folder_delete_orphans_documents(service) -> None:
     await service.save_folder(
         id="edf_1", title="F", created_at=1.0, updated_at=1.0,
@@ -556,8 +768,8 @@ async def test_revision_cas_accepts_base_plus_one_rejects_stale_base(service) ->
         )
 
     # Forward jump: stored is 1, this writer's base is 4 (revision 5) — it
-    # never synced the current state. A monotonic guard accepted this; the CAS
-    # rejects it (the P1 fix). Content untouched.
+    # never synced the current state. A monotonic guard accepts this, while
+    # the compare-and-swap contract rejects it. Content remains untouched.
     with pytest.raises(DocumentRevisionConflict) as excinfo:
         await save(5, "stale writer with a higher counter")
     assert excinfo.value.current_revision == 1

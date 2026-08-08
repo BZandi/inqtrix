@@ -12,13 +12,21 @@ import asyncio
 import os
 import time
 import uuid
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import select, text
 
-from inqtrix.auth.pat import PersonalAccessToken
+import inqtrix.storage.pat_postgres as pat_postgres_module
+from inqtrix.auth.pat import (
+    PatService,
+    PatVerifier,
+    PersonalAccessToken,
+)
+from inqtrix.auth.permissions import AuditEntry
 from inqtrix.storage.db import build_engine, build_session_factory
+from inqtrix.storage.identity_orm import audit_log
 from inqtrix.storage.migrate import run_migrations
 from inqtrix.storage.pat_postgres import PostgresPatStore
 from tests.storage._canonical_users import (
@@ -28,14 +36,26 @@ from tests.storage._canonical_users import (
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
 APP_ROLE = "inqtrix_app"
 OWNER_1_ID = canonical_user_id("pat-owner-1")
 OWNER_2_ID = canonical_user_id("pat-owner-2")
+
+
+class ActiveUserLookup:
+    async def find_by_user_id(self, *, tenant_id, user_id):
+        if tenant_id == "default" and user_id == OWNER_1_ID:
+            return SimpleNamespace(disabled_at=None)
+        return None
+
+
+class RecordingAudit:
+    def __init__(self) -> None:
+        self.entries: list[AuditEntry] = []
+
+    async def record(self, entry: AuditEntry) -> None:
+        self.entries.append(entry)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -72,6 +92,9 @@ async def store(engine):
                 )
             await session.execute(
                 text("DELETE FROM personal_access_tokens")
+            )
+            await session.execute(
+                audit_log.delete().where(audit_log.c.resource_type == "pat")
             )
             await ensure_canonical_users(
                 session,
@@ -174,6 +197,137 @@ async def test_last_used_throttle_is_one_guarded_statement(store):
     # Past the interval: writes again.
     await store.touch_last_used("tok1", now=1_400.0, min_interval=300.0)
     assert (await store.get("tok1")).last_used_at == 1_400.0
+
+
+@pytest.mark.asyncio
+async def test_token_lifecycle_commits_the_sampled_audit_contract(
+    store, engine
+):
+    token_id = "pat-audit-lifecycle"
+    await store.create(make_token(token_id))
+    assert await store.touch_last_used(
+        token_id,
+        now=1_000.0,
+        min_interval=300.0,
+    )
+    assert not await store.touch_last_used(
+        token_id,
+        now=1_100.0,
+        min_interval=300.0,
+    )
+    assert await store.revoke(
+        tenant_id="default",
+        token_id=token_id,
+        owner_user_id=OWNER_1_ID,
+        now=1_200.0,
+    )
+
+    factory = build_session_factory(engine)
+    async with factory() as session:
+        actions = (
+            await session.execute(
+                select(audit_log.c.action)
+                .where(
+                    audit_log.c.resource_type == "pat",
+                    audit_log.c.resource_id == token_id,
+                )
+                .order_by(audit_log.c.id)
+            )
+        ).scalars().all()
+
+    assert actions == ["pat.created", "pat.used", "pat.revoked"]
+
+
+@pytest.mark.asyncio
+async def test_bound_sink_does_not_duplicate_atomic_store_audit(
+    store, engine
+):
+    audit = RecordingAudit()
+    service = PatService(
+        store=store,
+        pepper="integration-pat-pepper",
+        audit=audit,
+    )
+    verifier = PatVerifier(
+        store=store,
+        pepper="integration-pat-pepper",
+        user_lookup=ActiveUserLookup(),
+        audit=audit,
+    )
+    minted = await service.create_token(
+        tenant_id="default",
+        owner_user_id=OWNER_1_ID,
+        name="atomic-audit",
+    )
+    await verifier.verify(minted.plaintext)
+    await verifier.verify(minted.plaintext)
+    assert await service.revoke_token(
+        tenant_id="default",
+        token_id=minted.record.token_id,
+        owner_user_id=OWNER_1_ID,
+    )
+
+    factory = build_session_factory(engine)
+    async with factory() as session:
+        actions = (
+            await session.execute(
+                select(audit_log.c.action)
+                .where(
+                    audit_log.c.resource_type == "pat",
+                    audit_log.c.resource_id == minted.record.token_id,
+                )
+                .order_by(audit_log.c.id)
+            )
+        ).scalars().all()
+
+    assert actions == ["pat.created", "pat.used", "pat.revoked"]
+    assert audit.entries == []
+
+
+@pytest.mark.parametrize("operation", ["create", "use", "revoke"])
+@pytest.mark.asyncio
+async def test_audit_failure_rolls_back_the_token_mutation(
+    store, monkeypatch, operation
+):
+    token_id = f"pat-audit-rollback-{operation}"
+    if operation != "create":
+        await store.create(make_token(token_id))
+
+    async def fail_audit(*_args, **_kwargs):
+        raise RuntimeError("synthetic audit failure")
+
+    monkeypatch.setattr(
+        pat_postgres_module,
+        "append_audit_row",
+        fail_audit,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic audit failure"):
+        if operation == "create":
+            await store.create(make_token(token_id))
+        elif operation == "use":
+            await store.touch_last_used(
+                token_id,
+                now=1_000.0,
+                min_interval=300.0,
+            )
+        else:
+            await store.revoke(
+                tenant_id="default",
+                token_id=token_id,
+                owner_user_id=OWNER_1_ID,
+                now=1_000.0,
+            )
+
+    stored = await store.get(token_id)
+    if operation == "create":
+        assert stored is None
+    elif operation == "use":
+        assert stored is not None
+        assert stored.last_used_at is None
+    else:
+        assert stored is not None
+        assert stored.revoked_at is None
 
 
 @pytest.mark.asyncio

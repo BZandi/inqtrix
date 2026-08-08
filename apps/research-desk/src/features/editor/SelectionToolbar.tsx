@@ -14,6 +14,7 @@ import {
   ListTodo,
   MessageSquarePlus,
   Quote,
+  Sparkles,
   Strikethrough,
   Type,
   Underline,
@@ -35,6 +36,7 @@ import { runBlockAction, type BlockActionId } from './blockActions'
  * reuse the existing `slash*` keys; `turnInto` reuses `blockTurnInto`. */
 export type SelectionToolbarLabels = {
   comment: string
+  privateComment?: string
   turnInto: string
   bold: string
   italic: string
@@ -86,69 +88,112 @@ function activeTurnInto(editor: Editor) {
  * close the menu).
  */
 export function SelectionToolbar({
+  commentOnly = false,
   editor,
   labels,
   onStartComment,
   onInteractingChange,
+  privateCommentEnabled = true,
+  teamCommentEnabled = false,
 }: {
+  commentOnly?: boolean
   editor: Editor
   labels: SelectionToolbarLabels
-  onStartComment: () => void
+  onStartComment: (visibility: 'private' | 'team') => void
   onInteractingChange: (interacting: boolean) => void
+  privateCommentEnabled?: boolean
+  teamCommentEnabled?: boolean
 }) {
   const active = activeTurnInto(editor)
   const ActiveIcon = active.icon
 
   return (
     <div className="flex min-w-0 items-center gap-0.5">
-      <Button className="h-6 gap-1 px-1.5" onClick={onStartComment} size="sm" type="button" variant="ghost">
-        <MessageSquarePlus className="size-3.5" />
-        {labels.comment}
-      </Button>
-      <Separator className="mx-0.5 h-4" orientation="vertical" />
-
-      <DropdownMenu onOpenChange={onInteractingChange}>
-        <DropdownMenuTrigger asChild>
-          <Button aria-label={labels.turnInto} className="h-6 gap-1 px-1.5" size="sm" type="button" variant="ghost">
-            <ActiveIcon className="size-3.5" />
-            <span className="max-w-[7rem] truncate">{labels[active.labelKey]}</span>
-            <ChevronDown className="size-3 opacity-60" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-52">
-          {TURN_INTO.map((block) => {
-            const Icon = block.icon
-            const isActive = block.id === active.id
-            return (
-              <DropdownMenuItem
-                className={cn(isActive && 'text-brand')}
-                key={block.id}
-                onSelect={() => runBlockAction(editor, block.id)}
+      <div className="flex items-center">
+        <Button
+          className={cn(
+            'h-6 gap-1 px-1.5',
+            teamCommentEnabled && privateCommentEnabled && 'rounded-r-none',
+          )}
+          onClick={() => onStartComment(teamCommentEnabled ? 'team' : 'private')}
+          size="sm"
+          type="button"
+          variant="ghost"
+        >
+          <MessageSquarePlus className="size-3.5" />
+          {labels.comment}
+        </Button>
+        {teamCommentEnabled && privateCommentEnabled ? (
+          <DropdownMenu onOpenChange={onInteractingChange}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                aria-label={labels.privateComment}
+                className="size-6 rounded-l-none border-l border-border"
+                size="icon"
+                type="button"
+                variant="ghost"
               >
-                <Icon className="size-4 text-muted-foreground" />
-                {labels[block.labelKey]}
-                {isActive ? <Check className="ml-auto size-4" /> : null}
+                <ChevronDown className="size-3" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-48">
+              <DropdownMenuItem onSelect={() => onStartComment('private')}>
+                <Sparkles className="size-4 text-muted-foreground" />
+                {labels.privateComment}
               </DropdownMenuItem>
-            )
-          })}
-        </DropdownMenuContent>
-      </DropdownMenu>
-      <Separator className="mx-0.5 h-4" orientation="vertical" />
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
+      </div>
+      {commentOnly ? null : (
+        <>
+          <Separator className="mx-0.5 h-4" orientation="vertical" />
 
-      <MiniToolbarButton active={editor.isActive('bold')} icon={Bold} label={labels.bold} onClick={() => editor.chain().focus().toggleBold().run()} />
-      <MiniToolbarButton active={editor.isActive('italic')} icon={Italic} label={labels.italic} onClick={() => editor.chain().focus().toggleItalic().run()} />
-      <MiniToolbarButton active={editor.isActive('underline')} icon={Underline} label={labels.underline} onClick={() => editor.chain().focus().toggleUnderline().run()} />
-      <MiniToolbarButton active={editor.isActive('strike')} icon={Strikethrough} label={labels.strike} onClick={() => editor.chain().focus().toggleStrike().run()} />
-      <MiniToolbarButton active={editor.isActive('code')} icon={Code2} label={labels.code} onClick={() => editor.chain().focus().toggleCode().run()} />
-      <Separator className="mx-0.5 h-4" orientation="vertical" />
+          <DropdownMenu onOpenChange={onInteractingChange}>
+            <DropdownMenuTrigger asChild>
+              <Button aria-label={labels.turnInto} className="h-6 gap-1 px-1.5" size="sm" type="button" variant="ghost">
+                <ActiveIcon className="size-3.5" />
+                <span className="max-w-[7rem] truncate">{labels[active.labelKey]}</span>
+                <ChevronDown className="size-3 opacity-60" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-52">
+              {TURN_INTO.map((block) => {
+                const Icon = block.icon
+                const isActive = block.id === active.id
+                return (
+                  <DropdownMenuItem
+                    className={cn(isActive && 'text-brand')}
+                    key={block.id}
+                    onSelect={() => runBlockAction(editor, block.id)}
+                  >
+                    <Icon className="size-4 text-muted-foreground" />
+                    {labels[block.labelKey]}
+                    {isActive ? <Check className="ml-auto size-4" /> : null}
+                  </DropdownMenuItem>
+                )
+              })}
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <Separator className="mx-0.5 h-4" orientation="vertical" />
 
-      <MiniToolbarButton active={editor.isActive('highlight')} icon={Highlighter} label={labels.highlight} onClick={() => editor.chain().focus().toggleHighlight().run()} />
+          <MiniToolbarButton active={editor.isActive('bold')} icon={Bold} label={labels.bold} onClick={() => editor.chain().focus().toggleBold().run()} />
+          <MiniToolbarButton active={editor.isActive('italic')} icon={Italic} label={labels.italic} onClick={() => editor.chain().focus().toggleItalic().run()} />
+          <MiniToolbarButton active={editor.isActive('underline')} icon={Underline} label={labels.underline} onClick={() => editor.chain().focus().toggleUnderline().run()} />
+          <MiniToolbarButton active={editor.isActive('strike')} icon={Strikethrough} label={labels.strike} onClick={() => editor.chain().focus().toggleStrike().run()} />
+          <MiniToolbarButton active={editor.isActive('code')} icon={Code2} label={labels.code} onClick={() => editor.chain().focus().toggleCode().run()} />
+          <Separator className="mx-0.5 h-4" orientation="vertical" />
+
+          <MiniToolbarButton active={editor.isActive('highlight')} icon={Highlighter} label={labels.highlight} onClick={() => editor.chain().focus().toggleHighlight().run()} />
+        </>
+      )}
     </div>
   )
 }
 
 /** Icon-only ghost toggle used across the selection toolbar. Brand-subtle fill
- * marks the active state (DESIGN §P2). No `.t-*` role — `Button` carries its own
+ * marks the active state (DESIGN, "Colour is function"). No `.t-*` role —
+ * `Button` carries its own
  * control size (DESIGN §0.7). */
 function MiniToolbarButton({
   active,

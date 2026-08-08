@@ -7,7 +7,7 @@ The column was created with the knowledge schema but never read or filtered
 (the Postgres store wrote it always-NULL). Knowledge collections are the
 cross-workspace SHARING surface — owner-scoped (``created_by_sub``) + ACL via
 ``resource_shares`` — NOT per-workspace project data, so a workspace dimension
-is conceptually wrong here (see ADR-AUTH-6 and docs/architecture/
+is conceptually wrong here (see docs/architecture/
 data-architecture.md). A dead always-NULL column violates Designprinzip 7
 (no inert fields) and misleads readers into thinking knowledge is
 workspace-scoped, so it is dropped.

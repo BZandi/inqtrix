@@ -1,11 +1,11 @@
-"""Patch phase (M7): turn the assignment + memo into anchored edits.
+"""Turn the assignment and memo into anchored editor patches.
 
 Reuses the ONE editor-instruct pipeline (``services/editor_assist_service``
 — the same prompt/schema/validation the ``/v1/editor/instruct`` route
 serves, Prinzip 4), so agent patches and user instructions can never
 drift apart. The memo travels as a REFERENCE document: quoted as source
 material, never as instruction. The phase only PROPOSES — applying is
-the always-gated user action (decision E14/E16).
+an always-gated user action.
 """
 
 from __future__ import annotations
@@ -94,10 +94,15 @@ def propose_patch_edits(
             timeout_seconds=timeout,
         )
     except EditorDocumentTooLarge as exc:
-        log.warning("Agent-Patch: Zieldokument zu gross (%s).", exc)
+        log.warning(
+            "Agent-Patch: Zieldokument zu gross (error_type=%s).",
+            type(exc).__name__,
+        )
         raise PatchProposalFailed("patch_document_too_large") from exc
     except (EditorInstructError, TimeoutError) as exc:
         log.warning(
-            "Agent-Patch: Instruct-Pipeline fehlgeschlagen: %s", exc
+            "Agent-Patch: Instruct-Pipeline fehlgeschlagen "
+            "(error_type=%s)",
+            type(exc).__name__,
         )
         raise PatchProposalFailed("patch_proposal_failed") from exc

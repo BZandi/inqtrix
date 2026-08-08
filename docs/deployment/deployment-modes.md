@@ -1,6 +1,6 @@
 # Deployment modes
 
-> Files: `deploy/compose/compose.stack.yaml`, `deploy/compose/compose.dev.yaml`, `src/inqtrix/settings.py`
+> Files: `deploy/compose/compose.stack.yaml`, `deploy/compose/compose.dev-ports.yaml`, `src/inqtrix/settings.py`
 
 ## Scope
 
@@ -23,7 +23,7 @@ Inqtrix has one codebase and several ways to run it. This page is the decision m
 ## How to choose
 
 - **Just looking?** Local demo or the env server — no database, no containers.
-- **Running it for a team, want it to "just work"?** Stack mode - one command, Postgres for durable data, a built-in UI. Add `knowledge`, `workers`, `s3`, or the single-replica `collaboration` profile only for the capabilities you need.
+- **Running it for a team, want it to "just work"?** Stack mode - one command, Postgres for durable data, a built-in UI. Add `knowledge`, `workers`, bundled SeaweedFS through `s3`, or the single-replica `collaboration` profile only for the local components you need. Managed S3 needs configuration but no `s3` profile.
 - **Using managed PostgreSQL or S3?** Keep the runtime and migration database identities separate, and give only API/worker a workload identity for S3. The canonical contracts are [Database migrations](database-migrations.md) and [Object storage](object-storage.md).
 - **Building software on top of Inqtrix?** Library mode (in-process) or the HTTP server with the native `/v1/runs` API.
 - **Bringing your own backend or identity provider?** Inqtrix is a Baukasten — every provider, storage backend, and auth mode is swappable; see the custom-provider guide and [Auth modes](auth-modes.md).

@@ -100,6 +100,7 @@ def test_explicit_oidc_with_connection_settings_resolves():
         oidc_client_secret="dev-secret",
         session_secret="dev-session-secret",
         pat_pepper="dev-pat-pepper",
+        pseudonym_pepper="dev-pseudonym-pepper",
     )
     assert resolve_auth_mode(settings, ServerSettings()) == "oidc"
 
@@ -116,6 +117,22 @@ def test_explicit_oidc_without_pat_pepper_is_rejected():
         session_secret="dev-session-secret",
     )
     with pytest.raises(RuntimeError, match="INQTRIX_PAT_PEPPER"):
+        resolve_auth_mode(settings, ServerSettings())
+
+
+def test_explicit_oidc_without_pseudonym_pepper_is_rejected():
+    """Multi-user SSO is exactly where subject correlation across
+    processes (logs <-> audit <-> traces) must not silently degrade to
+    per-process pseudonyms, so the pepper is required from first boot."""
+    settings = AuthSettings(
+        mode="oidc",
+        oidc_issuer="http://127.0.0.1:5556/dex",
+        oidc_client_id="inqtrix-local",
+        oidc_client_secret="dev-secret",
+        session_secret="dev-session-secret",
+        pat_pepper="dev-pat-pepper",
+    )
+    with pytest.raises(RuntimeError, match="INQTRIX_PSEUDONYM_PEPPER"):
         resolve_auth_mode(settings, ServerSettings())
 
 

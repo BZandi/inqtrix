@@ -15,7 +15,7 @@ READ_ONLY_TOOLS = ("web_research", "web_instant", "rag_query", "file_analysis")
 INTERNAL_READ_ONLY_TOOLS = ("rag_query", "file_analysis")
 """Tools that touch ONLY the user's own holdings — no web contact.
 
-The E16 amendment (plan M1 S7): in Standard mode (``balanced``) the plan
+In Standard mode (``balanced``), the plan
 gate is the web-search consent (tasks carry their verbatim queries), so
 a replan may only auto-approve when it introduces NO new web contact —
 otherwise new queries would run that the user never saw."""
@@ -61,7 +61,7 @@ def autonomy_auto_approves(
     autonomy: str,
     new_tasks: list[PlanTaskRecord],
 ) -> bool:
-    """E16 replan policy (amended by plan M1 S7): strict never,
+    """Replan policy: strict never,
     autonomous always, balanced only for <= 2 NEW INTERNAL read-only
     tasks — a replan that adds web queries always re-gates, because the
     approved plan is the user's web-search consent and new queries must

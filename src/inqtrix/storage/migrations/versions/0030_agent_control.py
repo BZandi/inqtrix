@@ -7,8 +7,8 @@ Revises: 0029_agent_run_tree
 Creates the control tables the workspace-agent negotiates through
 (``run_plans``/``run_plan_tasks``/``run_approvals``/``run_clarifications``/
 ``run_artifacts``/``run_artifact_revisions``) plus the ``agent_sessions``
-pair (structural clone of knowledge sessions, decision E15). All control
-tables are children of ``runs`` via ``ON DELETE CASCADE`` — the durable run
+pair, using the same private per-user structure as knowledge sessions. All
+control tables are children of ``runs`` via ``ON DELETE CASCADE`` — the durable run
 retention window (``run_durable_retention_seconds``, default 90 days) is
 the single retention authority; the session memo artifact survives across
 turns because every turn re-anchors it onto the newest run.
@@ -16,10 +16,10 @@ turns because every turn re-anchors it onto the newest run.
 RLS follows the 0003/0021 precedent: GRANT to the app role, ENABLE + FORCE
 ROW LEVEL SECURITY, fail-closed ``tenant_isolation`` policy.
 
-The LangGraph checkpointer tables (M5) are deliberately NOT managed here:
+The LangGraph checkpointer tables are deliberately NOT managed here:
 they are library-owned (``AsyncPostgresSaver.setup()`` at container build),
 and the checkpoint is a resumability cache, never the source of truth
-(rule R5).
+for application data.
 """
 
 from __future__ import annotations

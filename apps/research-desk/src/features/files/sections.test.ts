@@ -11,6 +11,8 @@ describe('file section identity', () => {
   it('creates opaque unique ids and resolves temporary semantics by kind', () => {
     const sections = createDefaultFileLibrarySections('2026-01-01T00:00:00.000Z')
     expect(new Set(sections.map((section) => section.id)).size).toBe(3)
+    expect(sections.every((section) => section.isBootstrapPlaceholder === true))
+      .toBe(true)
     expect(sections.map((section) => section.id)).not.toEqual(
       expect.arrayContaining([...LEGACY_FILE_SECTION_IDS]),
     )

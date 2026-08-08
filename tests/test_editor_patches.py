@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import replace
+from typing import Any
 
 import pytest
 from fastapi import FastAPI, Request
@@ -18,7 +20,12 @@ from fastapi.testclient import TestClient
 
 from inqtrix.auth.directory import MemoryUserDirectory
 from inqtrix.auth.identity_memory import MemoryIdentityStore
-from inqtrix.auth.permissions import AuthorizationService
+from inqtrix.auth.permissions import (
+    AccessMode,
+    AuthorizationService,
+    ResourceAccess,
+    SharePermission,
+)
 from inqtrix.auth.principal import ANONYMOUS_PRINCIPAL, Principal, UserContext
 from inqtrix.capabilities import CapabilityContext, build_capability_registry
 from inqtrix.project.editor_memory import MemoryEditorStore
@@ -607,6 +614,7 @@ def make_world() -> tuple[TestClient, object]:
                 email=f"{sub}@example.com",
                 email_verified=True,
                 display_name=name,
+                canonical_user_id=sub,
             )
 
     asyncio.run(mirror())
@@ -648,6 +656,74 @@ def _seed_http_document(client: TestClient, *, revision: int = 3) -> None:
         headers=as_user(OWNER),
     )
     assert response.status_code == 200
+
+
+def test_shared_document_contract_includes_owner_and_permission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, container = make_world()
+    _seed_http_document(client)
+    stored = asyncio.run(
+        container.editor_persistence_service.get_document(
+            "ed_doc",
+            visible_to=scoped(OWNER),
+        )
+    )
+    collaboration_document = replace(
+        stored,
+        collaboration_generation=1,
+        collaboration_schema_version=1,
+        content_mode="collaboration",
+    )
+    shared_access = ResourceAccess(
+        mode=AccessMode.SHARED,
+        permission=SharePermission.SUGGEST,
+    )
+
+    async def list_shared_documents(**_kwargs):
+        return [
+            (replace(collaboration_document, content_markdown=""), shared_access)
+        ], None
+
+    async def get_shared_document(
+        _document_id: str,
+        *,
+        visible_to,
+        minimum=SharePermission.VIEW,
+    ):
+        del visible_to, minimum
+        return collaboration_document, shared_access
+
+    monkeypatch.setattr(
+        container.editor_persistence_service,
+        "list_visible_documents",
+        list_shared_documents,
+    )
+    monkeypatch.setattr(
+        container.editor_persistence_service,
+        "get_document_with_access",
+        get_shared_document,
+    )
+
+    listed = client.get(
+        "/v1/editor/documents?scope=all",
+        headers=as_user(RECIPIENT),
+    )
+    assert listed.status_code == 200
+    [row] = listed.json()["data"]
+    assert "content_markdown" not in row
+    assert row["access"] == {
+        "mode": "shared",
+        "owner": {"id": str(OWNER), "name": "Olga Owner"},
+        "permission": "suggest",
+    }
+
+    detail = client.get(
+        "/v1/editor/documents/ed_doc",
+        headers=as_user(RECIPIENT),
+    )
+    assert detail.status_code == 200
+    assert detail.json()["access"] == row["access"]
 
 
 def _propose_http(container, *, edits: list[dict] | None = None) -> str:
@@ -835,6 +911,149 @@ def test_http_foreign_user_gets_indistinct_404() -> None:
     )
     assert unknown.status_code == 404
     assert unknown.json()["error"]["message"] == "Patch nicht gefunden"
+
+
+def test_http_private_suggestion_draft_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The nested private draft is revisioned, bounded and creator-scoped."""
+    client, container = make_world()
+    _seed_http_document(client)
+    stored = asyncio.run(
+        container.editor_persistence_service.store.get_document("ed_doc")
+    )
+    container.editor_persistence_service.store._documents[stored.id] = replace(
+        stored,
+        collaboration_generation=1,
+        collaboration_schema_hash="0" * 64,
+        collaboration_schema_version=1,
+        content_mode="collaboration",
+    )
+    service = container.editor_persistence_service
+    resolve_document_access = service._resolve_document_access
+
+    async def shared_document_access(document, *, visible_to, minimum):
+        if visible_to.principal.user_id == RECIPIENT:
+            return ResourceAccess(
+                mode=AccessMode.SHARED,
+                permission=SharePermission.SUGGEST,
+            )
+        return await resolve_document_access(
+            document,
+            visible_to=visible_to,
+            minimum=minimum,
+        )
+
+    monkeypatch.setattr(service, "_resolve_document_access", shared_document_access)
+    comment_body = {
+        "anchor": {
+            "from": 10,
+            "quoteAfter": "",
+            "quoteBefore": "",
+            "selectedText": "Alpha beta gamma.",
+            "to": 27,
+        },
+        "comment_markdown": "Rewrite privately",
+        "created_at": 2.0,
+        "evidence_preset": None,
+        "id": "edc_private_ai",
+        "kind": "inline_edit",
+        "status": "open",
+        "updated_at": 2.0,
+    }
+    created_comment = client.post(
+        "/v1/editor/documents/ed_doc/comments",
+        json={"comments": [comment_body]},
+        headers=as_user(OWNER),
+    )
+    assert created_comment.status_code == 201
+
+    draft = {
+        "anchor_version": 1,
+        "change_summary": ["Shorter"],
+        "evidence": None,
+        "group_id": "editor-suggestion-group-http",
+        "patch_id": "66666666-6666-4666-8666-666666666666",
+        "proposed_text": "Alpha, improved.",
+        "publication_command_id": "55555555-5555-4555-8555-555555555555",
+        "suggestion_id": "editor-suggestion-http",
+        "warnings": [],
+    }
+    endpoint = (
+        "/v1/editor/documents/ed_doc/comments/edc_private_ai/"
+        "suggestion-draft"
+    )
+    created = client.put(
+        endpoint,
+        json={"draft": draft, "expected_revision": 0},
+        headers=as_user(OWNER),
+    )
+    assert created.status_code == 200
+    assert created.json()["suggestion_draft"]["revision"] == 1
+
+    listed = client.get(
+        "/v1/editor/documents/ed_doc/comments",
+        headers=as_user(OWNER),
+    )
+    assert listed.status_code == 200
+    assert listed.json()["data"][0]["suggestion_draft"]["patch_id"] == (
+        draft["patch_id"]
+    )
+
+    recipient_list = client.get(
+        "/v1/editor/documents/ed_doc/comments",
+        headers=as_user(RECIPIENT),
+    )
+    assert recipient_list.status_code == 200
+    assert recipient_list.json()["data"] == []
+
+    foreign = client.put(
+        endpoint,
+        json={"draft": draft, "expected_revision": 0},
+        headers=as_user(RECIPIENT),
+    )
+    assert foreign.status_code == 404
+    assert foreign.json()["error"]["message"] == "Entwurf nicht gefunden"
+
+    stale = client.put(
+        endpoint,
+        json={
+            "draft": {
+                "proposed_text": "Stale",
+                "revision_source": "manual_edit",
+            },
+            "expected_revision": 0,
+        },
+        headers=as_user(OWNER),
+    )
+    assert stale.status_code == 409
+    assert stale.json()["error"]["current_revision"] == 1
+
+    too_large = client.put(
+        endpoint,
+        json={
+            "draft": {
+                "proposed_text": "x" * 1_048_577,
+                "revision_source": "manual_edit",
+            },
+            "expected_revision": 1,
+        },
+        headers=as_user(OWNER),
+    )
+    assert too_large.status_code == 413
+
+    deleted = client.request(
+        "DELETE",
+        endpoint,
+        json={"expected_revision": 1, "patch_id": draft["patch_id"]},
+        headers=as_user(OWNER),
+    )
+    assert deleted.status_code == 204
+    after_delete = client.get(
+        "/v1/editor/documents/ed_doc/comments",
+        headers=as_user(OWNER),
+    )
+    assert after_delete.json()["data"][0]["suggestion_draft"] is None
 
 
 # ------------------------------------------------------------------ #

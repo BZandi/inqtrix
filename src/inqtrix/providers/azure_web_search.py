@@ -35,7 +35,6 @@ from inqtrix.exceptions import (
     AgentRateLimited,
     AgentProviderTimeout,
     AgentTimeout,
-    AzureFoundryWebSearchAPIError,
 )
 from inqtrix.constants import SEARCH_TIMEOUT
 from inqtrix.providers._azure_common import (
@@ -55,11 +54,19 @@ from inqtrix.providers.base import (
     _operation_deadline,
 )
 from inqtrix.search_result import GroundedSearchResult, GroundedSource
-from inqtrix.urls import extract_urls
+from inqtrix.urls import (
+    CredentialBearingUrlError,
+    extract_urls,
+    safe_public_url_identity,
+)
 
 log = logging.getLogger("inqtrix")
 
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+def _annotation_offset(value: Any) -> int | None:
+    """Normalize an optional Responses API citation character offset."""
+
+    return value if isinstance(value, int) and value >= 0 else None
 
 
 class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
@@ -316,11 +323,13 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
                 raise AgentRateLimited(self._agent_name, exc) from exc
             status_code = int(details["status_code"] or 502)
             log.error(
-                "Azure-Foundry-WebSearch fehlgeschlagen fuer '%s': %s", query[:80], exc
+                "Azure-Foundry-WebSearch fehlgeschlagen (status=%s, type=%s)",
+                status_code,
+                type(exc).__name__,
             )
             self._set_nonfatal_notice(
-                f"Azure-Foundry-WebSearch fehlgeschlagen fuer Query '{query[:80]}': "
-                f"{details['message'] or exc}; leeres Ergebnis wird weiterverwendet.",
+                "Azure-Foundry-WebSearch fehlgeschlagen; leeres Ergebnis wird "
+                "als sichtbare Evidenzluecke weiterverwendet.",
                 code=(
                     "provider_timeout"
                     if status_code == 408
@@ -339,14 +348,15 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
             exc_text = str(exc).lower()
             if "timeout" in exc_text or "timed out" in exc_text:
                 raise AgentProviderTimeout(
-                    f"Azure-Foundry-WebSearch Timeout fuer '{query[:80]}'"
+                    "Azure-Foundry-WebSearch Provider-Timeout"
                 ) from exc
             log.error(
-                "Azure-Foundry-WebSearch fehlgeschlagen fuer '%s': %s", query[:80], exc
+                "Azure-Foundry-WebSearch fehlgeschlagen (type=%s)",
+                type(exc).__name__,
             )
             self._set_nonfatal_notice(
-                f"Azure-Foundry-WebSearch fehlgeschlagen fuer Query '{query[:80]}': "
-                f"{exc}; leeres Ergebnis wird weiterverwendet.",
+                "Azure-Foundry-WebSearch fehlgeschlagen; leeres Ergebnis wird "
+                "als sichtbare Evidenzluecke weiterverwendet.",
                 code="temporary_transport",
                 http_status=503,
             )
@@ -358,11 +368,12 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
             raise
         except Exception as exc:  # noqa: BLE001 -- non-fatal degrade (see gotcha #11)
             log.error(
-                "Azure-Foundry-WebSearch fehlgeschlagen fuer '%s': %s", query[:80], exc
+                "Azure-Foundry-WebSearch fehlgeschlagen (type=%s)",
+                type(exc).__name__,
             )
             self._set_nonfatal_notice(
-                f"Azure-Foundry-WebSearch fehlgeschlagen fuer Query '{query[:80]}': "
-                f"{exc}; leeres Ergebnis wird weiterverwendet.",
+                "Azure-Foundry-WebSearch fehlgeschlagen; leeres Ergebnis wird "
+                "als sichtbare Evidenzluecke weiterverwendet.",
                 code="provider_error",
                 http_status=502,
             )
@@ -371,7 +382,7 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
         result = self._parse_response(response)
         if not result.answer:
             self._set_nonfatal_notice(
-                f"Azure-Foundry-WebSearch fuer '{query[:80]}' lieferte keine Textantwort"
+                "Azure-Foundry-WebSearch lieferte keinen Antworttext."
             )
         return result
 
@@ -385,6 +396,33 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
         answer = str(getattr(response, "output_text", "") or "")
         sources: list[GroundedSource] = []
         seen: set[str] = set()
+
+        def add_source(
+            raw_url: str,
+            *,
+            title: str = "",
+            origin: str,
+            annotation_start: int | None = None,
+            annotation_end: int | None = None,
+        ) -> None:
+            try:
+                identity = safe_public_url_identity(raw_url)
+            except (CredentialBearingUrlError, ValueError):
+                return
+            canonical = identity.canonical_url
+            if canonical in seen:
+                return
+            seen.add(canonical)
+            sources.append(
+                GroundedSource(
+                    url=identity.url,
+                    title=title,
+                    rank=len(sources) + 1,
+                    origin=origin,
+                    annotation_start=annotation_start,
+                    annotation_end=annotation_end,
+                )
+            )
 
         for item in getattr(response, "output", []) or []:
             if getattr(item, "type", None) != "message":
@@ -400,38 +438,36 @@ class AzureFoundryWebSearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvi
                     if getattr(ann, "type", None) != "url_citation":
                         continue
                     url = str(getattr(ann, "url", "") or "").strip()
-                    if url and url not in seen:
-                        seen.add(url)
-                        sources.append(
-                            GroundedSource(
-                                url=url,
-                                title=str(getattr(ann, "title", "") or ""),
-                                rank=len(sources) + 1,
-                                origin="url_citation",
-                            )
+                    if url:
+                        add_source(
+                            url,
+                            title=str(getattr(ann, "title", "") or ""),
+                            origin="url_citation",
+                            annotation_start=_annotation_offset(
+                                getattr(ann, "start_index", None)
+                            ),
+                            annotation_end=_annotation_offset(
+                                getattr(ann, "end_index", None)
+                            ),
                         )
 
-        # Fallback: parse inline Markdown links, then bare URLs, from the answer.
-        if not sources and answer:
+        # Provider annotations are incomplete in some Foundry responses.
+        # Always merge URLs present in the answer instead of treating text
+        # extraction as an all-or-nothing fallback.
+        if answer:
             for match in _MARKDOWN_LINK_RE.finditer(answer):
                 url = match.group(2).strip()
-                if url and url not in seen:
-                    seen.add(url)
-                    sources.append(
-                        GroundedSource(
-                            url=url,
-                            title=match.group(1),
-                            rank=len(sources) + 1,
-                            origin="markdown_link",
-                        )
+                if url:
+                    add_source(
+                        url,
+                        title=match.group(1),
+                        origin="markdown_link",
                     )
             for url in extract_urls(answer):
-                if url and url not in seen:
-                    seen.add(url)
-                    sources.append(
-                        GroundedSource(
-                            url=url, rank=len(sources) + 1, origin="answer_url_fallback"
-                        )
+                if url:
+                    add_source(
+                        url,
+                        origin="answer_url_fallback",
                     )
 
         usage = getattr(response, "usage", None)

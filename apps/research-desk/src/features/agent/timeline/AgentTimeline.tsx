@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import type { MouseEvent } from 'react'
 import { motion, useReducedMotion } from 'motion/react'
 import {
   AlertTriangle,
@@ -42,6 +43,12 @@ import type { PlanSourceInfo } from '../plan/sourceLabel'
 import type { AgentPlanDraft } from '../plan/usePlanApproval'
 import { clarificationAnswerSummary } from '../clarificationAnswers'
 import {
+  agentArtifactReferences,
+  agentCitationLabelFromHref,
+  linkifyAgentArtifactCitations,
+  type AgentArtifactReference,
+} from '../artifactCitations'
+import {
   agentActivityIconKind,
   activityDisplayText,
   activityStepDisplayText,
@@ -51,6 +58,7 @@ import {
   effectiveAgentTaskStatus,
 } from '../plan/taskPresentation'
 import { agentRunCompletionRecap } from '../runPresentation'
+import { WebEvidenceSourceRow } from '../WebEvidenceSourceRow'
 
 export type AgentTimelineActions = {
   answerClarification: (
@@ -101,7 +109,7 @@ export function AgentRunTurn({
 }: {
   actions: AgentTimelineActions
   run: AgentRunRecord
-  /** Live updates are on the polling fallback (plan M1 T1) — shown as
+  /** Live updates are on the polling fallback — shown as
    * a visible hint, never a silent behavior change. */
   transportDegraded?: boolean
 }) {
@@ -405,6 +413,36 @@ function AgentAnswerBlock({
   const [copied, setCopied] = useState(false)
   const body = answer.contentMarkdown
   const writing = answer.status === 'writing'
+  const ready = answer.status === 'ready'
+  // The single citation path: the chat answer reuses the
+  // canvas machinery \u2014 same refs, same linkify, same label semantics.
+  // While writing, labels stay plain text (no chips, no sources yet).
+  const references = useMemo(
+    () => (writing ? [] : agentArtifactReferences(answer.refs)),
+    [answer.refs, writing],
+  )
+  const linkedBody = useMemo(
+    () =>
+      body !== undefined && references.length > 0
+        ? linkifyAgentArtifactCitations(body, references)
+        : body,
+    [body, references],
+  )
+  const onCitationClick = (event: MouseEvent<HTMLDivElement>) => {
+    const anchor = (event.target as HTMLElement | null)?.closest('a')
+    const label = agentCitationLabelFromHref(anchor?.getAttribute('href'))
+    if (!label) return
+    const reference = references.find((item) => item.label === label)
+    if (!reference) return
+    event.preventDefault()
+    event.stopPropagation()
+    actions.onOpenCanvas({
+      artifactId: answer.artifactId,
+      label,
+      runId: run.runId,
+      view: 'evidence',
+    })
+  }
   const copy = () => {
     if (body === undefined) return
     void navigator.clipboard.writeText(body).then(() => {
@@ -413,7 +451,11 @@ function AgentAnswerBlock({
     })
   }
   return (
-    <div className="px-1" aria-live={writing ? 'polite' : undefined}>
+    <div
+      className="px-1"
+      aria-live={writing ? 'polite' : undefined}
+      data-testid="agent-answer"
+    >
       <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 t-meta-sm font-semibold text-muted-foreground">
         <span>{t.chat.assistant}</span>
         <span className="font-normal">{t.agent.timeline.answerLabel}</span>
@@ -438,10 +480,11 @@ function AgentAnswerBlock({
         <MarkdownSelectionCopyMenu
           className="chat-markdown max-w-4xl text-sm leading-snug text-foreground"
           markdown={body}
+          onClickCapture={onCitationClick}
         >
           <MarkdownRenderer
             isStreaming={writing}
-            markdown={body}
+            markdown={linkedBody ?? body}
             variant="chat"
           />
           {writing && (
@@ -463,7 +506,24 @@ function AgentAnswerBlock({
           )}
         />
       )}
-      {body !== undefined && !writing && (
+      {answer.status === 'interrupted' && (
+        <p className="mt-1 t-meta text-destructive" role="status">
+          {t.agent.timeline.answerInterrupted}
+        </p>
+      )}
+      {ready && references.length > 0 && (
+        <AgentAnswerSources
+          onOpenEvidence={(label) =>
+            actions.onOpenCanvas({
+              artifactId: answer.artifactId,
+              label,
+              runId: run.runId,
+              view: 'evidence',
+            })}
+          references={references}
+        />
+      )}
+      {body !== undefined && ready && (
         <div className="mt-1 flex items-center gap-1">
           <Button
             aria-label={t.agent.timeline.answerCopy}
@@ -498,6 +558,87 @@ function AgentAnswerBlock({
       )}
     </div>
   )
+}
+
+/**
+ * Compact source list under the chat answer. Web references retain their
+ * external URL and expose the same evidence-trail action/status as the Canvas;
+ * Knowledge references open the evidence view directly.
+ */
+function AgentAnswerSources({
+  onOpenEvidence,
+  references,
+}: {
+  onOpenEvidence: (label: string) => void
+  references: AgentArtifactReference[]
+}) {
+  const { t } = useLocale()
+  return (
+    <section
+      className="mt-3 max-w-4xl border-t border-border/70 pt-2"
+      data-testid="agent-sources"
+    >
+      <h3 className="t-meta-sm font-semibold text-muted-foreground">
+        {t.knowledge.sources}
+      </h3>
+      <ul className="mt-1.5 space-y-1.5">
+        {references.map((reference) => {
+          const web = Boolean(reference.queryId)
+            || Boolean(reference.url && isWebHref(reference.url))
+          return (
+            <li
+              className={web ? undefined : 'flex min-w-0 items-start gap-2'}
+              key={reference.label}
+            >
+              {web ? (
+                <WebEvidenceSourceRow
+                  onInspect={() => onOpenEvidence(reference.label)}
+                  reference={{
+                    ...reference,
+                    domain: hostFromUrl(reference.url ?? ''),
+                    key: reference.referenceId ?? reference.label,
+                  }}
+                />
+              ) : (
+                <>
+                  <FileText className="mt-0.5 icon-sm shrink-0 text-muted-foreground/70" />
+                  <span className="mt-0.5 shrink-0 t-mono text-muted-foreground">
+                    {reference.label}
+                  </span>
+                  <button
+                    className="min-w-0 flex-1 truncate text-left t-list text-foreground transition-colors hover:text-brand"
+                    onClick={() => onOpenEvidence(reference.label)}
+                    type="button"
+                  >
+                    {reference.title}
+                  </button>
+                </>
+              )}
+            </li>
+          )
+        })}
+      </ul>
+    </section>
+  )
+}
+
+// Deliberately NO third-party favicon fetch here: loading
+// icons.duckduckgo.com/ip3/<domain>.ico would leak every cited source
+// hostname to an external service on view — against the product's
+// data-minimization line (log pseudonymization, webUrl()). Globe2 it is.
+
+function hostFromUrl(url: string): string | null {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return null
+  }
+}
+
+/** Same scheme guard as `webUrl()` (copyAnswer): tool-provided URLs are
+ * trusted data, but only http(s) ever reaches `window.open`/`href`. */
+function isWebHref(url: string): boolean {
+  return /^https?:\/\//i.test(url)
 }
 
 /** One transcript line, dispatched by step kind. */
@@ -540,15 +681,18 @@ function StreamEntry({
         ? `${text} · ${entry.error}`
         : text
       return (
-        <p className={cn(
-          'flex items-start gap-1.5 t-meta',
-          entry.taskId && 'pl-5',
-          failed
-            ? 'text-destructive/90'
-            : fallback
-              ? 'text-warning'
-              : 'text-muted-foreground',
-        )}>
+        <p
+          className={cn(
+            'flex items-start gap-1.5 t-meta',
+            entry.taskId && 'pl-5',
+            failed
+              ? 'text-destructive/90'
+              : fallback
+                ? 'text-warning'
+                : 'text-muted-foreground',
+          )}
+          data-testid="agent-activity-item"
+        >
           {failed || fallback ? (
             <AlertTriangle className="mt-0.5 icon-xs shrink-0" />
           ) : settled ? (
@@ -793,7 +937,14 @@ export function activityText(
   run: AgentRunRecord,
   t: TranslationDictionary,
 ): string {
-  if (run.status === 'queued') return t.agent.activity.queued
+  // A freshly submitted run without a real queue position reads as
+  // "starting", not as waiting in line (B4 polish — honest either way:
+  // an actual position > 0 keeps the queue label).
+  if (run.status === 'queued') {
+    return run.queuePosition && run.queuePosition > 0
+      ? t.agent.activity.queued
+      : t.agent.activity.starting
+  }
   if (run.status === 'waiting_for_approval') {
     return t.agent.activity.waitingApproval
   }

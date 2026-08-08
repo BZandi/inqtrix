@@ -1,6 +1,6 @@
 import type {
   KnowledgeDocumentText,
-  KnowledgeSearchHit,
+  KnowledgeSearchResponse,
 } from '@/features/researchRuns/types'
 
 /** One selectable knowledge collection (a ready vector index). */
@@ -22,9 +22,7 @@ export type DocumentViewerTarget = {
   /** Highlight candidates in priority order — the first one that
    * matches the document text wins (quote first, search terms after). */
   highlightTargets: string[]
-  /** The exact retrieved chunk for a citation — the "Beleg" view renders this
-   * (with the cited span highlighted) so the user verifies the source without
-   * scanning the whole document. Absent for Find-mode targets. */
+  /** The exact original-source excerpt for citations and Find-mode targets. */
   excerpt?: string | null
   /** 0-based chunk index, for the "Abschnitt N" label on the Beleg view. */
   chunkIndex?: number | null
@@ -44,7 +42,7 @@ export type DocumentViewerTarget = {
  * branch on demo mode themselves.
  */
 export type KnowledgeDataSource = {
-  search: (query: string, collectionIds: string[], topK: number) => Promise<KnowledgeSearchHit[]>
+  search: (query: string, collectionIds: string[], topK: number) => Promise<KnowledgeSearchResponse>
   loadDocumentText: (documentId: string) => Promise<KnowledgeDocumentText>
   /** Metadata-only authorization probe. The Original affordance stays disabled
    * until this confirms access for the current principal. */

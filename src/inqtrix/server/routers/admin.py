@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from fastapi import APIRouter, Request
 
+from inqtrix.auth.log_redaction import log_authorization_denial
 from inqtrix.auth.lifecycle import AdminAuthorizationError, UserLifecycleStatus
 from inqtrix.server.routers._admin_guard import require_instance_admin
 from inqtrix.services.request_parsing import error_response
@@ -51,11 +52,14 @@ def _revoked_admin_response(
     *, actor_user_id: uuid.UUID | None, command: str
 ):
     """Hide a lifecycle-time admin revocation while keeping it observable."""
-    log.warning(
-        "instance-admin lifecycle denied after live revalidation: "
-        "actor_user_id=%s command=%s",
-        actor_user_id,
-        command,
+    log_authorization_denial(
+        log,
+        action=command,
+        principal_kind="oidc_session",
+        actor_user_id=actor_user_id,
+        tenant_id=TENANT,
+        resource_type="admin_surface",
+        resource_id=TENANT,
     )
     return error_response(404, "Nicht gefunden", "not_found")
 
@@ -203,7 +207,6 @@ def build_admin_router(
 
     if provider.mode == "local":
         from inqtrix.auth.credentials import (
-            LOCAL_ISSUER,
             LocalCredential,
             hash_password,
             new_subject,

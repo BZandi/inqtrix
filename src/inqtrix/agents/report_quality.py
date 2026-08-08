@@ -179,8 +179,15 @@ def verify_quotes(
         if (text := str(ref.get("excerpt") or ref.get("source_text") or ""))
     ]
     quotes = _QUOTE.findall(markdown)
-    if not quotes or not evidence_texts:
+    if not quotes:
         return []
+    # Missing original text is not the same as "nothing to verify".  A web
+    # result may legitimately carry only a URL or provider summary; treating
+    # that state as an empty check list made the strict/tief critic believe no
+    # unverified quote existed.  Preserve every quote as an explicit failed
+    # verification until canonical evidence is available.
+    if not evidence_texts:
+        return [{"quote": quote, "verified": False} for quote in quotes]
     return [
         {"quote": quote, "verified": quote_is_verbatim(quote, evidence_texts)}
         for quote in quotes

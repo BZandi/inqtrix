@@ -10,7 +10,7 @@ admin-group membership produce an :class:`LdapIdentity`.
 
 The provider subclasses :class:`~inqtrix.auth.oidc.OidcAuthProvider` and
 reuses the session/CSRF/PAT/user-mirror machinery verbatim under the
-synthetic issuer ``"ldap"`` (ADR-AUTH-3). Constructor-First: every
+synthetic issuer ``"ldap"``. Constructor-First: every
 connection value arrives as an argument; only the settings bridge reads
 the environment.
 """
@@ -21,7 +21,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import TYPE_CHECKING, Callable
 
 from ldap3 import SUBTREE, SYNC, Connection, Server, Tls
 from ldap3.utils.conv import escape_filter_chars
@@ -29,7 +29,7 @@ from ldap3.utils.conv import escape_filter_chars
 from inqtrix.auth.oidc import OidcAuthProvider
 
 if TYPE_CHECKING:
-    import ssl
+    from inqtrix.auth.lifecycle import UserLifecycleService
 
     from inqtrix.auth.directory import UserDirectory
     from inqtrix.auth.invitations import RegistrationGate

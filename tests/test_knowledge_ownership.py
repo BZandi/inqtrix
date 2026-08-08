@@ -10,6 +10,7 @@ deletion revokes its shares, and ask paths deny invisible collections.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 
 import pytest
@@ -27,12 +28,17 @@ from inqtrix.knowledge.stores.ports import (
 )
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server.container import build_container
-from inqtrix.server.routers import chat, knowledge, runs, sources
+from inqtrix.runs.deletion_operations import DeletionOperationStore
+from inqtrix.server.routers import asset_records, chat, knowledge, runs, sources
 from inqtrix.server.routers.shares import build_router as build_shares_router
 from inqtrix.settings import ServerSettings, Settings, StorageSettings
 
 from tests.contract._app import StubSearch
-from tests.test_knowledge_routes import KnowledgeStubLLM, StubEmbeddings
+from tests.test_knowledge_routes import (
+    KnowledgeStubLLM,
+    StubEmbeddings,
+    wait_for_deletion,
+)
 from tests.test_runs_sharing import (
     OWNER,
     RECIPIENT,
@@ -49,8 +55,36 @@ class UnsafeCollectionSharingStore(MemoryKnowledgeStore):
         return False
 
 
+class PausedDeletionStore(DeletionOperationStore):
+    """Retain queued work until the test explicitly crosses the worker boundary."""
+
+    def _dispatch(self, record) -> None:
+        del record
+
+
+class FlakyDocumentDeletionStore(MemoryKnowledgeStore):
+    """Fail one physical delete after the durable search fence has landed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.delete_attempts = 0
+
+    async def delete_document_for_aggregate(
+        self, document_id: str, *, actor_user_id=None
+    ) -> None:
+        self.delete_attempts += 1
+        if self.delete_attempts == 1:
+            raise RuntimeError("temporary vector-store failure")
+        await super().delete_document_for_aggregate(
+            document_id,
+            actor_user_id=actor_user_id,
+        )
+
+
 def make_world(
     store: MemoryKnowledgeStore | None = None,
+    *,
+    deletion_store: DeletionOperationStore | None = None,
 ) -> tuple[TestClient, MemoryKnowledgeStore]:
     identity = MemoryIdentityStore()
     users = MemoryUserDirectory()
@@ -92,6 +126,7 @@ def make_world(
             store=store,
             default_top_k=4,
         ),
+        deletion_store=deletion_store,
     )
     assert container.share_service is not None
     if store.supports_collection_sharing:
@@ -99,6 +134,7 @@ def make_world(
     else:
         assert "knowledge_collection" not in container.share_service.resource_types
     app = FastAPI()
+    app.include_router(asset_records.build_router(container))
     app.include_router(knowledge.build_router(container))
     app.include_router(sources.build_router(container))
     app.include_router(runs.build_router(container))
@@ -205,6 +241,67 @@ def test_owner_sees_collection_stranger_does_not(world):
     assert client.get(
         "/v1/knowledge/collections", headers=as_user(OWNER)
     ).json()["data"]
+
+
+def test_foreign_asset_delete_is_non_disclosing_and_non_mutating(world):
+    client, _store = world
+    owner_headers = {
+        **as_user(OWNER),
+        "X-Inqtrix-Workspace-Id": "ws-owner",
+    }
+    stranger_headers = {
+        **as_user(RECIPIENT),
+        "X-Inqtrix-Workspace-Id": "ws-stranger",
+    }
+    assert client.put(
+        "/v1/assets/sections/sec_private",
+        headers=owner_headers,
+        json={
+            "kind": "custom",
+            "title": "Private files",
+            "created_at": 1.0,
+            "updated_at": 1.0,
+        },
+    ).status_code == 200
+    assert client.put(
+        "/v1/assets/asset_private",
+        headers=owner_headers,
+        json={
+            "section_id": "sec_private",
+            "group_id": None,
+            "title": "Private",
+            "label": "private",
+            "file_name": "private.txt",
+            "mime_type": "text/plain",
+            "origin": "library",
+            "page_count": None,
+            "parse_status": "parsed",
+            "parse_warning": None,
+            "text_truncated": False,
+            "size_bytes": 7,
+            "server_file_id": None,
+            "parser_id": "client",
+            "extracted_text": "private",
+            "created_at": 1.0,
+            "updated_at": 1.0,
+        },
+    ).status_code == 200
+
+    denied = client.delete(
+        "/v1/assets/asset_private",
+        headers=stranger_headers,
+    )
+
+    assert denied.status_code == 404
+    assert denied.json()["error"]["type"] == "not_found"
+    assert client.get(
+        "/v1/assets/asset_private",
+        headers=owner_headers,
+    ).status_code == 200
+    assert client.get(
+        "/v1/deletion-operations",
+        headers=stranger_headers,
+    ).json()["data"] == []
 
 
 def test_document_reads_deny_via_parent(world):
@@ -372,7 +469,7 @@ def test_edit_grant_admits_document_writes_not_deletion(world):
         f"/v1/knowledge/documents/{created.json()['id']}",
         headers=as_user(RECIPIENT),
     )
-    assert deleted.status_code == 204
+    wait_for_deletion(client, deleted, headers=as_user(RECIPIENT))
     # Deleting the COLLECTION stays owner-only even with edit.
     assert (
         client.delete(
@@ -381,6 +478,157 @@ def test_edit_grant_admits_document_writes_not_deletion(world):
         ).status_code
         == 404
     )
+
+
+def test_document_delete_revalidates_acl_before_destructive_progress() -> None:
+    deletions = PausedDeletionStore()
+    client, _store = make_world(deletion_store=deletions)
+    collection_id = create_collection(client, sub=OWNER)
+    granted = grant(client, collection_id, permission="edit")
+    share_id = granted.json()["data"][0]["id"]
+    created = add_document(client, collection_id, sub=RECIPIENT)
+    document_id = created.json()["id"]
+
+    started = client.delete(
+        f"/v1/knowledge/documents/{document_id}",
+        headers=as_user(RECIPIENT),
+    )
+    assert started.status_code == 202
+    assert client.get(
+        f"/v1/knowledge/collections/{collection_id}/documents",
+        headers=as_user(OWNER),
+    ).json()["data"] == []
+
+    revoked = client.delete(
+        f"/v1/shares/{share_id}",
+        headers=as_user(OWNER),
+    )
+    assert revoked.status_code == 204
+    operation_id = started.json()["operation_id"]
+    deletions._run(operation_id)
+
+    receipt = client.get(
+        f"/v1/deletion-operations/{operation_id}",
+        headers=as_user(RECIPIENT),
+    ).json()
+    assert receipt["status"] == "delete_failed"
+    assert receipt["completed_items"] == 0
+    restored = client.get(
+        f"/v1/knowledge/collections/{collection_id}/documents",
+        headers=as_user(OWNER),
+    ).json()["data"]
+    assert [item["id"] for item in restored] == [document_id]
+
+    assert grant(client, collection_id, permission="edit").status_code == 201
+    retried = client.post(
+        f"/v1/deletion-operations/{operation_id}/retry",
+        headers=as_user(RECIPIENT),
+    )
+    assert retried.status_code == 202
+    # Retry re-establishes the search tombstone before a worker may run.
+    assert client.get(
+        f"/v1/knowledge/collections/{collection_id}/documents",
+        headers=as_user(OWNER),
+    ).json()["data"] == []
+    deletions._run(operation_id)
+    receipt = client.get(
+        f"/v1/deletion-operations/{operation_id}",
+        headers=as_user(RECIPIENT),
+    ).json()
+    assert receipt["status"] == "deleted"
+
+
+def test_failed_document_delete_stays_hidden_and_retries_same_receipt() -> None:
+    store = FlakyDocumentDeletionStore()
+    client, _ = make_world(store)
+    collection_id = create_collection(client, sub=OWNER)
+    document_id = add_document(client, collection_id, sub=OWNER).json()["id"]
+    headers = {
+        **as_user(OWNER),
+        "X-Inqtrix-Workspace-Id": "ws-current-ui-context",
+    }
+
+    started = client.delete(
+        f"/v1/knowledge/documents/{document_id}",
+        headers=headers,
+    )
+    assert started.status_code == 202
+    operation_id = started.json()["operation_id"]
+    deadline = time.monotonic() + 3
+    receipt = None
+    while time.monotonic() < deadline:
+        receipt = client.get(
+            f"/v1/deletion-operations/{operation_id}",
+            headers=headers,
+        ).json()
+        if receipt["status"] == "delete_failed":
+            break
+        time.sleep(0.01)
+    assert receipt is not None and receipt["status"] == "delete_failed"
+    assert receipt["completed_items"] == 2
+    assert client.get(
+        f"/v1/knowledge/collections/{collection_id}/documents",
+        headers=as_user(OWNER),
+    ).json()["data"] == []
+    feed = client.get("/v1/deletion-operations", headers=headers)
+    assert feed.status_code == 200
+    assert operation_id in {
+        operation["operation_id"] for operation in feed.json()["data"]
+    }
+
+    retried = client.post(
+        f"/v1/deletion-operations/{operation_id}/retry",
+        headers=headers,
+    )
+    completed = wait_for_deletion(client, retried, headers=headers)
+    assert completed["operation_id"] == operation_id
+    assert store.delete_attempts == 2
+
+
+def test_partial_document_delete_converges_after_editor_share_is_revoked() -> None:
+    store = FlakyDocumentDeletionStore()
+    client, _ = make_world(store)
+    collection_id = create_collection(client, sub=OWNER)
+    granted = grant(client, collection_id, permission="edit")
+    share_id = granted.json()["data"][0]["id"]
+    document_id = add_document(client, collection_id, sub=OWNER).json()["id"]
+
+    started = client.delete(
+        f"/v1/knowledge/documents/{document_id}",
+        headers=as_user(RECIPIENT),
+    )
+    assert started.status_code == 202
+    operation_id = started.json()["operation_id"]
+    deadline = time.monotonic() + 3
+    receipt = None
+    while time.monotonic() < deadline:
+        receipt = client.get(
+            f"/v1/deletion-operations/{operation_id}",
+            headers=as_user(RECIPIENT),
+        ).json()
+        if receipt["status"] == "delete_failed":
+            break
+        time.sleep(0.01)
+    assert receipt is not None and receipt["status"] == "delete_failed"
+    assert receipt["completed_items"] == 2
+
+    assert client.delete(
+        f"/v1/shares/{share_id}", headers=as_user(OWNER)
+    ).status_code == 204
+    retried = client.post(
+        f"/v1/deletion-operations/{operation_id}/retry",
+        headers=as_user(RECIPIENT),
+    )
+    completed = wait_for_deletion(
+        client,
+        retried,
+        headers=as_user(RECIPIENT),
+    )
+    assert completed["operation_id"] == operation_id
+    assert client.get(
+        f"/v1/knowledge/collections/{collection_id}/documents",
+        headers=as_user(OWNER),
+    ).json()["data"] == []
 
 
 def test_memory_store_revocation_fences_all_collection_writes() -> None:
@@ -533,7 +781,7 @@ def test_collection_deletion_revokes_its_shares(world):
     deleted = client.delete(
         f"/v1/knowledge/collections/{collection_id}", headers=as_user(OWNER)
     )
-    assert deleted.status_code == 204
+    wait_for_deletion(client, deleted, headers=as_user(OWNER))
     after = client.get(
         "/v1/shares/inbox",
         headers=as_user(RECIPIENT),

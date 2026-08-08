@@ -204,12 +204,12 @@ class CohereRerank(_RetryNoticeMixin, RerankerProvider):
                     })
                     log.warning(
                         "Rerank transport error (model=%s, attempt=%d/%d). "
-                        "Retrying in %.1fs: %s",
+                        "Retrying in %.1fs (error_type=%s).",
                         active_model,
                         attempt,
                         MAX_PROVIDER_ATTEMPTS,
                         delay,
-                        sanitize_error(exc),
+                        type(exc).__name__,
                     )
                     _sleep_before_retry(delay, operation_deadline)
                     continue
@@ -261,10 +261,11 @@ class CohereRerank(_RetryNoticeMixin, RerankerProvider):
             raise
         except Exception as exc:  # noqa: BLE001 — normalized below, visibly
             log.warning(
-                "Rerank-Aufruf fehlgeschlagen (model=%s, candidates=%d): %s",
+                "Rerank-Aufruf fehlgeschlagen "
+                "(model=%s, candidates=%d, error_type=%s)",
                 active_model,
                 len(documents),
-                sanitize_error(exc),
+                type(exc).__name__,
             )
             raise RerankerError(
                 f"Rerank call failed for model {active_model!r}: "

@@ -4,8 +4,8 @@ Native auth for ``INQTRIX_AUTH_MODE=local``. The identity anchor is a
 synthetic stable subject minted at creation — never the email (email is
 mutable profile data, identity is not). Local accounts plug into the
 exact session/CSRF/PAT/user-mirror machinery of the OIDC BFF under the
-synthetic issuer ``"local"`` (ADR-AUTH-3: the principal ``kind`` stays
-``"oidc_session"``; only the issuer distinguishes the transport).
+synthetic issuer ``"local"``. The principal ``kind`` stays
+``"oidc_session"``; only the issuer distinguishes the transport.
 
 Discipline mirrors :mod:`inqtrix.auth.pat`: ONE hashing definition, a
 dummy-hash verify on the user-miss path so an unknown email costs the
@@ -25,6 +25,8 @@ from typing import Protocol
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
+
+from inqtrix.auth.log_redaction import pseudonymous_log_reference
 
 log = logging.getLogger("inqtrix")
 
@@ -267,14 +269,14 @@ class LocalAuthenticator:
             raise CredentialError("Ungueltige Anmeldedaten.")
         if not verify_password(credential.password_hash, password):
             log.warning(
-                "Local login failed: wrong password for user_id=%s.",
-                credential.user_id,
+                "Local login failed: wrong password for actor_ref=%s.",
+                pseudonymous_log_reference("usr", credential.user_id),
             )
             raise CredentialError("Ungueltige Anmeldedaten.")
         if credential.disabled_at is not None:
             log.warning(
-                "Local login denied: account disabled user_id=%s.",
-                credential.user_id,
+                "Local login denied: account disabled actor_ref=%s.",
+                pseudonymous_log_reference("usr", credential.user_id),
             )
             raise CredentialError("Ungueltige Anmeldedaten.")
         return credential

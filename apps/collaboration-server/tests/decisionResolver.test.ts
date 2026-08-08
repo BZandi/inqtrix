@@ -42,7 +42,36 @@ describe('patch decision resolver', () => {
     expect(result).toMatchObject({
       patchIds: [PATCH_ID],
       suggestionIds: [SUGGESTION_ID],
-      suggestions: [{ kind: 'modification', suggestionId: SUGGESTION_ID }],
+      suggestions: [{
+        kind: change === 'text replacement' ? 'replacement' : 'format',
+        suggestionId: SUGGESTION_ID,
+      }],
+    })
+    document.destroy()
+  })
+
+  it.each([
+    ['accept', ''],
+    ['reject', 'Hello'],
+  ] as const)('resolves an inline deletion at the document end with %s', (
+    decision,
+    expected,
+  ) => {
+    const tracked = inlineDeletionAtDocumentEnd()
+    const document = editorJsonToYDoc(tracked.toJSON())
+
+    const result = resolvePatchDecision(document, {
+      decision,
+      patchIds: [PATCH_ID],
+    })
+    const resolved = schema.nodeFromJSON(editorYDocToJson(document))
+
+    expect(serializeEditorJson(resolved.toJSON(), 'final').trim()).toBe(expected)
+    expect(suggestionDescriptors(resolved)).toEqual([])
+    expect(result).toMatchObject({
+      patchIds: [PATCH_ID],
+      suggestionIds: [SUGGESTION_ID],
+      suggestions: [{ kind: 'deletion', suggestionId: SUGGESTION_ID }],
     })
     document.destroy()
   })
@@ -158,6 +187,17 @@ function modification(
     transaction,
     state,
     { authorId: USER_ID, createdAt: 1_784_112_000, patchId: PATCH_ID },
+    () => SUGGESTION_ID,
+  )).doc
+}
+
+function inlineDeletionAtDocumentEnd(): ProseMirrorNode {
+  const document = schema.nodeFromJSON(parseEditorMarkdown('Hello'))
+  const state = EditorState.create({ schema, doc: document })
+  return state.apply(transformToInqtrixSuggestionTransaction(
+    state.tr.delete(1, 6),
+    state,
+    { authorId: USER_ID, createdAt: 1_784_112_002, patchId: PATCH_ID },
     () => SUGGESTION_ID,
   )).doc
 }

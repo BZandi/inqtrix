@@ -173,7 +173,7 @@ function demoAnswerRecord(options: DemoAnswerOptions = {}): KnowledgeAnswerRecor
     degradedStages,
     evidenceUsed: 6,
     gate: { maxRounds: gateMaxRounds, roundsUsed: gateRoundsUsed, sufficient: gateSufficient },
-    grounding: { total: 3, verified: 3 },
+    grounding: { degraded: false, total: 3, verified: 3 },
     profileId,
     quotes: [
       { label: 'K1', text: DEMO_QUOTE_ARTICLE_6, verified: true },
@@ -214,6 +214,7 @@ function demoAnswerRecord(options: DemoAnswerOptions = {}): KnowledgeAnswerRecor
       },
     ],
     refusal: false,
+    retrievalDegradations: [],
   }
 }
 
@@ -377,17 +378,32 @@ function searchDemoCorpus(query: string, collectionIds: string[]): KnowledgeSear
       }
       if (occurrences === 0) return
       hits.push({
+        chunk_id: `demo-chunk-${document.id}-${chunkIndex}`,
         chunk_index: chunkIndex,
         collection_id: document.collectionId,
         document_id: document.id,
         document_title: document.title,
+        excerpt: chunk.trim(),
+        generation_id: 'demo-generation',
+        page_number: null,
+        provenance_status: 'legacy_unspanned',
+        rank: 0,
+        reference_id: '',
+        revision_id: 'demo-revision',
         score: Math.min(0.99, 0.35 + occurrences * 0.12),
-        text: chunk.trim(),
+        source_span: null,
       })
     })
   }
 
-  return hits.sort((a, b) => b.score - a.score).slice(0, 20)
+  return hits
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 20)
+    .map((hit, index) => ({
+      ...hit,
+      rank: index + 1,
+      reference_id: `K${index + 1}`,
+    }))
 }
 
 function demoDocumentText(documentId: string): KnowledgeDocumentText {
@@ -412,6 +428,9 @@ export function createDemoKnowledgeDataSource(): KnowledgeDataSource {
     canLoadFileContent: null,
     loadDocumentText: (documentId) => Promise.resolve(demoDocumentText(documentId)),
     loadFileContent: null,
-    search: (query, collectionIds) => Promise.resolve(searchDemoCorpus(query, collectionIds)),
+    search: (query, collectionIds) => Promise.resolve({
+      data: searchDemoCorpus(query, collectionIds),
+      warnings: [],
+    }),
   }
 }

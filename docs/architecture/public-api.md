@@ -165,6 +165,14 @@ and an already-active direct share returns 409. A recipient accepts with
 declines/leaves, with `DELETE /v1/shares/{share_id}`. A later re-share creates
 a new id and requires new consent.
 
+`editor_document` is shareable too, but only once collaboration is enabled on
+it. A plain Markdown document has no owner to resolve for sharing, so
+`POST /v1/shares` answers `404 Ressource nicht gefunden` — the same answer an
+unknown id gets, because the sharing surface deliberately never distinguishes
+"exists but you may not" from "does not exist". Call
+`POST /v1/editor/documents/{id}/collaboration:enable` first; the browser does
+exactly this before it opens the share dialog.
+
 Only the resource owner manages shares. An accepted editor may perform the
 resource-specific edit operations but may not delete or re-share the resource.
 `GET /v1/shares/inbox` and `GET /v1/shares/mine` are lifecycle views; there are

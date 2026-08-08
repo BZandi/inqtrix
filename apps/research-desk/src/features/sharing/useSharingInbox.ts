@@ -132,6 +132,7 @@ export function useSharingInbox({
         await reload()
       } catch (error) {
         setState((prev) => ({ ...prev, mutationError: errorText(error) }))
+        throw error
       }
     },
     [demo, onResourcesChanged, reload],
@@ -147,6 +148,7 @@ export function useSharingInbox({
         await reload()
       } catch (error) {
         setState((prev) => ({ ...prev, mutationError: errorText(error) }))
+        throw error
       }
     },
     [demo, onResourcesChanged, reload],

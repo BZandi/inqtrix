@@ -29,25 +29,86 @@ Environment variables (convention, not enforced here):
 - ``INQTRIX_LOG_WEB_LEVEL`` — log level applied to the uvicorn loggers
   in the generated ``log_config`` (default ``INFO`` so access lines
   ``GET /health 200 OK`` make it into the file).
-- ``OBSERVABILITY_PROFILE`` — agent setting that controls structured
-  event detail (``summary`` by default, ``forensic`` for source/citation/
-  claim/answer lineage through the same sanitized logger).
+- ``OBSERVABILITY_PROFILE`` — agent setting that controls protected run-audit
+  detail (``summary`` by default, ``forensic`` for source/citation/claim/answer
+  lineage); ordinary logs receive a content-minimized operational projection.
+- ``INQTRIX_LOG_FORMAT`` — ``text`` (default, the historical pipe
+  format, byte-identical without the flag) or ``json`` (one
+  machine-readable object per line carrying the correlation fields from
+  :mod:`inqtrix.observability.context`; the recommended container
+  setting). The redaction filter runs unchanged in both formats.
+
+:func:`read_logging_env` reads all of these in one place so the four
+bootstrap sites (server entrypoint, worker entrypoint, ``create_app``,
+multi-stack assembly) cannot drift apart.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import re
 import sys
 import traceback
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, TextIO
 
+from inqtrix.observability.json_formatter import InqtrixJsonFormatter
 from inqtrix.urls import sanitize_log_message
 
 _FILE_FORMAT = "%(asctime)s | %(levelname)-7s | %(threadName)s | %(name)s | %(message)s"
 _CONSOLE_FORMAT = "%(levelname)s | %(message)s"
+
+
+@dataclass(frozen=True)
+class LoggingEnv:
+    """The process-level logging environment, resolved with defaults."""
+
+    enabled: bool
+    level: str
+    console: bool
+    include_web: bool
+    web_level: str
+    json_format: bool
+
+
+def read_logging_env() -> LoggingEnv:
+    """Read every ``INQTRIX_LOG_*`` process variable with its default.
+
+    Logging must be configurable BEFORE ``Settings()`` validation can
+    fail, so these stay plain environment reads on purpose; ``Settings``
+    never mirrors them (one source of truth per variable).
+    """
+    return LoggingEnv(
+        enabled=os.getenv("INQTRIX_LOG_ENABLED", "").lower() == "true",
+        level=os.getenv("INQTRIX_LOG_LEVEL", "INFO"),
+        console=os.getenv("INQTRIX_LOG_CONSOLE", "").lower() == "true",
+        include_web=(
+            os.getenv("INQTRIX_LOG_INCLUDE_WEB", "true").lower() != "false"
+        ),
+        web_level=os.getenv("INQTRIX_LOG_WEB_LEVEL", "INFO"),
+        json_format=(
+            os.getenv("INQTRIX_LOG_FORMAT", "text").strip().lower() == "json"
+        ),
+    )
+
+_SAFE_EXCEPTION_CODE_RE = re.compile(r"^[A-Za-z0-9_.:+-]{1,120}$")
+_SAFE_TRACEBACK_TYPE_RE = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_]*\.)*"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Warning)"
+    r"|BaseException|ExceptionGroup|BaseExceptionGroup|KeyboardInterrupt"
+    r"|SystemExit|GeneratorExit|StopIteration|StopAsyncIteration)"
+    r"(?:\[(?:code|error_code|status_code|sqlstate)=[A-Za-z0-9_.:+-]{1,120}\])?$"
+)
+_TRACEBACK_FRAME_RE = re.compile(r'^  File ".+", line \d+, in .+$')
+_TRACEBACK_CHAIN_LINES = frozenset({
+    "The above exception was the direct cause of the following exception:",
+    "During handling of the above exception, another exception occurred:",
+})
 
 # Web-server loggers that ``build_uvicorn_log_config`` reconfigures so
 # uvicorn / FastAPI log records mirror into the inqtrix file. Order
@@ -61,32 +122,215 @@ _WEB_LOGGER_NAMES: tuple[str, ...] = (
 )
 
 
+def _is_inqtrix_record(record: logging.LogRecord) -> bool:
+    """Return whether *record* belongs to the application logger tree."""
+
+    return record.name == "inqtrix" or record.name.startswith("inqtrix.")
+
+
+def _is_web_error_record(record: logging.LogRecord) -> bool:
+    """Return whether a web-server record can carry application failures.
+
+    Uvicorn's access logger has a separate formatter contract and contains
+    only the bounded request-line fields handled below.  Every other uvicorn
+    logger, plus FastAPI's logger tree, can receive an application exception
+    and therefore uses the same content-minimized projection as ``inqtrix``.
+    """
+
+    name = record.name
+    if name == "uvicorn.access" or name.startswith("uvicorn.access."):
+        return False
+    return (
+        name == "uvicorn"
+        or name.startswith("uvicorn.")
+        or name == "fastapi"
+        or name.startswith("fastapi.")
+    )
+
+
+def _safe_exception_code(exc: BaseException) -> tuple[str, str] | None:
+    """Return one machine-readable exception code without stringifying it."""
+
+    for attribute in ("code", "error_code", "status_code", "sqlstate"):
+        try:
+            raw = getattr(exc, attribute, None)
+        except Exception:  # noqa: BLE001 - defensive projection only
+            continue
+        if isinstance(raw, Enum):
+            raw = raw.value
+        if isinstance(raw, bool) or not isinstance(raw, (str, int)):
+            continue
+        value = str(raw)
+        if _SAFE_EXCEPTION_CODE_RE.fullmatch(value):
+            return attribute, value
+    return None
+
+
+def _exception_descriptor(exc: BaseException) -> str:
+    """Describe an exception solely by type and an optional stable code."""
+
+    label = type(exc).__name__
+    code = _safe_exception_code(exc)
+    if code is None:
+        return label
+    key, value = code
+    return f"{label}[{key}={value}]"
+
+
+def _project_exception_values(value: Any) -> Any:
+    """Replace exceptions nested in logging arguments without rendering args."""
+
+    if isinstance(value, BaseException):
+        return _exception_descriptor(value)
+    if isinstance(value, Mapping):
+        return {
+            key: _project_exception_values(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return tuple(_project_exception_values(item) for item in value)
+    if isinstance(value, list):
+        return [_project_exception_values(item) for item in value]
+    return value
+
+
+def _exception_chain(
+    exc: BaseException,
+    tb: Any,
+    *,
+    seen: set[int] | None = None,
+) -> list[tuple[BaseException, Any, str | None]]:
+    """Return cause/context chain from root to outer exception without args."""
+
+    visited = seen if seen is not None else set()
+    identity = id(exc)
+    if identity in visited:
+        return []
+    visited.add(identity)
+
+    prefix: list[tuple[BaseException, Any, str | None]] = []
+    cause = exc.__cause__
+    context = exc.__context__ if not exc.__suppress_context__ else None
+    if cause is not None:
+        prefix.extend(_exception_chain(cause, cause.__traceback__, seen=visited))
+        separator = "The above exception was the direct cause of the following exception:"
+    elif context is not None:
+        prefix.extend(_exception_chain(context, context.__traceback__, seen=visited))
+        separator = "During handling of the above exception, another exception occurred:"
+    else:
+        separator = None
+    prefix.append((exc, tb, separator if prefix else None))
+    return prefix
+
+
+def _format_exception_without_arguments(exc_info: tuple[Any, Any, Any]) -> str:
+    """Render safe frames and exception types, never exception messages/args."""
+
+    exc_type, exc, tb = exc_info
+    if not isinstance(exc, BaseException):
+        name = getattr(exc_type, "__name__", "Exception")
+        return str(name)
+
+    lines: list[str] = []
+    for current, current_tb, separator in _exception_chain(exc, tb):
+        if separator is not None:
+            lines.extend(("", separator, ""))
+        if current_tb is not None:
+            lines.append("Traceback (most recent call last):")
+            for frame in traceback.extract_tb(current_tb):
+                lines.append(
+                    f'  File "{frame.filename}", line {frame.lineno}, '
+                    f"in {frame.name}"
+                )
+        lines.append(_exception_descriptor(current))
+    return "\n".join(lines)
+
+
+def _project_preformatted_traceback(value: str) -> str:
+    """Strip messages/source lines from a traceback formatted by another handler."""
+
+    safe_lines: list[str] = []
+    for line in str(value).splitlines():
+        stripped = line.strip()
+        if stripped in {"Traceback (most recent call last):", "Stack (most recent call last):"}:
+            safe_lines.append(stripped)
+        elif stripped in _TRACEBACK_CHAIN_LINES:
+            safe_lines.append(stripped)
+        elif _TRACEBACK_FRAME_RE.fullmatch(line):
+            # Normal traceback frame; source-code lines are intentionally not
+            # retained because literals may contain prompts or credentials.
+            safe_lines.append(line)
+        else:
+            # A prior formatter may already have rendered ``Type: message``.
+            # Recover only the type/code prefix.  The prose after the first
+            # colon can contain provider responses, validation input or
+            # document text and is therefore never retained.
+            descriptor = stripped.partition(":")[0]
+            if _SAFE_TRACEBACK_TYPE_RE.fullmatch(descriptor):
+                safe_lines.append(descriptor)
+    return "\n".join(safe_lines) or "Exception"
+
+
 class _RedactSecretsFilter(logging.Filter):
-    """Scrub secrets from log records before they reach any handler.
+    """Project application/web exceptions and scrub secrets before handlers.
 
     Uses :func:`inqtrix.urls.sanitize_log_message` rather than
     ``sanitize_error`` so harmless URLs in answer text or citation maps are
-    preserved (only credential values inside URLs are redacted). This keeps
-    the log stream debuggable without leaking API keys.
+    preserved (only credential values inside URLs are redacted). Exception
+    arguments and tracebacks from application and web-error loggers retain
+    only their type, stable machine-readable code, and frame locations;
+    exception prose is never treated as operational log data.  Uvicorn access
+    records retain their canonical formatter arguments.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if isinstance(record.msg, str):
-            record.msg = sanitize_log_message(record.msg)
-        if record.args:
-            if isinstance(record.args, Mapping):
-                record.args = {
-                    key: sanitize_log_message(value) if isinstance(value, (str, Exception)) else value
-                    for key, value in record.args.items()
-                }
-            elif isinstance(record.args, tuple):
-                record.args = tuple(
-                    sanitize_log_message(arg) if isinstance(arg, (str, Exception)) else arg
-                    for arg in record.args
+        # Uvicorn's AccessFormatter requires its canonical five positional
+        # arguments after handler filters have run. Preserve that structure
+        # and scrub the request target in place; eagerly formatting and
+        # clearing ``args`` (the generic path below) would make the formatter
+        # fail while still leaving the console access stream unsanitized.
+        if (
+            record.name == "uvicorn.access"
+            and isinstance(record.args, tuple)
+            and len(record.args) >= 5
+        ):
+            sanitized_args = list(record.args)
+            sanitized_args[2] = sanitize_log_message(str(sanitized_args[2]))
+            record.args = tuple(sanitized_args)
+            return True
+        if _is_inqtrix_record(record) or _is_web_error_record(record):
+            # Application/web exceptions are operational signals, never log
+            # content. Project exception objects before getMessage() can call
+            # ``str(exc)`` and render provider bodies, URLs, validation input,
+            # claims or credentials. Non-exception arguments retain their
+            # existing formatting contract.
+            record.msg = _project_exception_values(record.msg)
+            record.args = _project_exception_values(record.args)
+            record.msg = sanitize_log_message(record.getMessage())
+            record.args = ()
+            if record.exc_info is not None:
+                record.exc_text = _format_exception_without_arguments(
+                    record.exc_info
                 )
-            else:
-                record.args = sanitize_log_message(record.args) if isinstance(
-                    record.args, (str, Exception)) else record.args
+                record.exc_info = None
+            elif record.exc_text:
+                record.exc_text = _project_preformatted_traceback(
+                    record.exc_text
+                )
+            if record.stack_info:
+                record.stack_info = _project_preformatted_traceback(
+                    record.stack_info
+                )
+            return True
+        # Sanitize the fully rendered message. Scrubbing the format template
+        # and arguments independently is unsafe for bearer path segments:
+        # ``"/s/%s", token`` would redact the ``%s`` placeholder itself,
+        # leave the argument behind, and make logging raise TypeError. Eager
+        # formatting happens at handler time (where logging would format
+        # anyway), preserves mapping-style records, and catches credentials
+        # that span a template/argument boundary.
+        record.msg = sanitize_log_message(record.getMessage())
+        record.args = ()
         if record.exc_info is not None:
             # Formatters render exc_info only after filters have run, so a raw
             # provider exception would otherwise bypass msg/args redaction.
@@ -136,6 +380,7 @@ def configure_logging(
     log_dir: str = "logs",
     console: bool = False,
     force: bool = True,
+    json_format: bool = False,
 ) -> Path | None:
     """Configure the ``inqtrix`` logger.
 
@@ -172,6 +417,12 @@ def configure_logging(
         non-``NullHandler`` handlers only, so the silent default
         installed by ``configure_logging(enabled=False)`` is still
         replaceable.
+    json_format:
+        When *True*, every handler renders structured JSON lines via
+        :class:`~inqtrix.observability.json_formatter.InqtrixJsonFormatter`
+        instead of the plaintext formats. The redaction filter is
+        attached identically in both modes; the default *False* keeps
+        the historical output byte-identical.
 
     Returns
     -------
@@ -191,8 +442,21 @@ def configure_logging(
 
     if console:
         console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.WARNING)
-        console_handler.setFormatter(logging.Formatter(_CONSOLE_FORMAT))
+        # Text mode keeps the historical "mirror WARNING+ to stderr"
+        # behaviour (byte-compatible). JSON mode makes stdout the
+        # CANONICAL machine-readable sink for container runtimes, so it
+        # must carry the configured level — otherwise the documented
+        # correlation workflow (`logs | jq 'select(.user == …)'`) can
+        # never see an INFO line, and every correlation field the
+        # program adds is invisible wherever no file sink is enabled.
+        console_handler.setLevel(
+            resolved_level if json_format else logging.WARNING
+        )
+        console_handler.setFormatter(
+            InqtrixJsonFormatter()
+            if json_format
+            else logging.Formatter(_CONSOLE_FORMAT)
+        )
         console_handler.addFilter(_RedactSecretsFilter())
         logger.addHandler(console_handler)
 
@@ -210,7 +474,11 @@ def configure_logging(
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setLevel(resolved_level)
-    file_handler.setFormatter(logging.Formatter(_FILE_FORMAT))
+    file_handler.setFormatter(
+        InqtrixJsonFormatter()
+        if json_format
+        else logging.Formatter(_FILE_FORMAT)
+    )
     file_handler.addFilter(redact_filter)
     logger.addHandler(file_handler)
 
@@ -221,6 +489,7 @@ def build_uvicorn_log_config(
     log_file: Path | str | None,
     *,
     web_level: str = "INFO",
+    json_format: bool = False,
 ) -> dict[str, object]:
     """Build a uvicorn-compatible ``log_config`` dict that mirrors web logs into *log_file*.
 
@@ -239,6 +508,11 @@ def build_uvicorn_log_config(
             for the ``include_web=False`` env path.
         web_level: Log level name applied to every web-server logger.
             Default ``INFO`` so request access lines reach the file.
+        json_format: When ``True``, every uvicorn/FastAPI handler
+            renders the same structured JSON lines as the ``inqtrix``
+            logger. This MUST follow the ``configure_logging`` choice —
+            uvicorn re-applies its ``dictConfig`` on every ``run()``, so
+            leaving it plaintext would mix formats on stdout.
 
     Returns:
         A dict-config compatible with ``logging.config.dictConfig`` and
@@ -251,11 +525,13 @@ def build_uvicorn_log_config(
         "default": {
             "formatter": "default",
             "class": "logging.StreamHandler",
+            "filters": ["redact_secrets"],
             "stream": "ext://sys.stderr",
         },
         "access": {
             "formatter": "access",
             "class": "logging.StreamHandler",
+            "filters": ["redact_secrets"],
             "stream": "ext://sys.stdout",
         },
     }
@@ -282,20 +558,36 @@ def build_uvicorn_log_config(
                 "()": "inqtrix.logging_config._RedactSecretsFilter",
             },
         },
-        "formatters": {
-            "default": {
-                "()": "uvicorn.logging.DefaultFormatter",
-                "fmt": "%(levelprefix)s %(message)s",
-                "use_colors": None,
-            },
-            "access": {
-                "()": "uvicorn.logging.AccessFormatter",
-                "fmt": '%(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
-            },
-            "file": {
-                "format": _FILE_FORMAT,
-            },
-        },
+        "formatters": (
+            {
+                # One JSON shape across app and web-server records; the
+                # access line is rendered into the message field.
+                "default": {
+                    "()": "inqtrix.observability.json_formatter.InqtrixJsonFormatter",
+                },
+                "access": {
+                    "()": "inqtrix.observability.json_formatter.InqtrixJsonFormatter",
+                },
+                "file": {
+                    "()": "inqtrix.observability.json_formatter.InqtrixJsonFormatter",
+                },
+            }
+            if json_format
+            else {
+                "default": {
+                    "()": "uvicorn.logging.DefaultFormatter",
+                    "fmt": "%(levelprefix)s %(message)s",
+                    "use_colors": None,
+                },
+                "access": {
+                    "()": "uvicorn.logging.AccessFormatter",
+                    "fmt": '%(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
+                },
+                "file": {
+                    "format": _FILE_FORMAT,
+                },
+            }
+        ),
         "handlers": handlers,
         "loggers": {
             "uvicorn": {
@@ -350,6 +642,8 @@ def describe_logging_state() -> dict[str, Any]:
         - ``web_level`` (str | None): uvicorn logger level when web
           loggers have any non-default handler; ``None`` when
           untouched.
+        - ``format`` (str): ``"json"`` when any real handler renders
+          structured JSON lines, ``"text"`` otherwise.
     """
     logger = logging.getLogger("inqtrix")
 
@@ -357,8 +651,11 @@ def describe_logging_state() -> dict[str, Any]:
     file_enabled = False
     console_enabled = False
     silent_only = True
+    json_active = False
 
     for handler in logger.handlers:
+        if isinstance(handler.formatter, InqtrixJsonFormatter):
+            json_active = True
         if isinstance(handler, logging.FileHandler):
             file_enabled = True
             silent_only = False
@@ -397,6 +694,7 @@ def describe_logging_state() -> dict[str, Any]:
         "silent": silent_only and not file_enabled and not console_enabled,
         "web_mirrored": web_mirrored,
         "web_level": web_level,
+        "format": "json" if json_active else "text",
     }
 
 
@@ -431,6 +729,8 @@ def format_logging_banner(state: dict[str, Any] | None = None) -> str:
         lines.append(f"  Log file:        {state['file_path']}")
     else:
         lines.append("  File logging:    DISABLED")
+
+    lines.append(f"  Log format:      {state.get('format', 'text')}")
 
     if state["console_enabled"]:
         lines.append("  Console output:  ENABLED (stderr, WARNING+)")

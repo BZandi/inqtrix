@@ -22,4 +22,8 @@ export type ActiveTarget =
   | { kind: 'all' }
   | { kind: 'collection'; sectionId: string }
   | { kind: 'index'; indexId: string }
-  | { kind: 'server-collection'; collectionId: string }
+  /** `fromIndexId` marks a collection opened deliberately from the index that
+   * it backs (the index's server-side storage view). Without it, a collection
+   * that BECOMES an index's storage while open is followed back to the index,
+   * since it is then no longer a thing of its own. */
+  | { kind: 'server-collection'; collectionId: string; fromIndexId?: string }

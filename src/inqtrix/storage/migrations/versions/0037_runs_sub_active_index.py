@@ -2,7 +2,6 @@
 
 Revision ID: 0037_runs_sub_active_index
 Revises: 0036_agent_memory_rls_guc
-Create Date: 2026-07-04
 
 The optional per-user in-flight run cap COUNTs
 ``created_by_sub = ? AND kind != 'agent' AND status IN ('queued','running')``

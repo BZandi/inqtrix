@@ -169,7 +169,7 @@ def test_discovery_payload_includes_per_stack_models_block():
     class _SearchWithModel(_StubSearch):
         def __init__(self, label: str, model: str) -> None:
             super().__init__(label=label)
-            # ADR-WS-12: standardized search_model property used by
+            # The standardized search_model property is used by
             # ``_stack_models_payload`` (no more attribute heuristic).
             self.search_model = model
 
@@ -347,7 +347,14 @@ def _patched_agent_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Patch agent_run to record the providers/settings it received."""
     captured: dict[str, Any] = {}
 
-    def fake_run(question, *, history, providers, strategies, settings):
+    def fake_run(
+        question,
+        *,
+        history,
+        providers,
+        strategies,
+        settings,
+    ):
         captured["llm_label"] = providers.llm._label
         captured["settings_max_rounds"] = settings.max_rounds
         return {

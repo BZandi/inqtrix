@@ -49,7 +49,6 @@ from inqtrix.constants import (
 from inqtrix.exceptions import (
     AgentModelCapacityError,
     AgentRateLimited,
-    AgentTimeout,
     AzureOpenAIAPIError,
 )
 from inqtrix.providers._azure_common import (
@@ -848,14 +847,30 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                 ),
             )
         except RateLimitError as e:
-            log.error("FATAL Rate-Limit (%s): %s", use_model, e)
+            log.error(
+                "FATAL Rate-Limit (model=%s, error_type=%s)",
+                use_model,
+                type(e).__name__,
+            )
             raise AgentRateLimited(use_model, e)
         except APIStatusError as e:
             if e.status_code == 429:
-                log.error("FATAL Rate-Limit (%s): %s", use_model, e)
+                log.error(
+                    "FATAL Rate-Limit "
+                    "(model=%s, status=%s, error_type=%s)",
+                    use_model,
+                    e.status_code,
+                    type(e).__name__,
+                )
                 raise AgentRateLimited(use_model, e)
             if is_model_capacity_error(e):
-                log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, e)
+                log.warning(
+                    "ALGO-FAIL model_capacity "
+                    "(model=%s, status=%s, error_type=%s)",
+                    use_model,
+                    e.status_code,
+                    type(e).__name__,
+                )
                 raise AgentModelCapacityError(
                     use_model,
                     "llm_complete",
@@ -864,12 +879,14 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                 ) from e
             details = self._extract_api_error_details(e)
             log.error(
-                "Azure-OpenAI-Aufruf fehlgeschlagen (%s, status=%s, code=%s, request-id=%s): %s",
+                "Azure-OpenAI-Aufruf fehlgeschlagen "
+                "(model=%s, status=%s, code=%s, request-id=%s, "
+                "error_type=%s)",
                 use_model,
                 details.get("status_code"),
                 details.get("error_code") or "-",
                 details.get("request_id") or "-",
-                e,
+                type(e).__name__,
             )
             raise AzureOpenAIAPIError(
                 model=use_model,
@@ -882,14 +899,23 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             ) from e
         except OpenAIError as e:
             if is_model_capacity_error(e):
-                log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, e)
+                log.warning(
+                    "ALGO-FAIL model_capacity (model=%s, error_type=%s)",
+                    use_model,
+                    type(e).__name__,
+                )
                 raise AgentModelCapacityError(
                     use_model,
                     "llm_complete",
                     str(e),
                     original=e,
                 ) from e
-            log.error("Azure-OpenAI-Aufruf fehlgeschlagen (%s): %s", use_model, e)
+            log.error(
+                "Azure-OpenAI-Aufruf fehlgeschlagen "
+                "(model=%s, error_type=%s)",
+                use_model,
+                type(e).__name__,
+            )
             raise AzureOpenAIAPIError(
                 model=use_model,
                 message=str(e),
@@ -915,7 +941,7 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
         deadline: float | None = None,
         reasoning_effort: str | None = None,
     ) -> ChatTurn:
-        """Run one native tool-calling chat turn (plan M2 step 1).
+        """Run one native tool-calling chat turn.
 
         Same transport, retry loop, request-parameter merging,
         reasoning-effort mapping, and error mapping as
@@ -957,14 +983,30 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             )
             return chat_turn_from_openai_response(r, model=use_model)
         except RateLimitError as e:
-            log.error("FATAL Rate-Limit (%s): %s", use_model, e)
+            log.error(
+                "FATAL Rate-Limit (model=%s, error_type=%s)",
+                use_model,
+                type(e).__name__,
+            )
             raise AgentRateLimited(use_model, e)
         except APIStatusError as e:
             if e.status_code == 429:
-                log.error("FATAL Rate-Limit (%s): %s", use_model, e)
+                log.error(
+                    "FATAL Rate-Limit "
+                    "(model=%s, status=%s, error_type=%s)",
+                    use_model,
+                    e.status_code,
+                    type(e).__name__,
+                )
                 raise AgentRateLimited(use_model, e)
             if is_model_capacity_error(e):
-                log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, e)
+                log.warning(
+                    "ALGO-FAIL model_capacity "
+                    "(model=%s, status=%s, error_type=%s)",
+                    use_model,
+                    e.status_code,
+                    type(e).__name__,
+                )
                 raise AgentModelCapacityError(
                     use_model,
                     "llm_chat",
@@ -973,12 +1015,14 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                 ) from e
             details = self._extract_api_error_details(e)
             log.error(
-                "Azure-OpenAI-Chat fehlgeschlagen (%s, status=%s, code=%s, request-id=%s): %s",
+                "Azure-OpenAI-Chat fehlgeschlagen "
+                "(model=%s, status=%s, code=%s, request-id=%s, "
+                "error_type=%s)",
                 use_model,
                 details.get("status_code"),
                 details.get("error_code") or "-",
                 details.get("request_id") or "-",
-                e,
+                type(e).__name__,
             )
             raise AzureOpenAIAPIError(
                 model=use_model,
@@ -991,14 +1035,23 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             ) from e
         except OpenAIError as e:
             if is_model_capacity_error(e):
-                log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, e)
+                log.warning(
+                    "ALGO-FAIL model_capacity (model=%s, error_type=%s)",
+                    use_model,
+                    type(e).__name__,
+                )
                 raise AgentModelCapacityError(
                     use_model,
                     "llm_chat",
                     str(e),
                     original=e,
                 ) from e
-            log.error("Azure-OpenAI-Chat fehlgeschlagen (%s): %s", use_model, e)
+            log.error(
+                "Azure-OpenAI-Chat fehlgeschlagen "
+                "(model=%s, error_type=%s)",
+                use_model,
+                type(e).__name__,
+            )
             raise AzureOpenAIAPIError(
                 model=use_model,
                 message=str(e),
@@ -1132,14 +1185,30 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                 track_tokens(state, response)
             return response
         except RateLimitError as e:
-            log.error("FATAL Rate-Limit (%s): %s", use_model, e)
+            log.error(
+                "FATAL Rate-Limit (model=%s, error_type=%s)",
+                use_model,
+                type(e).__name__,
+            )
             raise AgentRateLimited(use_model, e)
         except APIStatusError as e:
             if e.status_code == 429:
-                log.error("FATAL Rate-Limit (%s): %s", use_model, e)
+                log.error(
+                    "FATAL Rate-Limit "
+                    "(model=%s, status=%s, error_type=%s)",
+                    use_model,
+                    e.status_code,
+                    type(e).__name__,
+                )
                 raise AgentRateLimited(use_model, e)
             if is_model_capacity_error(e):
-                log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, e)
+                log.warning(
+                    "ALGO-FAIL model_capacity "
+                    "(model=%s, status=%s, error_type=%s)",
+                    use_model,
+                    e.status_code,
+                    type(e).__name__,
+                )
                 raise AgentModelCapacityError(
                     use_model,
                     "llm_complete",
@@ -1148,12 +1217,14 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
                 ) from e
             details = self._extract_api_error_details(e)
             log.error(
-                "Azure-OpenAI-Aufruf fehlgeschlagen (%s, status=%s, code=%s, request-id=%s): %s",
+                "Azure-OpenAI-Aufruf fehlgeschlagen "
+                "(model=%s, status=%s, code=%s, request-id=%s, "
+                "error_type=%s)",
                 use_model,
                 details.get("status_code"),
                 details.get("error_code") or "-",
                 details.get("request_id") or "-",
-                e,
+                type(e).__name__,
             )
             raise AzureOpenAIAPIError(
                 model=use_model,
@@ -1166,14 +1237,23 @@ class AzureOpenAILLM(_RetryNoticeMixin, _NonFatalNoticeMixin, LLMProvider):
             ) from e
         except OpenAIError as e:
             if is_model_capacity_error(e):
-                log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, e)
+                log.warning(
+                    "ALGO-FAIL model_capacity (model=%s, error_type=%s)",
+                    use_model,
+                    type(e).__name__,
+                )
                 raise AgentModelCapacityError(
                     use_model,
                     "llm_complete",
                     str(e),
                     original=e,
                 ) from e
-            log.error("Azure-OpenAI-Aufruf fehlgeschlagen (%s): %s", use_model, e)
+            log.error(
+                "Azure-OpenAI-Aufruf fehlgeschlagen "
+                "(model=%s, error_type=%s)",
+                use_model,
+                type(e).__name__,
+            )
             raise AzureOpenAIAPIError(
                 model=use_model,
                 message=str(e),

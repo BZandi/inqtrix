@@ -12,6 +12,7 @@ from inqtrix.prompts import (
     build_answer_section_system_prompt,
     build_answer_section_user_prompt,
     build_answer_system_prompt,
+    build_knowledge_answer_prompt,
 )
 from inqtrix.report_profiles import ReportProfile, tuning_for_report_profile
 from inqtrix.strategies._risk_scoring import KeywordRiskScorer
@@ -356,6 +357,21 @@ def test_monolithic_citation_rules_use_global_wording():
 
     assert "ZITATIONS-REGELN" in prompt
     assert "In Kernaussagen und Detailabschnitten" in prompt
+
+
+def test_knowledge_report_headings_do_not_expose_prompt_instructions():
+    prompt = build_knowledge_answer_prompt(
+        "Welche Regel gilt?",
+        "[K1] Regeltext",
+        report=True,
+    )
+
+    assert "## Kurzfazit\n" in prompt
+    assert "## Kernaussagen\n" in prompt
+    assert "## Detailanalyse\n" in prompt
+    assert "## Quellenlage\n" in prompt
+    assert "## Kurzfazit (" not in prompt
+    assert "## Kernaussagen (" not in prompt
 
 
 def test_section_abdeckungsregel_has_inline_marker_for_non_risiken_section():

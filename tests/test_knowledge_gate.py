@@ -68,7 +68,12 @@ class ScriptedLLM:
             )
         self.answer_prompts.append(prompt)
         return LLMResponse(
-            content="Antwort mit Beleg [K1].",
+            content=(
+                "ZITATE:\n"
+                '[K1] "Die Haftung ist auf den Auftragswert begrenzt."\n'
+                "ANTWORT:\n"
+                "Antwort mit Beleg [K1]."
+            ),
             prompt_tokens=42,
             completion_tokens=11,
             model="stub-answer",
@@ -105,6 +110,12 @@ class RecordingStore(MemoryKnowledgeStore):
                         chunk_index=0,
                         text=f"Zusatzbeleg {self.search_calls}",
                         source_text=f"Zusatzbeleg {self.search_calls}",
+                        source_start=0,
+                        source_end=len(f"Zusatzbeleg {self.search_calls}"),
+                        document_content_hash=(
+                            f"sha256:grow-{self.search_calls}"
+                        ),
+                        source_verified=True,
                     ),
                     score=0.05,
                     document_title=f"Zusatz {self.search_calls}",

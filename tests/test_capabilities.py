@@ -32,9 +32,12 @@ from inqtrix.auth.identity_memory import MemoryIdentityStore
 from inqtrix.auth.permissions import AuthorizationService, SharePermission
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
-from inqtrix.knowledge.stores.ports import KnowledgeProviderContext
+from inqtrix.knowledge.stores.ports import (
+    KnowledgeProviderContext,
+    RetrievalDegradation,
+)
 from inqtrix.search_result import GroundedSearchResult, GroundedSource
-from inqtrix.services.knowledge_service import KnowledgeService
+from inqtrix.services.knowledge_service import KnowledgeService, SearchOutcome
 from pydantic import BaseModel
 
 from tests.test_knowledge_engine import StubEmbeddings
@@ -221,7 +224,138 @@ def test_knowledge_search_capability_matches_direct_service_call():
     ]
     assert out.hits[0].rank == 1
     assert out.hits[0].chunk_id.startswith("kch_")
-    assert out.hits[0].source_text  # provenance present
+    assert out.hits[0].excerpt  # original evidence projection present
+
+
+@pytest.mark.parametrize(
+    ("reason", "candidate_cap"),
+    [
+        ("vector_overfetch_cap", 64),
+        ("vector_candidate_stalled", None),
+    ],
+)
+def test_knowledge_search_capability_exposes_retrieval_degradation(
+    reason: str,
+    candidate_cap: int | None,
+) -> None:
+    service = make_knowledge_service()
+    collection = asyncio.run(service.create_collection(name="Recht"))
+    asyncio.run(
+        service.add_document(
+            collection_id=collection.id,
+            title="Haftung",
+            text="Die Haftung ist auf den Auftragswert begrenzt.",
+        )
+    )
+    original = service.search_reported
+
+    async def degraded_search(**kwargs) -> SearchOutcome:
+        outcome = await original(**kwargs)
+        return replace(
+            outcome,
+            retrieval_degradations=[
+                RetrievalDegradation(
+                    reason=reason,
+                    retrieval_mode="dense",
+                    requested_top_k=4,
+                    returned_hits=len(outcome.candidates),
+                    candidate_cap=candidate_cap,
+                    requested_candidate_pool=40,
+                    returned_candidate_pool=8,
+                    final_top_k=4,
+                )
+            ],
+        )
+
+    service.search_reported = degraded_search  # type: ignore[method-assign]
+    registry = build_capability_registry(knowledge_service=service)
+
+    output = asyncio.run(
+        registry.invoke(
+            "knowledge.search",
+            {"query": "Haftung", "top_k": 4},
+            ANON,
+        )
+    )
+
+    assert output.hits
+    assert [warning.code for warning in output.warnings] == [reason]
+    assert output.warnings[0].returned_hits == len(output.hits)
+    assert output.warnings[0].candidate_cap == candidate_cap
+    assert output.warnings[0].stage == "vector_candidate_pool"
+    assert output.warnings[0].requested_candidate_pool == 40
+    assert output.warnings[0].returned_candidate_pool == 8
+    assert output.warnings[0].final_top_k == 4
+    assert output.warnings[0].final_evidence_complete is False
+    assert "finale angeforderte Belegzahl" in output.warnings[0].message
+
+
+@pytest.mark.parametrize(
+    ("reason", "candidate_cap"),
+    [
+        ("vector_overfetch_cap", 64),
+        ("vector_candidate_stalled", None),
+    ],
+)
+def test_knowledge_search_warning_distinguishes_complete_final_evidence(
+    reason: str,
+    candidate_cap: int | None,
+) -> None:
+    service = make_knowledge_service()
+    collection = asyncio.run(service.create_collection(name="Recht"))
+    asyncio.run(
+        service.add_document(
+            collection_id=collection.id,
+            title="Haftung",
+            text="Die Haftung ist auf den Auftragswert begrenzt.",
+        )
+    )
+    original = service.search_reported
+
+    async def candidate_pool_underfilled(**kwargs) -> SearchOutcome:
+        outcome = await original(**kwargs)
+        candidates = outcome.candidates * 4
+        return replace(
+            outcome,
+            candidates=candidates,
+            retrieval_degradations=[
+                RetrievalDegradation(
+                    reason=reason,
+                    retrieval_mode="dense",
+                    requested_top_k=4,
+                    returned_hits=4,
+                    candidate_cap=candidate_cap,
+                    requested_candidate_pool=40,
+                    returned_candidate_pool=8,
+                    final_top_k=4,
+                )
+            ],
+        )
+
+    service.search_reported = candidate_pool_underfilled  # type: ignore[method-assign]
+    registry = build_capability_registry(knowledge_service=service)
+
+    output = asyncio.run(
+        registry.invoke(
+            "knowledge.search",
+            {"query": "Haftung", "top_k": 4},
+            ANON,
+        )
+    )
+
+    assert len(output.hits) == 4
+    assert output.warnings[0].code == reason
+    assert output.warnings[0].candidate_cap == candidate_cap
+    assert output.warnings[0].final_evidence_complete is True
+    assert output.warnings[0].stage == "vector_candidate_pool"
+    assert output.warnings[0].requested_candidate_pool == 40
+    assert output.warnings[0].returned_candidate_pool == 8
+    assert output.warnings[0].final_top_k == 4
+    assert output.warnings[0].requested_top_k == 4
+    assert output.warnings[0].returned_hits == 4
+    assert "finale Belegzahl wurde dennoch vollständig erreicht" in (
+        output.warnings[0].message
+    )
 
 
 def test_knowledge_document_read_capability_returns_full_text():
@@ -427,11 +561,73 @@ def test_web_instant_capability_wraps_one_search_call():
         )
     )
     assert out.answer == "Antwort zu KI Regulierung"
-    # max_sources caps the returned list; recency reached the provider.
-    assert len(out.sources) == 1
+    # The full provider citation set survives the capability boundary. The
+    # caller may render a compact subset without losing audit evidence.
+    assert len(out.sources) == 2
+    assert out.parameters["visible_source_limit"] == 1
     assert search.last_kwargs["recency_filter"] == "week"
     assert out.prompt_tokens == 11
     assert out.completion_tokens == 7
+    assert out.query_id
+    assert out.query == "KI Regulierung"
+    assert out.provider == "_StubSearch"
+    assert out.started_at
+    assert out.finished_at
+    assert out.duration_ms >= 0
+
+
+def test_web_instant_keeps_original_question_separate_from_adaptive_query():
+    search = _StubSearch()
+    registry = build_capability_registry(search_provider=search)
+    context = CapabilityContext(
+        principal=_ANON_PRINCIPAL,
+        run_id="run_query_lineage",
+        question="Was kostet GPT-5.6 Sol je Azure-Region?",
+    )
+
+    out = asyncio.run(
+        registry.invoke(
+            "web.search.instant",
+            {"query": "Azure Retail Prices API GPT-5.6 Sol"},
+            context,
+        )
+    )
+
+    assert context.question == "Was kostet GPT-5.6 Sol je Azure-Region?"
+    assert out.query == "Azure Retail Prices API GPT-5.6 Sol"
+
+
+def test_web_instant_redacts_provider_credential_urls_before_output_and_bundle():
+    secret = "provider-output-secret"
+
+    class CredentialSearch(_StubSearch):
+        def search(self, query, **kwargs):
+            del query, kwargs
+            return GroundedSearchResult(
+                answer=(
+                    "Discovery https://api.example/data?client_secret=" + secret
+                ),
+                sources=[
+                    GroundedSource(
+                        url=f"https://api.example/data?x-api-key={secret}",
+                        title="Credential-bearing provider source",
+                    )
+                ],
+            )
+
+    registry = build_capability_registry(search_provider=CredentialSearch())
+    out = asyncio.run(
+        registry.invoke(
+            "web.search.instant",
+            {"query": "credential redaction"},
+            ANON,
+        )
+    )
+    serialized = out.model_dump_json()
+
+    assert secret not in serialized
+    assert "client_secret=[REDACTED]" in out.answer
+    assert "x-api-key=[REDACTED]" in out.sources[0].url
 
 
 def test_web_instant_forwards_provider_retry_notice_with_query_context():
@@ -529,9 +725,47 @@ def test_web_instant_preserves_provider_timeout_code() -> None:
     assert excinfo.value.http_status == 504
 
 
-# ------------------------------------------------------------------ #
-# conditional registration
-# ------------------------------------------------------------------ #
+def test_web_capabilities_use_run_resolved_search_provider() -> None:
+    """Named-stack tools use the run provider, without a page-reader seam."""
+
+    class LabelledSearch:
+        def __init__(self, label: str) -> None:
+            self.label = label
+            self.calls = 0
+
+        def search(self, query: str, **_kwargs) -> GroundedSearchResult:
+            self.calls += 1
+            return GroundedSearchResult(answer=f"answer:{self.label}")
+
+    default_search = LabelledSearch("default")
+    named_search = LabelledSearch("named")
+    registry = build_capability_registry(search_provider=default_search)
+    context = replace(
+        ANON,
+        search_provider=named_search,
+    )
+
+    search_output = asyncio.run(
+        registry.invoke("web.search.instant", {"query": "price"}, context)
+    )
+    assert search_output.answer == "answer:named"
+    assert named_search.calls == 1
+    assert default_search.calls == 0
+    assert registry.ids() == ("web.search.instant",)
+
+
+def test_web_source_read_is_not_registered() -> None:
+    registry = build_capability_registry(search_provider=_StubSearch())
+
+    assert "web.source.read" not in registry.ids()
+    with pytest.raises(UnknownCapability):
+        asyncio.run(
+            registry.invoke(
+                "web.source.read",
+                {"source_ref": "ref_missing"},
+                ANON,
+            )
+        )
 
 
 def test_registry_registers_only_wired_catalogs():

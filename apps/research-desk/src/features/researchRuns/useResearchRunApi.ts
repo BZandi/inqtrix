@@ -84,7 +84,7 @@ export function useResearchRunApi({
   // render a loading skeleton instead of an empty state until this flips,
   // so a reload does not flash "no runs" while pages stream in.
   const [runsHydrated, setRunsHydrated] = useState(false)
-  // Runs currently on the polling fallback (plan M1 T1) — the timeline
+  // Runs currently on the polling fallback — the timeline
   // shows a visible degradation hint for these.
   const [pollingRunIds, setPollingRunIds] = useState<string[]>([])
   const streamsRef = useRef(new Map<string, AbortController>())
@@ -176,7 +176,7 @@ export function useResearchRunApi({
       eventsUrl: summary.events_url,
       options: { apiKey, workspaceId },
       signal: controller.signal,
-      // Visible degradation (plan M1 T1): the timeline shows a hint
+      // Visible degradation: the timeline shows a hint
       // while the run is on the polling fallback; recovery clears it.
       onTransportChange: (transport) => {
         setPollingRunIds((current) => {
@@ -224,13 +224,22 @@ export function useResearchRunApi({
        * Knowledge asks. Omitted callbacks are intentionally not filled from the
        * global store callbacks, so those runs stay out of persisted state. */
       callbacks?: PerRunCallbacks
+      /** Preserve the typed rejection for a caller-owned visible recovery
+       * flow. The hook still records lastError and returns null. */
+      onRejected?: (error: unknown) => void
+      /** Default true. Set false only when the caller visibly handles a 401. */
+      reloadOnUnauthorized?: boolean
       /** Prevent the accepted summary from entering the global run store. */
       suppressSummary?: boolean
     },
   ): Promise<ResearchRunSummary | null> => {
     try {
       setLastError(null)
-      const summary = await createResearchRun(request, { apiKey, workspaceId })
+      const summary = await createResearchRun(request, {
+        apiKey,
+        reloadOnUnauthorized: options?.reloadOnUnauthorized,
+        workspaceId,
+      })
       if (options?.callbacks) {
         perRunCallbacksRef.current.set(summary.run_id, options.callbacks)
       }
@@ -243,6 +252,7 @@ export function useResearchRunApi({
       startStream(summary)
       return summary
     } catch (error) {
+      options?.onRejected?.(error)
       const message = messageFromError(error)
       setLastError(message)
       console.warn('Inqtrix run creation failed.', error)

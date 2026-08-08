@@ -159,6 +159,11 @@ def format_pat(token_id: str, secret: str) -> str:
 class PatStore(Protocol):
     """Persistence port for personal access tokens."""
 
+    @property
+    def atomic_audit_effects(self) -> bool:
+        """Whether create/use/revoke persist their audit rows atomically."""
+        ...
+
     async def create(self, token: PersonalAccessToken) -> None: ...
 
     async def get(self, token_id: str) -> PersonalAccessToken | None: ...
@@ -186,8 +191,18 @@ class PatStore(Protocol):
 
     async def touch_last_used(
         self, token_id: str, *, now: float, min_interval: float
-    ) -> None:
-        """Throttled ``last_used_at`` update (best effort, never raises)."""
+    ) -> bool:
+        """Throttled ``last_used_at`` update.
+
+        Returns:
+            ``True`` when the write actually happened — the sampling
+            signal the ``pat.used`` audit row keys off (one row per
+            throttle interval, matching the persisted timestamp).
+
+        Durable stores may raise when the timestamp and its atomic audit row
+        cannot both commit. :class:`PatVerifier` treats that bookkeeping
+        failure as fail-safe while retaining the rollback.
+        """
         ...
 
     async def revoke_all_for_owner(
@@ -207,6 +222,11 @@ class MemoryPatStore:
     def __init__(self) -> None:
         self._tokens: dict[str, PersonalAccessToken] = {}
         self._lock = threading.RLock()
+
+    @property
+    def atomic_audit_effects(self) -> bool:
+        """Memory mutations use the service/verifier audit fallback."""
+        return False
 
     async def create(self, token: PersonalAccessToken) -> None:
         with self._lock:
@@ -255,19 +275,20 @@ class MemoryPatStore:
 
     async def touch_last_used(
         self, token_id: str, *, now: float, min_interval: float
-    ) -> None:
+    ) -> bool:
         with self._lock:
             token = self._tokens.get(token_id)
             if token is None:
-                return
+                return False
             if (
                 token.last_used_at is not None
                 and token.last_used_at > now - min_interval
             ):
-                return
+                return False
             self._tokens[token_id] = dataclasses.replace(
                 token, last_used_at=now
             )
+            return True
 
     async def revoke_all_for_owner(
         self, *, tenant_id: str, owner_user_id: uuid.UUID, now: float
@@ -318,6 +339,14 @@ class PatVerifier:
         self._user_lookup = user_lookup
         self._audit = audit
 
+    def bind_audit(self, audit: "AuditSink") -> None:
+        """Bind the one canonical sink after composition is assembled."""
+        if self._audit is not None and self._audit is not audit:
+            raise RuntimeError(
+                "PatVerifier audit sink cannot be rebound to another instance"
+            )
+        self._audit = audit
+
     async def verify(self, bearer_value: str) -> Principal:
         """Verify one presented token or raise the uniform 401."""
         parsed = parse_pat(bearer_value.strip())
@@ -351,16 +380,39 @@ class PatVerifier:
             await self._audit_rejection(record, "user_disabled")
             raise self._unauthorized()
         try:
-            await self._store.touch_last_used(
+            touched = await self._store.touch_last_used(
                 record.token_id,
                 now=now,
                 min_interval=LAST_USED_WRITE_INTERVAL_SECONDS,
             )
         except Exception as exc:  # noqa: BLE001 — bookkeeping only
+            touched = False
             log.warning(
-                "PAT last_used-Update fehlgeschlagen (%s) — Anfrage "
+                "PAT last_used-Update fehlgeschlagen (error_type=%s) — Anfrage "
                 "laeuft weiter.",
-                exc,
+                type(exc).__name__,
+            )
+        if (
+            touched
+            and self._audit is not None
+            and not self._store.atomic_audit_effects
+        ):
+            # pat.used, SAMPLED on the same throttle as last_used_at:
+            # one audit row per interval, never one per request.
+            from inqtrix.services.audit_service import (
+                AuditService,
+                build_audit_entry,
+            )
+
+            await AuditService(self._audit).record(
+                build_audit_entry(
+                    tenant_id=record.tenant_id,
+                    actor_user_id=record.owner_user_id,
+                    action="pat.used",
+                    resource_type="pat",
+                    resource_id=record.token_id,
+                    origin={"auth_method": "pat"},
+                )
             )
         return Principal(
             user_id=record.owner_user_id,
@@ -430,6 +482,14 @@ class PatService:
         self._audit = audit
         self._max_per_user = max_per_user
         self._default_ttl_days = default_ttl_days
+
+    def bind_audit(self, audit: "AuditSink") -> None:
+        """Bind the one canonical sink after composition is assembled."""
+        if self._audit is not None and self._audit is not audit:
+            raise RuntimeError(
+                "PatService audit sink cannot be rebound to another instance"
+            )
+        self._audit = audit
 
     async def create_token(
         self,
@@ -534,7 +594,7 @@ class PatService:
     async def _audit_event(
         self, record: PersonalAccessToken, action: str
     ) -> None:
-        if self._audit is None:
+        if self._audit is None or self._store.atomic_audit_effects:
             return
         from inqtrix.auth.permissions import AuditEntry
 

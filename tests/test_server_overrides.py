@@ -1,4 +1,4 @@
-"""Tests for per-request agent overrides (ADR-WS-6).
+"""Tests for per-request agent overrides.
 
 Covers the whitelist Pydantic model, range validation, the merge
 helper ``apply_overrides`` (including the three profile-switch
@@ -144,7 +144,7 @@ def test_apply_overrides_merges_into_agent_settings():
 
 
 # ------------------------------------------------------------------ #
-# Profile-switch semantics — Scenarios A / B / C from ADR-WS-6
+# Profile-switch semantics — scenarios A / B / C
 # ------------------------------------------------------------------ #
 
 
@@ -647,7 +647,7 @@ def test_native_runs_direct_mode_returns_mode_summary(
 
 
 def test_depth_override_validates_and_merges():
-    """`depth` (plan M4) rides the generic whitelist: 'deep' merges
+    """`depth` rides the generic whitelist: 'deep' merges
     into AgentSettings, anything outside the vocabulary raises."""
     overrides = AgentOverridesRequest.model_validate({"depth": "deep"})
     merged = apply_overrides(AgentSettings(), overrides)

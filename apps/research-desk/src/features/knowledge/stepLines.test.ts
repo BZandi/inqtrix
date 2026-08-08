@@ -105,4 +105,154 @@ describe('knowledgeStepLine', () => {
     expect(line({ ...base, facts: { ...base.facts, finalKOverridden: true } }).secondary)
       .toBe('top_k 8 · final_k 16 · überschrieben')
   })
+
+  it.each([
+    {
+      candidateCap: 64,
+      finalComplete: true,
+      finalTopK: 3,
+      reason: 'vector_overfetch_cap',
+      returnedHits: 3,
+      suffix: 'Die Prüfung endete bei 64 Kandidaten.',
+    },
+    {
+      candidateCap: 64,
+      finalComplete: false,
+      finalTopK: 8,
+      reason: 'vector_overfetch_cap',
+      returnedHits: 3,
+      suffix: 'Die Prüfung endete bei 64 Kandidaten.',
+    },
+    {
+      candidateCap: null,
+      finalComplete: true,
+      finalTopK: 3,
+      reason: 'vector_candidate_stalled',
+      returnedHits: 3,
+      suffix: 'Die nächste Kandidatenstufe lieferte keine neuen aktiven Kandidaten und wurde beendet.',
+    },
+    {
+      candidateCap: null,
+      finalComplete: false,
+      finalTopK: 8,
+      reason: 'vector_candidate_stalled',
+      returnedHits: 3,
+      suffix: 'Die nächste Kandidatenstufe lieferte keine neuen aktiven Kandidaten und wurde beendet.',
+    },
+  ])('renders $reason with final completeness $finalComplete truthfully', ({
+    candidateCap,
+    finalComplete,
+    finalTopK,
+    reason,
+    returnedHits,
+    suffix,
+  }) => {
+    const retrieval: KnowledgeRunStepRecord = {
+      facts: {
+        candidateCount: 3,
+        retrievalDegradations: [{
+          candidate_cap: candidateCap,
+          final_evidence_complete: finalComplete,
+          final_top_k: finalTopK,
+          reason,
+          requested_candidate_pool: 12,
+          requested_top_k: finalTopK,
+          retrieval_mode: 'hybrid',
+          returned_candidate_pool: 6,
+          returned_hits: returnedHits,
+          stage: 'vector_candidate_pool',
+        }],
+      },
+      id: 'retrieval',
+      kind: 'retrieval',
+      status: 'done',
+    }
+
+    expect(line(retrieval).warning).toBe([
+      'Der Vektor-Kandidatenpool erreichte 6 von 12 geplanten Kandidaten.',
+      finalComplete
+        ? `Die ${finalTopK} final angeforderten verifizierten Belege sind dennoch vollständig verfügbar.`
+        : `Final sind nur ${returnedHits} von ${finalTopK} angeforderten verifizierten Belegen verfügbar.`,
+      suffix,
+    ].join(' '))
+  })
+
+  it('renders source-integrity exclusions through the shared warning copy', () => {
+    const retrieval: KnowledgeRunStepRecord = {
+      facts: {
+        candidateCount: 2,
+        retrievalWarnings: [{
+          code: 'chunks_require_reindex',
+          count: 3,
+          message: 'server fallback',
+          reason: 'source_unverified',
+          recommended_action: 'reindex',
+          stage: 'canonical_hydration',
+        }],
+      },
+      id: 'retrieval',
+      kind: 'retrieval',
+      status: 'done',
+    }
+
+    expect(line(retrieval).warning).toBe(
+      '3 ältere Treffer wurden ausgeschlossen, weil ihr Originaltext nicht '
+      + 'verifiziert werden konnte. Diese Inhalte müssen neu indiziert werden.',
+    )
+  })
+
+  it('keeps duplicate consolidation informational in the retained retrieval step', () => {
+    const retrieval: KnowledgeRunStepRecord = {
+      facts: {
+        candidateCount: 2,
+        retrievalWarnings: [{
+          code: 'duplicate_documents_collapsed',
+          count: 1,
+          message: '',
+          reason: 'duplicate_document',
+          recommended_action: null,
+          stage: 'canonical_hydration',
+        }],
+      },
+      id: 'retrieval',
+      kind: 'retrieval',
+      status: 'done',
+    }
+
+    expect(line(retrieval)).toMatchObject({
+      information: 'Ein inhaltsgleiches Dokument wurde mit seiner bereits vorhandenen '
+        + 'Quelle zusammengeführt, damit identische Passagen nicht mehrfach als Beleg erscheinen.',
+      warning: undefined,
+    })
+  })
+
+  it('names an unparseable grounding response instead of claiming zero checked quotes', () => {
+    expect(line({
+      facts: {
+        groundingMarker: '_knowledge_grounding_fallback',
+        quotesTotal: 0,
+        quotesVerified: 0,
+      },
+      id: 'grounding',
+      kind: 'grounding',
+      status: 'done',
+    }).primary).toBe('Zitatprüfung konnte nicht ausgewertet werden')
+  })
+
+  it('surfaces an unparseable evidence gate instead of presenting fallback as a normal verdict', () => {
+    expect(line({
+      facts: {
+        gateMarker: '_knowledge_gate_fallback',
+        rewritten: false,
+        round: 1,
+        roundsTotal: 3,
+        sufficient: true,
+      },
+      id: 'gate-0',
+      kind: 'gate',
+      status: 'done',
+    }).secondary).toBe(
+      'ausreichend · Evidenzbewertung nicht auswertbar — Antwortpfad sichtbar degradiert',
+    )
+  })
 })

@@ -1,13 +1,13 @@
-{{- if and .Values.migrations.enabled .Release.IsUpgrade (eq .Values.migrations.rlsMode "owner") }}
+{{- if and .Values.migrations.enabled .Release.IsUpgrade .Values.migrations.maintenanceConfirmed }}
 {{- $fullname := include "inqtrix.fullname" . }}
-{{- $serviceAccount := include "inqtrix.internalServiceAccountName" (dict "root" . "component" "owner-maintenance") }}
+{{- $serviceAccount := include "inqtrix.internalServiceAccountName" (dict "root" . "component" "schema-maintenance") }}
 {{- if .Values.serviceAccount.create }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: {{ $serviceAccount }}
   labels:
-    {{- include "inqtrix.labels" (dict "root" . "component" "owner-maintenance") | nindent 4 }}
+    {{- include "inqtrix.labels" (dict "root" . "component" "schema-maintenance") | nindent 4 }}
   annotations:
     "helm.sh/hook": pre-upgrade
     "helm.sh/hook-weight": "-30"
@@ -18,9 +18,9 @@ automountServiceAccountToken: true
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ $fullname }}-owner-maintenance
+  name: {{ $fullname }}-schema-maintenance
   labels:
-    {{- include "inqtrix.labels" (dict "root" . "component" "owner-maintenance") | nindent 4 }}
+    {{- include "inqtrix.labels" (dict "root" . "component" "schema-maintenance") | nindent 4 }}
   annotations:
     "helm.sh/hook": pre-upgrade
     "helm.sh/hook-weight": "-30"
@@ -32,6 +32,7 @@ rules:
       - {{ $fullname }}-api
       - {{ $fullname }}-worker
       - {{ $fullname }}-collaboration
+      - {{ $fullname }}-pgbouncer
     verbs: ["patch"]
   - apiGroups: ["autoscaling"]
     resources: ["horizontalpodautoscalers"]
@@ -45,15 +46,15 @@ rules:
   # before-hook-creation cleanup.
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["rolebindings"]
-    resourceNames: [{{ printf "%s-owner-maintenance" $fullname | quote }}]
+    resourceNames: [{{ printf "%s-schema-maintenance" $fullname | quote }}]
     verbs: ["delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ $fullname }}-owner-maintenance
+  name: {{ $fullname }}-schema-maintenance
   labels:
-    {{- include "inqtrix.labels" (dict "root" . "component" "owner-maintenance") | nindent 4 }}
+    {{- include "inqtrix.labels" (dict "root" . "component" "schema-maintenance") | nindent 4 }}
   annotations:
     "helm.sh/hook": pre-upgrade
     "helm.sh/hook-weight": "-30"
@@ -65,25 +66,25 @@ subjects:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ $fullname }}-owner-maintenance
+  name: {{ $fullname }}-schema-maintenance
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ $fullname }}-owner-maintenance
+  name: {{ $fullname }}-schema-maintenance
   labels:
-    {{- include "inqtrix.labels" (dict "root" . "component" "owner-maintenance") | nindent 4 }}
+    {{- include "inqtrix.labels" (dict "root" . "component" "schema-maintenance") | nindent 4 }}
   annotations:
     "helm.sh/hook": pre-upgrade
     "helm.sh/hook-weight": "-20"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: {{ add (int .Values.migrations.ownerMaintenanceTimeoutSeconds) 60 }}
+  activeDeadlineSeconds: {{ add (int .Values.migrations.maintenanceTimeoutSeconds) 60 }}
   template:
     metadata:
       labels:
-        {{- include "inqtrix.labels" (dict "root" . "component" "owner-maintenance") | nindent 8 }}
+        {{- include "inqtrix.labels" (dict "root" . "component" "schema-maintenance") | nindent 8 }}
     spec:
       serviceAccountName: {{ $serviceAccount }}
       automountServiceAccountToken: true
@@ -114,9 +115,9 @@ spec:
             - name: INQTRIX_K8S_WORKLOAD_PREFIX
               value: {{ $fullname | quote }}
             - name: INQTRIX_K8S_QUIESCE_TIMEOUT_SECONDS
-              value: {{ .Values.migrations.ownerMaintenanceTimeoutSeconds | quote }}
+              value: {{ .Values.migrations.maintenanceTimeoutSeconds | quote }}
             - name: INQTRIX_K8S_MAINTENANCE_ROLE_BINDING
-              value: {{ printf "%s-owner-maintenance" $fullname | quote }}
+              value: {{ printf "%s-schema-maintenance" $fullname | quote }}
           resources:
             requests:
               cpu: 25m

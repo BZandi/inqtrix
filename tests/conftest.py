@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import pytest
 
@@ -17,6 +18,37 @@ from inqtrix.strategies import (
     MultiSignalStopCriteria,
     StrategyContext,
 )
+
+
+INTEGRATION_MARKERS = {
+    "postgres": "INQTRIX_TEST_DATABASE_URL",
+    "qdrant": "INQTRIX_TEST_QDRANT_URL",
+}
+
+
+def pytest_collection_modifyitems(items):
+    """Gate the infrastructure-bound suites on the URL that they need.
+
+    Without the URL the persistence, isolation and migration proofs cannot
+    run, so they are skipped. With ``INQTRIX_TEST_REQUIRE_INTEGRATION=1`` the
+    same situation is an error instead: whoever asks for the release run must
+    not be able to obtain a green result while those proofs are absent.
+    """
+    require_integration = os.environ.get("INQTRIX_TEST_REQUIRE_INTEGRATION") == "1"
+    for marker, variable in INTEGRATION_MARKERS.items():
+        if os.environ.get(variable):
+            continue
+        gated = [item for item in items if item.get_closest_marker(marker)]
+        if not gated:
+            continue
+        if require_integration:
+            raise pytest.UsageError(
+                f"INQTRIX_TEST_REQUIRE_INTEGRATION=1 requires {variable}: "
+                f"{len(gated)} {marker} tests would be skipped."
+            )
+        skip = pytest.mark.skip(reason=f"{variable} not set ({marker} integration)")
+        for item in gated:
+            item.add_marker(skip)
 
 
 class _StubLLM:
@@ -70,6 +102,13 @@ def reset_inqtrix_logger():
 
     for handler in list(inqtrix_logger.handlers):
         inqtrix_logger.removeHandler(handler)
+    # Collection can import ``inqtrix.__main__`` before the first fixture is
+    # entered. That module configures the product logger with
+    # ``propagate=False``. Merely removing its handlers therefore still makes
+    # caplog-based tests silent for the whole run. Give every test a neutral,
+    # root-capturable logger and restore the collection-time state afterwards.
+    inqtrix_logger.setLevel(logging.NOTSET)
+    inqtrix_logger.propagate = True
 
     yield
 

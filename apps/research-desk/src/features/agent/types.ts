@@ -94,11 +94,15 @@ export type AgentApprovalWire = {
   decided_at: number | null
 }
 
-/** POST decision body for an approval. `plan` only with `decision: 'edit'`. */
+/** POST decision body for an approval. `plan` only with `decision: 'edit'`
+ * on a plan/replan gate; `actions` only with `decision: 'edit'` on a `tool`
+ * gate (exactly one action, args-only change — the backend re-validates the
+ * edited args against the live tool schema). */
 export type AgentApprovalDecisionRequest = {
   decision: 'approve' | 'reject' | 'edit'
   note?: string
   plan?: Record<string, unknown>
+  actions?: { tool: string; args: Record<string, unknown> }[]
   /** Decision-scoped user guidance for the report (structure, focus,
    * audience) — rendered into the synthesis prompts server-side. */
   report_guidance?: string
@@ -160,7 +164,14 @@ export type AgentArtifactMetaWire = {
   artifact_id: string
   run_id: string
   session_id: string | null
-  kind: 'memo' | 'evidence_bundle' | 'critic_report' | 'editor_patch' | 'answer'
+  kind:
+    | 'memo'
+    | 'evidence_bundle'
+    | 'critic_report'
+    | 'editor_patch'
+    | 'answer'
+    | 'deliverable'
+    | 'context_archive'
   title: string
   status: 'writing' | 'ready'
   revision: number
@@ -173,6 +184,9 @@ export type AgentArtifactMetaWire = {
 /** Artifact detail (`GET .../artifacts/{id}?revision=`). */
 export type AgentArtifactDetailWire = AgentArtifactMetaWire & {
   content_markdown: string
+  /** Kind-specific, bounded artifact data. Evidence bundles use this field
+   * for their typed source-read lineage; older servers may omit it. */
+  payload?: Record<string, unknown>
   refs: Record<string, unknown>[]
   revisions: { revision: number; created_by: string; created_at: number }[]
 }
@@ -185,6 +199,10 @@ export type ServerAgentSession = {
   created_at: number
   updated_at: number
   items_json?: string
+  lifecycle_status?: 'active' | 'deleting' | 'delete_failed'
+  deletion_operation_id?: string | null
+  deletion_stage?: string | null
+  deletion_error?: string | null
 }
 
 export type ServerAgentSessionGroup = {

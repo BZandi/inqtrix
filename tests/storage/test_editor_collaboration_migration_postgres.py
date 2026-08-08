@@ -28,10 +28,7 @@ from inqtrix.storage.runtime_contract import (
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
 
 def _identifier(value: str) -> str:
@@ -892,7 +889,7 @@ async def _verify_runtime_rejects_migration_role_membership(
         )
         with pytest.raises(
             DatabaseRuntimeContractError,
-            match="forbidden direct/inherited/SET ROLE capabilities",
+            match="runtime session login",
         ):
             await verify_database_url_runtime_contract(
                 runtime_url.render_as_string(hide_password=False),
@@ -1027,7 +1024,7 @@ def test_head_upgrade_backfills_populated_tenants_for_managed_roles(
         run_migrations(
             owner_dsn,
             rls_mode=rls_mode,
-            services_quiesced=(rls_mode == "owner"),
+            services_quiesced=True,
         )
         asyncio.run(_verify_head_agent_contract(admin_database_url))
         asyncio.run(
@@ -1036,6 +1033,206 @@ def test_head_upgrade_backfills_populated_tenants_for_managed_roles(
                 role_name,
             )
         )
+    finally:
+        asyncio.run(
+            _cleanup_database(
+                admin_url,
+                role_name=role_name,
+                database_name=database_name,
+            )
+        )
+
+
+async def _seed_release_integrity_contract(database_url: URL) -> None:
+    connection = await asyncpg.connect(**_connection_kwargs(database_url))
+    try:
+        await connection.execute(
+            """
+            INSERT INTO asset_sections (
+                id, tenant_id, kind, title, created_at, updated_at
+            ) VALUES ('fsec_integrity', 'tenant-a', 'custom', 'Integrity', 1, 1);
+
+            INSERT INTO files (
+                id, tenant_id, file_name, content_type, size_bytes, sha256,
+                object_key, created_at
+            ) VALUES
+                ('fl_integrity_a', 'tenant-a', 'a.txt', 'text/plain', 10,
+                 'sha-a', 'integrity/a', 1),
+                ('fl_integrity_b', 'tenant-a', 'b.txt', 'text/plain', 20,
+                 'sha-b', 'integrity/b', 1),
+                ('fl_integrity_c', 'tenant-a', 'c.txt', 'text/plain', 30,
+                 'sha-c', 'integrity/c', 1);
+
+            INSERT INTO asset_records (
+                id, tenant_id, section_id, title, label, file_name, mime_type,
+                server_file_id, created_at, updated_at
+            ) VALUES
+                ('fa_integrity_a', 'tenant-a', 'fsec_integrity', 'A', 'A',
+                 'a.txt', 'text/plain', 'fl_integrity_a', 1, 1),
+                ('fa_integrity_b', 'tenant-a', 'fsec_integrity', 'B', 'B',
+                 'b.txt', 'text/plain', 'fl_integrity_b', 1, 1),
+                ('fa_integrity_c', 'tenant-a', 'fsec_integrity', 'C', 'C',
+                 'c.txt', 'text/plain', 'fl_integrity_c', 1, 1);
+
+            INSERT INTO knowledge_collections (
+                id, tenant_id, name, embedding_model, embedding_dim, created_at
+            ) VALUES ('kc_integrity', 'tenant-a', 'Integrity', 'test', 3, 1);
+
+            INSERT INTO knowledge_documents (
+                id, collection_id, tenant_id, title, text, metadata, source_id,
+                lifecycle_status, created_at
+            ) VALUES
+                ('kd_integrity_valid', 'kc_integrity', 'tenant-a', 'valid',
+                 'valid', '{"fileId":"fa_integrity_a"}',
+                 'asset:fa_integrity_a', 'active', 1),
+                ('kd_integrity_conflict', 'kc_integrity', 'tenant-a', 'conflict',
+                 'conflict', '{"fileId":"fa_integrity_a"}',
+                 'asset:fa_integrity_b', 'active', 2),
+                ('kd_integrity_dangling', 'kc_integrity', 'tenant-a', 'dangling',
+                 'dangling', '{}', 'asset:missing', 'active', 3),
+                ('kd_integrity_duplicate_a', 'kc_integrity', 'tenant-a', 'dup-a',
+                 'dup-a', '{"fileId":"fa_integrity_c"}', NULL, 'active', 4),
+                ('kd_integrity_duplicate_b', 'kc_integrity', 'tenant-a', 'dup-b',
+                 'dup-b', '{"fileId":"fa_integrity_c"}', NULL, 'active', 5);
+            """
+        )
+    finally:
+        await connection.close()
+
+
+async def _verify_quota_stock_guard(database_url: URL) -> None:
+    """Verify that the real 0066 DDL preserved both literal guard patterns."""
+    connection = await asyncpg.connect(**_connection_kwargs(database_url))
+    try:
+        revision = await connection.fetchval(
+            "SELECT version_num FROM alembic_version"
+        )
+        assert revision == "0066_quota_stock_lifecycle"
+        definition = await connection.fetchval(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = 'ck_quota_adjustments_no_file_stock'"
+        )
+        assert "asset-upload:%:stored-bytes" in str(definition)
+        assert "asset-delete:%:stored-bytes" in str(definition)
+    finally:
+        await connection.close()
+
+
+def test_quota_stock_guard_executes_colon_patterns_as_literal_ddl() -> None:
+    """Revision 0066 must not parse the LIKE pattern as a bind parameter."""
+    run_migrations(TEST_DATABASE_URL)
+    admin_url = make_url(TEST_DATABASE_URL)
+    suffix = uuid.uuid4().hex[:12]
+    role_name = f"inqtrix_quota_guard_{suffix}"
+    database_name = f"inqtrix_quota_guard_{suffix}"
+    password = f"test_{uuid.uuid4().hex}"
+    admin_database_url = admin_url.set(database=database_name)
+
+    try:
+        asyncio.run(
+            _provision_database(
+                admin_url,
+                role_name=role_name,
+                password=password,
+                database_name=database_name,
+            )
+        )
+        database_dsn = admin_database_url.render_as_string(hide_password=False)
+        run_migrations(database_dsn, revision="0065_generation_cleanup_contract")
+        run_migrations(
+            database_dsn,
+            revision="0066_quota_stock_lifecycle",
+            services_quiesced=True,
+        )
+        asyncio.run(_verify_quota_stock_guard(admin_database_url))
+    finally:
+        asyncio.run(
+            _cleanup_database(
+                admin_url,
+                role_name=role_name,
+                database_name=database_name,
+            )
+        )
+
+
+async def _verify_release_integrity_contract(database_url: URL) -> None:
+    connection = await asyncpg.connect(**_connection_kwargs(database_url))
+    try:
+        rows = await connection.fetch(
+            "SELECT id, source_id, lifecycle_status FROM knowledge_documents "
+            "WHERE id LIKE 'kd_integrity_%' ORDER BY id"
+        )
+        by_id = {str(row["id"]): row for row in rows}
+        assert by_id["kd_integrity_valid"]["source_id"] == "asset:fa_integrity_a"
+        assert by_id["kd_integrity_valid"]["lifecycle_status"] == "active"
+        for document_id in (
+            "kd_integrity_conflict",
+            "kd_integrity_dangling",
+            "kd_integrity_duplicate_a",
+            "kd_integrity_duplicate_b",
+        ):
+            assert by_id[document_id]["source_id"] is None
+            assert by_id[document_id]["lifecycle_status"] == "quarantined"
+
+        expected_constraints = {
+            "fk_deletion_operation_assets_tenant_operation",
+            "fk_deletion_operation_events_tenant_operation",
+            "fk_upload_operations_tenant_asset",
+            "fk_upload_operation_events_tenant_operation",
+            "fk_upload_operation_outbox_tenant_operation",
+            "fk_knowledge_revisions_tenant_document",
+            "fk_knowledge_generations_tenant_collection",
+        }
+        constraints = await connection.fetch(
+            "SELECT conname, pg_get_constraintdef(oid) AS definition "
+            "FROM pg_constraint WHERE conname = ANY($1::text[])",
+            list(expected_constraints),
+        )
+        assert {str(row["conname"]) for row in constraints} == expected_constraints
+        assert all(
+            "FOREIGN KEY (tenant_id" in str(row["definition"])
+            for row in constraints
+        )
+
+        await connection.execute(
+            "INSERT INTO deletion_operations "
+            "(operation_id, tenant_id, target_kind, target_id, created_at, updated_at) "
+            "VALUES ('del_integrity', 'tenant-a', 'asset', 'fa_integrity_a', 1, 1)"
+        )
+        with pytest.raises(asyncpg.ForeignKeyViolationError):
+            await connection.execute(
+                "INSERT INTO deletion_operation_events "
+                "(operation_id, sequence, tenant_id, type, created_at, data) "
+                "VALUES ('del_integrity', 1, 'tenant-b', 'created', 1, '{}')"
+            )
+    finally:
+        await connection.close()
+
+
+def test_populated_release_integrity_upgrade_is_fail_closed() -> None:
+    """Populated 0067 data is reconciled before tenant FKs become active."""
+    run_migrations(TEST_DATABASE_URL)
+    admin_url = make_url(TEST_DATABASE_URL)
+    suffix = uuid.uuid4().hex[:12]
+    role_name = f"inqtrix_integrity_{suffix}"
+    database_name = f"inqtrix_integrity_{suffix}"
+    password = f"test_{uuid.uuid4().hex}"
+    admin_database_url = admin_url.set(database=database_name)
+
+    try:
+        asyncio.run(
+            _provision_database(
+                admin_url,
+                role_name=role_name,
+                password=password,
+                database_name=database_name,
+            )
+        )
+        database_dsn = admin_database_url.render_as_string(hide_password=False)
+        run_migrations(database_dsn, revision="0067_session_deletion_contract")
+        asyncio.run(_seed_release_integrity_contract(admin_database_url))
+        run_migrations(database_dsn, services_quiesced=True)
+        asyncio.run(_verify_release_integrity_contract(admin_database_url))
     finally:
         asyncio.run(
             _cleanup_database(
@@ -1074,7 +1271,7 @@ def test_owner_upgrade_tracks_tables_created_between_source_and_head() -> None:
             hide_password=False
         )
         owner_dsn = owner_url.render_as_string(hide_password=False)
-        run_migrations(admin_database_dsn, revision="0029_runtime_contract")
+        run_migrations(admin_database_dsn, revision="0029_agent_run_tree")
         asyncio.run(
             _transfer_schema_ownership(admin_database_url, role_name)
         )
@@ -1342,13 +1539,14 @@ def test_0048_upgrade_and_downgrade_work_for_non_bypass_owner(
         )
         asyncio.run(_verify_upgrade(admin_database_url, owners))
 
-        downgrade_migrations(
-            owner_dsn,
-            revision="0047_resource_sync",
-            rls_mode="owner",
-            services_quiesced=True,
-        )
-        asyncio.run(_verify_downgrade(admin_database_url))
+        with pytest.raises(RuntimeError, match="irreversible"):
+            downgrade_migrations(
+                owner_dsn,
+                revision="0047_resource_sync",
+                rls_mode="owner",
+                services_quiesced=True,
+            )
+        asyncio.run(_verify_head_rls_inventory(admin_database_url))
     finally:
         asyncio.run(
             _cleanup_database(

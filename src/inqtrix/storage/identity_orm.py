@@ -301,9 +301,38 @@ audit_log = Table(
     Column("resource_id", Text, nullable=False),
     Column("workspace_id", UUID(as_uuid=True), nullable=True),
     Column("detail", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    # Read-model fields (migration 0072, OCSF-oriented): outcome of the
+    # action, request origin facts, correlation join keys into logs and
+    # traces, and the stable usr_<hex16> pseudonym computed at write
+    # time so the admin panel never recomputes HMACs per page.
+    Column(
+        "outcome", Text, nullable=False, server_default=text("'success'")
+    ),
+    Column("origin", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column(
+        "correlation",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    ),
+    Column("actor_pseudonym", Text, nullable=True),
     Index("ix_audit_log_tenant_occurred", "tenant_id", "occurred_at"),
+    Index(
+        "ix_audit_log_tenant_action_occurred",
+        "tenant_id",
+        "action",
+        "occurred_at",
+    ),
+    Index(
+        "ix_audit_log_tenant_actor_occurred",
+        "tenant_id",
+        "actor_user_id",
+        "occurred_at",
+    ),
 )
 """Append-only audit trail of semantic actions. The application role
 holds INSERT/SELECT only — UPDATE/DELETE are not granted (note: grants
 bind the runtime role; table owner and superusers bypass them, so this
-is WORM-ish, not compliance-grade WORM)."""
+is WORM-ish, not compliance-grade WORM). Retention deletes flow through
+the SECURITY DEFINER function ``audit_prune(cutoff)`` (migration 0072),
+the one sanctioned door through that grant wall."""

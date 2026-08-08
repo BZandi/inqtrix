@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest'
 import type { AdminSystemRuntime, AdminUser } from '@/api/inqtrixClient'
 import {
   activeAdminCount,
+  auditDateInputValue,
+  auditEpochFromDateInput,
   canDisable,
   canSetRole,
   deriveFeatureRows,
@@ -139,6 +141,15 @@ describe('deriveFeatureRows', () => {
         worker_dispatch: true,
       },
       storage: { backend: 'postgres', durable: true },
+      observability: {
+        tracing: 'off',
+        tracing_active: false,
+        content_capture: false,
+        sample_rate: 1,
+        spool: false,
+        retention_days: null,
+        ui_link_configured: false,
+      },
     }
 
     expect(
@@ -175,5 +186,35 @@ describe('patRevealReducer', () => {
     expect(patRevealReducer(revealed, { type: 'dismiss' })).toEqual({
       phase: 'idle',
     })
+  })
+})
+
+describe('audit date range', () => {
+  it('renders an epoch bound in the operator timezone', () => {
+    // Local, not UTC: the bound was created from a locally picked day,
+    // so rendering it back through UTC would shift the field.
+    const epoch = auditEpochFromDateInput('2026-07-25')
+    expect(auditDateInputValue(epoch)).toBe('2026-07-25')
+    expect(auditDateInputValue(undefined)).toBe('')
+  })
+
+  it('treats the upper bound as the FOLLOWING midnight', () => {
+    // The range is half-open, so picking a day as "to" must include
+    // that whole day — otherwise the last day silently returns nothing.
+    const from = auditEpochFromDateInput('2026-07-25')
+    const to = auditEpochFromDateInput('2026-07-25', true)
+    expect(from).toBeDefined()
+    expect(to).toBeDefined()
+    expect((to as number) - (from as number)).toBe(86400)
+  })
+
+  it('maps empty and malformed input to no bound', () => {
+    expect(auditEpochFromDateInput('')).toBeUndefined()
+    expect(auditEpochFromDateInput('not-a-date')).toBeUndefined()
+  })
+
+  it('round-trips a picked day', () => {
+    const epoch = auditEpochFromDateInput('2026-01-09')
+    expect(auditDateInputValue(epoch)).toBe('2026-01-09')
   })
 })

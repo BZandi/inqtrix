@@ -1,4 +1,4 @@
-"""Native tool-calling contract of the provider layer (plan M2 step 1).
+"""Native tool-calling contract of the provider layer.
 
 Secures: the shared OpenAI-response -> ChatTurn mapping (id passthrough
 and synthesis, strict argument parsing), the LiteLLM/Azure ``chat()``

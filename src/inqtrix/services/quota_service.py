@@ -29,6 +29,7 @@ import logging
 import uuid
 from typing import TYPE_CHECKING, Sequence
 
+from inqtrix.auth.log_redaction import pseudonymous_log_reference
 from inqtrix.quota.models import (
     DEFAULT_USER_ID,
     STOCK_PERIOD,
@@ -36,11 +37,11 @@ from inqtrix.quota.models import (
     QuotaDimension,
     QuotaExceeded,
     QuotaSubject,
+    StockLifecycleState,
     current_period_start,
     effective_limit,
     period_end,
 )
-from inqtrix.urls import sanitize_log_message
 
 if TYPE_CHECKING:
     from inqtrix.auth.principal import Principal
@@ -97,9 +98,7 @@ class QuotaService:
             return None
         if principal.user_id is None:
             return None
-        return QuotaSubject(
-            tenant_id=principal.tenant_id, user_id=principal.user_id
-        )
+        return QuotaSubject(tenant_id=principal.tenant_id, user_id=principal.user_id)
 
     def _now(self) -> float:
         import time
@@ -158,13 +157,13 @@ class QuotaService:
         if limit is not None and used + amount > limit:
             # No Silent Fallbacks (Designprinzip 1): every block is
             # visible in the log, at parity with the per-run token-budget
-            # abort. The canonical user UUID remains sanitized for log parity.
+            # abort. The actor is a process-local pseudonym, never a UUID.
             log.warning(
-                "Quota-Block: dimension=%s used=%d limit=%d user_id=%s",
+                "Quota-Block: dimension=%s used=%d limit=%d actor_ref=%s",
                 dimension.value,
                 used,
                 limit,
-                sanitize_log_message(str(subject.user_id)),
+                pseudonymous_log_reference("usr", subject.user_id),
             )
             raise QuotaExceeded(
                 dimension=dimension,
@@ -204,6 +203,82 @@ class QuotaService:
             return
         await self._record_subject(subject, dimension, amount)
 
+    async def record_for_subject_once(
+        self,
+        subject: QuotaSubject | None,
+        dimension: QuotaDimension,
+        amount: int,
+        *,
+        adjustment_id: str,
+    ) -> None:
+        """Apply a retry-safe lifecycle adjustment and propagate store failure.
+
+        Durable upload, deletion, and indexing operations share an idempotency
+        key with their aggregate or immutable revision so a crash between the
+        receipt and terminal state cannot double-book usage.
+        """
+
+        if subject is None or amount == 0:
+            return
+        await self._store.add_usage_once(
+            adjustment_id=adjustment_id,
+            tenant_id=subject.tenant_id,
+            subject_user_id=subject.user_id,
+            dimension=dimension,
+            period_start=_active_period(dimension, self._now()),
+            amount=amount,
+        )
+
+    async def set_stock_for_subject(
+        self,
+        subject: QuotaSubject,
+        dimension: QuotaDimension,
+        *,
+        stock_key: str,
+        amount: int,
+    ) -> StockLifecycleState:
+        """Converge one live resource's contribution to a stock dimension."""
+
+        return await self._store.reconcile_stock(
+            stock_key=stock_key,
+            tenant_id=subject.tenant_id,
+            subject_user_id=subject.user_id,
+            dimension=dimension,
+            desired_amount=amount,
+            tombstone=False,
+        )
+
+    async def tombstone_stock_for_subject(
+        self,
+        subject: QuotaSubject,
+        dimension: QuotaDimension,
+        *,
+        stock_key: str,
+    ) -> StockLifecycleState:
+        """Release and permanently fence one resource stock lifecycle."""
+
+        return await self._store.reconcile_stock(
+            stock_key=stock_key,
+            tenant_id=subject.tenant_id,
+            subject_user_id=subject.user_id,
+            dimension=dimension,
+            desired_amount=0,
+            tombstone=True,
+        )
+
+    async def stock_state(
+        self,
+        *,
+        tenant_id: str,
+        stock_key: str,
+    ) -> StockLifecycleState | None:
+        """Read the canonical resource-level truth for a stock key."""
+
+        return await self._store.read_stock(
+            stock_key=stock_key,
+            tenant_id=tenant_id,
+        )
+
     async def _record_subject(
         self, subject: QuotaSubject, dimension: QuotaDimension, amount: int
     ) -> None:
@@ -227,11 +302,11 @@ class QuotaService:
         except Exception as exc:  # noqa: BLE001 — recording is non-fatal
             log.warning(
                 "Quota-Buchung fehlgeschlagen (Verbrauch nicht gezaehlt): "
-                "dimension=%s amount=%d user_id=%s error=%s",
+                "dimension=%s amount=%d actor_ref=%s error_type=%s",
                 dimension.value,
                 amount,
-                sanitize_log_message(str(subject.user_id)),
-                sanitize_log_message(exc),
+                pseudonymous_log_reference("usr", subject.user_id),
+                type(exc).__name__,
             )
 
     def record_blocking(
@@ -251,6 +326,61 @@ class QuotaService:
         if subject is None or amount == 0:
             return
         asyncio.run(self._record_subject(subject, dimension, amount))
+
+    def record_blocking_once(
+        self,
+        subject: QuotaSubject | None,
+        dimension: QuotaDimension,
+        amount: int,
+        *,
+        adjustment_id: str,
+    ) -> None:
+        """Durably apply a retry-safe lifecycle adjustment.
+
+        Unlike ordinary telemetry-style recording, this method propagates a
+        store failure: the owning operation remains retryable until its work
+        and quota receipt agree.
+        """
+
+        if subject is None or amount == 0:
+            return
+
+        async def _record() -> None:
+            await self.record_for_subject_once(
+                subject,
+                dimension,
+                amount,
+                adjustment_id=adjustment_id,
+            )
+
+        asyncio.run(_record())
+
+    def tombstone_stock_blocking(
+        self,
+        subject: QuotaSubject,
+        dimension: QuotaDimension,
+        *,
+        stock_key: str,
+    ) -> StockLifecycleState:
+        """Synchronous worker bridge for a durable stock tombstone."""
+
+        return asyncio.run(
+            self.tombstone_stock_for_subject(
+                subject,
+                dimension,
+                stock_key=stock_key,
+            )
+        )
+
+    def stock_state_blocking(
+        self,
+        *,
+        tenant_id: str,
+        stock_key: str,
+    ) -> StockLifecycleState | None:
+        """Synchronous worker bridge for stock residual verification."""
+
+        return asyncio.run(self.stock_state(tenant_id=tenant_id, stock_key=stock_key))
 
     # -- the UI / admin view --------------------------------------------- #
 
@@ -327,9 +457,7 @@ class QuotaService:
             "stock_dimensions": [d.value for d in dims if d.is_stock],
             "ceilings": {d.value: env[d][1] for d in dims},
             "env_defaults": {d.value: env[d][0] for d in dims},
-            "tenant_default": {
-                d.value: default_raw.get(d) for d in dims
-            },
+            "tenant_default": {d.value: default_raw.get(d) for d in dims},
             "subjects": [
                 {
                     "user_id": sub,

@@ -111,6 +111,54 @@ def create_providers(settings: "Settings") -> "ProviderContext":
     providers_cfg = getattr(settings, "providers", None)
     llm = _build_llm_provider(settings, providers_cfg)
     search = _build_search_provider(settings, providers_cfg)
+
+    return instrument_providers(
+        ProviderContext(llm=llm, search=search),
+        settings,
+        provider_name=_sel(providers_cfg, "llm_provider", "litellm"),
+    )
+
+
+def instrument_providers(
+    providers: ProviderContext,
+    settings: "Settings",
+    *,
+    provider_name: str = "custom",
+) -> ProviderContext:
+    """Instrument a provider context and publish the content policy.
+
+    ONE wrap point for every LLM and search call in the codebase
+    (duration_ms on the response DTOs, gen_ai spans, call metrics,
+    ledger rows, error visibility). Applies to BOTH origins — providers
+    this module builds and providers a caller injects — because
+    telemetry that depends on how the object was constructed is
+    telemetry an operator cannot rely on.
+
+    Idempotent: the wrappers refuse to double-wrap, so calling this on
+    an already-instrumented context is a no-op. Without the
+    observability extra the wrappers degrade to duration measurement.
+    """
+    from inqtrix.observability.content import (
+        build_content_policy,
+        set_active_content_policy,
+    )
+    from inqtrix.observability.provider_tracing import (
+        instrument_llm,
+        instrument_search,
+    )
+    from inqtrix.providers.base import ProviderContext
+
+    policy = build_content_policy(settings)
+    # Publish for deep call sites that cannot be threaded a policy (the
+    # kernel tool boundary) — the whole process gates content on ONE
+    # decision, built from the COMPOSED settings.
+    set_active_content_policy(policy)
+    llm = providers.llm
+    search = providers.search
+    if llm is not None:
+        llm = instrument_llm(llm, provider_name=provider_name, policy=policy)
+    if search is not None:
+        search = instrument_search(search, policy=policy)
     return ProviderContext(llm=llm, search=search)
 
 

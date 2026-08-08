@@ -1,4 +1,4 @@
-"""Multi-stack hosting for the Inqtrix HTTP server (ADR-MS-1).
+"""Multi-stack hosting for the Inqtrix HTTP server.
 
 Lets a single FastAPI process host multiple ``(providers, strategies,
 agent_settings)`` triples side by side. UIs pick one per request via a
@@ -179,7 +179,7 @@ def _stack_models_payload(
         value = getattr(llm_models, attr, "")
         return value if isinstance(value, str) else ""
 
-    # ADR-WS-12: read the standardized SearchProvider.search_model
+    # Read the standardized SearchProvider.search_model
     # property; the ABC default returns "<ClassName>(unknown)" for
     # subclasses that forget to override, which is intentionally loud.
     search_provider = bundle.providers.search
@@ -212,7 +212,7 @@ def create_multi_stack_app(
     stacks: dict[str, StackBundle],
     default_stack: str,
 ) -> FastAPI:
-    """Build a FastAPI app that hosts multiple Baukasten stacks (ADR-MS-1).
+    """Build a FastAPI app that hosts multiple Baukasten stacks.
 
     Validates that ``stacks`` is non-empty, ``default_stack`` is a key
     in it, and every stack name matches ``^[a-z0-9_]+$``.
@@ -274,12 +274,13 @@ def create_multi_stack_app(
     # the rationale behind ``force=False``. A multi-stack example that
     # set up its own ``configure_logging(...)`` keeps its handlers; the
     # silent default is only installed when nothing was configured yet.
-    from inqtrix.logging_config import configure_logging
+    from inqtrix.logging_config import configure_logging, read_logging_env
     configure_logging(
         enabled=settings.agent.testing_mode,
         level="DEBUG" if settings.agent.testing_mode else "WARNING",
         console=True,
         force=False,
+        json_format=read_logging_env().json_format,
     )
 
     _semaphore: asyncio.Semaphore | None = None
@@ -402,7 +403,7 @@ def create_multi_stack_app(
         run_store=run_store,
     )
 
-    # Discovery route — unauthenticated by design (ADR-MS-3).
+    # The discovery route is unauthenticated by design.
     @app_router.get("/v1/stacks")
     def list_stacks() -> dict[str, Any]:
         return discovery_cache.get(
@@ -421,6 +422,11 @@ def create_multi_stack_app(
     )
     if cors_kwargs is not None:
         app.add_middleware(CORSMiddleware, **cors_kwargs)
+
+    # Added LAST so Starlette places it OUTERMOST (see create_app).
+    from inqtrix.server.request_context import RequestContextMiddleware
+
+    app.add_middleware(RequestContextMiddleware)
     app.include_router(app_router)
     app.state.container = container
 

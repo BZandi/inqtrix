@@ -79,6 +79,9 @@ class TaskOutcome:
             in supervisor prompts.
         evidence: EvidenceRef dicts (``label``/``kind``/``url`` or
             ``document_id``+``chunk_index``/``excerpt``).
+        web_search_ledger: Provider-returned search answers and citation
+            lineage produced by this task. It is checkpointed separately from
+            the compact summary and never fetches the linked pages.
         claims: Compact claim projections harvested from children.
         child_run_id: The spawned research child, when any.
         failure_reason: Visible reason for failed tasks.
@@ -92,6 +95,7 @@ class TaskOutcome:
     summary: str = ""
     answer_markdown: str = ""
     evidence: list[dict[str, Any]] = field(default_factory=list)
+    web_search_ledger: dict[str, Any] = field(default_factory=dict)
     claims: list[dict[str, Any]] = field(default_factory=list)
     child_run_id: str | None = None
     failure_reason: str = ""
@@ -157,6 +161,8 @@ def task_result_payload(
         payload["answer_markdown"] = outcome.answer_markdown
     if outcome.evidence:
         payload["evidence"] = list(outcome.evidence)
+    if outcome.web_search_ledger:
+        payload["web_search_ledger"] = dict(outcome.web_search_ledger)
     if outcome.claims:
         payload["claims"] = list(outcome.claims)
     usage = {
@@ -243,11 +249,22 @@ def project_child_run_outcome(
         for claim in result.get("top_claims", [])
     ]
     answer = str(result.get("answer", ""))
+    raw_ledger = result.get("web_search_ledger")
+    web_search_ledger = (
+        dict(raw_ledger) if isinstance(raw_ledger, dict) else {}
+    )
+    if web_search_ledger:
+        from inqtrix.evidence import attach_web_search_lineage
+
+        references = attach_web_search_lineage(
+            references, web_search_ledger
+        )
     return TaskOutcome(
-        status="completed" if references else "insufficient_evidence",
+        status="completed" if answer.strip() else "insufficient_evidence",
         summary=task_result_summary(answer),
         answer_markdown=normalize_agent_markdown(answer),
         evidence=references,
+        web_search_ledger=web_search_ledger,
         claims=claims,
         child_run_id=child_id,
     )

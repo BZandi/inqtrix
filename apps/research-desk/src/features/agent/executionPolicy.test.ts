@@ -69,6 +69,23 @@ describe('normalizeAgentExecutionSnapshot', () => {
         source_policy: { web: 'available', knowledge: 'disabled' },
         consent_reason: 'explicit_directive',
         tool_use_counts: { web: 1, knowledge: 0 },
+        limits: {
+          tool_calls: {
+            used: 12,
+            limit: 30,
+            ceiling: 60,
+            recoverable: true,
+            extendable: true,
+          },
+          tokens: {
+            used: 900,
+            limit: 1000,
+            ceiling: 1000,
+            recoverable: false,
+            extendable: false,
+            reason: 'operator_ceiling_exactly_once_required',
+          },
+        },
       },
     })).toEqual({
       executionDirective: 'quick_web',
@@ -80,7 +97,37 @@ describe('normalizeAgentExecutionSnapshot', () => {
       sourcePolicy: { web: 'available', knowledge: 'disabled' },
       consentReason: 'explicit_directive',
       toolUseCounts: { web: 1, knowledge: 0 },
+      limits: {
+        tool_calls: {
+          used: 12,
+          limit: 30,
+          ceiling: 60,
+          recoverable: true,
+          extendable: true,
+          reason: null,
+        },
+        tokens: {
+          used: 900,
+          limit: 1000,
+          ceiling: 1000,
+          recoverable: false,
+          extendable: false,
+          reason: 'operator_ceiling_exactly_once_required',
+        },
+      },
     })
+  })
+
+  it('drops malformed limits instead of inventing operator policy', () => {
+    const normalized = normalizeAgentExecutionSnapshot({
+      execution: {
+        limits: {
+          broken: { limit: '30' },
+          fixed: { used: -1, limit: 8, ceiling: 4, extendable: true },
+        },
+      },
+    })
+    expect(normalized?.limits).toEqual({})
   })
 })
 

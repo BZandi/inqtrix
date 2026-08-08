@@ -270,10 +270,14 @@ def test_visibility_denial_is_logged_for_operators(monkeypatch, caplog):
             )
 
     assert denied.status_code == 404
-    assert any(
-        "authz denied" in message and str(_user_id("user-b")) in message
-        for message in caplog.messages
+    authz_messages = [
+        message for message in caplog.messages if "authz denied" in message
+    ]
+    assert any("actor_ref=usr_" in message for message in authz_messages)
+    assert all(
+        str(_user_id("user-b")) not in message for message in authz_messages
     )
+    assert all(run_id not in message for message in authz_messages)
 
 
 def test_sub_collision_across_tenants_is_not_visible(monkeypatch):

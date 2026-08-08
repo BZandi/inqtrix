@@ -9,6 +9,15 @@ export type AgentSourcePolicy = {
 /** One-message execution route selected from the slash command menu. */
 export type AgentExecutionDirective = 'quick_web' | 'knowledge_only'
 
+export type AgentExecutionLimit = {
+  used: number | null
+  limit: number
+  ceiling: number
+  recoverable: boolean
+  extendable: boolean
+  reason: string | null
+}
+
 export type AgentExecutionSnapshot = {
   executionDirective: AgentExecutionDirective | null
   effectiveMode: string | null
@@ -19,6 +28,7 @@ export type AgentExecutionSnapshot = {
   sourcePolicy: AgentSourcePolicy
   consentReason: string | null
   toolUseCounts: { web: number; knowledge: number }
+  limits: Record<string, AgentExecutionLimit>
 }
 
 export type AgentExecutionDisplay = {
@@ -143,6 +153,35 @@ export function normalizeAgentExecutionSnapshot(
     : {}
   const stringOrNull = (value: unknown): string | null =>
     typeof value === 'string' && value.length > 0 ? value : null
+  const rawLimits = record.limits && typeof record.limits === 'object'
+    ? record.limits as Record<string, unknown>
+    : {}
+  const limits = Object.fromEntries(
+    Object.entries(rawLimits).flatMap(([key, value]) => {
+      if (!value || typeof value !== 'object') return []
+      const limitRecord = value as Record<string, unknown>
+      const limit = nonNegativeInteger(limitRecord.limit)
+      const ceiling = nonNegativeInteger(limitRecord.ceiling)
+      const recoverable = limitRecord.recoverable
+      const extendable = limitRecord.extendable
+      if (
+        limit === null
+        || ceiling === null
+        || ceiling < limit
+        || typeof recoverable !== 'boolean'
+        || typeof extendable !== 'boolean'
+        || (extendable && (!recoverable || ceiling <= limit))
+      ) return []
+      return [[key, {
+        used: nonNegativeInteger(limitRecord.used),
+        limit,
+        ceiling,
+        recoverable,
+        extendable,
+        reason: stringOrNull(limitRecord.reason),
+      } satisfies AgentExecutionLimit]]
+    }),
+  )
   return {
     executionDirective,
     effectiveMode: stringOrNull(record.effective_mode ?? record.mode),
@@ -164,5 +203,54 @@ export function normalizeAgentExecutionSnapshot(
           ? counts.knowledge
           : 0,
     },
+    limits,
   }
+}
+
+function nonNegativeInteger(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null
+}
+
+/** The model a session was last run with, mirroring the composer's exclusivity
+ * contract: a tier pick clears the explicit model, a model pick clears the
+ * tier. Stored in `items_json` beside the source policy. */
+export type AgentSessionModelSelection = {
+  model: string | null
+  tier: 'high' | 'mid' | 'fast' | null
+  effort: string | null
+}
+
+const AGENT_MODEL_TIERS = new Set(['high', 'mid', 'fast'])
+
+/** Parse a stored selection defensively: an unknown tier resolves to null so a
+ * row written by a future build cannot pin a tier this one does not know.
+ * Returns null when nothing was ever picked, which is what lets the account
+ * preference seed the composer instead. */
+export function normalizeAgentModelSelection(
+  value: unknown,
+): AgentSessionModelSelection | null {
+  if (!value || typeof value !== 'object') return null
+  const candidate = value as Record<string, unknown>
+  const model = typeof candidate.model === 'string' && candidate.model ? candidate.model : null
+  const rawTier = typeof candidate.tier === 'string' ? candidate.tier : ''
+  const tier = AGENT_MODEL_TIERS.has(rawTier)
+    ? (rawTier as 'high' | 'mid' | 'fast')
+    : null
+  const effort = typeof candidate.effort === 'string' && candidate.effort
+    ? candidate.effort
+    : null
+  if (model === null && tier === null && effort === null) return null
+  // Exclusivity: an explicit model wins, exactly as the reducer enforces.
+  return model !== null ? { model, tier: null, effort } : { model: null, tier, effort }
+}
+
+/** Stable key for change detection. Must cover every field, or a changed
+ * selection never reaches the server. */
+export function agentModelSelectionKey(
+  selection: AgentSessionModelSelection | null | undefined,
+): string {
+  if (!selection) return '-'
+  return `${selection.model ?? ''}|${selection.tier ?? ''}|${selection.effort ?? ''}`
 }

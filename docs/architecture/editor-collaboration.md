@@ -6,9 +6,8 @@ This page describes the optional live-collaboration architecture for editor
 documents: ownership boundaries, persistence, synchronization, suggestions,
 and failure semantics. It does not describe the end-user controls in detail;
 see [Collaborate on editor documents](../how-to/collaborate-on-editor-documents.md).
-Version 1 is online-only and single-replica. It does not provide guest links,
-offline writes, mouse pointers, shared discussion threads, or full version
-restore.
+The transport remains online-only and single-replica. It does not provide guest
+links, offline document writes, mouse pointers, or full version restore.
 
 ## Guarantees
 
@@ -31,7 +30,7 @@ The diagram answers: "Which process is allowed to decide and persist what?"
 ```mermaid
 flowchart LR
     browser["Browser: React, Tiptap, Y.Doc"] -->|"REST + session cookie"| api["FastAPI"]
-    browser -->|"same-origin /collaboration"| proxy["Vite, nginx, or Python launcher"]
+    browser -->|"same-origin /collaboration"| proxy["Vite dev proxy or selected web adapter"]
     proxy -->|"binary WebSocket relay"| gateway["FastAPI collaboration gateway"]
     gateway -->|"private WebSocket + service bearer"| node["Hocuspocus Node service"]
     node -->|"private authenticated HTTP"| api
@@ -40,9 +39,10 @@ flowchart LR
     schema --> node
 ```
 
-The public browser transport is always `/collaboration`. nginx, Vite, and
-`scripts/run_research_desk.py` forward it to FastAPI, not to Node. FastAPI
-validates the browser Origin and relays binary frames to the private Node URL.
+The public browser transport is always `/collaboration`. The Vite development
+proxy and the selected production web adapter (Python by default, nginx only
+when explicitly selected) forward it to FastAPI, not to Node. FastAPI validates
+the browser Origin and relays binary frames to the private Node URL.
 The same proxies forward the content-free `GET /collaboration/instance`
 release probe to FastAPI. That probe reports an identity only when two
 RLS-scoped reads of the canonical tenant's unexpired fencing lease agree around
@@ -63,6 +63,7 @@ decorations stay in the Research Desk.
 | Yjs snapshot | Checkpoint of the same truth | Bounds replay time; it never replaces uncommitted tail updates. |
 | `content_markdown` | No, derived projection | Read-only outage view, search/context, source view, and export. |
 | Patch and activity rows | Metadata, not body truth | Suggestion ownership, decisions, audit-oriented history, and inspector lists. |
+| Shared comment threads and messages | Durable collaborative metadata | Anchored discussions, replies, mentions, resolution, tombstones, and per-user read cursors. |
 | Awareness | No, ephemeral | Current participants and carets. It is not restored or backed up separately. |
 
 Migration `0048_editor_collaboration` adds collaboration mode and sequence
@@ -78,6 +79,12 @@ metadata to `editor_documents`, then creates:
 
 The tables use the existing PostgreSQL database and tenant RLS. There is no
 SQLite database, second PostgreSQL server, or sidecar volume.
+
+Migration `0051_editor_comments` adds separate thread, message, and read-cursor
+tables for team discussions. Private AI notes remain in `editor_comments` and
+are never migrated into shared threads. Migration `0052_editor_review` adds
+bounded activity summaries and decision outcomes and advances compatible
+collaboration documents to editor schema version 2.
 
 ## Document lifecycle
 
@@ -110,12 +117,12 @@ treat its `cl1...` value as opaque; it never belongs in a URL, log, or metric.
 Editor documents extend the existing direct-share system with one additional
 permission:
 
-| Permission | Live read | Direct edit | Suggest | Accept/reject | Metadata/share/delete |
-|---|---:|---:|---:|---:|---:|
-| Owner | Yes | Yes | Yes | Yes | Yes |
-| `edit` | Yes | Yes | Yes | Yes | No |
-| `suggest` | Yes | No | Yes, enforced | No | No |
-| `view` | Yes | No | No | No | No |
+| Permission | Live read | Team comment | Direct edit | Suggest | Accept/reject | Metadata/share/delete |
+|---|---:|---:|---:|---:|---:|---:|
+| Owner | Yes | Yes | Yes | Yes | Yes | Yes |
+| `edit` | Yes | Yes | Yes | Yes | Yes | No |
+| `suggest` | Yes | Yes | No | Yes, enforced | No | No |
+| `view` | Yes | No | No | No | No | No |
 
 Other resource types keep their existing `view|edit` matrix. Share, session,
 and account invalidations reuse `user_events`; Node polls that feed, rechecks
@@ -133,7 +140,12 @@ The editor API remains additive and keeps Markdown compatibility:
 | `PATCH /v1/editor/documents/{id}` | Owner-only title/folder/metadata update using `expected_metadata_revision`. |
 | `POST /v1/editor/documents/{id}/collaboration:enable` | Owner-only, atomic Markdown-to-Yjs conversion. |
 | `POST /v1/editor/documents/{id}/collaboration/session` | Issues or rotates the opaque lease and returns room, access, user, and protocol/schema metadata. |
-| `GET /v1/editor/documents/{id}/activity` | Keyset page of attributed direct, suggestion, decision, and system updates. Adjacent direct updates by one user may be grouped for display. |
+| `GET /v1/editor/documents/{id}/activity` | Keyset page of attributed direct, suggestion, decision, comment, and system updates. Bounded summaries expose at most three sanitized edits. |
+| `GET/POST /v1/editor/documents/{id}/collaboration/comments` | Incrementally lists or creates durable shared threads with participant metadata. |
+| `POST .../comments/{thread_id}/replies` | Adds an idempotent reply with optional participant mentions. |
+| `PATCH .../comments/{thread_id}` | Resolves or reopens a thread under live permission and revision checks. |
+| `PATCH/DELETE .../comments/{thread_id}/messages/{message_id}` | Lets an author edit or tombstone only their own contribution. |
+| `POST .../collaboration/comments/read` | Advances the caller's personal comment read cursor. |
 | `POST /v1/editor/documents/{id}/patches:decide` | Idempotent accept/reject for explicit patch IDs using `expected_sequence` and a decision UUID. |
 | `POST /v1/editor/documents/{id}/collaboration/projection:flush` | Waits for the room queue and returns a current confirmed Markdown projection. |
 | `GET /collaboration/instance` | Unauthenticated, no-store release probe returning only contract/service/status and the stable DB-fenced instance ID/epoch; unavailable or changing state returns 503. |
@@ -174,29 +186,65 @@ update hash returns its original sequence instead of inserting a duplicate,
 alongside the locked document's current persisted sequence so a replay after
 later edits cannot regress the room watermark.
 
+The initial Yjs sync response is allowed to be a no-op when applying its
+canonical V1 payload introduces no novel state. This semantic check is
+deliberately not limited to the two-byte empty update: after a sidecar restart,
+a fully synchronized browser can legitimately send a non-empty redundant
+state update. Ordinary update frames still require either novel validated
+state or a matching durable journal hash, and suggestion topology validation
+still runs for any update that changes Yjs structure.
+
 If applying a committed update to the active in-memory Y.Doc fails, the room is
 closed with `1011` and rebuilt from the latest verified snapshot plus update
 tail. The committed database state remains authoritative.
+
+If a client transport disappears after persistence starts but before the
+committed update can be applied to the active Y.Doc, the room enters a
+reconstruction quarantine with a new room epoch. Frames already queued by
+other clients against the previous epoch are neither applied nor acknowledged.
+Those clients receive the retryable `1012/restarting` close and reconnect only
+after the room has been rebuilt from durable state. The transport whose
+in-flight operation was interrupted may retain the more specific
+`4401/invalid_lease` close. This separates one initiating transport failure
+from collateral recovery and prevents stale queued frames from becoming
+internal-consistency errors or duplicate mutations.
+
+Awareness remains ephemeral and is never persisted. Hocuspocus 4.3 and 4.4
+decode an inbound awareness frame through a scratch `Awareness` object whose
+constructor inserts one leading empty local state. The sidecar removes only
+that exact leading sentinel before ownership and single-sender identity
+validation. Any different multi-state shape is rejected rather than guessed
+at, and the normalization counter makes the compatibility adapter observable.
 
 ## Suggestions and AI
 
 Direct edits are immediately part of the final document and appear in activity
 history; Inqtrix does not reconstruct them later as accept/reject patches.
-Suggest mode stores insertion, deletion, and modification marks with a
-suggestion UUID, patch UUID, author, and creation time. Server validation
-requires the original projection to remain unchanged for a `suggest` user and
-prevents a user from rewriting or deciding another user's suggestion.
+Suggest mode records five semantic kinds: insertion, deletion, replacement,
+format, and structure. Text changes use suggestion marks; reversible heading,
+paragraph, list, quote, and code-block transformations use canonical structure
+metadata. Every suggestion carries a secure UUID, patch UUID, author, and
+creation time. Server validation requires the original projection to remain
+unchanged for a `suggest` user and prevents a user from rewriting or deciding
+another user's suggestion.
 
 Accept and reject are idempotent server mutations with an expected sequence
-and command UUID. Structural operations that cannot be represented reversibly
-as marks are rejected in Suggest mode. This includes table row/column changes,
-merge/split operations, and atomic mathematics nodes; a user with `edit`
-permission must switch to Edit for those operations.
+and command UUID. Table topology, merge/split operations, and other structure
+changes without a safe inverse are rejected with a specific editor-action
+error; they do not close the collaboration transport.
 
-Comments and AI work remain private to their creator. AI first waits for all
-durable acknowledgements and a current Markdown projection. Its result is then
-published through the same Node coordinator as a shared suggestion, never as a
-direct collaboration edit and never through the legacy Markdown patch path.
+Shared comments and private AI work are separate domains. Team threads are
+persisted with a Yjs-relative anchor and bounded quote fallback, delivered
+through a transactional `user_events` invalidation, and incrementally reloaded
+after reconnect. Replies, mentions, resolve/reopen, author-only editing, and
+tombstones never mutate the Y.Doc. A thread that can no longer resolve its
+anchor remains visible as orphaned. Private AI notes remain creator-only and
+are sent to the assistant only through an explicit user action.
+
+AI first waits for all durable acknowledgements and a current Markdown
+projection. Its result is then published through the same Node coordinator as
+a shared suggestion, never as a direct collaboration edit and never through
+the legacy Markdown patch path.
 
 ## Projection, source, and export
 
@@ -219,7 +267,22 @@ explicit choice to export that saved state.
 
 The editor becomes read-only while connecting, reconnecting, after access
 revocation, after a durability error, or when protocol/schema versions differ.
-There is no offline write queue and no fallback to legacy autosave. Disabling
+Transport and lease failures retry with jittered 1, 2, 4, 8, 15, then
+30-second delays. A manual retry is single-flight: it disconnects the stale
+transport, rotates the lease, reconnects, synchronizes authoritative Yjs state,
+and idempotently replays retained local updates. Authentication, compatibility,
+revocation, and durable rejection use distinct recovery actions instead of one
+generic retry loop.
+
+An expired collaboration lease is a controller-owned recovery condition, not a
+lost browser login. The session endpoint may return one `401` for the stale
+lease after a sidecar epoch change; the controller then requests a fresh lease
+without reloading the SPA or leaving the open editor. A second unauthenticated
+response becomes the explicit sign-in recovery state.
+
+There is no offline document-write queue and no fallback to legacy autosave.
+Unsaved shared-comment drafts are retained in browser storage, but their
+messages are not considered persisted until the API confirms them. Disabling
 the feature removes the collaboration routes but leaves legacy documents
 unchanged; existing collaboration documents remain available through their
 last persisted Markdown projection in read-only form.
@@ -235,7 +298,7 @@ Protocol close codes are stable operator signals:
 | `4503` | Collaboration service not ready. |
 | `1009` | Frame exceeds the configured limit. |
 | `1011` | Persistence or internal consistency failure. |
-| `1012` | Planned service restart. |
+| `1012` | Retryable room reconstruction or planned service restart. |
 
 ## Related docs
 

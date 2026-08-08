@@ -17,7 +17,6 @@ from inqtrix.runtime_logging import (
     new_run_id,
     sanitize_event_payload,
 )
-from inqtrix.urls import sanitize_error
 
 log = logging.getLogger("inqtrix")
 
@@ -41,6 +40,7 @@ class AgentState(TypedDict):
     source_tier_counts: dict[str, int]
     source_quality_score: float
     consolidated_claims: list[dict[str, Any]]
+    consolidated_claims_full: NotRequired[list[dict[str, Any]]]
     claim_status_counts: dict[str, int]
     claim_quality_score: float
     claim_needs_primary_total: int
@@ -95,6 +95,7 @@ class AgentState(TypedDict):
     answer_claim_bindings: list[dict[str, Any]]
     answer_evidence_bindings: NotRequired[list[dict[str, Any]]]
     evidence_contract_status: NotRequired[str]
+    evidence_omissions: NotRequired[list[dict[str, Any]]]
     iteration_logs: list[dict[str, Any]]
     total_prompt_tokens: int
     total_completion_tokens: int
@@ -163,6 +164,7 @@ def initial_state(
         "source_tier_counts": {"primary": 0, "mainstream": 0, "stakeholder": 0, "unknown": 0, "low": 0},
         "source_quality_score": 0.0,
         "consolidated_claims": [],
+        "consolidated_claims_full": [],
         "claim_status_counts": {"verified": 0, "contested": 0, "unverified": 0},
         "claim_quality_score": 0.0,
         "claim_needs_primary_total": 0,
@@ -205,6 +207,7 @@ def initial_state(
         "answer_claim_bindings": [],
         "answer_evidence_bindings": [],
         "evidence_contract_status": "unknown",
+        "evidence_omissions": [],
         "iteration_logs": [],
         "total_prompt_tokens": 0,
         "total_completion_tokens": 0,
@@ -421,13 +424,25 @@ def build_run_snapshot(
         except ValidationError as exc:
             log.warning(
                 "Ungueltiger Agent-Ausfuehrungsblock aus Run-Snapshot "
-                "kann nicht veroeffentlicht werden: %s",
-                sanitize_error(str(exc)),
+                "kann nicht veroeffentlicht werden "
+                "(error_code=%s, error_count=%d)",
+                type(exc).__name__,
+                exc.error_count(),
             )
             raise RuntimeError(
                 "Run-Snapshot enthaelt einen ungueltigen "
                 "Agent-Ausfuehrungsblock."
             ) from exc
+    # Knowledge runs carry a compact execution receipt through the same
+    # snapshot/result lifecycle as research metrics.  The projection is
+    # explicitly text-free: queries, gate prose, grounding quotes and source
+    # bodies stay out of SSE snapshots.  Parsing is strict so a malformed or
+    # contradictory receipt cannot be published as a successful run.
+    from inqtrix.result import KnowledgeResultState
+
+    knowledge = KnowledgeResultState.from_sources(state)
+    if knowledge is not None:
+        snapshot.update(knowledge.to_export_fields())
     return snapshot
 
 
@@ -474,19 +489,22 @@ def emit_run_event(
     try:
         sink(event_type, payload or {})
     except Exception as exc:  # noqa: BLE001 - event sinks are observability only
-        log.warning("Native run event sink failed: %s", sanitize_error(exc))
+        log.warning(
+            "Native run event sink failed (error_code=%s)",
+            type(exc).__name__,
+        )
 
 
 def append_iteration_log(s: dict, entry: dict[str, Any], *, testing_mode: bool = False) -> None:
     """Add an iteration log entry and mirror it into debug logs.
 
     The entry runs through :func:`sanitize_event_payload` **before** it is
-    stored in ``state["iteration_logs"]`` (testing mode) and before it is
-    forwarded to the file-log path. This ensures the testing-mode export
-    surfaced via ``run_test`` / ``/v1/test/run`` / parity tooling shares
-    the same redaction guarantees as the file logs: credential-bearing
-    URL query parameters, bearer tokens, and provider raw payloads never
-    appear in either sink.
+    stored in ``state["iteration_logs"]`` (testing mode) and before its
+    operational projection is forwarded to the file-log path. The protected
+    testing export retains reconstructable redacted evidence; ordinary logs
+    receive only IDs, lifecycle/status fields, models, counters, usage and
+    timings. Credential-bearing URL values, bearer tokens and provider raw
+    payloads never appear in either sink.
     """
     materialized_entry = dict(entry)
     if "_run_id" in s:

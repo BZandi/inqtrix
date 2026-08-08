@@ -1,4 +1,4 @@
-"""Tests for opt-in TLS / Bearer-API-key / CORS security helpers (ADR-WS-7)."""
+"""Tests for opt-in TLS, bearer API-key, and CORS security helpers."""
 
 from __future__ import annotations
 

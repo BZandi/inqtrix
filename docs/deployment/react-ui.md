@@ -1,7 +1,7 @@
 # React UI
 
-> Files: `apps/research-desk/`, `package.json`, `pnpm-lock.yaml`,
-> `package-lock.json`, `pnpm-workspace.yaml`
+> Files: `apps/research-desk/`, `package.json`, `package-lock.json`,
+> `src/inqtrix_web_gateway/`, `deploy/docker/Dockerfile.web`
 
 ## Scope
 
@@ -197,42 +197,18 @@ archives. See [Collaborate on editor documents](../how-to/collaborate-on-editor-
 for the user workflow and [Editor collaboration](editor-collaboration.md) for
 deployment.
 
-## Package managers and lockfiles
+## Package manager and lockfile
 
-pnpm via Corepack is the reference path. The root `package.json` pins the
-package manager with `packageManager`, and `pnpm-lock.yaml` is committed for
-reproducible installs:
-
-```bash
-corepack enable
-corepack pnpm install --frozen-lockfile
-```
-
-The workspace security settings live in `pnpm-workspace.yaml`:
-
-- `minimumReleaseAge: 1440` delays newly published package versions by one day.
-- `minimumReleaseAgeStrict: true` fails resolution when no mature version fits.
-- `minimumReleaseAgeIgnoreMissingTime: false` fails registries that omit publish
-  timestamps instead of silently bypassing the age gate.
-- `blockExoticSubdeps: true` prevents transitive dependencies from pulling code
-  from exotic sources such as arbitrary git URLs or tarballs.
-- `trustPolicy: no-downgrade` fails if a package's trust evidence regresses
-  compared to earlier releases.
-
-The root `package.json` also keeps pnpm build-script execution narrow through
-`pnpm.onlyBuiltDependencies`, currently allowing only `esbuild`, which Vite
-needs during install.
-
-npm is a supported alternative for environments without pnpm/Corepack. Use the
-committed root `package-lock.json`:
+npm is the only supported JavaScript package manager. The committed root
+`package-lock.json` is the single dependency source for every workspace:
 
 ```bash
 npm ci
 ```
 
-The npm path does not enforce the pnpm-only security settings above. Do not
-switch package managers inside an existing `node_modules` tree; use a fresh
-checkout or rebuild `node_modules` before moving between pnpm and npm.
+Do not introduce a second lock, manager-specific patches, or an install hook as
+a parallel dependency policy. Fix a dependency boundary in application code or
+upgrade to an official release.
 
 ## Local icon assets
 
@@ -249,15 +225,19 @@ notice intact.
 Start the API server first:
 
 ```bash
+# uv:
 uv run python examples/webserver_stacks/multi_stack.py
+
+# or a standard pip/plain-Python environment:
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+python examples/webserver_stacks/multi_stack.py
 ```
 
 Install frontend dependencies and run Vite from the repository root:
 
 ```bash
-corepack pnpm install --frozen-lockfile
-pnpm run ui:dev
-# or:
 npm ci
 npm run ui:dev
 ```
@@ -269,11 +249,6 @@ development while preserving the production boundary between frontend and API.
 ## Build
 
 ```bash
-pnpm run ui:typecheck
-pnpm run ui:lint
-pnpm run ui:test
-pnpm run ui:build
-# or:
 npm run ui:typecheck
 npm run ui:lint
 npm run ui:test
@@ -284,9 +259,9 @@ npm run ui:build
 is not part of `ui:build`.
 
 The Vite build output is `apps/research-desk/dist/`. The directory is ignored by
-git because it is a generated artifact. Deployment should build it in CI and
-publish the resulting static files, or copy them into a release artifact in a
-dedicated packaging step.
+git because it is a generated artifact. The image build compiles it once and
+copies the same result into the selected Python or nginx runtime target. Other
+packaging paths must likewise build it in a deliberate release step.
 
 ## Local production preview
 
@@ -299,8 +274,6 @@ change against the production build before shipping it.
 `ui:prod` builds the bundle and serves it through `vite preview` in one step:
 
 ```bash
-pnpm run ui:prod
-# or:
 npm run ui:prod
 ```
 
@@ -320,8 +293,8 @@ Two caveats for the preview path:
   common reason a fix appears to have no effect in the preview.
 - `vite preview` does not proxy `/v1` or `/health` -- only the dev server does -- so
   the preview is UI-only. To exercise the production bundle against a running backend
-  on one origin, use the Python launcher (Path B under *Same-origin serving without
-  Node*).
+  on one origin, use the standard packaged Python gateway under
+  *Same-origin serving without Node*.
 
 ## Runtime API boundary
 
@@ -584,8 +557,8 @@ horizontal overflow.
 
 The first production path should be a separately served static frontend:
 
-1. Run `corepack enable && corepack pnpm install --frozen-lockfile`.
-2. Run `pnpm run ui:build`.
+1. Run `npm ci`.
+2. Run `npm run ui:build`.
 3. Publish `apps/research-desk/dist/` through the chosen static hosting layer.
 4. Configure `VITE_INQTRIX_API_BASE_URL` at build time when the API is not
    same-origin. The value must be a complete origin such as
@@ -597,236 +570,242 @@ artifacts should ever move into a release package.
 
 ## Same-origin serving without Node
 
-The recommended production topology runs the React bundle and the
-Inqtrix API as two separate pods. Each setup below makes the browser see
-**one origin** — the frontend host — and routes `/v1/*` and `/health`
-to the backend internally. With this in place the React app needs no
-`VITE_INQTRIX_API_BASE_URL` at build time and no CORS configuration on
-the backend, so the same `dist/` artifact deploys to every environment.
+The Python web gateway is the standard runtime for the built React bundle.
+nginx remains an explicit alternative for operators that already standardize on
+it. Both keep the browser on one origin and route `/api/*`, `/v1/*`, `/health`,
+and `/collaboration` to FastAPI. They are mutually exclusive implementations
+of the same logical `web` service; Compose never starts both.
 
-### When to use which
-
-Paths A and B below keep the browser on one origin and need no
-`VITE_INQTRIX_API_BASE_URL`. The last row is the split-origin alternative from
-[Deployment options](#deployment-options) above, for hosts that cannot proxy.
-
-| Situation | Recommendation |
+| Situation | Selection |
 |---|---|
-| Production with Kubernetes / separate frontend and backend pods | nginx reverse-proxy (path A) |
-| Server without container runtime, only Python available | Python launcher (path B) |
-| Local verification of the production build | Python launcher (path B) |
-| Build in CI, deploy to cluster | nginx reverse-proxy (path A) |
-| Static host that cannot proxy (plain CDN), split origin | Separately served static build with a build-time `VITE_INQTRIX_API_BASE_URL`; backend needs CORS |
+| Default Compose, Kubernetes, bare-metal Python, or local production-build verification | Packaged Python gateway |
+| Enterprise platform that explicitly requires nginx behind its own TLS edge | nginx override |
+| Static CDN that cannot proxy | Split-origin build with `VITE_INQTRIX_API_BASE_URL`; configure backend CORS |
 
-### Path A: nginx reverse-proxy in the frontend pod
+### Standard: packaged Python web gateway
 
 Pod topology:
 
-```
-+---------------------+         +-----------------------+
-|  Frontend pod       |         |  Backend pod          |
-|  nginx:stable       |         |  python:3.12-slim     |
-|  /usr/share/        |  /v1/*  |  uvicorn :5100        |
-|    nginx/html/      | ------> |  python -m inqtrix    |
-|    = dist/ contents | /health |                       |
-|  /etc/nginx/        | ------> |                       |
-|    conf.d/          |         |                       |
-|    default.conf     |         |                       |
-+--------^------------+         +-----------------------+
+```text
++----------------------+            +-----------------------+
+|  Frontend pod        |            |  Backend pod          |
+|  python:3.12-slim    |   /api/*   |  python:3.12-slim     |
+|  inqtrix_web_gateway |   /v1/*    |  uvicorn :5100        |
+|  dist/ contents      | ---------> |  python -m inqtrix    |
+|  HTTP + WebSocket    |  /health   |                       |
+|  proxy :8080         |  /collab-  |                       |
+|                      |  oration   |                       |
++--------^-------------+            +-----------------------+
          |
        Browser
        (single origin)
 ```
 
-`nginx.conf` snippet — copy into the frontend pod as
-`/etc/nginx/conf.d/default.conf`:
+[`deploy/docker/Dockerfile.web`](../../deploy/docker/Dockerfile.web) produces
+one shared Node build stage and two explicit final targets. The default
+`web-python` target contains the built SPA, the packaged
+`src/inqtrix_web_gateway`, and dependencies projected from the repository's
+single `uv.lock` through the `web-gateway` group. Its runtime contains no Node,
+npm, uv, nginx, or API/agent dependency graph. It covers cookie login, SSE
+streaming, uploads, the instance probe, the collaboration WebSocket, SPA
+fallback, MIME handling, cache policy, forwarded-header trust, and sanitized
+guest-link logs.
 
-```nginx
-# Two-pod deployment: this nginx pod serves the React bundle and
-# proxies the API to the Inqtrix backend service. Browser sees a
-# single origin, so VITE_INQTRIX_API_BASE_URL stays empty.
+The runtime accepts these primary values:
 
-server {
-    listen 8080;
-    server_name _;
+| Variable | Meaning | Typical Kubernetes value |
+|---|---|---|
+| `INQTRIX_BACKEND_URL` | Full API origin the proxy forwards to | `http://inqtrix-api:5100` |
+| `INQTRIX_PUBLIC_BASE_URL` | Primary origin contract: exact browser-visible scheme and authority | `https://desk.example` |
+| `INQTRIX_EXTERNAL_SCHEME` | Optional scheme-only override; when set with the public base URL it must match that URL | `https` behind a TLS ingress |
+| `INQTRIX_PROXY_MAX_BODY_BYTES` | Optional explicit whole-request cap in bytes | normally derived |
 
-    root /usr/share/nginx/html;       # mount dist/ here
-    index index.html;
+The Helm chart deploys this image as the `web` pod and derives public-origin
+values from its Ingress or OpenShift Route. Liveness uses `/`; readiness uses
+the API-aware `/health`.
 
-    # SPA fallback: unknown paths return index.html so client-side
-    # routing keeps working. API paths below win because they are
-    # declared first.
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
+#### Container quickstart
 
-    # Long cache for hashed assets (Vite emits content-hashed names).
-    location /assets/ {
-        access_log off;
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-        try_files $uri =404;
-    }
-
-    # API reverse-proxy. Replace "inqtrix-backend" with the actual
-    # Kubernetes Service name in your namespace.
-    location /v1/ {
-        proxy_pass http://inqtrix-backend:5100;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Authorization $http_authorization;
-        proxy_set_header X-Inqtrix-Workspace-Id $http_x_inqtrix_workspace_id;
-
-        # SSE streaming for run/indexing events and /v1/user/events.
-        # Without these flags the browser sees invalidations/progress
-        # only after nginx flushes its response buffer.
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_set_header Connection "";
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-    }
-
-    location = /health {
-        proxy_pass http://inqtrix-backend:5100;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-    }
-}
-```
-
-Key behaviours encoded in the snippet:
-
-| Aspect | Reason |
-|---|---|
-| `proxy_buffering off` + `Connection ""` + long `proxy_read_timeout` | Required for run/indexing event streams and `/v1/user/events`. Without these flags the browser receives buffered progress or invalidations too late. |
-| `proxy_set_header Authorization $http_authorization` | Forwards the Bearer token used when `INQTRIX_SERVER_API_KEY` is enabled. |
-| `proxy_set_header X-Inqtrix-Workspace-Id` | Forwards the per-browser workspace namespace header so `/v1/runs` hydration scopes to the current project. |
-| Listen port `8080` | nginx runs non-root inside the container; a `Service` can fan a public port 80 in front of it. |
-
-#### nginx quickstart (local Docker validation)
-
-Build the React app once, then run the nginx container with the snippet
-above:
+Build and run the same image used by Compose and Helm:
 
 ```bash
-corepack enable && corepack pnpm install --frozen-lockfile
-pnpm run ui:build
-# npm alternative:
-npm ci
-npm run ui:build
-
-# Save the snippet above as deploy/nginx-inqtrix.conf, then:
-docker run --rm -p 8080:8080 \
-  -v "$PWD/apps/research-desk/dist:/usr/share/nginx/html:ro" \
-  -v "$PWD/deploy/nginx-inqtrix.conf:/etc/nginx/conf.d/default.conf:ro" \
-  --add-host inqtrix-backend:host-gateway \
-  nginx:stable-alpine
+docker build --target web-python \
+  -f deploy/docker/Dockerfile.web -t inqtrix-web .
+docker run --rm -p 8080:8080 --read-only --tmpfs /tmp \
+  -e INQTRIX_BACKEND_URL=http://host.docker.internal:5100 \
+  -e INQTRIX_PUBLIC_BASE_URL=http://localhost:8080 \
+  inqtrix-web
 ```
 
-`--add-host inqtrix-backend:host-gateway` resolves the
-`proxy_pass http://inqtrix-backend:5100` line to the host machine
-(where the local backend listens) on macOS and Linux Docker. In a real
-cluster, the `inqtrix-backend` hostname resolves via Kubernetes service
-DNS instead.
+For direct TLS in Compose, mount certificate material from outside the
+repository through the supplied override; no second image or web service is
+created:
 
-### Path B: Python launcher `scripts/run_research_desk.py`
+```bash
+INQTRIX_PUBLIC_BASE_URL=https://desk.example:8080 \
+INQTRIX_WEB_TLS_CERTFILE=/absolute/path/tls.crt \
+INQTRIX_WEB_TLS_KEYFILE=/absolute/path/tls.key \
+podman compose -f deploy/compose/compose.stack.yaml \
+  -f deploy/compose/compose.web-tls.yaml \
+  --env-file deploy/.env.stack.secrets \
+  --env-file deploy/.env.stack \
+  up -d --build
+```
 
-The repository ships a Python launcher that serves the same role as
-nginx for hosts where only Python is available (no container runtime,
-no nginx). It is also the easiest way to verify the production build
-locally without container tooling.
+The override applies that one required public origin to the web gateway, API,
+and worker, so guest links, OIDC callbacks, source URLs, forwarded headers,
+and WebSocket Origin checks cannot retain a different value from a paired
+runtime file. It also disables the plain-HTTP account- and guest-cookie
+escape hatches for the API; Direct TLS always restores `Secure` cookies and
+the `__Host-` account-cookie contract.
 
-The launcher uses `httpx` to stream `/v1/*`, `/api/*` and `/health` to
+The normal trusted-LAN stack remains HTTP-capable for signed-in users.
+Account-less guest links remain disabled there; they require a real HTTPS/WSS
+browser origin through direct TLS or a trusted edge terminator.
+
+#### Direct host start
+
+The same package runs directly on hosts where containers or nginx are not
+permitted. It is also the shortest way to verify a production `dist/` locally.
+The gateway uses `httpx` to stream `/v1/*`, `/api/*` and `/health` to
 the configured backend origin while serving `dist/` as a SPA. It also uses a
 WebSocket client to relay binary `/collaboration` frames to FastAPI. SSE
 streaming works because the HTTP proxy uses `aiter_raw()` without buffering.
 
-Its behaviour tracks the nginx template, so switching between the two
-does not change what the browser observes:
+It is the same production runtime without the container boundary. Multi-worker
+mode shares one listen socket, direct TLS supports Compose or bare metal, and
+the request-body cap derives from the backend file limit.
+
+The browser observes the same contract in either packaging:
 
 - Unknown paths outside `/assets/` serve `index.html` (SPA fallback);
   missing files under `/assets/` stay hard 404s.
 - `index.html` (and every other non-asset path) is served with
   `Cache-Control: no-cache` so a redeploy is picked up immediately;
   hashed `/assets/` bundles cache immutably for a year.
-- Proxied requests carry the original `Host` plus `X-Forwarded-For`,
-  `X-Real-IP` and `X-Forwarded-Proto` (an outer TLS terminator's value
-  is preserved), so per-client login rate limiting keeps distinct
-  buckets, and the raw request target is forwarded byte-identically
-  (encoded path segments and repeated query keys survive).
+- Proxied requests replace client-supplied forwarded Host/Proto metadata with
+  the configured `INQTRIX_PUBLIC_BASE_URL`, the optional matching scheme
+  override, or the gateway connection as the documented fallback.
+  `X-Forwarded-For` remains append-only and `X-Real-IP` records the immediate
+  peer, so per-client login rate limiting keeps distinct buckets. The raw
+  request target is forwarded byte-identically (encoded path segments and
+  repeated query keys survive).
 - `/collaboration` preserves the public Host, Origin, cookies, raw query, binary
   frames, and upstream close behavior. It never starts or connects directly to
   the Node service.
-- An unreachable backend answers `502 Bad Gateway` like nginx, with a
+- An unreachable backend answers `502 Bad Gateway`, with a
   60-second HTTP connect timeout; an unavailable collaboration gateway closes
   the socket visibly rather than degrading to polling or autosave.
 
-#### Launcher quickstart
-
-The launcher requires a pre-built `dist/`. Build it once before
-starting the server:
+The gateway requires a pre-built `dist/`:
 
 ```bash
-corepack enable
-corepack pnpm install --frozen-lockfile
-pnpm run ui:build      # -> apps/research-desk/dist/
-# npm alternative:
 npm ci
 npm run ui:build       # -> apps/research-desk/dist/
 ```
 
-Then start the launcher (it lives in `scripts/`, runs via `uv`):
+Both supported Python installation paths execute the same module:
 
 ```bash
-# Default: serve on 127.0.0.1:8080, proxy to http://localhost:5100
-uv run python scripts/run_research_desk.py
+# uv: minimal locked gateway projection
+uv sync --only-group web-gateway
+uv run --only-group web-gateway python -m inqtrix_web_gateway \
+  --dist-dir apps/research-desk/dist \
+  --backend-url http://127.0.0.1:5100 \
+  --host 127.0.0.1 --port 8080
+
+# Standard Python/pip
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+python -m inqtrix_web_gateway \
+  --dist-dir apps/research-desk/dist \
+  --backend-url http://127.0.0.1:5100 \
+  --host 127.0.0.1 --port 8080
 ```
 
-```bash
-# Custom backend origin (e.g. backend on a different host or port):
-INQTRIX_BACKEND_URL=https://inqtrix-api.example.com \
-  uv run python scripts/run_research_desk.py
-```
-
-```bash
-# Bind to all interfaces on port 80 (e.g. inside a container):
-RESEARCH_DESK_HOST=0.0.0.0 \
-RESEARCH_DESK_PORT=80 \
-  uv run python scripts/run_research_desk.py
-```
+CLI arguments override environment variables; environment variables override
+documented defaults. Startup validates `dist/index.html`, the backend origin,
+and the TLS certificate/key pair before accepting traffic.
 
 ```bash
 # Point at a dist/ outside the repository (release-artifact layout):
 INQTRIX_DIST_DIR=/opt/research-desk/dist \
 INQTRIX_BACKEND_URL=http://inqtrix-backend.svc.cluster.local:5100 \
-  uv run python scripts/run_research_desk.py
+  python -m inqtrix_web_gateway
 ```
 
-#### Launcher environment variables
+#### Gateway environment variables
 
 | Variable | Default | Effect |
 |---|---|---|
+| `INQTRIX_WEB_ADAPTER` | `python` | Image/Compose integrity sentinel. The Python target accepts only `python`; the nginx target accepts only `nginx`. Operators select the adapter through the documented image target or Compose override, not by changing this value in isolation. |
 | `RESEARCH_DESK_HOST` | `127.0.0.1` | uvicorn bind host. Use `0.0.0.0` inside containers. |
 | `RESEARCH_DESK_PORT` | `8080` | uvicorn bind port. |
-| `INQTRIX_BACKEND_URL` | `http://localhost:5100` | Origin the launcher proxies `/v1/*` and `/health` to. |
+| `RESEARCH_DESK_WORKERS` | `1` | Worker processes. Above 1 uses uvicorn's multiprocess supervisor sharing one listen socket; the upstream pool and body caps apply per worker. |
+| `WEB_CONCURRENCY` | unset | Not a second worker setting. A conflicting value is ignored with a warning; use only `RESEARCH_DESK_WORKERS`. |
+| `RESEARCH_DESK_SSL_CERTFILE` / `RESEARCH_DESK_SSL_KEYFILE` | unset | Optional TLS termination; both must be set together. `RESEARCH_DESK_SSL_KEYFILE_PASSWORD` decrypts an encrypted key file. |
+| `INQTRIX_BACKEND_URL` | `http://localhost:5100` | Origin the gateway proxies `/v1/*`, `/api/*`, `/health`, and `/collaboration` to. |
+| `INQTRIX_PUBLIC_BASE_URL` | unset | Explicit browser origin when a trusted reverse proxy terminates TLS before the gateway; pins the forwarded scheme AND host. |
+| `INQTRIX_EXTERNAL_SCHEME` | unset | Optional scheme-only override: pins `X-Forwarded-Proto` while the forwarded host follows the request. If `INQTRIX_PUBLIC_BASE_URL` is also set, both schemes must match or startup fails. |
+| `INQTRIX_MAX_UPSTREAM_CONNECTIONS` | `200` | Per-worker ceiling for pooled backend connections; each browser tab holds one long-lived SSE stream. |
+| `INQTRIX_PROXY_MAX_BODY_BYTES` | derived | Explicit request-body cap in bytes. Unset derives `INQTRIX_MAX_FILE_BYTES` + 10 MiB; mirror the backend variable in split-container setups or the gateway warns and uses the packaged default. |
 | `INQTRIX_DIST_DIR` | `<repo>/apps/research-desk/dist` | Override when serving a `dist/` from a release artifact path. |
+| `INQTRIX_COLLABORATION_MAX_FRAME_BYTES` / `INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES` | `2097152` / `32` | Collaboration relay frame-size and queue-depth limits; keep in sync with the collaboration service. |
 
-If the resolved `dist/` directory does not exist, the launcher fails
-loudly at startup with a `RuntimeError` naming the resolved path; run
-`pnpm run ui:build` or `npm run ui:build` first, or set `INQTRIX_DIST_DIR`
-to an existing directory.
+If the resolved `dist/` directory or `index.html` does not exist, startup fails
+loudly and names the resolved path; run `npm run ui:build` first or point
+`INQTRIX_DIST_DIR` at an existing release artifact.
+
+### Alternative: nginx
+
+The `web-nginx` target consumes the exact same `ui-build` output. Choose it
+only by overlaying `compose.web-nginx.yaml`; the override replaces the
+implementation of the existing `web` service:
+
+```bash
+podman compose \
+  -f deploy/compose/compose.stack.yaml \
+  -f deploy/compose/compose.web-nginx.yaml \
+  --env-file deploy/.env.stack.secrets \
+  --env-file deploy/.env.stack \
+  up -d --build
+```
+
+`INQTRIX_WEB_NGINX_IMAGE` optionally changes the nginx image name/tag from
+`inqtrix-web-nginx:local`; it does not select nginx by itself. The override file
+is still required so the `web-nginx` build target and adapter sentinel change
+together.
+
+Or build the target directly:
+
+```bash
+docker build --target web-nginx \
+  -f deploy/docker/Dockerfile.web -t inqtrix-web-nginx .
+```
+
+The nginx option is HTTP-only and is intended to sit behind an external TLS
+terminator. It must not be combined with `compose.web-tls.yaml`, whose direct
+TLS variables belong to the Python gateway. nginx delegates WebSocket
+frame/queue limits to FastAPI and the collaboration sidecar; the Python gateway
+can enforce them at the edge. The same black-box suite verifies SPA fallback,
+caching, streaming, multiple `Set-Cookie` headers, hop-by-hop isolation,
+forwarded-origin trust, upload limits, guest-route privacy, recovery, and log
+redaction. One malformed-header outcome is intentionally adapter-specific:
+Python can remove an arbitrary request field named by `Connection` and continue;
+stock nginx has no generic removal directive and rejects that request with 400.
+Both prevent the nominated field from reaching the backend. Response-side,
+Python also removes arbitrary dynamically nominated fields; nginx removes the
+fixed protocol set and requires the trusted application backend not to emit
+custom `Connection`-nominated response fields.
 
 ### Backend notes (apply to both paths)
 
 - Build the bundle with `VITE_INQTRIX_API_BASE_URL` left **unset**. A baked
   absolute origin makes the browser call that backend directly and bypass the
   proxy, which reintroduces the cross-origin requirement and defeats the
-  single-origin setup. The backend origin belongs in `proxy_pass` (nginx) or
-  `INQTRIX_BACKEND_URL` (launcher), set at runtime.
+  single-origin setup. The backend origin belongs in
+  `INQTRIX_BACKEND_URL`, set at runtime.
 - `INQTRIX_SERVER_CORS_ORIGINS` can stay unset. The browser sees a
   single origin, so cross-origin preflight never happens.
 - Terminate TLS at the frontend pod, ingress, or sidecar. Backend

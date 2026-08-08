@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from typing import Protocol, Sequence, runtime_checkable
 
-from inqtrix.quota.models import QuotaDimension
+from inqtrix.quota.models import QuotaDimension, StockLifecycleState
 
 
 @runtime_checkable
@@ -37,6 +37,54 @@ class QuotaStore(Protocol):
         keying — add_usage never compares against or rewrites a stale
         window. Stock totals never drop below 0.
         """
+        ...
+
+    async def add_usage_once(
+        self,
+        *,
+        adjustment_id: str,
+        tenant_id: str,
+        subject_user_id: uuid.UUID,
+        dimension: QuotaDimension,
+        period_start: float,
+        amount: int,
+    ) -> int:
+        """Apply one adjustment and counter update in the same transaction.
+
+        Repeating ``adjustment_id`` with the same tenant, subject, dimension,
+        and amount must return without changing usage again. A different
+        ``period_start`` is a valid calendar-rollover replay and remains bound
+        to the original receipt. Any other contradiction raises
+        :class:`inqtrix.quota.models.QuotaAdjustmentConflict` without changing
+        counters. This is the durable boundary used by retryable operations.
+        """
+        ...
+
+    async def reconcile_stock(
+        self,
+        *,
+        stock_key: str,
+        tenant_id: str,
+        subject_user_id: uuid.UUID,
+        dimension: QuotaDimension,
+        desired_amount: int,
+        tombstone: bool,
+    ) -> StockLifecycleState:
+        """Converge one resource stock and its aggregate counter atomically.
+
+        A tombstone is permanent.  Calls that arrive after it may confirm the
+        state but cannot charge the resource again.  Replays and either order
+        of upload/delete therefore converge to the same counter value.
+        """
+        ...
+
+    async def read_stock(
+        self,
+        *,
+        stock_key: str,
+        tenant_id: str,
+    ) -> StockLifecycleState | None:
+        """Read one canonical stock lifecycle state, if it exists."""
         ...
 
     async def read_usage(

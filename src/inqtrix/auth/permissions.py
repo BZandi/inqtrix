@@ -30,6 +30,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Mapping, Protocol, Sequence
 
+from inqtrix.auth.log_redaction import log_authorization_denial
 from inqtrix.auth.principal import Principal, UserContext
 
 log = logging.getLogger("inqtrix")
@@ -223,6 +224,16 @@ class AuditEntry:
             owner's behalf (``agent.*`` actions from the agent runtime).
             ``actor_user_id`` carries the effective actor's canonical UUID;
             the column distinguishes who acted, not resource ownership.
+        outcome: ``success`` (default) | ``failure`` | ``denied`` —
+            OCSF-oriented result of the action (migration 0072).
+        origin: Request origin facts (``ip``, ``user_agent``,
+            ``auth_method``). Empty for events without a request (worker
+            jobs) — absence is meaningful, never fabricated.
+        correlation: Join keys into logs and traces (``request_id``,
+            ``run_id``, ``trace_id``).
+        actor_pseudonym: Stable ``usr_<hex16>`` reference of the actor,
+            computed at write time (the identifier logs/traces carry).
+        workspace_id: Workspace scope of the action, when one applies.
     """
 
     tenant_id: str
@@ -232,6 +243,37 @@ class AuditEntry:
     resource_id: str
     detail: dict[str, str] = field(default_factory=dict)
     actor_type: str = "user"
+    outcome: str = "success"
+    origin: dict[str, str] = field(default_factory=dict)
+    correlation: dict[str, str] = field(default_factory=dict)
+    actor_pseudonym: str | None = None
+    workspace_id: uuid.UUID | None = None
+
+    def __post_init__(self) -> None:
+        """Derive the actor pseudonym here, not at each writer.
+
+        The read model (migration 0072) shows the actor ONLY as
+        ``actor_pseudonym``; a writer that forgets it produces an
+        actor-blank row in the admin panel and every export. Deriving
+        it from ``actor_user_id`` at construction makes that
+        impossible for all writers at once — an explicitly passed
+        pseudonym still wins.
+        """
+        # A denial recorded as a success is worse than no row: the auditor
+        # who filters the panel by outcome is told the request went through.
+        # Derived here so no writer can get it wrong, the same way the
+        # pseudonym is.
+        if self.action.endswith(".denied") and self.outcome == "success":
+            object.__setattr__(self, "outcome", "denied")
+        if self.actor_pseudonym or self.actor_user_id is None:
+            return
+        from inqtrix.auth.log_redaction import stable_pseudonym
+
+        object.__setattr__(
+            self,
+            "actor_pseudonym",
+            stable_pseudonym("usr", self.actor_user_id),
+        )
 
 
 class MembershipRepository(Protocol):
@@ -403,11 +445,23 @@ class AuthorizationService:
         shares: ShareRepository,
         audit: AuditSink,
         restrict_to_workspace_members: bool = False,
+        sharing_enabled: bool = True,
     ) -> None:
         self._members = members
         self._shares = shares
         self._audit = audit
         self._restrict_to_workspace_members = restrict_to_workspace_members
+        self._sharing_enabled = sharing_enabled
+
+    @property
+    def audit_sink(self) -> AuditSink:
+        """The append-only audit sink behind this service.
+
+        Exposed so administrative surfaces (pseudonym resolution, the
+        audit read API) write through the SAME sink instead of wiring a
+        second one — one write path per deployment.
+        """
+        return self._audit
 
     async def resolve_user_context(
         self, principal: Principal
@@ -500,6 +554,8 @@ class AuthorizationService:
             return None
         if owner_user_id == principal.user_id:
             return ResourceAccess(AccessMode.OWNER)
+        if not self._sharing_enabled:
+            return None
         satisfying_permissions = share_permissions_satisfying(
             resource_type,
             minimum,
@@ -638,21 +694,26 @@ class AuthorizationService:
         detail: dict[str, str],
     ) -> None:
         """Make one denial visible in the log and the audit trail."""
-        log.warning(
-            "authz denied: user_id=%s kind=%s resource=%s/%s detail=%s",
-            principal.user_id,
-            principal.kind,
-            resource_type,
-            resource_id,
-            detail,
+        log_authorization_denial(
+            log,
+            action="require",
+            principal_kind=principal.kind,
+            actor_user_id=principal.user_id,
+            tenant_id=principal.tenant_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
         )
+        # Local import: audit_service imports AuditEntry from this module.
+        from inqtrix.services.audit_service import build_audit_entry
+
         await self._audit.record(
-            AuditEntry(
+            build_audit_entry(
                 tenant_id=principal.tenant_id,
                 actor_user_id=principal.user_id,
                 action="authz.denied",
                 resource_type=resource_type,
                 resource_id=resource_id,
                 detail=detail,
+                outcome="denied",
             )
         )

@@ -100,7 +100,7 @@ def make_ask_world() -> tuple[TestClient, KnowledgeStubLLM, MemoryKnowledgeStore
         ),
         workspace_admin=identity,
         knowledge=KnowledgeProviderContext(
-            embeddings=StubEmbeddings(),
+            embeddings=StubEmbeddings(selectable=["stub-embed-legacy"]),
             store=store,
             default_top_k=4,
         ),
@@ -118,9 +118,18 @@ def as_user(user_id: uuid.UUID) -> dict[str, str]:
     return {SUB_HEADER: str(user_id)}
 
 
-def make_collection(client: TestClient, *, sub: uuid.UUID, name: str) -> str:
+def make_collection(
+    client: TestClient,
+    *,
+    sub: uuid.UUID,
+    name: str,
+    embedding_model: str | None = None,
+) -> str:
+    payload = {"name": name}
+    if embedding_model is not None:
+        payload["embedding_model"] = embedding_model
     response = client.post(
-        "/v1/knowledge/collections", json={"name": name}, headers=as_user(sub)
+        "/v1/knowledge/collections", json=payload, headers=as_user(sub)
     )
     assert response.status_code == 201
     return response.json()["id"]
@@ -285,34 +294,43 @@ def test_explicit_invisible_collection_still_denied_on_both_asks():
         assert chat_denied.status_code == 404
 
 
-def test_mixed_model_visible_set_narrows_to_default_model():
-    """The pin honours the stores' one-model-per-query invariant: a
-    visible set spanning several embedding models narrows to the default
-    model's collections (the exact pre-pin coverage) instead of pinning
-    an explicit multi-model list the stores reject. Red before the
-    narrowing: the run failed on the mixed-scope error."""
-    client, _llm, store = make_ask_world()
+def test_mixed_model_visible_set_searches_every_visible_model_group():
+    """Admission pins the full visible corpus and shared retrieval performs
+    model-homogeneous searches before rank fusion.  No visible collection may
+    disappear merely because it uses a non-default embedding model."""
+    client, _llm, _store = make_ask_world()
     with client:
         recipient_cid = make_collection(client, sub=RECIPIENT, name="Meins")
         recipient_doc = add_doc(
             client, recipient_cid, sub=RECIPIENT, text=RECIPIENT_TEXT
         )
-        # Legacy (created_by_user_id=None) collection with a DIFFERENT
-        # embedding model/dimension: visible to everyone, so the
-        # recipient's visible set now spans two models.
-        legacy = asyncio.run(
-            store.create_collection(
-                name="Altbestand",
-                embedding_model="stub-embed-legacy",
-                embedding_dim=4,
-            )
+        legacy_cid = make_collection(
+            client,
+            sub=RECIPIENT,
+            name="Altbestand",
+            embedding_model="stub-embed-legacy",
+        )
+        legacy_text = "Historische Frist betraegt 72 Stunden."
+        legacy_doc = add_doc(
+            client,
+            legacy_cid,
+            sub=RECIPIENT,
+            text=legacy_text,
         )
 
-        payload = run_knowledge_ask(client, sub=RECIPIENT, filters=None)
+        implicit_payload = run_knowledge_ask(
+            client, sub=RECIPIENT, filters=None
+        )
+        explicit_payload = run_knowledge_ask(
+            client,
+            sub=RECIPIENT,
+            filters={"collection_ids": [recipient_cid, legacy_cid]},
+        )
 
-    urls = [ref["url"] for ref in payload.get("references", [])]
-    assert any(recipient_doc in url for url in urls), payload
-    assert all(legacy.id not in url for url in urls), urls
+    for payload in (implicit_payload, explicit_payload):
+        urls = [ref["url"] for ref in payload.get("references", [])]
+        assert any(recipient_doc in url for url in urls), payload
+        assert any(legacy_doc in url for url in urls), payload
 
 
 def test_auth_off_unscoped_ask_stays_marker_silent(caplog):

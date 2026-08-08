@@ -110,3 +110,9 @@ class RunContext:
         default=None, repr=False
     )
     """Live effective-actor check used at capability/tool safepoints."""
+    stack_name: str = ""
+    """Provider stack this execution was resolved on (``""`` = default).
+
+    Agent child submissions thread it back into the resolver so a parent
+    admitted on stack X never silently fans out on the default stack
+    (F7c) — the same inheritance rule as ``workspace_id``."""

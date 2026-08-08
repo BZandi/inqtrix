@@ -192,6 +192,71 @@ export function SystemStatusPanel({
         )}
       </SystemStatusSection>
 
+      <SystemStatusSection title={t.adminSystem.observabilityTitle}>
+        {runtime?.observability ? (
+          <>
+            <SystemValueRow title={t.adminSystem.tracingMode}>
+              <RuntimeValueGroup>
+                {/* Raw mode code, NOT RuntimeCode: runtimeLabels maps
+                    "local" to a storage label from another context. */}
+                <span className="t-mono text-foreground">
+                  {runtime.observability.tracing}
+                </span>
+                {runtime.observability.tracing !== 'off' ? (
+                  <StatusBadge
+                    density="table"
+                    label={
+                      runtime.observability.tracing_active
+                        ? t.adminSystem.tracingActive
+                        : t.adminSystem.tracingInactive
+                    }
+                    tone={
+                      runtime.observability.tracing_active
+                        ? 'success'
+                        : 'warning'
+                    }
+                  />
+                ) : null}
+                {runtime.observability.tracing_active
+                  && runtime.observability.sample_rate < 1 ? (
+                  <span className="t-meta text-muted-foreground">
+                    {t.adminSystem.tracingSampleRate(
+                      runtime.observability.sample_rate,
+                    )}
+                  </span>
+                ) : null}
+              </RuntimeValueGroup>
+            </SystemValueRow>
+            <SystemValueRow title={t.adminSystem.traceContent}>
+              <StatusBadge
+                density="table"
+                label={
+                  runtime.observability.content_capture
+                    ? t.adminSystem.traceContentOn
+                    : t.adminSystem.traceContentOff
+                }
+                tone={
+                  runtime.observability.content_capture ? 'warning' : 'neutral'
+                }
+              />
+            </SystemValueRow>
+            <SystemValueRow title={t.adminSystem.traceRetention}>
+              <span className="t-meta text-muted-foreground">
+                {runtime.observability.retention_days != null
+                  ? t.adminSystem.traceRetentionDays(
+                      runtime.observability.retention_days,
+                    )
+                  : runtime.observability.spool
+                    ? t.adminSystem.traceRetentionSpool
+                    : t.adminSystem.none}
+              </span>
+            </SystemValueRow>
+          </>
+        ) : (
+          <RuntimeUnavailable error={runtimeError} status={runtimeStatus} />
+        )}
+      </SystemStatusSection>
+
       <section className="min-w-0 bg-transparent">
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-border/65 px-3 py-2">
           <h3 className="t-section text-foreground">
@@ -206,6 +271,8 @@ export function SystemStatusPanel({
             detail={featureDetailFor('openapi', t)}
             featureKey="openapi"
             isOn={openapiOn}
+            reasonCode={null}
+            state={openapiOn ? 'enabled' : 'disabled'}
           />
           {features.length === 0 ? (
             <div className="px-3 py-6 text-center">
@@ -220,6 +287,13 @@ export function SystemStatusPanel({
                 featureKey={feature.key}
                 isOn={feature.on}
                 key={feature.key}
+                reasonCode={
+                  capabilities?.feature_status?.[feature.key]?.reason_code ?? null
+                }
+                state={
+                  capabilities?.feature_status?.[feature.key]?.state
+                    ?? (feature.on ? 'enabled' : 'disabled')
+                }
               />
             ))
           )}
@@ -316,23 +390,38 @@ function FeatureGateRow({
   detail,
   featureKey,
   isOn,
+  reasonCode,
+  state,
 }: {
   detail: FeatureDetail
   featureKey: string
   isOn: boolean
+  reasonCode: string | null
+  state: 'degraded' | 'disabled' | 'enabled'
 }) {
   const { t } = useLocale()
+  const statusLabel = state === 'degraded'
+    ? t.adminSystem.featureDegraded
+    : isOn
+      ? t.adminSystem.featureOn
+      : t.adminSystem.featureOff
 
   return (
-    <div className="grid min-h-9 grid-cols-[minmax(7rem,13rem)_1.25rem_minmax(0,1fr)_2rem] items-center gap-2 rounded-md px-3 py-2 transition-colors hover:bg-surface/45">
+    <div className="grid min-h-9 grid-cols-[minmax(7rem,13rem)_1.25rem_minmax(0,1fr)_auto] items-center gap-2 rounded-md px-3 py-2 transition-colors hover:bg-surface/45">
       <span className="truncate t-list text-foreground">{detail.label}</span>
-      <FeatureInfoTooltip detail={detail} featureKey={featureKey} isOn={isOn} />
+      <FeatureInfoTooltip
+        detail={detail}
+        featureKey={featureKey}
+        isOn={isOn}
+        reasonCode={reasonCode}
+        state={state}
+      />
       <span aria-hidden="true" />
       <StatusBadge
-        className="w-8 justify-center"
+        className="min-w-8 justify-center"
         density="table"
-        label={isOn ? t.adminSystem.featureOn : t.adminSystem.featureOff}
-        tone={isOn ? 'success' : 'neutral'}
+        label={statusLabel}
+        tone={state === 'degraded' ? 'warning' : isOn ? 'success' : 'neutral'}
       />
     </div>
   )
@@ -342,13 +431,24 @@ function FeatureInfoTooltip({
   detail,
   featureKey,
   isOn,
+  reasonCode,
+  state,
 }: {
   detail: FeatureDetail
   featureKey: string
   isOn: boolean
+  reasonCode: string | null
+  state: 'degraded' | 'disabled' | 'enabled'
 }) {
   const { t } = useLocale()
-  const statusLabel = isOn ? t.adminSystem.featureOn : t.adminSystem.featureOff
+  const statusLabel = state === 'degraded'
+    ? t.adminSystem.featureDegraded
+    : isOn
+      ? t.adminSystem.featureOn
+      : t.adminSystem.featureOff
+  const reason = reasonCode
+    ? (t.adminSystem.featureReasons as Record<string, string>)[reasonCode]
+    : null
 
   return (
     <Tooltip>
@@ -385,6 +485,11 @@ function FeatureInfoTooltip({
               label={t.adminSystem.featureEffect}
               value={isOn ? detail.enabled : detail.disabled}
             />
+            {reason ? (
+              <p className="t-meta-sm rounded-md bg-warning-subtle px-2 py-1.5 text-warning">
+                {reason}
+              </p>
+            ) : null}
           </div>
         </div>
       </TooltipContent>

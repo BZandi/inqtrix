@@ -43,12 +43,12 @@ class AgentSessionsService:
         self._durable = durable
 
     @property
-    def store(self) -> AgentSessionStore:
-        return self._store
-
-    @property
     def durable(self) -> bool:
         return self._durable
+
+    @property
+    def store(self) -> AgentSessionStore:
+        return self._store
 
     async def claim_session(
         self,
@@ -79,6 +79,8 @@ class AgentSessionsService:
             existing = None
         if existing is not None:
             self._require_owner(existing, visible_to=visible_to)
+            if existing.lifecycle_status != "active":
+                raise AgentSessionNotFound(session_id)
             if owners and visible_to is not None:
                 if len(owners) != 1:
                     raise AgentSessionNotFound(session_id)
@@ -171,6 +173,127 @@ class AgentSessionsService:
         await self._store.delete_session(
             session_id, scope=ResourceScope.from_record(session)
         )
+
+    async def prepare_deletion(
+        self,
+        session_id: str,
+        *,
+        visible_to: "UserContext | None",
+        request_workspace_id: str | None,
+    ) -> AgentSession:
+        session = await self.get_session(session_id, visible_to=visible_to)
+        deny_cross_workspace(
+            resource_workspace_id=session.workspace_id,
+            request_workspace_id=request_workspace_id,
+            not_found=lambda: AgentSessionNotFound(session_id),
+        )
+        return session
+
+    async def mark_deletion_state(
+        self,
+        session: AgentSession,
+        *,
+        lifecycle_status: str,
+        operation_id: str,
+        stage: str,
+        error: str | None,
+    ) -> None:
+        await self._store.set_session_deletion_state(
+            session.id,
+            scope=ResourceScope.from_record(session),
+            lifecycle_status=lifecycle_status,
+            deletion_operation_id=operation_id,
+            deletion_stage=stage,
+            deletion_error=error,
+        )
+
+    def delete_run_aggregate(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        owner_user_id: uuid.UUID | None,
+        workspace_id: str | None,
+        run_ids: tuple[str, ...],
+        checkpointer: object | None,
+    ) -> None:
+        preparer = getattr(
+            self._run_store, "prepare_agent_session_aggregate_deletion", None
+        )
+        if callable(preparer):
+            preparer(
+                session_id,
+                tenant_id=tenant_id,
+                requester_user_id=owner_user_id,
+                workspace_id=workspace_id,
+                run_ids=run_ids,
+            )
+        elif self._durable:
+            raise RuntimeError(
+                "durable run store cannot fence an active agent session"
+            )
+        if run_ids and checkpointer is None:
+            raise RuntimeError(
+                "agent checkpoint store is unavailable for verified deletion"
+            )
+        if checkpointer is not None:
+            delete_thread = getattr(checkpointer, "delete_thread_strict", None)
+            if not callable(delete_thread):
+                raise RuntimeError("agent checkpointer has no strict deletion surface")
+            for run_id in run_ids:
+                delete_thread(run_id)
+        deleter = getattr(self._run_store, "delete_agent_session_aggregate", None)
+        if not callable(deleter):
+            if self._durable:
+                raise RuntimeError("durable run store cannot delete an agent session")
+            return
+        deleter(
+            session_id,
+            tenant_id=tenant_id,
+            requester_user_id=owner_user_id,
+            workspace_id=workspace_id,
+            run_ids=run_ids,
+        )
+
+    async def delete_registry_for_operation(
+        self, session_id: str, *, scope: ResourceScope
+    ) -> None:
+        try:
+            await self._store.delete_session(
+                session_id, scope=scope
+            )
+        except AgentSessionNotFound:
+            return
+
+    async def deletion_residuals(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        owner_user_id: uuid.UUID | None,
+        workspace_id: str | None,
+        run_ids: tuple[str, ...],
+        scope: ResourceScope,
+    ) -> dict[str, int]:
+        # The session tombstone is intentionally retained until the deletion
+        # operation and row removal commit atomically.  Only dependent data is
+        # expected to be absent at this point.
+        del scope
+        counter = getattr(self._run_store, "agent_session_residuals", None)
+        run_residuals = (
+            counter(
+                session_id,
+                tenant_id=tenant_id,
+                requester_user_id=owner_user_id,
+                workspace_id=workspace_id,
+                run_ids=run_ids,
+            )
+            if callable(counter)
+            else {}
+        )
+        return {
+            str(key): int(value) for key, value in dict(run_residuals).items()
+        }
 
     async def save_group(
         self, *, id: str, title: str, created_at: float, updated_at: float,

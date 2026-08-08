@@ -1,3 +1,5 @@
+import { Buffer } from 'node:buffer'
+
 import { FastApiCollaborationClient } from '../src/apiClient'
 import { SidecarMetrics } from '../src/metrics'
 import { settings, silentLogger, USER_ID } from './helpers'
@@ -30,9 +32,14 @@ describe('FastAPI collaboration client contracts', () => {
       actorKind: 'human',
       actorUserId: USER_ID,
       changeKind: 'decision',
+      changeSummary: {
+        edits: [{ after: 'new', before: 'old', kind: 'replacement', position: 4 }],
+        omittedEditCount: 0,
+      },
       commandId: '44444444-4444-4444-8444-444444444444',
       commandPayloadHash: 'b'.repeat(64),
       decision: 'accept',
+      decisionOutcome: 'accepted',
       documentId: 'ed_test',
       expectedSequence: 41,
       fence: { epoch: 7, instanceId: 'test-instance', leaseExpiresAt: 999 },
@@ -45,6 +52,7 @@ describe('FastAPI collaboration client contracts', () => {
         createdAt: 1_784_112_000,
         kinds: [],
         patchId: PATCH_ID,
+        supersededSuggestionIds: [],
       }],
       suggestions: [{
         authorId: USER_ID,
@@ -74,9 +82,19 @@ describe('FastAPI collaboration client contracts', () => {
       actor_kind: 'human',
       actor_user_id: USER_ID,
       change_kind: 'decision',
+      change_summary: {
+        edits: [{
+          after: 'new',
+          before: 'old',
+          kind: 'replacement',
+          position: 4,
+        }],
+        omitted_edit_count: 0,
+      },
       command_id: '44444444-4444-4444-8444-444444444444',
       command_payload_hash: 'b'.repeat(64),
       decision: 'accept',
+      decision_outcome: 'accepted',
       epoch: 7,
       expected_sequence: 41,
       generation: 2,
@@ -88,6 +106,7 @@ describe('FastAPI collaboration client contracts', () => {
         created_at: 1_784_112_000,
         kinds: [],
         patch_id: PATCH_ID,
+        superseded_suggestion_ids: [],
       }],
       suggestion_ids: [SUGGESTION_ID],
       suggestions: [{
@@ -143,6 +162,52 @@ describe('FastAPI collaboration client contracts', () => {
     expect(requested).toBe(
       'http://fastapi.internal/internal/collaboration/policy-events?after_id=11&limit=500&tenant_id=tenant-1',
     )
+  })
+
+  it('carries the policy cursor captured by lease introspection', async () => {
+    const configured = settings()
+    let includePolicyCursor = true
+    const client = new FastApiCollaborationClient(
+      configured,
+      silentLogger,
+      new SidecarMetrics(),
+      async () => new Response(JSON.stringify({
+        document_id: 'ed_test',
+        expires_at: 1_900_000_000,
+        generation: 1,
+        lease_id: 'lease-1',
+        permission: 'edit',
+        protocol_version: configured.protocolVersion,
+        schema_hash: 'a'.repeat(64),
+        schema_version: configured.schemaVersion,
+        session_id: 'session-1',
+        tenant_id: configured.tenantId,
+        user: {
+          color: '#2563EB',
+          id: USER_ID,
+          name: 'Ada',
+        },
+        valid: true,
+        ...(includePolicyCursor ? { policy_cursor: 41 } : {}),
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    )
+
+    await expect(client.introspectLease({
+      fence: { epoch: 1, instanceId: 'test-instance', leaseExpiresAt: 999 },
+      room: 'editor:ed_test:1',
+      token: 'lease-token',
+    })).resolves.toMatchObject({
+      policyCursor: 41,
+    })
+
+    includePolicyCursor = false
+    await expect(client.introspectLease({
+      fence: { epoch: 1, instanceId: 'test-instance', leaseExpiresAt: 999 },
+      room: 'editor:ed_test:1',
+      token: 'lease-token',
+    })).resolves.toMatchObject({
+      policyCursor: 0,
+    })
   })
 
   it('looks up a durable command before mutating current document state', async () => {
@@ -329,6 +394,81 @@ describe('FastAPI collaboration client contracts', () => {
     expect(requested).toBe(
       'http://fastapi.internal/internal/collaboration/documents/ed_test/state?epoch=7&generation=1&instance_id=test-instance&tenant_id=tenant-1',
     )
+  })
+
+  it('loads snapshots larger than the generic internal string limit', async () => {
+    const stateUpdate = new Uint8Array(728).fill(0x5a)
+    const encodedState = Buffer.from(stateUpdate).toString('base64')
+    expect(encodedState.length).toBeGreaterThan(512)
+    const snapshot = {
+      covered_sequence: 0,
+      state_hash: 'a'.repeat(64),
+      state_update_base64: encodedState,
+      state_vector_base64: 'AQ==',
+    }
+    const client = new FastApiCollaborationClient(
+      settings(),
+      silentLogger,
+      new SidecarMetrics(),
+      async () => new Response(JSON.stringify({
+        document_id: 'ed_test',
+        generation: 1,
+        persisted_sequence: 0,
+        schema_hash: 'b'.repeat(64),
+        schema_version: 1,
+        snapshot,
+        snapshot_candidates: [{ ...snapshot, updates: [] }],
+        updates: [],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    )
+
+    await expect(client.loadDocumentState({
+      documentId: 'ed_test',
+      fence: { epoch: 7, instanceId: 'test-instance', leaseExpiresAt: 999 },
+      generation: 1,
+    })).resolves.toMatchObject({
+      snapshot: {
+        stateUpdate,
+      },
+      snapshotCandidates: [{
+        snapshot: {
+          stateUpdate,
+        },
+      }],
+    })
+  })
+
+  it('rejects snapshot payloads beyond the configured document limit', async () => {
+    const oversizedState = Buffer.from(new Uint8Array(9).fill(0x5a)).toString('base64')
+    const snapshot = {
+      covered_sequence: 0,
+      state_hash: 'a'.repeat(64),
+      state_update_base64: oversizedState,
+      state_vector_base64: 'AQ==',
+    }
+    const client = new FastApiCollaborationClient(
+      settings({ documentLimitBytes: 8 }),
+      silentLogger,
+      new SidecarMetrics(),
+      async () => new Response(JSON.stringify({
+        document_id: 'ed_test',
+        generation: 1,
+        persisted_sequence: 0,
+        schema_hash: 'b'.repeat(64),
+        schema_version: 1,
+        snapshot,
+        updates: [],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    )
+
+    await expect(client.loadDocumentState({
+      documentId: 'ed_test',
+      fence: { epoch: 7, instanceId: 'test-instance', leaseExpiresAt: 999 },
+      generation: 1,
+    })).rejects.toMatchObject({
+      reason: 'invalid_snapshot_state_update_base64',
+      status: 503,
+    })
   })
 
   it('rejects a loaded tail that omits its authoritative update hash', async () => {

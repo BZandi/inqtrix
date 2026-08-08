@@ -107,13 +107,14 @@ def test_file_ingestion_end_to_end(tmp_path):
         payload = ingested.json()
         assert payload["title"] == "vertrag.md"
         assert payload["metadata"]["file_id"] == file_id
+        assert payload["metadata"]["source_id"] == f"file:{file_id}"
         assert payload["metadata"]["parser"] == "markitdown"
 
         hits = client.post(
             "/v1/knowledge/search",
             json={"query": "Haftung Auftragswert begrenzt"},
         ).json()["data"]
-    assert hits and "Haftung" in hits[0]["text"]
+    assert hits and "Haftung" in hits[0]["excerpt"]
 
 
 def test_foreign_file_stays_hidden_for_ingestion(tmp_path):

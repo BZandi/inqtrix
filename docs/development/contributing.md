@@ -16,16 +16,18 @@ cd inqtrix
 uv sync --extra dev
 source .venv/bin/activate
 
-# Option B: conda
-conda create -n inqtrix python=3.11
-conda activate inqtrix
-pip install -e ".[dev]"
+# Option B: standard Python and pip
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
 ```
 
 Offline regression check:
 
 ```bash
 uv run pytest tests/ -v
+# or in the activated pip environment:
+python -m pytest tests/ -v
 ```
 
 See [Installation](../getting-started/installation.md) for the full bootstrap.

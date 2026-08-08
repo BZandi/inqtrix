@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from inqtrix.project.base_session_store import (
     BaseSessionStore,
     DEFAULT_TENANT as _DEFAULT_TENANT,
 )
+from inqtrix.project.deletion_fence import reject_retained_deletion_target
 from inqtrix.project.knowledge_sessions_ports import (
     KnowledgeSession,
     KnowledgeSessionGroup,
@@ -42,6 +43,10 @@ _META_COLUMNS = (
     knowledge_sessions.c.workspace_id,
     knowledge_sessions.c.title,
     knowledge_sessions.c.group_id,
+    knowledge_sessions.c.lifecycle_status,
+    knowledge_sessions.c.deletion_operation_id,
+    knowledge_sessions.c.deletion_stage,
+    knowledge_sessions.c.deletion_error,
     knowledge_sessions.c.created_at,
     knowledge_sessions.c.updated_at,
 )
@@ -50,6 +55,51 @@ _META_COLUMNS = (
 class PostgresKnowledgeSessionStore(BaseSessionStore):
     """Durable
     :class:`~inqtrix.project.knowledge_sessions_ports.KnowledgeSessionStore`."""
+
+    async def claim_session(
+        self, *, id: str, title: str, created_at: float,
+        created_by_user_id: uuid.UUID | None, workspace_id: str | None,
+    ) -> KnowledgeSession:
+        values = dict(
+            id=id,
+            tenant_id=_DEFAULT_TENANT,
+            created_by_user_id=created_by_user_id,
+            workspace_id=workspace_id,
+            title=title,
+            group_id=None,
+            items_json="[]",
+            created_at=created_at,
+            updated_at=created_at,
+        )
+        async with self._session() as session:
+            await reject_retained_deletion_target(
+                session,
+                target_kind="knowledge_session",
+                target_id=id,
+                tenant_id=_DEFAULT_TENANT,
+                not_found=KnowledgeSessionNotFound,
+            )
+            row = (
+                await session.execute(
+                    pg_insert(knowledge_sessions)
+                    .values(**values)
+                    .on_conflict_do_nothing(index_elements=[knowledge_sessions.c.id])
+                    .returning(knowledge_sessions)
+                )
+            ).first()
+            if row is None:
+                row = (
+                    await session.execute(
+                        select(knowledge_sessions).where(
+                            knowledge_sessions.c.tenant_id == _DEFAULT_TENANT,
+                            knowledge_sessions.c.id == id,
+                            knowledge_sessions.c.lifecycle_status == "active",
+                        )
+                    )
+                ).first()
+                if row is None:
+                    raise KnowledgeSessionNotFound(id)
+        return _from_row(row)
 
     async def upsert_session(
         self, *, id: str, title: str, items_json: str, group_id: str | None,
@@ -66,9 +116,20 @@ class PostgresKnowledgeSessionStore(BaseSessionStore):
         )
         mutable = ["title", "group_id", "items_json", "updated_at"]
         stmt = scoped_postgres_upsert(
-            pg_insert(knowledge_sessions), knowledge_sessions, values, mutable
+            pg_insert(knowledge_sessions),
+            knowledge_sessions,
+            values,
+            mutable,
+            extra_condition=knowledge_sessions.c.lifecycle_status == "active",
         ).returning(knowledge_sessions)
         async with self._session() as session:
+            await reject_retained_deletion_target(
+                session,
+                target_kind="knowledge_session",
+                target_id=id,
+                tenant_id=_DEFAULT_TENANT,
+                not_found=KnowledgeSessionNotFound,
+            )
             if group_id is not None:
                 await require_scoped_parent(
                     session,
@@ -116,6 +177,62 @@ class PostgresKnowledgeSessionStore(BaseSessionStore):
                 session, table=knowledge_sessions, resource_id=session_id,
                 tenant_id=_DEFAULT_TENANT, scope=scope,
                 not_found=KnowledgeSessionNotFound,
+            )
+
+    async def set_session_deletion_state(
+        self,
+        session_id: str,
+        *,
+        scope: ResourceScope,
+        lifecycle_status: str,
+        deletion_operation_id: str,
+        deletion_stage: str,
+        deletion_error: str | None,
+    ) -> None:
+        async with self._session() as session:
+            changed = await session.scalar(
+                update(knowledge_sessions)
+                .where(
+                    knowledge_sessions.c.tenant_id == _DEFAULT_TENANT,
+                    knowledge_sessions.c.id == session_id,
+                    knowledge_sessions.c.created_by_user_id.is_not_distinct_from(
+                        scope.created_by_user_id
+                    ),
+                    knowledge_sessions.c.workspace_id.is_not_distinct_from(
+                        scope.workspace_id
+                    ),
+                )
+                .values(
+                    lifecycle_status=lifecycle_status,
+                    deletion_operation_id=deletion_operation_id,
+                    deletion_stage=deletion_stage,
+                    deletion_error=deletion_error,
+                )
+                .returning(knowledge_sessions.c.id)
+            )
+            if changed is None:
+                raise KnowledgeSessionNotFound(session_id)
+
+    async def count_session_residuals(
+        self, session_id: str, *, scope: ResourceScope
+    ) -> int:
+        async with self._session() as session:
+            return int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(knowledge_sessions)
+                    .where(
+                        knowledge_sessions.c.tenant_id == _DEFAULT_TENANT,
+                        knowledge_sessions.c.id == session_id,
+                        knowledge_sessions.c.created_by_user_id.is_not_distinct_from(
+                            scope.created_by_user_id
+                        ),
+                        knowledge_sessions.c.workspace_id.is_not_distinct_from(
+                            scope.workspace_id
+                        ),
+                    )
+                )
+                or 0
             )
 
     async def upsert_group(
@@ -174,6 +291,10 @@ def _from_row(row) -> KnowledgeSession:
         tenant_id=row.tenant_id,
         created_by_user_id=row.created_by_user_id,
         workspace_id=row.workspace_id,
+        lifecycle_status=getattr(row, "lifecycle_status", "active") or "active",
+        deletion_operation_id=getattr(row, "deletion_operation_id", None),
+        deletion_stage=getattr(row, "deletion_stage", None),
+        deletion_error=getattr(row, "deletion_error", None),
     )
 
 

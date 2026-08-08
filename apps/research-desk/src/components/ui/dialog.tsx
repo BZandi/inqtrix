@@ -25,7 +25,7 @@ type DialogProps = {
 /**
  * Hand-built modal dialog (overlay tier §6: `rounded-xl` + `shadow-lg`),
  * modelled on the share dialog but extracted as the shared primitive.
- * Accessibility (P7): focus moves into the panel on open and is trapped
+ * Accessibility: focus moves into the panel on open and is trapped
  * with Tab/Shift+Tab, Esc closes (when dismissable), and focus returns to
  * the previously-focused element on unmount. Wrap the children in a
  * `<form>` to get Enter-to-submit. Renders nothing when `open` is false.

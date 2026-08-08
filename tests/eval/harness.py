@@ -60,9 +60,9 @@ gitignored and rebuilt from the Publications Office Cellar via
 multi-hop/aggregation headroom."""
 GOLDEN_DORA_HOLDOUT_DIR = Path(__file__).parent / "golden_dora_holdout"
 """Held-out tier: queries split out of the DORA set that are NEVER
-tuned against — release-gate only. Catching over-fitting requires a
-set the tuning loop has never seen; sharing the DORA corpus keeps it
-rebuildable without duplication."""
+tuned against. It detects overfitting regressions but does not certify a
+release. Catching over-fitting requires a set the tuning loop has never seen;
+sharing the DORA corpus keeps it rebuildable without duplication."""
 GOLDEN_GQUAD_DIR = Path(__file__).parent / "golden_gquad"
 """GermanQuAD tier: everyday-German Wikipedia QA (deepset/germanquad,
 CC BY-SA 4.0) — the non-legal counterweight to the four legal tiers.

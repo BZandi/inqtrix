@@ -176,17 +176,21 @@ apply happens solely through `POST /v1/editor/patches/{id}:apply`.
   `plan_decision: "rejected"`, the approval resume payload includes the
   decider's `note`, and finalize skips memory-candidate staging. (Same
   contract as patch rejection, which already ended the run normally.)
-* **Discovery probes** (§4 Phase 1): deterministic, budget-capped
-  (`discovery_max_tool_calls`). The wired set is P1 `knowledge.collections
-  .list`, P2 `knowledge.search` per sub-goal, and the optional P6
-  `web.search.instant` preview. The plan's P3-P5 are deliberately not
-  probed: P3 (prior-run reuse) is a named follow-up needing a runs-read
-  capability plus a similarity heuristic (a new catalog for one consumer;
-  within a session the prior context already rides the memo lineage); P4
-  (referenced files) has no input — a run carries collection ids and one
-  patch-target document, not a list of @-mentioned files; P5
-  (canvas/editor context) is already covered by the intake memo read (E15)
-  and the patch-phase document read. See `agents/discovery.py`.
+* **Discovery probes:** deterministic and budget-capped through
+  `discovery_max_tool_calls`. The wired set is
+  `knowledge.collections.list`, `knowledge.search` per sub-goal, and the
+  optional `web.search.instant` preview. Discovery deliberately does not
+  probe prior-run reuse because that requires a runs-read capability and a
+  similarity policy; within a session, prior context already follows the memo
+  lineage. It also does not probe referenced files because a run carries
+  collection ids and at most one patch target rather than a list of mentioned
+  files. Canvas and editor context are already covered by the intake memo and
+  patch-phase document reads. See `agents/discovery.py`.
+  If the deterministic probe plan exceeds the cap, the omitted count is
+  retained in probe statistics and emitted as a visible limit event plus
+  narration; the run never presents the shortened plan as complete. The
+  clarification and critic-replan caps use the same visible event vocabulary
+  when they proceed with a stated assumption or an unresolved evidence gap.
 * **Tools per task** (E18/E19): normal Mission plans express each independent
   web evidence question as one `web_instant` task. That task contains exactly
   one self-contained natural-language question and performs exactly one
@@ -198,7 +202,10 @@ apply happens solely through `POST /v1/editor/patches/{id}:apply`.
   server selects `compact` for an explicit normal-depth child and `deep` for
   Deep; the public Research Desk's `schnell` report profile is not an Agent
   Desk child profile. Per-task model-generated token/time/child budgets are
-  not execution authority; deployment quotas and report-profile timeouts are.
+  not execution authority; deployment quotas and bounded provider/child
+  transport contracts are. A reached boundary remains a typed task/run state
+  and visible evidence gap; it is never rewritten as a successful complete
+  result or a hidden lower-quality mode.
   `rag_query` runs the knowledge algorithm
   IN-PROCESS with its retrieval profile (`schnell`/`standard`/
   `gruendlich`/`tief`); `file_analysis` summarizes internal document
@@ -222,25 +229,26 @@ apply happens solely through `POST /v1/editor/patches/{id}:apply`.
 * **Scoping**: every internal tool call is pinned to the current effective
   actor's live resource rights. Explicit collection ids are asserted; an
   omitted scope is normalized to that actor's visible collections rather than
-  being rediscovered under the owner later. Limitation: with collections on
-  DIFFERENT embedding models, an un-pinned retrieval fails loudly per
-  task ("query one model scope at a time") — pin `collection_ids` in
-  the plan for mixed-model deployments.
+  being rediscovered under the owner later. The shared Knowledge retrieval
+  implementation partitions a mixed embedding-model scope by model, embeds
+  once per group, and rank-fuses the group results before the common reranker.
+  Neither orchestrator nor its tool adapter selects only the default model.
 * **Evidence**: dedup by the platform citation identity
   (`doc:{id}#{chunk}` / canonical URL) and assign stable `K#`/`W#` labels in
   first-seen order. Exact retrieval fields (`source_text`/`excerpt`) remain
-  source passages. If an instant provider exposes only URLs, the bounded
-  `grounded_support` field preserves the statement around that citation from
-  the provider-grounded answer; it is explicitly provenance context, never a
-  verbatim source excerpt. Duplicate observations may fill missing metadata
-  but never replace stronger source text. Each synthesis section receives only
-  the labels selected for that outline section, avoiding whole-ledger citation
-  flooding. Contradiction analysis runs one mid-tier call over lexically
-  overlapping claim pairs only; sufficiency is deterministic criterion
-  coverage plus one fast-tier three-way verdict. Workspace and kernel results
-  export the same structured references; the kernel persists its trusted
-  `reference_id` ledger in the existing `evidence_bundle` artifact so
-  park/resume and `read_canvas`/`write_canvas` retain labels and evidence.
+  source passages. Generated retrieval context is never exposed through this
+  contract. Web evidence is the complete provider-grounded search result:
+  exact query, coherent provider answer, provider snippets, and every returned
+  link. Inqtrix does not fetch those linked pages. A URL tier is quality
+  metadata and cannot discard an `unknown` result. Because one coherent
+  provider answer may synthesize several links, the ledger records whether a
+  citation has an explicit provider mapping, a provider snippet, or only
+  source-list membership; it never invents a one-to-one passage mapping.
+  Child research reports and their web-search ledgers reach the parent
+  orchestrator without a second page-read gate. The kernel persists this
+  ledger in the existing evidence artifact so park/resume and the evidence
+  Canvas retain the exact query, answer, links, and stable `reference_id`
+  labels.
 * **Synthesis**: outline first, then one call per section; every section
   flushes into the memo artifact (revision++, `artifact.updated`), so
   the canvas streams section-wise without a delta protocol (E12). Quotes
@@ -316,9 +324,29 @@ high — overridable through the existing
 `agent_overrides.model/model_tier/effort` and per-task
 `params.model_tier`.
 
-## Interaction layer (plan M1)
+The normal/deep kernel bases are `kernel_max_tool_calls` (30/60 through
+the deep variant) and `kernel_max_iterations` (73/121). Explicit extensions
+are bounded independently by
+`kernel_max_tool_calls_extension_ceiling` (60/120) and
+`kernel_max_iterations_extension_ceiling` (145/241), again with deep
+variants. A configured ceiling below its base cannot shrink the base; the
+effective ceiling is their maximum. `/v1/capabilities.agent.limits` publishes
+these pairs together with mission discovery/plan/replan/clarification/child
+limits, research round/source-read limits, and the non-extendable token
+ceiling. Every live Agent execution snapshot publishes measured usage and the
+effective boundary in `execution.limits`; older servers omit the capability
+block and the UI hides it rather than guessing.
 
-* **Two permission modes (E16 amendment).** The UI presents
+The manifest also publishes the effective `schnell` kernel boundary (33
+steps and no in-run extension at the defaults) instead of presenting the
+normal tier's larger allowance before submission. The isolated `quick_web`
+route publishes and reports its own fixed one-search boundary; because that
+route bypasses the kernel graph, the UI must not display the normal kernel
+tool/step limits for it.
+
+## Interaction layer
+
+* **Two permission modes.** The UI presents
   Standard/Auto (`/v1/capabilities` `agent.mode_presets`, mapped onto
   the unchanged wire vocabulary `balanced`/`autonomous`;
   `advanced_autonomy` republishes the legacy three-way control incl.
@@ -361,10 +389,10 @@ Memory knobs: `memory_provider` (`none`/`mem0`), `memory_mode`
 `effective_mode: candidate_only` with a degraded reason; it does not
 auto-retain memories yet.
 
-## Cognitive kernel (`mode=agent_kernel`, plan M2, ADR-PLAT-2)
+## Cognitive kernel (`mode=agent_kernel`)
 
-A SECOND registered algorithm next to the phase machine: an LLM
-tool-calling loop on deepagents, assembled through the ONE harness seam
+A second **orchestrator** registered next to the phase machine: an LLM
+tool-calling loop on deepagents, assembled through the one harness seam
 (`agents/harness.py::build_kernel_agent`, pin `deepagents>=0.6.12,<0.7`
 with contract tests in `tests/agents/test_harness_kernel_contract.py`
 as the upgrade gate). The phase machine stays registered — it is the
@@ -373,10 +401,19 @@ resume under their own algorithm.
 
 * **Two-layer architecture.** The kernel (`agents/kernel/`) is the
   conversational brain: it answers directly, asks structured questions
-  (`ask_user` -> the M1 clarification machinery, deterministic ids
+  (`ask_user` -> the structured clarification machinery, deterministic ids
   hashed from the checkpointed `tool_call_id`), searches, writes canvas
   deliverables, and DELEGATES multi-strand researched deliverables to
   the phase machine as child runs.
+  It is not a second retrieval implementation. `search_project_knowledge` and
+  Mission `rag_query` are thin orchestration adapters around the same
+  `knowledge.search` capability and `KnowledgeService.search` used by the
+  Knowledge Desk. Dense/sparse fusion, mixed-model partition/rank fusion,
+  reranking, authorization, active-revision filtering, degradation reporting,
+  and canonical evidence projection therefore remain owned by the Knowledge
+  subsystem. Likewise, kernel web research and mission research share the
+  configured provider search and the same web-search ledger contract; neither
+  creates a separate crawler or page-reader path.
 * **Same platform seams.** Registry algorithm behind the normal
   RunService -> queue -> worker path; sync `graph.stream` only; shared
   checkpointer with `thread_id=run_id`; park/resume against control
@@ -407,10 +444,30 @@ resume under their own algorithm.
   slot-free (`waiting_for_children`) and re-find their child via
   `origin_key=tool_call_id` on resume re-execution (persisted in the
   replay payload, no schema change).
-* **Budgets.** `kernel_max_iterations` restores a hard
-  `recursion_limit` (deepagents lifts the default); the model-call
-  boundary checks the cancel event AND the run-cumulative token budget
-  (prior segments recovered from checkpointed `usage_metadata`).
+  Source tier is quality metadata rather than a domain admission list. An
+  unknown publisher remains in the ledger and its complete provider-grounded
+  answer reaches synthesis; the tier can influence ordering, cross-check
+  planning, and confidence, but never silently remove the information.
+* **Transparent limits.** Kernel tool-call and graph-step limits are
+  checkpoint-safe decision gates. An overflowing tool batch is rejected in
+  full before any tool executes; reaching either boundary creates one durable
+  clarification and parks the existing run as `waiting_for_input`. The user
+  may extend to the published operator ceiling, accept an explicitly labelled
+  non-generative partial receipt, or cancel. An extension folds into the same
+  checkpointed run and retains prior tool/token usage; it does not create a
+  second lifecycle or reset counters. LangGraph's per-invocation
+  `recursion_limit` is reduced by the checkpoint's cumulative step coordinate,
+  so approval and clarification resumes cannot acquire a fresh step budget.
+  The `schnell` step/tool ceiling is intentionally not extendable because an
+  extension would contradict that tier's latency contract.
+* **Token boundary.** The model-call boundary checks the cancel event and the
+  run-cumulative token budget (prior segments recovered from checkpointed
+  `usage_metadata`). A token ceiling is a typed, visible operator stop and is
+  not offered as extendable: provider usage from the failing graph node is not
+  yet an exactly-once checkpointed continuation coordinate. Presenting the
+  same three choices here would risk replaying paid work or undercounting it.
+  The Agent Desk therefore labels token limits separately from recoverable
+  tool/step gates.
 * **Continuity + events.** The per-run user message carries the K1
   session context (history block, artifact registry for CAS updates,
   response-form hints) — the system prompt stays compile-time static.
@@ -500,7 +557,7 @@ was merely available or actually invoked. Successful source-tool calls advance
 the counters; parked kernel segments restore them from the checkpoint. See
 [Run events](../observability/run-events.md#run-summary) for the wire example.
 
-## Skills (plan M3)
+## Skills
 
 Skills are SERVER-ENFORCED policy objects, not a prompt category: the
 entity (`content/skills.py::SkillRecord`, table `skill_templates`,
@@ -521,7 +578,7 @@ the single policy gate.
   placeholder are allowed as context-only inputs. At intake a
   fast-tier check (`SkillPointCheck`) decides which points the
   question/history already answer: missing REQUIRED points join the
-  M1 options-chip clarification round (options map 1:1), missing
+  options-chip clarification round (options map 1:1), missing
   optional points run on their `default_assumption` — visibly named
   in the run.
 * **Admission.** The composer submits `skill_ids` (slash menu) plus
@@ -536,7 +593,7 @@ the single policy gate.
 * **`requires_plan` matrix.** `always` forces the plan gate in every
   mode (including Auto — the only way a skill can force review);
   `never` frees only the mission-weight default; `auto` follows the
-  mode. The STRICTEST activated skill wins; the E16 web-regate and
+  mode. The strictest activated skill wins; the web-search re-consent gate and
   the patch gate are untouchable by skills.
 * **Model activation.** Attached skills inject as delimited
   USER-content blocks (marked as user content that cannot lift
@@ -568,7 +625,7 @@ the single policy gate.
 Settings: `INQTRIX_AGENT_SKILLS_MAX_ATTACHED` (3),
 `INQTRIX_AGENT_SKILLS_DISCLOSURE_BUDGET_CHARS` (4000).
 
-## Deep mode (plan M4)
+## Deep mode
 
 Thoroughness is ORTHOGONAL to the permission mode: `agent_overrides.depth`
 (`normal` | `deep`, default `normal`, published as `agent.depth_modes` +
@@ -580,10 +637,14 @@ never an unbounded loop:
   effort > skill pin > deep > tier map). The tier stays with the tier
   map (`agent_kernel` is high-tier already).
 * **Budgets.** The kernel `recursion_limit` rises to
-  `INQTRIX_AGENT_KERNEL_MAX_ITERATIONS_DEEP` (40) — a raised, still
-  hard-and-loud ceiling. Independently, all model-emitted tool calls count
-  against a checkpoint-derived cumulative limit (30 normal, 60 deep); an
-  overflowing multi-call batch is rejected before any tool executes.
+  `INQTRIX_AGENT_KERNEL_MAX_ITERATIONS_DEEP` (121 = 14 sequential tool
+  turns plus the answer; one tool turn costs 8 measured super-steps, the
+  answer turn 9) — a raised, still operator-bounded decision point.
+  Independently,
+  all model-emitted tool calls count against a checkpoint-derived
+  cumulative limit (30 normal, 60 deep); an overflowing multi-call batch
+  is rejected before any tool executes. Explicit extension may raise the
+  effective deep limits only to 241 steps and 120 tool calls by default.
 * **Child profiles.** Normal kernel `run_web_research` children are forced
   to COMPACT; Deep children and every deep phase-machine child research run
   are forced onto the DEEP report profile
@@ -611,8 +672,10 @@ Optional extra `agent`: `deepagents` (isolated behind
 `agents/harness.py`; pulls `langchain-anthropic` and
 `langchain-google-genai` unconditionally — see THIRD_PARTY_NOTICES),
 `langchain`, `langgraph-checkpoint-postgres`, `psycopg`. Deployments
-should set `LANGGRAPH_STRICT_MSGPACK=true`. Sync with
-`uv sync --extra agent --extra knowledge-qdrant --extra queue-valkey`.
+should set `LANGGRAPH_STRICT_MSGPACK=true`. Install with
+`uv sync --extra agent --extra knowledge-qdrant --extra queue-valkey`, or use
+standard Python/pip with
+`python -m pip install -e ".[agent,knowledge-qdrant,queue-valkey]"`.
 
 ## Related docs
 

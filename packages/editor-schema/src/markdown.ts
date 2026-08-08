@@ -34,6 +34,16 @@ export function sanitizeSerializedEditorMarkdown(markdown: string): string {
 
 export function parseEditorMarkdown(markdown: string): JSONContent {
   const parsed = getMarkdownManager().parse(normalizeEditorMarkdown(markdown))
+  // MarkdownManager currently returns an empty doc for an empty string, but
+  // the editor schema requires at least one block. Empty editor documents are
+  // valid product state and must be convertible to collaboration without a
+  // misleading `invalid_schema` conflict.
+  if (parsed.type === 'doc' && (!parsed.content || parsed.content.length === 0)) {
+    return canonicalizeEditorJson({
+      type: 'doc',
+      content: [{ type: 'paragraph' }],
+    })
+  }
   return canonicalizeEditorJson(parsed)
 }
 

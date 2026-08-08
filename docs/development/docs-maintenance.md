@@ -19,6 +19,26 @@ Every page under `docs/**`:
 9. New terms are defined on first use. Avoid shorthand such as "ledger", "bundle", "contract", or "strategy" unless the local page says what object it refers to and where it lives.
 10. Technical identifiers in prose include their data kind and type on first use within a section when the kind is not obvious from the sentence.
 
+## Current-state versioned content
+
+Versioned documentation describes the supported present contract. Do not cite
+private plans, priority labels, internal decision ids, task logs, branches,
+commits, incidents, or the dates on which internal decisions and fixes were
+made. State the current rationale and observable behaviour directly.
+
+Functional protocol versions, schema revisions, dependency or image versions,
+source provenance, retention examples, and deterministic temporal fixtures
+remain valid when the described behaviour depends on them. Runtime verification
+reports and their timestamps are local artifacts; public evidence identifies
+the Inqtrix version under test.
+
+`README.md` and `docs/**` are the public documentation hierarchy.
+[`apps/research-desk/DESIGN.md`](../../apps/research-desk/DESIGN.md) is the
+intentional code-adjacent exception: it is the versioned design-language
+contract for Research Desk tokens, motion, primitives, and accessibility
+behaviour. Private agent memory and editor-specific rule files are never a
+public source of truth.
+
 ## Reader depth (configuration, APIs, and heuristics)
 
 Structure alone (Scope, Related docs, tables) is not enough when a reader must predict runtime behaviour.
@@ -149,10 +169,10 @@ Whenever a code change alters public behaviour, update the matching `docs/**` pa
 | `create_app`/`register_routes`/`build_container` injection seams (`auth_provider=`, `object_store_impl=`, `run_store=`, `permissions=`, `knowledge=`) | `docs/how-to/writing-a-custom-auth-provider.md`, `docs/how-to/writing-a-custom-storage.md` |
 | `src/inqtrix/knowledge/<x>.py`, `src/inqtrix/knowledge/stores/<x>.py`, `src/inqtrix/storage/knowledge_orm.py`, `src/inqtrix/services/knowledge_service.py` | `docs/knowledge/overview.md` and the data-flow/diagram page `docs/architecture/knowledge-retrieval.md`; profile semantics additionally `docs/configuration/knowledge-profiles.md` |
 | `src/inqtrix/storage/<x>.py`, `src/inqtrix/runs/<x>.py`, `src/inqtrix/worker/<x>.py` | `docs/getting-started/platform-components.md`, `docs/configuration/settings-and-env.md`; migration/RLS changes additionally `docs/deployment/database-migrations.md`, object-store/S3 changes additionally `docs/deployment/object-storage.md` |
-| project-persistence tier (`src/inqtrix/storage/{chat,editor,asset_records,knowledge_sessions,vector_index,account}_orm.py` + migrations, `src/inqtrix/project/*`, `src/inqtrix/services/{chat_history,editor_persistence,asset_records,knowledge_sessions,vector_index,account_preferences}_service.py`, and the `apps/research-desk` sync hooks) | `docs/architecture/data-architecture.md` (what-lives-where, the storage matrix, scoping, load-on-use / defer-while-indexing / account-wins, capability-gated tier switch) |
+| project-persistence tier (`src/inqtrix/storage/{chat,editor,asset_records,knowledge_sessions,vector_index,account}_orm.py` + migrations, `src/inqtrix/project/*`, `src/inqtrix/services/{chat_history,editor_persistence,asset_records,knowledge_sessions,vector_index,account_preferences}_service.py`, and the `apps/research-desk` sync hooks) | `docs/architecture/data-architecture.md` (what lives where, the storage matrix, scoping, load-on-use, server-owned upload/index/delete lifecycles, revision/generation publication, account-wins, and capability-gated tier switch) |
 | editor collaboration (`packages/editor-schema/**`, `apps/collaboration-server/**`, `src/inqtrix/{project,services,storage,server}/**collaboration**`, editor share/patch changes, and `apps/research-desk/src/features/editor/**`) | `docs/architecture/editor-collaboration.md` (truth, flow, contracts), `docs/how-to/collaborate-on-editor-documents.md` (roles and UX), `docs/deployment/editor-collaboration.md` (topology and operations), `docs/configuration/settings-and-env.md` (every variable), and `docs/development/testing-strategy.md` (cross-runtime gates) |
-| `deploy/compose/compose.dev.yaml` | `docs/getting-started/platform-components.md` (manual/host section) and, for the Dex/OIDC pieces, `docs/deployment/auth-modes.md` |
-| `deploy/compose/compose.stack.yaml`, `deploy/docker/**`, `deploy/nginx/**`, `deploy/.env.stack.example`, `deploy/.env.migrate.example` | `docs/getting-started/stack-quickstart.md`, `docs/getting-started/platform-components.md`, `docs/deployment/runbooks.md`, `docs/deployment/deployment-modes.md`, `docs/deployment/kubernetes.md` (image hardening / nginx upstream template); migration-env changes additionally `docs/deployment/database-migrations.md`, S3 changes `docs/deployment/object-storage.md`, collaboration profile or proxy changes `docs/deployment/editor-collaboration.md` |
+| `deploy/compose/compose.dev-ports.yaml` | `docs/development/local-infrastructure.md`, `docs/getting-started/platform-components.md` (manual/host section), and, for Dex/OIDC ports, `docs/deployment/auth-modes.md` |
+| `deploy/compose/compose.stack.yaml`, `deploy/compose/compose.web-nginx.yaml`, `deploy/docker/**`, `src/inqtrix_web_gateway/**`, `deploy/.env.stack.example`, `deploy/.env.stack.secrets.example`, `deploy/.env.migrate.secrets.example` | `docs/getting-started/stack-quickstart.md`, `docs/getting-started/platform-components.md`, `docs/deployment/runbooks.md`, `docs/deployment/deployment-modes.md`, `docs/deployment/react-ui.md`, `docs/deployment/kubernetes.md` (image hardening / Python web proxy); migration-env changes additionally `docs/deployment/database-migrations.md`, S3 changes `docs/deployment/object-storage.md`, collaboration profile or proxy changes `docs/deployment/editor-collaboration.md` |
 | `deploy/helm/inqtrix/**` (Helm chart, values, templates) | `docs/deployment/kubernetes.md`, `docs/deployment/deployment-modes.md`; migration role/Secret changes additionally `docs/deployment/database-migrations.md`, object-store identity/CA changes `docs/deployment/object-storage.md`, collaboration values/templates `docs/deployment/editor-collaboration.md` |
 | `src/inqtrix/agent.py` public API | `docs/architecture/public-api.md`, `docs/architecture/overview.md` |
 | `src/inqtrix/nodes.py` | `docs/architecture/nodes.md` |
@@ -160,11 +180,14 @@ Whenever a code change alters public behaviour, update the matching `docs/**` pa
 | `src/inqtrix/evidence.py` | `docs/architecture/evidence-pipeline.md` |
 | `src/inqtrix/prompts.py` answer behaviour | `docs/architecture/evidence-pipeline.md`, `docs/architecture/nodes.md` |
 | `src/inqtrix/runtime_logging.py` forensic schemas / log tooling | `docs/observability/logging.md`, `docs/observability/forensic-cookbook.md` |
-| `apps/research-desk/**`, `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml` | `docs/deployment/react-ui.md` and, when the run-event contract changes, `docs/observability/run-events.md`; when a frontend dependency is added or changed, also regenerate `THIRD_PARTY_NOTICES.md`/`.json` per [`release-process.md`](release-process.md) (step 7) |
+| `apps/research-desk/**`, `package.json`, `package-lock.json` | `docs/deployment/react-ui.md` and, when the run-event contract changes, `docs/observability/run-events.md`; when a frontend dependency is added or changed, also regenerate `THIRD_PARTY_NOTICES.md`/`.json` per [`release-process.md`](release-process.md) (step 7) |
+| `apps/research-desk/src/styles/globals.css`, `apps/research-desk/src/motion/**`, `apps/research-desk/src/components/ui/**`, visual role or primitive changes | `apps/research-desk/DESIGN.md`; public user-visible behaviour additionally updates the relevant page under `docs/**` |
 
 **Env-var completeness rule.** [`settings-and-env.md`](../configuration/settings-and-env.md) is the single source of truth for environment variables and must list **every** variable the code reads: every `Field(alias=...)` / `validation_alias` in `settings.py` (a new `*Settings` class gets its own block), and every `os.getenv` / `os.environ` read in the server/worker bootstrap, scripts, and tests (the last under the development/test-only section). A variable may appear in a table row or in a "Further tuning" prose line, but it must appear under its exact name so the page stays greppable. The committed `.env.example` / `deploy/.env.stack.example` templates are curated starters, not the reference; keep them free of variables that no longer exist in code. Deep-dive pages (provider recipes, auth modes, logging) may show usage but link here for the definition.
 
-Maintainer notes are not a substitute for the public docs. Private decision logs describe why a change was made; `docs/**` describes the behaviour a user relies on.
+Maintainer notes are not a substitute for the public docs. Private working
+memory may retain local deliberation, while `docs/**` describes the current
+behaviour a user relies on.
 
 Public docs must stand on their own. Do not reference private memory paths, internal decision ids, or internal issue numbers from user-facing pages; rewrite the behaviour directly or link to another public `docs/**` page.
 

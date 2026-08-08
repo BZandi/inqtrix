@@ -14,6 +14,7 @@ import { ReportPanel } from '@/features/report/ReportPanel'
 import type { ResearchRunRecord } from '@/features/project/types'
 import { useLocale } from '@/i18n/LocaleProvider'
 import type { JobFilter, ResearchJob } from '../types'
+import type { ResearchSubmissionOutcome } from '../researchSubmission'
 import { ResearchRunColumn } from './ResearchRunColumn'
 
 const RESEARCH_REPORT_PANEL_ID = 'research-report-panel'
@@ -22,6 +23,7 @@ const RESEARCH_RUN_PANEL_ID = 'research-run-panel'
 type ResearchWorkspaceProps = {
   activeFilter: JobFilter
   allJobs: ResearchJob[]
+  authenticatedUserId: string | null
   cancelErrorByRunId: Record<string, string>
   cancelSubmittingRunIds: ReadonlySet<string>
   expandedJobId: string | null
@@ -34,7 +36,8 @@ type ResearchWorkspaceProps = {
   jobs: ResearchJob[]
   onActiveFilterChange: (filter: JobFilter) => void
   onCancelJob: (jobId: string) => void
-  onComposerSubmit: (request: CreateResearchRunRequest) => void
+  onAuthenticationRequired: () => void
+  onComposerSubmit: (request: CreateResearchRunRequest) => Promise<ResearchSubmissionOutcome>
   onComposerVisibleChange: (isComposerVisible: boolean) => void
   onResearchQuestionChange: (question: string) => void
   researchQuestion: string
@@ -57,6 +60,7 @@ type ResearchWorkspaceProps = {
 export function ResearchWorkspace({
   activeFilter,
   allJobs,
+  authenticatedUserId,
   cancelErrorByRunId,
   cancelSubmittingRunIds,
   expandedJobId,
@@ -66,6 +70,7 @@ export function ResearchWorkspace({
   isSubmitDisabled,
   jobs,
   onActiveFilterChange,
+  onAuthenticationRequired,
   onCancelJob,
   onComposerSubmit,
   onComposerVisibleChange,
@@ -121,6 +126,7 @@ export function ResearchWorkspace({
     <ResearchRunColumn
       activeFilter={activeFilter}
       allJobs={allJobs}
+      authenticatedUserId={authenticatedUserId}
       cancelErrorByRunId={cancelErrorByRunId}
       cancelSubmittingRunIds={cancelSubmittingRunIds}
       expandedJobId={expandedJobId}
@@ -129,6 +135,7 @@ export function ResearchWorkspace({
       isSubmitDisabled={isSubmitDisabled}
       jobs={jobs}
       onActiveFilterChange={onActiveFilterChange}
+      onAuthenticationRequired={onAuthenticationRequired}
       onCancelJob={onCancelJob}
       onComposerSubmit={onComposerSubmit}
       onComposerVisibleChange={onComposerVisibleChange}

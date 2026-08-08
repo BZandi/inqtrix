@@ -12,7 +12,8 @@ import type { InqtrixCapabilities } from './types'
 function caps(timeouts?: InqtrixCapabilities['timeouts']): InqtrixCapabilities {
   return {
     algorithms: [],
-    features: { embedding_provider: false, knowledge: false, openapi: false },
+    features: { embedding_provider: false, knowledge: false,
+    multi_stack: false, openapi: false },
     ...(timeouts ? { timeouts } : {}),
   }
 }

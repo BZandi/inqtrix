@@ -8,13 +8,34 @@ The release process is maintainer-owned. This page exists so contributors know w
 
 The repository is marked experimental and is at `0.2.0`, a placeholder. The version is defined once as `__version__` in `src/inqtrix/__init__.py`; `pyproject.toml` derives the package version from it (Hatchling dynamic version). No version has been tagged or published yet. A formal release process — signing, PyPI publication, GitHub Releases, change categorisation — is a dedicated follow-up task.
 
+## Automation status
+
+Source-controlled GitHub Actions automation is intentionally disabled. There
+are no active workflow YAML files under `.github/workflows`; the previous CI
+and image-release definitions are retained byte-for-byte as non-executable
+audit snapshots in
+[`docs/archive/github-actions/`](../archive/github-actions/README.md).
+
+The archived definitions are not an alternative execution path and must not be
+restored unchanged. Reactivation requires a separate review of triggers,
+least-privilege permissions, immutable source and image digests, per-platform
+scanning, protected release approval, and required-check configuration. This
+source-tree status does not assert that repository-level GitHub Actions
+settings are disabled or that queued, running, or historical runs have been
+administratively blocked.
+
 ## Bumping the version
 
 The version lives in **one place**: `__version__` in [`src/inqtrix/__init__.py`](../../src/inqtrix/__init__.py). `pyproject.toml` declares `dynamic = ["version"]` with a `[tool.hatch.version]` source pointing at that file, so Hatchling derives the package version (and the wheel metadata) from that single line. Verify with:
 
 ```bash
+# uv
 uv run python -c "import inqtrix; print(inqtrix.__version__)"
 uv run python -c "from importlib.metadata import version; print(version('inqtrix'))"
+
+# or, after `python -m pip install -e .`
+python -c "import inqtrix; print(inqtrix.__version__)"
+python -c "from importlib.metadata import version; print(version('inqtrix'))"
 ```
 
 A few surfaces cannot read the Python version and are bumped by hand:
@@ -24,7 +45,8 @@ A few surfaces cannot read the Python version and are bumped by hand:
 3. **`apps/research-desk/package.json`**: the React app's `version` (npm; internal and not user-facing, but keep it in sync for tidiness).
 4. **Docs prose** that names the number: this page's *Today's state* and [`docs/reference/changelog.md`](../reference/changelog.md).
 
-There is no CI or release pipeline (the repository is local-only and experimental), so the version is bumped manually at milestones.
+There is currently no active source-controlled CI or release pipeline, so the
+version is bumped manually at milestones.
 
 ## What contributors can do
 
@@ -42,13 +64,24 @@ There is no CI or release pipeline (the repository is local-only and experimenta
 6. Publish to PyPI if applicable (`uv build`, inspection, `uv publish`).
 7. Refresh and verify third-party notices before packaging distributable assets:
    ```bash
-   uv sync --all-extras --dev
-   pnpm install
+   # Locked uv release environment
+   uv sync --all-extras
+   npm ci
    uv run python scripts/generate_third_party_notices.py
    uv run python scripts/generate_third_party_notices.py --check
+
+   # The generator itself also runs in a standard pip environment:
+   python -m pip install -e ".[dev]"
+   python scripts/generate_third_party_notices.py
+   python scripts/generate_third_party_notices.py --check
    ```
 
-Automating this workflow is explicitly out of scope today.
+   The uv path remains authoritative for refreshing `uv.lock`; the plain
+   Python commands document that the project scripts do not require uv as
+   their runtime.
+
+Automated release publication remains disabled and is explicitly out of scope
+until the reactivation review described above has been completed.
 
 ## Related docs
 

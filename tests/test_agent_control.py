@@ -343,6 +343,9 @@ async def test_approve_decision_resumes_run_and_audits(
             for event in subscription.replay
             if event["type"] == "inqtrix.agent.approval.decided"
         )
+        assert decision_event["data"]["decided_by_user_id"] == str(
+            PRINCIPAL.user_id
+        )
         resumed_event = next(
             event
             for event in subscription.replay
@@ -1859,6 +1862,10 @@ async def test_runtime_control_write_revalidates_effective_actor_after_revoke(
             )
     finally:
         release.set()
+        _wait_until(
+            lambda: run_store.get(run_id, visible_to=VISIBLE)["status"]
+            == "failed"
+        )
 
 
 @pytest.mark.asyncio

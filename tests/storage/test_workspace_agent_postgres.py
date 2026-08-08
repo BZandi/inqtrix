@@ -32,16 +32,14 @@ from inqtrix.storage.db import build_engine, build_session_factory
 from inqtrix.storage.migrate import run_migrations
 from tests.agents.test_workspace_agent import (
     FakeSearch,
+    RESEARCH_PLAN,
     ScriptedLLM,
     fake_child_graph,
 )
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -120,6 +118,10 @@ def test_park_resume_checkpoint_roundtrip_on_postgres(pg_agent_client):
     """Full arc on the durable backend: PostgresSaver checkpoint, park,
     R9 decide-in-transaction resume, memo artifact, child run."""
     client = pg_agent_client
+    # Keep the child-producing plan explicit. The shared ScriptedLLM default
+    # intentionally exercises the lightweight web_instant path, while this
+    # durable contract needs a real child run across the park/resume boundary.
+    client.llm.scripts["ExecutionPlanModel"] = RESEARCH_PLAN
     with client:
         response = client.post(
             "/v1/runs",
@@ -127,6 +129,7 @@ def test_park_resume_checkpoint_roundtrip_on_postgres(pg_agent_client):
                 "question": "Erstelle eine Marktanalyse.",
                 "mode": "workspace_agent",
                 "session_id": "sess-pg",
+                "tool_directives": ["web_research"],
             },
         )
         assert response.status_code == 202, response.text

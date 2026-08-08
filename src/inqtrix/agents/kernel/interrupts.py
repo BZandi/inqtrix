@@ -1,4 +1,4 @@
-"""Kernel interrupt translation (plan M2 step 3/5, `2.3`).
+"""Kernel interrupt translation.
 
 Two interrupt ORIGINS, one outer machinery (park -> control rows ->
 decide/answer -> wake -> resume-from-rows, rule R5):

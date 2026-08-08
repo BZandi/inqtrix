@@ -3,15 +3,40 @@ import {
   cancelIndexingJob,
   hasHttpStatus,
   listIndexingJobs,
+  resumeIndexingJob,
+  resumeIndexingJobWithoutContext,
   startIndexingJob,
   streamIndexingJobEvents,
 } from '@/api/inqtrixClient'
 import {
+  currentIndexingJobs,
+  indexingJobDisposition,
   isTerminalIndexingStatus,
+  type ActiveIndexingJobStatus,
   type IndexingJobEvent,
   type IndexingJobSnapshot,
   type IndexingJobSummary,
+  type PausedIndexingJobStatus,
 } from './indexingTypes'
+
+export type IndexingPauseView = {
+  completedDocuments: number
+  currentBatch: number
+  generationId: string | null
+  jobId: string
+  message: string
+  phase: string
+  status: 'paused_dependency' | 'paused_validation'
+  totalBatches: number
+  totalDocuments: number
+}
+
+export type IndexingMemberProgressView = {
+  currentBatch?: number
+  phase?: string
+  status: 'queued' | 'running' | 'cancelling'
+  totalBatches?: number
+}
 
 /**
  * Drives the server-backed reindex lifecycle, mirroring
@@ -24,10 +49,20 @@ import {
  */
 type IndexingCallbacks = {
   onCancelled: (collectionId: string) => void
-  onComplete: (collectionId: string) => void
+  onComplete: (
+    collectionId: string,
+    summary: IndexingJobSummary,
+  ) => void
   /** A single document finished embedding (server document id) — flips just
    * that file's row live, so a re-embed no longer flips all files together. */
   onDocumentCompleted: (collectionId: string, documentId: string) => void
+  /** Stable document identity precedes all phase events for that document. */
+  onDocumentStarted: (collectionId: string, documentId: string) => void
+  onDocumentProgress: (
+    collectionId: string,
+    documentId: string,
+    progress: IndexingMemberProgressView,
+  ) => void
   onError: (collectionId: string, message: string) => void
   onProgress: (
     collectionId: string,
@@ -36,11 +71,20 @@ type IndexingCallbacks = {
     currentDocumentTitle?: string,
   ) => void
   onQueued: (collectionId: string, queuePosition: number | null) => void
+  onPaused?: (collectionId: string, pause: IndexingPauseView) => void
+  onReadyRaw?: (collectionId: string, jobId: string) => void
+  onResumed?: (
+    collectionId: string,
+    jobId: string,
+    totalDocuments: number,
+  ) => void
+  onSuperseded?: (collectionId: string, jobId: string) => void
   onStart: (
     collectionId: string,
     jobId: string,
     totalDocuments: number,
-    status: 'cancelling' | 'queued' | 'running',
+    status: ActiveIndexingJobStatus | PausedIndexingJobStatus,
+    summary: IndexingJobSummary,
   ) => void
 }
 
@@ -63,25 +107,38 @@ export function useIndexingJobApi({
   onCancelled,
   onComplete,
   onDocumentCompleted,
+  onDocumentProgress,
+  onDocumentStarted,
   onError,
   onProgress,
   onQueued,
+  onPaused,
+  onReadyRaw,
+  onResumed,
   onStart,
+  onSuperseded,
   refreshToken = 0,
   sessionAuthed,
   workspaceId,
 }: UseIndexingJobApiOptions) {
   const streamsRef = useRef(new Map<string, AbortController>())
   const jobCollectionRef = useRef(new Map<string, string>())
+  const jobSummaryRef = useRef(new Map<string, IndexingJobSummary>())
   const lastProgressRef = useRef(new Map<string, number>())
   const callbacksRef = useRef<IndexingCallbacks>({
     onCancelled,
     onComplete,
     onDocumentCompleted,
+    onDocumentProgress,
+    onDocumentStarted,
     onError,
     onProgress,
     onQueued,
+    onPaused,
+    onReadyRaw,
+    onResumed,
     onStart,
+    onSuperseded,
   })
 
   useEffect(() => {
@@ -89,16 +146,37 @@ export function useIndexingJobApi({
       onCancelled,
       onComplete,
       onDocumentCompleted,
+      onDocumentProgress,
+      onDocumentStarted,
       onError,
       onProgress,
       onQueued,
+      onPaused,
+      onReadyRaw,
+      onResumed,
       onStart,
+      onSuperseded,
     }
-  }, [onCancelled, onComplete, onDocumentCompleted, onError, onProgress, onQueued, onStart])
+  }, [
+    onCancelled,
+    onComplete,
+    onDocumentCompleted,
+    onDocumentProgress,
+    onDocumentStarted,
+    onError,
+    onPaused,
+    onProgress,
+    onQueued,
+    onReadyRaw,
+    onResumed,
+    onStart,
+    onSuperseded,
+  ])
 
   const handleEvent = useCallback((event: IndexingJobEvent) => {
     const collectionId = jobCollectionRef.current.get(event.job_id)
-    if (!collectionId) return
+    const summary = jobSummaryRef.current.get(event.job_id)
+    if (!collectionId || !summary) return
     const snapshot = (event.data?.snapshot ?? {}) as IndexingJobSnapshot
     const emitProgress = () =>
       callbacksRef.current.onProgress(
@@ -121,7 +199,7 @@ export function useIndexingJobApi({
       // tick may have been dropped by the throttle, and the history entry
       // reads the live counts when it is recorded.
       emitProgress()
-      callbacksRef.current.onComplete(collectionId)
+      callbacksRef.current.onComplete(collectionId, summary)
     } else if (event.type === 'inqtrix.index.failed') {
       emitProgress()
       const error = (event.data?.error ?? {}) as { message?: string }
@@ -135,6 +213,36 @@ export function useIndexingJobApi({
         collectionId,
         typeof position === 'number' ? position : null,
       )
+    } else if (
+      event.type === 'inqtrix.index.paused_dependency'
+      || event.type === 'inqtrix.index.paused_validation'
+    ) {
+      emitProgress()
+      const error = (event.data?.error ?? {}) as { message?: string }
+      callbacksRef.current.onPaused?.(collectionId, {
+        completedDocuments: snapshot.completed_documents ?? 0,
+        currentBatch: snapshot.current_batch ?? 0,
+        generationId: null,
+        jobId: event.job_id,
+        message: error.message ?? 'Indizierung wurde pausiert.',
+        phase: snapshot.phase ?? 'paused',
+        status: event.type.endsWith('paused_dependency')
+          ? 'paused_dependency'
+          : 'paused_validation',
+        totalBatches: snapshot.total_batches ?? 0,
+        totalDocuments: snapshot.total_documents ?? 0,
+      })
+    } else if (event.type === 'inqtrix.index.resumed') {
+      emitProgress()
+      callbacksRef.current.onResumed?.(
+        collectionId,
+        event.job_id,
+        snapshot.total_documents ?? 0,
+      )
+    } else if (event.type === 'inqtrix.index.superseded') {
+      callbacksRef.current.onSuperseded?.(collectionId, event.job_id)
+    } else if (event.type === 'inqtrix.index.ready_raw_by_user_choice') {
+      callbacksRef.current.onReadyRaw?.(collectionId, event.job_id)
     } else if (event.type === 'inqtrix.index.document_completed') {
       // Per-document flip — NOT throttled (each file should land) and it carries
       // no counts, so it never touches the progress bar.
@@ -142,23 +250,97 @@ export function useIndexingJobApi({
       if (typeof documentId === 'string') {
         callbacksRef.current.onDocumentCompleted(collectionId, documentId)
       }
+    } else if (event.type === 'inqtrix.index.document_started') {
+      const documentId = event.data?.document_id
+      if (typeof documentId === 'string') {
+        callbacksRef.current.onDocumentStarted(collectionId, documentId)
+      }
+    } else if (event.type === 'inqtrix.index.document_progress') {
+      const documentId = event.data?.document_id
+      const phase = event.data?.phase
+      if (typeof documentId === 'string' && typeof phase === 'string') {
+        callbacksRef.current.onDocumentProgress(collectionId, documentId, {
+          currentBatch: typeof event.data?.current_batch === 'number'
+            ? event.data.current_batch
+            : 0,
+          phase,
+          status: 'running',
+          totalBatches: typeof event.data?.total_batches === 'number'
+            ? event.data.total_batches
+            : 0,
+        })
+      }
     }
   }, [])
 
   const startStream = useCallback((summary: IndexingJobSummary) => {
     jobCollectionRef.current.set(summary.job_id, summary.collection_id)
+    jobSummaryRef.current.set(summary.job_id, summary)
     if (streamsRef.current.has(summary.job_id)) return
+    // Hydrate the one current projection before attaching after its cursor.
+    // Historical SSE frames are audit history, not new UI transitions.
+    callbacksRef.current.onProgress(
+      summary.collection_id,
+      summary.completed_documents,
+      summary.total_documents,
+      summary.snapshot.current_document_title,
+    )
+    for (const documentId of summary.checkpoint.completed_document_ids ?? []) {
+      callbacksRef.current.onDocumentCompleted(
+        summary.collection_id,
+        documentId,
+      )
+    }
+    for (const [documentId, progress] of Object.entries(
+      summary.checkpoint.document_progress ?? {},
+    )) {
+      callbacksRef.current.onDocumentProgress(
+        summary.collection_id,
+        documentId,
+        {
+          currentBatch: progress.current_batch ?? 0,
+          phase: progress.phase ?? 'preparing',
+          status: 'running',
+          totalBatches: progress.total_batches ?? 0,
+        },
+      )
+    }
+    const disposition = indexingJobDisposition(summary.status)
+    if (disposition.kind === 'paused') {
+      callbacksRef.current.onPaused?.(summary.collection_id, {
+        completedDocuments: summary.completed_documents,
+        currentBatch: summary.current_batch,
+        generationId: summary.generation_id,
+        jobId: summary.job_id,
+        message: summary.error?.message ?? 'Indizierung wurde pausiert.',
+        phase: summary.phase,
+        status: disposition.status,
+        totalBatches: summary.total_batches,
+        totalDocuments: summary.total_documents,
+      })
+      return
+    }
     if (isTerminalIndexingStatus(summary.status)) {
-      // Terminal already (resume of a finished job): reflect the outcome.
-      if (summary.status === 'completed') {
-        callbacksRef.current.onComplete(summary.collection_id)
-      } else if (summary.status === 'failed') {
+      // Terminal already (resume of a finished job): reflect the exact outcome.
+      if (disposition.kind === 'completed') {
+        callbacksRef.current.onComplete(summary.collection_id, summary)
+      } else if (disposition.kind === 'failed') {
         callbacksRef.current.onError(
           summary.collection_id,
           summary.error?.message ?? 'Indizierung fehlgeschlagen.',
         )
-      } else if (summary.status === 'cancelled') {
+      } else if (disposition.kind === 'cancelled') {
         callbacksRef.current.onCancelled(summary.collection_id)
+      } else if (disposition.kind === 'superseded') {
+        callbacksRef.current.onSuperseded?.(
+          summary.collection_id,
+          summary.job_id,
+        )
+      } else if (disposition.kind === 'ready_raw') {
+        callbacksRef.current.onReadyRaw?.(
+          summary.collection_id,
+          summary.job_id,
+        )
       }
       return
     }
@@ -167,6 +349,9 @@ export function useIndexingJobApi({
     const collectionId = summary.collection_id
     void streamIndexingJobEvents(summary.events_url, {
       apiKey,
+      lastEventId: summary.last_event_sequence == null
+        ? undefined
+        : String(summary.last_event_sequence),
       signal: controller.signal,
       workspaceId,
       onEvent: handleEvent,
@@ -191,7 +376,8 @@ export function useIndexingJobApi({
       collectionId,
       summary.job_id,
       summary.total_documents,
-      activeStatus(summary.status),
+      requireActiveStatus(summary.status),
+      summary,
     )
     startStream(summary)
     return summary
@@ -204,31 +390,70 @@ export function useIndexingJobApi({
     startStream(summary)
   }, [apiKey, startStream, workspaceId])
 
-  useEffect(() => {
-    if (!enabled) {
-      for (const controller of streamsRef.current.values()) controller.abort()
-      streamsRef.current.clear()
-      jobCollectionRef.current.clear()
-      lastProgressRef.current.clear()
-      return undefined
+  const resumeReindex = useCallback(async (jobId: string) => {
+    const summary = await resumeIndexingJob(jobId, { apiKey, workspaceId })
+    const disposition = indexingJobDisposition(summary.status)
+    if (disposition.kind === 'active') {
+      callbacksRef.current.onResumed?.(
+        summary.collection_id,
+        summary.job_id,
+        summary.total_documents,
+      )
     }
-    let ignore = false
+    startStream(summary)
+    return summary
+  }, [apiKey, startStream, workspaceId])
+
+  const resumeRawReindex = useCallback(async (jobId: string) => {
+    const summary = await resumeIndexingJobWithoutContext(jobId, {
+      apiKey,
+      workspaceId,
+    })
+    const disposition = indexingJobDisposition(summary.status)
+    if (disposition.kind === 'active') {
+      callbacksRef.current.onResumed?.(
+        summary.collection_id,
+        summary.job_id,
+        summary.total_documents,
+      )
+    }
+    startStream(summary)
+    return summary
+  }, [apiKey, startStream, workspaceId])
+
+  useEffect(() => {
+    // Authentication and workspace changes invalidate the authority of every
+    // open stream. A user-invalidation refresh does not: aborting here for
+    // every refresh can race the terminal frame that triggered the refresh.
     for (const controller of streamsRef.current.values()) controller.abort()
     streamsRef.current.clear()
+    jobCollectionRef.current.clear()
+    jobSummaryRef.current.clear()
+    lastProgressRef.current.clear()
+  }, [apiKey, enabled, sessionAuthed, workspaceId])
 
+  useEffect(() => {
+    if (!enabled) return undefined
+    let ignore = false
     async function hydrate() {
       try {
         const jobs = await listIndexingJobs({ apiKey, workspaceId })
         if (ignore) return
-        for (const summary of jobs) {
-          if (!isTerminalIndexingStatus(summary.status)) {
+        for (const summary of currentIndexingJobs(jobs)) {
+          const disposition = indexingJobDisposition(summary.status)
+          if (disposition.kind === 'active' || disposition.kind === 'paused') {
             callbacksRef.current.onStart(
               summary.collection_id,
               summary.job_id,
               summary.total_documents,
-              activeStatus(summary.status),
+              disposition.status,
+              summary,
             )
           }
+          // Terminal summaries are intentionally projected too. They repair a
+          // terminal event lost to navigation, reconnect, or an invalidation
+          // arriving at the same instant; reducers make duplicate terminals
+          // idempotent.
           startStream(summary)
         }
       } catch (error) {
@@ -254,15 +479,19 @@ export function useIndexingJobApi({
     }
   }, [])
 
-  return { cancelReindex, startReindex }
+  return { cancelReindex, resumeRawReindex, resumeReindex, startReindex }
 }
 
 function messageFromError(error: unknown) {
   return error instanceof Error ? error.message : 'Inqtrix request failed.'
 }
 
-function activeStatus(status: IndexingJobSummary['status']): 'cancelling' | 'queued' | 'running' {
-  if (status === 'cancelling') return 'cancelling'
-  if (status === 'queued') return 'queued'
-  return 'running'
+function requireActiveStatus(
+  status: IndexingJobSummary['status'],
+): ActiveIndexingJobStatus {
+  const disposition = indexingJobDisposition(status)
+  if (disposition.kind !== 'active') {
+    throw new Error(`Indexing job did not start: ${status}`)
+  }
+  return disposition.status
 }

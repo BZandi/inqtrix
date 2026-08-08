@@ -21,8 +21,11 @@ from inqtrix.core.context import RunContext, RuntimeContext
 from inqtrix.core.results import RunRequest
 from inqtrix.knowledge.algorithm import KnowledgeAlgorithm
 from inqtrix.knowledge.grounding import (
+    GROUNDING_MARKER_FORMAT_REPAIRED,
     GROUNDING_MARKER_FALLBACK,
     GROUNDING_MARKER_PARSED,
+    GroundingFailureCode,
+    GroundingStatus,
     check_grounding,
 )
 from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
@@ -57,6 +60,8 @@ def test_verified_quote_and_stripped_answer():
     )
     report = check_grounding(content, EVIDENCE)
     assert report.marker == GROUNDING_MARKER_PARSED
+    assert report.status is GroundingStatus.VERIFIED
+    assert report.publishable is True
     assert report.answer == "Die Haftung ist begrenzt [K1]."
     assert [(q.label, q.verified) for q in report.quotes] == [("K1", True)]
 
@@ -125,6 +130,10 @@ def test_paraphrase_is_visibly_unverified():
     )
     report = check_grounding(content, EVIDENCE)
     assert report.marker == GROUNDING_MARKER_PARSED
+    assert report.status is GroundingStatus.REJECTED_QUOTE
+    assert report.failure_code is GroundingFailureCode.QUOTE_UNVERIFIED
+    assert report.answer == ""
+    assert report.publishable is False
     assert report.quotes[0].verified is False
 
 
@@ -133,29 +142,34 @@ def test_out_of_range_label_is_unverified():
     report = check_grounding(content, EVIDENCE)
     assert report.quotes[0].label == "K7"
     assert report.quotes[0].verified is False
+    assert report.status is GroundingStatus.REJECTED_QUOTE
 
 
-def test_missing_answer_section_falls_back_to_full_content():
+def test_missing_answer_section_is_not_publishable():
     content = "Eine Antwort ohne das verlangte Format [K1]."
     report = check_grounding(content, EVIDENCE)
     assert report.marker == GROUNDING_MARKER_FALLBACK
-    assert report.answer == content
+    assert report.status is GroundingStatus.REJECTED_FORMAT
+    assert report.failure_code is GroundingFailureCode.FORMAT_INVALID
+    assert report.answer == ""
     assert report.quotes == []
 
 
-def test_answer_section_without_quotes_falls_back_but_strips():
+def test_answer_section_without_quotes_is_not_publishable():
     content = "ZITATE:\n\nANTWORT:\nNur die Antwort [K1]."
     report = check_grounding(content, EVIDENCE)
     assert report.marker == GROUNDING_MARKER_FALLBACK
-    assert report.answer == "Nur die Antwort [K1]."
+    assert report.answer == ""
+    assert report.status is GroundingStatus.REJECTED_FORMAT
 
 
 def test_empty_answer_after_separator_is_a_visible_fallback():
     """Truncated completions must not masquerade as clean parses."""
     content = 'ZITATE:\n[K1] "Die Haftung"\nANTWORT:\n'
     report = check_grounding(content, EVIDENCE)
-    assert report.answer == content
+    assert report.answer == ""
     assert report.marker == GROUNDING_MARKER_FALLBACK
+    assert report.status is GroundingStatus.REJECTED_FORMAT
     assert report.quotes == []
 
 
@@ -168,6 +182,32 @@ def test_bold_separator_and_crlf_are_tolerated():
     assert report.marker == GROUNDING_MARKER_PARSED
     assert report.quotes[0].verified is True
     assert report.answer == 'Die Haftung ist begrenzt [K1].' 
+
+
+def test_missing_zitate_header_is_rejected_even_with_a_valid_quote_line():
+    report = check_grounding(
+        '[K1] "Die Haftung ist auf den Auftragswert begrenzt."\n'
+        "ANTWORT:\nAntwort [K1].",
+        EVIDENCE,
+    )
+
+    assert report.status is GroundingStatus.REJECTED_FORMAT
+    assert report.quotes == []
+    assert report.answer == ""
+
+
+def test_one_bounded_markdown_heading_repair_is_audited():
+    report = check_grounding(
+        "### ZITATE:\n"
+        '[K1] "Die Haftung ist auf den Auftragswert begrenzt."\n'
+        "### ANTWORT:\nAntwort [K1].",
+        EVIDENCE,
+    )
+
+    assert report.status is GroundingStatus.VERIFIED
+    assert report.marker == GROUNDING_MARKER_FORMAT_REPAIRED
+    assert report.format_repaired is True
+    assert report.answer == "Antwort [K1]."
 
 
 # ------------------------------------------------------------------ #
@@ -271,6 +311,9 @@ def test_grounded_answer_is_verified_stripped_and_evented():
     assert "ZITATE:" in llm.prompts[0]
     state = result.raw["result_state"]["knowledge_grounding"]
     assert state["marker"] == GROUNDING_MARKER_PARSED
+    assert state["status"] == GroundingStatus.VERIFIED.value
+    assert state["failure_code"] is None
+    assert state["format_repaired"] is False
     assert state["quotes_total"] == 1
     assert state["quotes_verified"] == 1
     assert state["quotes"][0]["verified"] is True
@@ -283,13 +326,16 @@ def test_grounded_answer_is_verified_stripped_and_evented():
     assert grounding_events == [
         {
             "marker": GROUNDING_MARKER_PARSED,
+            "status": GroundingStatus.VERIFIED.value,
+            "failure_code": None,
+            "format_repaired": False,
             "quotes_total": 1,
             "quotes_verified": 1,
         }
     ]
 
 
-def test_unverified_quote_warns_but_answers(caplog):
+def test_unverified_quote_fails_closed_with_safe_visible_reason(caplog):
     llm = GroundedLLM(
         "ZITATE:\n"
         '[K1] "Die Haftung wurde komplett ausgeschlossen."\n'
@@ -303,13 +349,26 @@ def test_unverified_quote_warns_but_answers(caplog):
     with caplog.at_level(logging.WARNING, logger="inqtrix"):
         result = run_question(algorithm, runtime, context)
 
-    assert result.answer == "Antwort [K1]."
+    assert "nicht veröffentlicht" in result.answer
+    assert "Antwort [K1]." not in result.answer
+    assert result.successful is False
+    assert result.terminal_failure is not None
+    assert (
+        result.terminal_failure.type
+        == GroundingFailureCode.QUOTE_UNVERIFIED.value
+    )
     state = result.raw["result_state"]["knowledge_grounding"]
     assert state["quotes_verified"] == 0
+    assert state["status"] == GroundingStatus.REJECTED_QUOTE.value
+    assert (
+        state["failure_code"]
+        == GroundingFailureCode.QUOTE_UNVERIFIED.value
+    )
+    assert result.raw["result_state"]["answer"] == result.answer
     assert any("Knowledge-Grounding" in m for m in caplog.messages)
 
 
-def test_unparseable_shape_falls_back_loudly(caplog):
+def test_unparseable_shape_fails_closed_loudly(caplog):
     llm = GroundedLLM("Antwort ohne Format [K1].")
     algorithm, context, runtime, events = make_algorithm(
         llm, grounding_enabled=True
@@ -318,15 +377,29 @@ def test_unparseable_shape_falls_back_loudly(caplog):
     with caplog.at_level(logging.WARNING, logger="inqtrix"):
         result = run_question(algorithm, runtime, context)
 
-    assert result.answer == "Antwort ohne Format [K1]."
+    assert "nicht veröffentlicht" in result.answer
+    assert "Antwort ohne Format [K1]." not in result.answer
+    assert result.successful is False
+    assert result.terminal_failure is not None
+    assert (
+        result.terminal_failure.type
+        == GroundingFailureCode.FORMAT_INVALID.value
+    )
     state = result.raw["result_state"]["knowledge_grounding"]
     assert state["marker"] == GROUNDING_MARKER_FALLBACK
-    assert any(GROUNDING_MARKER_FALLBACK in m for m in caplog.messages)
+    assert state["status"] == GroundingStatus.REJECTED_FORMAT.value
+    assert any("knowledge_grounding_format_invalid" in m for m in caplog.messages)
     assert [
-        payload["marker"]
+        (payload["marker"], payload["status"], payload["failure_code"])
         for event, payload in events
         if event == "inqtrix.knowledge.grounding.checked"
-    ] == [GROUNDING_MARKER_FALLBACK]
+    ] == [
+        (
+            GROUNDING_MARKER_FALLBACK,
+            GroundingStatus.REJECTED_FORMAT.value,
+            GroundingFailureCode.FORMAT_INVALID.value,
+        )
+    ]
 
 
 def test_grounding_off_restores_plain_prompt_and_passthrough():

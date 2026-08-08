@@ -34,6 +34,7 @@ from inqtrix.auth.principal import (
     AuthProvider,
     NoneAuthProvider,
     Principal,
+    UserContext,
 )
 from inqtrix.auth.identity_memory import MemoryIdentityStore
 from inqtrix.auth.permissions import AuthorizationService
@@ -452,6 +453,38 @@ def test_chat_admission_and_recording(tmp_path, monkeypatch):
         assert blocked.json()["error"]["dimension"] == "llm_tokens"
 
 
+def test_chat_terminal_failure_records_consumed_tokens(tmp_path, monkeypatch):
+    rejected = minimal_agent_result(answer="rejected model completion")
+    rejected["result_state"]["_terminal_failure"] = {
+        "type": "knowledge_grounding_quote_unverified",
+        "message": "Die Wissensantwort konnte nicht sicher belegt werden.",
+    }
+    monkeypatch.setattr(
+        "inqtrix.research.web_research.run_web_graph",
+        lambda *a, **k: rejected,
+    )
+    client, container = make_quota_client(
+        tmp_path, QuotaSettings(enabled=True, llm_tokens_default=100_000)
+    )
+
+    with client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "Hallo?"}]},
+            headers={SUB_HEADER: USER_A},
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "error": {
+            "message": "Die Wissensantwort konnte nicht sicher belegt werden.",
+            "type": "knowledge_grounding_quote_unverified",
+        }
+    }
+    assert "rejected model completion" not in response.text
+    assert used(container, USER_A, QuotaDimension.LLM_TOKENS) == 18
+
+
 # --------------------------------------------------------------------------- #
 # HTTP: editor + text (LLM_TOKENS estimate)
 # --------------------------------------------------------------------------- #
@@ -620,6 +653,98 @@ def test_files_admission_blocks_when_full(tmp_path):
         assert blocked.status_code == 429
         assert blocked.json()["error"]["dimension"] == "stored_bytes"
         assert used(container, USER_A, QuotaDimension.STORED_BYTES) == 160
+
+
+def test_bound_upload_replay_repairs_at_full_quota_without_second_charge(
+    tmp_path,
+):
+    client, container = make_quota_client(
+        tmp_path, QuotaSettings(enabled=True, stored_bytes_default=10)
+    )
+    user_id = _user_id(USER_A)
+    principal = Principal(
+        user_id=user_id,
+        kind="oidc_session",
+        tenant_id="default",
+        role="member",
+    )
+    visible_to = UserContext(principal=principal)
+    asyncio.run(
+        container.asset_records_service.save_section(
+            id="quota-section",
+            kind="custom",
+            title="Quota",
+            created_at=1.0,
+            updated_at=1.0,
+            caller_user_id=user_id,
+            workspace_id=None,
+            visible_to=visible_to,
+        )
+    )
+    data = {
+        "asset_id": "quota-asset",
+        "section_id": "quota-section",
+        "title": "Quota file",
+        "label": "quota",
+        "origin": "library",
+        "created_at": "1.0",
+        "updated_at": "1.0",
+    }
+    payload = b"q" * 20
+    with client:
+        first = client.post(
+            "/v1/files",
+            files={"file": ("quota.bin", payload, "application/octet-stream")},
+            data=data,
+            headers={SUB_HEADER: USER_A},
+        )
+        assert first.status_code == 202, first.text
+        first_body = first.json()
+        operation_id = first_body["upload_operation"]["operation_id"]
+        file_id = first_body["asset"]["server_file_id"]
+        assert first_body["upload_operation"]["status"] == "queued"
+        assert first_body["upload_operation"]["stage"] == "parsing"
+        assert used(container, USER_A, QuotaDimension.STORED_BYTES) == 0
+
+        claimed = (
+            container.upload_operation_service.operations.claim_for_execution(
+                operation_id, "default", allow_takeover=False
+            )
+        )
+        assert claimed is not None
+        container.upload_operation_service.execute_claimed(claimed)
+
+        terminal = client.get(
+            f"/v1/uploads/{operation_id}", headers={SUB_HEADER: USER_A}
+        )
+        assert terminal.status_code == 200, terminal.text
+        assert terminal.json()["status"] == "ready"
+        assert terminal.json()["stage"] == "ready"
+        assert used(container, USER_A, QuotaDimension.STORED_BYTES) == 20
+
+        replay = client.post(
+            "/v1/files",
+            files={"file": ("quota.bin", payload, "application/octet-stream")},
+            data={**data, "created_at": "9.0", "updated_at": "9.0"},
+            headers={SUB_HEADER: USER_A},
+        )
+        fresh = client.post(
+            "/v1/files",
+            files={"file": ("fresh.bin", b"x", "application/octet-stream")},
+            data={
+                **data,
+                "asset_id": "quota-asset-fresh",
+                "title": "Fresh",
+            },
+            headers={SUB_HEADER: USER_A},
+        )
+
+    assert replay.status_code == 200
+    assert replay.json()["id"] == file_id
+    assert replay.json()["upload_operation"]["operation_id"] == operation_id
+    assert replay.json()["upload_operation"]["status"] == "ready"
+    assert used(container, USER_A, QuotaDimension.STORED_BYTES) == 20
+    assert fresh.status_code == 429
 
 
 # --------------------------------------------------------------------------- #

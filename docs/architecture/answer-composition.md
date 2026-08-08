@@ -119,8 +119,8 @@ in short:
    length guidance, format rules.
 7. **EVIDENZ-UEBERSICHT** (always): the embedded `evidence_overview.markdown`
    from `render_evidence_ledger_overview()`.
-8. **ZITATIONS-REGELN** (always): `[E1](URL)` format, allowlist-only,
-   inline-only, no separate "Quellen" list.
+8. **ZITATIONS-REGELN** (always): inline Markdown links labelled `E1`
+   whose targets are in the allowlist, no separate "Quellen" list.
 
 The crucial property: **the full evidence overview is in every section's
 system prompt**. Sections are not given a scoped sub-overview -- the
@@ -353,7 +353,8 @@ Kontext'", `completed_headings=[]`, empty `report_so_far_summary`, empty
 `used_evidence_labels`, `section_focus_labels=[E3, E7, E12]`,
 `synthesizing_existing=False`.
 
-LLM output (synthetic): "Die GKV-Reformkommission hat im April 2026 ... [E3](URL)... [E12](URL)..."
+LLM output (synthetic): "Die GKV-Reformkommission hat im April 2026 ..."
+with inline citations labelled `E3` and `E12` at their allowlisted source URLs.
 → `used_evidence_labels={E3, E7, E12}` after `_extract_evidence_labels`.
 
 ### Call 2 — Analyse (display 3/6)

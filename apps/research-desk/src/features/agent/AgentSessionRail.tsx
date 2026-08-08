@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 
-import { FolderPlus, Pin, PinOff, SquarePen, Trash2 } from '@/components/icons'
+import { FolderPlus, Pin, PinOff, RotateCcw, SquarePen, Trash2 } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import {
   ExplorerFolderRow,
@@ -34,6 +34,7 @@ export function AgentSessionRail({
   onCreateSessionGroup,
   onDeleteSession,
   onRenameSession,
+  onRetrySessionDeletion,
   onSelectSession,
   onTogglePinnedSession,
   pinnedSessionIds,
@@ -49,6 +50,7 @@ export function AgentSessionRail({
   onCreateSessionGroup: () => void
   onDeleteSession: (sessionId: string) => void
   onRenameSession: (sessionId: string, title: string) => void
+  onRetrySessionDeletion: (sessionId: string) => void
   onSelectSession: (sessionId: string) => void
   onTogglePinnedSession: (sessionId: string) => void
   pinnedSessionIds: readonly string[]
@@ -120,13 +122,19 @@ export function AgentSessionRail({
     const isPinned = pinnedSessionIds.includes(session.id)
     const editing = editingSessionId === session.id
     const mutable = session.persistable !== false
+    const deleting = session.deletion?.status === 'deleting'
+    const deleteFailed = session.deletion?.status === 'delete_failed'
     const timeLabel = displayRelativeAge(
       agentSessionHistoryTimeIso(session, runs),
       locale,
     )
     return (
       <ExplorerHistoryRow
-        actions={[
+        actions={session.deletion ? (deleteFailed ? [{
+          icon: <RotateCcw className="icon-sm" />,
+          label: t.agent.sessions.retryDelete,
+          onSelect: () => onRetrySessionDeletion(session.id),
+        }] : []) : [
           {
             icon: isPinned ? <PinOff className="icon-sm" /> : <Pin className="icon-sm" />,
             label: isPinned ? t.agent.sessions.unpin : t.agent.sessions.pin,
@@ -140,8 +148,11 @@ export function AgentSessionRail({
           }] : []),
         ]}
         active={selectedSessionId === session.id}
+        disabled={Boolean(session.deletion)}
         indicator={
-          gate ? (
+          deleting ? (
+            <ExplorerRunningIndicator label={t.agent.sessions.deleting} />
+          ) : gate ? (
             <span
               aria-hidden="true"
               className="size-1.5 shrink-0 rounded-full bg-warning inqtrix-running-dot"
@@ -153,7 +164,7 @@ export function AgentSessionRail({
         key={session.id}
         nested={nested}
         onSelect={() => onSelectSession(session.id)}
-        onStartRename={mutable ? () => {
+        onStartRename={mutable && !session.deletion ? () => {
           setEditingSessionId(session.id)
           setTitleDraft(session.title)
         } : undefined}
@@ -167,8 +178,12 @@ export function AgentSessionRail({
             value={titleDraft}
           />
         ) : undefined}
-        renameLabel={mutable ? t.agent.sessions.rename : undefined}
-        timeLabel={timeLabel}
+        renameLabel={mutable && !session.deletion ? t.agent.sessions.rename : undefined}
+        timeLabel={deleting
+          ? t.agent.sessions.deleting
+          : deleteFailed
+            ? t.agent.sessions.deleteFailed
+            : timeLabel}
         title={session.title}
       />
     )

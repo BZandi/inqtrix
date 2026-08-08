@@ -33,6 +33,11 @@ from inqtrix.agents.memory_ports import AgentMemoryUnavailable
 from inqtrix.agents.markdown import normalize_agent_markdown
 from inqtrix.agents.patterns._structured import observe_structured_retries
 from inqtrix.agents.telemetry import model_retry_activity, provider_retry_activity
+from inqtrix.evidence import (
+    attach_web_search_lineage,
+    build_instant_web_search_ledger,
+    merge_web_search_ledgers,
+)
 from inqtrix.agents.clarification import (
     blocking_questions,
     build_clarification,
@@ -69,6 +74,7 @@ from inqtrix.agents.discovery import (
 )
 from inqtrix.agents.harness import run_quarantined_file_analysis
 from inqtrix.agents.intake import route_readiness, run_intake
+from inqtrix.agents.limit_contract import LIMIT_REACHED_EVENT
 from inqtrix.agents.phase_models import (
     AgentCriticFinding,
     AgentCriticReport,
@@ -205,7 +211,7 @@ class AgentPhaseState(TypedDict, total=False):
     session_id: str
     skill_point_answers: dict[str, dict[str, str]]
     """Per attached skill: point-name -> answer (from context or the
-    clarify round); feeds the {{name}} substitution (plan M3)."""
+    clarify round); feeds the {{name}} substitution."""
     skill_questions: list[dict[str, Any]]
     """Pending REQUIRED skill points for the clarify gate; emptied
     after the round (never re-asked)."""
@@ -216,7 +222,7 @@ class AgentPhaseState(TypedDict, total=False):
     """Output form of the latest completed session turn (K3 routing
     memory); '' when unknown."""
     deliverable: str
-    """The turn's output form (plan M1 S3): ``chat`` writes the
+    """The turn's output form: ``chat`` writes the
     run-local inline answer artifact, ``canvas`` the session memo.
     Decided ONCE at intake (request override > intake profile > canvas;
     a patch assignment forces canvas)."""
@@ -271,6 +277,8 @@ class AgentPhaseState(TypedDict, total=False):
     legacy_budget_notice_task_ids: list[str]
     """Legacy-budget tasks already narrated in this checkpointed run."""
     references: list[dict[str, Any]]
+    web_search_ledger: dict[str, Any]
+    """Provider search answers and citation lineage retained for the Canvas."""
     claims: list[dict[str, Any]]
     contradictions: list[dict[str, Any]]
     tool_use_counts: dict[str, int]
@@ -295,17 +303,17 @@ class AgentPhaseState(TypedDict, total=False):
 
 
 class WorkspaceAgentAlgorithm:
-    """Stufe-3 workspace agent over the platform seams (plan §4).
+    """Workspace agent over the platform seams.
 
     Args:
-        control_store: Plans/approvals/clarifications/artifacts (M4).
+        control_store: Plans, approvals, clarifications, and artifacts.
         run_service: Child research runs + the run store handle.
         resolver: Builds child ``ResolvedAgentContext``s (report
-            profiles per task, decision E18).
-        capability_registry: Read-only tool surface (M2); ``None``
+            profiles per task according to the task contract).
+        capability_registry: Read-only tool surface; ``None``
             degrades discovery/instant tools loudly per probe.
-        checkpointer: The E8 checkpointer handle (Postgres or the
-            volatile dev escape).
+        checkpointer: Postgres checkpointer or the volatile development
+            escape.
         platform: Server-side agent limits (never prompted).
     """
 
@@ -407,6 +415,11 @@ class WorkspaceAgentAlgorithm:
                 "revisions_used": 0,
                 "outcomes": {},
                 "references": [],
+                "web_search_ledger": {
+                    "schema_version": 1,
+                    "kind": "web_search_ledger",
+                    "searches": {},
+                },
                 "claims": [],
                 "contradictions": [],
                 "tool_use_counts": {"web": 0, "knowledge": 0},
@@ -527,8 +540,14 @@ class WorkspaceAgentAlgorithm:
                     "artifact_id": result_state.get("artifact_id", ""),
                     "critic_report": result_state.get("critic"),
                     "references": result_state.get("references", []),
+                    "web_search_ledger": result_state.get(
+                        "web_search_ledger", {}
+                    ),
                     "report_references": result_state.get(
                         "references", []
+                    ),
+                    "answer_claim_bindings": result_state.get(
+                        "answer_claim_bindings", []
                     ),
                     "contradictions": result_state.get(
                         "contradictions", []
@@ -646,8 +665,8 @@ class _RunDeps:
         self.editor_docs = algorithm._editor_docs
         self.memory = algorithm._memory
         # Per-user visibility, resolved ONCE per segment: the agent's
-        # tool calls must see exactly what its OWNER sees (decision E5;
-        # the M0 P0-1 precedent — visible_to=None is the historical
+        # tool calls must see exactly what its owner sees. By contract,
+        # visible_to=None is the
         # see-everything view of the anonymous/static modes only).
         self.visible_to = None
         if (
@@ -891,6 +910,55 @@ def _workspace_execution_payload(
         or deps.request.autonomy
         or deps.platform.default_autonomy
     )
+    limits: dict[str, object] = {
+        "discovery_tool_calls": {
+            "used": sum(
+                int(value or 0)
+                for value in dict(
+                    state.get("discovery_tool_use_counts") or {}
+                ).values()
+            ),
+            "limit": deps.platform.discovery_max_tool_calls,
+            "ceiling": deps.platform.discovery_max_tool_calls,
+            "recoverable": False,
+            "extendable": False,
+            "reason": "deterministic_discovery_budget",
+        },
+        "plan_tasks": {
+            "limit": deps.platform.max_plan_tasks,
+            "ceiling": deps.platform.max_plan_tasks,
+            "recoverable": False,
+            "extendable": False,
+            "reason": "validated_plan_shape",
+        },
+        "replan_rounds": {
+            "used": int(state.get("replan_rounds", 0) or 0),
+            "limit": deps.platform.max_replan_rounds,
+            "ceiling": deps.platform.max_replan_rounds,
+            "recoverable": False,
+            "extendable": False,
+            "reason": "deterministic_mission_budget",
+        },
+        "clarification_rounds": {
+            "used": int(state.get("clarification_rounds", 0) or 0),
+            "limit": deps.platform.max_clarification_rounds,
+            "ceiling": deps.platform.max_clarification_rounds,
+            "recoverable": False,
+            "extendable": False,
+            "reason": "deterministic_mission_budget",
+        },
+    }
+    token_budget = int(deps.context.token_budget or 0)
+    if token_budget > 0:
+        usage = dict(state.get("usage") or {})
+        limits["tokens"] = {
+            "used": sum(int(value or 0) for value in usage.values()),
+            "limit": token_budget,
+            "ceiling": token_budget,
+            "recoverable": False,
+            "extendable": False,
+            "reason": "operator_ceiling_exactly_once_required",
+        }
     return execution_payload(
         execution_directive=deps.request.execution_directive,
         effective_mode="workspace_agent",
@@ -905,6 +973,7 @@ def _workspace_execution_payload(
             else "permission_policy"
         ),
         tool_use_counts=dict(state.get("tool_use_counts") or {}),
+        limits=limits,
     )
 
 
@@ -964,6 +1033,30 @@ def _add_usage(state: AgentPhaseState, delta: dict[str, int]) -> None:
             "%d/%d Tokens.",
             used,
             budget,
+        )
+        deps.emit(
+            LIMIT_REACHED_EVENT,
+            {
+                "kind": "tokens",
+                "used": used,
+                "limit": budget,
+                "ceiling": budget,
+                "extendable": False,
+                "recoverable": False,
+                "reason": "operator_ceiling_exactly_once_required",
+                "state": "failed_at_node_boundary",
+            },
+        )
+        _emit_narration(
+            deps,
+            narration_id="n-limit-tokens",
+            kind="limit",
+            text=(
+                "Das feste serverseitige Tokenlimit ist erreicht. Der Lauf "
+                "wurde ohne automatische Teilantwort beendet; eine "
+                "Erweiterung ist für diesen Lauf nicht möglich."
+            ),
+            phase=str(state.get("phase", "execution") or "execution"),
         )
         deps.emit(
             ACTIVITY_EVENT,
@@ -1185,7 +1278,7 @@ def _node_intake(state: AgentPhaseState) -> AgentPhaseState:
         state["deliverable"] = "chat"
     else:
         state["deliverable"] = "canvas"
-    # Skill point check (plan M3 `3.4`), ONCE per run: what
+    # Skill point check, once per run: what
     # question+history already answer never gets asked again; missing
     # REQUIRED points queue structured questions for the clarify gate.
     if deps.skills and "skill_point_answers" not in state:
@@ -1248,6 +1341,29 @@ def _node_clarify(state: AgentPhaseState) -> AgentPhaseState:
         state["assumptions_note"] = (
             "Maximale Rueckfrage-Runden erreicht; beste Annahme verwendet."
         )
+        deps.emit(
+            LIMIT_REACHED_EVENT,
+            {
+                "kind": "clarification_rounds",
+                "used": rounds,
+                "limit": max_rounds,
+                "ceiling": max_rounds,
+                "extendable": False,
+                "recoverable": False,
+                "reason": "deterministic_mission_budget",
+                "state": "continued_with_visible_assumption",
+            },
+        )
+        _emit_narration(
+            deps,
+            narration_id="n-clarification-limit",
+            kind="limit",
+            text=(
+                "Das Rückfrage-Limit ist erreicht. Der Lauf arbeitet mit "
+                "der im Ergebnis ausdrücklich ausgewiesenen besten Annahme weiter."
+            ),
+            phase="clarification",
+        )
         return state
     profile = _profile_of(state)
     discovery = _discovery_of(state)
@@ -1270,11 +1386,13 @@ def _node_clarify(state: AgentPhaseState) -> AgentPhaseState:
         questions, dropped = filter_repeated_questions(
             questions, asked_prompts
         )
-        for prompt in dropped:
-            log.warning(
-                "Rueckfrage bereits beantwortet, uebersprungen: %s", prompt
-            )
         if dropped:
+            log.warning(
+                "Rueckfragen-Dedup hat bereits beantwortete Eintraege "
+                "uebersprungen (run=%s, count=%d).",
+                run_id,
+                len(dropped),
+            )
             _emit_narration(
                 deps,
                 narration_id=f"n-clarify-skip-{rounds}",
@@ -1285,7 +1403,7 @@ def _node_clarify(state: AgentPhaseState) -> AgentPhaseState:
                 ),
                 phase="clarification",
             )
-    # Skill point questions (plan M3 `3.4`) join the SAME round —
+    # Skill point questions join the same round —
     # appended LAST so their positional q-ids stay recoverable for the
     # answer mapping below (sanitize assigns ids by position). The
     # round cap still applies: overflowing skill questions are cut
@@ -1417,8 +1535,9 @@ def _asked_clarification_prompts(
     except Exception as exc:  # noqa: BLE001 — dedup is an enhancement
         log.warning(
             "Rueckfragen-Dedup ohne fruehere Runden (Listing schlug "
-            "fehl): %s",
-            exc,
+            "fehl; run=%s, error_type=%s).",
+            run_id,
+            type(exc).__name__,
         )
         return []
     prompts: list[str] = []
@@ -1480,7 +1599,7 @@ def _node_discovery(state: AgentPhaseState) -> AgentPhaseState:
         # Standard mode (balanced) keeps ALL web contact behind the plan
         # gate (the tasks carry their verbatim queries — that is the
         # consent surface); only Auto (autonomous) may probe the web
-        # during discovery (E16 amendment, plan M1 S7). Internal probes
+        # during discovery in autonomous mode. Internal probes
         # stay available in every mode.
         web_preview_allowed=(
             deps.platform.allow_web_discovery_preview
@@ -1493,6 +1612,32 @@ def _node_discovery(state: AgentPhaseState) -> AgentPhaseState:
         ),
     )
     state["probe_plan"] = plan.as_payload()
+    if plan.omitted_count > 0:
+        deps.emit(
+            LIMIT_REACHED_EVENT,
+            {
+                "kind": "discovery_tool_calls",
+                "used": len(plan.probes),
+                "limit": plan.limit,
+                "ceiling": plan.limit,
+                "extendable": False,
+                "recoverable": False,
+                "omitted": plan.omitted_count,
+                "reason": "deterministic_discovery_budget",
+                "state": "continued_with_visible_omission",
+            },
+        )
+        _emit_narration(
+            deps,
+            narration_id="n-discovery-limit",
+            kind="limit",
+            text=(
+                f"Das Discovery-Limit von {plan.limit} Aufrufen ist "
+                f"erreicht; {plan.omitted_count} geplante Sondierung(en) "
+                "wurden sichtbar ausgelassen."
+            ),
+            phase="discovery",
+        )
 
     if state.get("autonomy") == "strict":
         run_id = deps.context.run_id or ""
@@ -1736,7 +1881,7 @@ def _node_plan(state: AgentPhaseState) -> AgentPhaseState:
             reason=reason,
             previous_tasks=previous_tasks,
         )
-        # requires_plan matrix (plan M3 `3.5`, strictest wins): `always`
+        # requires_plan matrix (strictest wins): `always`
         # forces the gate in EVERY mode and round (the one way a skill
         # author reins in Auto), `never` frees only ROUND 0 — the E16
         # web-replan re-gate is a security consent no skill may lift.
@@ -2076,6 +2221,11 @@ def _outcome_from_persisted_task(
         for item in payload.get("claims", [])
         if isinstance(item, dict)
     ]
+    persisted_ledger = (
+        dict(payload.get("web_search_ledger"))
+        if isinstance(payload.get("web_search_ledger"), dict)
+        else {}
+    )
     persisted_usage_raw = payload.get("usage")
     persisted_usage = (
         {
@@ -2114,6 +2264,9 @@ def _outcome_from_persisted_task(
             or str(payload.get("answer_markdown") or "")
         ),
         evidence=list(base.evidence) or persisted_evidence,
+        web_search_ledger=(
+            dict(base.web_search_ledger) or persisted_ledger
+        ),
         claims=list(base.claims) or persisted_claims,
         child_run_id=task.child_run_id or base.child_run_id,
         failure_reason=failure_reason,
@@ -2130,7 +2283,15 @@ def _outcome_from_persisted_task(
 def _cancelled_task_outcome(
     spent: TaskOutcome | None = None,
 ) -> TaskOutcome:
-    """Canonical cancel projection that retains already consumed resources."""
+    """Canonical cancel projection that retains only consumed resources.
+
+    A provider result that arrives after the authoritative task row entered
+    ``cancel_requested`` must not become synthesis input.  Usage remains
+    accountable, while evidence and prose from the superseded attempt stay
+    outside the task-result projection (child runs keep their own audit
+    lineage).  Treating late evidence as an ordinary cancelled-task result
+    would let a user cancellation influence the final answer on resume.
+    """
     return TaskOutcome(
         status="cancelled",
         summary="Aufgabe auf Nutzerwunsch abgebrochen.",
@@ -2301,10 +2462,10 @@ def _fold_pending_children(
             outcome, attempt=attempt, cancelled=deps.cancelled()
         ):
             log.warning(
-                "Task %s transient fehlgeschlagen (%s) — ein Retry mit "
+                "Task %s transient fehlgeschlagen (failure_code=%s) — ein Retry mit "
                 "unveraenderten Operatorgrenzen.",
                 task_id,
-                outcome.failure_reason,
+                outcome.failure_code or "unknown",
             )
             try:
                 retry_id = _submit_child_run(
@@ -2316,9 +2477,10 @@ def _fold_pending_children(
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning(
-                    "Agent-Task %s Retry konnte nicht eingereicht werden: %s",
+                    "Agent-Task %s Retry konnte nicht eingereicht werden "
+                    "(error_type=%s).",
                     task_id,
-                    exc,
+                    type(exc).__name__,
                 )
                 outcomes[task_id] = outcome
                 _emit_task_ended(deps, task, task_id, outcome)
@@ -2460,9 +2622,9 @@ def _node_execute(state: AgentPhaseState) -> AgentPhaseState:
                 except Exception as exc:  # noqa: BLE001 — admission stays visible
                     log.warning(
                         "Agent-Task %s (web_research) konnte nicht "
-                        "eingereicht werden: %s",
+                        "eingereicht werden (error_type=%s).",
                         task.task_id,
-                        exc,
+                        type(exc).__name__,
                     )
                     outcome = TaskOutcome(
                         status="failed",
@@ -2804,8 +2966,38 @@ def _node_evidence(state: AgentPhaseState) -> AgentPhaseState:
     _set_phase(state, "evidence")
     outcomes = _outcomes_from_state(state)
     references, claims = evidence.merge_evidence(outcomes)
+    web_search_ledger = merge_web_search_ledgers(
+        [
+            outcome.web_search_ledger
+            for outcome in outcomes.values()
+            if outcome.web_search_ledger
+        ]
+    )
+    references = attach_web_search_lineage(
+        [dict(reference) for reference in references],
+        web_search_ledger,
+    )
     state["references"] = references
     state["claims"] = claims
+    state["web_search_ledger"] = web_search_ledger
+    if web_search_ledger.get("searches"):
+        _run_async(
+            deps.control.upsert_artifact(
+                run_id=deps.context.run_id or "",
+                kind="evidence_bundle",
+                session_id=None,
+                title="Agent evidence",
+                status="ready",
+                content_markdown="",
+                payload={
+                    "schema_version": 1,
+                    "web_search_ledger": web_search_ledger,
+                },
+                refs=references,
+                updated_by="agent",
+                artifact_id=f"art_{(deps.context.run_id or '')[-12:]}_evidence",
+            )
+        )
 
     consolidator = getattr(
         deps.context.strategies, "claim_consolidation", None
@@ -3374,6 +3566,19 @@ def _node_critic(state: AgentPhaseState) -> AgentPhaseState:
         else:
             state["route"] = "critic_research_exhausted"
             deps.emit(
+                LIMIT_REACHED_EVENT,
+                {
+                    "kind": "replan_rounds",
+                    "used": int(state.get("replan_rounds", 0) or 0),
+                    "limit": deps.platform.max_replan_rounds,
+                    "ceiling": deps.platform.max_replan_rounds,
+                    "extendable": False,
+                    "recoverable": False,
+                    "reason": "deterministic_mission_budget",
+                    "state": "continued_with_visible_gap",
+                },
+            )
+            deps.emit(
                 ACTIVITY_EVENT,
                 {
                     "kind": "critic_research_exhausted",
@@ -3477,7 +3682,7 @@ def _node_patch(state: AgentPhaseState) -> AgentPhaseState:
     Runs only when the request carried a ``document_id``. NO interrupt
     here — the LLM call and the control-store writes must COMMIT before
     the approval node interrupts (the plan/plan_approval split). The
-    agent NEVER applies the patch (decision E14): apply happens solely
+    agent NEVER applies the patch: apply happens solely
     through ``POST /v1/editor/patches/{id}:apply``.
     """
     deps = _deps()
@@ -3593,7 +3798,7 @@ def _node_patch(state: AgentPhaseState) -> AgentPhaseState:
 
 
 def _node_patch_approval(state: AgentPhaseState) -> AgentPhaseState:
-    """The patch approval interrupt — ALWAYS gated (decision E16).
+    """The patch approval interrupt is ALWAYS gated.
 
     Deliberately no autonomy branch: a write effect interrupts in every
     mode, including ``autonomous``. Rejection ends the run NORMALLY (the
@@ -3650,6 +3855,14 @@ def _node_finalize(state: AgentPhaseState) -> AgentPhaseState:
     memo = state.get("memo_markdown", "")
     if memo:
         _flush_deliverable(deps, state, memo, status="ready")
+        # The evidence artifact remains the complete audit ledger.  Public
+        # answer references are only those still cited after deterministic
+        # claim repair, so an unknown/attributed-only source cannot re-enter
+        # the answer through the final result projection.
+        state["references"] = synthesis.cited_references(
+            state.get("memo_markdown", ""),
+            state.get("references", []),
+        )
     critic = state.get("critic")
     if critic is not None:
         run_id = deps.context.run_id or ""
@@ -3688,45 +3901,27 @@ def _flush_deliverable(
 ) -> None:
     """Route the deliverable write to its ONE artifact channel (M1 S3).
 
-    ``chat`` writes the run-local answer artifact (simple, agent-only
-    writer); everything else stays on the session-memo path with its
-    provenance reconcile (E15/R10 untouched).
+    Canvas deliverables stay on the session-memo path with their provenance
+    reconcile (E15/R10).  Chat deliverables are deliberately not persisted
+    inside graph nodes: the native RunService publisher creates the empty
+    ``writing`` answer artifact only when the algorithm has returned its final
+    Markdown, then finalizes it immediately before ``answer.ready``.
     """
     if state.get("deliverable") == "chat":
-        _flush_answer(deps, state, body, status=status)
-    else:
-        _flush_memo(deps, state, body, status=status)
+        _ground_mission_output(deps, state, body)
+        return
+    _flush_memo(deps, state, body, status=status)
 
 
-def _flush_answer(
-    deps: "_RunDeps", state: AgentPhaseState, body: str, *, status: str
-) -> None:
-    """Write the run-local chat answer artifact (kind ``answer``).
+def _ground_mission_output(
+    deps: "_RunDeps", state: AgentPhaseState, body: str
+) -> str:
+    """Commit the already synthesized answer without a second content gate."""
 
-    Deliberately WITHOUT the memo's reconcile machinery: the answer is
-    run-local (``session_id=None`` — it never joins the session-memo
-    lineage), agent-only (the user edits chat answers by asking a
-    follow-up, not in place), and its deterministic id makes the write
-    idempotent across node re-execution.
-    """
-    run_id = deps.context.run_id or ""
-    cited_refs = synthesis.cited_references(
-        body, state.get("references", [])
-    )
-    _run_async(
-        deps.control.upsert_artifact(
-            run_id=run_id,
-            kind="answer",
-            session_id=None,
-            title=state.get("memo_title", "Antwort"),
-            status=status,
-            content_markdown=body,
-            payload={},
-            refs=cited_refs,
-            updated_by="agent",
-            artifact_id=f"art_{run_id[-12:]}_answer",
-        )
-    )
+    _ = deps
+    answer = normalize_agent_markdown(body)
+    state["memo_markdown"] = answer
+    return answer
 
 
 def _flush_memo(
@@ -3751,6 +3946,7 @@ def _flush_memo(
     * ``expected_revision`` is passed verbatim (``0`` on a fresh session)
       so a concurrently-inserted row is caught as a conflict too.
     """
+    memo = _ground_mission_output(deps, state, memo)
     run_id = deps.context.run_id or ""
     session_id = state.get("session_id") or None
     resolved_id = (
@@ -3894,7 +4090,10 @@ def _stage_memory_candidates(
             timeout=deps.timeout,
         )
     except Exception as exc:  # noqa: BLE001 - candidate generation is optional
-        log.warning("Agent memory reflection failed: %s", exc)
+        log.warning(
+            "Agent memory reflection failed (error_type=%s).",
+            type(exc).__name__,
+        )
         state["memory_status"] = "unavailable"
         deps.emit(
             ACTIVITY_EVENT,
@@ -4086,10 +4285,9 @@ def _execute_task(
             f"{exc.args[0] if exc.args else exc}"
         )
         log.warning(
-            "Agent-Task %s (%s) fehlgeschlagen: %s",
+            "Agent-Task %s (%s) fehlgeschlagen (failure_code=invalid_input).",
             task.task_id,
             task.tool_kind,
-            reason,
         )
         return TaskOutcome(
             status="failed",
@@ -4098,13 +4296,15 @@ def _execute_task(
             transient=False,
         )
     except Exception as exc:  # noqa: BLE001 — task failures stay visible
+        failure_code = _task_failure_code(exc)
         log.warning(
-            "Agent-Task %s (%s) fehlgeschlagen: %s",
+            "Agent-Task %s (%s) fehlgeschlagen "
+            "(failure_code=%s, error_type=%s).",
             task.task_id,
             task.tool_kind,
-            exc,
+            failure_code,
+            type(exc).__name__,
         )
-        failure_code = _task_failure_code(exc)
         return TaskOutcome(
             status="failed",
             failure_reason=sanitize_error(exc),
@@ -4180,9 +4380,17 @@ def _submit_child_run(
     overrides: dict[str, Any] = {"report_profile": profile}
     if task.params.get("model_tier"):
         overrides["model_tier"] = task.params["model_tier"]
-    resolved_child = deps.resolver.resolve(
-        {"mode": "research", "agent_overrides": overrides}
-    )
+    resolve_payload: dict[str, Any] = {
+        "mode": "research",
+        "agent_overrides": overrides,
+    }
+    parent_stack = getattr(deps.context, "stack_name", "") or ""
+    if parent_stack:
+        # Parity with the kernel (F7c): a mission admitted on stack X
+        # fans its research children out on the SAME provider stack, not
+        # the default stack's models/search.
+        resolve_payload["stack"] = parent_stack
+    resolved_child = deps.resolver.resolve(resolve_payload)
     question = _task_execution_question(task)
     run_id = deps.context.run_id or ""
     summary = deps.run_service.submit(
@@ -4280,6 +4488,25 @@ def _run_web_instant(deps: "_RunDeps", task: PlanTaskRecord) -> TaskOutcome:
     provider_answer = str(data.get("answer", "")).strip()
     answer = normalize_agent_markdown(provider_answer)
     sources = list(data.get("sources", []))
+    web_search_ledger = build_instant_web_search_ledger(
+        run_id=str(deps.context.run_id or ""),
+        query_id=str(data.get("query_id") or ""),
+        query=str(data.get("query") or query),
+        provider=str(data.get("provider") or ""),
+        answer=provider_answer,
+        sources=[
+            dict(source) for source in sources if isinstance(source, dict)
+        ],
+        parameters=(
+            dict(data.get("parameters"))
+            if isinstance(data.get("parameters"), dict)
+            else {}
+        ),
+        started_at=str(data.get("started_at") or ""),
+        finished_at=str(data.get("finished_at") or ""),
+        prompt_tokens=int(data.get("prompt_tokens", 0) or 0),
+        completion_tokens=int(data.get("completion_tokens", 0) or 0),
+    )
     usage = {
         "prompt_tokens": int(data.get("prompt_tokens", 0) or 0),
         "completion_tokens": int(data.get("completion_tokens", 0) or 0),
@@ -4301,13 +4528,17 @@ def _run_web_instant(deps: "_RunDeps", task: PlanTaskRecord) -> TaskOutcome:
             {
                 "url": source.get("url"),
                 "title": source.get("title"),
-                "excerpt": source.get("snippet"),
+                "provider_snippet": source.get("snippet"),
             }
             for source in sources
+            if isinstance(source, dict)
         ],
     )
+    instant_evidence = attach_web_search_lineage(
+        instant_evidence, web_search_ledger
+    )
     return TaskOutcome(
-        status="completed" if sources else "insufficient_evidence",
+        status="completed" if answer else "insufficient_evidence",
         summary=task_result_summary(
             answer
             or "; ".join(
@@ -4316,6 +4547,7 @@ def _run_web_instant(deps: "_RunDeps", task: PlanTaskRecord) -> TaskOutcome:
         ),
         answer_markdown=answer,
         evidence=instant_evidence,
+        web_search_ledger=web_search_ledger,
         usage=usage,
     )
 
@@ -4347,7 +4579,31 @@ def _run_rag_query(
     queries = _task_queries(task)
     answers: list[str] = []
     references_by_key: dict[str, dict[str, Any]] = {}
+    retrieval_warning_messages: list[str] = []
     usage_total = {"prompt_tokens": 0, "completion_tokens": 0}
+    active_query_index = 0
+
+    def _forward_knowledge_event(
+        event: str, payload: dict[str, Any]
+    ) -> None:
+        """Preserve nested Knowledge verdicts in mission/parent audit."""
+
+        if event not in {
+            "inqtrix.knowledge.grounding.checked",
+            "inqtrix.knowledge.retrieval.degraded",
+            "inqtrix.knowledge.retrieval.warning",
+        }:
+            return
+        deps.emit(
+            event,
+            {
+                **dict(payload),
+                "task_id": task.task_id,
+                "attempt": attempt,
+                "query_index": active_query_index,
+            },
+        )
+
     sub_context = RunContext(
         providers=deps.context.providers,
         strategies=deps.context.strategies,
@@ -4356,10 +4612,11 @@ def _run_rag_query(
         workspace_id=deps.context.workspace_id,
         run_id=None,
         cancel_token=deps.context.cancel_token,
-        event_sink=None,
+        event_sink=_forward_knowledge_event,
         token_budget=int(deps.context.token_budget or 0),
     )
     for index, query in enumerate(queries, start=1):
+        active_query_index = index
         activity = {
             "kind": "searching",
             "scope": "task",
@@ -4397,9 +4654,72 @@ def _run_rag_query(
                 },
             )
             raise
+        raw_state = result.raw.get("result_state", {}) or {}
+        retrieval_state = raw_state.get("knowledge_retrieval", {}) or {}
+        retrieval_degradations = list(
+            retrieval_state.get("degradations", []) or []
+        )
+        retrieval_warnings = list(retrieval_state.get("warnings", []) or [])
+        for degradation in retrieval_degradations:
+            if not isinstance(degradation, dict):
+                continue
+            message = (
+                "Die Knowledge-Suche erreichte eine technische "
+                "Kandidatengrenze und lieferte "
+                f"{int(degradation.get('returned_hits', 0) or 0)}/"
+                f"{int(degradation.get('requested_top_k', 0) or 0)} "
+                "angeforderte verifizierte Treffer; das Ergebnis ist kein "
+                "Vollständigkeitsnachweis."
+            )
+            if message not in retrieval_warning_messages:
+                retrieval_warning_messages.append(message)
+        for warning in retrieval_warnings:
+            if not isinstance(warning, dict):
+                continue
+            count = int(warning.get("count", 0) or 0)
+            code = str(warning.get("code", "") or "").strip()
+            rendered = (
+                "Die Knowledge-Suche schloss "
+                f"{count if count else 'einzelne'} Treffer durch eine "
+                "Integritätsprüfung aus"
+                f"{f' ({code})' if code else ''}."
+            )
+            if rendered not in retrieval_warning_messages:
+                retrieval_warning_messages.append(rendered)
+        usage = result.raw.get("usage", {}) or {}
+        usage_total["prompt_tokens"] += int(
+            usage.get("prompt_tokens", 0) or 0
+        )
+        usage_total["completion_tokens"] += int(
+            usage.get("completion_tokens", 0) or 0
+        )
+        terminal_failure = result.terminal_failure
+        if terminal_failure is not None:
+            # A nested Knowledge run retains its token usage and safe failure
+            # explanation, but neither its rejected completion nor a partial
+            # multi-query result may enter mission synthesis.  Stop this task
+            # at the first terminal verdict and persist the same stable code.
+            deps.emit(
+                ACTIVITY_EVENT,
+                {
+                    **activity,
+                    "status": "failed",
+                    "error": {
+                        "code": terminal_failure.type,
+                        "message": terminal_failure.message,
+                    },
+                },
+            )
+            return TaskOutcome(
+                status="failed",
+                summary=task_result_summary(terminal_failure.message),
+                failure_reason=terminal_failure.message,
+                failure_code=terminal_failure.type,
+                usage=usage_total,
+                transient=False,
+            )
         if result.answer:
             answers.append(result.answer)
-        raw_state = result.raw.get("result_state", {}) or {}
         for ref in raw_state.get("report_references", []):
             if not isinstance(ref, dict):
                 continue
@@ -4414,11 +4734,6 @@ def _run_rag_query(
                 )
             )
             references_by_key.setdefault(key, normalized)
-        usage = result.raw.get("usage", {}) or {}
-        usage_total["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
-        usage_total["completion_tokens"] += int(
-            usage.get("completion_tokens", 0) or 0
-        )
         deps.emit(
             ACTIVITY_EVENT,
             {
@@ -4429,10 +4744,17 @@ def _run_rag_query(
                         raw_state.get("report_references", []) or []
                     )
                 },
+                "warnings": [*retrieval_degradations, *retrieval_warnings],
             },
         )
     references = list(references_by_key.values())
     answer = "\n\n".join(answers)
+    if retrieval_warning_messages:
+        answer = (
+            answer
+            + "\n\nRetrieval-Hinweis:\n"
+            + "\n".join(f"- {message}" for message in retrieval_warning_messages)
+        ).strip()
     return TaskOutcome(
         status=(
             "completed"
@@ -4454,6 +4776,7 @@ def _run_file_analysis(deps: "_RunDeps", task: PlanTaskRecord) -> TaskOutcome:
             failure_code="capability_unavailable",
         )
     hits_by_key: dict[str, dict[str, Any]] = {}
+    retrieval_warning_messages: list[str] = []
     queries = _task_queries(task)
     for index, query in enumerate(queries, start=1):
         activity = {
@@ -4497,12 +4820,21 @@ def _run_file_analysis(deps: "_RunDeps", task: PlanTaskRecord) -> TaskOutcome:
             raise
         data = output.model_dump() if hasattr(output, "model_dump") else output
         query_hits = list(data.get("hits") or data.get("results") or [])
+        query_warnings = [
+            warning
+            for warning in list(data.get("warnings") or [])
+            if isinstance(warning, dict)
+        ]
+        for warning in query_warnings:
+            message = str(warning.get("message") or "").strip()
+            if message and message not in retrieval_warning_messages:
+                retrieval_warning_messages.append(message)
         for hit in query_hits:
             key = str(
                 (
+                    hit.get("chunk_id"),
                     hit.get("document_id"),
                     hit.get("chunk_index"),
-                    hit.get("text"),
                 )
             )
             hits_by_key.setdefault(key, hit)
@@ -4512,10 +4844,14 @@ def _run_file_analysis(deps: "_RunDeps", task: PlanTaskRecord) -> TaskOutcome:
                 **activity,
                 "status": "completed",
                 "metrics": {"result_count": len(query_hits)},
+                "warnings": query_warnings,
             },
         )
     hits = list(hits_by_key.values())
-    content = "\n\n".join(str(hit.get("text", "")) for hit in hits)
+    # Knowledge capabilities deliberately expose only canonical excerpts.
+    # Never revive the former ``text`` fallback here: that field can be the
+    # embedding-only text with a model-generated retrieval prefix.
+    content = "\n\n".join(str(hit.get("excerpt", "")) for hit in hits)
     if not content.strip():
         return TaskOutcome(
             status="insufficient_evidence",
@@ -4538,16 +4874,22 @@ def _run_file_analysis(deps: "_RunDeps", task: PlanTaskRecord) -> TaskOutcome:
             usage=usage,
             transient=False,
         )
+    warning_note = (
+        "\n\nRetrieval-Hinweis: "
+        + " ".join(retrieval_warning_messages)
+        + " Die Trefferliste ist kein Vollständigkeitsnachweis."
+        if retrieval_warning_messages
+        else ""
+    )
+    answer_markdown = normalize_agent_markdown(summary.summary + warning_note)
     return TaskOutcome(
         status="completed",
-        summary=task_result_summary(summary.summary),
-        answer_markdown=normalize_agent_markdown(summary.summary),
+        summary=task_result_summary(summary.summary + warning_note),
+        answer_markdown=answer_markdown,
         evidence=[
             {
                 **dict(hit),
-                "excerpt": hit.get("excerpt")
-                or hit.get("source_text")
-                or hit.get("text"),
+                "excerpt": hit.get("excerpt"),
             }
             for hit in hits
         ],
@@ -4696,6 +5038,7 @@ def _capability_context(
         workspace_id=deps.context.workspace_id,
         run_id=deps.context.run_id,
         knowledge_collection_ids=deps.knowledge_collection_ids,
+        search_provider=deps.context.providers.search,
         authority_check=getattr(deps.context, "authority_check", None),
         on_provider_retry=on_provider_retry,
     )

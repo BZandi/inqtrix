@@ -62,6 +62,20 @@ export class ApiRequestError extends Error {
   }
 }
 
+/** Whether the failure proves the persistence transaction did not write.
+ *
+ * A 4xx answer from the internal API is a decision, not an outage: the request
+ * was understood, rejected, and rolled back. Callers use this to distinguish a
+ * rejection they can recover from locally from an unknown outcome that leaves
+ * the in-memory room possibly ahead of the store. Timeouts, transport errors
+ * and 5xx are deliberately NOT deterministic — the write may have landed.
+ */
+export function isDeterministicRejection(error: unknown): boolean {
+  return error instanceof ApiRequestError
+    && error.status >= 400
+    && error.status < 500
+}
+
 export function collaborationError(error: unknown): CollaborationError {
   if (error instanceof CollaborationError) return error
   if (error instanceof ApiRequestError) {

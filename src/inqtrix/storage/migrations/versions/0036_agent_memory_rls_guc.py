@@ -2,7 +2,6 @@
 
 Revision ID: 0036_agent_memory_rls_guc
 Revises: 0035_children_wait
-Create Date: 2026-07-04
 
 Migrations 0033/0034 created ``tenant_isolation`` on
 ``agent_memory_candidates`` and ``agent_feedback`` gated on

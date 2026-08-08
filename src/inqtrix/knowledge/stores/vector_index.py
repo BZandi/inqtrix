@@ -38,11 +38,55 @@ class ChunkVector:
         dense: The dense embedding for the chunk.
         text: The embedded chunk text; a hybrid index recomputes its BM25
             sparse vector from this. Dense-only indexes ignore it.
+        generation_id: Physical index generation this point belongs to.
+            ``None`` is the explicit legacy generation, not a wildcard.
+        revision_id: Immutable document revision this point represents.
+            ``None`` is the explicit legacy revision, not a wildcard.
     """
 
     chunk_id: str
     dense: tuple[float, ...]
     text: str = field(default="", repr=False)
+    generation_id: str | None = None
+    revision_id: str | None = None
+
+
+@dataclass(frozen=True)
+class VectorSearchScope:
+    """Canonical active vector scope for one logical collection.
+
+    A collection generation is selected atomically in Postgres.  Document
+    revisions are selected independently inside that generation.  Passing both
+    selectors into the vector index prevents unpublished points from competing
+    in nearest-neighbour or sparse ranking before canonical hydration runs.
+
+    ``generation_id=None`` matches only points whose generation payload is
+    absent/null.  Likewise, legacy documents are explicitly named in
+    ``legacy_document_ids`` and match only points without a revision payload.
+    ``legacy_payload_chunk_ids`` is narrower still: it is populated only
+    while the migration-marked compatibility generation is active and admits
+    old points that predate *both* payload fields for those exact verified
+    canonical chunk ids.
+    Canonical hydration still requires the active generation/revision and a
+    verified source span.  None of these values means "all".
+    """
+
+    collection_id: str
+    generation_id: str | None
+    active_revision_ids: tuple[str, ...] = ()
+    legacy_document_ids: tuple[str, ...] = ()
+    legacy_payload_chunk_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class VectorPointRef:
+    """Lean identity of one derived point returned by reconciliation scroll."""
+
+    chunk_id: str
+    collection_id: str
+    document_id: str
+    generation_id: str | None = None
+    revision_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -103,10 +147,80 @@ class VectorIndex(Protocol):
         """Remove all chunk vectors of one document."""
         ...
 
+    async def count_document(
+        self, *, embedding_model: str, document_id: str
+    ) -> int:
+        """Count one logical document's residual points after deletion."""
+        ...
+
+    async def delete_chunks(
+        self, *, embedding_model: str, chunk_ids: list[str]
+    ) -> None:
+        """Remove exactly the identified vectors after an atomic pointer swap."""
+        ...
+
+    async def count_chunks(
+        self, *, embedding_model: str, chunk_ids: list[str]
+    ) -> int:
+        """Count exactly identified points for deletion verification."""
+        ...
+
+    async def count_generation(
+        self,
+        *,
+        embedding_model: str,
+        collection_id: str,
+        generation_id: str,
+    ) -> int:
+        """Count every point in one logical collection generation."""
+        ...
+
+    async def delete_generation(
+        self,
+        *,
+        embedding_model: str,
+        collection_id: str,
+        generation_id: str,
+    ) -> None:
+        """Delete one exact logical generation without a large id payload."""
+        ...
+
+    async def count_generation_document(
+        self,
+        *,
+        embedding_model: str,
+        collection_id: str,
+        generation_id: str,
+        document_id: str,
+    ) -> int:
+        """Count one document's points inside an exact shadow generation."""
+        ...
+
+    async def delete_generation_document(
+        self,
+        *,
+        embedding_model: str,
+        collection_id: str,
+        generation_id: str,
+        document_id: str,
+    ) -> None:
+        """Delete one document scope, including points unknown to Postgres."""
+        ...
+
+    def point_ids_for_chunks(self, chunk_ids: list[str]) -> list[str]:
+        """Return stable physical point identifiers for a cleanup manifest."""
+        ...
+
     async def delete_collection(
         self, *, embedding_model: str, collection_id: str
     ) -> None:
         """Remove all chunk vectors of one logical collection."""
+        ...
+
+    async def count_collection(
+        self, *, embedding_model: str, collection_id: str
+    ) -> int:
+        """Count a logical collection's residual points after deletion."""
         ...
 
     async def search(
@@ -114,10 +228,10 @@ class VectorIndex(Protocol):
         *,
         embedding_model: str,
         query_embedding: list[float],
-        collection_ids: list[str],
+        scopes: list[VectorSearchScope],
         top_k: int,
     ) -> list[VectorHit]:
-        """Dense nearest-neighbour search scoped to *collection_ids*."""
+        """Dense nearest-neighbour search within canonical active scopes."""
         ...
 
     async def hybrid_search(
@@ -126,7 +240,7 @@ class VectorIndex(Protocol):
         embedding_model: str,
         query_text: str,
         query_embedding: list[float],
-        collection_ids: list[str],
+        scopes: list[VectorSearchScope],
         top_k: int,
     ) -> list[VectorHit]:
         """Fused dense + sparse search (only when ``supports_hybrid``)."""
@@ -142,6 +256,12 @@ class VectorIndex(Protocol):
         them)."""
         ...
 
+    async def scroll_chunk_points(
+        self, *, embedding_model: str
+    ) -> list[VectorPointRef]:
+        """Return every point identity in one model space for exact reconcile."""
+        ...
+
 
 @dataclass
 class _MemoryEntry:
@@ -149,6 +269,8 @@ class _MemoryEntry:
     collection_id: str
     document_id: str
     embedding_model: str
+    generation_id: str | None
+    revision_id: str | None
 
 
 class MemoryVectorIndex:
@@ -194,6 +316,8 @@ class MemoryVectorIndex:
                     collection_id=collection_id,
                     document_id=document_id,
                     embedding_model=embedding_model,
+                    generation_id=vector.generation_id,
+                    revision_id=vector.revision_id,
                 )
 
     async def delete_document(
@@ -208,6 +332,115 @@ class MemoryVectorIndex:
             for chunk_id in doomed:
                 del self._entries[chunk_id]
 
+    async def count_document(
+        self, *, embedding_model: str, document_id: str
+    ) -> int:
+        with self._lock:
+            return sum(
+                1
+                for entry in self._entries.values()
+                if entry.embedding_model == embedding_model
+                and entry.document_id == document_id
+            )
+
+    async def delete_chunks(
+        self, *, embedding_model: str, chunk_ids: list[str]
+    ) -> None:
+        with self._lock:
+            for chunk_id in chunk_ids:
+                entry = self._entries.get(chunk_id)
+                if entry is not None and entry.embedding_model == embedding_model:
+                    del self._entries[chunk_id]
+
+    async def count_chunks(
+        self, *, embedding_model: str, chunk_ids: list[str]
+    ) -> int:
+        wanted = set(chunk_ids)
+        if not wanted:
+            return 0
+        with self._lock:
+            return sum(
+                1
+                for chunk_id, entry in self._entries.items()
+                if chunk_id in wanted
+                and entry.embedding_model == embedding_model
+            )
+
+    async def count_generation(
+        self,
+        *,
+        embedding_model: str,
+        collection_id: str,
+        generation_id: str,
+    ) -> int:
+        with self._lock:
+            return sum(
+                1
+                for entry in self._entries.values()
+                if entry.embedding_model == embedding_model
+                and entry.collection_id == collection_id
+                and entry.generation_id == generation_id
+            )
+
+    async def delete_generation(
+        self,
+        *,
+        embedding_model: str,
+        collection_id: str,
+        generation_id: str,
+    ) -> None:
+        with self._lock:
+            doomed = [
+                chunk_id
+                for chunk_id, entry in self._entries.items()
+                if entry.embedding_model == embedding_model
+                and entry.collection_id == collection_id
+                and entry.generation_id == generation_id
+            ]
+            for chunk_id in doomed:
+                del self._entries[chunk_id]
+
+    async def count_generation_document(
+        self,
+        *,
+        embedding_model: str,
+        collection_id: str,
+        generation_id: str,
+        document_id: str,
+    ) -> int:
+        with self._lock:
+            return sum(
+                1
+                for entry in self._entries.values()
+                if entry.embedding_model == embedding_model
+                and entry.collection_id == collection_id
+                and entry.generation_id == generation_id
+                and entry.document_id == document_id
+            )
+
+    async def delete_generation_document(
+        self,
+        *,
+        embedding_model: str,
+        collection_id: str,
+        generation_id: str,
+        document_id: str,
+    ) -> None:
+        with self._lock:
+            doomed = [
+                chunk_id
+                for chunk_id, entry in self._entries.items()
+                if entry.embedding_model == embedding_model
+                and entry.collection_id == collection_id
+                and entry.generation_id == generation_id
+                and entry.document_id == document_id
+            ]
+            for chunk_id in doomed:
+                del self._entries[chunk_id]
+
+    def point_ids_for_chunks(self, chunk_ids: list[str]) -> list[str]:
+        return list(chunk_ids)
+
     async def delete_collection(
         self, *, embedding_model: str, collection_id: str
     ) -> None:
@@ -220,15 +453,26 @@ class MemoryVectorIndex:
             for chunk_id in doomed:
                 del self._entries[chunk_id]
 
+    async def count_collection(
+        self, *, embedding_model: str, collection_id: str
+    ) -> int:
+        with self._lock:
+            return sum(
+                1
+                for entry in self._entries.values()
+                if entry.embedding_model == embedding_model
+                and entry.collection_id == collection_id
+            )
+
     async def search(
         self,
         *,
         embedding_model: str,
         query_embedding: list[float],
-        collection_ids: list[str],
+        scopes: list[VectorSearchScope],
         top_k: int,
     ) -> list[VectorHit]:
-        scoped = set(collection_ids)
+        by_collection = {scope.collection_id: scope for scope in scopes}
         with self._lock:
             hits = [
                 VectorHit(
@@ -237,7 +481,7 @@ class MemoryVectorIndex:
                 )
                 for chunk_id, entry in self._entries.items()
                 if entry.embedding_model == embedding_model
-                and entry.collection_id in scoped
+                and _memory_entry_is_active(chunk_id, entry, by_collection)
             ]
         hits.sort(key=lambda hit: hit.score, reverse=True)
         return hits[: max(0, top_k)]
@@ -248,7 +492,7 @@ class MemoryVectorIndex:
         embedding_model: str,
         query_text: str,
         query_embedding: list[float],
-        collection_ids: list[str],
+        scopes: list[VectorSearchScope],
         top_k: int,
     ) -> list[VectorHit]:
         # Dense-only index: callers dispatch on ``supports_hybrid`` and
@@ -266,3 +510,42 @@ class MemoryVectorIndex:
                 for entry in self._entries.values()
                 if entry.embedding_model == embedding_model
             }
+
+    async def scroll_chunk_points(
+        self, *, embedding_model: str
+    ) -> list[VectorPointRef]:
+        with self._lock:
+            return [
+                VectorPointRef(
+                    chunk_id=chunk_id,
+                    collection_id=entry.collection_id,
+                    document_id=entry.document_id,
+                    generation_id=entry.generation_id,
+                    revision_id=entry.revision_id,
+                )
+                for chunk_id, entry in self._entries.items()
+                if entry.embedding_model == embedding_model
+            ]
+
+
+def _memory_entry_is_active(
+    chunk_id: str,
+    entry: _MemoryEntry,
+    by_collection: dict[str, VectorSearchScope],
+) -> bool:
+    """Apply the same exact generation/revision contract as Qdrant."""
+
+    scope = by_collection.get(entry.collection_id)
+    if scope is None:
+        return False
+    if (
+        entry.generation_id is None
+        and entry.revision_id is None
+        and chunk_id in scope.legacy_payload_chunk_ids
+    ):
+        return True
+    if entry.generation_id != scope.generation_id:
+        return False
+    if entry.revision_id is None:
+        return entry.document_id in scope.legacy_document_ids
+    return entry.revision_id in scope.active_revision_ids

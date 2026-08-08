@@ -20,7 +20,10 @@ import * as Y from 'yjs'
 
 import { FastApiCollaborationClient } from './apiClient'
 import { CollaborationAuthenticator } from './authenticator'
-import { enforceAwarenessIdentity } from './awareness'
+import {
+  enforceAwarenessIdentity,
+  removeHocuspocusScratchAwarenessState,
+} from './awareness'
 import type {
   CollaborationApi,
   CollaborationPolicyEvent,
@@ -29,7 +32,9 @@ import type {
   SidecarLogger,
 } from './contracts'
 import { DocumentCoordinator } from './documentCoordinator'
-import { reconstructDocument } from './documentState'
+import {
+  reconstructValidatedDocument,
+} from './documentState'
 import { reconcileDurability } from './durabilityReconciliation'
 import {
   collaborationError,
@@ -51,6 +56,7 @@ import {
 } from './operations'
 import { SessionRegistry, SlidingWindowRateLimiter } from './rateLimit'
 import { SnapshotRetryController } from './snapshotRetry'
+import { VerificationFaultGate } from './verificationFault'
 
 type InternalContext = {
   internalOperation: true
@@ -60,8 +66,13 @@ type TransportContext = {
   transportId: string
 }
 
+type ReconstructionContext = {
+  reconstructionEpoch: number
+}
+
 type HocuspocusContext = Partial<ConnectionContext>
   & Partial<InternalContext>
+  & Partial<ReconstructionContext>
   & Partial<TransportContext>
 
 type HocuspocusPayload = Parameters<WebSocketLike['send']>[0]
@@ -94,6 +105,7 @@ export type CollaborationSidecarDependencies = {
   metrics?: SidecarMetrics
   shutdownTimeoutMs?: number
   socketCloseGraceMs?: number
+  verificationFaults?: VerificationFaultGate | null
 }
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 25_000
@@ -141,6 +153,7 @@ export class CollaborationSidecar {
   private readonly transportConnections = new Map<string, Set<string>>()
   private readonly transportTeardowns = new Map<string, TransportTeardown>()
   private readonly updateLimiter: SlidingWindowRateLimiter
+  private readonly verificationFaults: VerificationFaultGate | null
   private readonly webSocketServer: WebSocketServer
   private started = false
   private stopping = false
@@ -153,6 +166,7 @@ export class CollaborationSidecar {
     this.metrics = dependencies.metrics ?? new SidecarMetrics()
     this.shutdownTimeoutMs = dependencies.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS
     this.socketCloseGraceMs = dependencies.socketCloseGraceMs ?? DEFAULT_SOCKET_CLOSE_GRACE_MS
+    this.verificationFaults = dependencies.verificationFaults ?? null
     if (this.shutdownTimeoutMs < 1 || this.socketCloseGraceMs < 0) {
       throw new Error('Shutdown deadlines must be non-negative')
     }
@@ -421,30 +435,27 @@ export class CollaborationSidecar {
       }) => {
         try {
           const context = await this.authenticator.authenticate(documentName, token)
+          if (this.verificationFaults?.blocksConnection(context)) {
+            throw reloadRequired()
+          }
           this.coordinator.assertJoinAllowed(documentName)
           if (!this.sessions.add(context.documentId, context.user.id, socketId)) {
             throw rateLimited()
           }
           connectionConfig.readOnly = context.access === 'view'
-          return context
+          return {
+            ...context,
+            reconstructionEpoch: this.coordinator.joinEpoch(documentName),
+          }
         } catch (error) {
           const mapped = collaborationError(error)
           this.closeSocketAfterHook(hookContext, mapped)
           throw mapped
         }
       },
-      onTokenSync: async ({ connection, context, documentName, token }) => {
-        try {
-          const current = connectionContext(context)
-          const renewed = await this.authenticator.renew(current, documentName, token)
-          connection.context = { ...connection.context, ...renewed }
-          connection.readOnly = renewed.access === 'view'
-          this.scheduleConnectionLease(connection, documentName, renewed.expiresAt)
-          return renewed
-        } finally {
-          this.clearPolicyRevalidation(connection, documentName)
-        }
-      },
+      onTokenSync: ({ connection, context, documentName, token }) => (
+        this.renewConnectionToken(connection, context, documentName, token)
+      ),
       onLoadDocument: async ({ context, documentName, socketId }) => {
         const parsed = parseEditorCollaborationRoom(documentName)
         if (!parsed) throw invalidRoom()
@@ -467,7 +478,7 @@ export class CollaborationSidecar {
             generation: parsed.generation,
           })
           let selectedUpdates = state.updates
-          const document = await reconstructDocument(state, {
+          const reconstructedValidation = await reconstructValidatedDocument(state, {
             documentId: parsed.documentId,
             generation: parsed.generation,
             schemaVersion: this.settings.schemaVersion,
@@ -483,6 +494,7 @@ export class CollaborationSidecar {
               selectedUpdates = [...updates]
             },
           })
+          const document = reconstructedValidation.document
           try {
             this.coordinator.initialize(documentName, state.persistedSequence, {
               bytes: selectedUpdates.reduce(
@@ -490,8 +502,8 @@ export class CollaborationSidecar {
                 0,
               ),
               updates: selectedUpdates.length,
-            })
-            return Y.encodeStateAsUpdate(document)
+            }, reconstructedValidation)
+            return reconstructedValidation.encodedState.slice()
           } finally {
             document.destroy()
           }
@@ -510,7 +522,25 @@ export class CollaborationSidecar {
       beforeSync: async ({ connection, context, document, documentName, payload, type }) => {
         if (type === 0) return
         if (type !== 1 && type !== 2) throw incompatible()
+        this.ensureConnectionRegistered(connection, documentName)
+        if (
+          this.coordinator.requiresReconstruction(documentName)
+          || (
+            context.reconstructionEpoch !== undefined
+            && this.coordinator.reconstructionEpoch(documentName)
+              !== context.reconstructionEpoch
+          )
+        ) {
+          // Hocuspocus drains frames that were already queued before the
+          // transport began closing. Its read-only path rejects those updates
+          // without applying or acknowledging them, while the retryable close
+          // moves the provider onto a freshly reconstructed room.
+          connection.readOnly = true
+          this.closeConnectionTransport(connection, reloadRequired())
+          return
+        }
         if (!this.updateLimiter.consume(connection.socketId)) throw rateLimited()
+        let verificationOutageTriggered = false
         try {
           await this.coordinator.prepareClientUpdate({
             allowNoop: type === 1,
@@ -520,11 +550,24 @@ export class CollaborationSidecar {
             room: documentName,
             update: payload,
           })
+          const connectionId = pendingKey(connection.socketId, documentName)
+          if (this.verificationFaults?.triggerSidecarOutage(
+            connectionContext(context),
+            this.coordinator.pendingClientUpdate(connectionId),
+          )) {
+            verificationOutageTriggered = true
+            connection.readOnly = true
+            this.coordinator.abortClientUpdate(connectionId)
+            throw unavailable()
+          }
         } catch (error) {
           const mapped = collaborationError(error)
           if (this.coordinator.requiresReconstruction(documentName)) {
             this.discardHeldOutbound(documentName)
-            this.closeDocument(document, reloadRequired())
+            this.closeDocument(
+              document,
+              verificationOutageTriggered ? mapped : reloadRequired(),
+            )
           }
           this.closeConnectionTransport(connection, mapped)
           throw mapped
@@ -532,8 +575,10 @@ export class CollaborationSidecar {
       },
       afterHandleMessage: async ({ connection, document, documentName }) => {
         try {
+          const connectionId = pendingKey(connection.socketId, documentName)
+          const pending = this.coordinator.pendingClientUpdate(connectionId)
           const ack = this.coordinator.finishClientUpdate(
-            pendingKey(connection.socketId, documentName),
+            connectionId,
             document,
           )
           if (ack) {
@@ -541,6 +586,13 @@ export class CollaborationSidecar {
               this.queueSnapshot(documentName, document)
             }
             this.flushHeldOutbound(documentName)
+            if (this.verificationFaults?.triggerLostAcknowledgement(
+              connectionContext(connection.context),
+              pending,
+            )) {
+              this.closeConnectionTransport(connection, reloadRequired())
+              return
+            }
             connection.sendStateless(JSON.stringify(ack))
           }
         } catch (error) {
@@ -555,7 +607,22 @@ export class CollaborationSidecar {
       beforeHandleAwareness: async ({ connection, context, document, states }) => {
         if (!connection || !context) return
         this.enforceConnectionLease(context)
-        if (!this.awarenessLimiter.consume(connection.socketId)) throw rateLimited()
+        if (!this.awarenessLimiter.consume(connection.socketId)) {
+          // Cursor and selection changes are ephemeral. Fast typing can
+          // legitimately emit more awareness frames than the configured
+          // sampling rate; dropping only the excess state keeps the durable
+          // document transport healthy while still bounding presence work.
+          states.clear()
+          this.metrics.increment('inqtrix_collaboration_awareness_dropped_total', {
+            reason: 'rate_limited',
+          })
+          return
+        }
+        if (removeHocuspocusScratchAwarenessState(states)) {
+          this.metrics.increment(
+            'inqtrix_collaboration_awareness_scratch_states_removed_total',
+          )
+        }
         assertAwarenessOwnership(document, connection, states)
         enforceAwarenessIdentity(states, connectionContext(context))
       },
@@ -574,6 +641,11 @@ export class CollaborationSidecar {
           this.metrics.increment('inqtrix_collaboration_reconcile_requests_total')
           this.metrics.add(
             'inqtrix_collaboration_reconcile_acknowledgements_total',
+            acknowledged,
+          )
+          this.verificationFaults?.recordDurabilityReconciliation(
+            connectionContext(connection.context),
+            payload,
             acknowledged,
           )
         } catch (error) {
@@ -599,19 +671,8 @@ export class CollaborationSidecar {
           throw error
         }
       },
-      connected: async ({ connection, context, documentName, socketId }) => {
-        const transportId = context.transportId
-        if (hasConnectionContext(context) && transportId) {
-          this.registerConnection({
-            connection,
-            documentName,
-            socketId,
-            transportId,
-          })
-          this.authenticatedAddresses.add(authAddressKey(transportId, connection.messageAddress))
-          this.releaseInitialAuthIngress(transportId, connection.messageAddress)
-          this.scheduleConnectionLease(connection, documentName, context.expiresAt)
-        }
+      connected: async ({ connection, documentName }) => {
+        this.ensureConnectionRegistered(connection, documentName)
         this.metrics.set('inqtrix_collaboration_active_connections', this.sockets.size)
       },
       onDisconnect: async ({ context, document, documentName, socketId }) => {
@@ -778,7 +839,10 @@ export class CollaborationSidecar {
   }
 
   private isReady(): boolean {
-    return this.started && !this.stopping && this.leaseManager.isReady()
+    return this.started
+      && !this.stopping
+      && this.leaseManager.isReady()
+      && !this.verificationFaults?.sidecarOutageActive()
   }
 
   private handleLeaseLoss(): void {
@@ -870,8 +934,40 @@ export class CollaborationSidecar {
     }
 
     const checkedDocuments = new Map<string, boolean>()
+    const commentDocuments = new Set<string>()
+    const commentMentions = new Map<string, Set<string>>()
     for (const event of page.events) {
-      if (event.resourceType === 'editor_document' && event.resourceId) {
+      if (
+        event.resourceType === 'editor_document'
+        && event.resourceId
+        && event.scope === 'collaboration_guest_policy'
+      ) {
+        this.requestGuestConnectionRevalidations(event)
+        continue
+      }
+      if (
+        event.resourceType === 'editor_document'
+        && event.resourceId
+        && event.scope === 'collaboration_comment_changed'
+      ) {
+        commentDocuments.add(event.resourceId)
+        continue
+      }
+      if (
+        event.resourceType === 'editor_document'
+        && event.resourceId
+        && event.scope === 'collaboration_comment_mention'
+      ) {
+        const recipients = commentMentions.get(event.resourceId) ?? new Set<string>()
+        recipients.add(event.targetUserId)
+        commentMentions.set(event.resourceId, recipients)
+        continue
+      }
+      if (
+        event.resourceType === 'editor_document'
+        && event.resourceId
+        && this.documentConnectionsRequireGenerationCheck(event)
+      ) {
         let generationInvalid = checkedDocuments.get(event.resourceId)
         if (generationInvalid === undefined) {
           generationInvalid = await this.closeGenerationMismatches(event.resourceId)
@@ -881,8 +977,68 @@ export class CollaborationSidecar {
       }
       this.requestAffectedConnectionRevalidations(event)
     }
+    for (const documentId of commentDocuments) {
+      this.broadcastCommentEvent(
+        documentId,
+        'collaboration_comment_changed',
+      )
+    }
+    for (const [documentId, recipients] of commentMentions) {
+      this.broadcastCommentEvent(
+        documentId,
+        'collaboration_comment_mentioned',
+        recipients,
+      )
+    }
     this.policyCursor = page.cursor
     this.metrics.set('inqtrix_collaboration_policy_cursor', page.cursor)
+  }
+
+  private broadcastCommentEvent(
+    documentId: string,
+    type: 'collaboration_comment_changed' | 'collaboration_comment_mentioned',
+    recipients?: ReadonlySet<string>,
+  ): void {
+    const payload = JSON.stringify({
+      document_id: documentId,
+      type,
+    })
+    for (const document of this.hocuspocus.documents.values()) {
+      const parsed = parseEditorCollaborationRoom(document.name)
+      if (parsed?.documentId !== documentId) continue
+      for (const connection of document.getConnections()) {
+        if (
+          recipients
+          && (
+            !hasConnectionContext(connection.context)
+            || !recipients.has(connection.context.user.id)
+          )
+        ) {
+          continue
+        }
+        connection.sendStateless(payload)
+      }
+    }
+  }
+
+  private documentConnectionsRequireGenerationCheck(
+    event: CollaborationPolicyEvent,
+  ): boolean {
+    const documentId = event.resourceId
+    if (!documentId) return false
+    for (const document of this.hocuspocus.documents.values()) {
+      const parsed = parseEditorCollaborationRoom(document.name)
+      if (parsed?.documentId !== documentId) continue
+      for (const connection of document.getConnections()) {
+        if (
+          !hasConnectionContext(connection.context)
+          || connection.context.policyCursor < event.id
+        ) {
+          return true
+        }
+      }
+    }
+    return false
   }
 
   private async closeGenerationMismatches(documentId: string): Promise<boolean> {
@@ -933,6 +1089,28 @@ export class CollaborationSidecar {
       for (const connection of document.getConnections()) {
         if (!hasConnectionContext(connection.context)) continue
         if (connection.context.user.id !== event.targetUserId) continue
+        if (event.id <= connection.context.policyCursor) continue
+        this.requestPolicyRevalidation(connection, document.name)
+      }
+    }
+  }
+
+  private requestGuestConnectionRevalidations(
+    event: CollaborationPolicyEvent,
+  ): void {
+    const documentId = event.resourceId
+    if (!documentId) return
+    for (const document of this.hocuspocus.documents.values()) {
+      const parsed = parseEditorCollaborationRoom(document.name)
+      if (parsed?.documentId !== documentId) continue
+      for (const connection of document.getConnections()) {
+        if (
+          !hasConnectionContext(connection.context)
+          || connection.context.user.kind !== 'guest'
+        ) {
+          continue
+        }
+        if (event.id <= connection.context.policyCursor) continue
         this.requestPolicyRevalidation(connection, document.name)
       }
     }
@@ -976,6 +1154,28 @@ export class CollaborationSidecar {
     connection.requestToken()
   }
 
+  private async renewConnectionToken(
+    connection: Connection<HocuspocusContext>,
+    context: HocuspocusContext,
+    documentName: string,
+    token: string,
+  ): Promise<ConnectionContext> {
+    try {
+      const current = connectionContext(context)
+      const renewed = await this.authenticator.renew(current, documentName, token)
+      connection.context = { ...connection.context, ...renewed }
+      connection.readOnly = renewed.access === 'view'
+      this.scheduleConnectionLease(connection, documentName, renewed.expiresAt)
+      return renewed
+    } catch (error) {
+      const mapped = collaborationError(error)
+      this.closeConnectionTransport(connection, mapped)
+      throw mapped
+    } finally {
+      this.clearPolicyRevalidation(connection, documentName)
+    }
+  }
+
   private clearPolicyRevalidation(
     connection: Connection<HocuspocusContext>,
     documentName: string,
@@ -1001,6 +1201,26 @@ export class CollaborationSidecar {
     const keys = this.transportConnections.get(registration.transportId) ?? new Set<string>()
     keys.add(key)
     this.transportConnections.set(registration.transportId, keys)
+  }
+
+  private ensureConnectionRegistered(
+    connection: Connection<HocuspocusContext>,
+    documentName: string,
+  ): void {
+    const context = connection.context
+    const transportId = context.transportId
+    if (!hasConnectionContext(context) || !transportId) return
+    const key = pendingKey(connection.socketId, documentName)
+    if (this.connections.has(key)) return
+    this.registerConnection({
+      connection,
+      documentName,
+      socketId: connection.socketId,
+      transportId,
+    })
+    this.authenticatedAddresses.add(authAddressKey(transportId, connection.messageAddress))
+    this.releaseInitialAuthIngress(transportId, connection.messageAddress)
+    this.scheduleConnectionLease(connection, documentName, context.expiresAt)
   }
 
   private enforceConnectionLease(context: HocuspocusContext): void {
@@ -1512,6 +1732,8 @@ function hasConnectionContext(context: HocuspocusContext): context is Connection
     && typeof context.generation === 'number'
     && typeof context.leaseId === 'string'
     && typeof context.expiresAt === 'number'
+    && Number.isSafeInteger(context.policyCursor)
+    && (context.policyCursor ?? -1) >= 0
     && typeof context.tenantId === 'string'
     && typeof context.user?.id === 'string'
   )

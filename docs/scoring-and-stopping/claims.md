@@ -108,24 +108,26 @@ unverified.
 
 | Branch condition | `status` | `verification_basis` | Example |
 |---|---|---|---|
-| `support_count > 0` AND `contradict_count > 0` | `contested` | `contested` | Reuters bestätigt, dpa widerspricht |
-| `has_primary=True` AND `support_count >= 1` | `verified` | `verified_primary` | SEC-Filing oder ECB-Pressemitteilung |
-| `support_count >= 2` AND `supporting_non_low_domain_count >= 2` | `verified` | `verified_cross_checked` | Reuters + Bloomberg melden dieselbe Zahl |
-| `independent_support_count >= 2` AND `quality_domain_count >= 2` | `verified` | `verified_cross_checked` | zwei voneinander unabhängige Tagesschau- und Spiegel-Artikel |
-| `support_count >= 2` AND (`has_primary` OR `has_mainstream` OR `has_stakeholder`) | `verified` | `verified_cross_checked` | zwei Bestätigungen, mindestens eine aus einer Qualitätsquelle |
-| `support_count >= 1` AND (`has_primary` OR `has_mainstream`) | `verified` | `verified_quality_source` | einzelner Tagesschau-Artikel |
-| `needs_primary=True` AND `has_primary=False` | `unverified` | `missing_primary_source` | Zahl ohne Primärbeleg |
-| Otherwise | `unverified` | `weak_evidence` | einzelner Blog-Treffer |
+| Affirmed and negated members coexist | `contested` | `contested` | provider-grounded results make opposing claims |
+| At least one affirmed primary-tier source exists | `verified` | `verified_primary` | an official or regulator URL returned by the provider |
+| At least two affirmed, non-low domains support the claim | `verified` | `verified_cross_checked` | two independent provider-grounded results support the same value |
+| At least two evidence records from two quality-tier domains support the claim | `verified` | `verified_cross_checked` | two separately grounded reports agree |
+| At least two affirmed supports include a primary, mainstream, or stakeholder source | `verified` | `verified_cross_checked` | repeated provider evidence agrees |
+| One affirmed primary or mainstream source exists | `verified` | `verified_quality_source` | one provider-grounded institutional or editorial source |
+| `needs_primary=True` without a primary-tier source | `unverified` | `missing_primary_source` | a central number has only unknown, stakeholder, or low-tier support |
+| Otherwise | `unverified` | `weak_evidence` | evidence is too shallow |
 
-`needs_primary` is a quality signal, not a hard entry requirement. A claim
-can be report-worthy via cross-check from quality domains
-(`verified_cross_checked`) or via a single primary/mainstream source
-(`verified_quality_source`) while still missing a true primary citation.
-The `verification_basis` makes that explicit so the answer can word the
-evidence strength honestly. The `verified_quality_source` basis is also
-specifically tracked by the depth-gap diagnostic and by the cross-check
-target planner (see [stop-criteria.md](stop-criteria.md#evidence-depth-gap)
-and [calculation-overview.md](calculation-overview.md)).
+Source tiers remain discovery, ranking, and source-quality signals. They do
+not admit or reject a provider result. Unknown publishers remain in the
+ledger and reach synthesis; a single unknown source is merely insufficient to
+mark a central claim verified.
+
+`needs_primary` is an evidence-depth signal for factual claims. The
+`verified_quality_source` basis is still tracked by the depth-gap diagnostic
+and cross-check planner because one grounded quality source is useful but not
+corroboration (see
+[stop-criteria.md](stop-criteria.md#evidence-depth-gap) and
+[calculation-overview.md](calculation-overview.md)).
 
 ## Claim-quality score
 
@@ -183,7 +185,7 @@ persisted on `AgentState`:
 available but no longer feeds the answer prompt directly; the answer
 composer derives its allowlist from
 `EvidenceOverview.allowed_urls` (see
-[evidence-pipeline.md](../architecture/evidence-pipeline.md#rendering-evidenceledger-markdown)).
+[evidence-pipeline.md](../architecture/evidence-pipeline.md#rendering-evidenceledger--markdown)).
 The public `top_sources` field in the result follows the
 [result schema](../architecture/result-schema.md): answer-linked URLs first,
 prompt-selected evidence URLs second, remaining discovered citations last.
@@ -194,7 +196,7 @@ prompt-selected evidence URLs second, remaining discovered citations last.
 |---|---|---|---|
 | Raw claim extraction | **LLM-parsed** (`LLMClaimExtractor`) | Search result text per source | Provider call returns JSON list; validator drops malformed entries; max 8 per source. |
 | Signature dedup | Deterministic | Claim text | Token-regex + stopword/negation strip + first 16 tokens joined. |
-| `status` / `verification_basis` | Deterministic | `support_count`, `contradict_count`, tier booleans, `needs_primary` | 8-branch decision table above. |
+| `status` / `verification_basis` | Deterministic | provider-grounded source URLs, source tiers, support/contradiction counts, `needs_primary` | decision table above. |
 | `claim_quality_score` | Deterministic | Each claim's basis | Weighted average per weights table. |
 | Materialisation cut | Deterministic | `consolidated`, profile caps | Keep all verified + contested + ranked unverified up to `materialize_max_*`. |
 

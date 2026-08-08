@@ -1,4 +1,4 @@
-"""Skill schema with tenant RLS (plan M3 `3.1`).
+"""Skill schema with tenant RLS.
 
 Revision ID: 0041_skill_templates
 Revises: 0040_kernel_control_kinds

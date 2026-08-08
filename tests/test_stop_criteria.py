@@ -1,5 +1,7 @@
 """Direct regression tests for multi-signal stop heuristics."""
 
+import logging
+
 from inqtrix.settings import AgentSettings
 from inqtrix.strategies import MultiSignalStopCriteria
 
@@ -127,6 +129,38 @@ def test_extract_competing_events_skips_cap_when_same_event_persists_in_round_th
 
     assert conf == strategy._confidence_stop
     assert state["competing_events"] == "Verwechslung zwischen Entwurf A und Entwurf B"
+
+
+def test_extract_competing_events_keeps_model_text_out_of_operational_logs(caplog):
+    strategy = MultiSignalStopCriteria(AgentSettings())
+    logger = logging.getLogger("inqtrix")
+    previous_level = logger.level
+    logger.addHandler(caplog.handler)
+    logger.setLevel(logging.INFO)
+
+    private_event = "PRIVATE_COMPETING_EVENT_TEXT"
+    try:
+        state = _base_state()
+        strategy.extract_competing_events(
+            state,
+            f"COMPETING_EVENTS: {private_event}\n",
+            conf=5,
+        )
+        strategy.extract_competing_events(
+            _base_state(),
+            "COMPETING_EVENTS: Keine\n",
+            conf=5,
+        )
+    finally:
+        logger.removeHandler(caplog.handler)
+        logger.setLevel(previous_level)
+
+    assert state["competing_events"] == private_event
+    assert "competing_events_present=true" in caplog.text
+    assert f"chars={len(private_event)}" in caplog.text
+    assert "competing_events_present=false" in caplog.text
+    assert private_event not in caplog.text
+    assert "Keine" not in caplog.text
 
 
 def test_extract_evidence_scores_emits_warning_on_parse_miss():

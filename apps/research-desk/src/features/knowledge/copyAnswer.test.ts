@@ -50,6 +50,7 @@ function makeAnswer(overrides: Partial<KnowledgeAnswerRecord> = {}): KnowledgeAn
     references: REFERENCES,
     quotes: QUOTES,
     degradedStages: [],
+    retrievalDegradations: [],
     ...overrides,
   }
 }

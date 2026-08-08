@@ -1,3 +1,4 @@
+import { createSecurePrefixedId } from '@inqtrix/editor-schema'
 import type { JSONContent } from '@tiptap/core'
 import type { Editor } from '@tiptap/react'
 import type { EditorCommentAnchorRecord, EditorCommentKind, EditorCommentThreadRecord } from '@/features/project/types'
@@ -271,6 +272,5 @@ function pickAnchorCandidate(
 }
 
 function createLocalId(prefix: string): string {
-  if (globalThis.crypto?.randomUUID) return `${prefix}-${globalThis.crypto.randomUUID()}`
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  return createSecurePrefixedId(prefix)
 }

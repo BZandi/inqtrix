@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 from alembic.script import ScriptDirectory
 
+from inqtrix.storage.migration_contract import SCHEMA_HEAD_REVISION
+
 from inqtrix.storage.migrate import build_alembic_config
 
 
@@ -19,9 +21,7 @@ def _migration(name: str):
 
 def test_packaged_revision_modules_have_no_runtime_imports() -> None:
     """Historical DDL must depend only on revision-local schema literals."""
-    versions_dir = Path(
-        _migration("0001_identity_schema").__file__ or ""
-    ).parent
+    versions_dir = Path(_migration("0001_identity_schema").__file__ or "").parent
     offenders: dict[str, list[str]] = {}
     for path in sorted(versions_dir.glob("[0-9][0-9][0-9][0-9]_*.py")):
         runtime_imports = [
@@ -47,9 +47,7 @@ def test_historical_create_migrations_are_frozen_snapshots() -> None:
     assert "inqtrix.storage.knowledge_sessions_orm" not in inspect.getsource(
         knowledge_sessions
     )
-    assert "inqtrix.storage.user_event_orm" not in inspect.getsource(
-        user_events
-    )
+    assert "inqtrix.storage.user_event_orm" not in inspect.getsource(user_events)
 
     identity_tables = identity._identity_metadata.tables
     assert {"groups", "group_members"}.issubset(identity_tables)
@@ -64,9 +62,7 @@ def test_historical_create_migrations_are_frozen_snapshots() -> None:
     assert "created_by_sub" in run_table.c
     assert "created_by_user_id" not in run_table.c
     assert "kind" not in run_table.c
-    assert "ix_runs_tenant_created" in {
-        index.name for index in run_table.indexes
-    }
+    assert "ix_runs_tenant_created" in {index.name for index in run_table.indexes}
 
     session_tables = knowledge_sessions._knowledge_sessions_metadata.tables
     assert set(session_tables) == {"knowledge_sessions"}
@@ -353,10 +349,7 @@ def test_0045_installs_locked_direct_shares_and_restricting_user_fks(
         "skill_template",
     ):
         assert f"'{resource_type}'" in statements
-    assert (
-        "tenant_id, recipient_user_id, resource_type, resource_id"
-        in statements
-    )
+    assert "tenant_id, recipient_user_id, resource_type, resource_id" in statements
     assert "ADD CONSTRAINT ck_resource_shares_type" in statements
 
     for table, column in migration._FOREIGN_KEYS:
@@ -408,7 +401,87 @@ def test_v02_migration_chain_and_downgrades_are_irreversible() -> None:
     assert script.get_revision("0049_tenant_integrity").down_revision == (
         "0048_editor_collaboration"
     )
-    assert script.get_current_head() == "0049_tenant_integrity"
+    assert script.get_revision("0050_context_archive").down_revision == (
+        "0049_tenant_integrity"
+    )
+    assert script.get_revision("0051_editor_comments").down_revision == (
+        "0050_context_archive"
+    )
+    assert script.get_revision("0052_editor_review").down_revision == (
+        "0051_editor_comments"
+    )
+    assert script.get_revision("0053_editor_guest_links").down_revision == (
+        "0052_editor_review"
+    )
+    assert script.get_revision("0054_guest_lease_sessions").down_revision == (
+        "0053_editor_guest_links"
+    )
+    assert script.get_revision("0055_knowledge_revision").down_revision == (
+        "0054_guest_lease_sessions"
+    )
+    assert script.get_revision("0056_run_runtime").down_revision == (
+        "0055_knowledge_revision"
+    )
+    assert script.get_revision("0057_asset_deletion").down_revision == (
+        "0056_run_runtime"
+    )
+    assert script.get_revision("0058_source_lifecycle").down_revision == (
+        "0057_asset_deletion"
+    )
+    assert script.get_revision("0059_durable_upload").down_revision == (
+        "0058_source_lifecycle"
+    )
+    assert script.get_revision("0060_knowledge_history").down_revision == (
+        "0059_durable_upload"
+    )
+    assert script.get_revision("0061_indexing_operation_kinds").down_revision == (
+        "0060_knowledge_history"
+    )
+    assert script.get_revision("0062_vector_index_deletion").down_revision == (
+        "0061_indexing_operation_kinds"
+    )
+    assert script.get_revision("0063_durable_file_preparation").down_revision == (
+        "0062_vector_index_deletion"
+    )
+    assert script.get_revision("0064_revision_job_idempotency").down_revision == (
+        "0063_durable_file_preparation"
+    )
+    assert script.get_revision("0065_generation_cleanup_contract").down_revision == (
+        "0064_revision_job_idempotency"
+    )
+    assert script.get_revision("0066_quota_stock_lifecycle").down_revision == (
+        "0065_generation_cleanup_contract"
+    )
+    assert script.get_revision("0067_session_deletion_contract").down_revision == (
+        "0066_quota_stock_lifecycle"
+    )
+    assert script.get_revision("0068_release_integrity").down_revision == (
+        "0067_session_deletion_contract"
+    )
+    assert script.get_revision("0069_knowledge_source_scope").down_revision == (
+        "0068_release_integrity"
+    )
+    assert script.get_revision("0070_contextualization_circuits").down_revision == (
+        "0069_knowledge_source_scope"
+    )
+    assert script.get_revision("0071_asset_section_roles").down_revision == (
+        "0070_contextualization_circuits"
+    )
+    assert script.get_revision("0072_audit_read_model").down_revision == (
+        "0071_asset_section_roles"
+    )
+    assert script.get_revision("0073_llm_usage").down_revision == (
+        "0072_audit_read_model"
+    )
+    assert script.get_revision("0074_llm_usage_run_index").down_revision == (
+        "0073_llm_usage"
+    )
+    assert script.get_revision(
+        "0075_audit_session_references"
+    ).down_revision == ("0074_llm_usage_run_index")
+    # Derived, not spelled: the head lives in migration_contract and a second
+    # literal here would drift the moment a migration lands.
+    assert script.get_current_head() == SCHEMA_HEAD_REVISION
 
     for name in (
         "0045_canonical_user_ids",
@@ -417,3 +490,18 @@ def test_v02_migration_chain_and_downgrades_are_irreversible() -> None:
     ):
         with pytest.raises(RuntimeError, match="irreversible"):
             _migration(name).downgrade()
+
+
+def test_durable_upload_migration_refuses_ambiguous_data_and_lossy_rollback() -> None:
+    migration = _migration("0059_durable_upload")
+    source = inspect.getsource(migration)
+
+    assert "duplicate_bindings" in migration._ASSET_FILE_BINDING_PREFLIGHT_SQL
+    assert "dangling_bindings" in migration._ASSET_FILE_BINDING_PREFLIGHT_SQL
+    assert "tenant_mismatches" in migration._ASSET_FILE_BINDING_PREFLIGHT_SQL
+    assert "owner_mismatches" in migration._ASSET_FILE_BINDING_PREFLIGHT_SQL
+    assert "workspace_mismatches" in migration._ASSET_FILE_BINDING_PREFLIGHT_SQL
+    assert "Resolve the exact" in migration._ASSET_FILE_BINDING_PREFLIGHT_SQL
+    assert "rows explicitly" in migration._ASSET_FILE_BINDING_PREFLIGHT_SQL
+    assert "UPDATE asset_records SET upload_status = 'failed'" not in source
+    assert "Durable upload downgrade blocked" in source

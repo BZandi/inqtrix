@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from inqtrix.project.scoped_upsert import ResourceScope
 
@@ -32,6 +32,39 @@ class AssetNotFound(KeyError):
     """Raised when an asset id is unknown to the store (HTTP 404)."""
 
 
+class AssetDeletionInProgress(RuntimeError):
+    """Raised when a client mutation targets an asset being deleted."""
+
+
+class AssetUploadConflict(RuntimeError):
+    """Raised when an upload id is reused for a different binding or blob."""
+
+
+AssetSectionSemanticRole = Literal[
+    "temporary",
+    "library",
+    "project_sources",
+    "custom",
+]
+"""Server-owned meaning of a file-library section.
+
+The three prepared roles are unique within one owner/workspace scope.
+``custom`` is deliberately non-unique: titles are presentation data and two
+user-created sections may have exactly the same title.  ``None`` is reserved
+for rows created before this identity contract existed.
+"""
+
+
+DEFAULT_ASSET_SECTION_SPECS: tuple[
+    tuple[AssetSectionSemanticRole, str, str], ...
+] = (
+    ("temporary", "temporary", "Temporäre Dateien"),
+    ("library", "custom", "Bibliothek"),
+    ("project_sources", "custom", "Projekt-Quellen"),
+)
+"""Stable prepared-role order and its initial presentation."""
+
+
 @dataclass(frozen=True)
 class AssetSection:
     """A top-level file-library section.
@@ -42,6 +75,8 @@ class AssetSection:
         title: Section label.
         created_at/updated_at: Unix timestamps.
         tenant_id/created_by_user_id/workspace_id: The scope.
+        semantic_role: Server-owned stable role.  ``None`` means the row
+            predates the role contract and must not be guessed from its title.
     """
 
     id: str
@@ -52,6 +87,7 @@ class AssetSection:
     tenant_id: str = "default"
     created_by_user_id: uuid.UUID | None = None
     workspace_id: str | None = None
+    semantic_role: AssetSectionSemanticRole | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +147,22 @@ class AssetRecord:
     tenant_id: str = "default"
     created_by_user_id: uuid.UUID | None = None
     workspace_id: str | None = None
+    lifecycle_status: str = "active"
+    deletion_operation_id: str | None = None
+    deletion_stage: str | None = None
+    deletion_error: str | None = None
+    upload_status: str = "ready"
+    upload_error: str | None = None
+    upload_operation_id: str | None = None
+    # Server-owned canonical preparation material.  Browser asset PUTs may
+    # update ``extracted_text`` for local UX, but document indexing reads only
+    # this operation-fenced copy so a stale client cannot replace provenance.
+    prepared_text: str = field(repr=False, default="")
+    prepared_parser_id: str | None = None
+    prepared_content_hash: str | None = None
+    prepared_file_sha256: str | None = None
+    prepared_page_texts: tuple[str, ...] = field(repr=False, default=())
+    prepared_at: float | None = None
 
 
 @runtime_checkable
@@ -134,6 +186,19 @@ class AssetStore(Protocol):
     async def list_sections(
         self, *, created_by_user_id: uuid.UUID | None, workspace_id: str | None
     ) -> list[AssetSection]: ...
+
+    async def ensure_default_sections(
+        self,
+        *,
+        created_by_user_id: uuid.UUID | None,
+        workspace_id: str | None,
+    ) -> list[AssetSection]:
+        """Return one canonical section for every prepared semantic role.
+
+        The operation is idempotent and concurrency-safe within the exact
+        owner/workspace scope.  Existing legacy rows are never relabelled.
+        """
+        ...
 
     async def delete_section(
         self, section_id: str, *, scope: ResourceScope
@@ -205,8 +270,168 @@ class AssetStore(Protocol):
         :class:`AssetNotFound`."""
         ...
 
+    async def find_asset_by_server_file_id(
+        self, server_file_id: str
+    ) -> AssetRecord | None:
+        """Return the asset bound to an original file, when one exists.
+
+        The file identifier is globally opaque.  This lookup is used only
+        after the file service has authorized the caller, so direct deletion
+        cannot bypass the asset aggregate lifecycle.
+        """
+        ...
+
+    async def list_assets_by_server_file_id(
+        self, server_file_id: str
+    ) -> list[AssetRecord]:
+        """Return every legacy reference to one physical original file."""
+        ...
+
+    async def detach_server_file_for_deletion(
+        self,
+        asset_id: str,
+        *,
+        scope: ResourceScope,
+        operation_id: str,
+        expected_server_file_id: str,
+    ) -> AssetRecord:
+        """Release one file FK while retaining the operation-owned asset.
+
+        Only the deletion operation already recorded on the asset may clear
+        its expected binding. Implementations must make a repeated call after
+        a successful detach idempotent so the immutable operation manifest can
+        resume blob and quota cleanup without discarding the visible retry
+        anchor.
+        """
+        ...
+
+    async def list_assets_by_ids(
+        self,
+        asset_ids: tuple[str, ...],
+        *,
+        scope: ResourceScope,
+    ) -> list[AssetRecord]:
+        """Batch-load exact assets inside one owner/workspace scope."""
+        ...
+
     async def delete_asset(
         self, asset_id: str, *, scope: ResourceScope
     ) -> None: ...
+
+    async def set_asset_deletion_state(
+        self,
+        asset_id: str,
+        *,
+        scope: ResourceScope,
+        lifecycle_status: str,
+        deletion_operation_id: str | None,
+        deletion_stage: str | None,
+        deletion_error: str | None,
+    ) -> AssetRecord: ...
+
+    async def finalize_asset_upload(
+        self,
+        *,
+        id: str,
+        section_id: str,
+        group_id: str | None,
+        title: str,
+        label: str,
+        file_name: str,
+        mime_type: str,
+        origin: str,
+        page_count: int | None,
+        parse_status: str,
+        parse_warning: str | None,
+        text_truncated: bool,
+        size_bytes: int,
+        server_file_id: str,
+        parser_id: str | None,
+        created_at: float,
+        updated_at: float,
+        scope: ResourceScope,
+        upload_operation_id: str | None = None,
+    ) -> AssetRecord:
+        """Attach one uploaded blob only while its reservation is active.
+
+        Implementations must perform this as a lifecycle CAS and must never
+        insert a missing row.
+        """
+        ...
+
+    async def tombstone_asset_id(
+        self, asset_id: str, *, scope: ResourceScope
+    ) -> None:
+        """Prevent a missing id from being recreated during retained deletion."""
+        ...
+
+    async def tombstone_section_id(
+        self, section_id: str, *, scope: ResourceScope
+    ) -> None:
+        """Prevent new children/recreation while a section delete is retained."""
+        ...
+
+    async def tombstone_group_id(
+        self, group_id: str, *, scope: ResourceScope
+    ) -> None:
+        """Prevent recreation or new child bindings during retained deletion."""
+        ...
+
+    async def set_asset_upload_state(
+        self,
+        asset_id: str,
+        *,
+        scope: ResourceScope,
+        upload_status: str,
+        upload_error: str | None,
+        upload_operation_id: str | None,
+        expected_upload_operation_id: str | None = None,
+    ) -> AssetRecord:
+        """Persist the server-owned original-file transfer state."""
+        ...
+
+    async def set_asset_prepared_text(
+        self,
+        asset_id: str,
+        *,
+        scope: ResourceScope,
+        server_file_id: str,
+        expected_upload_operation_id: str | None,
+        text: str,
+        parser_id: str,
+        content_hash: str,
+        file_sha256: str,
+        page_texts: list[str] | None,
+        prepared_at: float,
+    ) -> AssetRecord:
+        """CAS-persist canonical server parsing for one bound original.
+
+        ``None`` fences the compatibility path for assets that predate durable
+        upload operations.  Their immutable server file remains the source;
+        browser-provided display text is never promoted to canonical input.
+        """
+        ...
+
+    async def set_asset_parse_failure(
+        self,
+        asset_id: str,
+        *,
+        scope: ResourceScope,
+        server_file_id: str,
+        expected_upload_operation_id: str,
+        message: str,
+    ) -> AssetRecord:
+        """Record a deterministic parse failure without trusting client text."""
+        ...
+
+    async def list_assets_for_target(
+        self,
+        *,
+        section_id: str | None,
+        group_id: str | None,
+        scope: ResourceScope,
+    ) -> list[AssetRecord]:
+        """Return full records covered by an owner-scoped container target."""
+        ...
 
     async def aclose(self) -> None: ...

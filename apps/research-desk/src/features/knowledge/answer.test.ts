@@ -91,6 +91,66 @@ describe('knowledgeAnswerFromRunResult references', () => {
     expect(ref.chunkIndex).toBe(3)
     expect(ref.excerpt).toBeNull()
   })
+
+  it('preserves an unparseable grounding result as a visible degradation', () => {
+    const result = {
+      answer: 'Antwort ohne auswertbaren Zitate-Block.',
+      knowledge_grounding: {
+        enabled: true,
+        marker: '_knowledge_grounding_fallback',
+        quotes_total: 0,
+        quotes_verified: 0,
+      },
+    } as unknown as ResearchRunResult
+
+    expect(knowledgeAnswerFromRunResult(result).grounding).toEqual({
+      degraded: true,
+      total: 0,
+      verified: 0,
+    })
+  })
+
+  it('projects persisted retrieval degradations onto the final answer record', () => {
+    const degradation = {
+      candidate_cap: 64,
+      final_evidence_complete: false,
+      final_top_k: 8,
+      reason: 'vector_overfetch_cap',
+      requested_candidate_pool: 40,
+      requested_top_k: 8,
+      retrieval_mode: 'hybrid',
+      returned_candidate_pool: 6,
+      returned_hits: 3,
+      stage: 'vector_candidate_pool',
+    }
+    const result = {
+      answer: 'Teilweise belegte Antwort.',
+      knowledge_retrieval: { degradations: [degradation] },
+    } as unknown as ResearchRunResult
+
+    expect(knowledgeAnswerFromRunResult(result).retrievalDegradations).toEqual([
+      degradation,
+    ])
+  })
+
+  it('projects persisted source-integrity warnings onto the final answer record', () => {
+    const warning = {
+      code: 'chunks_pending_reconciliation',
+      count: 3,
+      message: 'server fallback',
+      reason: 'canonical_chunk_unavailable',
+      recommended_action: 'reconcile',
+      stage: 'canonical_hydration',
+    }
+    const result = {
+      answer: 'Teilweise belegte Antwort.',
+      knowledge_retrieval: { warnings: [warning] },
+    } as unknown as ResearchRunResult
+
+    expect(knowledgeAnswerFromRunResult(result).retrievalWarnings).toEqual([
+      warning,
+    ])
+  })
 })
 
 describe('citationLabelFromHref', () => {

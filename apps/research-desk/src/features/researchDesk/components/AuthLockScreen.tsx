@@ -83,6 +83,11 @@ export function AuthLockScreen({
       <motion.section
         animate={{ opacity: 1, scale: 1, y: 0 }}
         aria-labelledby="auth-lock-title"
+        // The lock screen covers the whole application, so it must also
+        // CLAIM to: without aria-modal, assistive technology keeps
+        // offering the covered shell as if it were still available. The
+        // shell itself is made inert by the caller.
+        aria-modal="true"
         className="relative w-full max-w-4xl overflow-hidden rounded-lg border border-border bg-card/95 shadow-[0_24px_80px_var(--shadow-soft)] backdrop-blur-2xl"
         initial={reduceMotion ? false : { opacity: 0, scale: 0.98, y: 10 }}
         role="dialog"

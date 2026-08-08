@@ -1,4 +1,4 @@
-"""SQLAlchemy Core definition of the skill schema (plan M3 `3.1`).
+"""SQLAlchemy Core definition of the skill schema.
 
 Separate ``MetaData`` on purpose (immutable-snapshot rule): the table
 arrives with revision 0041. Timestamps are unix-seconds doubles,

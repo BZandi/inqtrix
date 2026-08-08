@@ -10,6 +10,9 @@ streaming rejection, and the capability manifest.
 from __future__ import annotations
 
 import asyncio
+import re
+import time
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -17,11 +20,24 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
-from inqtrix.knowledge.stores.ports import KnowledgeProviderContext
+from inqtrix.knowledge.stores.ports import (
+    KnowledgeProviderContext,
+    RetrievalCandidateBatch,
+    RetrievalDegradation,
+    RetrievalExclusion,
+)
 from inqtrix.providers.base import LLMResponse, ProviderContext
 from inqtrix.search_result import GroundedSearchResult
 from inqtrix.server.container import build_container
-from inqtrix.server.routers import capabilities, chat, knowledge, runs, sources
+from inqtrix.server.routers import (
+    asset_records,
+    capabilities,
+    chat,
+    knowledge,
+    knowledge_sessions,
+    runs,
+    sources,
+)
 from inqtrix.settings import (
     AgentSettings,
     KnowledgeSettings,
@@ -29,9 +45,36 @@ from inqtrix.settings import (
     Settings,
     StorageSettings,
 )
+from inqtrix.source_authority import SourceScope
 
 from tests.contract._app import wait_for_run_status
 from tests.test_knowledge_engine import StubEmbeddings
+
+
+def wait_for_deletion(
+    client: TestClient,
+    response,
+    *,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Wait for the durable receipt rather than treating HTTP 202 as terminal."""
+
+    assert response.status_code == 202
+    operation_id = response.json()["operation_id"]
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        current = client.get(
+            f"/v1/deletion-operations/{operation_id}",
+            headers=headers,
+        )
+        assert current.status_code == 200
+        payload = current.json()
+        if payload["status"] == "deleted":
+            return payload
+        if payload["status"] == "delete_failed":
+            raise AssertionError(payload)
+        time.sleep(0.01)
+    raise AssertionError(f"deletion {operation_id} did not finish")
 
 
 class KnowledgeStubLLM:
@@ -47,8 +90,23 @@ class KnowledgeStubLLM:
     def complete_with_metadata(self, prompt: str, **kwargs: Any) -> LLMResponse:
         self.prompts.append(prompt)
         self.kwargs.append(kwargs)
+        evidence_match = re.search(
+            r"DOKUMENT-AUSZUEGE:\n[\s\S]*?^\[K1\][^\n]*\n([^\n]+)",
+            prompt,
+            flags=re.MULTILINE,
+        )
+        quote = (
+            evidence_match.group(1).strip()
+            if evidence_match is not None
+            else "Die Haftung ist auf den Auftragswert begrenzt."
+        )
+        answer = (
+            "Die Haftung ist auf den Auftragswert begrenzt [K1]."
+            if "Die Haftung ist auf den Auftragswert begrenzt." in quote
+            else f"{quote} [K1]."
+        )
         return LLMResponse(
-            content="Die Haftung ist auf den Auftragswert begrenzt [K1].",
+            content=f'ZITATE:\n[K1] "{quote}"\nANTWORT:\n{answer}',
             prompt_tokens=42,
             completion_tokens=11,
             model="stub-answer-model",
@@ -72,12 +130,14 @@ def make_knowledge_client(
     llm: KnowledgeStubLLM | None = None,
     with_knowledge: bool = True,
     settings: Settings | None = None,
+    store: MemoryKnowledgeStore | None = None,
 ) -> tuple[TestClient, KnowledgeStubLLM]:
     active_llm = llm or KnowledgeStubLLM()
+    active_store = store or MemoryKnowledgeStore()
     knowledge_context = (
         KnowledgeProviderContext(
             embeddings=StubEmbeddings(),
-            store=MemoryKnowledgeStore(),
+            store=active_store,
             default_top_k=4,
         )
         if with_knowledge
@@ -97,8 +157,10 @@ def make_knowledge_client(
         knowledge=knowledge_context,
     )
     app = FastAPI()
+    app.include_router(asset_records.build_router(container))
     app.include_router(capabilities.build_router(container))
     app.include_router(chat.build_router(container))
+    app.include_router(knowledge_sessions.build_router(container))
     app.include_router(runs.build_router(container))
     if container.knowledge_service is not None:
         app.include_router(knowledge.build_router(container))
@@ -147,9 +209,51 @@ def test_collection_and_document_lifecycle_over_http():
         assert payload["metadata"] == {"source": "vertrag.pdf"}
 
         deleted = client.delete(f"/v1/knowledge/documents/{payload['id']}")
-        assert deleted.status_code == 204
+        wait_for_deletion(client, deleted)
         gone = client.delete(f"/v1/knowledge/collections/{collection_id}")
-        assert gone.status_code == 204
+        wait_for_deletion(client, gone)
+
+
+def test_legacy_member_resolves_by_stable_source_without_exposing_text():
+    store = MemoryKnowledgeStore()
+    store.source_lifecycle_authority.register_active(
+        SourceScope(
+            tenant_id="default",
+            source_id="asset:asset-legacy",
+            owner_user_id=None,
+            workspace_id=None,
+        )
+    )
+    client, _ = make_knowledge_client(store=store)
+    with client:
+        collection = client.post(
+            "/v1/knowledge/collections",
+            json={"name": "Legacy"},
+        ).json()
+        document = client.post(
+            f"/v1/knowledge/collections/{collection['id']}/documents",
+            json={
+                "title": "Legacy.pdf",
+                "text": "Canonical server evidence.",
+                "metadata": {"source_id": "document:legacy"},
+            },
+        ).json()
+
+        resolved = client.get(
+            f"/v1/knowledge/collections/{collection['id']}/documents/by-source",
+            params={"source_id": "document:legacy"},
+        )
+        missing = client.get(
+            f"/v1/knowledge/collections/{collection['id']}/documents/by-source",
+            params={"source_id": "asset:missing"},
+        )
+
+    assert resolved.status_code == 200
+    assert resolved.json()["id"] == document["id"]
+    assert "text" not in resolved.json()
+    assert "source_text" not in resolved.json()
+    assert missing.status_code == 404
+    assert missing.json()["error"]["type"] == "knowledge_source_unresolved"
 
 
 def test_search_returns_scored_candidates():
@@ -167,15 +271,137 @@ def test_search_returns_scored_candidates():
     hit = body["data"][0]
     assert hit["document_title"] == "Rahmenvertrag Kunde X"
     assert hit["score"] > 0
-    assert "Haftung" in hit["text"]
-    # Additive agent-citation identity/provenance fields.
+    assert "Haftung" in hit["excerpt"]
+    # The public hit carries only verified original evidence, never the
+    # synthetic retrieval text used by the vector index.
     assert hit["chunk_id"].startswith("kch_")
     assert hit["rank"] == 1
     assert "chunk_index" in hit
-    assert "source_text" in hit
+    assert "text" not in hit
+    assert "source_text" not in hit
+    assert hit["provenance_status"] in {"verified_span", "legacy_unspanned"}
     assert "page_number" in hit
     # Envelope carries a warnings list (empty on a clean unscoped search).
     assert body["warnings"] == []
+
+
+def test_search_reports_store_side_unverified_exclusion_without_text(monkeypatch):
+    """Canonical hydration may reject a vector before a candidate exists."""
+
+    store = MemoryKnowledgeStore()
+    client, _ = make_knowledge_client(store=store)
+    with client:
+        collection_id = _create_collection_with_document(client)
+
+        async def excluded_search(**_kwargs):
+            return RetrievalCandidateBatch(
+                exclusions=(
+                    RetrievalExclusion(
+                        reason="source_unverified",
+                        stage="canonical_hydration",
+                        count=2,
+                        recommended_action="reindex",
+                    ),
+                )
+            )
+
+        monkeypatch.setattr(store, "search", excluded_search)
+        response = client.post(
+            "/v1/knowledge/search",
+            json={
+                "query": "Haftung",
+                "collection_ids": [collection_id],
+                "top_k": 4,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == []
+    warning = response.json()["warnings"][0]
+    assert warning == {
+        "code": "chunks_require_reindex",
+        "message": (
+            "Treffer ohne verifizierbaren Originaltext wurden ausgeschlossen "
+            "und müssen neu indiziert werden."
+        ),
+        "count": 2,
+    }
+    assert "chunk" not in warning
+    assert "text" not in warning
+
+
+@pytest.mark.parametrize(
+    ("reason", "top_k", "final_complete"),
+    [
+        ("vector_overfetch_cap", 1, True),
+        ("vector_overfetch_cap", 4, False),
+        ("vector_candidate_stalled", 1, True),
+        ("vector_candidate_stalled", 4, False),
+    ],
+)
+def test_search_warning_distinguishes_candidate_pool_from_final_evidence(
+    reason: str,
+    top_k: int,
+    final_complete: bool,
+):
+    store = MemoryKnowledgeStore()
+    client, _ = make_knowledge_client(store=store)
+
+    with client:
+        _create_collection_with_document(client)
+        original_search = store.search
+
+        async def bounded_search(**kwargs: Any) -> RetrievalCandidateBatch:
+            candidates = await original_search(**kwargs)
+            return RetrievalCandidateBatch(
+                candidates,
+                degradations=(
+                    RetrievalDegradation(
+                        reason=reason,
+                        retrieval_mode="dense",
+                        requested_top_k=int(kwargs["top_k"]),
+                        returned_hits=len(candidates),
+                        candidate_cap=(
+                            64 if reason == "vector_overfetch_cap" else None
+                        ),
+                        requested_candidate_pool=8,
+                        returned_candidate_pool=len(candidates),
+                        final_top_k=int(kwargs["top_k"]),
+                    ),
+                ),
+            )
+
+        store.search = bounded_search  # type: ignore[method-assign]
+        response = client.post(
+            "/v1/knowledge/search",
+            json={"query": "Haftung", "top_k": top_k},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    warning = body["warnings"][0]
+    assert warning == {
+        "candidate_cap": 64 if reason == "vector_overfetch_cap" else None,
+        "code": reason,
+        "final_evidence_complete": final_complete,
+        "final_top_k": top_k,
+        "message": warning["message"],
+        "reason": reason,
+        "requested_candidate_pool": 8,
+        "requested_top_k": top_k,
+        "retrieval_mode": "dense",
+        "returned_candidate_pool": 1,
+        "returned_hits": 1,
+        "stage": "vector_candidate_pool",
+    }
+    if final_complete:
+        assert "finale Belegzahl wurde dennoch vollständig erreicht" in warning[
+            "message"
+        ]
+    else:
+        assert "bevor die finale angeforderte Belegzahl erreicht war" in warning[
+            "message"
+        ]
 
 
 def test_search_top_k_above_upper_bound_is_rejected():
@@ -261,6 +487,7 @@ def test_native_run_in_knowledge_mode_completes_with_references():
     client, _ = make_knowledge_client()
     with client:
         collection_id = _create_collection_with_document(client)
+        session_id = "ks_native_knowledge"
 
         created = client.post(
             "/v1/runs",
@@ -268,15 +495,21 @@ def test_native_run_in_knowledge_mode_completes_with_references():
                 "question": "Wie ist die Haftung geregelt?",
                 "mode": "knowledge",
                 "knowledge_filters": {"collection_ids": [collection_id]},
+                "session_id": session_id,
             },
         )
         assert created.status_code == 202
+        assert created.json()["session_id"] == session_id
         run_id = created.json()["run_id"]
         wait_for_run_status(client, run_id, "completed")
 
         result = client.get(f"/v1/runs/{run_id}/result")
+        claimed_session = client.get(f"/v1/knowledge-sessions/{session_id}")
 
     assert result.status_code == 200
+    assert claimed_session.status_code == 200
+    assert claimed_session.json()["id"] == session_id
+    assert claimed_session.json()["title"] == "Wie ist die Haftung geregelt?"
     payload = result.json()
     assert payload["answer"].endswith("[K1].")
     reference = payload["references"][0]
@@ -453,7 +686,9 @@ def test_build_knowledge_context_constructs_from_settings():
     context = build_knowledge_context(settings)
 
     assert context is not None
-    assert isinstance(context.embeddings, LiteLLMEmbeddings)
+    # The tracing wrapper is transparent: capability surface and private
+    # knobs delegate, and the backend class stays reachable via _provider.
+    assert isinstance(context.embeddings._provider, LiteLLMEmbeddings)
     assert context.embeddings.default_model == "text-embedding-3-small"
     assert context.embeddings.selectable_embedding_models == [
         "text-embedding-3-small",
@@ -583,15 +818,15 @@ def test_capabilities_publishes_agent_tool_manifest():
     )
     assert knowledge_search["read_only"] is True
     assert knowledge_search["effect"] == "read"
-    # Regression: the tool manifest must never CLOBBER the M5 agent
-    # vocabulary block — the desk reads both from the same key.
+    # The tool manifest must never clobber the agent vocabulary block:
+    # the desk reads both from the same key.
     assert payload["agent"]["autonomy_modes"] == [
         "strict", "balanced", "autonomous",
     ]
     assert payload["agent"]["default_autonomy"]
     assert isinstance(payload["agent"]["max_plan_tasks"], int)
-    # Two-mode UI presets (plan M1 S7): the composer maps Standard/Auto
-    # onto the UNCHANGED wire vocabulary above; advanced_autonomy
+    # The composer maps the two-mode Standard/Auto presets onto the
+    # unchanged wire vocabulary above; advanced_autonomy
     # republishes the legacy three-way control (default off).
     assert payload["agent"]["mode_presets"] == [
         {"id": "standard", "autonomy": "balanced"},
@@ -600,7 +835,7 @@ def test_capabilities_publishes_agent_tool_manifest():
     assert payload["agent"]["advanced_autonomy"] is False
     # The run-overview contract (published == enforced): what each
     # permission mode gates, derived from the kernel policy config and
-    # the E16 replan rule. A policy change must surface here — the
+    # the web-replan rule. A policy change must surface here — the
     # composer overview renders exactly this block.
     modes = payload["agent"]["permission_modes"]
     assert set(modes) == {"strict", "balanced", "autonomous"}
@@ -609,7 +844,11 @@ def test_capabilities_publishes_agent_tool_manifest():
     assert balanced["web_replan_regate"] is True
     assert balanced["patch_gate"] is True
     assert balanced["kernel_gated_tools"] == [
-        "load_skill", "run_deep_mission", "run_web_research", "web_instant",
+        "delegate_batch",
+        "load_skill",
+        "run_deep_mission",
+        "run_web_research",
+        "web_instant",
     ]
     assert balanced["kernel_conditional_tools"] == [
         "search_project_knowledge",
@@ -623,12 +862,36 @@ def test_capabilities_publishes_agent_tool_manifest():
     strict = modes["strict"]
     assert strict["web_replan_regate"] is True
     assert "read_project_document" in strict["kernel_gated_tools"]
-    # Skill limits ride the agent block (plan M3); the skill LIST stays
-    # on the authenticated /v1/skills — this endpoint is unauth.
+    # Skill limits ride the agent block; the skill list stays on the
+    # authenticated /v1/skills endpoint because this endpoint is unauthenticated.
     assert payload["agent"]["skills"] == {
         "max_attached": 3,
         "disclosure_budget_chars": 4000,
     }
+    limits = payload["agent"]["limits"]
+    assert limits["kernel"]["schnell"] == {
+        "tool_calls": 30,
+        "tool_calls_ceiling": 30,
+        "steps": 33,
+        "steps_ceiling": 33,
+    }
+    assert limits["kernel"]["normal"] == {
+        "tool_calls": 30,
+        "tool_calls_ceiling": 60,
+        "steps": 73,
+        "steps_ceiling": 145,
+    }
+    assert limits["kernel"]["deep"] == {
+        "tool_calls": 60,
+        "tool_calls_ceiling": 120,
+        "steps": 121,
+        "steps_ceiling": 241,
+    }
+    assert limits["mission"]["discovery_tool_calls"] == 15
+    assert limits["mission"]["plan_tasks"] == 8
+    assert limits["tokens"]["extendable"] is False
+    assert limits["tokens"]["recoverable"] is False
+    assert limits["directives"]["quick_web"] == {"web_searches": 1}
     # Memory backend: routes mounted, but the volatile store must not
     # advertise sync-ability (same rule as prompt_templates).
     assert payload["features"]["skills"] is False
@@ -690,19 +953,49 @@ def test_document_chunk_serves_neighbour_context():
         assert payload["chunk_id"].startswith("kch_")
         assert payload["document_id"] == document_id
         assert payload["chunk_index"] == 1
-        assert "Kapitel 1" in payload["text"]
-        # No contextualizer wired: source_text equals the chunk text.
-        assert payload["source_text"] == payload["text"]
+        assert "Kapitel 1" in payload["excerpt"]
+        assert "text" not in payload
+        assert "source_text" not in payload
         assert payload["page_number"] is None
+        assert payload["provenance_status"] == "verified_span"
+        assert payload["source_span"]["offset_unit"] == "utf8_byte"
         assert [n["chunk_index"] for n in payload["neighbors"]] == [0, 2]
-        assert "Kapitel 0" in payload["neighbors"][0]["text"]
-        assert "Kapitel 2" in payload["neighbors"][1]["text"]
+        assert "Kapitel 0" in payload["neighbors"][0]["excerpt"]
+        assert "Kapitel 2" in payload["neighbors"][1]["excerpt"]
+        assert all(
+            neighbor["provenance_status"] == "verified_span"
+            for neighbor in payload["neighbors"]
+        )
 
         bare = client.get(
             f"/v1/knowledge/documents/{document_id}/chunks/1"
         )
         assert bare.status_code == 200
         assert bare.json()["neighbors"] == []
+
+
+def test_document_chunk_fails_closed_when_canonical_span_is_invalid():
+    store = MemoryKnowledgeStore()
+    client, _ = make_knowledge_client(store=store)
+    with client:
+        collection_id = _create_collection_with_document(client)
+        document_id = client.get(
+            f"/v1/knowledge/collections/{collection_id}/documents"
+        ).json()["data"][0]["id"]
+        with store._lock:
+            stored = store._chunks[document_id][0]
+            store._chunks[document_id][0] = replace(
+                stored,
+                document_content_hash="not-the-canonical-hash",
+            )
+
+        response = client.get(
+            f"/v1/knowledge/documents/{document_id}/chunks/0"
+        )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["type"] == "knowledge_reindex_required"
+    assert "excerpt" not in response.json()
 
 
 def test_document_chunk_rejects_bad_context_and_unknown_ids():

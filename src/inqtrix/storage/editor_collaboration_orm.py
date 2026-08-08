@@ -12,6 +12,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     Float,
+    ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
@@ -36,6 +37,7 @@ editor_collaboration_updates = Table(
     Column("update_hash", Text, nullable=False),
     Column("update_bytes", LargeBinary, nullable=True),
     Column("actor_user_id", UUID(as_uuid=True), nullable=True),
+    Column("actor_guest_identity_id", UUID(as_uuid=True), nullable=True),
     Column("actor_kind", Text, nullable=False),
     Column("change_kind", Text, nullable=False),
     Column(
@@ -44,6 +46,15 @@ editor_collaboration_updates = Table(
         nullable=False,
         server_default=text("'[]'::jsonb"),
     ),
+    Column(
+        "change_summary",
+        JSONB,
+        nullable=False,
+        server_default=text(
+            """'{"edits":[],"omitted_edit_count":0}'::jsonb"""
+        ),
+    ),
+    Column("decision_outcome", Text, nullable=True),
     Column("command_id", UUID(as_uuid=True), nullable=True),
     Column("command_payload_hash", Text, nullable=True),
     Column("created_at", Float, nullable=False),
@@ -63,12 +74,26 @@ editor_collaboration_updates = Table(
         name="ck_collaboration_updates_hash",
     ),
     CheckConstraint(
-        "actor_kind <> 'human' OR actor_user_id IS NOT NULL",
-        name="ck_collaboration_updates_human_actor",
+        "(actor_kind = 'human' AND actor_user_id IS NOT NULL "
+        "AND actor_guest_identity_id IS NULL) OR "
+        "(actor_kind = 'guest' AND actor_user_id IS NULL "
+        "AND actor_guest_identity_id IS NOT NULL) OR "
+        "(actor_kind IN ('assistant', 'agent', 'system') "
+        "AND actor_guest_identity_id IS NULL)",
+        name="ck_collaboration_updates_actor",
     ),
     CheckConstraint(
         "jsonb_typeof(suggestion_ids) = 'array'",
         name="ck_collaboration_updates_suggestion_ids",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(change_summary) = 'object'",
+        name="ck_collaboration_updates_change_summary",
+    ),
+    CheckConstraint(
+        "decision_outcome IS NULL OR "
+        "decision_outcome IN ('accepted', 'rejected')",
+        name="ck_collaboration_updates_decision_outcome",
     ),
     CheckConstraint(
         "(update_bytes IS NOT NULL AND payload_pruned_at IS NULL) OR "
@@ -76,7 +101,7 @@ editor_collaboration_updates = Table(
         name="ck_collaboration_updates_payload",
     ),
     CheckConstraint(
-        "actor_kind IN ('human', 'assistant', 'agent', 'system')",
+        "actor_kind IN ('human', 'guest', 'assistant', 'agent', 'system')",
         name="ck_collaboration_updates_actor_kind",
     ),
     CheckConstraint(
@@ -111,6 +136,11 @@ editor_collaboration_updates = Table(
         "ix_collaboration_updates_actor_user",
         "actor_user_id",
         postgresql_where=text("actor_user_id IS NOT NULL"),
+    ),
+    Index(
+        "ix_collaboration_updates_actor_guest",
+        "actor_guest_identity_id",
+        postgresql_where=text("actor_guest_identity_id IS NOT NULL"),
     ),
 )
 
@@ -168,9 +198,12 @@ editor_collaboration_leases = Table(
     Column("token_hash", Text, nullable=False),
     Column("document_id", Text, nullable=False),
     Column("generation", BigInteger, nullable=False),
-    Column("user_id", UUID(as_uuid=True), nullable=False),
+    Column("user_id", UUID(as_uuid=True), nullable=True),
+    Column("actor_kind", Text, nullable=False, server_default=text("'user'")),
+    Column("guest_identity_id", UUID(as_uuid=True), nullable=True),
+    Column("guest_link_id", UUID(as_uuid=True), nullable=True),
     Column("permission", Text, nullable=False),
-    Column("session_id", Text, nullable=False),
+    Column("session_id", Text, nullable=True),
     Column("issued_at", Float, nullable=False),
     Column("expires_at", Float, nullable=False),
     Column("validated_at", Float, nullable=True),
@@ -199,6 +232,15 @@ editor_collaboration_leases = Table(
         "(rotation_command_id IS NOT NULL AND rotated_from_lease_id IS NOT NULL)",
         name="ck_collaboration_leases_rotation",
     ),
+    CheckConstraint(
+        "(actor_kind = 'user' AND user_id IS NOT NULL "
+        "AND guest_identity_id IS NULL AND guest_link_id IS NULL "
+        "AND session_id IS NOT NULL) OR "
+        "(actor_kind = 'guest' AND user_id IS NULL "
+        "AND guest_identity_id IS NOT NULL AND guest_link_id IS NOT NULL "
+        "AND session_id IS NULL)",
+        name="ck_collaboration_leases_actor",
+    ),
     UniqueConstraint(
         "token_hash",
         name="uq_editor_collaboration_leases_token_hash",
@@ -223,6 +265,11 @@ editor_collaboration_leases = Table(
         postgresql_where=text("revoked_at IS NULL"),
     ),
     Index("ix_collaboration_leases_user", "user_id"),
+    Index(
+        "ix_collaboration_leases_guest_identity",
+        "guest_identity_id",
+        postgresql_where=text("guest_identity_id IS NOT NULL"),
+    ),
     Index("ix_collaboration_leases_session", "session_id"),
     Index("ix_collaboration_leases_rotated_from", "rotated_from_lease_id"),
 )
@@ -252,5 +299,177 @@ editor_collaboration_instances = Table(
     CheckConstraint(
         "lease_expires_at >= updated_at",
         name="ck_collaboration_instances_lease",
+    ),
+)
+
+editor_collaboration_comment_threads = Table(
+    "editor_collaboration_comment_threads",
+    editor_collaboration_metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
+    Column("document_id", Text, nullable=False),
+    Column("generation", BigInteger, nullable=False),
+    Column("revision", BigInteger, nullable=False),
+    Column("status", Text, nullable=False, server_default=text("'open'")),
+    Column("created_by_user_id", UUID(as_uuid=True), nullable=True),
+    Column("created_by_guest_identity_id", UUID(as_uuid=True), nullable=True),
+    Column("resolved_by_user_id", UUID(as_uuid=True), nullable=True),
+    Column("resolved_by_guest_identity_id", UUID(as_uuid=True), nullable=True),
+    Column("resolved_at", Float, nullable=True),
+    Column("anchor", JSONB, nullable=False),
+    Column("quote_text", Text, nullable=False, server_default=text("''")),
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+    Column("last_command_id", UUID(as_uuid=True), nullable=False),
+    Column("last_command_payload_hash", Text, nullable=False),
+    Column("last_command_kind", Text, nullable=False),
+    UniqueConstraint(
+        "tenant_id",
+        "id",
+        name="uq_collaboration_comment_threads_tenant_id",
+    ),
+    CheckConstraint(
+        "generation >= 1 AND revision >= 1",
+        name="ck_collaboration_comment_threads_position",
+    ),
+    CheckConstraint(
+        "status IN ('open', 'resolved')",
+        name="ck_collaboration_comment_threads_status",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(anchor) = 'object'",
+        name="ck_collaboration_comment_threads_anchor",
+    ),
+    CheckConstraint(
+        "length(last_command_payload_hash) = 64",
+        name="ck_collaboration_comment_threads_command_hash",
+    ),
+    CheckConstraint(
+        "last_command_kind IN ('create', 'resolve', 'reopen')",
+        name="ck_collaboration_comment_threads_command_kind",
+    ),
+    CheckConstraint(
+        "(created_by_user_id IS NOT NULL)::integer "
+        "+ (created_by_guest_identity_id IS NOT NULL)::integer = 1",
+        name="ck_collaboration_comment_threads_creator_actor",
+    ),
+    CheckConstraint(
+        "(status = 'open' AND resolved_by_user_id IS NULL "
+        "AND resolved_by_guest_identity_id IS NULL AND resolved_at IS NULL) "
+        "OR (status = 'resolved' AND "
+        "((resolved_by_user_id IS NOT NULL)::integer "
+        "+ (resolved_by_guest_identity_id IS NOT NULL)::integer = 1) "
+        "AND resolved_at IS NOT NULL)",
+        name="ck_collaboration_comment_threads_resolution",
+    ),
+    Index(
+        "ix_collaboration_comment_threads_document_revision",
+        "tenant_id",
+        "document_id",
+        "generation",
+        "revision",
+    ),
+    Index(
+        "ix_collaboration_comment_threads_status_updated",
+        "tenant_id",
+        "document_id",
+        "generation",
+        "status",
+        "updated_at",
+    ),
+)
+
+editor_collaboration_comment_messages = Table(
+    "editor_collaboration_comment_messages",
+    editor_collaboration_metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
+    Column("document_id", Text, nullable=False),
+    Column("thread_id", UUID(as_uuid=True), nullable=False),
+    Column("revision", BigInteger, nullable=False),
+    Column("author_user_id", UUID(as_uuid=True), nullable=True),
+    Column("author_guest_identity_id", UUID(as_uuid=True), nullable=True),
+    Column("body_markdown", Text, nullable=False),
+    Column(
+        "mention_user_ids",
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+    ),
+    Column("created_at", Float, nullable=False),
+    Column("edited_at", Float, nullable=True),
+    Column("deleted_at", Float, nullable=True),
+    Column("last_command_id", UUID(as_uuid=True), nullable=False),
+    Column("last_command_payload_hash", Text, nullable=False),
+    Column("last_command_kind", Text, nullable=False),
+    ForeignKeyConstraint(
+        ["tenant_id", "thread_id"],
+        [
+            "editor_collaboration_comment_threads.tenant_id",
+            "editor_collaboration_comment_threads.id",
+        ],
+        ondelete="CASCADE",
+        name="fk_collaboration_comment_messages_thread",
+    ),
+    CheckConstraint(
+        "revision >= 1",
+        name="ck_collaboration_comment_messages_revision",
+    ),
+    CheckConstraint(
+        "(author_user_id IS NOT NULL)::integer "
+        "+ (author_guest_identity_id IS NOT NULL)::integer = 1",
+        name="ck_collaboration_comment_messages_author_actor",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(mention_user_ids) = 'array'",
+        name="ck_collaboration_comment_messages_mentions",
+    ),
+    CheckConstraint(
+        "length(last_command_payload_hash) = 64",
+        name="ck_collaboration_comment_messages_command_hash",
+    ),
+    CheckConstraint(
+        "last_command_kind IN ('create', 'reply', 'edit', 'delete')",
+        name="ck_collaboration_comment_messages_command_kind",
+    ),
+    Index(
+        "ix_collaboration_comment_messages_thread_created",
+        "tenant_id",
+        "thread_id",
+        "created_at",
+        "id",
+    ),
+    Index(
+        "ix_collaboration_comment_messages_document_revision",
+        "tenant_id",
+        "document_id",
+        "revision",
+    ),
+)
+
+editor_collaboration_comment_reads = Table(
+    "editor_collaboration_comment_reads",
+    editor_collaboration_metadata,
+    Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
+    Column("document_id", Text, nullable=False),
+    Column("generation", BigInteger, nullable=False),
+    Column("user_id", UUID(as_uuid=True), nullable=False),
+    Column(
+        "last_read_revision",
+        BigInteger,
+        nullable=False,
+        server_default=text("0"),
+    ),
+    Column("updated_at", Float, nullable=False),
+    PrimaryKeyConstraint(
+        "tenant_id",
+        "document_id",
+        "generation",
+        "user_id",
+        name="pk_editor_collaboration_comment_reads",
+    ),
+    CheckConstraint(
+        "generation >= 1 AND last_read_revision >= 0",
+        name="ck_collaboration_comment_reads_position",
     ),
 )

@@ -77,6 +77,12 @@ class UserDirectory(Protocol):
         """Return the user with canonical *user_id*, or ``None``."""
         ...
 
+    async def profiles_for_user_ids(
+        self, *, tenant_id: str, user_ids: tuple[uuid.UUID, ...]
+    ) -> dict[uuid.UUID, "MirroredUser"]:
+        """Resolve display profiles for a bounded set of canonical user ids."""
+        ...
+
     async def set_instance_role(
         self, *, tenant_id: str, user_id: uuid.UUID, role: str
     ) -> bool:

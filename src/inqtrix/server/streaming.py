@@ -26,6 +26,7 @@ from inqtrix.text import iter_word_chunks
 from inqtrix.urls import sanitize_error
 
 if TYPE_CHECKING:
+    from inqtrix.auth.permissions import AuditSink
     from inqtrix.auth.principal import Principal
     from inqtrix.core.algorithms import AgentAlgorithm
     from inqtrix.core.context import RuntimeContext
@@ -75,10 +76,9 @@ async def _watch_disconnect(
     via that path during an active streaming response (its ASGI receive
     side stays idle while we only write SSE chunks), so the probe never
     flips. A blocking ``await request.receive()`` in a parallel task is
-    the only reliable way to surface the disconnect — verified live in
-    the Azure stack test 2026-04-19 where polling missed the disconnect
-    entirely and a 138s deep-3-round run completed despite a 3s
-    ``curl --max-time`` abort.
+    the only reliable way to surface the disconnect. Polling alone can
+    miss it and allow a long-running request to complete after the client
+    has already aborted.
 
     Args:
         request: The Starlette/FastAPI request whose receive channel we
@@ -111,8 +111,9 @@ async def _watch_disconnect(
         raise
     except Exception as exc:  # noqa: BLE001 — disconnect watcher must not crash the stream
         log.debug(
-            "Disconnect watcher exiting after receive() error: %s",
-            sanitize_error(exc),
+            "Disconnect watcher exiting after receive() error "
+            "(error_type=%s)",
+            type(exc).__name__,
         )
         cancel_event.set()
 
@@ -131,6 +132,8 @@ async def stream_response(
     cancel_event: threading.Event | None = None,
     quota_service: "QuotaService | None" = None,
     principal: "Principal | None" = None,
+    audit_sink: "AuditSink | None" = None,
+    audit_service_starts: bool = True,
 ) -> AsyncIterator[str]:
     """Execute the agent and yield progress updates + answer as SSE chunks.
 
@@ -202,10 +205,25 @@ async def stream_response(
         park=None,
     )
 
-    # Start the algorithm in a separate thread, dispatched through the registry.
+    # Start the algorithm in a separate thread, dispatched through the
+    # registry. The root span opens INSIDE the thread (run_in_executor
+    # copies no contextvars) — this closes the historical tracing
+    # blind spot of the OpenAI-compatible streaming path.
+    from inqtrix.observability.otel import chat_thread_call
+
     agent_future = loop.run_in_executor(
         None,
-        partial(algorithm.run, run_request, runtime=runtime, context=run_context),
+        chat_thread_call(
+            partial(
+                algorithm.run,
+                run_request,
+                runtime=runtime,
+                context=run_context,
+            ),
+            mode=run_request.mode,
+            principal=principal,
+            streamed=True,
+        ),
     )
 
     # Spawn the disconnect watcher when we have a real request. Tests
@@ -226,6 +244,27 @@ async def stream_response(
         except (asyncio.CancelledError, Exception):  # noqa: BLE001 — cleanup-only
             pass
 
+    async def _audit_terminal(reason: str) -> None:
+        """Index row for an exit that never reaches the normal path.
+
+        Timeouts and agent errors return before the completion row is
+        written; without this the admin index would show no trace of a
+        request that definitely ran. Usage is unknown on these paths
+        (the agent thread may still be running), so the row carries the
+        reason instead of token counts.
+        """
+        from inqtrix.services.audit_service import audit_chat_completed
+
+        await audit_chat_completed(
+            audit_sink,
+            principal,
+            usage=None,
+            streamed=True,
+            failed=True,
+            enabled=audit_service_starts,
+            reason=reason,
+        )
+
     # Read progress updates and stream them as SSE chunks. Track whether ANY
     # progress chunk actually streamed, so the answer/progress separator is
     # emitted only when there was a progress section to separate from (event-only
@@ -234,6 +273,7 @@ async def stream_response(
     while include_progress and progress_queue is not None and not agent_future.done():
         if time.monotonic() >= request_deadline:
             await _shutdown_watcher()
+            await _audit_terminal("request_deadline")
             yield make_chunk(chat_id, t(ui_state, "sse_request_timeout"))
             yield make_chunk(chat_id, "", finish_reason="stop")
             yield "data: [DONE]\n\n"
@@ -252,8 +292,9 @@ async def stream_response(
             continue
         except Exception as exc:
             log.warning(
-                "Progress-Streaming deaktiviert nach unerwartetem Fehler: %s",
-                sanitize_error(exc),
+                "Progress-Streaming deaktiviert nach unerwartetem Fehler "
+                "(error_type=%s)",
+                type(exc).__name__,
             )
             break
 
@@ -268,8 +309,9 @@ async def stream_response(
             break
         except Exception as exc:
             log.warning(
-                "Restliche Progress-Meldungen konnten nicht serialisiert werden: %s",
-                sanitize_error(exc),
+                "Restliche Progress-Meldungen konnten nicht serialisiert "
+                "werden (error_type=%s)",
+                type(exc).__name__,
             )
             break
 
@@ -292,13 +334,15 @@ async def stream_response(
                 "Streamed run timed out; abandoned token spend not "
                 "booked toward quota."
             )
+        await _audit_terminal("timeout")
         yield make_chunk(chat_id, t(ui_state, "sse_request_timeout"))
         yield make_chunk(chat_id, "", finish_reason="stop")
         yield "data: [DONE]\n\n"
         return
     except Exception as e:
         await _shutdown_watcher()
-        log.error("Agent-Fehler: %s", e)
+        log.error("Agent-Fehler (error_type=%s)", type(e).__name__)
+        await _audit_terminal(f"agent_error:{type(e).__name__}")
         yield make_chunk(
             chat_id,
             t(ui_state, "sse_agent_error", err=sanitize_error(e)),
@@ -318,6 +362,40 @@ async def stream_response(
             QuotaDimension.LLM_TOKENS,
             consumed_tokens(result.get("usage")),
         )
+
+    # Service-start index row — right beside the quota booking so an
+    # abandoned stream that consumed tokens still leaves its entry.
+    from inqtrix.services.audit_service import audit_chat_completed
+
+    await audit_chat_completed(
+        audit_sink,
+        principal,
+        usage=result.get("usage") or None,
+        streamed=True,
+        failed=agent_result.terminal_failure is not None,
+        enabled=audit_service_starts,
+    )
+
+    terminal_failure = agent_result.terminal_failure
+    if terminal_failure is not None:
+        # A returned terminal failure preserves metering/audit information but
+        # is not an answer.  Stream only its safe explanation and close with an
+        # explicit error reason; never emit the rejected model completion as a
+        # normal word stream followed by ``finish_reason=stop``.
+        await _shutdown_watcher()
+        yield make_chunk(
+            chat_id,
+            terminal_failure.message,
+            inqtrix={
+                "error": {
+                    "type": terminal_failure.type,
+                    "message": terminal_failure.message,
+                }
+            },
+        )
+        yield make_chunk(chat_id, "", finish_reason="error")
+        yield "data: [DONE]\n\n"
+        return
 
     # Cancel-on-disconnect path: graph.run returns cancelled=True with an
     # empty answer. Stop emitting because the client is gone.
@@ -379,6 +457,8 @@ async def guarded_stream(
     cancel_event: threading.Event | None = None,
     quota_service: "QuotaService | None" = None,
     principal: "Principal | None" = None,
+    audit_sink: "AuditSink | None" = None,
+    audit_service_starts: bool = True,
 ) -> AsyncIterator[str]:
     """Stream with semaphore guard for correct concurrency limiting.
 
@@ -405,5 +485,7 @@ async def guarded_stream(
             cancel_event=cancel_event,
             quota_service=quota_service,
             principal=principal,
+            audit_sink=audit_sink,
+            audit_service_starts=audit_service_starts,
         ):
             yield chunk

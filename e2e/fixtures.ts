@@ -67,15 +67,24 @@ export const test = base.extend<Fixtures>({
     const ownerContext = await browser.newContext({
       ...deviceOptions,
       baseURL: endpoint.baseURL!,
+      ignoreHTTPSErrors:
+        process.env.INQTRIX_E2E_IGNORE_HTTPS_ERRORS === '1',
       storageState: endpoint.ownerStorageState,
     })
     const collaboratorContext = await browser.newContext({
       ...deviceOptions,
       baseURL: endpoint.baseURL!,
+      ignoreHTTPSErrors:
+        process.env.INQTRIX_E2E_IGNORE_HTTPS_ERRORS === '1',
       storageState: endpoint.collaboratorStorageState,
     })
 
     try {
+      await assertDistinctAuthenticatedActors(
+        ownerContext,
+        collaboratorContext,
+        stack,
+      )
       await use({
         collaboratorContext,
         collaboratorPage: await collaboratorContext.newPage(),
@@ -91,3 +100,34 @@ export const test = base.extend<Fixtures>({
 })
 
 export { expect } from '@playwright/test'
+
+async function assertDistinctAuthenticatedActors(
+  ownerContext: BrowserContext,
+  collaboratorContext: BrowserContext,
+  stack: CollaborationE2EStack,
+): Promise<void> {
+  const [ownerResponse, collaboratorResponse] = await Promise.all([
+    ownerContext.request.get('/api/auth/session'),
+    collaboratorContext.request.get('/api/auth/session'),
+  ])
+  if (ownerResponse.status() !== 200 || collaboratorResponse.status() !== 200) {
+    throw new Error('Collaboration fixture identities are not authenticated.')
+  }
+  const [ownerSession, collaboratorSession] = await Promise.all([
+    ownerResponse.json() as Promise<{ user?: { id?: unknown } }>,
+    collaboratorResponse.json() as Promise<{ user?: { id?: unknown } }>,
+  ])
+  const ownerId = ownerSession.user?.id
+  const collaboratorId = collaboratorSession.user?.id
+  if (
+    typeof ownerId !== 'string'
+    || typeof collaboratorId !== 'string'
+    || ownerId !== stack.owner.userId
+    || collaboratorId !== stack.collaborator.userId
+    || ownerId === collaboratorId
+  ) {
+    throw new Error(
+      'Collaboration fixture storage states do not match two distinct declared identities.',
+    )
+  }
+}

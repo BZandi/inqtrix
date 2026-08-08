@@ -1,5 +1,6 @@
 {
-  "_established": "2026-01-01 re-baseline after the C5 column-interleave fusion fix (5 criterion pairs restored, CCON->CON ids, 4 labels migrated): qdrant hybrid + Cohere-rerank-v4.0-pro + contextual retrieval (gpt-5.4 contextualizer), 233 docs, 33 retrieval queries. The corrected corpus is honestly harder: b19 (paraphrase, gsk-con-6) drops to rank 3 behind the restored CON siblings; recall@3 stays 1.0. multi_complete unchanged 0.75 — b30 (4-doc backup-encryption aggregation) still crowds out the c5-ops pair, the documented multi-hop headroom.",
+  "_inqtrix_version": "0.2.0",
+  "_context": "Regression baseline with the corrected C5 column-interleave corpus (5 criterion pairs restored, CCON->CON ids, 4 labels migrated): qdrant hybrid + Cohere-rerank-v4.0-pro + contextual retrieval (gpt-5.4 contextualizer), 233 docs, 33 retrieval queries. The corrected corpus is harder: b19 (paraphrase, gsk-con-6) ranks third behind the restored CON siblings; recall@3 stays 1.0. multi_complete remains 0.75 because b30 (4-doc backup-encryption aggregation) still crowds out the c5-ops pair, preserving documented multi-hop headroom.",
   "recall_at_1": 0.9697,
   "recall_at_3": 1.0,
   "recall_at_5": 1.0,

@@ -28,6 +28,8 @@ async def _save(
     preset="slate",
     user_bubble_tone="gray",
     enable_agent_memory=False,
+    chat_model_tier="",
+    agent_model_tier="",
     updated_at=1.0,
 ):
     return await service.save_preferences(
@@ -37,6 +39,8 @@ async def _save(
         theme=theme,
         theme_preset=preset, user_bubble_tone=user_bubble_tone,
         enable_agent_memory=enable_agent_memory,
+        chat_model_tier=chat_model_tier,
+        agent_model_tier=agent_model_tier,
         updated_at=updated_at,
     )
 
@@ -137,3 +141,68 @@ async def test_validation_rejects_out_of_domain(service) -> None:
         await _save(service, USER, preset="neon")
     with pytest.raises(AccountPreferencesValidationError):
         await _save(service, USER, user_bubble_tone="rainbow")
+    with pytest.raises(AccountPreferencesValidationError):
+        await _save(service, USER, chat_model_tier="turbo")
+    with pytest.raises(AccountPreferencesValidationError):
+        await _save(service, USER, agent_model_tier="turbo")
+
+
+@pytest.mark.asyncio
+async def test_model_tier_defaults_to_no_preference_and_round_trips(service) -> None:
+    await _save(service, USER)
+    stored = await service.get_preferences(user_id=USER)
+    assert stored.chat_model_tier == ""
+    assert stored.agent_model_tier == ""
+
+    await _save(service, USER, chat_model_tier="mid", agent_model_tier="fast")
+    stored = await service.get_preferences(user_id=USER)
+    assert stored.chat_model_tier == "mid"
+    assert stored.agent_model_tier == "fast"
+
+
+@pytest.mark.asyncio
+async def test_chat_tier_never_carries_over_to_the_agent(service) -> None:
+    """The two surfaces stay independent all the way down to storage.
+
+    An agent run fans out over several thinking nodes while a chat answer is a
+    single call. The client keeps the selections apart for that reason; if the
+    preference row merged them, a chat pick would raise agent spend the moment
+    it synced.
+    """
+    await _save(service, USER, chat_model_tier="high")
+    stored = await service.get_preferences(user_id=USER)
+    assert stored.chat_model_tier == "high"
+    assert stored.agent_model_tier == ""
+
+
+def test_router_reads_an_absent_or_null_tier_as_no_preference() -> None:
+    """A missing key and an explicit ``null`` both mean "no preference".
+
+    The router reads every other field through ``str(body.get(key, default))``.
+    Copying that pattern here would turn JSON ``null`` into the string
+    ``'None'`` — a value the service rejects, so an old client omitting the
+    field would get a 400 on an otherwise valid save.
+    """
+    from inqtrix.server.routers.account_preferences import _tier
+
+    assert _tier({}, "chat_model_tier") == ""
+    assert _tier({"chat_model_tier": None}, "chat_model_tier") == ""
+    assert _tier({"chat_model_tier": "mid"}, "chat_model_tier") == "mid"
+    assert _tier({"chat_model_tier": None}, "chat_model_tier") != "None"
+
+
+@pytest.mark.asyncio
+async def test_model_tier_domain_follows_the_routing_table(service) -> None:
+    """Every tier the resolver knows is accepted — no hand-maintained copy.
+
+    A second literal list would drift from the tiers routing actually resolves,
+    and the drift would only surface as a rejected save for a tier that works
+    everywhere else.
+    """
+    from inqtrix.model_routing import TIER_NAMES
+
+    for tier in TIER_NAMES:
+        await _save(service, USER, chat_model_tier=tier, agent_model_tier=tier)
+        stored = await service.get_preferences(user_id=USER)
+        assert stored.chat_model_tier == tier
+        assert stored.agent_model_tier == tier

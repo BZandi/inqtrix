@@ -1,4 +1,4 @@
-"""Behavioral tests for the owner-mode Kubernetes quiesce hook."""
+"""Behavioral tests for the schema-maintenance Kubernetes quiesce hook."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 from inqtrix.deployment.kubernetes_maintenance import (
     KubernetesMaintenanceConfig,
     quiesce_database_clients,
-    run_owner_maintenance,
+    run_schema_maintenance,
 )
 
 
@@ -35,7 +35,7 @@ class _Api:
         return {}
 
 
-def test_owner_maintenance_removes_hpa_scales_every_client_and_waits(
+def test_schema_maintenance_removes_hpa_scales_every_client_and_waits(
     monkeypatch,
 ) -> None:
     api = _Api()
@@ -52,10 +52,11 @@ def test_owner_maintenance_removes_hpa_scales_every_client_and_waits(
                 "rel-inqtrix-api",
                 "rel-inqtrix-worker",
                 "rel-inqtrix-collaboration",
+                "rel-inqtrix-pgbouncer",
             ),
             hpa_names=("rel-inqtrix-api",),
             timeout_seconds=30,
-            role_binding_name="rel-inqtrix-owner-maintenance",
+            role_binding_name="rel-inqtrix-schema-maintenance",
         ),
     )
 
@@ -65,14 +66,18 @@ def test_owner_maintenance_removes_hpa_scales_every_client_and_waits(
         "rel-inqtrix-api",
         "rel-inqtrix-worker",
         "rel-inqtrix-collaboration",
+        "rel-inqtrix-pgbouncer",
     ]
     assert all(call[2] == {"spec": {"replicas": 0}} for call in scale_calls)
     pod_calls = [call for call in api.calls if "/pods?" in call[0]]
     assert len(pod_calls) == 2
-    assert "component+in+%28api%2Cworker%2Ccollaboration%29" in pod_calls[0][0]
+    assert (
+        "component+in+%28api%2Cworker%2Ccollaboration%2Cpgbouncer%29"
+        in pod_calls[0][0]
+    )
 
 
-def test_owner_maintenance_revokes_scale_binding_after_quiesce(
+def test_schema_maintenance_revokes_scale_binding_after_quiesce(
     monkeypatch,
 ) -> None:
     api = _Api()
@@ -85,21 +90,21 @@ def test_owner_maintenance_revokes_scale_binding_after_quiesce(
         deployment_names=("rel-inqtrix-api",),
         hpa_names=("rel-inqtrix-api",),
         timeout_seconds=30,
-        role_binding_name="rel-inqtrix-owner-maintenance",
+        role_binding_name="rel-inqtrix-schema-maintenance",
     )
 
-    run_owner_maintenance(api, config)  # type: ignore[arg-type]
+    run_schema_maintenance(api, config)  # type: ignore[arg-type]
 
     assert api.calls[-1] == (
         "/apis/rbac.authorization.k8s.io/v1/namespaces/inqtrix/"
-        "rolebindings/rel-inqtrix-owner-maintenance",
+        "rolebindings/rel-inqtrix-schema-maintenance",
         "DELETE",
         None,
         True,
     )
 
 
-def test_owner_maintenance_revokes_scale_binding_when_quiesce_times_out(
+def test_schema_maintenance_revokes_scale_binding_when_quiesce_times_out(
     monkeypatch,
 ) -> None:
     api = _Api()
@@ -112,15 +117,15 @@ def test_owner_maintenance_revokes_scale_binding_when_quiesce_times_out(
         deployment_names=("rel-inqtrix-api",),
         hpa_names=("rel-inqtrix-api",),
         timeout_seconds=-1,
-        role_binding_name="rel-inqtrix-owner-maintenance",
+        role_binding_name="rel-inqtrix-schema-maintenance",
     )
 
     with pytest.raises(RuntimeError, match="did not terminate"):
-        run_owner_maintenance(api, config)  # type: ignore[arg-type]
+        run_schema_maintenance(api, config)  # type: ignore[arg-type]
 
     assert api.calls[-1] == (
         "/apis/rbac.authorization.k8s.io/v1/namespaces/inqtrix/"
-        "rolebindings/rel-inqtrix-owner-maintenance",
+        "rolebindings/rel-inqtrix-schema-maintenance",
         "DELETE",
         None,
         True,

@@ -1,8 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type {
-  CollaborationChangeKind,
-  SuggestionKind,
-} from '@inqtrix/editor-schema'
+import type { SuggestionKind } from '@inqtrix/editor-schema'
 
 import {
   AlertTriangle,
@@ -14,12 +11,23 @@ import {
   ListChecks,
   LoaderCircle,
   LockKeyhole,
+  MessageSquarePlus,
+  MessageSquareText,
   PanelRightClose,
+  PenLine,
+  RefreshCw,
   Users,
   X,
 } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Dialog } from '@/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   Select,
@@ -38,6 +46,7 @@ import {
   compactChangeText,
   filterInspectorChanges,
   filterInspectorHistory,
+  type EditorCollaborationStatusKind,
   type EditorCollaborationStatusModel,
   type EditorChangesView,
   type EditorInspectorTab,
@@ -45,11 +54,61 @@ import {
   type InspectorChange,
   type InspectorHistoryEntry,
   type InspectorHistoryFilters,
+  type InspectorHistoryKind,
   type InspectorOpenFilters,
   type InspectorParticipant,
 } from './model'
 
 type InspectorDecision = 'accept' | 'reject'
+
+export const COLLABORATION_SAVING_REVEAL_MS = 600
+export const COLLABORATION_SAVING_MIN_VISIBLE_MS = 500
+
+/**
+ * Hide acknowledgement pulses that complete faster than a person can act on
+ * them, while keeping real latency and every exceptional state visible.
+ */
+function useCalmCollaborationStatusKind(
+  kind: EditorCollaborationStatusKind,
+): EditorCollaborationStatusKind {
+  const [visibleKind, setVisibleKind] = useState(kind)
+  const visibleKindRef = useRef(kind)
+  const savingShownAtRef = useRef<number | null>(
+    kind === 'saving' ? Date.now() : null,
+  )
+
+  useEffect(() => {
+    let timer: number | null = null
+    const show = (next: EditorCollaborationStatusKind) => {
+      visibleKindRef.current = next
+      savingShownAtRef.current = next === 'saving' ? Date.now() : null
+      setVisibleKind(next)
+    }
+
+    if (kind === 'saving' && visibleKindRef.current === 'saved') {
+      timer = window.setTimeout(
+        () => show('saving'),
+        COLLABORATION_SAVING_REVEAL_MS,
+      )
+    } else if (kind === 'saved' && visibleKindRef.current === 'saving') {
+      const shownAt = savingShownAtRef.current ?? Date.now()
+      const remaining = Math.max(
+        0,
+        COLLABORATION_SAVING_MIN_VISIBLE_MS - (Date.now() - shownAt),
+      )
+      if (remaining === 0) show('saved')
+      else timer = window.setTimeout(() => show('saved'), remaining)
+    } else if (kind !== visibleKindRef.current) {
+      show(kind)
+    }
+
+    return () => {
+      if (timer !== null) window.clearTimeout(timer)
+    }
+  }, [kind])
+
+  return visibleKind
+}
 
 export type EditorInspectorProps = {
   activeTab: EditorInspectorTab
@@ -58,7 +117,11 @@ export type EditorInspectorProps = {
   changes: readonly InspectorChange[]
   changesError: string | null
   changesView: EditorChangesView
+  collaborationActive: boolean
   collaborationStatus: EditorCollaborationStatusModel
+  commentCount: number
+  comments: ReactNode
+  commentUnreadCount: number
   decisionError: string | null
   display: CollaborationReviewDisplay
   history: readonly InspectorHistoryEntry[]
@@ -72,7 +135,10 @@ export type EditorInspectorProps = {
   onDecision: (decision: InspectorDecision, patchIds: string[]) => void
   onDisplayChange: (display: CollaborationReviewDisplay) => void
   onHistoryFiltersChange: (filters: InspectorHistoryFilters) => void
+  onLogin?: () => void
   onOpenFiltersChange: (filters: InspectorOpenFilters) => void
+  onReconnect?: () => Promise<void>
+  onReload?: () => void
   onSelectedChangeIdChange: (changeId: string | null) => void
   openFilters: InspectorOpenFilters
   selectedChangeId: string | null
@@ -85,7 +151,7 @@ const copy = {
     all: 'Alle',
     allAuthors: 'Alle Personen',
     allTypes: 'Alle Arten',
-    assistant: 'Assistenz',
+    assistant: 'KI',
     author: 'Person',
     batchAcceptBody: 'Alle gefilterten offenen Änderungen annehmen?',
     batchAcceptTitle: 'Änderungen annehmen',
@@ -93,6 +159,8 @@ const copy = {
     batchRejectTitle: 'Änderungen ablehnen',
     cancel: 'Abbrechen',
     changes: 'Änderungen',
+    comments: 'Kommentare',
+    commentMode: 'Kommentieren',
     close: 'Inspector schließen',
     status: {
       access_revoked: 'Zugriff entzogen',
@@ -103,18 +171,29 @@ const copy = {
       saved: 'Gespeichert',
       saving: 'Wird gespeichert',
       syncing: 'Wird synchronisiert',
+      origin_rejected: 'Serveradresse stimmt nicht',
       update_required: 'Update erforderlich',
     },
     projection: 'Bestätigter Stand',
+    diagnostics: 'Verbindungsdiagnose',
+    reconnectAttempt: 'Verbindungsversuch',
+    nextReconnect: 'Nächster Versuch',
+    retryNow: 'Jetzt erneut verbinden',
+    signInAgain: 'Erneut anmelden',
+    updateApp: 'App aktualisieren',
+    unconfirmed: 'Nicht bestätigte Änderungen',
+    none: 'Keine',
     participants: 'Teilnehmende',
     deletion: 'Löschung',
     display: 'Anzeige',
     edit: 'Bearbeiten',
     final: 'Final',
+    format: 'Formatierung',
     history: 'Verlauf',
     insertion: 'Einfügung',
     loading: 'Änderungen werden geladen',
     modification: 'Änderung',
+    replacement: 'Ersetzung',
     next: 'Nächste Änderung',
     noChanges: 'Keine offenen Änderungen.',
     noHistory: 'Kein Verlauf für diese Filter.',
@@ -128,7 +207,10 @@ const copy = {
     sourceReadOnly: 'Quelltext ist in der Zusammenarbeit schreibgeschützt.',
     suggest: 'Vorschlagen',
     suggestLocked: 'Diese Freigabe erlaubt nur Vorschläge.',
+    structure: 'Struktur',
     type: 'Art',
+    technicalDetails: 'Technische Details',
+    moreEdits: 'weitere Änderungen',
     viewLocked: 'Diese Freigabe ist schreibgeschützt.',
   },
   en: {
@@ -137,7 +219,7 @@ const copy = {
     all: 'All',
     allAuthors: 'All people',
     allTypes: 'All types',
-    assistant: 'Assistant',
+    assistant: 'AI',
     author: 'Person',
     batchAcceptBody: 'Accept all filtered open changes?',
     batchAcceptTitle: 'Accept changes',
@@ -145,6 +227,8 @@ const copy = {
     batchRejectTitle: 'Reject changes',
     cancel: 'Cancel',
     changes: 'Changes',
+    comments: 'Comments',
+    commentMode: 'Comment',
     close: 'Close inspector',
     status: {
       access_revoked: 'Access revoked',
@@ -155,18 +239,29 @@ const copy = {
       saved: 'Saved',
       saving: 'Saving',
       syncing: 'Syncing',
+      origin_rejected: 'Server address mismatch',
       update_required: 'Update required',
     },
     projection: 'Confirmed version',
+    diagnostics: 'Connection diagnostics',
+    reconnectAttempt: 'Connection attempt',
+    nextReconnect: 'Next attempt',
+    retryNow: 'Reconnect now',
+    signInAgain: 'Sign in again',
+    updateApp: 'Update app',
+    unconfirmed: 'Unconfirmed changes',
+    none: 'None',
     participants: 'Participants',
     deletion: 'Deletion',
     display: 'Display',
     edit: 'Edit',
     final: 'Final',
+    format: 'Formatting',
     history: 'History',
     insertion: 'Insertion',
     loading: 'Loading changes',
     modification: 'Change',
+    replacement: 'Replacement',
     next: 'Next change',
     noChanges: 'No open changes.',
     noHistory: 'No history for these filters.',
@@ -180,10 +275,49 @@ const copy = {
     sourceReadOnly: 'Source is read-only during collaboration.',
     suggest: 'Suggest',
     suggestLocked: 'This share permits suggestions only.',
+    structure: 'Structure',
     type: 'Type',
+    technicalDetails: 'Technical details',
+    moreEdits: 'more edits',
     viewLocked: 'This share is read-only.',
   },
 } as const
+
+function InspectorTabTrigger({
+  count,
+  countClassName,
+  label,
+  value,
+}: {
+  count?: number
+  countClassName?: string
+  label: string
+  value: EditorInspectorTab
+}) {
+  const accessibleLabel = count && count > 0 ? `${label} ${count}` : label
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="block h-7 min-w-0">
+          <TabsTrigger
+            aria-label={accessibleLabel}
+            className="h-7 w-full min-w-0 gap-1 overflow-hidden px-2 text-xs"
+            value={value}
+          >
+            <span className="min-w-0 truncate">{label}</span>
+            {count && count > 0 ? (
+              <span className={cn('t-hint shrink-0 tabular-nums', countClassName)}>
+                {count}
+              </span>
+            ) : null}
+          </TabsTrigger>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{accessibleLabel}</TooltipContent>
+    </Tooltip>
+  )
+}
 
 export function EditorInspector({
   activeTab,
@@ -192,7 +326,11 @@ export function EditorInspector({
   changes,
   changesError,
   changesView,
+  collaborationActive,
   collaborationStatus,
+  commentCount,
+  comments,
+  commentUnreadCount,
   decisionError,
   display,
   history,
@@ -206,7 +344,10 @@ export function EditorInspector({
   onDecision,
   onDisplayChange,
   onHistoryFiltersChange,
+  onLogin,
   onOpenFiltersChange,
+  onReconnect,
+  onReload,
   onSelectedChangeIdChange,
   openFilters,
   selectedChangeId,
@@ -265,24 +406,48 @@ export function EditorInspector({
       value={activeTab}
     >
       <div className="flex inqtrix-panel-header items-center gap-2 border-b border-border px-3">
-        <TabsList className="grid h-8 min-w-0 flex-1 grid-cols-2 rounded-md p-0.5">
-          <TabsTrigger className="h-7 min-w-0 px-2 text-xs" value="assistant">
-            {labels.assistant}
-          </TabsTrigger>
-          <TabsTrigger className="h-7 min-w-0 gap-1 px-2 text-xs" value="changes">
-            {labels.changes}
-            {changes.length > 0 ? (
-              <span className="t-hint tabular-nums text-muted-foreground">{changes.length}</span>
-            ) : null}
-          </TabsTrigger>
+        <TabsList className={cn(
+          'grid h-8 min-w-0 flex-1 rounded-md p-0.5',
+          collaborationActive ? 'grid-cols-3' : 'grid-cols-1',
+        )}>
+          {collaborationActive ? (
+            <InspectorTabTrigger
+              count={commentCount > 0 ? (commentUnreadCount > 0 ? commentUnreadCount : commentCount) : 0}
+              countClassName={commentUnreadCount > 0 ? 'text-brand' : 'text-muted-foreground'}
+              label={labels.comments}
+              value="comments"
+            />
+          ) : null}
+          {collaborationActive ? (
+            <InspectorTabTrigger
+              count={changes.length}
+              countClassName="text-muted-foreground"
+              label={labels.changes}
+              value="changes"
+            />
+          ) : null}
+          <InspectorTabTrigger label={labels.assistant} value="assistant" />
         </TabsList>
         <IconButton label={labels.close} onClick={onClose}>
           <PanelRightClose className="icon-sm" />
         </IconButton>
       </div>
 
-      <EditorCollaborationStatus model={collaborationStatus} variant="inspector" />
+      <EditorCollaborationStatus
+        model={collaborationStatus}
+        onLogin={onLogin}
+        onReconnect={onReconnect}
+        onReload={onReload}
+        variant="inspector"
+      />
 
+      <TabsContent
+        className="m-0 min-h-0 flex-1 data-[state=inactive]:hidden"
+        forceMount
+        value="comments"
+      >
+        {comments}
+      </TabsContent>
       <TabsContent
         className="m-0 min-h-0 flex-1 data-[state=inactive]:hidden"
         forceMount
@@ -388,7 +553,7 @@ export function EditorInspector({
                 label={labels.type}
                 onValueChange={(value) => onHistoryFiltersChange({
                   ...historyFilters,
-                  type: value === 'all' ? null : value as CollaborationChangeKind,
+                  type: value === 'all' ? null : value as InspectorHistoryKind,
                 })}
                 options={historyTypeOptions(labels)}
                 placeholder={labels.allTypes}
@@ -494,7 +659,7 @@ export function EditorWriteModeControl({
   onModeChange,
   sourceReadOnly,
 }: {
-  access: 'edit' | 'suggest' | 'view' | null
+  access: 'comment' | 'edit' | 'suggest' | 'view' | null
   canEdit: boolean
   collaborationActive: boolean
   mode: EditorWriteMode
@@ -505,7 +670,15 @@ export function EditorWriteModeControl({
   const labels = copy[locale]
   if (!collaborationActive) return null
   const editLocked = sourceReadOnly || access !== 'edit' || !canEdit
-  const suggestLocked = sourceReadOnly || access === 'view' || access === null || !canEdit
+  const suggestLocked = sourceReadOnly
+    || access === 'comment'
+    || access === 'view'
+    || access === null
+    || !canEdit
+  const commentLocked = sourceReadOnly
+    || access === 'view'
+    || access === null
+    || !canEdit
   const lockLabel = sourceReadOnly
     ? labels.sourceReadOnly
     : access === 'view' || access === null
@@ -517,6 +690,7 @@ export function EditorWriteModeControl({
       <ModeButton
         active={mode === 'edit'}
         disabled={editLocked}
+        icon={<PenLine className="icon-sm" />}
         label={labels.edit}
         lockLabel={editLocked ? lockLabel : null}
         onClick={() => onModeChange('edit')}
@@ -524,9 +698,18 @@ export function EditorWriteModeControl({
       <ModeButton
         active={mode === 'suggest'}
         disabled={suggestLocked}
+        icon={<MessageSquareText className="icon-sm" />}
         label={labels.suggest}
         lockLabel={suggestLocked ? lockLabel : null}
         onClick={() => onModeChange('suggest')}
+      />
+      <ModeButton
+        active={mode === 'comment'}
+        disabled={commentLocked}
+        icon={<MessageSquarePlus className="icon-sm" />}
+        label={labels.commentMode}
+        lockLabel={commentLocked ? lockLabel : null}
+        onClick={() => onModeChange('comment')}
       />
       {mode === 'view' ? (
         <Tooltip>
@@ -544,14 +727,22 @@ export function EditorWriteModeControl({
 
 export function EditorCollaborationStatus({
   model,
+  onLogin,
+  onReconnect,
+  onReload,
   variant,
 }: {
   model: EditorCollaborationStatusModel
+  onLogin?: () => void
+  onReconnect?: () => Promise<void>
+  onReload?: () => void
   variant: 'inspector' | 'topbar'
 }) {
   const { locale } = useLocale()
   const labels = copy[locale]
-  const statusLabel = model.notice ?? labels.status[model.kind]
+  const [actionPending, setActionPending] = useState(false)
+  const visibleKind = useCalmCollaborationStatusKind(model.kind)
+  const statusLabel = labels.status[visibleKind]
   const projectionLabel = model.projectionConfirmedAt
     ? `${labels.projection}: ${new Date(model.projectionConfirmedAt).toLocaleString(locale)}`
     : null
@@ -560,67 +751,173 @@ export function EditorCollaborationStatus({
     : `${model.participants.length} ${labels.participants}: ${model.participants
       .map((participant) => participant.name)
       .join(', ')}`
-  const fullLabel = [statusLabel, projectionLabel, participantLabel].filter(Boolean).join('. ')
+  const fullLabel = [
+    statusLabel,
+    model.notice,
+    projectionLabel,
+    participantLabel,
+  ].filter((part): part is string => Boolean(part)).reduce(
+    (label, part) => {
+      if (!label) return part
+      return `${label}${/[.!?]$/u.test(label) ? ' ' : '. '}${part}`
+    },
+    '',
+  )
   const avatarSize = variant === 'topbar' ? 'size-5' : 'size-6'
+  const action = model.recoverability === 'retry' && onReconnect
+    ? {
+        label: labels.retryNow,
+        run: async () => onReconnect(),
+      }
+    : model.recoverability === 'login' && onLogin
+      ? {
+          label: labels.signInAgain,
+          run: async () => onLogin(),
+        }
+      : model.recoverability === 'reload' && onReload
+        ? {
+            label: labels.updateApp,
+            run: async () => onReload(),
+          }
+        : null
+  const runAction = () => {
+    if (!action || actionPending) return
+    setActionPending(true)
+    void action.run().finally(() => setActionPending(false))
+  }
   return (
     <div
       aria-label={fullLabel}
       aria-live="polite"
       className={cn(
-        'flex shrink-0 items-center justify-between gap-2',
+        'shrink-0',
         variant === 'inspector'
-          ? 'h-9 border-b border-border px-3'
-          : 'h-7 max-w-56 rounded-md bg-muted/60 px-1.5',
+          ? 'border-b border-border px-3 py-1'
+          : 'max-w-56',
       )}
+      data-editor-status-kind={visibleKind}
       role="status"
       title={fullLabel}
     >
-      <div className="flex min-w-0 items-center gap-1.5">
-        <span
-          aria-hidden
-          className={cn(
-            'size-2 shrink-0 rounded-full',
-            model.kind === 'saved' ? 'bg-success'
-              : model.kind === 'saving'
-                || model.kind === 'syncing'
-                || model.kind === 'reconnecting'
-                ? 'bg-warning'
-                : model.kind === 'read_only' || model.kind === 'inactive'
-                  ? 'bg-muted-foreground/50'
-                  : 'bg-destructive',
-          )}
-        />
-        <span className="t-meta-sm truncate text-muted-foreground">
-          {statusLabel}
-          {projectionLabel ? ` · ${projectionLabel}` : ''}
-        </span>
-      </div>
-      <div aria-hidden className="flex shrink-0 items-center" data-participant-count={model.participants.length}>
-        {model.participants.length === 0 ? <Users className="icon-sm text-muted-foreground" /> : null}
-        {model.visibleParticipants.map((participant, index) => (
-          <span
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            aria-label={fullLabel}
             className={cn(
-              't-hint flex items-center justify-center rounded-full border-2 border-background font-medium',
-              avatarSize,
-              index > 0 && '-ml-1.5',
+              'flex w-full min-w-0 items-center justify-between gap-2 rounded-md px-1.5 text-left outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring',
+              variant === 'inspector' ? 'h-7' : 'h-7 bg-muted/60',
             )}
-            key={participant.id}
-            data-participant-id={participant.id}
-            style={{ backgroundColor: participant.color, color: avatarTextColor(participant.color) }}
-            title={participant.name}
+            type="button"
           >
-            {initials(participant.name)}
-          </span>
-        ))}
-        {model.participantOverflow > 0 ? (
-          <span className={cn(
-            't-hint -ml-1.5 flex items-center justify-center rounded-full border-2 border-background bg-muted text-muted-foreground',
-            avatarSize,
-          )}>
-            +{model.participantOverflow}
-          </span>
-        ) : null}
-      </div>
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span
+                aria-hidden
+                className={cn(
+                  'size-2 shrink-0 rounded-full',
+                  visibleKind === 'saved' ? 'bg-success'
+                    : visibleKind === 'saving'
+                      || visibleKind === 'syncing'
+                      || visibleKind === 'reconnecting'
+                      ? 'bg-warning'
+                      : visibleKind === 'read_only' || visibleKind === 'inactive'
+                        ? 'bg-muted-foreground/50'
+                        : 'bg-destructive',
+                )}
+              />
+              <span
+                className={cn(
+                  't-meta-sm truncate text-muted-foreground',
+                  variant === 'topbar' && 'w-[6.75rem]',
+                )}
+                data-editor-status-label
+              >
+                {statusLabel}
+              </span>
+            </span>
+            <span aria-hidden className="flex shrink-0 items-center" data-participant-count={model.participants.length}>
+              {model.participants.length === 0 ? <Users className="icon-sm text-muted-foreground" /> : null}
+              {model.visibleParticipants.map((participant, index) => (
+                <span
+                  className={cn(
+                    't-hint flex items-center justify-center rounded-full border-2 border-background font-medium',
+                    avatarSize,
+                    index > 0 && '-ml-1.5',
+                  )}
+                  key={participant.id}
+                  data-participant-id={participant.id}
+                  style={{ backgroundColor: participant.color, color: avatarTextColor(participant.color) }}
+                  title={participant.name}
+                >
+                  {initials(participant.name)}
+                </span>
+              ))}
+              {model.participantOverflow > 0 ? (
+                <span className={cn(
+                  't-hint -ml-1.5 flex items-center justify-center rounded-full border-2 border-background bg-muted text-muted-foreground',
+                  avatarSize,
+                )}>
+                  +{model.participantOverflow}
+                </span>
+              ) : null}
+            </span>
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-72">
+          <div className="space-y-1 px-2 py-1.5">
+            <p className="t-list">{labels.diagnostics}</p>
+            <p className="t-meta-sm text-muted-foreground">{model.notice ?? statusLabel}</p>
+          </div>
+          <DropdownMenuSeparator />
+          <div className="space-y-1 px-2 py-1.5">
+            <DiagnosticRow
+              label={labels.projection}
+              value={model.projectionConfirmedAt
+                ? new Date(model.projectionConfirmedAt).toLocaleString(locale)
+                : labels.none}
+            />
+            <DiagnosticRow
+              label={labels.unconfirmed}
+              value={model.hasUnconfirmedLocalChanges ? '1+' : labels.none}
+            />
+            {model.reconnectAttempt > 0 ? (
+              <DiagnosticRow
+                label={labels.reconnectAttempt}
+                value={String(model.reconnectAttempt)}
+              />
+            ) : null}
+            {model.nextReconnectAt ? (
+              <DiagnosticRow
+                label={labels.nextReconnect}
+                value={new Date(model.nextReconnectAt).toLocaleTimeString(locale)}
+              />
+            ) : null}
+          </div>
+          {action ? (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                disabled={actionPending}
+                onSelect={(event) => {
+                  event.preventDefault()
+                  runAction()
+                }}
+              >
+                <RefreshCw className={actionPending ? 'animate-spin' : undefined} />
+                {action.label}
+              </DropdownMenuItem>
+            </>
+          ) : null}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  )
+}
+
+function DiagnosticRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="t-meta-sm text-muted-foreground">{label}</span>
+      <span className="t-meta-sm tabular-nums">{value}</span>
     </div>
   )
 }
@@ -761,21 +1058,54 @@ function HistoryChanges({
           type="button"
         >
           <span className="min-w-0">
-            <span className="t-list block truncate">{historyTypeLabel(entry.type, labels)}</span>
+            <span className="t-list block text-pretty">
+              {activityHeadline(entry, locale)}
+            </span>
             <span className="t-meta-sm mt-0.5 flex min-w-0 items-center gap-1.5 text-muted-foreground">
-              <span className="truncate">{entry.actor.name}</span>
-              <span aria-hidden>·</span>
               <span className="shrink-0">{formatInspectorTime(entry.createdAt, locale)}</span>
+              {(entry.updateCount ?? 1) > 1 ? (
+                <>
+                  <span aria-hidden>·</span>
+                  <span>{entry.updateCount} Updates</span>
+                </>
+              ) : null}
             </span>
           </span>
           <ChevronDown className={cn('icon-sm mt-0.5 text-muted-foreground transition-transform', expanded && 'rotate-180')} />
         </button>
         {expanded ? (
-          <div className="t-meta-sm border-t border-border/70 px-3 py-2 text-muted-foreground">
-            <span className="tabular-nums">{entry.fromSequence}–{entry.toSequence}</span>
-            {entry.suggestionIds.length > 0 ? (
-              <span> · {entry.suggestionIds.length} {labels.changes.toLocaleLowerCase(locale)}</span>
+          <div className="space-y-2 border-t border-border/70 px-3 py-2">
+            {(entry.summary ?? []).map((edit, index) => (
+              <div
+                className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-start gap-1.5"
+                key={`${entry.id}:${edit.position}:${index}`}
+              >
+                <span className="t-meta-sm break-words rounded-sm bg-destructive-subtle px-1.5 py-1 text-destructive">
+                  {edit.before || '∅'}
+                </span>
+                <span aria-hidden className="t-meta-sm pt-1 text-muted-foreground">→</span>
+                <span className="t-meta-sm break-words rounded-sm bg-success-subtle px-1.5 py-1 text-success">
+                  {edit.after || '∅'}
+                </span>
+              </div>
+            ))}
+            {(entry.omittedEditCount ?? 0) > 0 ? (
+              <p className="t-meta-sm text-muted-foreground">
+                +{entry.omittedEditCount} {labels.moreEdits}
+              </p>
             ) : null}
+            <details className="group">
+              <summary className="t-meta-sm cursor-pointer select-none text-muted-foreground">
+                {labels.technicalDetails}
+              </summary>
+              <div className="t-hint mt-1 space-y-0.5 break-all text-muted-foreground">
+                <p className="tabular-nums">Sequence {entry.fromSequence}–{entry.toSequence}</p>
+                {entry.commandId ? <p>Command {entry.commandId}</p> : null}
+                {entry.suggestionIds.length > 0 ? (
+                  <p>{entry.suggestionIds.length} Suggestion IDs</p>
+                ) : null}
+              </div>
+            </details>
           </div>
         ) : null}
       </div>
@@ -833,15 +1163,17 @@ function SegmentButton({ active, count, label, onClick }: {
   )
 }
 
-function ModeButton({ active, disabled, label, lockLabel, onClick }: {
+function ModeButton({ active, disabled, icon, label, lockLabel, onClick }: {
   active: boolean
   disabled: boolean
+  icon: ReactNode
   label: string
   lockLabel: string | null
   onClick: () => void
 }) {
   const button = (
     <button
+      aria-label={label}
       aria-pressed={active}
       className={cn(
         'flex h-6 items-center gap-1 rounded-sm px-2 text-xs font-medium transition-colors',
@@ -853,7 +1185,8 @@ function ModeButton({ active, disabled, label, lockLabel, onClick }: {
       type="button"
     >
       {disabled ? <LockKeyhole className="icon-xs" /> : null}
-      {label}
+      <span aria-hidden data-editor-mode-icon>{icon}</span>
+      <span data-editor-mode-label>{label}</span>
     </button>
   )
   if (!lockLabel) return button
@@ -957,14 +1290,14 @@ function uniqueParticipants(participants: readonly InspectorParticipant[]): Insp
 }
 
 function suggestionTypeOptions(labels: typeof copy.de | typeof copy.en) {
-  return (['insertion', 'deletion', 'modification'] as const).map((type) => ({
+  return (['insertion', 'deletion', 'replacement', 'format', 'structure'] as const).map((type) => ({
     label: suggestionTypeLabel(type, labels),
     value: type,
   }))
 }
 
 function historyTypeOptions(labels: typeof copy.de | typeof copy.en) {
-  return (['direct', 'suggestion', 'decision', 'system'] as const).map((type) => ({
+  return (['direct', 'suggestion', 'decision', 'comment', 'system'] as const).map((type) => ({
     label: historyTypeLabel(type, labels),
     value: type,
   }))
@@ -978,13 +1311,83 @@ function suggestionTypeLabel(
 }
 
 function historyTypeLabel(
-  type: CollaborationChangeKind,
+  type: InspectorHistoryKind,
   labels: typeof copy.de | typeof copy.en,
 ): string {
   const historyLabels = labels === copy.de
-    ? { decision: 'Entscheidung', direct: 'Direkte Änderung', suggestion: 'Vorschlag', system: 'System' }
-    : { decision: 'Decision', direct: 'Direct edit', suggestion: 'Suggestion', system: 'System' }
+    ? { comment: 'Kommentar', decision: 'Entscheidung', direct: 'Direkte Änderung', suggestion: 'Vorschlag', system: 'System' }
+    : { comment: 'Comment', decision: 'Decision', direct: 'Direct edit', suggestion: 'Suggestion', system: 'System' }
   return historyLabels[type]
+}
+
+function activityHeadline(
+  entry: InspectorHistoryEntry,
+  locale: 'de' | 'en',
+): string {
+  const count = Math.max(1, entry.suggestionIds.length)
+  const firstEdit = entry.summary?.[0]
+  if (locale === 'de') {
+    if (entry.type === 'comment') {
+      const actions = {
+        created: 'erstellte einen Kommentar',
+        message_deleted: 'löschte einen Kommentar',
+        message_edited: 'bearbeitete einen Kommentar',
+        reopened: 'öffnete einen Kommentar erneut',
+        replied: 'antwortete auf einen Kommentar',
+        resolved: 'löste einen Kommentar auf',
+      } as const
+      return `${entry.actor.name} ${
+        actions[entry.commentAction ?? 'created']
+      }`
+    }
+    if (entry.type === 'decision') {
+      const noun = count === 1 ? 'Vorschlag' : 'Vorschläge'
+      return entry.outcome === 'rejected'
+        ? `${entry.actor.name} lehnte ${count} ${noun} ab`
+        : `${entry.actor.name} nahm ${count} ${noun} an`
+    }
+    if (entry.type === 'suggestion') {
+      const kind = firstEdit && firstEdit.kind !== 'direct'
+        ? suggestionTypeLabel(firstEdit.kind, copy.de).toLocaleLowerCase('de')
+        : 'Änderung'
+      return `${entry.actor.name} schlug eine ${kind} vor`
+    }
+    if (entry.type === 'direct') {
+      return firstEdit?.kind === 'structure' && firstEdit.before && firstEdit.after
+        ? `${entry.actor.name} änderte ${firstEdit.before} in ${firstEdit.after}`
+        : `${entry.actor.name} bearbeitete das Dokument`
+    }
+    return `${entry.actor.name} aktualisierte den Dokumentstatus`
+  }
+  if (entry.type === 'comment') {
+    const actions = {
+      created: 'created a comment',
+      message_deleted: 'deleted a comment',
+      message_edited: 'edited a comment',
+      reopened: 'reopened a comment',
+      replied: 'replied to a comment',
+      resolved: 'resolved a comment',
+    } as const
+    return `${entry.actor.name} ${actions[entry.commentAction ?? 'created']}`
+  }
+  if (entry.type === 'decision') {
+    const noun = count === 1 ? 'suggestion' : 'suggestions'
+    return entry.outcome === 'rejected'
+      ? `${entry.actor.name} rejected ${count} ${noun}`
+      : `${entry.actor.name} accepted ${count} ${noun}`
+  }
+  if (entry.type === 'suggestion') {
+    const kind = firstEdit && firstEdit.kind !== 'direct'
+      ? suggestionTypeLabel(firstEdit.kind, copy.en).toLocaleLowerCase('en')
+      : 'change'
+    return `${entry.actor.name} suggested a ${kind}`
+  }
+  if (entry.type === 'direct') {
+    return firstEdit?.kind === 'structure' && firstEdit.before && firstEdit.after
+      ? `${entry.actor.name} changed ${firstEdit.before} to ${firstEdit.after}`
+      : `${entry.actor.name} edited the document`
+  }
+  return `${entry.actor.name} updated the document status`
 }
 
 function formatInspectorTime(timestamp: number, locale: 'de' | 'en'): string {

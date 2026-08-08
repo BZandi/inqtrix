@@ -21,7 +21,7 @@ response_form, session run-guard) in the runs router; a new agent-grade
 algorithm joins here so every correlated surface widens together."""
 
 AGENT_TOOL_DIRECTIVES = ("web_research", "rag_query")
-"""Composer ``/``-function tokens (plan M3 `3.2`): hard tool hints the
+"""Composer ``/``-function tokens: hard tool hints the
 runs router whitelists (unknown directive = 400) and the planner/kernel
 prompt honors. Both the wire admission and the prompt injection read
 THIS tuple."""

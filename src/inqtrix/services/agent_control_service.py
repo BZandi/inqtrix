@@ -46,7 +46,6 @@ from inqtrix.agents.control_ports import (
     ClarificationRecord,
     PlanNotFound,
     PlanRecord,
-    PlanTaskCancellationConflict,
     PlanTaskNotFound,
     PlanTaskRecord,
     additive_replan_errors,
@@ -713,7 +712,12 @@ class AgentControlService:
                 {
                     "approval_id": approval_id,
                     "status": APPROVAL_STATUS_BY_DECISION[decision],
-                    "decided_by_user_id": decided_by,
+                    # Event payloads are JSON values.  The durable approval
+                    # row keeps its UUID type; the wire event uses the same
+                    # string representation as the HTTP contract.
+                    "decided_by_user_id": (
+                        str(decided_by) if decided_by is not None else None
+                    ),
                 },
             )
             await self._record_audit(
@@ -1131,10 +1135,10 @@ class AgentControlService:
         caller_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> dict[str, Any]:
-        """Copy an artifact into a NEW editor document (endpoint #12).
+        """Copy an artifact into a NEW editor document.
 
         Not idempotent by design — every export creates a fresh document
-        (copy-out semantics, decision E14 keeps patching separate).
+        and remains separate from the patch-application path.
 
         Raises:
             AgentControlUnavailable: Editor persistence is not wired (502).

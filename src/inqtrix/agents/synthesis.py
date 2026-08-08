@@ -1,8 +1,8 @@
-"""Phase 8 — memo synthesis into the canvas artifact (§4).
+"""Synthesize the memo into the canvas artifact.
 
 Outline first, then ONE call per section; every finished section flushes
 into the memo artifact (revision++) so the canvas streams section-wise
-(decision E12 — no delta protocol, the artifact row is the truth).
+without a delta protocol; the artifact row is the source of truth.
 Citation validation, quote grounding, and coverage stats live in
 ``report_quality`` (shared with the kernel, Prinzip 4); this module
 re-exports the names its callers and tests already import.
@@ -10,7 +10,7 @@ re-exports the names its callers and tests already import.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from inqtrix.agents.markdown import normalize_agent_markdown
 from inqtrix.agents.patterns._structured import StructuredOutcome, structured_call
@@ -158,7 +158,7 @@ def write_chat_answer(
     user_guidance: str = "",
     known_labels: list[str] | None = None,
 ) -> tuple[str, dict[str, int]]:
-    """The ONE chat-form answer call (plan M1 S3); ``(markdown, usage)``.
+    """The single chat-form answer call; ``(markdown, usage)``.
 
     The chat deliverable skips the outline/section loop: one direct
     conversational answer over the same evidence digest, citation labels

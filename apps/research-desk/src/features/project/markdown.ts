@@ -1,3 +1,4 @@
+import { normalizeAgentModelSelection } from '@/features/agent/executionPolicy'
 import type {
   ResearchSource,
   ResearchRunAccess,
@@ -95,6 +96,17 @@ export function serializeProjectManifest(
   const savedUi: ProjectUiState = {
     ...state.ui,
     activeView: state.ui.activeView,
+    // The model selection is NOT project data. It lives in the account
+    // preferences, which carry a load-time precedence rule (a loaded file
+    // must not bleed into the live account row). These six fields have no
+    // such rule, so writing them here would create a second, competing store
+    // that silently wins whenever a project is opened.
+    selectedAgentEffort: null,
+    selectedAgentModel: null,
+    selectedAgentModelTier: null,
+    selectedChatEffort: null,
+    selectedChatModel: null,
+    selectedChatModelTier: null,
   }
   const frontmatter = {
     chat_group_order: state.chatThreadGroupOrder,
@@ -195,6 +207,9 @@ export function serializeChatThread(
     created_at: thread.createdAt,
     kind: 'inqtrix.chat',
     message_order: thread.messages.map((message) => message.id),
+    // The thread's own property (not a second global store): in file-backed
+    // projects this IS the durable home of the pick.
+    model_selection: thread.modelSelection ?? null,
     preview: thread.preview,
     schema_version: PROJECT_SCHEMA_VERSION,
     source: thread.source,
@@ -248,11 +263,23 @@ export function serializeFileAsset(
 ): ProjectFile {
   const frontmatter = {
     created_at: asset.createdAt,
+    ...(asset.deletionError !== undefined
+      ? { deletion_error: asset.deletionError }
+      : {}),
+    ...(asset.deletionOperationId !== undefined
+      ? { deletion_operation_id: asset.deletionOperationId }
+      : {}),
+    ...(asset.deletionStage !== undefined
+      ? { deletion_stage: asset.deletionStage }
+      : {}),
     file_id: asset.id,
     file_name: asset.fileName,
     group_id: asset.groupId,
     kind: 'inqtrix.file_asset',
     label: asset.label,
+    ...(asset.lifecycleStatus !== undefined
+      ? { lifecycle_status: asset.lifecycleStatus }
+      : {}),
     mime_type: asset.mimeType,
     origin: asset.origin,
     page_count: asset.pageCount,
@@ -260,6 +287,9 @@ export function serializeFileAsset(
     parse_warning: asset.parseWarning,
     schema_version: PROJECT_SCHEMA_VERSION,
     section_id: asset.sectionId,
+    ...(asset.serverSynced !== undefined
+      ? { server_synced: asset.serverSynced }
+      : {}),
     size_bytes: asset.sizeBytes,
     text_truncated: asset.textTruncated,
     title: asset.title,
@@ -281,6 +311,11 @@ export function serializeEditorDocument(
   const comments = Object.values(state.editorComments)
     .filter((comment) => comment.documentId === document.id)
     .sort((a, b) => a.anchor.from - b.anchor.from || a.createdAt.localeCompare(b.createdAt))
+    .map((comment) => {
+      const { suggestionDraft, ...exportableComment } = comment
+      void suggestionDraft
+      return exportableComment
+    })
   const frontmatter = {
     comments,
     created_at: document.createdAt,
@@ -292,8 +327,20 @@ export function serializeEditorDocument(
     document_id: document.id,
     folder_id: detachedCollaboration ? null : document.folderId,
     kind: 'inqtrix.editor_document',
+    ...(!detachedCollaboration && document.recovery
+      ? {
+          recovery: {
+            captured_at: document.recovery.capturedAt,
+            original_document_id: document.recovery.originalDocumentId,
+            reason: document.recovery.reason,
+          },
+        }
+      : {}),
     revision: document.revision,
     schema_version: PROJECT_SCHEMA_VERSION,
+    ...(!detachedCollaboration && document.serverSynced !== undefined
+      ? { server_synced: document.serverSynced }
+      : {}),
     source: document.source,
     source_run_id: document.sourceRunId ?? null,
     title: document.title,
@@ -545,10 +592,12 @@ export function parseChatThread(markdown: string): ChatThreadRecord {
   requireKind(data, 'inqtrix.chat')
   const messages = parseChatBody(parsed.body)
 
+  const modelSelection = normalizeAgentModelSelection(data.model_selection)
   return {
     createdAt: stringValue(data.created_at),
     id: stringValue(data.thread_id),
     messages,
+    ...(modelSelection ? { modelSelection } : {}),
     preview: stringValue(data.preview),
     source: 'imported',
     title: stringValue(data.title),
@@ -621,20 +670,34 @@ export function parseFileAsset(markdown: string): FileAssetRecord {
   const parsed = parseFrontmatter(markdown)
   const data = parsed.data
   requireKind(data, 'inqtrix.file_asset')
+  const lifecycleStatus = fileAssetLifecycle(data.lifecycle_status)
 
   return {
     createdAt: stringValue(data.created_at),
+    ...(data.deletion_error !== undefined
+      ? { deletionError: asString(data.deletion_error) ?? null }
+      : {}),
+    ...(data.deletion_operation_id !== undefined
+      ? { deletionOperationId: asString(data.deletion_operation_id) ?? null }
+      : {}),
+    ...(data.deletion_stage !== undefined
+      ? { deletionStage: asString(data.deletion_stage) ?? null }
+      : {}),
     extractedText: parsed.body.trimStart(),
     fileName: stringValue(data.file_name),
     groupId: asString(data.group_id) ?? null,
     id: stringValue(data.file_id),
     label: stringValue(data.label),
+    ...(lifecycleStatus ? { lifecycleStatus } : {}),
     mimeType: stringValue(data.mime_type),
     origin: fileAssetOriginOrDefault(data.origin),
     pageCount: optionalNumber(data.page_count) ?? null,
     parseStatus: fileParseStatusOrDefault(data.parse_status),
     parseWarning: asString(data.parse_warning) ?? null,
     sectionId: stringValue(data.section_id),
+    ...(typeof data.server_synced === 'boolean'
+      ? { serverSynced: data.server_synced }
+      : {}),
     sizeBytes: optionalNumber(data.size_bytes) ?? 0,
     textTruncated: data.text_truncated === true,
     title: stringValue(data.title),
@@ -646,29 +709,45 @@ function fileAssetOriginOrDefault(value: unknown): FileAssetOrigin {
   return value === 'chat' || value === 'editor' || value === 'library' ? value : 'library'
 }
 
+function fileAssetLifecycle(value: unknown): FileAssetRecord['lifecycleStatus'] | undefined {
+  return value === 'active' || value === 'deleting' || value === 'delete_failed'
+    ? value
+    : undefined
+}
+
 function fileParseStatusOrDefault(value: unknown): FileParseStatus {
   return value === 'parsed' || value === 'partial' || value === 'unsupported' || value === 'error'
     ? value
     : 'parsed'
 }
 
+export type EditorDocumentImportIdentity = {
+  commentIds: Array<{ sourceId: string; targetId: string }>
+  documentId: { sourceId: string; targetId: string }
+}
+
 export function parseEditorDocument(markdown: string): {
   comments: EditorCommentThreadRecord[]
   document: EditorDocumentRecord
+  importIdentity?: EditorDocumentImportIdentity
 } {
   const parsed = parseFrontmatter(markdown)
   const data = parsed.data
   requireKind(data, 'inqtrix.editor_document')
   const detachedCollaboration = data.detached_from_collaboration === true
+  const sourceDocumentId = stringValue(data.document_id)
   const documentId = detachedCollaboration
     ? createDetachedEntityId('editor-doc')
-    : stringValue(data.document_id)
-  const comments = normalizeEditorComments(data.comments, documentId, {
+    : sourceDocumentId
+  const recovery = detachedCollaboration
+    ? undefined
+    : editorDocumentRecoveryOrUndefined(data.recovery)
+  const normalizedComments = normalizeEditorComments(data.comments, documentId, {
     remapIdentity: detachedCollaboration,
   })
 
   return {
-    comments,
+    comments: normalizedComments.comments,
     document: {
       contentMarkdown: parsed.body.trimStart(),
       createdAt: stringValue(data.created_at),
@@ -679,11 +758,40 @@ export function parseEditorDocument(markdown: string): {
       revision: detachedCollaboration
         ? 0
         : typeof data.revision === 'number' ? data.revision : 1,
+      ...(recovery ? { recovery } : {}),
+      ...(!detachedCollaboration && typeof data.server_synced === 'boolean'
+        ? { serverSynced: data.server_synced }
+        : {}),
       source: editorDocumentSourceOrDefault(data.source),
       sourceRunId: asString(data.source_run_id),
       title: normalizeEditorTitle(stringValue(data.title)),
       updatedAt: stringValue(data.updated_at),
     },
+    ...(detachedCollaboration
+      ? {
+          importIdentity: {
+            commentIds: normalizedComments.importIdentities,
+            documentId: { sourceId: sourceDocumentId, targetId: documentId },
+          },
+        }
+      : {}),
+  }
+}
+
+function editorDocumentRecoveryOrUndefined(
+  value: unknown,
+): EditorDocumentRecord['recovery'] | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const candidate = value as Record<string, unknown>
+  if (
+    candidate.reason !== 'remote_deleted'
+    || typeof candidate.captured_at !== 'string'
+    || typeof candidate.original_document_id !== 'string'
+  ) return undefined
+  return {
+    capturedAt: candidate.captured_at,
+    originalDocumentId: candidate.original_document_id,
+    reason: 'remote_deleted',
   }
 }
 
@@ -1129,17 +1237,24 @@ function normalizeEditorComments(
   value: unknown,
   fallbackDocumentId: string,
   { remapIdentity = false }: { remapIdentity?: boolean } = {},
-): EditorCommentThreadRecord[] {
-  if (!Array.isArray(value)) return []
-  return value.flatMap((item) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+): {
+  comments: EditorCommentThreadRecord[]
+  importIdentities: Array<{ sourceId: string; targetId: string }>
+} {
+  const comments: EditorCommentThreadRecord[] = []
+  const importIdentities: Array<{ sourceId: string; targetId: string }> = []
+  if (!Array.isArray(value)) return { comments, importIdentities }
+
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
     const record = item as Record<string, unknown>
     const anchor = normalizeEditorCommentAnchor(record.anchor)
     const serializedId = asString(record.id)
     const commentMarkdown = asString(record.commentMarkdown ?? record.comment_markdown)
-    if ((!serializedId && !remapIdentity) || !anchor || !commentMarkdown) return []
+    if ((!serializedId && !remapIdentity) || !anchor || !commentMarkdown) continue
     const evidencePreset = editorEvidencePresetOrUndefined(record.evidencePreset ?? record.evidence_preset)
-    return [{
+    const id = remapIdentity ? createDetachedEntityId('editor-comment') : serializedId!
+    comments.push({
       anchor,
       commentMarkdown,
       createdAt: stringOrNow(record.createdAt ?? record.created_at),
@@ -1147,12 +1262,17 @@ function normalizeEditorComments(
         ? fallbackDocumentId
         : asString(record.documentId ?? record.document_id) ?? fallbackDocumentId,
       ...(evidencePreset ? { evidencePreset } : {}),
-      id: remapIdentity ? createDetachedEntityId('editor-comment') : serializedId!,
+      id,
       kind: editorCommentKindOrDefault(record.kind),
       status: editorCommentStatusOrDefault(record.status),
       updatedAt: stringOrNow(record.updatedAt ?? record.updated_at),
-    }]
-  })
+    })
+    if (remapIdentity && serializedId) {
+      importIdentities.push({ sourceId: serializedId, targetId: id })
+    }
+  }
+
+  return { comments, importIdentities }
 }
 
 function normalizeEditorCommentAnchor(value: unknown): EditorCommentAnchorRecord | null {

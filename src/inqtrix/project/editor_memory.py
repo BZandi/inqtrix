@@ -24,7 +24,10 @@ from inqtrix.project.editor_ports import (
     EditorComment,
     EditorDocument,
     EditorFolder,
+    EditorSuggestionDraft,
     FolderNotFound,
+    SuggestionDraftNotFound,
+    SuggestionDraftRevisionConflict,
 )
 from inqtrix.project.scoped_upsert import ResourceScope, require_memory_scope
 
@@ -381,6 +384,21 @@ class MemoryEditorStore:
             id_of=lambda c: c.id,
         )
 
+    async def get_comment(
+        self,
+        document_id: str,
+        comment_id: str,
+        *,
+        created_by_user_id: uuid.UUID | None = None,
+    ) -> EditorComment:
+        comment = self._comments.get((document_id, comment_id))
+        if comment is None or (
+            created_by_user_id is not None
+            and comment.created_by_user_id != created_by_user_id
+        ):
+            raise SuggestionDraftNotFound(comment_id)
+        return comment
+
     async def delete_comment(
         self,
         *,
@@ -416,6 +434,94 @@ class MemoryEditorStore:
         ):
             return
         self._comments.pop(key, None)
+
+    async def save_comment_suggestion_draft(
+        self,
+        *,
+        document_id: str,
+        comment_id: str,
+        draft: EditorSuggestionDraft,
+        expected_revision: int,
+        expected_document_owner_user_id: uuid.UUID | None,
+        expected_document_workspace_id: str | None,
+        expected_document_content_mode: str,
+        actor_user_id: uuid.UUID | None,
+    ) -> EditorSuggestionDraft:
+        document = require_memory_scope(
+            self._documents.get(document_id),
+            created_by_user_id=expected_document_owner_user_id,
+            workspace_id=expected_document_workspace_id,
+            resource_id=document_id,
+            not_found=DocumentNotFound,
+        )
+        if (
+            document.content_mode != expected_document_content_mode
+            or expected_document_content_mode != "collaboration"
+        ):
+            raise DocumentNotFound(document_id)
+        comment = self._comments.get((document_id, comment_id))
+        if comment is None or comment.created_by_user_id != actor_user_id:
+            raise SuggestionDraftNotFound(comment_id)
+        current_revision = (
+            comment.suggestion_draft.revision
+            if comment.suggestion_draft is not None
+            else 0
+        )
+        if current_revision != expected_revision:
+            raise SuggestionDraftRevisionConflict(
+                current_revision=current_revision
+            )
+        if draft.revision != expected_revision + 1:
+            raise SuggestionDraftRevisionConflict(
+                current_revision=current_revision
+            )
+        self._comments[(document_id, comment_id)] = replace(
+            comment,
+            suggestion_draft=draft,
+        )
+        return draft
+
+    async def delete_comment_suggestion_draft(
+        self,
+        *,
+        document_id: str,
+        comment_id: str,
+        expected_revision: int,
+        patch_id: str,
+        expected_document_owner_user_id: uuid.UUID | None,
+        expected_document_workspace_id: str | None,
+        expected_document_content_mode: str,
+        actor_user_id: uuid.UUID | None,
+    ) -> None:
+        document = require_memory_scope(
+            self._documents.get(document_id),
+            created_by_user_id=expected_document_owner_user_id,
+            workspace_id=expected_document_workspace_id,
+            resource_id=document_id,
+            not_found=DocumentNotFound,
+        )
+        if (
+            document.content_mode != expected_document_content_mode
+            or expected_document_content_mode != "collaboration"
+        ):
+            raise DocumentNotFound(document_id)
+        comment = self._comments.get((document_id, comment_id))
+        if comment is None or comment.created_by_user_id != actor_user_id:
+            raise SuggestionDraftNotFound(comment_id)
+        draft = comment.suggestion_draft
+        current_revision = draft.revision if draft is not None else 0
+        if (
+            draft is None
+            or draft.patch_id != patch_id
+            or current_revision != expected_revision
+        ):
+            raise SuggestionDraftRevisionConflict(
+                current_revision=current_revision
+            )
+        self._comments[(document_id, comment_id)] = replace(
+            comment,
+            suggestion_draft=None,
+        )
 
     async def aclose(self) -> None:
         return None

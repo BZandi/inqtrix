@@ -1,16 +1,16 @@
 """SQLAlchemy Core definitions of the agent-sessions schema.
 
-Structural clone of :mod:`inqtrix.storage.knowledge_sessions_orm` (plan
-decision E15: agent sessions ARE the knowledge-sessions pattern): private
-per-user sessions with a heavy ``items_json`` body (the client-side desk
-snapshot), optional grouping, keyset-ready owner indexes. Created by
-migration 0030.
+Agent sessions use the same structural pattern as
+:mod:`inqtrix.storage.knowledge_sessions_orm`: private per-user sessions
+with a heavy ``items_json`` body (the client-side desk snapshot), optional
+grouping, and keyset-ready owner indexes. Created by migration 0030.
 """
 
 from __future__ import annotations
 
 from sqlalchemy import (
     Column,
+    CheckConstraint,
     Float,
     ForeignKey,
     Index,
@@ -63,8 +63,16 @@ agent_sessions = Table(
     # sessions. The durable artifact CONTENT lives in run_artifacts, not
     # here (rule R1) — items_json only mirrors what the desk rendered.
     Column("items_json", Text, nullable=False, server_default=text("'[]'")),
+    Column("lifecycle_status", Text, nullable=False, server_default=text("'active'")),
+    Column("deletion_operation_id", Text, nullable=True),
+    Column("deletion_stage", Text, nullable=True),
+    Column("deletion_error", Text, nullable=True),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
+    CheckConstraint(
+        "lifecycle_status IN ('active', 'deleting', 'delete_failed')",
+        name="ck_agent_sessions_lifecycle_status",
+    ),
     Index(
         "ix_agent_sessions_owner_updated",
         "tenant_id",
@@ -72,6 +80,11 @@ agent_sessions = Table(
         "workspace_id",
         "updated_at",
         "id",
+    ),
+    Index(
+        "ix_agent_sessions_deletion_operation",
+        "tenant_id",
+        "deletion_operation_id",
     ),
 )
 """Saved agent-desk sessions; ``runs.session_id`` and

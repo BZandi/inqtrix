@@ -1,9 +1,14 @@
 import type { HocuspocusProvider } from '@hocuspocus/provider'
+import { EDITOR_SCHEMA_BEHAVIOR_INPUTS } from '@inqtrix/editor-schema'
 import type { Extensions } from '@tiptap/core'
 import { describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
+import type { EditorSuggestionRecord } from '@/features/project/types'
 
 vi.mock('../tiptap', () => ({
+  InqtrixCollaborationCaret: {
+    configure: vi.fn(() => ({ name: 'collaborationCaret' })),
+  },
   collaborationCaretOptions: {
     render: vi.fn(),
     selectionRender: vi.fn(),
@@ -19,10 +24,88 @@ vi.mock('../tiptap', () => ({
 import {
   collaborationBindingForEditorDocument,
   configureEditorExtensionsForCollaboration,
+  editorSuggestionDecorationSignature,
+  editorSuggestionShouldAutoStaleOnMissingTarget,
   editorSurfaceInitialContent,
   editorSurfaceLifecyclePolicy,
   isCollaborationSurfaceSynced,
 } from './MarkdownEditorSurface'
+
+describe('private suggestion decoration identity', () => {
+  it('rebuilds a stable suggestion when its materialized anchor moves', () => {
+    const suggestion: EditorSuggestionRecord = {
+      anchor: {
+        from: 5,
+        quoteAfter: '',
+        quoteBefore: '',
+        selectedText: 'target',
+        to: 11,
+      },
+      anchorText: 'target',
+      blockId: 'block-1',
+      createdAt: '2026-07-31T00:00:00.000Z',
+      documentId: 'document-1',
+      editPosition: 'replace',
+      groupId: 'group-1',
+      id: 'editor-suggestion-stable',
+      originalText: 'target',
+      origin: { kind: 'global_run' },
+      proposedText: 'proposal',
+      revision: 1,
+      status: 'pending',
+      updatedAt: '2026-07-31T00:00:00.000Z',
+    }
+
+    const before = editorSuggestionDecorationSignature([suggestion])
+    const after = editorSuggestionDecorationSignature([{
+      ...suggestion,
+      anchor: { ...suggestion.anchor, from: 12, to: 18 },
+    }])
+
+    expect(after).not.toBe(before)
+    expect(editorSuggestionDecorationSignature([{
+      ...suggestion,
+      anchor: { ...suggestion.anchor },
+    }])).toBe(before)
+  })
+
+  it('leaves relative collaboration anchors pending when a decoration target is missing', () => {
+    const legacySuggestion: EditorSuggestionRecord = {
+      anchor: {
+        from: 1,
+        quoteAfter: '',
+        quoteBefore: '',
+        selectedText: 'target',
+        to: 7,
+      },
+      anchorText: 'target',
+      blockId: 'block-1',
+      createdAt: '2026-07-31T00:00:00.000Z',
+      documentId: 'document-1',
+      editPosition: 'replace',
+      groupId: 'group-1',
+      id: 'editor-suggestion-transient',
+      originalText: 'target',
+      origin: { kind: 'global_run' },
+      proposedText: 'proposal',
+      revision: 1,
+      status: 'pending',
+      updatedAt: '2026-07-31T00:00:00.000Z',
+    }
+    const relativeSuggestion: EditorSuggestionRecord = {
+      ...legacySuggestion,
+      anchor: {
+        ...legacySuggestion.anchor,
+        relativeFrom: 'relative-from',
+        relativeTo: 'relative-to',
+        relativeVersion: EDITOR_SCHEMA_BEHAVIOR_INPUTS.relativePositions,
+      } as EditorSuggestionRecord['anchor'],
+    }
+
+    expect(editorSuggestionShouldAutoStaleOnMissingTarget(legacySuggestion)).toBe(true)
+    expect(editorSuggestionShouldAutoStaleOnMissingTarget(relativeSuggestion)).toBe(false)
+  })
+})
 
 describe('MarkdownEditorSurface lifecycle policy', () => {
   it('preserves the complete legacy markdown lifecycle', () => {

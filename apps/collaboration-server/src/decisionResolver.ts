@@ -8,7 +8,10 @@ import { EditorState, type Transaction } from '@tiptap/pm/state'
 import { initProseMirrorDoc, updateYFragment } from '@tiptap/y-tiptap'
 import {
   EDITOR_YJS_FRAGMENT,
+  INQTRIX_STRUCTURE_SUGGESTION_ATTR,
   createEditorSchemaExtensions,
+  isStructureSuggestionData,
+  resolveStructureSuggestion,
   suggestionDescriptors,
   type SuggestionDescriptor,
 } from '@inqtrix/editor-schema'
@@ -55,7 +58,9 @@ export function resolvePatchDecision(
   const unselectedBefore = descriptorFingerprints(before, selectedIds)
   const orderedIds = [...selected]
     .sort((left, right) => (
-      Number(right.kind === 'modification') - Number(left.kind === 'modification')
+      Number(right.kind === 'structure') - Number(left.kind === 'structure')
+      || Number(right.kind === 'format') - Number(left.kind === 'format')
+      || Number(right.kind === 'replacement') - Number(left.kind === 'replacement')
       || left.suggestionId.localeCompare(right.suggestionId)
     ))
     .map((item) => item.suggestionId)
@@ -67,9 +72,17 @@ export function resolvePatchDecision(
     if (!range || overlapsUnselectedSuggestion(state, range, selectedIds)) {
       throw decisionConflict()
     }
+    if (current.kind === 'structure') {
+      try {
+        state = resolveStructureSuggestion(state, suggestionId, input.decision)
+      } catch {
+        throw decisionConflict()
+      }
+      continue
+    }
     const markKinds = suggestionMarkKinds(state.doc, suggestionId)
     if (
-      current.kind === 'modification'
+      current.kind === 'format'
       && markKinds.size === 1
       && markKinds.has('modification')
     ) {
@@ -77,7 +90,7 @@ export function resolvePatchDecision(
       continue
     }
     if (
-      current.kind === 'modification'
+      current.kind === 'replacement'
       && !(
         markKinds.size === 2
         && markKinds.has('deletion')
@@ -199,7 +212,12 @@ function suggestionRange(state: EditorState, suggestionId: string): SuggestionRa
   let from = Number.POSITIVE_INFINITY
   let to = Number.NEGATIVE_INFINITY
   state.doc.descendants((node, position) => {
-    if (!node.marks.some((mark) => (
+    const structure = node.attrs[INQTRIX_STRUCTURE_SUGGESTION_ATTR]
+    const hasStructure = (
+      isStructureSuggestionData(structure)
+      && structure.suggestionId === suggestionId
+    )
+    if (!hasStructure && !node.marks.some((mark) => (
       mark.attrs.suggestionId === suggestionId || mark.attrs.id === suggestionId
     ))) return true
     from = Math.min(from, position)
@@ -227,6 +245,14 @@ function overlapsUnselectedSuggestion(
         overlaps = true
         return false
       }
+    }
+    const structure = node.attrs[INQTRIX_STRUCTURE_SUGGESTION_ATTR]
+    if (
+      isStructureSuggestionData(structure)
+      && !selectedIds.has(structure.suggestionId)
+    ) {
+      overlaps = true
+      return false
     }
     return true
   })

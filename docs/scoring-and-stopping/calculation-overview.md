@@ -58,14 +58,13 @@ next, and that no metric exists in the code without a row here.
 
 | Metric / label | Where | Type | Inputs | Formula / trigger | Default | Detail |
 |---|---|---|---|---|---|---|
-| `verification_basis` | `strategies/_claim_consolidation.py::consolidate()` | Deterministic | `support_count`, `contradict_count`, tier booleans, `needs_primary` | 8-branch decision table | One of `verified_cross_checked` / `verified_primary` / `verified_quality_source` / `contested` / `missing_primary_source` / `weak_evidence` | [claims.md](claims.md#status-determination) |
+| `verification_basis` | `strategies/_claim_consolidation.py::consolidate()` | Deterministic | provider-grounded source URLs, source tiers, support/contradiction counts, `needs_primary` | decision table | One of `verified_cross_checked` / `verified_primary` / `verified_quality_source` / `contested` / `missing_primary_source` / `weak_evidence` | [claims.md](claims.md#status-determination) |
 | `status` | same | Deterministic | Same | Maps from `verification_basis` | `verified` / `contested` / `unverified` | [claims.md](claims.md) |
 | `support_count` | same | Deterministic | Affirmed evidence rows | Count of affirmed evidence | int | [claims.md](claims.md) |
 | `contradict_count` | same | Deterministic | Negated evidence rows | Count of negated evidence | int | [claims.md](claims.md) |
-| `independent_support_count` | same | Deterministic | Affirmed evidence rows | Count grouped by distinct domain | int | [claims.md](claims.md) |
-| `supporting_non_low_domain_count` | same | Deterministic | Domains backing the claim | Count where tier != `low` | int | [claims.md](claims.md) |
-| `quality_domain_count` | same | Deterministic | Domains backing the claim | Count where tier in (`primary`, `mainstream`) | int | [claims.md](claims.md) |
-| `has_primary` / `has_mainstream` / `has_stakeholder` | same | Deterministic | Tier set of backing domains | Boolean per tier | bool | [claims.md](claims.md) |
+| `independent_support_count` | same | Deterministic | evidence ids and distinct provider-cited domains | Maximum of distinct evidence records and supporting domains | int | [claims.md](claims.md) |
+| `quality_domain_count` | same | Deterministic | provider-cited URLs | Count of distinct primary, mainstream, or stakeholder domains | int | [claims.md](claims.md) |
+| `has_primary` / `has_mainstream` / `has_stakeholder` | same | Deterministic | source-tier counts | Boolean per configured tier | bool | [claims.md](claims.md) |
 
 ### Group 5 -- Claim aggregates
 
@@ -81,7 +80,7 @@ next, and that no metric exists in the code without a row here.
 | Metric / label | Where | Type | Inputs | Formula / trigger | Default | Detail |
 |---|---|---|---|---|---|---|
 | `_record_verification_label` | `evidence.py` | Deterministic | A record's `claims[]` verification fields | `cross-checked` / `primary-source` / `single-source verified` / `contested` / `source-context` / `unverified` | -- | [evidence-pipeline.md](../architecture/evidence-pipeline.md#verification-labels-per-record) |
-| `_evidence_record_score` | `evidence.py` (~628) | Deterministic | tier, verification label, claims/passages counts, snippet length, `source_date` | Tier rank + verification rank + capped contributions; see formula in evidence-pipeline.md | int | [evidence-pipeline.md](../architecture/evidence-pipeline.md#rendering-evidenceledger-markdown) |
+| `_evidence_record_score` | `evidence.py` (~628) | Deterministic | tier, verification label, claims/passages counts, snippet length, `source_date` | Tier rank + verification rank + capped contributions; see formula in evidence-pipeline.md | int | [evidence-pipeline.md](../architecture/evidence-pipeline.md#rendering-evidenceledger--markdown) |
 | `_SOURCE_CONTEXT_TIER_RANK` | `evidence.py` (~25) | Constant | -- | `{primary:60, mainstream:50, stakeholder:40, unknown:25, low:-100}` | -- | [evidence-pipeline.md](../architecture/evidence-pipeline.md) |
 | `_VERIFICATION_RANK` | `evidence.py` (~545) | Constant | -- | `{cross-checked:50, primary-source:42, contested:30, single-source verified:24, source-context:12, unverified:8}` | -- | [evidence-pipeline.md](../architecture/evidence-pipeline.md) |
 | `rendered_record_count` | `evidence.py::render_evidence_ledger_overview()` | Deterministic | Records that fit the char budget | Counter | int | [evidence-pipeline.md](../architecture/evidence-pipeline.md) |
@@ -128,10 +127,10 @@ The prompt + parser live in `prompts.py::EVALUATE_FORMAT_SUFFIX` (~lines
 
 | Metric / label | Where parsed | Range | Effect | Detail |
 |---|---|---|---|---|
-| `evidence_consistency` | `_stop_criteria.py::extract_evidence_scores()` | 0-10 | Defaults to 5 if parse fails (`_evidence_consistency_parsed=False`). Feeds Stage 2c sanity cap. | [confidence.md](confidence.md#stage-2c--evidence-score-sanity-cap) |
+| `evidence_consistency` | `_stop_criteria.py::extract_evidence_scores()` | 0-10 | Defaults to 5 if parse fails (`_evidence_consistency_parsed=False`). Feeds Stage 2c sanity cap. | [confidence.md](confidence.md#stage-2c----evidence-score-sanity-cap) |
 | `evidence_sufficiency` | same | 0-10 | Defaults to 5 if parse fails. Lowered to ≤ 3 by Stage 3 "Empty claim ledger" guardrail. Feeds Stage 2c and `utility_score`. | [confidence.md](confidence.md) |
-| `competing_events` | `_stop_criteria.py::extract_competing_events()` | text | Compared to `prev_competing_events` for novelty. Triggers Stage 2b cap when `conf >= confidence_stop` AND (new OR `round < 3`). | [confidence.md](confidence.md#stage-2b--competing-events-cap) |
-| `contradictions_detected` | `_stop_criteria.py::check_contradictions()` | "ja"/"nein" + severity | Severity keywords (`grundlegend`, `fundamental`, `gegenteil`, `widerspricht`, `unvereinbar`) → cap `confidence_stop - 2`; otherwise → `confidence_stop - 1`. | [confidence.md](confidence.md#stage-2a--contradictions-cap) |
+| `competing_events` | `_stop_criteria.py::extract_competing_events()` | text | Compared to `prev_competing_events` for novelty. Triggers Stage 2b cap when `conf >= confidence_stop` AND (new OR `round < 3`). | [confidence.md](confidence.md#stage-2b----competing-events-cap) |
+| `contradictions_detected` | `_stop_criteria.py::check_contradictions()` | "ja"/"nein" + severity | Severity keywords (`grundlegend`, `fundamental`, `gegenteil`, `widerspricht`, `unvereinbar`) → cap `confidence_stop - 2`; otherwise → `confidence_stop - 1`. | [confidence.md](confidence.md#stage-2a----contradictions-cap) |
 | `gaps` | `nodes.py::evaluate` | text | Free-text gap report. Read by next `plan()` round for query generation. | [stop-criteria.md](stop-criteria.md) |
 
 ### Group 11 -- Stop signals
@@ -141,7 +140,7 @@ The prompt + parser live in `prompts.py::EVALUATE_FORMAT_SUFFIX` (~lines
 | `utility_score` | `_stop_criteria.py::compute_utility()` | Deterministic | `0.3·Δconf + 0.2·Δcit + 0.2·suff_norm + 0.3·evidence_gain` | Two consecutive rounds < 0.15 → `done=True` (unless suppressed) | [stop-criteria.md](stop-criteria.md) |
 | `falsification_triggered` | `_stop_criteria.py::check_falsification()` | Deterministic | `round ≥ 2` AND `0 < prev_conf ≤ 4` AND `conf ≤ 4`; release when `conf ≥ confidence_stop - 2` | Next `plan()` injects "debunked" queries | [falsification.md](falsification.md) |
 | `stagnation_detected` | `_stop_criteria.py::check_stagnation()` | Deterministic | `round ≥ 2` AND `prev_conf, conf ≤ 4` AND `|Δconf| ≤ 1` AND (`citations ≥ 30` OR `falsification_triggered`) | `done=True`, `_stop_reason="stagnation_low_evidence"` | [stop-criteria.md](stop-criteria.md) |
-| `plateau_detected` | `_stop_criteria.py::check_plateau()` | Deterministic | `round ≥ 2` AND `conf == prev_conf` AND `conf ≥ 6` AND competing events not changing AND `!stagnation` AND `!evidence_depth_gap.active` | `done=True`, `_stop_reason="plateau_stop"` | [confidence.md](confidence.md#stage-4d--plateau-check) |
+| `plateau_detected` | `_stop_criteria.py::check_plateau()` | Deterministic | `round ≥ 2` AND `conf == prev_conf` AND `conf ≥ 6` AND competing events not changing AND `!stagnation` AND `!evidence_depth_gap.active` | `done=True`, `_stop_reason="plateau_stop"` | [confidence.md](confidence.md#stage-4d----plateau-check) |
 | `evidence_contract_status` | `nodes.py::answer` | Deterministic | Branch on `answer_evidence_bindings` + `algorithm_failures` + `depth_gap` | `clean` / `needs_review` / `source_context_only` / `algorithm_failed` / `unknown` | [evidence-pipeline.md](../architecture/evidence-pipeline.md#answerevidencebinding) |
 
 ### Group 12 -- Loop control
@@ -292,9 +291,9 @@ expose the value properly.
 | Magic `+4` bonus for `verified_quality_source` in crosscheck planner | `nodes.py::_select_crosscheck_targets()` | `verified_quality_source` claims get +4 ranking points without a code comment explaining why. The rule is intentional (lax single-quality-source verification needs cross-check), but the magic number deserves to be a named constant. | **documented** in [claims.md](claims.md) and Group 8 above |
 | Confidence cap chain spread across 3 files | `nodes.py` + `apply_confidence_guardrails()` + `_stop_criteria.py` | 9 stages in 3 files; before this doc PR no single place explained the order and interactions. | **documented** in [confidence.md](confidence.md) |
 | `_confidence_unjustified_drop` not exposed in structured output | `nodes.py` ~4187-4199 | Computed every round but only emitted as `log.warning()`; missing from `iteration_log`, `score_ledger`, and `ResearchResult`. A downstream observer cannot see when the rule fires. | **simplification candidate** (narrow scope) -- expose in `iteration_log` and `score_snapshot` so the observation actually accumulates. Whether the drop should also be auto-corrected (revert to `prev_conf`, raise a new stop-heuristic, change utility weighting, or keep the status quo) is a **separate** open design question; surfacing the marker is the prerequisite for deciding it. |
-| `_evidence_record_score` weights without rationale | `evidence.py` ~628 | 7 weighted components and 6 cap values, no code comments justifying the numbers. | **documented** in [evidence-pipeline.md](../architecture/evidence-pipeline.md#rendering-evidenceledger-markdown) and Group 6 above |
-| Plateau suppression hidden inside `check_plateau` | `_stop_criteria.py::check_plateau()` | `_evidence_depth_gap_active` suppresses the plateau stop; the link is not obvious without reading the code. | **documented** in [stop-criteria.md](stop-criteria.md) and [confidence.md](confidence.md#stage-4d--plateau-check) |
-| First-writer-wins for guardrail gap hints | `nodes.py::apply_confidence_guardrails()` | Multiple guardrails may fire in one round, but only the first one publishes the gap hint. | **documented** in [confidence.md](confidence.md#hidden-coupling-----first-writer-wins-for-gap-hints) |
+| `_evidence_record_score` weights without rationale | `evidence.py` ~628 | 7 weighted components and 6 cap values, no code comments justifying the numbers. | **documented** in [evidence-pipeline.md](../architecture/evidence-pipeline.md#rendering-evidenceledger--markdown) and Group 6 above |
+| Plateau suppression hidden inside `check_plateau` | `_stop_criteria.py::check_plateau()` | `_evidence_depth_gap_active` suppresses the plateau stop; the link is not obvious without reading the code. | **documented** in [stop-criteria.md](stop-criteria.md) and [confidence.md](confidence.md#stage-4d----plateau-check) |
+| First-writer-wins for guardrail gap hints | `nodes.py::apply_confidence_guardrails()` | Multiple guardrails may fire in one round, but only the first one publishes the gap hint. | **documented** in [confidence.md](confidence.md#hidden-coupling----first-writer-wins-for-gap-hints) |
 | Empty-claim-ledger special case | guardrails | Instead of capping `conf`, lowers `evidence_sufficiency` to ≤ 3, which feeds the next round's Stage 2c. | **documented** in [confidence.md](confidence.md) |
 | Evidence overview not per-section scoped | `_compose_answer_sections` + section system prompt | Every section LLM call sees the full evidence overview; `section_focus_labels` is only an advisory bullet in the user prompt. | **documented** in [answer-composition.md](../architecture/answer-composition.md) (intentional design) |
 | `used_evidence_labels` double effect | `nodes.py` + `evidence.py::select_section_evidence_records` | Same set acts as a soft hint in the user prompt AND a hard `-16` penalty in the focus ranker. | **documented** in [answer-composition.md](../architecture/answer-composition.md) |

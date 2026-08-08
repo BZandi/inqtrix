@@ -206,23 +206,36 @@ The compose stack ships Dex behind the profile `oidc` — a development
 reference, not an architectural dependency:
 
 ```bash
-docker compose -f deploy/compose/compose.dev.yaml --profile oidc up -d
+docker compose \
+  -f deploy/compose/compose.stack.yaml \
+  -f deploy/compose/compose.dev-ports.yaml \
+  --env-file deploy/.env.stack.secrets.local \
+  --env-file deploy/.env.stack.local \
+  --profile oidc up -d dex
 ```
 
 The bundled `deploy/compose/dex-config.yaml` registers issuer
-`http://127.0.0.1:5556/dex`, client `inqtrix-local` (secret from
-`INQTRIX_OIDC_CLIENT_SECRET`, compose default `inqtrix-dev-oidc-secret`),
-callbacks for the API on port 5100 and the Vite dev server on 5173, and a
-demo user `admin@example.com` / `password`.
+`http://dex.localhost:5556/dex`, client `inqtrix-local` (secret from
+`INQTRIX_OIDC_CLIENT_SECRET` in the selected secrets file), callbacks for the
+API on port 5100 and the Vite dev server on 5173, and a demo user
+`admin@example.com` / `password`.
+
+Visible configuration (`deploy/.env.stack.local`):
 
 ```dotenv
 INQTRIX_AUTH_MODE=oidc
-INQTRIX_OIDC_ISSUER=http://127.0.0.1:5556/dex
+INQTRIX_OIDC_ISSUER=http://dex.localhost:5556/dex
 INQTRIX_OIDC_CLIENT_ID=inqtrix-local
-INQTRIX_OIDC_CLIENT_SECRET=inqtrix-dev-oidc-secret
 INQTRIX_OIDC_REDIRECT_URL=http://127.0.0.1:5100/api/auth/callback
-INQTRIX_SESSION_SECRET=dev-session-secret-xxxxx
 INQTRIX_OIDC_INSECURE_DEV_COOKIES=true
+```
+
+Credentials (`deploy/.env.stack.secrets.local`, mode `0600`):
+
+```dotenv
+INQTRIX_OIDC_CLIENT_SECRET=replace-with-a-local-dev-secret
+INQTRIX_SESSION_SECRET=replace-with-an-independent-session-secret
+INQTRIX_PAT_PEPPER=replace-with-an-independent-pat-pepper
 ```
 
 `INQTRIX_OIDC_INSECURE_DEV_COOKIES=true` drops the `Secure` flag and the
@@ -240,7 +253,7 @@ Native email/password accounts — the **default** — for multi-user
 deployments without an external IdP. The first visit creates the instance
 owner; the in-app admin area then manages users, invitations, and access
 tokens. It reuses the OIDC cookie session + CSRF machinery verbatim
-(ADR-AUTH-3) under the synthetic issuer `local`; only the login transport
+under the synthetic issuer `local`; only the login transport
 differs (a server-side password check via `POST /api/auth/login/local`).
 Requires `INQTRIX_SESSION_SECRET`, `INQTRIX_PAT_PEPPER`, and the Postgres
 backend for durable accounts. Self-signup is off by default
@@ -273,7 +286,12 @@ copy-paste recipe is the
   cooldown-limited refresh on unknown key ids.
 - **CSRF** — OWASP signed double-submit: the token is an HMAC over the
   session id, delivered in a non-HttpOnly cookie and required back in the
-  `X-CSRF-Token` header on every unsafe method.
+  `X-CSRF-Token` header on every unsafe method. A successful
+  `GET /api/auth/session` refreshes that readable cookie from the current
+  server secret. The SPA uses this only for a typed `csrf_error`: concurrent
+  mutations share one bootstrap and each original request is retried at most
+  once. Other 403 responses, guest tokens, and bearer-token requests are never
+  retried through this path.
 - **Cookies** — HttpOnly session cookie with the `__Host-` prefix,
   `Secure`, and `SameSite=Lax` in secure mode.
 - **`Cache-Control: no-store`** on every `/api/auth/*` response.

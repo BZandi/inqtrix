@@ -16,6 +16,7 @@ Precedence (highest wins):
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
@@ -40,6 +41,8 @@ _SETTINGS_MODEL_CONFIG = {
     "env_file_encoding": "utf-8",
 }
 
+
+_log = logging.getLogger("inqtrix")
 
 class ModelSettings(BaseSettings):
     """Per-role model identifiers loaded from environment variables.
@@ -283,7 +286,7 @@ class AgentSettings(BaseSettings):
         "normal",
         alias="DEPTH",
         description=(
-            "Agent-mode thoroughness (plan M4): ``normal`` or ``deep``. "
+            "Agent-mode thoroughness: ``normal`` or ``deep``. "
             "``deep`` is deterministic budget-plus-verification, never an "
             "unbounded loop: the kernel runs with high reasoning effort "
             "(unless the request or a skill pin sets one), a raised "
@@ -292,7 +295,7 @@ class AgentSettings(BaseSettings):
             "the final answer. Orthogonal to the permission mode."
         ),
     )
-    """Agent-mode thoroughness (plan M4): ``normal`` (default) or ``deep``. Deep = deterministic budget + verification: high reasoning effort on the kernel node (precedence: explicit request effort > skill pin > deep), ``kernel_max_iterations_deep`` as the loop ceiling, child research runs forced onto the DEEP report profile, and exactly ONE rubric-checked verification/revision round before finalization. Distinct from ``report_profile`` (research-mode answer preset) and orthogonal to autonomy."""
+    """Agent-mode thoroughness: ``normal`` (default) or ``deep``. Deep = deterministic budget + verification: high reasoning effort on the kernel node (precedence: explicit request effort > skill pin > deep), ``kernel_max_iterations_deep`` as the loop ceiling, child research runs forced onto the DEEP report profile, and exactly ONE rubric-checked verification/revision round before finalization. Distinct from ``report_profile`` (research-mode answer preset) and orthogonal to autonomy."""
 
     agent_tier: Literal["", "schnell", "gruendlich", "tief"] = Field(
         "",
@@ -569,12 +572,13 @@ class AgentSettings(BaseSettings):
             "the compact INFO/DEBUG behavior, ``debug`` is reserved for "
             "future mid-level diagnostics, and ``forensic`` emits "
             "provider-neutral source, citation, claim, stop, and answer "
-            "lineage events through the existing sanitized logger. "
-            "Forensic mode is semantically complete but does not log raw "
-            "provider request bodies, headers, SDK responses, or secrets."
+            "lineage into the protected run audit. Ordinary logs receive "
+            "only its content-minimized operational projection; exact "
+            "queries, URLs, evidence, prompts, and provider prose stay out "
+            "of container/file logs."
         ),
     )
-    """Controls structured runtime event detail. ``summary`` keeps the compact INFO/DEBUG behavior, ``debug`` is reserved for future mid-level diagnostics, and ``forensic`` emits provider-neutral source, citation, claim, stop, and answer lineage events through the existing sanitized logger. Forensic mode is semantically complete but does not log raw provider request bodies, headers, SDK responses, or secrets."""
+    """Control protected audit detail and its content-minimized log projection."""
 
     skip_search: bool = Field(
         False,
@@ -817,12 +821,12 @@ class ServerSettings(BaseSettings):
             "TTL (seconds) for completed, failed, or cancelled native "
             "run records. During this window the UI can still fetch "
             "``/v1/runs/{run_id}``, replay buffered events, or load the "
-            "result payload. Persistence across refreshes beyond this "
-            "short window is intentionally left to a future database "
-            "adapter."
+            "result payload when the in-memory run store is active. The "
+            "durable Postgres store uses ``run_durable_retention_seconds`` "
+            "instead."
         ),
     )
-    """TTL (seconds) for completed, failed, or cancelled native run records. During this window the UI can still fetch ``/v1/runs/{run_id}``, replay buffered events, or load the result payload. Persistence across refreshes beyond this short window is intentionally left to a future database adapter."""
+    """TTL for terminal native run records in the in-memory store; the durable Postgres store uses ``run_durable_retention_seconds``."""
     run_durable_retention_seconds: int = Field(
         7_776_000,
         alias="RUN_DURABLE_RETENTION_SECONDS",
@@ -842,6 +846,26 @@ class ServerSettings(BaseSettings):
         ),
     )
     """Retention (seconds) for terminal native run records in the durable (Postgres) store; default 90 days. Distinct from ``run_completed_ttl_seconds``, which bounds the in-memory store's replay buffer to a short window: this governs how long completed research reports stay fetchable from the database, so they survive page reloads, re-logins, and other devices instead of vanishing after the in-memory TTL. The in-memory store ignores this value. Lazy cleanup deletes terminal rows older than the window (their events and result payloads cascade); raise it to keep reports longer at the cost of bounded table growth, or set 0 to evict on the next cleanup."""
+    deletion_max_concurrent: int = Field(
+        2,
+        alias="INQTRIX_DELETION_MAX_CONCURRENT",
+        ge=1,
+        description=(
+            "Maximum aggregate deletion operations executed in this process "
+            "at once. The worker's global concurrency remains an additional "
+            "upper bound in Valkey mode."
+        ),
+    )
+    deletion_receipt_retention_seconds: int = Field(
+        2_592_000,
+        alias="INQTRIX_DELETION_RECEIPT_RETENTION_SECONDS",
+        ge=86_400,
+        description=(
+            "Retention for terminal deletion-operation metadata. The "
+            "default is 30 days; receipts contain identifiers and status, "
+            "never document text or blob content."
+        ),
+    )
     run_event_buffer_size: int = Field(
         200,
         alias="RUN_EVENT_BUFFER_SIZE",
@@ -1074,13 +1098,14 @@ class StorageSettings(BaseSettings):
         False,
         alias="INQTRIX_MIGRATION_SERVICES_QUIESCED",
         description=(
-            "Explicit operator assertion that API, worker and collaboration "
-            "processes are stopped and their database pools drained. Required "
-            "for owner-mode upgrades of an existing schema; a fresh install "
-            "has no running services and does not require it."
+            "Explicit operator assertion that API, worker, collaboration and "
+            "pooler processes are stopped and database sessions drained. "
+            "Required for every actual revision change on an installed schema, "
+            "independent of RLS mode; a fresh install or no-op at the installed "
+            "target does not require it."
         ),
     )
-    """Operator assertion that API, worker and collaboration processes are stopped and their pools drained; required for owner-mode upgrades of an existing schema."""
+    """Operator assertion that workloads and poolers are stopped and their database sessions drained before an installed schema changes revision."""
     app_role: str = Field(
         "inqtrix_app",
         alias="INQTRIX_DATABASE_APP_ROLE",
@@ -1116,14 +1141,15 @@ class StorageSettings(BaseSettings):
         description=(
             "Persistent connections per POOLED engine (the platform "
             "bundle, run store, indexing store, and auth bundle each "
-            "own one; NullPool stores are unaffected). The worst-case "
-            "budget of one process is pooled_engines x (pool_size + "
-            "max_overflow) plus the in-flight NullPool connections — "
-            "size the sum of all replicas below Postgres "
-            "max_connections (or front it with a transaction pooler)."
+            "own one; NullPool stores, including the API's run-thread "
+            "lane, are unaffected). The worst-case budget of one "
+            "process is pooled_engines x (pool_size + max_overflow) "
+            "plus the in-flight NullPool connections — size the sum of "
+            "all replicas below Postgres max_connections (or front it "
+            "with a transaction pooler)."
         ),
     )
-    """Persistent connections per POOLED engine (default 5, the SQLAlchemy default — existing deployments see zero change). Four engines per API process are pooled (platform bundle, run store, indexing store, auth bundle) and the worker adds two more; NullPool stores open per-operation connections and ignore this. Budget arithmetic: pooled_engines x (pool_size + max_overflow) per process, summed over replicas, must stay below Postgres ``max_connections`` unless a transaction pooler fronts the database."""
+    """Persistent connections per POOLED engine (default 5, the SQLAlchemy default — existing deployments see zero change). Four engines per API process are pooled (platform bundle, run store, indexing store, auth bundle) and the worker adds two more; NullPool stores open per-operation connections and ignore this. The API's run-thread lane (``build_run_thread_persistence``) adds a fifth engine on Postgres, but it is NullPool and therefore holds nothing idle: its transient use is bounded by the run-concurrency cap (``RUN_MAX_CONCURRENT``, falling back to ``MAX_CONCURRENT``), not by this setting. Budget arithmetic: pooled_engines x (pool_size + max_overflow) per process, summed over replicas, must stay below Postgres ``max_connections`` unless a transaction pooler fronts the database."""
     pool_max_overflow: int = Field(
         10,
         alias="INQTRIX_DATABASE_POOL_MAX_OVERFLOW",
@@ -1381,7 +1407,7 @@ class AuthSettings(BaseSettings):
     """Authentication configuration for the HTTP server.
 
     The mode selector plus the GENERIC OIDC contract surface
-    (ADR-AUTH-1): Inqtrix speaks only standard OIDC — discovery,
+    Inqtrix speaks only standard OIDC — discovery,
     authorization code + PKCE — and hardwires no identity provider.
     The claim-mapping and fallback fields exist because issuer +
     client id + secret alone are not enough for real IdP
@@ -1671,6 +1697,22 @@ class AuthSettings(BaseSettings):
         ),
     )
     """Server-side secret mixed into the HMAC of every personal access token. Required in oidc mode (fail-loud at startup); a database leak alone must not suffice to verify guesses against stolen hashes. Rotating the pepper invalidates every issued token at once — clients receive uniform 401s, so treat rotation as deliberate maintenance with re-issue."""
+    pseudonym_pepper: str = Field(
+        "",
+        alias="INQTRIX_PSEUDONYM_PEPPER",
+        description=(
+            "Instance-wide secret behind the pseudonymous subject "
+            "references in logs, traces, and audit correlation. Set the "
+            "SAME value for the API server and every worker: one person "
+            "then carries ONE stable pseudonym across processes and "
+            "restarts. Empty keeps the historical per-process references "
+            "(a startup WARNING explains the degraded correlation). "
+            "REQUIRED in oidc mode (fail-loud at startup). Rotating the "
+            "pepper deliberately breaks linkability with all previously "
+            "written pseudonyms."
+        ),
+    )
+    """Instance-wide secret behind the stable subject pseudonyms in logs/traces/audit correlation. Shared by API server and workers; empty falls back to per-process references (WARNING at startup). Required in oidc mode; rotation deliberately breaks linkability with previously written pseudonyms."""
     pat_max_per_user: int = Field(
         10,
         alias="INQTRIX_PAT_MAX_PER_USER",
@@ -1879,8 +1921,9 @@ class AuthSettings(BaseSettings):
             "Number of trusted reverse proxies between the client and this "
             "server, used to read the real client IP from the RIGHT of "
             "``X-Forwarded-For`` for the login throttle key. ``1`` (default) "
-            "fits the bundled single proxy (nginx ``web`` container or "
-            "``scripts/run_research_desk.py``) and is not client-spoofable. "
+            "fits the selected bundled single proxy (the packaged Python "
+            "web gateway or the explicit nginx alternative) and is not "
+            "client-spoofable. "
             "Set ``0`` when exposing the API server directly with no proxy "
             "(only the socket peer is trusted); set the exact chain length "
             "for multiple proxies — too high re-opens spoofing."
@@ -2031,6 +2074,34 @@ class KnowledgeSettings(BaseSettings):
         ),
     )
     """Contextual retrieval: one batched fast-tier LLM call per document at ingestion generates situating contexts prepended before embedding and BM25 indexing. Off by default; re-ingest existing documents to apply."""
+    contextualization_circuit_cooldown_seconds: float = Field(
+        60.0,
+        alias="INQTRIX_CONTEXTUALIZATION_CIRCUIT_COOLDOWN_SECONDS",
+        ge=1.0,
+        le=3_600.0,
+        description=(
+            "Cooldown after a transient contextualization provider failure. "
+            "During this interval the tenant/provider/model circuit rejects "
+            "new provider calls and indexing pauses visibly; it never "
+            "publishes a partial or raw fallback. The next explicit resume "
+            "after the cooldown receives one half-open probe."
+        ),
+    )
+    """Provider/model circuit cooldown in seconds; it pauses work and never acts as an indexing deadline."""
+    contextualization_circuit_probe_lease_seconds: float = Field(
+        900.0,
+        alias="INQTRIX_CONTEXTUALIZATION_CIRCUIT_PROBE_LEASE_SECONDS",
+        ge=30.0,
+        le=7_200.0,
+        description=(
+            "Lease for the single half-open contextualization probe. The "
+            "runtime raises the effective lease to at least the provider call "
+            "budget plus a safety margin, so another worker cannot start a "
+            "duplicate probe while the first request is legitimately in "
+            "flight. An expired lease is recoverable after a worker crash."
+        ),
+    )
+    """Configured minimum lease for the single half-open provider probe."""
     gate: Literal["on", "off"] = Field(
         "on",
         alias="INQTRIX_KNOWLEDGE_GATE",
@@ -2051,13 +2122,15 @@ class KnowledgeSettings(BaseSettings):
             "Quote-then-answer grounding for mode=knowledge: the "
             "answer prompt requires a block of verbatim, labelled "
             "quotes before the answer; the quotes are verified "
-            "deterministically against the evidence (no extra LLM "
-            "call), reported visibly via markers and a run event, and "
-            "stripped from the user-facing answer. ``off`` restores "
-            "the plain single-section answer prompt."
+            "deterministically against the evidence. One bounded "
+            "header-format repair is permitted; malformed grounding or "
+            "an unverifiable quote fails the answer visibly and emits a "
+            "typed run event instead of publishing unchecked model text. "
+            "Verified quotes are stripped from the user-facing answer. "
+            "``off`` restores the plain single-section answer prompt."
         ),
     )
-    """Quote-then-answer grounding for mode=knowledge: the answer prompt requires a block of verbatim, labelled quotes before the answer; quotes are verified deterministically against the evidence (no extra LLM call), reported visibly, and stripped from the user-facing answer. ``off`` restores the plain single-section answer prompt."""
+    """Quote-then-answer grounding for mode=knowledge. One deterministic header repair is allowed; malformed grounding or any unverifiable quote fails closed with a typed event and never publishes unchecked model text. Verified quotes are stripped from the user-facing answer. ``off`` restores the plain single-section answer prompt."""
     gate_max_rounds: int = Field(
         3,
         alias="INQTRIX_KNOWLEDGE_GATE_MAX_ROUNDS",
@@ -2210,88 +2283,97 @@ class KnowledgeSettings(BaseSettings):
         ge=10_000,
         description=(
             "Upper bound on one uploaded document's text size. "
-            "Protects the synchronous in-process ingestion path from "
-            "unbounded embedding work; raise when the worker-based "
-            "pipeline lands."
+            "Applied when immutable source intent is reserved, before "
+            "contextualization or embedding work is queued."
         ),
     )
-    """Upper bound on one uploaded document's text size. Protects the synchronous in-process ingestion path from unbounded embedding work; raise when the worker-based pipeline lands."""
+    """Upper bound on one document revision's canonical source text, enforced before provider work is queued."""
     reindex_max_concurrent: int = Field(
         6,
         alias="INQTRIX_REINDEX_MAX_CONCURRENT",
         ge=1,
         description=(
-            "Maximum number of reindex (re-embed) jobs executing at "
-            "once — i.e. how many DIFFERENT collections can re-embed "
-            "simultaneously. Within a single job the documents are "
-            "re-embedded one after another, and reindex is serialized "
-            "per collection (one active job per collection, enforced at "
-            "the database), so this value never parallelizes a single "
-            "collection — it only sets how many separate collections "
-            "reindex in parallel. Each running job streams embedding "
-            "calls, so concurrent jobs add up on the embedding endpoint "
-            "and compete with live query-embedding for retrieval; raise "
-            "this for faster bulk reindexing when the embedding provider "
-            "has headroom, lower it if background reindex starves "
-            "interactive search or hits the provider's rate limit. In "
+            "Maximum number of indexing operations admitted for concurrent "
+            "execution. Collection-generation builds are serialized per "
+            "collection, while immutable document-revision deltas may run "
+            "alongside one generation and publish through their own revision "
+            "fences. Concurrent operations add up on the embedding endpoint "
+            "and compete with live query embedding; raise this when the "
+            "provider has headroom, or lower it when background indexing "
+            "starves interactive retrieval or reaches provider limits. In "
             "worker mode (INQTRIX_QUEUE_BACKEND=valkey) the actual "
             "execution parallelism is INQTRIX_WORKER_CONCURRENCY per "
             "worker process; this value then governs admission only. "
             "Additional jobs wait in the FIFO queue."
         ),
     )
-    """Maximum number of reindex (re-embed) jobs executing at once = how many different collections re-embed simultaneously (a single collection is always serialized, one active job per collection). Concurrent jobs add up on the embedding endpoint and compete with live query-embedding; raise for faster bulk reindex when the provider has headroom, lower if it starves interactive search. In worker mode the actual parallelism is INQTRIX_WORKER_CONCURRENCY; this then governs admission only."""
+    """Admission limit for concurrently executing indexing operations; one collection generation may coexist with independently fenced document revisions."""
     reindex_queue_max_size: int = Field(
         50,
         alias="INQTRIX_REINDEX_QUEUE_MAX_SIZE",
         ge=0,
         description=(
-            "Maximum number of reindex jobs waiting in the FIFO queue. "
+            "Maximum number of indexing operations waiting in the FIFO queue. "
             "Active jobs governed by ``reindex_max_concurrent`` do not "
-            "count. When the queue is full, the reindex endpoint returns "
+            "count. When the queue is full, submission returns "
             "HTTP 429."
         ),
     )
-    """Maximum number of reindex jobs waiting in the FIFO queue. Active jobs do not count against this limit. When the queue is full, the reindex endpoint returns HTTP 429."""
+    """Maximum number of indexing operations waiting in the FIFO queue; active operations do not count against the limit."""
     reindex_completed_ttl_seconds: int = Field(
         3_600,
         alias="INQTRIX_REINDEX_COMPLETED_TTL_SECONDS",
         ge=0,
         description=(
             "TTL (seconds) for terminal (completed/failed/cancelled) "
-            "reindex job records. During this window the UI can still "
+            "indexing-operation records. During this window the UI can still "
             "fetch the job, replay events, and read its history entry. "
             "Longer than the run TTL because a returning browser shows "
             "recent reindex history. Governs retention in both the "
             "in-memory store and the durable Postgres store "
             "(INQTRIX_STORAGE_BACKEND=postgres); the per-collection "
-            "INQTRIX_REINDEX_HISTORY_LIMIT caps history independently."
+            "INQTRIX_REINDEX_HISTORY_LIMIT caps history independently. "
+            "Queued, running, cancelling, and paused operations are never "
+            "expired by this value."
         ),
     )
-    """TTL (seconds) for terminal reindex job records. During this window the UI can still fetch the job, replay events, and read its history entry. Longer than the run TTL so a returning browser sees recent history. Governs retention in both the in-memory store and the durable Postgres store; the per-collection history limit caps history independently."""
+    """TTL for terminal indexing-operation records only; non-terminal work has no age deadline."""
     reindex_event_buffer_size: int = Field(
         200,
         alias="INQTRIX_REINDEX_EVENT_BUFFER_SIZE",
         ge=1,
         description=(
-            "Number of recent structured events retained per reindex "
+            "Number of recent structured events retained per indexing "
             "job for late SSE subscribers. Bounded to avoid unbounded "
-            "memory growth during a long re-embed over many documents."
+            "memory growth during long-running provider work."
         ),
     )
-    """Number of recent structured events retained per reindex job for late SSE subscribers. Bounded to avoid unbounded memory growth during a long re-embed over many documents."""
+    """Number of recent structured events retained per indexing operation for late SSE subscribers."""
     reindex_history_limit: int = Field(
         10,
         alias="INQTRIX_REINDEX_HISTORY_LIMIT",
         ge=0,
         description=(
-            "Maximum number of terminal reindex records retained per "
+            "Maximum number of terminal indexing records retained per "
             "collection (the inline 'last N runs' history the UI "
             "shows). Older terminal records for a collection are evicted "
             "beyond this count even before their TTL expires."
         ),
     )
-    """Maximum number of terminal reindex records retained per collection (the inline 'last N runs' history the UI shows). Older terminal records for a collection are evicted beyond this count even before their TTL expires."""
+    """Maximum number of terminal indexing records retained per collection before TTL eviction."""
+
+    generation_rollback_retention_seconds: int = Field(
+        7 * 24 * 60 * 60,
+        alias="INQTRIX_GENERATION_ROLLBACK_RETENTION_SECONDS",
+        ge=0,
+        description=(
+            "How long a superseded, fully validated knowledge generation "
+            "remains rollback-available. Expiry is serviced by the existing "
+            "worker maintenance cadence; interrupted vector cleanup stays "
+            "visibly retryable and never re-enters rollback availability."
+        ),
+    )
+    """Rollback window for superseded knowledge generations (default seven days)."""
 
     def selectable_embedding_model_list(self) -> list[str]:
         """Parse the comma-separated selectable-models field."""
@@ -2352,6 +2434,20 @@ class QueueSettings(BaseSettings):
         ),
     )
     """Maximum number of runs one worker process executes concurrently. Each run blocks one thread for its full duration, so this bounds provider load per worker replica."""
+    worker_metrics_port: int = Field(
+        0,
+        alias="INQTRIX_WORKER_METRICS_PORT",
+        ge=0,
+        le=65535,
+        description=(
+            "Port for the worker process's own Prometheus /metrics "
+            "endpoint (each worker exposes its own registry; no "
+            "pushgateway). 0 (default) disables the endpoint. Also "
+            "requires INQTRIX_METRICS_ENABLED=true and the `metrics` "
+            "extra."
+        ),
+    )
+    """Worker /metrics port (0 = off; needs INQTRIX_METRICS_ENABLED)."""
     worker_max_attempts: int = Field(
         3,
         alias="INQTRIX_WORKER_MAX_ATTEMPTS",
@@ -2819,6 +2915,19 @@ class SharingSettings(BaseSettings):
 
     model_config = _SETTINGS_MODEL_CONFIG
 
+    enabled: bool = Field(
+        True,
+        alias="INQTRIX_SHARING_ENABLED",
+        description=(
+            "Enable direct resource sharing with signed-in people. Disabling "
+            "the module suspends the public sharing surface without deleting "
+            "stored grants. The default remains true for backwards "
+            "compatibility; unsupported authentication modes still keep the "
+            "module unavailable."
+        ),
+    )
+    """Master switch for direct person-to-person sharing (default ``True``)."""
+
     restrict_to_workspace_members: bool = Field(
         False,
         alias="INQTRIX_SHARING_RESTRICT_TO_WORKSPACE_MEMBERS",
@@ -2841,6 +2950,97 @@ class SharingSettings(BaseSettings):
     the boundary. A revoked share is never restored automatically when the
     setting is later disabled. Default ``False`` keeps sharing tenant-wide.
     """
+
+
+class EditorGuestLinkSettings(BaseSettings):
+    """Optional account-less editor link sharing.
+
+    Link sharing is deliberately independent from normal collaboration so an
+    enterprise deployment can keep signed-in teamwork while refusing bearer
+    links. Enabling the module is validated by the composition root against
+    sharing, collaboration, Postgres, and an HTTPS public base URL.
+    """
+
+    model_config = _SETTINGS_MODEL_CONFIG
+
+    enabled: bool = Field(
+        False,
+        alias="INQTRIX_EDITOR_GUEST_LINKS_ENABLED",
+        description=(
+            "Enable password-protected editor links for visitors without an "
+            "Inqtrix account. Requires sharing, collaboration, PostgreSQL, "
+            "and an HTTPS INQTRIX_PUBLIC_BASE_URL."
+        ),
+    )
+    """Master switch for account-less editor links (default ``False``)."""
+
+    stats_enabled: bool = Field(
+        True,
+        alias="INQTRIX_EDITOR_GUEST_LINK_STATS_ENABLED",
+        description=(
+            "Collect bounded successful-open and guest-session counters for "
+            "editor share links. Security throttling remains active even when "
+            "product statistics are disabled."
+        ),
+    )
+    """Whether privacy-bounded guest-link product statistics are collected."""
+
+    default_ttl_seconds: int = Field(
+        7 * 24 * 60 * 60,
+        alias="INQTRIX_EDITOR_GUEST_LINK_DEFAULT_TTL_SECONDS",
+        ge=60 * 60,
+        le=30 * 24 * 60 * 60,
+        description="Default guest-link lifetime in seconds (default 7 days).",
+    )
+    """Default guest-link lifetime, bounded to one hour through 30 days."""
+
+    max_ttl_seconds: int = Field(
+        30 * 24 * 60 * 60,
+        alias="INQTRIX_EDITOR_GUEST_LINK_MAX_TTL_SECONDS",
+        ge=60 * 60,
+        le=30 * 24 * 60 * 60,
+        description="Maximum guest-link lifetime in seconds (maximum 30 days).",
+    )
+    """Operator ceiling for guest-link expiry (maximum 30 days)."""
+
+    token_hmac_secret: str = Field(
+        "",
+        alias="INQTRIX_EDITOR_GUEST_LINK_TOKEN_SECRET",
+        description=(
+            "Independent HMAC secret used to store guest-link token digests. "
+            "Required at 32+ characters when guest links are enabled and must "
+            "not reuse the session or collaboration secret."
+        ),
+    )
+    """Independent secret used only for guest-link token digests."""
+    allow_insecure_http: bool = Field(
+        False,
+        alias="INQTRIX_EDITOR_GUEST_LINKS_ALLOW_INSECURE_HTTP",
+        description=(
+            "Development escape hatch: allow guest links behind a plain "
+            "HTTP INQTRIX_PUBLIC_BASE_URL and drop the Secure flag from "
+            "the guest cookies. Guest-link tokens, passwords, and "
+            "sessions then cross the wire UNENCRYPTED — never use in "
+            "production; activation logs a WARNING at startup. The "
+            "Level-3 release gates still verify guest access over "
+            "HTTPS regardless of this switch."
+        ),
+    )
+    """Explicit dev/trusted-LAN opt-in for HTTP guest links (default off, plan pattern of ``INQTRIX_OIDC_INSECURE_DEV_COOKIES``). Without it, an HTTP public base URL keeps failing the boot guard loudly; with it, the guard degrades to a startup WARNING, guest cookies drop ``Secure``, and the capability manifest stops reporting ``https_required``."""
+
+    @model_validator(mode="after")
+    def _validate_guest_link_settings(self) -> "EditorGuestLinkSettings":
+        if self.default_ttl_seconds > self.max_ttl_seconds:
+            raise ValueError(
+                "INQTRIX_EDITOR_GUEST_LINK_DEFAULT_TTL_SECONDS must be less "
+                "than or equal to INQTRIX_EDITOR_GUEST_LINK_MAX_TTL_SECONDS"
+            )
+        if self.enabled and len(self.token_hmac_secret) < 32:
+            raise ValueError(
+                "INQTRIX_EDITOR_GUEST_LINK_TOKEN_SECRET must contain at least "
+                "32 characters when guest links are enabled"
+            )
+        return self
 
 
 class CollaborationSettings(BaseSettings):
@@ -3082,12 +3282,12 @@ class CollaborationSettings(BaseSettings):
     )
     """Collaboration protocol version. Version ``1`` is the initial wire contract."""
     schema_version: int = Field(
-        1,
+        2,
         alias="INQTRIX_COLLABORATION_SCHEMA_VERSION",
         ge=1,
         description="Shared Tiptap/Yjs schema version.",
     )
-    """Shared editor schema version. Version ``1`` is the initial schema contract."""
+    """Shared editor schema version. Version ``2`` adds reversible structure proposals."""
 
     @field_validator("allowed_origins", mode="before")
     @classmethod
@@ -3182,18 +3382,18 @@ class AgentPlatformSettings(BaseSettings):
             "(Postgres) or the explicit volatile escape below."
         ),
     )
-    """Master switch for the workspace-agent mode. Even when True the algorithm only registers with a durable checkpointer (Postgres backend) or the explicit volatile escape below — degrading VISIBLY instead of silently (decision E8)."""
+    """Master switch for the workspace-agent mode. Even when True the algorithm only registers with a durable checkpointer (Postgres backend) or the explicit volatile escape below, so degraded durability remains visible."""
     kernel_enabled: bool = Field(
         False,
         alias="INQTRIX_AGENT_KERNEL_ENABLED",
         description=(
-            "Rollout switch for the cognitive-kernel mode (plan M2). "
+            "Rollout switch for the cognitive-kernel mode. "
             "Even when True the kernel only registers with a "
             "checkpointer AND an LLM provider that supports native "
             "tool calling; a failed gate logs a WARNING."
         ),
     )
-    """Rollout switch for the ``mode=agent_kernel`` algorithm (plan M2, default False while the kernel matures). Even when True the kernel only registers when the checkpointer gate passes (same rule as ``enabled``) AND the default LLM provider reports ``supports_tool_calls()`` — an enabled-but-ungated deployment logs a WARNING instead of silently missing the mode."""
+    """Rollout switch for the ``mode=agent_kernel`` algorithm (default False while the kernel matures). Even when True the kernel only registers when the checkpointer gate passes (same rule as ``enabled``) AND the default LLM provider reports ``supports_tool_calls()`` — an enabled-but-ungated deployment logs a WARNING instead of silently missing the mode."""
     default_agent_mode: str = Field(
         "agent_kernel",
         alias="INQTRIX_AGENT_DEFAULT_MODE",
@@ -3214,7 +3414,7 @@ class AgentPlatformSettings(BaseSettings):
             "capabilities agent.skills."
         ),
     )
-    """Per-run cap on explicitly attached skills (default 3, plan M3). Enforced server-side at run admission; the composer reads the published value instead of hardcoding it."""
+    """Per-run cap on explicitly attached skills (default 3). Enforced server-side at run admission; the composer reads the published value instead of hardcoding it."""
     skills_disclosure_budget_chars: int = Field(
         4000,
         alias="INQTRIX_AGENT_SKILLS_DISCLOSURE_BUDGET_CHARS",
@@ -3224,28 +3424,54 @@ class AgentPlatformSettings(BaseSettings):
             "line, never silently."
         ),
     )
-    """Character budget of the model-facing skill disclosure block (default 4000, plan M3 `3.3`). Deterministic cut with a visible overflow line — a silent truncation would hide activatable skills from the model."""
+    """Character budget of the model-facing skill disclosure block (default 4000). Deterministic cut with a visible overflow line — a silent truncation would hide activatable skills from the model."""
     kernel_max_iterations: int = Field(
-        24,
+        73,
+        ge=1,
         alias="INQTRIX_AGENT_KERNEL_MAX_ITERATIONS",
         description=(
-            "LangGraph recursion_limit for one kernel run. deepagents "
-            "lifts the default bound to 9999; this restores a hard, "
-            "loud ceiling (GraphRecursionError fails the run)."
+            "Initial cumulative LangGraph super-step allowance for one "
+            "kernel run. deepagents lifts the default bound to 9999; "
+            "this restores a durable user-decision point. Sized by "
+            "formula: 9 (answer turn) + N tool turns x 8 super-steps; "
+            "the default 73 buys 8 sequential tool turns plus the "
+            "answer."
         ),
     )
-    """LangGraph ``recursion_limit`` per kernel run (default 24, plan M2 `2.7`). One model turn spans several graph super-steps (middleware nodes included), so 24 bounds the loop at roughly 6-8 model turns; the Deep mode raises it (M4). Exceeding it raises ``GraphRecursionError`` — a loudly failed run, never a silent truncation."""
+    """Cumulative checkpointed LangGraph super-step limit per kernel run (default 73 = 9 + 8x8). The limit counts graph super-steps, NOT model turns: the final answer turn costs 9 (``_ANSWER_TURN_SUPERSTEPS``) and every tool-calling turn 8 (``_SUPERSTEPS_PER_TOOL_TURN``) — both measured and pinned by the harness contract test. 73 therefore buys exactly 8 sequential tool turns plus the answer; lower limits may allow barely one ordinary tool turn. ``kernel_max_tool_calls`` (30) stays the limit on PARALLEL batch work; sequentially this recursion ceiling binds first. Reaching it parks the checkpointed run for an explicit user decision; no partial answer is implied."""
     kernel_max_iterations_deep: int = Field(
-        40,
+        121,
+        ge=1,
         alias="INQTRIX_AGENT_KERNEL_MAX_ITERATIONS_DEEP",
         description=(
-            "LangGraph recursion_limit for one kernel run in Deep mode "
-            "(plan M4). Higher than the normal ceiling because Deep "
-            "biases toward more tool work and delegation, but still a "
-            "hard, loud bound."
+            "Initial cumulative LangGraph super-step allowance for one "
+            "kernel run in Deep mode. "
+            "Higher than the normal initial allowance because Deep "
+            "biases toward more tool work and delegation. Reaching it "
+            "parks for an explicit, operator-bounded decision."
         ),
     )
-    """LangGraph ``recursion_limit`` per kernel run when ``depth=deep`` (default 40, plan M4). Deep buys more tool turns, not an unbounded loop — exceeding the ceiling still fails the run loudly."""
+    """LangGraph ``recursion_limit`` per kernel run when ``depth=deep`` (default 121 = 9 + 14x8). Same measured arithmetic as the normal ceiling, so this buys exactly 14 sequential tool turns plus the answer. Deep buys more tool turns, not an unbounded loop. Reaching the ceiling parks a durable run for an explicit partial/cancel/extension decision; the extension remains bounded by ``kernel_max_iterations_extension_ceiling_deep``. When a deployment lengthens deep runs further, raise the edge route timeout (Helm ``timeout: 3630s``) and ``INQTRIX_MAX_TOTAL_SECONDS`` in the same change, otherwise a K8s route cuts the SSE stream mid-run."""
+    kernel_max_iterations_extension_ceiling: int = Field(
+        145,
+        ge=1,
+        alias="INQTRIX_AGENT_KERNEL_MAX_ITERATIONS_EXTENSION_CEILING",
+        description=(
+            "Operator ceiling for an explicitly user-extended normal "
+            "kernel step limit. It can never reduce the configured base."
+        ),
+    )
+    """Maximum cumulative checkpointed kernel super-steps after an explicit user extension in normal mode (default 145). This is an operator safety ceiling, not a model-controlled budget."""
+    kernel_max_iterations_extension_ceiling_deep: int = Field(
+        241,
+        ge=1,
+        alias="INQTRIX_AGENT_KERNEL_MAX_ITERATIONS_EXTENSION_CEILING_DEEP",
+        description=(
+            "Operator ceiling for an explicitly user-extended deep "
+            "kernel step limit. It can never reduce the configured base."
+        ),
+    )
+    """Maximum cumulative checkpointed kernel super-steps after an explicit user extension in Deep mode (default 241)."""
     kernel_max_tool_calls: int = Field(
         30,
         ge=1,
@@ -3267,7 +3493,116 @@ class AgentPlatformSettings(BaseSettings):
             "ceiling."
         ),
     )
-    """Run-wide tool-call ceiling for Deep kernel runs (default 60). Deep permits more evidence work while retaining the same fail-loud, whole-batch rejection contract."""
+    """Run-wide tool-call ceiling for Deep kernel runs (default 60). Deep permits more evidence work while retaining the same whole-batch rejection contract."""
+    kernel_max_tool_calls_extension_ceiling: int = Field(
+        60,
+        ge=1,
+        alias="INQTRIX_AGENT_KERNEL_MAX_TOOL_CALLS_EXTENSION_CEILING",
+        description=(
+            "Operator ceiling for an explicitly user-extended normal "
+            "kernel tool-call limit. It can never reduce the configured base."
+        ),
+    )
+    """Maximum run-wide tool calls after an explicit user extension in normal mode (default 60). Overflowing batches remain atomic: none of their tools run before the decision."""
+    kernel_max_tool_calls_extension_ceiling_deep: int = Field(
+        120,
+        ge=1,
+        alias="INQTRIX_AGENT_KERNEL_MAX_TOOL_CALLS_EXTENSION_CEILING_DEEP",
+        description=(
+            "Operator ceiling for an explicitly user-extended deep "
+            "kernel tool-call limit. It can never reduce the configured base."
+        ),
+    )
+    """Maximum run-wide tool calls after an explicit user extension in Deep mode (default 120)."""
+    kernel_sufficiency_gate: bool = Field(
+        True,
+        alias="INQTRIX_AGENT_KERNEL_SUFFICIENCY_GATE",
+        description=(
+            "Adaptive evidence-sufficiency judgement for kernel runs: "
+            "after enough source-tool calls, one cheap fast-tier verdict "
+            "advises the model to answer now or search only the named "
+            "gaps. Advisory — tool budget and recursion stay the hard "
+            "stops."
+        ),
+    )
+    """Advisory kernel sufficiency judge (default on). The middleware node is always compiled in; this flag short-circuits the judgement, so per-turn super-step costs stay constant either way. schnell-tier runs never judge (their budget is one search)."""
+    kernel_sufficiency_min_tool_calls: int = Field(
+        3,
+        ge=1,
+        alias="INQTRIX_AGENT_KERNEL_SUFFICIENCY_MIN_TOOL_CALLS",
+        description=(
+            "Successful web/knowledge tool calls before the first "
+            "sufficiency judgement of a normal kernel run. Runs below "
+            "the threshold never pay a judge call."
+        ),
+    )
+    """Sufficiency threshold of normal runs (default 3): the count of SUCCESSFUL source-tool calls (web + project knowledge) that arms the first advisory verdict. Guarantees cheapness — simple 0-2-tool runs never spend judge tokens."""
+    kernel_sufficiency_min_tool_calls_deep: int = Field(
+        5,
+        ge=1,
+        alias="INQTRIX_AGENT_KERNEL_SUFFICIENCY_MIN_TOOL_CALLS_DEEP",
+        description=(
+            "Successful web/knowledge tool calls before the first "
+            "sufficiency judgement of a deep kernel run."
+        ),
+    )
+    """Sufficiency threshold of Deep runs (default 5): Deep buys more evidence work before the first advisory verdict — proportional to its doubled tool budget."""
+    kernel_sufficiency_max_judgements: int = Field(
+        2,
+        ge=1,
+        alias="INQTRIX_AGENT_KERNEL_SUFFICIENCY_MAX_JUDGEMENTS",
+        description=(
+            "Run-wide cap on sufficiency judgements. The count is "
+            "derived from flagged nudge messages in the checkpointed "
+            "transcript, so it is cumulative across park/resume."
+        ),
+    )
+    """Run-wide judgement cap (default 2). Counted via the flagged nudge messages still present in the checkpointed transcript — idempotent across park/resume, and the same evidence state is never judged twice. Known bound: a context compaction that summarizes away old nudge messages forgets them, so an extremely long run may judge more than the cap in total — acceptable for an ADVISORY fast-tier call (the hard stops stay tool budget and recursion)."""
+    kernel_context_trigger_tokens: int = Field(
+        0,
+        ge=0,
+        alias="INQTRIX_AGENT_KERNEL_CONTEXT_TRIGGER_TOKENS",
+        description=(
+            "Explicit token threshold at which the kernel compacts its "
+            "transcript. 0 (default) derives the threshold from the "
+            "resolved model's card (context window x trigger fraction, "
+            "floor 128k); a nonzero value pins it verbatim."
+        ),
+    )
+    """Explicit kernel compaction threshold in tokens (default 0 = auto). Auto derives ``context_window_tokens x kernel_context_trigger_fraction`` from the resolved model's card with a 128k floor; models without a card use the floor. A nonzero pin wins over the derivation — operators with unusual serving limits set it directly."""
+    kernel_context_trigger_fraction: float = Field(
+        0.75,
+        gt=0.0,
+        le=1.0,
+        alias="INQTRIX_AGENT_KERNEL_CONTEXT_TRIGGER_FRACTION",
+        description=(
+            "Fraction of the resolved model's context window at which "
+            "the kernel compacts (only used when the trigger-token pin "
+            "is 0)."
+        ),
+    )
+    """Fraction of the model context window that arms compaction when no explicit pin is set (default 0.75). Deliberately below deepagents' 0.85 default: the kernel must compact BEFORE a provider over-budget rejection, and the summary call itself still needs headroom."""
+    kernel_context_keep_messages: int = Field(
+        12,
+        ge=2,
+        alias="INQTRIX_AGENT_KERNEL_CONTEXT_KEEP_MESSAGES",
+        description=(
+            "Newest messages kept verbatim when the kernel compacts; "
+            "everything older is summarized into the run archive."
+        ),
+    )
+    """Newest transcript messages preserved verbatim per compaction (default 12). Aggressive on purpose: compacting RARELY and LARGELY breaks the provider prompt-cache prefix once per compaction instead of on every turn (halve-not-trim)."""
+    kernel_context_offload_chars: int = Field(
+        8000,
+        ge=0,
+        alias="INQTRIX_AGENT_KERNEL_CONTEXT_TOOL_RESULT_OFFLOAD_CHARS",
+        description=(
+            "Bulk tool results above this many characters are archived "
+            "in full and replaced in-context by a digest plus the "
+            "citable reference lines. 0 disables the offload."
+        ),
+    )
+    """Character threshold for bulk tool-result offload (default 8000, 0 = off). The full text lands in the run's ``context_archive`` artifact (readable via ``read_canvas``); the transcript keeps a digest PLUS every reference line, so offloading can never break a citation."""
     max_parallel_children: int = Field(
         6,
         alias="INQTRIX_AGENT_MAX_PARALLEL_CHILDREN",
@@ -3332,7 +3667,7 @@ class AgentPlatformSettings(BaseSettings):
             "(no plan interrupt; write actions ALWAYS gated)."
         ),
     )
-    """Permission mode when the request names none (decision E16). ``strict`` approves discovery and every plan delta; ``balanced`` (default) approves the initial plan and auto-applies small read-only replans; ``autonomous`` skips plan interrupts entirely. Write-effect actions are gated in EVERY mode."""
+    """Permission mode when the request names none. ``strict`` approves discovery and every plan delta; ``balanced`` (default) approves the initial plan and auto-applies small read-only replans; ``autonomous`` skips plan interrupts entirely. Write-effect actions are gated in EVERY mode."""
     allow_web_discovery_preview: bool = Field(
         True,
         alias="INQTRIX_AGENT_ALLOW_WEB_DISCOVERY_PREVIEW",
@@ -3340,10 +3675,10 @@ class AgentPlatformSettings(BaseSettings):
             "Permit ONE instant web search during discovery so the "
             "planner sees the external source situation. Applies only "
             "in autonomous mode — Standard keeps all web contact "
-            "behind the plan gate (E16 amendment)."
+            "behind the plan gate."
         ),
     )
-    """Permit ONE ``web.search.instant`` call during discovery (default on) so the planner sees the external source situation before committing to web tasks; off = discovery stays fully internal. Since the E16 amendment (plan M1 S7) the preview additionally requires ``autonomous`` mode — in Standard the approved plan (whose tasks carry their verbatim queries) is the ONLY web-search consent surface."""
+    """Permit ONE ``web.search.instant`` call during discovery (default on) so the planner sees the external source situation before committing to web tasks; off = discovery stays fully internal. The preview additionally requires ``autonomous`` mode — in Standard the approved plan (whose tasks carry their verbatim queries) is the ONLY web-search consent surface."""
     advanced_autonomy: bool = Field(
         False,
         alias="INQTRIX_AGENT_ADVANCED_AUTONOMY",
@@ -3352,18 +3687,18 @@ class AgentPlatformSettings(BaseSettings):
             "in the UI instead of the two-mode Standard/Auto toggle."
         ),
     )
-    """Republish the legacy three-way autonomy control in the UI (default off). The wire vocabulary (strict/balanced/autonomous) is unchanged either way — this only decides whether the composer shows the simplified two-mode Standard/Auto toggle (plan M1 S7, the Cowork pattern) or all three modes; ``strict`` stays fully functional for API callers and enterprise deployments regardless."""
+    """Republish the legacy three-way autonomy control in the UI (default off). The wire vocabulary (strict/balanced/autonomous) is unchanged either way — this only decides whether the composer shows the simplified two-mode Standard/Auto toggle or all three modes; ``strict`` stays fully functional for API callers and enterprise deployments regardless."""
     allow_volatile: bool = Field(
         False,
         alias="INQTRIX_AGENT_ALLOW_VOLATILE",
         description=(
-            "Dev escape (E8): register the agent WITHOUT Postgres using "
+            "Development escape: register the agent WITHOUT Postgres using "
             "an in-memory checkpointer. Interrupted runs then die with "
             "the process — logged loudly, surfaced as "
             "workspace_agent_durable=false."
         ),
     )
-    """Dev escape (decision E8): register the workspace agent WITHOUT the Postgres backend, checkpointing in memory. Interrupted runs then cannot survive a restart — the container logs a WARNING and ``/v1/capabilities`` reports ``workspace_agent_durable: false`` so the degradation is visible, never silent."""
+    """Development escape: register the workspace agent WITHOUT the Postgres backend, checkpointing in memory. Interrupted runs then cannot survive a restart — the container logs a WARNING and ``/v1/capabilities`` reports ``workspace_agent_durable: false`` so the degradation is visible, never silent."""
     memory_provider: str = Field(
         "none",
         alias="INQTRIX_AGENT_MEMORY_PROVIDER",
@@ -3424,6 +3759,172 @@ class AgentPlatformSettings(BaseSettings):
                 "candidate_only, auto_safe"
             )
         return normalized
+
+
+class ObservabilitySettings(BaseSettings):
+    """Trace-sink selection and volume knobs (``INQTRIX_TRACING``).
+
+    One question per switch: ``INQTRIX_TRACING`` decides WHERE spans go
+    (nothing / correlation-ids only / spool files / live OTLP);
+    ``OBSERVABILITY_PROFILE`` on the agent group keeps deciding HOW DEEP
+    capture goes. The OTLP endpoint and headers are read by the exporter
+    itself from the standard ``OTEL_EXPORTER_OTLP_ENDPOINT`` /
+    ``OTEL_EXPORTER_OTLP_HEADERS`` variables — Langfuse example:
+    ``…/api/public/otel`` plus ``Authorization=Basic <base64(pk:sk)>,
+    x-langfuse-ingestion-version=4``.
+    """
+
+    model_config = _SETTINGS_MODEL_CONFIG
+
+    tracing: Literal["off", "local", "file", "otlp"] = Field(
+        "off",
+        alias="INQTRIX_TRACING",
+        description=(
+            "Trace sink. off (default) = no tracer. local = spans exist "
+            "only to stamp trace_id/span_id into JSON logs, nothing is "
+            "persisted. file = spans additionally spool as OTLP-JSON "
+            "lines under the spool dir (replayable into Langfuse later). "
+            "otlp = live export via OTLP/HTTP to the standard "
+            "OTEL_EXPORTER_OTLP_* endpoint. Requires the `observability` "
+            "extra for every value except off (missing extra logs a "
+            "WARNING and stays off)."
+        ),
+    )
+    """Trace sink: ``off`` (default) | ``local`` (ids only) | ``file`` (OTLP-JSON spool, replayable) | ``otlp`` (live export). Non-off values need the ``observability`` extra; a missing extra degrades loudly to off."""
+    trace_sample_rate: float = Field(
+        1.0,
+        alias="INQTRIX_TRACE_SAMPLE_RATE",
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Head sampling ratio (ParentBased+TraceIdRatio, decides per "
+            "whole trace). 1.0 keeps everything; lower it in production "
+            "when volume grows. Note: the Langfuse SDK variable "
+            "LANGFUSE_SAMPLE_RATE does NOT apply to pure OTLP export — "
+            "this is the authoritative knob."
+        ),
+    )
+    """Head-sampling ratio for traces (parent-based trace-id ratio; per-trace decision)."""
+    trace_spool_dir: str = Field(
+        "logs/traces",
+        alias="INQTRIX_TRACE_SPOOL_DIR",
+        description=(
+            "Directory for spooled OTLP-JSON trace files in "
+            "INQTRIX_TRACING=file mode. Created automatically."
+        ),
+    )
+    """Spool directory for ``file`` mode (created automatically)."""
+    trace_spool_max_mb: int = Field(
+        2048,
+        alias="INQTRIX_TRACE_SPOOL_MAX_MB",
+        ge=16,
+        description=(
+            "Total size cap for the spool directory. Oldest spool files "
+            "are deleted first (size-based retention backstop; the "
+            "primary retention lever for live export is time-based on "
+            "the backend)."
+        ),
+    )
+    """Total spool-size cap in MiB; oldest files rotate out first."""
+    trace_content: Literal["auto", "on", "off"] = Field(
+        "auto",
+        alias="INQTRIX_TRACE_CONTENT",
+        description=(
+            "Whether spans carry CONTENT (prompts, messages, redacted "
+            "raw responses, search answers) in addition to metadata. "
+            "auto (default) follows OBSERVABILITY_PROFILE: content only "
+            "in the forensic profile. on/off override explicitly. "
+            "Content is always redacted through the existing sanitizers "
+            "and hard-capped per attribute (see "
+            "INQTRIX_TRACE_MAX_ATTR_BYTES) — Langfuse OSS applies no "
+            "server-side truncation or masking."
+        ),
+    )
+    """Span content capture: ``auto`` (follows OBSERVABILITY_PROFILE) | ``on`` | ``off``. Content is always redacted and byte-capped caller-side."""
+    trace_max_attr_bytes: int = Field(
+        1_048_576,
+        alias="INQTRIX_TRACE_MAX_ATTR_BYTES",
+        ge=1_024,
+        description=(
+            "Per-attribute byte cap for span content. Sized as a BACKSTOP "
+            "against pathological payloads, not as a routine limit: a cap "
+            "that trims normal prompts would defeat the purpose of "
+            "forensic capture. 1 MiB keeps real prompts, responses and "
+            "tool arguments whole (Langfuse itself only warns past 16 MB "
+            "per span, and the OTel SDK sets no attribute-length limit at "
+            "all). Every capped value still raises an inqtrix.truncation "
+            "span event, so the rare cap is visible."
+        ),
+    )
+    """Per-attribute byte backstop for span content (1 MiB; truncations are reported)."""
+    trace_ui_url: str = Field(
+        "",
+        alias="INQTRIX_TRACE_UI_URL",
+        description=(
+            'Browser base URL of the Langfuse UI for the "Trace '
+            'oeffnen" deep link (joined with the htmlPath the trace API '
+            "returns — no projectId configuration needed). Often "
+            "differs from the in-cluster OTLP endpoint, e.g. "
+            "http://localhost:3300 for the bundled compose profile. "
+            "Empty (default) hides the link."
+        ),
+    )
+    """Browser base URL of the Langfuse UI for admin deep links; empty hides them."""
+    trace_retention_days: int = Field(
+        30,
+        alias="INQTRIX_TRACE_RETENTION_DAYS",
+        ge=0,
+        description=(
+            "Time-based retention for traces in Langfuse, enforced by "
+            "Inqtrix's own worker cleanup job (the native Langfuse "
+            "retention feature is EE-only self-hosted): traces older "
+            "than this many days are batch-deleted via the Langfuse "
+            "API. 0 disables the job. Only active with "
+            "INQTRIX_TRACING=otlp; the file spool has its own "
+            "size-based cap instead."
+        ),
+    )
+    """Trace retention in days for the worker's Langfuse cleanup job (0 = off; otlp mode only)."""
+    audit_service_starts: bool = Field(
+        True,
+        alias="INQTRIX_AUDIT_SERVICE_STARTS",
+        description=(
+            "Enriches the service-start index the admin panel drills "
+            "into: gates the chat.completed rows entirely and the "
+            "metadata block (mode, duration, token sums) on run "
+            "terminal rows. Run and indexing terminal rows themselves "
+            "belong to the mandatory resource-effect trail and stay — "
+            "audit as a whole has NO off switch. Never content."
+        ),
+    )
+    """Service-start index enrichment (chat rows + run terminal detail; default on)."""
+    audit_retention_days: int = Field(
+        365,
+        alias="INQTRIX_AUDIT_RETENTION_DAYS",
+        ge=0,
+        description=(
+            "Time-based retention for audit_log rows, enforced by the "
+            "worker via the SECURITY DEFINER function audit_prune "
+            "(the app role itself holds INSERT/SELECT only). 365 days "
+            "matches the ISO 27001 / BSI OPS.1.1.5 guidance. 0 disables "
+            "pruning (rows are kept indefinitely)."
+        ),
+    )
+    """Audit retention in days for the worker prune job (0 = keep forever)."""
+
+    usage_retention_days: int = Field(
+        730,
+        alias="INQTRIX_USAGE_RETENTION_DAYS",
+        ge=0,
+        description=(
+            "Time-based retention for llm_usage ledger rows (consumption "
+            "history), enforced by the worker via the SECURITY DEFINER "
+            "function llm_usage_prune (the app role holds INSERT/SELECT "
+            "only). Default 730 days = 24 months of product data. "
+            "0 disables pruning (rows are kept indefinitely)."
+        ),
+    )
+    """Usage-ledger retention in days for the worker prune job (0 = keep forever)."""
 
 
 class Settings(BaseSettings):
@@ -3519,6 +4020,15 @@ class Settings(BaseSettings):
         ),
     )
     """Resource-sharing policy (tenant-wide by default)."""
+    editor_guest_links: EditorGuestLinkSettings = Field(
+        default_factory=EditorGuestLinkSettings,
+        description=(
+            "Optional password-protected editor links for guests without an "
+            "account. Disabled by default and dependent on sharing, live "
+            "collaboration, Postgres, and HTTPS."
+        ),
+    )
+    """Optional account-less editor-link settings."""
     collaboration: CollaborationSettings = Field(
         default_factory=CollaborationSettings,
         description=(
@@ -3535,3 +4045,53 @@ class Settings(BaseSettings):
         ),
     )
     """Workspace-agent platform limits (``INQTRIX_AGENT_*``)."""
+    observability: ObservabilitySettings = Field(
+        default_factory=ObservabilitySettings,
+        description=(
+            "Trace-sink selection (INQTRIX_TRACING: off|local|file|otlp) "
+            "and trace volume knobs. Off by default; requires the "
+            "`observability` extra for any non-off value."
+        ),
+    )
+    """Trace-sink selection and volume knobs (``INQTRIX_TRACING``)."""
+
+    @model_validator(mode="after")
+    def _warn_forensic_without_recording_sink(self) -> "Settings":
+        """Forensic depth without a recording sink records NOTHING.
+
+        The two knobs are orthogonal by design (depth vs. destination),
+        and that is exactly how an operator ends up asking for full
+        lineage while every span is dropped: ``off`` installs no
+        provider at all, ``local`` installs an ALWAYS_OFF sampler, and a
+        sample rate below 1.0 drops whole traces head-first — forensic
+        is the one profile whose promise is PER-RUN completeness.
+        Silence here would be the worst kind of fallback: the operator
+        believes they have a forensic record and has none.
+        """
+        profile = str(
+            getattr(self.agent, "observability_profile", "") or ""
+        ).strip().lower()
+        if profile != "forensic":
+            return self
+        mode = str(self.observability.tracing or "off")
+        rate = float(self.observability.trace_sample_rate or 0.0)
+        if mode in ("off", "local"):
+            _log.warning(
+                "OBSERVABILITY_PROFILE=forensic mit INQTRIX_TRACING=%s: "
+                "es wird KEIN Span aufgezeichnet (off installiert keinen "
+                "Provider, local samplet bewusst alles weg) - die "
+                "forensische Tiefe landet nirgends. Setze "
+                "INQTRIX_TRACING=file (Datei-Spool) oder otlp.",
+                mode,
+            )
+        elif rate < 1.0:
+            _log.warning(
+                "OBSERVABILITY_PROFILE=forensic mit "
+                "INQTRIX_TRACE_SAMPLE_RATE=%s: Head-Sampling entscheidet "
+                "pro LAUF, nicht pro Ereignis - rund %.0f%% der Laeufe "
+                "haben dann GAR keine forensische Aufzeichnung. Fuer "
+                "vollstaendige Lineage 1.0 setzen.",
+                rate,
+                max(0.0, (1.0 - rate) * 100),
+            )
+        return self

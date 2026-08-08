@@ -1,10 +1,10 @@
 """Pydantic schema of an executable agent plan.
 
-THE one plan shape (Designprinzip 4): the M5 planner produces it as
+THE one plan shape: the planner produces it as
 structured output, the approval edit endpoint accepts it as the user's
 revision, and :mod:`inqtrix.agents.plan_validation` checks both through the
-same deterministic rules. Field semantics follow plan decision E18/E19
-(smallest sufficient tool, retrieval profile per gap depth).
+same deterministic rules. Field semantics select the smallest sufficient
+tool and a retrieval profile matched to the evidence gap.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from inqtrix.agents.control_ports import TASK_TOOL_KINDS
 from inqtrix.core.results import WebRecency
 
 WEB_RESEARCH_PROFILES = ("schnell", "compact", "deep")
-"""Report profiles a ``web_research`` task may request (E18) — the literal
+"""Report profiles a ``web_research`` task may request — the literal
 :class:`~inqtrix.report_profiles.ReportProfile` values. ``schnell``
 (1 round / 6 parallel queries) is the DEFAULT agent-child grain of the
 ``gruendlich`` tier: a plan web task is a bounded STORM round, not a

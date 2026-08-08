@@ -1,5 +1,5 @@
 export const EDITOR_COLLABORATION_PROTOCOL_VERSION = 1
-export const EDITOR_SCHEMA_VERSION = 1
+export const EDITOR_SCHEMA_VERSION = 2
 export const EDITOR_YJS_FRAGMENT = 'content'
 export const EDITOR_ROOM_PREFIX = 'inqtrix-editor-v1'
 
@@ -19,11 +19,11 @@ export const EDITOR_SCHEMA_BEHAVIOR_INPUTS = Object.freeze({
   linkPolicy: 'http-https-mailto-noopener-v1',
   markdownProjection: 'gfm-final-original-v1',
   relativePositions: 'yjs-relative-position-base64-v1',
-  suggestionTransform: 'adjacent-semantic-modification-pairs-inline-only-table-topology-guard-v5',
-  yjsValidation: 'canonical-v1-full-consumption-novel-delta-and-live-state-v7',
+  suggestionTransform: 'semantic-five-kind-structure-metadata-table-topology-guard-v6',
+  yjsValidation: 'canonical-v1-structure-attributes-full-consumption-live-state-v8',
 })
 
-export const EDITOR_BLOCK_SUGGESTIONS_SUPPORTED = false
+export const EDITOR_BLOCK_SUGGESTIONS_SUPPORTED = true
 
 // Code blocks admit inline suggestion marks on their text content. No block
 // parent advertises node-level suggestion support to the upstream transform.

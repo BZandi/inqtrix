@@ -14,7 +14,18 @@ export function linkifyCitationLabels(
   markdown: string,
   isCitationLabel: CitationLabelPredicate,
   knownLabels?: ReadonlySet<string>,
-  options: { requireKnownBracketed?: boolean } = {},
+  options: {
+    requireKnownBracketed?: boolean
+    /**
+     * Also redirect a label that ALREADY links to an external URL.
+     *
+     * Only for surfaces whose citations belong in an evidence panel: the
+     * panel carries the excerpt, the provenance and the verification status,
+     * and the URL stays reachable from there. Restricted to labels present in
+     * ``knownLabels``, so an ordinary link in prose is never rewritten.
+     */
+    redirectKnownExternalLinks?: boolean
+  } = {},
 ): string {
   let out = markdown.replace(
     /\[([A-Z]\d+)\](?!\()/g,
@@ -25,6 +36,18 @@ export function linkifyCitationLabels(
         : match
     ),
   )
+  if (options.redirectKnownExternalLinks && knownLabels) {
+    // [E3](https://…) -> [E3](#kref-E3). A label already pointing at #kref-
+    // is left alone; so is any label the reference set does not know.
+    out = out.replace(
+      /\[([A-Z]\d+)\]\((?!#kref-)[^)\s]+\)/g,
+      (match, label: string) => (
+        isCitationLabel(label) && knownLabels.has(label)
+          ? citationLink(label)
+          : match
+      ),
+    )
+  }
   if (!knownLabels || knownLabels.size === 0) return out
 
   out = out.replace(

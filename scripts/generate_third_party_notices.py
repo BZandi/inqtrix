@@ -40,7 +40,7 @@ PYTHON_LICENSE_OVERRIDES: dict[str, tuple[str, str]] = {
 }
 
 # JavaScript packages that ship a LICENSE file but omit the `license` field from
-# package.json, so the pnpm metadata carries no SPDX id and the automatic
+# package-lock.json, so the npm metadata carries no SPDX id and the automatic
 # resolver would fail closed. Keyed by canonical npm name; mirrors
 # PYTHON_LICENSE_OVERRIDES. Verify the bundled LICENSE upstream before adding
 # an entry (khroma@2.1.0 ships an MIT license file, package.json omits it).
@@ -249,8 +249,13 @@ def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _iter_pnpm_package_jsons(store_root: Path) -> list[Path]:
-    return sorted(store_root.glob("*/node_modules/**/package.json"))
+def _npm_lock_package_name(path: str) -> str:
+    """Derive an npm package name from a lockfile ``packages`` path."""
+
+    marker = "node_modules/"
+    if marker not in path:
+        return ""
+    return path.rsplit(marker, 1)[1]
 
 
 def _react_package_key(name: str, version: str) -> str:
@@ -311,13 +316,12 @@ def _manifest_dependency_names(manifest: Mapping[str, Any], field: str) -> set[s
 
 
 def collect_react_entries(repo_root: Path) -> list[NoticeEntry]:
-    """Collect browser and Node workspace notices from installed pnpm metadata."""
+    """Collect browser and Node workspace notices from the canonical npm lock."""
     root_manifest_path = repo_root / "package.json"
     app_manifest_path = repo_root / "apps" / "research-desk" / "package.json"
     server_manifest_path = repo_root / "apps" / "collaboration-server" / "package.json"
     schema_manifest_path = repo_root / "packages" / "editor-schema" / "package.json"
-    lock_path = repo_root / "pnpm-lock.yaml"
-    store_root = repo_root / "node_modules" / ".pnpm"
+    lock_path = repo_root / "package-lock.json"
     if not root_manifest_path.exists():
         raise NoticeGenerationError("Root package.json not found.")
     if not app_manifest_path.exists():
@@ -327,18 +331,15 @@ def collect_react_entries(repo_root: Path) -> list[NoticeEntry]:
     if not schema_manifest_path.exists():
         raise NoticeGenerationError("Editor schema package.json not found.")
     if not lock_path.exists():
-        raise NoticeGenerationError("pnpm-lock.yaml not found; cannot build JavaScript notices.")
-    if not store_root.exists():
         raise NoticeGenerationError(
-            "node_modules/.pnpm not found. Run `pnpm install` before generating notices."
+            "package-lock.json not found; cannot build JavaScript notices."
         )
 
     root_manifest = _read_json(root_manifest_path)
-    package_manager = str(root_manifest.get("packageManager") or "")
-    if not package_manager.startswith("pnpm@"):
+    lock_document = _read_json(lock_path)
+    if lock_document.get("lockfileVersion") != 3:
         raise NoticeGenerationError(
-            "Root package.json does not pin pnpm as packageManager; "
-            "refusing to use pnpm metadata as the JavaScript notice source."
+            "package-lock.json must use lockfileVersion 3."
         )
 
     app_manifest = _read_json(app_manifest_path)
@@ -360,12 +361,18 @@ def collect_react_entries(repo_root: Path) -> list[NoticeEntry]:
 
     packages_by_key: dict[str, dict[str, Any]] = {}
     keys_by_name: dict[str, set[str]] = {}
-    for package_json in _iter_pnpm_package_jsons(store_root):
-        package = _read_json(package_json)
-        name = str(package.get("name") or "")
-        version = str(package.get("version") or "")
+    locked_packages = lock_document.get("packages")
+    if not isinstance(locked_packages, Mapping):
+        raise NoticeGenerationError("package-lock.json packages must be an object.")
+    for path, raw_package in locked_packages.items():
+        if not isinstance(path, str) or not isinstance(raw_package, Mapping):
+            continue
+        name = str(raw_package.get("name") or _npm_lock_package_name(path))
+        version = str(raw_package.get("version") or "")
         if not name or not version:
             continue
+        package = dict(raw_package)
+        package["name"] = name
         key = _react_package_key(name, version)
         packages_by_key.setdefault(key, package)
         keys_by_name.setdefault(canonical_name(name), set()).add(key)
@@ -383,7 +390,7 @@ def collect_react_entries(repo_root: Path) -> list[NoticeEntry]:
             license_id, source = override
         else:
             license_id = _license_from_react_package(package)
-            source = "pnpm package metadata"
+            source = "package-lock.json metadata"
         if key in react_prod:
             ecosystem = "react"
             dependency_surface = "react-prod"
@@ -436,8 +443,8 @@ def build_json_document(entries: list[NoticeEntry]) -> str:
         "generated_by": "scripts/generate_third_party_notices.py",
         "sources": {
             "python_lock": "uv.lock",
-            "javascript_lock": "pnpm-lock.yaml",
-            "javascript_note": "package-lock.json is intentionally ignored because packageManager pins pnpm.",
+            "javascript_lock": "package-lock.json",
+            "javascript_note": "package-lock.json is the sole JavaScript dependency source.",
             "javascript_packages": [
                 "package.json",
                 "apps/research-desk/package.json",
@@ -481,13 +488,14 @@ def build_markdown_document(entries: list[NoticeEntry]) -> str:
     lines = [
         "# Third-Party Notices",
         "",
-        "This file is generated by `uv run python scripts/generate_third_party_notices.py`.",
+        "This file is generated by `uv run python "
+        "scripts/generate_third_party_notices.py` or, after the documented "
+        "pip installation, `python scripts/generate_third_party_notices.py`.",
         "Do not edit it manually.",
         "",
         "The inventory is provided for license-notice transparency only and is not legal advice.",
         "JavaScript package data is based on every shipping workspace manifest,",
-        "`pnpm-lock.yaml`, and installed pnpm metadata;",
-        "`package-lock.json` is intentionally ignored because the root `packageManager` pins pnpm.",
+        "and the canonical npm `package-lock.json`.",
         "",
         "## Summary",
         "",
@@ -568,7 +576,9 @@ def main(argv: list[str] | None = None) -> int:
                 paths = ", ".join(str(path.relative_to(repo_root)) for path in stale)
                 print(
                     f"Third-party notices are stale: {paths}. "
-                    "Run `uv run python scripts/generate_third_party_notices.py`.",
+                    "Run `uv run python scripts/generate_third_party_notices.py` "
+                    "or `python scripts/generate_third_party_notices.py` in the "
+                    "documented pip environment.",
                     file=sys.stderr,
                 )
                 return 1

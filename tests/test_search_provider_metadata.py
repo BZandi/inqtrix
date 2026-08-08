@@ -1,4 +1,4 @@
-"""Tests for the standardized ``SearchProvider.search_model`` property (ADR-WS-12).
+"""Tests for the standardized ``SearchProvider.search_model`` property.
 
 Each in-tree search provider must expose a stable, operator-friendly
 identifier via ``search_model``. The ABC default is intentionally loud

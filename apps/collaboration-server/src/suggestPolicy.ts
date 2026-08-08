@@ -7,14 +7,17 @@ import {
 } from '@tiptap/y-tiptap'
 import {
   EDITOR_YJS_FRAGMENT,
+  INQTRIX_STRUCTURE_SUGGESTION_ATTR,
   SUGGESTION_MARK_NAMES,
   createEditorSchemaExtensions,
+  isStructureSuggestionData,
   projectOriginalDocument,
   suggestionDescriptors,
   type CollaborationAccess,
   type CollaborationChangeKind,
   type SuggestionDescriptor,
   type SuggestionKind,
+  type SuggestionMarkKind,
 } from '@inqtrix/editor-schema'
 import * as Y from 'yjs'
 
@@ -22,7 +25,7 @@ import type { SuggestionPatchState } from './contracts'
 import { CloseCodes, CollaborationError } from './errors'
 
 export type SuggestionOccurrence = {
-  markKind: SuggestionKind
+  markKind: SuggestionMarkKind | 'structure'
   node: unknown
   position: SuggestionPosition
 }
@@ -67,6 +70,15 @@ export type SuggestionPolicyResult = {
   suggestionIds: string[]
 }
 
+/** Whether a suggestion position mapper has to be built for this pair.
+ *
+ * Exported so the decision is pinned by a contract instead of being an
+ * implicit side effect of the validator's control flow. */
+export function needsPositionMapper(before: JSONContent, after: JSONContent): boolean {
+  return collectSuggestionRecords(before).size > 0
+    || collectSuggestionRecords(after).size > 0
+}
+
 export function validateSuggestionUpdate(
   before: JSONContent,
   after: JSONContent,
@@ -78,7 +90,13 @@ export function validateSuggestionUpdate(
 
   const beforeRecords = collectSuggestionRecords(before)
   const afterRecords = collectSuggestionRecords(after)
-  const positionMapper = documents
+  // Only build the mapper when a suggestion can actually be compared.
+  // Both consumers are no-ops without records: `changedSuggestionIds`
+  // iterates the union of both key sets, and the foreign-record loop
+  // below iterates `beforeRecords`. Getting this wrong fails LOUD — the
+  // loop rejects the update on a missing mapper rather than accepting
+  // something unverified.
+  const positionMapper = documents && (beforeRecords.size > 0 || afterRecords.size > 0)
     ? createYjsSuggestionPositionMapper(before, after, documents)
     : null
   validatePatchGroups(beforeRecords)
@@ -93,9 +111,16 @@ export function validateSuggestionUpdate(
     if (!previous && record.authorId !== actorUserId) throw policyViolation()
     if (previous && !sameSuggestionMetadata(previous, record)) throw policyViolation()
   }
+  const supersededSuggestionIds = new Set<string>()
   for (const [id, record] of beforeRecords) {
     const next = afterRecords.get(id)
-    if (!next) throw policyViolation()
+    if (!next) {
+      if (isSupersededSlashInsertion(record, beforeRecords, afterRecords, actorUserId)) {
+        supersededSuggestionIds.add(id)
+        continue
+      }
+      throw policyViolation()
+    }
     if (record.authorId === actorUserId) continue
     if (!positionMapper || !sameSuggestionRecord(record, next, positionMapper)) {
       throw policyViolation()
@@ -109,7 +134,12 @@ export function validateSuggestionUpdate(
     if (!isReversibleSuggestionStructure(before, after)) throw policyViolation()
   }
 
-  const patches = patchStatesForChanges(beforeRecords, afterRecords, changedIds)
+  const patches = patchStatesForChanges(
+    beforeRecords,
+    afterRecords,
+    changedIds,
+    supersededSuggestionIds,
+  )
   if (patches.some((patch) => patch.activeSuggestionIds.length === 0)) {
     throw policyViolation()
   }
@@ -120,6 +150,66 @@ export function validateSuggestionUpdate(
     suggestions: changedIds.map((id) => descriptor(afterRecords.get(id) ?? beforeRecords.get(id))),
     suggestionIds: changedIds,
   }
+}
+
+/**
+ * Selecting a slash-menu structure command legitimately replaces the actor's
+ * complete `/query` insertion with one structure suggestion in the same patch.
+ * Keep this exception deliberately narrow; every other disappearance still
+ * requires an explicit durable accept/reject decision.
+ */
+function isSupersededSlashInsertion(
+  record: SuggestionRecord,
+  before: ReadonlyMap<string, SuggestionRecord>,
+  after: ReadonlyMap<string, SuggestionRecord>,
+  actorUserId: string,
+): boolean {
+  if (
+    record.authorId !== actorUserId
+    || record.kind !== 'insertion'
+    || record.occurrences.length === 0
+  ) return false
+  const beforeGroup = groupByPatch(before).get(record.patchId) ?? []
+  const afterGroup = groupByPatch(after).get(record.patchId) ?? []
+  if (
+    beforeGroup.length !== 1
+    || beforeGroup[0]?.suggestionId !== record.suggestionId
+    || afterGroup.length !== 1
+  ) return false
+  const replacement = afterGroup[0]
+  if (
+    !replacement
+    || replacement.kind !== 'structure'
+    || replacement.authorId !== actorUserId
+    || replacement.createdAt !== record.createdAt
+  ) return false
+
+  const ordered = [...record.occurrences].sort((
+    left,
+    right,
+  ) => left.position.from - right.position.from)
+  let previousTo: number | null = null
+  let command = ''
+  for (const occurrence of ordered) {
+    if (
+      occurrence.markKind !== 'insertion'
+      || (
+        previousTo !== null
+        && occurrence.position.from !== previousTo
+      )
+      || !occurrence.node
+      || typeof occurrence.node !== 'object'
+    ) return false
+    const text = Reflect.get(occurrence.node, 'text')
+    if (
+      typeof text !== 'string'
+      || text.length === 0
+      || occurrence.position.to - occurrence.position.from !== text.length
+    ) return false
+    command += text
+    previousTo = occurrence.position.to
+  }
+  return command.startsWith('/') && command.length <= 96
 }
 
 export function deriveSuggestionPatchStates(
@@ -168,12 +258,12 @@ function collectProseMirrorSuggestionRecords(
 
   document.descendants((node, position) => {
     const suggestionMarks = node.marks.filter((mark) => (
-      SUGGESTION_MARK_NAMES.has(mark.type.name as SuggestionKind)
+      SUGGESTION_MARK_NAMES.has(mark.type.name)
     ))
     for (const mark of suggestionMarks) {
       const attrs = mark.attrs
       const id = typeof attrs.suggestionId === 'string' ? attrs.suggestionId : null
-      const kind = mark.type.name as SuggestionKind
+      const kind = mark.type.name as SuggestionMarkKind
       const record = id ? records.get(id) : null
       if (!record) throw policyViolation('invalid_schema', 409)
       const positionIdentity = suggestionPositionAt(
@@ -188,6 +278,27 @@ function collectProseMirrorSuggestionRecords(
         position: positionIdentity,
       }
       record.occurrences.push(occurrence)
+    }
+    const structure = node.attrs[INQTRIX_STRUCTURE_SUGGESTION_ATTR]
+    if (structure !== null && structure !== undefined) {
+      if (!isStructureSuggestionData(structure)) {
+        throw policyViolation('invalid_schema', 409)
+      }
+      const record = records.get(structure.suggestionId)
+      if (!record || record.kind !== 'structure') {
+        throw policyViolation('invalid_schema', 409)
+      }
+      const positionIdentity = suggestionPositionAt(
+        document,
+        position,
+        position + node.nodeSize,
+      )
+      if (!positionIdentity) throw policyViolation('invalid_schema', 409)
+      record.occurrences.push({
+        markKind: 'structure',
+        node: structureNodeSignature(node),
+        position: positionIdentity,
+      })
     }
   })
   if ([...records.values()].some((record) => record.occurrences.length === 0)) {
@@ -234,7 +345,7 @@ function nonTextAtoms(document: ProseMirrorNode): unknown[] {
     atoms.push({
       attrs: node.attrs,
       marks: node.marks
-        .filter((mark) => !SUGGESTION_MARK_NAMES.has(mark.type.name as SuggestionKind))
+        .filter((mark) => !SUGGESTION_MARK_NAMES.has(mark.type.name))
         .map((mark) => ({ attrs: mark.attrs, type: mark.type.name })),
       type: node.type.name,
     })
@@ -246,6 +357,7 @@ function patchStatesForChanges(
   before: ReadonlyMap<string, SuggestionRecord>,
   after: ReadonlyMap<string, SuggestionRecord>,
   affectedSuggestionIds: readonly string[],
+  supersededSuggestionIds: ReadonlySet<string> = new Set(),
 ): SuggestionPatchState[] {
   const beforeGroups = groupByPatch(before)
   const afterGroups = groupByPatch(after)
@@ -267,6 +379,9 @@ function patchStatesForChanges(
       createdAt: reference.createdAt,
       kinds: [...new Set(active.map((record) => record.kind))].sort(suggestionKindOrder),
       patchId,
+      supersededSuggestionIds: [...supersededSuggestionIds]
+        .filter((suggestionId) => before.get(suggestionId)?.patchId === patchId)
+        .sort(),
     }
   })
 }
@@ -432,7 +547,9 @@ function suggestionKindOrder(left: SuggestionKind, right: SuggestionKind): numbe
   const order: Record<SuggestionKind, number> = {
     insertion: 0,
     deletion: 1,
-    modification: 2,
+    replacement: 2,
+    format: 3,
+    structure: 4,
   }
   return order[left] - order[right]
 }
@@ -446,10 +563,23 @@ function suggestionNodeSignature(
     marks: node.marks
       .filter((mark) => (
         mark !== targetMark
-        && !SUGGESTION_MARK_NAMES.has(mark.type.name as SuggestionKind)
+        && !SUGGESTION_MARK_NAMES.has(mark.type.name)
       ))
       .map((mark) => ({ attrs: mark.attrs, type: mark.type.name })),
     text: node.text,
+    type: node.type.name,
+  }
+}
+
+function structureNodeSignature(node: ProseMirrorNode): unknown {
+  const attrs = { ...node.attrs }
+  delete attrs[INQTRIX_STRUCTURE_SUGGESTION_ATTR]
+  return {
+    attrs,
+    marks: node.marks
+      .filter((mark) => !SUGGESTION_MARK_NAMES.has(mark.type.name))
+      .map((mark) => ({ attrs: mark.attrs, type: mark.type.name })),
+    text: node.textContent,
     type: node.type.name,
   }
 }

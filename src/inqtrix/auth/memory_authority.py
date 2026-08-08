@@ -320,6 +320,35 @@ class MemoryAuthorityCoordinator:
             additional_targets=additional_targets,
         )
 
+    def append_audit_row(
+        self,
+        *,
+        tenant_id: str,
+        actor_user_id: uuid.UUID | None,
+        action: str,
+        resource_type: str,
+        resource_id: str,
+        detail: dict[str, str] | None = None,
+        outcome: str = "success",
+        correlation: dict[str, str] | None = None,
+        workspace_id: uuid.UUID | None = None,
+    ) -> None:
+        """One audit index row WITHOUT invalidations (memory twin of
+        ``resource_access.append_audit_row``) — service-start terminals
+        land here atomically with the state change."""
+        _users, identity = self._require_bound()
+        identity._record_effect_locked(
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            detail=detail,
+            outcome=outcome,
+            correlation=correlation,
+            workspace_id=workspace_id,
+        )
+
     def append_registered_resource_effects(
         self,
         *,

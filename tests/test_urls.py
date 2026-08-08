@@ -1,6 +1,14 @@
 """ Tests for inqtrix.urls — URL normalization and extraction."""
 
-from inqtrix.urls import normalize_url, extract_urls, count_allowed_links, sanitize_answer_links
+import pytest
+
+from inqtrix.urls import (
+    count_allowed_links,
+    extract_urls,
+    normalize_url,
+    safe_public_url_identity,
+    sanitize_answer_links,
+)
 
 
 class TestNormalizeUrl:
@@ -72,11 +80,62 @@ class TestExtractUrls:
     def test_http_url(self):
         assert extract_urls("Visit http://example.com") == ["http://example.com"]
 
+    def test_bare_url_drops_surrounding_single_quote(self):
+        assert extract_urls("Visit 'https://example.com/path'.") == [
+            "https://example.com/path"
+        ]
+
     def test_url_in_markdown_link(self):
         text = "[Link](https://example.com/page)"
         result = extract_urls(text)
         assert len(result) == 1
         assert "example.com/page" in result[0]
+
+    def test_angle_and_markdown_odata_urls_encode_spaces(self):
+        odata = (
+            "https://prices.example/api?$filter="
+            "contains(meterName, 'model family')"
+        )
+        expected = (
+            "https://prices.example/api?$filter="
+            "contains(meterName,%20'model%20family')"
+        )
+
+        assert extract_urls(f"<{odata}>") == [expected]
+        assert extract_urls(f"[API]({odata})") == [expected]
+        assert safe_public_url_identity(odata).url == expected
+
+    def test_adjacent_urls_are_split_into_independent_identities(self):
+        assert extract_urls(
+            "https://first.example/pathhttps://second.example/data"
+        ) == [
+            "https://first.example/path",
+            "https://second.example/data",
+        ]
+
+    def test_percent_encoded_embedded_url_drops_wrapper_identity(self):
+        assert extract_urls(
+            "https://wrapper.example/redirect?"
+            "next=https%3A%2F%2Ftarget.example%2Fapi"
+        ) == ["https://target.example/api"]
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://first.example/pathhttps://second.example/data",
+            (
+                "https://wrapper.example/redirect?"
+                "next=https%3A%2F%2Ftarget.example%2Fapi"
+            ),
+            (
+                "https://wrapper.example/redirect?"
+                "next=https%253A%252F%252Ftarget.example%252Fapi"
+            ),
+        ],
+    )
+    def test_public_identity_rejects_embedded_second_url(self, url):
+        with pytest.raises(ValueError):
+            safe_public_url_identity(url)
 
 
 class TestCountAllowedLinks:

@@ -6,7 +6,7 @@
 #   docker build -f deploy/docker/Dockerfile.api -t inqtrix-api .
 
 # --- Stage 1: resolve deps + install the project with uv ---
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS build
+FROM ghcr.io/astral-sh/uv:0.9.30-python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 AS build
 WORKDIR /app
 ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1
@@ -25,10 +25,10 @@ COPY src ./src
 # stays hidden even though the runtime is fully wired. The `metrics` extra
 # (prometheus-client) is baked in so INQTRIX_METRICS_ENABLED works without a
 # rebuild; it stays dormant until the flag is set.
-RUN uv sync --frozen --no-dev --extra agent --extra knowledge-qdrant --extra queue-valkey --extra metrics
+RUN uv sync --frozen --no-dev --extra agent --extra knowledge-qdrant --extra queue-valkey --extra metrics --extra observability
 
 # --- Stage 2: slim runtime ---
-FROM python:3.12-slim-bookworm
+FROM docker.io/library/python:3.12.13-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b
 WORKDIR /app
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
@@ -48,13 +48,15 @@ COPY --from=build /app/src /app/src
 # owns no files, so every path the process writes is made group-0 owned and
 # group-writable (chgrp 0 + chmod g=u): /app for HOME, logs and the image-default
 # object store (data/object-store), the fastembed/qdrant-client model cache
-# (XDG_CACHE_HOME), and /var/lib/inqtrix/objects -- the conventional object-store
-# mount point pre-created so a mounted volume/PVC inherits these writable perms
-# for the random UID (a fresh Docker named volume copies the image dir's perms;
-# a Kubernetes PVC needs the same group-0 ownership via fsGroup). USER 1001 keeps
-# the container non-root: vanilla Kubernetes honours 1001, OpenShift substitutes
-# its own range UID.
+# (XDG_CACHE_HOME), and the /var/lib/inqtrix mount points -- object store and
+# trace spool -- pre-created so a mounted volume/PVC inherits these writable
+# perms for the random UID (a fresh Docker named volume copies the image dir's
+# perms; a Kubernetes PVC needs the same group-0 ownership via fsGroup). A mount
+# point that is NOT pre-created here arrives root-owned without group write, and
+# the process cannot write into it. USER 1001 keeps the container non-root:
+# vanilla Kubernetes honours 1001, OpenShift substitutes its own range UID.
 RUN mkdir -p /app/.cache /app/data /var/lib/inqtrix/objects \
+        /var/lib/inqtrix/traces \
     && chgrp -R 0 /app /var/lib/inqtrix \
     && chmod -R g=u /app /var/lib/inqtrix
 USER 1001

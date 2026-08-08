@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     Column,
     Float,
     ForeignKey,
@@ -35,9 +36,10 @@ from sqlalchemy import (
     MetaData,
     Table,
     Text,
+    UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSON, UUID
 
 asset_metadata = MetaData()
 
@@ -50,14 +52,34 @@ asset_sections = Table(
     Column("workspace_id", Text, nullable=True),
     Column("kind", Text, nullable=False, server_default=text("'custom'")),
     Column("title", Text, nullable=False),
+    # Server-owned identity. NULL is retained only for rows created before
+    # the semantic-role contract; ordinary user sections use ``custom``.
+    Column("semantic_role", Text, nullable=True),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
+    CheckConstraint(
+        "semantic_role IS NULL OR semantic_role IN "
+        "('temporary', 'library', 'project_sources', 'custom')",
+        name="ck_asset_sections_semantic_role",
+    ),
     Index(
         "ix_asset_sections_owner_created",
         "tenant_id",
         "created_by_user_id",
         "created_at",
         "id",
+    ),
+    Index(
+        "uq_asset_sections_prepared_role_scope",
+        "tenant_id",
+        "created_by_user_id",
+        "workspace_id",
+        "semantic_role",
+        unique=True,
+        postgresql_nulls_not_distinct=True,
+        postgresql_where=text(
+            "semantic_role IN ('temporary', 'library', 'project_sources')"
+        ),
     ),
 )
 """Top-level file-library sections (the library's outermost grouping)."""
@@ -125,8 +147,38 @@ asset_records = Table(
     Column("parser_id", Text, nullable=True),
     # The heavy extracted text — excluded from the list query, loaded on open.
     Column("extracted_text", Text, nullable=False, server_default=text("''")),
+    # Canonical server parse used for knowledge revision reservation.  It is
+    # intentionally separate from the client-editable presentation body.
+    Column("prepared_text", Text, nullable=True),
+    Column("prepared_parser_id", Text, nullable=True),
+    Column("prepared_content_hash", Text, nullable=True),
+    Column("prepared_file_sha256", Text, nullable=True),
+    Column("prepared_page_texts", JSON, nullable=True),
+    Column("prepared_at", Float, nullable=True),
+    # Server-owned destructive lifecycle.  The client may display these
+    # fields but never clears them through the normal asset PUT path.
+    Column(
+        "lifecycle_status",
+        Text,
+        nullable=False,
+        server_default=text("'active'"),
+    ),
+    Column("deletion_operation_id", Text, nullable=True),
+    Column("deletion_stage", Text, nullable=True),
+    Column("deletion_error", Text, nullable=True),
+    Column(
+        "upload_status",
+        Text,
+        nullable=False,
+        server_default=text("'ready'"),
+    ),
+    Column("upload_error", Text, nullable=True),
+    Column("upload_operation_id", Text, nullable=True),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
+    UniqueConstraint(
+        "tenant_id", "id", name="uq_asset_records_tenant_id"
+    ),
     Index(
         "ix_asset_records_owner_created",
         "tenant_id",

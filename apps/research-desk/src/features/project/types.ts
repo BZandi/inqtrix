@@ -1,3 +1,7 @@
+import {
+  EDITOR_SCHEMA_BEHAVIOR_INPUTS,
+  type SerializedRelativePosition,
+} from '@inqtrix/editor-schema'
 import type { JobFilter, JobPhase, JobStatus, AppView } from '@/features/researchDesk/types'
 import type { Locale } from '@/i18n/translations'
 import { asFiniteNumber, asNonEmptyString } from '@/lib/coerce'
@@ -7,11 +11,15 @@ import type {
   ThemePreset,
   UserBubbleTone,
 } from '@/theme/ThemeProvider'
+import type { AgentSessionModelSelection } from '@/features/agent/executionPolicy'
 import type {
   ResearchClaim,
   ResearchMetrics,
   ReportReference,
   ChatModelTier,
+  ModelTierPreference,
+  KnowledgeRetrievalDegradation,
+  KnowledgeSearchWarning,
   ResearchRunEvent,
   ResearchRunMode,
   ResearchRunResult,
@@ -105,10 +113,15 @@ export type EditorDocumentContentMode = 'collaboration' | 'markdown'
 
 export type EditorDocumentAccess = {
   mode: 'owner' | 'shared'
+  owner?: {
+    id: string
+    name: string
+  }
   permission: 'edit' | 'suggest' | 'view'
 }
 
 export type EditorDocumentCollaboration = {
+  commentRevision?: number
   generation: number
   persistedSequence: number
   projectionSequence: number
@@ -123,6 +136,9 @@ export type EditorCollaborationConnectionStatus =
   | 'error'
   | 'inactive'
   | 'incompatible'
+  // The server refused this page origin. Terminal like an incompatibility,
+  // but a different remedy: the operator fixes an address, not a version.
+  | 'origin_rejected'
   | 'read_only'
   | 'reconnecting'
 
@@ -135,6 +151,8 @@ export type EditorCollaborationDurabilityStatus =
 export type EditorCollaborationUser = {
   color: string
   id: string
+  kind?: 'guest' | 'user'
+  link_label?: string
   name: string
 }
 
@@ -156,6 +174,9 @@ export type EditorCommentAnchorRecord = {
   from: number
   quoteAfter: string
   quoteBefore: string
+  relativeFrom?: SerializedRelativePosition
+  relativeTo?: SerializedRelativePosition
+  relativeVersion?: typeof EDITOR_SCHEMA_BEHAVIOR_INPUTS.relativePositions
   selectedMarkdown?: string
   selectedText: string
   to: number
@@ -169,6 +190,7 @@ export type EditorCommentThreadRecord = {
   evidencePreset?: EditorEvidencePreset
   id: string
   kind: EditorCommentKind
+  suggestionDraft?: EditorPrivateSuggestionDraftRecord
   status: EditorCommentStatus
   updatedAt: string
 }
@@ -183,6 +205,22 @@ export type EditorSuggestionRevisionRecord = {
   instruction?: string
   proposedText: string
   source: EditorSuggestionRevisionSource
+  warnings?: string[]
+}
+
+export type EditorPrivateSuggestionDraftRecord = {
+  anchorVersion: 1
+  changeSummary?: string[]
+  createdAt: string
+  evidence?: EditorSuggestionEvidence
+  groupId: string
+  patchId: string
+  proposedText: string
+  publicationCommandId: string
+  revision: number
+  revisionHistory?: EditorSuggestionRevisionRecord[]
+  suggestionId: string
+  updatedAt: string
   warnings?: string[]
 }
 
@@ -223,6 +261,11 @@ export type EditorSuggestionRecord = {
   originalMarkdown?: string
   originalText: string
   origin: EditorSuggestionOrigin
+  privateDraft?: {
+    patchId: string
+    publicationCommandId: string
+    revision: number
+  }
   proposedText: string
   revision?: number
   revisionHistory?: EditorSuggestionRevisionRecord[]
@@ -255,7 +298,24 @@ export type EditorDocumentRecord = {
   id: string
   /** Independent compare-and-swap revision for title/folder changes. */
   metadataRevision?: number
+  /**
+   * Marks a local-only recovery copy created from work that had not reached
+   * the server before the authoritative document disappeared. Recovery copies
+   * never reuse the removed server id and remain outside autosave until the
+   * user explicitly saves them as a new document.
+   */
+  recovery?: {
+    capturedAt: string
+    originalDocumentId: string
+    reason: 'remote_deleted'
+  }
   revision: number
+  /**
+   * Local provenance set only after this exact id was observed in a server
+   * response or acknowledged by a successful save. It distinguishes a
+   * remotely deleted document from a never-confirmed offline draft.
+   */
+  serverSynced?: boolean
   source: EditorDocumentSource
   sourceRunId?: string
   title: string
@@ -287,6 +347,13 @@ export type EditorUiState = {
 
 export type ProjectPreferences = {
   agentMemoryEnabled: boolean
+  /** Tier a new agent run starts on. SEPARATE from the chat preference on
+   * purpose: an agent run fans out over several thinking nodes while a chat
+   * answer is a single call, so a chat pick must never raise agent spend.
+   * Mirrors the same split on {@link ProjectUiState}. */
+  agentModelTier: ModelTierPreference
+  /** Tier a new chat starts on. */
+  chatModelTier: ModelTierPreference
   contrastMode: ContrastMode
   locale: Locale
   theme: ThemeMode
@@ -430,20 +497,70 @@ export type FileParseStatus = 'parsed' | 'partial' | 'unsupported' | 'error'
 
 export type FileAssetOrigin = 'chat' | 'editor' | 'library'
 
+export type FileAssetLifecycleStatus = 'active' | 'deleting' | 'delete_failed'
+
+/** Server-owned original-file upload lifecycle.  The intermediate values are
+ * deliberately more precise than a boolean spinner: after a reload the UI can
+ * distinguish bytes that have not moved yet, a queued dependency retry, and
+ * finalisation of an already durable object. */
+export type FileAssetUploadStatus =
+  | 'awaiting_upload'
+  | 'uploading'
+  | 'retrying'
+  | 'parsing'
+  | 'finalizing'
+  | 'ready'
+  | 'failed'
+  | 'cancelled'
+
+export type FileAssetBodyLoadState = {
+  error: string | null
+  status: 'failed' | 'loading' | 'ready'
+}
+
 export type FileSectionKind = 'temporary' | 'custom'
+export type FileSectionSemanticRole =
+  | 'temporary'
+  | 'library'
+  | 'project_sources'
+  | 'custom'
 
 export type FileLibrarySectionRecord = {
   createdAt: string
+  /** Server-owned aggregate deletion state. Kept on the section itself so an
+   * empty-section operation remains visible and retryable after navigation or
+   * a project reload; the durable operation feed refreshes these fields. */
+  deletionError?: string | null
+  deletionOperationId?: string | null
+  deletionStage?: string | null
   id: string
+  /** Transient/project-persisted marker for the untouched sections created
+   * while the client is bootstrapping. Server records intentionally omit it:
+   * once a section exists remotely it is authoritative user data. */
+  isBootstrapPlaceholder?: boolean
   kind: FileSectionKind
+  lifecycleStatus?: FileAssetLifecycleStatus
+  /** Server-owned stable meaning. `null` identifies a row created before the
+   * semantic-role contract; clients never infer a role from a translated
+   * title. */
+  semanticRole?: FileSectionSemanticRole | null
+  /** Local provenance marker set only after this exact id was observed or
+   * accepted by the persistence service. It is not deletion authority; it
+   * only permits an exact retained server receipt to claim an unprojected row. */
+  serverSynced?: boolean
   title: string
   updatedAt: string
 }
 
 export type FileGroupRecord = {
   createdAt: string
+  deletionError?: string | null
+  deletionOperationId?: string | null
+  deletionStage?: string | null
   id: string
+  lifecycleStatus?: FileAssetLifecycleStatus
   sectionId: string
+  serverSynced?: boolean
   title: string
   updatedAt: string
 }
@@ -465,12 +582,22 @@ export type FileAssetRecord = {
   textTruncated: boolean
   title: string
   updatedAt: string
+  /** Server-owned aggregate lifecycle. A row remains addressable while its
+   * blob, knowledge evidence, and vector memberships are being removed. */
+  lifecycleStatus?: FileAssetLifecycleStatus
+  deletionOperationId?: string | null
+  deletionStage?: string | null
+  deletionError?: string | null
   /**
    * Server file id (`fl_...`) when the original was uploaded to the
    * connected backend (`features.files`). `null`/absent = local-only
    * asset — every feature keeps working from `extractedText`.
    */
   serverFileId?: string | null
+  /** Local provenance marker set only by server hydration/confirmation. A
+   * missing asset-list row is never interpreted as deletion; an exact durable
+   * deletion receipt may reconcile this row only when the marker is true. */
+  serverSynced?: boolean
   /**
    * Which parser produced `extractedText`: `'markitdown'` (the server
    * parser ladder, used when `features.document_parser` is on) or
@@ -479,6 +606,13 @@ export type FileAssetRecord = {
    * Display-only provenance for the file card badge.
    */
   parserId?: string | null
+  /** Server-owned parser and immutable content identity for the canonical
+   * body admitted to Chat/Editor model context. Metadata proves preparation;
+   * preparedText itself is loaded only from the asset detail endpoint. */
+  preparedParserId?: string | null
+  preparedContentHash?: string | null
+  preparedAt?: string | null
+  preparedText?: string
   /**
    * Transient, client-only: a background server (MarkItDown) parse is in
    * flight, kicked off right after upload to upgrade the instant client parse.
@@ -486,6 +620,20 @@ export type FileAssetRecord = {
    * absent after a reload, at which point the upgrade happens at index time.
    */
   parsePending?: boolean
+  /** The original bytes are queued or in flight. Created locally before the
+   * request and hydrated from the server-owned upload lifecycle afterwards,
+   * so reloads and second tabs retain a truthful uploading state. */
+  uploadPending?: boolean
+  /** Durable server state for the original-file upload. Undefined is reserved
+   * for deliberately local assets (for example incognito attachments). */
+  uploadStatus?: FileAssetUploadStatus
+  /** Stable operation identity once the multipart body has been fully spooled
+   * and hashed. Reservations intentionally have no operation id yet. */
+  uploadOperationId?: string | null
+  /** Visible failure for the last original-file upload. Connected assets
+   * receive this from the durable server lifecycle; local-only failures keep
+   * the same field until an explicit retry succeeds. */
+  uploadError?: string | null
 }
 
 /** Embedding model identifier. Open string: the authoritative catalog
@@ -514,7 +662,13 @@ export const EMBED_MODELS: readonly EmbedModelDescriptor[] = [
 
 export const DEFAULT_EMBED_MODEL_ID: EmbedModelId = 'text-embedding-3-large'
 
-export type VectorIndexStatus = 'error' | 'indexing' | 'ready' | 'stale'
+export type VectorIndexStatus =
+  | 'delete_failed'
+  | 'deleting'
+  | 'error'
+  | 'indexing'
+  | 'ready'
+  | 'stale'
 
 // 'skipped' is TERMINAL: the document carried no extractable text, so it can
 // never embed — distinct from 'pending' (queued, will embed) so the UI stops
@@ -530,8 +684,9 @@ export type VectorIndexMemberRecord = {
   state: VectorIndexMemberState
   /** The backend knowledge-document id this member was ingested as, once known.
    * Lets "remove from index" delete the exact document from the searchable
-   * collection (no full rebuild). Absent for members built before this was
-   * tracked → removal falls back to local-only + the reconcile sweep. */
+   * collection (no full rebuild). Members built before this was tracked must
+   * be reconciled by stable source id; a server-backed member is never removed
+   * locally while this identity is unresolved. */
   serverDocumentId?: string
 }
 
@@ -552,11 +707,41 @@ export type VectorIndexRunHistoryEntry = {
 /** Max retained history entries per index (newest first). */
 export const VECTOR_INDEX_HISTORY_LIMIT = 10
 
+/** Server-backed progress for one document inside a multi-document index run.
+ * The document job is the authority for phase and batch counters; the client
+ * only contributes the local queue state before that job is submitted. */
+export type IndexingMemberLive = {
+  currentBatch?: number
+  phase?: string
+  /** 1-based server queue position when the document job has been accepted
+   * but not claimed. Client-side waiting has no position. */
+  queuePosition?: number | null
+  status:
+    | 'queued'
+    | 'running'
+    | 'cancelling'
+    | 'paused_dependency'
+    | 'paused_validation'
+  totalBatches?: number
+}
+
 /** Ephemeral live state of a running reindex — high-frequency progress
  * kept OUT of the serialized project (never marks the project dirty). */
 export type IndexingJobLive = {
+  /** Truthful server execution state. Paused jobs retain their checkpoint and
+   * active generation; they are not treated as failed or completed. */
+  status?:
+    | 'queued'
+    | 'running'
+    | 'cancelling'
+    | 'paused_dependency'
+    | 'paused_validation'
   completedDocuments: number
+  currentBatch?: number
   currentDocumentTitle?: string
+  pauseMessage?: string
+  phase?: string
+  totalBatches?: number
   /** The asset ids this run actually PROCESSES (its working set): the new
    * (pending) members for an incremental add, every member for a rebuild /
    * durable re-embed. A file row reads "läuft" only while its id is in here and
@@ -569,6 +754,9 @@ export type IndexingJobLive = {
    * Ephemeral — the persisted member states take over on completion. */
   embeddedFileIds?: string[]
   skippedFileIds?: string[]
+  /** Per-document queue and execution facts. This is intentionally ephemeral:
+   * durable truth remains in each server indexing job and its event stream. */
+  memberProgress?: Record<string, IndexingMemberLive>
   jobId: string
   /** 0..100 whole percent, derived from completed/total. */
   percent: number
@@ -685,6 +873,11 @@ export type ChatThreadRecord = {
   createdAt: string
   id: string
   messages: ChatMessageRecord[]
+  /** The model picked inside THIS thread; absent = nothing picked, the
+   * account preference seeds the composer. Persisted on the thread row
+   * (server) and in the thread file (project export) — it is the object's
+   * own property, not a second global store. */
+  modelSelection?: AgentSessionModelSelection
   preview: string
   source: 'api' | 'imported' | 'mock'
   title: string
@@ -721,12 +914,23 @@ export type KnowledgeStepFacts = {
    * confirms coverage in the retrieval step line. */
   collectionDocumentCount?: number
   contextMarker?: string
+  /** Parse/validation marker returned by the evidence gate. A fallback marker
+   * means the gate could not be evaluated and must remain visible even though
+   * the answer pipeline continues with the retrieved evidence. */
+  gateMarker?: string
   degradedStages?: string[]
   dropped?: number
   kept?: number
   profile?: string
   quotesTotal?: number
   quotesVerified?: number
+  /** Backend parse/verification marker. A fallback marker is a visible
+   * degradation even when no quote rows could be produced. */
+  groundingMarker?: string
+  /** Technical retrieval shortfalls retained from the event stream. */
+  retrievalDegradations?: KnowledgeRetrievalDegradation[]
+  /** Source-integrity exclusions retained through the shared warning shape. */
+  retrievalWarnings?: KnowledgeSearchWarning[]
   rewritten?: boolean
   round?: number
   roundsTotal?: number
@@ -800,8 +1004,12 @@ export type KnowledgeAnswerRecord = {
   profileId?: string | null
   autoSelected?: boolean
   degradedStages: string[]
+  /** Technical retrieval boundaries that affected this answer. */
+  retrievalDegradations: KnowledgeRetrievalDegradation[]
+  /** Source-integrity exclusions that affected this answer. */
+  retrievalWarnings?: KnowledgeSearchWarning[]
   gate?: { sufficient: boolean; roundsUsed: number; maxRounds: number } | null
-  grounding?: { total: number; verified: number } | null
+  grounding?: { total: number; verified: number; degraded: boolean } | null
   candidateCount?: number | null
   evidenceUsed?: number | null
 }
@@ -841,6 +1049,8 @@ export type KnowledgeSessionRecord = {
   isBootstrapPlaceholder?: boolean
   title: string
   updatedAt: string
+  /** Durable server-owned deletion lifecycle. */
+  deletion?: import('./sessionDeletion').SessionDeletionState
 }
 
 export type KnowledgeSessionGroupRecord = {
@@ -888,6 +1098,8 @@ export type ProjectState = {
   knowledgeSessionOrder: string[]
   knowledgeSessions: Record<string, KnowledgeSessionRecord>
   selectedKnowledgeSessionId: string | null
+  /** Ephemeral terminal receipts that reject stale session hydration. */
+  knowledgeSessionDeletionReceipts?: Record<string, string>
   /** Agent Desk records. Session-scoped like the knowledge thread: runs
    * reference short-lived server rows, so none of this is part of
    * project files — server hydration rebuilds it. */
@@ -897,6 +1109,12 @@ export type ProjectState = {
   agentSessionOrder: string[]
   agentSessions: Record<string, AgentSessionRecord>
   selectedAgentSessionId: string | null
+  /** Ephemeral terminal receipts that reject late run/list responses after a
+   * server-confirmed aggregate deletion. Never serialized with the project. */
+  agentSessionDeletionReceipts?: Record<
+    string,
+    { operationId: string; runIds: string[] }
+  >
   /** Polymorphic canvas state (base view + overlay stack). Ephemeral:
    * never serialized, never marks the project dirty. */
   agentCanvas: CanvasState
@@ -1229,10 +1447,15 @@ function snapshotFromEvent(event: ResearchRunEvent): ResearchRunSnapshot | undef
 
 function statusFromEvent(event: ResearchRunEvent): JobStatus | undefined {
   if (event.type === 'inqtrix.run.queued') return 'queued'
-  if (event.type === 'inqtrix.run.started') return 'running'
+  if (event.type === 'inqtrix.run.started' || event.type === 'inqtrix.run.resumed') return 'running'
   if (event.type === 'inqtrix.run.completed') return 'completed'
   if (event.type === 'inqtrix.run.failed') return 'failed'
   if (event.type === 'inqtrix.run.cancelled') return 'cancelled'
+
+  // Only the run lifecycle owns ResearchRunRecord.status. Node, query, and
+  // tool events may use the same status vocabulary for their own operation;
+  // treating those payloads as run state can create a false terminal card.
+  if (event.type !== 'inqtrix.run.snapshot') return undefined
 
   const status = event.data.status
   if (

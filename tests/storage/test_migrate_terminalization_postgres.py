@@ -17,15 +17,13 @@ from inqtrix.storage.migrate import (
     V02PreflightReport,
     _lock_v02_cutover_tables,
     _terminalize_v02_locked,
-    _v02_terminal_statuses_sql,
+    _v02_index_terminal_statuses_sql,
+    _v02_run_terminal_statuses_sql,
 )
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
 
 class _MigrationContract:
@@ -183,7 +181,12 @@ async def test_v02_terminalization_rolls_back_both_lifecycles_on_event_error(
             await _terminalize_v02_locked(
                 connection,
                 report,
-                terminal_statuses_sql=_v02_terminal_statuses_sql(),
+                run_terminal_statuses_sql=(
+                    _v02_run_terminal_statuses_sql()
+                ),
+                indexing_terminal_statuses_sql=(
+                    _v02_index_terminal_statuses_sql()
+                ),
             )
     assert "reject_platform_upgrade_event" in str(exc_info.value)
     assert getattr(exc_info.value.orig, "sqlstate", None) == "23514"

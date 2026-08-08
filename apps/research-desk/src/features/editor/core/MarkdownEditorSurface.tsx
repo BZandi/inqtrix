@@ -7,14 +7,19 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import Collaboration from '@tiptap/extension-collaboration'
-import CollaborationCaret from '@tiptap/extension-collaboration-caret'
 import type { Extensions } from '@tiptap/core'
 import { EditorContent, useEditor, type Editor } from '@tiptap/react'
 import { BubbleMenu } from '@tiptap/react/menus'
 import { EDITOR_YJS_FRAGMENT } from '@inqtrix/editor-schema'
 import { useReducedMotion } from 'motion/react'
-import { X } from '@/components/icons'
+import { AtSign, Check, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Textarea } from '@/components/ui/textarea'
 import { resizeTextareaToRows } from '@/features/composer/textareaAutosize'
@@ -33,7 +38,7 @@ import {
 } from '@/features/textImprove'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
-import { collaborationCaretOptions, commentDecorationPluginKey, createEditorExtensions, normalizeEditorMarkdownForTiptap, serializeEditorFinalProjectionMarkdown, serializeEditorMarkdown, suggestionDecorationPluginKey, type CollaborationReviewOverlayUpdate } from '../tiptap'
+import { InqtrixCollaborationCaret, commentDecorationPluginKey, createEditorExtensions, normalizeEditorMarkdownForTiptap, serializeEditorFinalProjectionMarkdown, serializeEditorMarkdown, suggestionDecorationPluginKey, type CollaborationReviewOverlayUpdate } from '../tiptap'
 import type { CollaborationDocumentHandle } from '../useCollaborationDocument'
 import { BlockHandle } from '../BlockHandle'
 import { TableControls } from '../TableControls'
@@ -52,7 +57,16 @@ import {
 } from '../anchoring'
 import { COMMENT_KIND_ORDER, commentKindMeta } from '../commentKinds'
 import type { EditorCopy } from '../editorCopy'
-import { escapeCssIdentifier, resetExternalContentFlag } from '../editorDom'
+import { hasCollaborationRelativeAnchor } from '../inspector/relativeAnchors'
+import {
+  applyScrollableTableSemantics,
+  escapeCssIdentifier,
+  resetExternalContentFlag,
+} from '../editorDom'
+import type {
+  EditorCollaborationCommentActor,
+  EditorCollaborationCommentThread,
+} from '@/api/inqtrixClient'
 
 export type MarkdownEditorSurfaceProps = {
   collaboration?: CollaborationDocumentHandle | null
@@ -70,6 +84,13 @@ export type MarkdownEditorSurfaceProps = {
   mode: ProjectState['editorUi']['viewMode']
   onChange: (contentMarkdown: string) => void
   onCreateComment: (comment: EditorCommentThreadRecord) => void
+  onCreateTeamComment?: (input: {
+    anchor: EditorCommentThreadRecord['anchor']
+    bodyMarkdown: string
+    mentionUserIds: string[]
+    quote: string
+  }) => void
+  onCollaborationSuggestionUndo?: (patchId: string) => Promise<void>
   onEditorReady: (editor: Editor | null) => void
   onAcceptSuggestion: (suggestion: EditorSuggestionRecord) => void
   onEditSuggestion: (suggestionId: string, proposedText: string) => void
@@ -77,12 +98,19 @@ export type MarkdownEditorSurfaceProps = {
   onRefineSuggestion: (suggestionId: string, instruction: string) => Promise<void>
   onRejectSuggestion: (suggestionId: string) => void
   onSelectComment: (commentId: string) => void
+  onSelectTeamComment?: (commentId: string) => void
   onStopSuggestion: (suggestionId: string) => void
+  onTeamCommentDraftChange?: (value: string) => void
+  privateCommentsEnabled?: boolean
   runningSuggestionIds: readonly string[]
   selectedCommentId: string | null
   suggestionActionsDisabled?: boolean
   suggestionErrors: Record<string, string>
   suggestions: EditorSuggestionRecord[]
+  teamCommentParticipants?: readonly EditorCollaborationCommentActor[]
+  teamCommentDraft?: string
+  teamComments?: readonly EditorCollaborationCommentThread[]
+  selectedTeamCommentId?: string | null
   textImprovement: Omit<TextImprovementApiOptions, 'locale'>
 }
 
@@ -166,8 +194,7 @@ export function configureEditorExtensionsForCollaboration(
       document: collaboration.document,
       field: EDITOR_YJS_FRAGMENT,
     }),
-    CollaborationCaret.configure({
-      ...collaborationCaretOptions,
+    InqtrixCollaborationCaret.configure({
       provider: collaboration.provider,
       user: collaboration.user,
     }),
@@ -220,6 +247,8 @@ export function MarkdownEditorSurface({
   mode,
   onChange,
   onCreateComment,
+  onCreateTeamComment,
+  onCollaborationSuggestionUndo,
   onEditorReady,
   onAcceptSuggestion,
   onEditSuggestion,
@@ -227,29 +256,45 @@ export function MarkdownEditorSurface({
   onMarkSuggestionStale,
   onRefineSuggestion,
   onSelectComment,
+  onSelectTeamComment,
   onStopSuggestion,
+  onTeamCommentDraftChange,
+  privateCommentsEnabled = true,
   runningSuggestionIds,
   selectedCommentId,
+  selectedTeamCommentId = null,
   suggestionActionsDisabled = false,
   suggestionErrors,
   suggestions,
+  teamCommentParticipants = [],
+  teamCommentDraft = '',
+  teamComments = [],
   textImprovement,
 }: MarkdownEditorSurfaceProps) {
   const documentIdRef = useRef(document.id)
   const editorInstanceRef = useRef<Editor | null>(null)
   const isApplyingExternalContentRef = useRef(false)
   const onAcceptSuggestionRef = useRef(onAcceptSuggestion)
+  const onCollaborationSuggestionUndoRef = useRef(onCollaborationSuggestionUndo)
   const onEditSuggestionRef = useRef(onEditSuggestion)
   const onMarkSuggestionStaleRef = useRef(onMarkSuggestionStale)
   const onRefineSuggestionRef = useRef(onRefineSuggestion)
   const onRejectSuggestionRef = useRef(onRejectSuggestion)
   const onSelectCommentRef = useRef(onSelectComment)
+  const onSelectTeamCommentRef = useRef(onSelectTeamComment)
   const onStopSuggestionRef = useRef(onStopSuggestion)
   const suggestionsRef = useRef(suggestions)
+  const teamCommentIdsRef = useRef(new Set(teamComments.map((comment) => comment.id)))
   const previousModeRef = useRef(mode)
-  const commentsSignature = comments.map((comment) => `${comment.id}:${comment.status}:${comment.kind}:${comment.anchor.from}:${comment.anchor.to}`).join('|')
-  const suggestionsSignature = suggestions.map((suggestion) =>
-    `${suggestion.id}:${suggestion.revision ?? 1}:${suggestion.editPosition ?? 'replace'}:${suggestion.anchorText ?? ''}:${suggestion.originalText.length}:${suggestion.proposedText}`).join('|')
+  const commentsSignature = [
+    ...comments.map((comment) => (
+      `${comment.id}:${comment.status}:${comment.kind}:${comment.anchor.from}:${comment.anchor.to}`
+    )),
+    ...teamComments.map((comment) => (
+      `${comment.id}:${comment.status}:team:${String(comment.anchor.from)}:${String(comment.anchor.to)}`
+    )),
+  ].join('|')
+  const suggestionsSignature = editorSuggestionDecorationSignature(suggestions)
   const suggestionUiSignature = suggestions.map((suggestion) =>
     `${suggestion.id}:${runningSuggestionIds.includes(suggestion.id) ? 'running' : 'idle'}:${suggestionErrors[suggestion.id] ?? ''}`).join('|')
   const tiptapContentMarkdown = normalizeEditorMarkdownForTiptap(document.contentMarkdown)
@@ -273,24 +318,31 @@ export function MarkdownEditorSurface({
 
   useEffect(() => {
     suggestionsRef.current = suggestions
-  }, [suggestions])
+    teamCommentIdsRef.current = new Set(teamComments.map((comment) => comment.id))
+  }, [suggestions, teamComments])
 
   useEffect(() => {
     onAcceptSuggestionRef.current = onAcceptSuggestion
+    onCollaborationSuggestionUndoRef.current = onCollaborationSuggestionUndo
     onEditSuggestionRef.current = onEditSuggestion
     onMarkSuggestionStaleRef.current = onMarkSuggestionStale
     onRefineSuggestionRef.current = onRefineSuggestion
     onRejectSuggestionRef.current = onRejectSuggestion
     onSelectCommentRef.current = onSelectComment
+    onSelectTeamCommentRef.current = onSelectTeamComment
     onStopSuggestionRef.current = onStopSuggestion
-  }, [onAcceptSuggestion, onEditSuggestion, onMarkSuggestionStale, onRefineSuggestion, onRejectSuggestion, onSelectComment, onStopSuggestion])
+  }, [onAcceptSuggestion, onCollaborationSuggestionUndo, onEditSuggestion, onMarkSuggestionStale, onRefineSuggestion, onRejectSuggestion, onSelectComment, onSelectTeamComment, onStopSuggestion])
 
   const editor = useEditor({
     ...initialContent,
     editable: lifecyclePolicy.editable,
     editorProps: {
       attributes: {
+        'aria-label': copy.documentEditor,
+        'aria-multiline': 'true',
+        'aria-readonly': String(!lifecyclePolicy.editable),
         class: 'editor-prose min-h-full focus:outline-none',
+        role: 'textbox',
       },
       handlePaste: (_view, event) => {
         const pastedMarkdown = event.clipboardData?.getData('text/plain') ?? ''
@@ -305,9 +357,19 @@ export function MarkdownEditorSurface({
     },
     extensions: configureEditorExtensionsForCollaboration(createEditorExtensions({
       collaborationReview: collaborationReviewPolicy,
+      onCollaborationSuggestionUndo: collaborationMode && onCollaborationSuggestionUndo
+        ? async (patchId) => {
+            const request = onCollaborationSuggestionUndoRef.current
+            if (!request) {
+              throw new Error('Suggestion undo is not available for this editor.')
+            }
+            await request(patchId)
+          }
+        : undefined,
       syntaxMarkerRemoveLabel: copy.removeFormatting,
       placeholderEmpty: copy.placeholderEmpty,
       placeholderHeading: copy.placeholderHeading,
+      teamCommentLabel: copy.bubbleTeamComment,
       slash: {
         labels: {
           title: copy.slashTitle,
@@ -328,9 +390,16 @@ export function MarkdownEditorSurface({
           codeBlock: copy.slashCodeBlock,
           table: copy.slashTable,
           divider: copy.slashDivider,
+          suggestUnavailable: copy.slashSuggestUnavailable,
         },
       },
-      onClick: (commentId) => onSelectCommentRef.current(commentId),
+      onClick: (commentId) => {
+        if (teamCommentIdsRef.current.has(commentId)) {
+          onSelectTeamCommentRef.current?.(commentId)
+          return
+        }
+        onSelectCommentRef.current(commentId)
+      },
       onSuggestionAccept: (suggestionId) => {
         const suggestion = suggestionsRef.current.find((item) => item.id === suggestionId)
         if (suggestion) onAcceptSuggestionRef.current(suggestion)
@@ -369,6 +438,16 @@ export function MarkdownEditorSurface({
   }, [editor, onEditorReady])
 
   useEffect(() => {
+    if (!editor || editor.isDestroyed) return
+    const root = editor.view.dom
+    const apply = () => applyScrollableTableSemantics(root, copy.scrollableTable)
+    apply()
+    const observer = new MutationObserver(apply)
+    observer.observe(root, { childList: true, subtree: true })
+    return () => observer.disconnect()
+  }, [copy.scrollableTable, editor])
+
+  useEffect(() => {
     if (!editor || editor.isDestroyed || documentIdRef.current === document.id) return
     documentIdRef.current = document.id
     if (!lifecyclePolicy.applyExternalContent) return
@@ -399,11 +478,17 @@ export function MarkdownEditorSurface({
   useEffect(() => {
     if (!editor || editor.isDestroyed) return
     editor.setEditable(lifecyclePolicy.editable)
+    editor.view.dom.setAttribute('aria-readonly', String(!lifecyclePolicy.editable))
   }, [editor, lifecyclePolicy.editable])
 
   useEffect(() => {
+    if (!editor || editor.isDestroyed) return
+    editor.view.dom.setAttribute('aria-label', copy.documentEditor)
+  }, [copy.documentEditor, editor])
+
+  useEffect(() => {
     if (!editor || editor.isDestroyed || mode !== 'live') return
-    const items = comments
+    const privateItems = comments
       .filter((comment) => comment.status !== 'resolved')
       .map((comment) => {
         const resolved = resolveMaterializedAnchor(editor, comment.anchor)
@@ -419,6 +504,23 @@ export function MarkdownEditorSurface({
       })
       .filter((item): item is NonNullable<typeof item> => Boolean(item))
       .filter((item) => item.from < item.to)
+    const teamItems = teamComments
+      .filter((comment) => comment.status !== 'resolved')
+      .map((comment) => {
+        const anchor = comment.anchor as EditorCommentThreadRecord['anchor']
+        const resolved = resolveMaterializedAnchor(editor, anchor)
+        if (!resolved) return null
+        return {
+          from: resolved.range.from,
+          id: comment.id,
+          kind: 'team' as const,
+          selected: selectedTeamCommentId === comment.id,
+          status: 'open' as const,
+          to: resolved.range.to,
+        }
+      })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    const items = [...privateItems, ...teamItems]
     isApplyingExternalContentRef.current = true
     editor.view.dispatch(editor.state.tr.setMeta(commentDecorationPluginKey, { items }))
     resetExternalContentFlag(isApplyingExternalContentRef)
@@ -428,7 +530,7 @@ export function MarkdownEditorSurface({
     // no longer moves per local edit, and the decorations already self-map
     // through transactions for in-place typing (see tiptap commentDecoration
     // plugin), so content is the correct, direct trigger.
-  }, [commentsSignature, document.contentMarkdown, editor, mode, selectedCommentId])
+  }, [commentsSignature, document.contentMarkdown, editor, mode, selectedCommentId, selectedTeamCommentId])
 
   useEffect(() => {
     if (!editor || editor.isDestroyed || mode !== 'live') return
@@ -436,7 +538,9 @@ export function MarkdownEditorSurface({
     const items = suggestions.flatMap((suggestion) => {
       const target = resolveSuggestionDecorationTarget(editor, suggestion)
       if (!target) {
-        staleSuggestionIds.push(suggestion.id)
+        if (editorSuggestionShouldAutoStaleOnMissingTarget(suggestion)) {
+          staleSuggestionIds.push(suggestion.id)
+        }
         return []
       }
       const plan = suggestionDiffPlan(suggestion.originalText, suggestion.proposedText)
@@ -471,16 +575,19 @@ export function MarkdownEditorSurface({
     isApplyingExternalContentRef.current = true
     editor.view.dispatch(editor.state.tr.setMeta(suggestionDecorationPluginKey, { items }))
     resetExternalContentFlag(isApplyingExternalContentRef)
-    for (const suggestionId of staleSuggestionIds) onMarkSuggestionStaleRef.current(suggestionId)
+    for (const suggestionId of staleSuggestionIds) {
+      onMarkSuggestionStaleRef.current(suggestionId)
+    }
   }, [copy.accept, copy.cancelEdit, copy.editSuggestion, copy.proposedText, copy.refineSuggestion, copy.refinementPlaceholder, copy.reject, copy.revision, copy.saveSuggestion, copy.sendRefinement, copy.refiningSuggestion, copy.stopRun, document.revision, editor, mode, selectedCommentId, suggestionActionsDisabled, suggestionUiSignature, suggestionsSignature])
 
   useEffect(() => {
-    if (!selectedCommentId) return
+    const selectedId = selectedTeamCommentId ?? selectedCommentId
+    if (!selectedId) return
     const target = globalThis.document?.querySelector<HTMLElement>(
-      `[data-editor-comment-anchor="${escapeCssIdentifier(selectedCommentId)}"]`,
+      `[data-editor-comment-anchor="${escapeCssIdentifier(selectedId)}"]`,
     )
     target?.scrollIntoView({ block: 'center', behavior: 'smooth' })
-  }, [selectedCommentId])
+  }, [selectedCommentId, selectedTeamCommentId])
 
   if (lifecyclePolicy.renderSourceEditor) {
     return (
@@ -534,6 +641,7 @@ export function MarkdownEditorSurface({
       >
         {editor && lifecyclePolicy.editable ? (
           <EditorBubbleMenu
+            commentOnly={collaborationReviewPolicy?.writeMode === 'comment'}
             copy={copy}
             editor={editor}
             onCreateComment={(commentMarkdown, kind) => {
@@ -541,6 +649,27 @@ export function MarkdownEditorSurface({
               if (!comment) return
               onCreateComment(comment)
             }}
+            onCreateTeamComment={onCreateTeamComment
+              ? (bodyMarkdown, mentionUserIds) => {
+                  const comment = createCommentFromSelection(
+                    editor,
+                    document.id,
+                    bodyMarkdown,
+                    'collect',
+                  )
+                  if (!comment) return
+                  onCreateTeamComment({
+                    anchor: comment.anchor,
+                    bodyMarkdown,
+                    mentionUserIds,
+                    quote: comment.anchor.selectedText,
+                  })
+                }
+              : undefined}
+            onTeamCommentDraftChange={onTeamCommentDraftChange}
+            privateCommentsEnabled={privateCommentsEnabled}
+            teamCommentParticipants={teamCommentParticipants}
+            teamCommentDraft={teamCommentDraft}
             textImprovement={textImprovement}
           />
         ) : null}
@@ -604,6 +733,27 @@ export function MarkdownEditorSurface({
   )
 }
 
+export function editorSuggestionDecorationSignature(
+  suggestions: readonly EditorSuggestionRecord[],
+): string {
+  return suggestions.map((suggestion) => [
+    suggestion.id,
+    suggestion.revision ?? 1,
+    suggestion.editPosition ?? 'replace',
+    suggestion.anchor.from,
+    suggestion.anchor.to,
+    suggestion.anchorText ?? '',
+    suggestion.originalText.length,
+    suggestion.proposedText,
+  ].join(':')).join('|')
+}
+
+export function editorSuggestionShouldAutoStaleOnMissingTarget(
+  suggestion: EditorSuggestionRecord,
+): boolean {
+  return !hasCollaborationRelativeAnchor(suggestion.anchor)
+}
+
 function resolveSuggestionDecorationTarget(
   editor: Editor,
   suggestion: EditorSuggestionRecord,
@@ -630,14 +780,29 @@ function resolveSuggestionDecorationTarget(
 }
 
 function EditorBubbleMenu({
+  commentOnly,
   copy,
   editor,
   onCreateComment,
+  onCreateTeamComment,
+  onTeamCommentDraftChange,
+  privateCommentsEnabled,
+  teamCommentParticipants,
+  teamCommentDraft,
   textImprovement,
 }: {
+  commentOnly: boolean
   copy: EditorCopy
   editor: Editor
   onCreateComment: (commentMarkdown: string, kind: EditorCommentKind) => void
+  onCreateTeamComment?: (
+    bodyMarkdown: string,
+    mentionUserIds: string[],
+  ) => void
+  onTeamCommentDraftChange?: (value: string) => void
+  privateCommentsEnabled: boolean
+  teamCommentParticipants: readonly EditorCollaborationCommentActor[]
+  teamCommentDraft: string
   textImprovement: Omit<TextImprovementApiOptions, 'locale'>
 }) {
   const { locale, t } = useLocale()
@@ -645,6 +810,10 @@ function EditorBubbleMenu({
   const [isCommenting, setIsCommenting] = useState(false)
   const [commentDraft, setCommentDraft] = useState('')
   const [commentKind, setCommentKind] = useState<EditorCommentKind>('collect')
+  const [commentVisibility, setCommentVisibility] = useState<'private' | 'team'>(
+    privateCommentsEnabled ? 'private' : 'team',
+  )
+  const [mentionUserIds, setMentionUserIds] = useState<string[]>([])
   const [commentImproveError, setCommentImproveError] = useState<string | null>(null)
   const commentTextareaRef = useRef<HTMLTextAreaElement | null>(null)
   // Keeps the bubble open while the "Turn into" dropdown is open (a transaction
@@ -665,12 +834,17 @@ function EditorBubbleMenu({
     resizeTextareaToRows(commentTextareaRef.current, 6)
   }, [commentDraft, isCommenting])
 
-  function closeCommentComposer() {
+  function closeCommentComposer(preserveTeamDraft = false) {
     const collapseAt = editor.state.selection.to
     editor.commands.setTextSelection(collapseAt)
     editor.commands.blur()
+    if (commentVisibility === 'team' && !preserveTeamDraft) {
+      onTeamCommentDraftChange?.('')
+    }
     setCommentDraft('')
     setCommentKind('collect')
+    setCommentVisibility(privateCommentsEnabled ? 'private' : 'team')
+    setMentionUserIds([])
     setCommentImproveError(null)
     commentTextImprove.clearProposal()
     setIsCommenting(false)
@@ -683,12 +857,19 @@ function EditorBubbleMenu({
   function submitComment() {
     const value = commentDraft.trim()
     if (!value) return
-    onCreateComment(value, commentKind)
+    if (commentVisibility === 'team' && onCreateTeamComment) {
+      onCreateTeamComment(value, mentionUserIds)
+      closeCommentComposer(true)
+      return
+    } else {
+      onCreateComment(value, commentKind)
+    }
     closeCommentComposer()
   }
 
   function handleCommentDraftChange(value: string) {
     setCommentDraft(value)
+    if (commentVisibility === 'team') onTeamCommentDraftChange?.(value)
     setCommentImproveError(null)
     commentTextImprove.clearProposal()
   }
@@ -774,12 +955,18 @@ function EditorBubbleMenu({
                   submitComment()
                 }
               }}
-              placeholder={copy.inlineComment}
+              placeholder={commentVisibility === 'team'
+                ? copy.inlineTeamComment
+                : copy.inlineComment}
               ref={commentTextareaRef}
               value={commentDraft}
             />
             <TextImproveButton
-              className="absolute right-9 top-2 z-10"
+              className={cn(
+                'absolute right-9 top-2 z-10',
+                (commentVisibility === 'team' || !privateCommentsEnabled)
+                  && 'hidden',
+              )}
               disabled={!commentDraft.trim()}
               isLoading={commentTextImprove.isImproving}
               label={t.textImprove.improve}
@@ -793,8 +980,14 @@ function EditorBubbleMenu({
               </p>
             ) : null}
             <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1">
-                {COMMENT_KIND_ORDER.map((kind) => {
+              <div className="flex min-w-0 items-center gap-1">
+                {commentVisibility === 'team' ? (
+                  <TeamMentionPicker
+                    onChange={setMentionUserIds}
+                    participants={teamCommentParticipants}
+                    selected={mentionUserIds}
+                  />
+                ) : privateCommentsEnabled ? COMMENT_KIND_ORDER.map((kind) => {
                   const kindMeta = commentKindMeta(kind, copy)
                   const KindIcon = kindMeta.Icon
                   const active = commentKind === kind
@@ -815,18 +1008,24 @@ function EditorBubbleMenu({
                       {kindMeta.label}
                     </button>
                   )
-                })}
+                }) : null}
               </div>
               <Button disabled={!commentDraft.trim()} size="sm" type="submit">
-                {copy.inlineCommentSubmit}
+                {commentVisibility === 'team'
+                  ? copy.inlineTeamCommentSubmit
+                  : copy.inlineCommentSubmit}
               </Button>
             </div>
           </form>
         ) : (
           <SelectionToolbar
+            commentOnly={commentOnly}
             editor={editor}
             labels={{
-              comment: copy.bubbleComment,
+              comment: onCreateTeamComment
+                ? copy.bubbleTeamComment
+                : copy.bubbleComment,
+              privateComment: copy.bubblePrivateComment,
               turnInto: copy.blockTurnInto,
               bold: copy.bubbleBold,
               italic: copy.bubbleItalic,
@@ -847,11 +1046,66 @@ function EditorBubbleMenu({
             onInteractingChange={(interacting) => {
               toolbarInteractingRef.current = interacting
             }}
-            onStartComment={() => setIsCommenting(true)}
+            privateCommentEnabled={privateCommentsEnabled}
+            onStartComment={(visibility) => {
+              setCommentVisibility(visibility)
+              setCommentDraft(visibility === 'team' ? teamCommentDraft : '')
+              setIsCommenting(true)
+            }}
+            teamCommentEnabled={Boolean(onCreateTeamComment)}
           />
         )}
       </div>
     </BubbleMenu>
+  )
+}
+
+function TeamMentionPicker({
+  onChange,
+  participants,
+  selected,
+}: {
+  onChange: (selected: string[]) => void
+  participants: readonly EditorCollaborationCommentActor[]
+  selected: readonly string[]
+}) {
+  return (
+    <div className="flex min-w-0 items-center gap-1">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button aria-label="@Mention" size="icon" type="button" variant="ghost">
+            <AtSign className="icon-sm" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start">
+          {participants.map((participant) => {
+            if (!participant.id) return null
+            const active = selected.includes(participant.id)
+            return (
+              <DropdownMenuItem
+                key={participant.id}
+                onSelect={(event) => {
+                  event.preventDefault()
+                  onChange(active
+                    ? selected.filter((id) => id !== participant.id)
+                    : [...selected, participant.id!])
+                }}
+              >
+                {participant.name}
+                {active ? <Check className="ml-auto icon-sm" /> : null}
+              </DropdownMenuItem>
+            )
+          })}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <span className="t-hint truncate text-muted-foreground">
+        {selected
+          .map((id) => participants.find((participant) => participant.id === id)?.name)
+          .filter(Boolean)
+          .map((name) => `@${name}`)
+          .join(' ')}
+      </span>
+    </div>
   )
 }
 

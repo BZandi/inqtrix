@@ -81,6 +81,30 @@ export const DEMO_AGENT_TIERS: AgentTierCapability[] = [
 export const DEMO_AGENT_OVERVIEW_SOURCE: AgentOverviewSource = {
   default_mode: 'agent_kernel',
   durable: true,
+  limits: {
+    tokens: {
+      enabled: false,
+      limit: 0,
+      ceiling: 0,
+      recoverable: false,
+      extendable: false,
+      reason: 'operator_ceiling_exactly_once_required',
+    },
+    kernel: {
+      schnell: { tool_calls: 30, tool_calls_ceiling: 30, steps: 33, steps_ceiling: 33 },
+      normal: { tool_calls: 30, tool_calls_ceiling: 60, steps: 73, steps_ceiling: 145 },
+      deep: { tool_calls: 60, tool_calls_ceiling: 120, steps: 121, steps_ceiling: 241 },
+    },
+    directives: { quick_web: { web_searches: 1 } },
+    mission: {
+      discovery_tool_calls: 15,
+      plan_tasks: 8,
+      replan_rounds: 2,
+      clarification_rounds: 2,
+      parallel_children: 6,
+    },
+    research: { rounds: 2 },
+  },
   tools: [
     {
       id: 'web.search.instant',
@@ -118,6 +142,7 @@ export const DEMO_AGENT_OVERVIEW_SOURCE: AgentOverviewSource = {
       web_replan_regate: true,
       patch_gate: true,
       kernel_gated_tools: [
+        'delegate_batch',
         'load_skill',
         'run_deep_mission',
         'run_web_research',
@@ -573,6 +598,61 @@ function answerDetailAction(
   }
 }
 
+// A kernel `write_canvas` deliverable — distinct from the inline answer, it
+// opens as a document tab (Phase 1 deliverable routing must be demo-visible).
+const DELIVERABLE_MARKDOWN = `# Kurz-Memo: EU AI Act
+
+Die zentrale Pflicht ist die **CE-Kennzeichnung** für Hochrisiko-Systeme [K1].
+Marktseitig zeichnet sich eine Konsolidierung der Anbieter ab [W1].
+
+- Geltungsbereich prüfen (Annex III)
+- Konformitätsbewertung einplanen
+- Dokumentationspflichten ab Q3`
+
+function deliverableMeta(
+  runId: string,
+  revision: number,
+  status: 'writing' | 'ready',
+): AgentArtifactMetaWire {
+  return {
+    artifact_id: `deliverable-${runId}`,
+    run_id: runId,
+    session_id: null,
+    kind: 'deliverable',
+    title: 'Kurz-Memo: EU AI Act',
+    status,
+    revision,
+    updated_by: 'agent',
+    refs_count: 2,
+    created_at: Date.now() / 1000,
+    updated_at: Date.now() / 1000,
+  }
+}
+
+function deliverableDetailAction(
+  runId: string,
+  revision: number,
+  status: 'writing' | 'ready',
+): ResearchDeskAction {
+  return {
+    artifact: {
+      ...deliverableMeta(runId, revision, status),
+      content_markdown: DELIVERABLE_MARKDOWN,
+      refs: [
+        { label: 'K1', document_id: 'doc-demo-1', chunk_index: 0, title: 'EU AI Act Umsetzungsleitfaden' },
+        { label: 'W1', url: 'https://example.com/markt-konsolidierung', title: 'Marktbericht Konsolidierung' },
+      ],
+      revisions: Array.from({ length: revision }, (_, index) => ({
+        revision: index + 1,
+        created_by: 'agent',
+        created_at: Date.now() / 1000,
+      })),
+    },
+    runId,
+    type: 'setAgentRunArtifactDetail',
+  }
+}
+
 function memoDetailAction(
   runId: string,
   revision: number,
@@ -623,7 +703,10 @@ export type AgentDemoActions = {
   decideApproval: (
     runId: string,
     approvalId: string,
-    decision: { decision: string },
+    decision: {
+      decision: string
+      actions?: { tool: string; args: Record<string, unknown> }[]
+    },
   ) => Promise<unknown>
   submit: (input: {
     autonomy: string
@@ -633,22 +716,22 @@ export type AgentDemoActions = {
      * so the per-task source line shows the real selection. */
     collectionIds?: string[]
     documentId?: string
-    /** Output form (plan M1): 'chat' plays the inline-answer variant. */
+    /** Output form: 'chat' plays the inline-answer variant. */
     responseForm?: string
-    /** Selected engine (plan M2): 'agent_kernel' plays the conversational
+    /** Selected engine: 'agent_kernel' plays the conversational
      * inline-answer variant — the demo's honest approximation of the
      * kernel's direct-answer behavior. */
     engineMode?: string
-    /** Attached skill labels (plan M3): shown as an intake narration
+    /** Attached skill labels: shown as an intake narration
      * line so an attached demo skill is visibly acknowledged. */
     skillLabels?: string[]
     /** One-message route from the direct-command group. */
     executionDirective?: AgentExecutionDirective | null
     sourcePolicy?: AgentSourcePolicy
-    /** Thoroughness (plan M4): 'deep' plays the verification narration
+    /** Thoroughness: 'deep' plays the verification narration
      * and stamps the Deep badge onto the run summary. */
     depth?: string
-    /** Selected Stufe (P5): echoed as agent_overrides.agent_tier so the
+    /** Selected Stufe: echoed as agent_overrides.agent_tier so the
      * tier-aware gate UI (Suchtiefe ceiling, add-task defaults) is
      * demo-visible. */
     agentTier?: string
@@ -679,7 +762,7 @@ export function createAgentDemo(
   const responseForms = new Map<string, string>()
   const sourcePolicies = new Map<string, AgentSourcePolicy>()
   const acceptedSummaries = new Map<string, ResearchRunSummary>()
-  // Thoroughness per run (plan M4): read by the post-clarification
+  // Thoroughness per run: read by the post-clarification
   // sequence, which runs outside the submit closure.
   const depths = new Map<string, string>()
   // R3 picker selection per run — same closure rule as `depths`.
@@ -689,6 +772,16 @@ export function createAgentDemo(
   >()
   const lastDemoPatchWires = new Map<string, AgentPatchWire>()
   const lastDemoPatchEdits = new Map<string, AgentPatchWire['edits']>()
+  // Strict quick-web tool gate (Phase 2): the search execution is HELD until
+  // the tool approval is decided; the resume thunk (built in submit, capturing
+  // the run's step sequence) is played by decideApproval's apr-tool branch.
+  const heldQuickWeb = new Map<
+    string,
+    (decision: {
+      decision: string
+      actions?: { tool: string; args: Record<string, unknown> }[]
+    }) => void
+  >()
 
   const submit: AgentDemoActions['submit'] = ({
     autonomy,
@@ -757,7 +850,7 @@ export function createAgentDemo(
         },
       }
       acceptedSummaries.set(runId, usedSummary)
-      playSteps(runtime, [
+      const preGate: DemoStep[] = [
         {
           delayMs: 300,
           actions: [
@@ -765,6 +858,17 @@ export function createAgentDemo(
             makeEvent(runId, next(), 'inqtrix.agent.phase.changed', { phase: 'intake' }),
           ],
         },
+      ]
+      // The search execution + answer/deliverable tail, parameterized on the
+      // (possibly edited) query so a strict-mode edit flows into the demo.
+      // Kernel lanes emit REAL tool events (bare-query args_preview) —
+      // the demo mirrors that wire shape instead of fabricating a
+      // generic searching activity (parity rule: new UI must be
+      // visible in the demo).
+      const demoTool = toolKind === 'web_instant'
+        ? 'web_instant'
+        : 'search_project_knowledge'
+      const executionTail = (searchProbe: string): DemoStep[] => [
         {
           delayMs: 500,
           actions: [
@@ -772,24 +876,39 @@ export function createAgentDemo(
             makeEvent(runId, next(), 'inqtrix.agent.task.started', {
               task_id: 'direct-1', ordinal: 0, tool_kind: toolKind, attempt: 1,
             }),
-            makeEvent(runId, next(), 'inqtrix.agent.activity', {
-              kind: 'searching', probe: question,
+            makeEvent(runId, next(), 'inqtrix.agent.tool.started', {
+              tool: demoTool,
+              tool_call_id: 'demo-direct-1',
+              args_preview: searchProbe,
             }),
           ],
         },
         {
           delayMs: 1200,
           actions: [
+            makeEvent(runId, next(), 'inqtrix.agent.tool.finished', {
+              tool: demoTool,
+              tool_call_id: 'demo-direct-1',
+              status: 'success',
+            }),
             makeEvent(runId, next(), 'inqtrix.agent.task.finished', {
               task_id: 'direct-1', ordinal: 0, tool_kind: toolKind, status: 'completed',
             }),
             { select: true, summary: usedSummary, type: 'upsertAgentRunSummary' },
             makeEvent(runId, next(), 'inqtrix.agent.phase.changed', { phase: 'synthesis', previous_phase: 'execution' }),
             makeEvent(runId, next(), 'inqtrix.node.model_resolution', demoModelResolution('agent_answer', modelSelection)),
-            { artifacts: [answerMeta(runId, 2, 'ready')], runId, type: 'setAgentRunArtifacts' },
+            {
+              artifacts: [answerMeta(runId, 2, 'ready'), deliverableMeta(runId, 1, 'ready')],
+              runId,
+              type: 'setAgentRunArtifacts',
+            },
             answerDetailAction(runId, 2, 'ready'),
+            deliverableDetailAction(runId, 1, 'ready'),
             makeEvent(runId, next(), 'inqtrix.agent.artifact.created', {
               artifact_id: `answer-${runId}`, kind: 'answer', revision: 2, updated_by: 'agent',
+            }),
+            makeEvent(runId, next(), 'inqtrix.agent.artifact.created', {
+              artifact_id: `deliverable-${runId}`, kind: 'deliverable', revision: 1, updated_by: 'agent',
             }),
           ],
         },
@@ -800,7 +919,97 @@ export function createAgentDemo(
             makeEvent(runId, next(), 'inqtrix.run.completed', {}),
           ],
         },
-      ])
+      ]
+      // Non-autonomous autonomy (Standard/balanced or strict) gates the direct
+      // web search behind a tool approval (Phase 2, demo-visible): play up to
+      // the gate, hold the search until decideApproval resolves it. (The demo
+      // presets expose Standard/Auto; strict is not selectable here.)
+      if (executionDirective === 'quick_web' && autonomy !== 'autonomous') {
+        playSteps(runtime, [
+          ...preGate,
+          {
+            delayMs: 500,
+            actions: [
+              { approvals: [demoToolApproval(runId, question)], runId, type: 'setAgentRunApprovals' },
+              makeEvent(runId, next(), 'inqtrix.run.waiting', { status: 'waiting_for_approval' }),
+            ],
+          },
+        ])
+        heldQuickWeb.set(runId, (decision) => {
+          const approved = decision.decision !== 'reject'
+          const status = approved
+            ? decision.decision === 'edit' ? 'edited' : 'approved'
+            : 'rejected'
+          dispatch({
+            approvals: [{
+              ...demoToolApproval(runId, question),
+              status,
+              decision: decision.decision,
+              decided_at: Date.now() / 1000,
+            }],
+            runId,
+            type: 'setAgentRunApprovals',
+          })
+          if (!approved) {
+            // Mirrors the backend contract: a rejected gate COMPLETES the
+            // run with a receipt as its answer (never a blank / failure).
+            playSteps(runtime, [
+              {
+                delayMs: 300,
+                actions: [
+                  makeEvent(runId, next(), 'inqtrix.agent.approval.decided', { approval_id: `apr-tool-${runId}`, status: 'rejected' }),
+                  makeEvent(runId, next(), 'inqtrix.agent.phase.changed', { phase: 'synthesis', previous_phase: 'execution' }),
+                  {
+                    artifacts: [{ ...answerMeta(runId, 1, 'ready'), title: 'Werkzeug abgelehnt', refs_count: 0 }],
+                    runId,
+                    type: 'setAgentRunArtifacts',
+                  },
+                  {
+                    artifact: {
+                      ...answerMeta(runId, 1, 'ready'),
+                      title: 'Werkzeug abgelehnt',
+                      refs_count: 0,
+                      content_markdown: 'Die direkte Websuche wurde nicht freigegeben. Passe den Auftrag an oder gib die Suche frei.',
+                      refs: [],
+                      revisions: [{ revision: 1, created_by: 'agent', created_at: Date.now() / 1000 }],
+                    },
+                    runId,
+                    type: 'setAgentRunArtifactDetail',
+                  },
+                  makeEvent(runId, next(), 'inqtrix.agent.artifact.created', { artifact_id: `answer-${runId}`, kind: 'answer', revision: 1, updated_by: 'agent' }),
+                ],
+              },
+              {
+                delayMs: 400,
+                actions: [
+                  makeEvent(runId, next(), 'inqtrix.agent.phase.changed', { phase: 'done', previous_phase: 'synthesis' }),
+                  makeEvent(runId, next(), 'inqtrix.run.completed', {}),
+                ],
+              },
+            ])
+            return
+          }
+          const editedQuery = decision.actions?.[0]?.args?.query
+          const searchProbe =
+            typeof editedQuery === 'string' && editedQuery.trim()
+              ? editedQuery
+              : question
+          playSteps(runtime, [
+            {
+              delayMs: 200,
+              actions: [
+                makeEvent(runId, next(), 'inqtrix.agent.approval.decided', {
+                  approval_id: `apr-tool-${runId}`,
+                  status: decision.decision === 'edit' ? 'edited' : 'approved',
+                }),
+              ],
+            },
+            ...executionTail(searchProbe),
+          ])
+        })
+        return
+      }
+      playSteps(runtime, [...preGate, ...executionTail(question)])
       return
     }
     const gate = autonomy !== 'autonomous'
@@ -908,6 +1117,14 @@ export function createAgentDemo(
     decision,
   ) => {
     const approved = decision.decision !== 'reject'
+    if (approvalId.startsWith('apr-tool-')) {
+      // The held strict quick-web search resumes (approve/edit) or ends with
+      // a reject receipt — all choreography lives in the submit-closure thunk.
+      const resume = heldQuickWeb.get(runId)
+      heldQuickWeb.delete(runId)
+      resume?.(decision)
+      return Promise.resolve()
+    }
     if (approvalId.startsWith('apr-patch-')) {
       // The patch gate: either way the run finishes NORMALLY (the memo
       // stays the deliverable; the patch decision is its own record).
@@ -1425,7 +1642,7 @@ export function createAgentDemo(
         delayMs: 1500,
         actions: [
           makeEvent(runId, next(), 'inqtrix.agent.phase.changed', { phase: 'critic', previous_phase: 'synthesis' }),
-          // Deep (plan M4): the verification pass is demo-visible as
+          // Deep: the verification pass is demo-visible as
           // its deterministic narration line.
           ...(depths.get(runId) === 'deep'
             ? [
@@ -1582,6 +1799,30 @@ function demoApproval(runId: string): AgentApprovalWire {
     decided_by_user_id: null,
     created_at: Date.now() / 1000,
     decided_at: null,
+  }
+}
+
+function demoToolApproval(runId: string, query: string): AgentApprovalWire {
+  return {
+    ...demoApproval(runId),
+    approval_id: `apr-tool-${runId}`,
+    kind: 'tool',
+    subject_type: 'tool',
+    subject_id: 'web_instant',
+    payload: {
+      // Production carries recency in the approval PAYLOAD, not the
+      // tool args (web_instant(query) has no recency field) — the edit
+      // form must show exactly the one editable arg it does in a real
+      // run, so keep args to {query} here too.
+      actions: [
+        {
+          tool: 'web_instant',
+          args: { query },
+          summary: 'Eine direkte Websuche ausfuehren.',
+        },
+      ],
+      recency: 'month',
+    },
   }
 }
 

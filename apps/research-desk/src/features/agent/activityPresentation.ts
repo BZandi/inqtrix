@@ -31,6 +31,7 @@ export function normalizeAgentOperation(value: unknown): AgentOperation | undefi
       return 'knowledge_collections'
     case 'knowledge_search':
     case 'knowledge.search':
+    case 'search_project_knowledge':
       return 'knowledge_search'
     case 'web_instant':
     case 'web.search.instant':

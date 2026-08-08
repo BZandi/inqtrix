@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
@@ -55,6 +56,453 @@ def evidence_id_for_citation(query_id: str, citation_record: dict[str, Any]) -> 
     citation_id = str(citation_record.get("citation_id", "") or "")
     source_id = str(citation_record.get("source_id", "") or "")
     return make_record_id("ev", query_id, citation_id or source_id, canonical)
+
+
+def build_web_search_ledger(
+    *,
+    run_id: str,
+    query_records: list[dict[str, Any]],
+    query_synthesis: Mapping[str, dict[str, Any]],
+    citation_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Project provider-visible search results into one read-only UI ledger.
+
+    This is deliberately not a second evidence or validation system. It
+    serializes the exact search request metadata, provider answer and provider
+    citations already stored by the Research Desk so an answer reference can
+    open the producing search in the Canvas. No URL is fetched here.
+    """
+
+    citations_by_query: dict[str, list[dict[str, Any]]] = {}
+    for raw in citation_records:
+        if not isinstance(raw, dict):
+            continue
+        query_id = str(raw.get("query_id") or "")
+        if not query_id:
+            continue
+        canonical_url = normalize_url(
+            str(raw.get("canonical_url") or raw.get("url") or "")
+        )
+        if not canonical_url:
+            continue
+        citations_by_query.setdefault(query_id, []).append(
+            {
+                "citation_id": str(raw.get("citation_id") or ""),
+                "source_id": str(raw.get("source_id") or ""),
+                "url": canonical_url,
+                "title": str(raw.get("title") or ""),
+                "snippet": str(raw.get("snippet") or ""),
+                "rank": max(0, int(raw.get("rank") or 0)),
+                "origin": str(raw.get("origin") or ""),
+                "source_date": str(raw.get("source_date") or ""),
+                "last_updated": str(raw.get("last_updated") or ""),
+                "annotation_start": _optional_nonnegative_int(
+                    raw.get("annotation_start")
+                ),
+                "annotation_end": _optional_nonnegative_int(
+                    raw.get("annotation_end")
+                ),
+            }
+        )
+
+    searches: dict[str, dict[str, Any]] = {}
+    for raw in query_records:
+        if not isinstance(raw, dict):
+            continue
+        query_id = str(raw.get("query_id") or raw.get("invocation_id") or "")
+        if not query_id:
+            continue
+        synthesis = query_synthesis.get(query_id, {})
+        provider_answer = str(synthesis.get("provider_answer") or "")
+        citations = _with_provider_answer_context(
+            provider_answer,
+            citations_by_query.get(query_id, []),
+        )
+        searches[query_id] = {
+            "query_id": query_id,
+            "invocation_id": str(raw.get("invocation_id") or query_id),
+            "source_run_id": run_id,
+            "round": max(0, int(raw.get("round") or 0)),
+            "query_index": max(0, int(raw.get("query_index") or 0)),
+            "query": str(raw.get("query") or synthesis.get("query") or ""),
+            "provider": str(raw.get("provider") or ""),
+            "parameters": dict(raw.get("parameters") or {}),
+            "status": str(raw.get("status") or "completed"),
+            "notice": str(raw.get("notice") or ""),
+            "started_at": str(raw.get("started_at") or ""),
+            "finished_at": str(raw.get("finished_at") or ""),
+            "duration_ms": max(0, int(raw.get("duration_ms") or 0)),
+            "usage": dict(raw.get("usage") or {}),
+            "provider_answer": provider_answer,
+            "citations": citations,
+        }
+
+    # Legacy result states can carry synthesis/citations but no invocation
+    # records. Preserve them instead of making their provider answer disappear.
+    for query_id, synthesis in query_synthesis.items():
+        key = str(query_id or "")
+        if not key or key in searches:
+            continue
+        provider_answer = str(synthesis.get("provider_answer") or "")
+        searches[key] = {
+            "query_id": key,
+            "invocation_id": key,
+            "source_run_id": run_id,
+            "round": max(0, int(synthesis.get("round") or 0)),
+            "query_index": 0,
+            "query": str(synthesis.get("query") or ""),
+            "provider": "",
+            "parameters": {},
+            "status": "completed",
+            "notice": "",
+            "started_at": "",
+            "finished_at": "",
+            "duration_ms": 0,
+            "usage": {
+                "prompt_tokens": max(
+                    0, int(synthesis.get("prompt_tokens") or 0)
+                ),
+                "completion_tokens": max(
+                    0, int(synthesis.get("completion_tokens") or 0)
+                ),
+            },
+            "provider_answer": provider_answer,
+            "citations": _with_provider_answer_context(
+                provider_answer,
+                citations_by_query.get(key, []),
+            ),
+        }
+
+    return {
+        "schema_version": 1,
+        "kind": "web_search_ledger",
+        "searches": searches,
+    }
+
+
+def build_instant_web_search_ledger(
+    *,
+    run_id: str,
+    query_id: str,
+    query: str,
+    provider: str,
+    answer: str,
+    sources: list[dict[str, Any]],
+    parameters: Mapping[str, Any] | None = None,
+    started_at: str = "",
+    finished_at: str = "",
+    duration_ms: int = 0,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+) -> dict[str, Any]:
+    """Build the same ledger shape for one direct provider search."""
+
+    citation_records: list[dict[str, Any]] = []
+    for index, source in enumerate(sources, start=1):
+        url = normalize_url(str(source.get("url") or ""))
+        if not url:
+            continue
+        source_id = make_record_id("src", url)
+        rank = max(1, int(source.get("rank") or index))
+        citation_records.append(
+            {
+                "citation_id": make_record_id(
+                    "cit", query_id, rank, url, source.get("origin") or "provider"
+                ),
+                "query_id": query_id,
+                "source_id": source_id,
+                "url": url,
+                "canonical_url": url,
+                "rank": rank,
+                "origin": str(source.get("origin") or "provider"),
+                "title": str(source.get("title") or ""),
+                "snippet": str(source.get("snippet") or ""),
+                "source_date": str(source.get("date") or ""),
+                "last_updated": str(source.get("last_updated") or ""),
+                "annotation_start": _optional_nonnegative_int(
+                    source.get("annotation_start")
+                ),
+                "annotation_end": _optional_nonnegative_int(
+                    source.get("annotation_end")
+                ),
+            }
+        )
+    return build_web_search_ledger(
+        run_id=run_id,
+        query_records=[
+            {
+                "query_id": query_id,
+                "invocation_id": query_id,
+                "round": 0,
+                "query_index": 0,
+                "query": query,
+                "provider": provider,
+                "parameters": dict(parameters or {}),
+                "status": "completed",
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "duration_ms": max(0, int(duration_ms or 0)),
+                "usage": {
+                    "prompt_tokens": max(0, int(prompt_tokens or 0)),
+                    "completion_tokens": max(
+                        0, int(completion_tokens or 0)
+                    ),
+                },
+            }
+        ],
+        query_synthesis={
+            query_id: {
+                "query": query,
+                "round": 0,
+                "provider_answer": answer,
+                "prompt_tokens": max(0, int(prompt_tokens or 0)),
+                "completion_tokens": max(0, int(completion_tokens or 0)),
+            }
+        },
+        citation_records=citation_records,
+    )
+
+
+def merge_web_search_ledgers(
+    ledgers: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    """Merge provider-search records without filtering their content."""
+
+    searches: dict[str, dict[str, Any]] = {}
+    for ledger in ledgers:
+        raw_searches = ledger.get("searches", {}) if isinstance(ledger, dict) else {}
+        if not isinstance(raw_searches, dict):
+            continue
+        for query_id, raw in raw_searches.items():
+            if not isinstance(raw, dict):
+                continue
+            key = str(query_id or raw.get("query_id") or "")
+            if not key:
+                continue
+            existing = searches.get(key)
+            if existing is None:
+                searches[key] = dict(raw)
+                continue
+            # Replays may add timing or source rows. Merge only additive
+            # information; an existing provider answer is never replaced by a
+            # later empty or differently summarized value.
+            merged = dict(existing)
+            for field_name, value in raw.items():
+                if field_name == "citations":
+                    continue
+                if merged.get(field_name) in (None, "", [], {}):
+                    merged[field_name] = value
+            citations: OrderedDict[str, dict[str, Any]] = OrderedDict()
+            for citation in [
+                *(existing.get("citations", []) or []),
+                *(raw.get("citations", []) or []),
+            ]:
+                if not isinstance(citation, dict):
+                    continue
+                identity = str(citation.get("citation_id") or "") or normalize_url(
+                    str(citation.get("url") or "")
+                )
+                if identity:
+                    citations[identity] = dict(citation)
+            merged["citations"] = list(citations.values())
+            searches[key] = merged
+    return {
+        "schema_version": 1,
+        "kind": "web_search_ledger",
+        "searches": searches,
+    }
+
+
+def attach_web_search_lineage(
+    references: list[dict[str, Any]],
+    ledger: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Attach stable search/citation pointers to final web references."""
+
+    by_url: dict[str, list[tuple[str, dict[str, Any], dict[str, Any]]]] = {}
+    searches = ledger.get("searches", {}) if isinstance(ledger, dict) else {}
+    if isinstance(searches, dict):
+        for query_id, search in searches.items():
+            if not isinstance(search, dict):
+                continue
+            for citation in search.get("citations", []) or []:
+                if not isinstance(citation, dict):
+                    continue
+                url = normalize_url(str(citation.get("url") or ""))
+                if url:
+                    by_url.setdefault(url, []).append(
+                        (str(query_id), search, citation)
+                    )
+
+    projected: list[dict[str, Any]] = []
+    for raw in references:
+        ref = dict(raw)
+        if ref.get("document_id") is not None:
+            projected.append(ref)
+            continue
+        url = normalize_url(str(ref.get("url") or ""))
+        matches = by_url.get(url, [])
+        if matches:
+            query_ids = list(dict.fromkeys(item[0] for item in matches))
+            citation_ids = list(
+                dict.fromkeys(
+                    str(item[2].get("citation_id") or "")
+                    for item in matches
+                    if str(item[2].get("citation_id") or "")
+                )
+            )
+            source_run_ids = list(
+                dict.fromkeys(
+                    str(item[1].get("source_run_id") or "")
+                    for item in matches
+                    if str(item[1].get("source_run_id") or "")
+                )
+            )
+            ref["query_id"] = query_ids[0]
+            ref["query_ids"] = query_ids
+            if citation_ids:
+                ref["citation_id"] = citation_ids[0]
+                ref["citation_ids"] = citation_ids
+            if source_run_ids:
+                ref["source_run_id"] = source_run_ids[0]
+                ref["source_run_ids"] = source_run_ids
+            primary_citation = matches[0][2]
+            source_id = str(primary_citation.get("source_id") or "")
+            if source_id:
+                ref["source_id"] = source_id
+            support = str(primary_citation.get("grounded_support") or "")
+            if support and not ref.get("grounded_support"):
+                ref["grounded_support"] = support
+            if not ref.get("provider_snippet") and primary_citation.get("snippet"):
+                ref["provider_snippet"] = str(primary_citation["snippet"])
+        projected.append(ref)
+    return projected
+
+
+def _with_provider_answer_context(
+    provider_answer: str,
+    citations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Add honest provider-answer context without inventing URL attribution."""
+
+    if not citations:
+        return []
+    # Reuse the established deterministic URL-to-answer-context helper. It
+    # removes the URL from the displayed passage and never claims that the
+    # passage is a verbatim excerpt from the linked webpage.
+    from inqtrix.agents.evidence import enrich_instant_evidence
+
+    enriched = enrich_instant_evidence(
+        provider_answer,
+        [
+            {
+                "url": citation.get("url"),
+                "title": citation.get("title"),
+            }
+            for citation in citations
+        ],
+    )
+    projected: list[dict[str, Any]] = []
+    for citation, support in zip(citations, enriched, strict=True):
+        row = dict(citation)
+        annotation_support = _annotation_support(provider_answer, citation)
+        nearby_support = str(support.get("grounded_support") or "")
+        if annotation_support and _is_citation_marker(
+            annotation_support,
+            str(citation.get("url") or ""),
+        ):
+            # Azure commonly annotates only the rendered Markdown link, not
+            # the proposition before it. Preserve useful nearby context while
+            # recording that the provider did not expose a 1:1 claim mapping.
+            row["grounded_support"] = (
+                _citation_marker_context(provider_answer, citation)
+                or nearby_support
+                or annotation_support
+            )
+            row["mapping_status"] = "provider_citation_marker"
+        elif annotation_support:
+            row["grounded_support"] = annotation_support
+            row["mapping_status"] = "provider_answer_context"
+        elif nearby_support:
+            row["grounded_support"] = nearby_support
+            row["mapping_status"] = "provider_citation_marker"
+        elif row.get("snippet"):
+            row["mapping_status"] = "provider_snippet"
+        else:
+            row["mapping_status"] = "source_only"
+        projected.append(row)
+    return projected
+
+
+def _annotation_support(
+    provider_answer: str,
+    citation: Mapping[str, Any],
+) -> str:
+    """Return the exact provider-answer span attached to one citation."""
+
+    start = _optional_nonnegative_int(citation.get("annotation_start"))
+    end = _optional_nonnegative_int(citation.get("annotation_end"))
+    if (
+        start is None
+        or end is None
+        or end <= start
+        or end > len(provider_answer)
+    ):
+        return ""
+    return " ".join(provider_answer[start:end].split())[:600]
+
+
+def _is_citation_marker(annotation: str, url: str) -> bool:
+    """Return whether a provider-native span contains only a link marker."""
+
+    cleaned = _MARKDOWN_LINK_RE.sub("", annotation)
+    target = normalize_url(url)
+    cleaned = re.sub(
+        r"https?://[^\s)\]}>,\"']+",
+        lambda match: (
+            ""
+            if normalize_url(match.group(0)) == target
+            else match.group(0)
+        ),
+        cleaned,
+    )
+    words = re.findall(r"[A-Za-zÄÖÜäöüß0-9$€£%]+", cleaned)
+    return len(words) < 3
+
+
+def _citation_marker_context(
+    provider_answer: str,
+    citation: Mapping[str, Any],
+) -> str:
+    """Return the answer line surrounding an Azure citation marker."""
+
+    start = _optional_nonnegative_int(citation.get("annotation_start"))
+    end = _optional_nonnegative_int(citation.get("annotation_end"))
+    if start is None or end is None or end <= start:
+        return ""
+    line_start = provider_answer.rfind("\n", 0, start) + 1
+    line_end = provider_answer.find("\n", end)
+    if line_end < 0:
+        line_end = len(provider_answer)
+    context = provider_answer[line_start:line_end].strip()
+    context = _MARKDOWN_LINK_RE.sub("", context)
+    target = normalize_url(str(citation.get("url") or ""))
+    context = re.sub(
+        r"https?://[^\s)\]}>,\"']+",
+        lambda match: (
+            ""
+            if normalize_url(match.group(0)) == target
+            else match.group(0)
+        ),
+        context,
+    )
+    context = re.sub(r"^[ \t]*(?:[-*+] |#+ |>|\d+[.)] )", "", context)
+    context = " ".join(context.split()).strip(" ()-–—")
+    return context[:600]
+
+
+def _optional_nonnegative_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and value >= 0 else None
 
 
 def _bounded_text(text: Any, limit: int) -> str:
@@ -384,7 +832,7 @@ def merge_evidence_records(
 def derive_claim_ledger_from_evidence(
     evidence_ledger: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Derive the legacy raw claim ledger from EvidenceRecord claims."""
+    """Derive the raw claim ledger from EvidenceRecord claims."""
     by_raw_id: OrderedDict[str, dict[str, Any]] = OrderedDict()
     for record in evidence_ledger:
         evidence_id = str(record.get("evidence_id", "") or "")

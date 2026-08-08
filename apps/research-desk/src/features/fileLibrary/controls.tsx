@@ -28,7 +28,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import type { FileAssetRecord } from '@/features/project/types'
-import { fileStatus, typeMeta } from './helpers'
+import { fileStatus, ingestBadgeState, typeMeta } from './helpers'
 import type { SortMode, ViewMode } from './constants'
 
 export function InlineText({
@@ -124,12 +124,13 @@ export function TypeBadge({ asset }: { asset: FileAssetRecord }) {
  * for cleanly parsed documents. */
 export function StatusMark({ asset }: { asset: FileAssetRecord }) {
   const { t } = useLocale()
-  // While a background server parse runs, suppress any client-parse error
-  // marker (e.g. pdf.js failing on Safari): it is about to be superseded by
-  // the server text, so a red alarm here would be misleading. The ParserBadge
-  // shows the "Parsing…" state instead; a real error only surfaces if the
-  // server parse also fails (which clears parsePending).
-  if (asset.parsePending) return null
+  // While the upload or a background server parse runs, suppress any
+  // client-parse error marker (e.g. pdf.js failing on Safari): it is about
+  // to be superseded, so a red alarm here would be misleading. The
+  // ParserBadge shows the in-flight (or upload-error) state instead; a real
+  // error only surfaces once the transient states settle. A failed upload's
+  // pill already carries the message — no duplicate info marker next to it.
+  if (asset.parsePending || asset.uploadPending || asset.uploadError != null) return null
   const status = fileStatus(asset)
   if (status === 'ok') {
     // A clean parse can still carry a note — e.g. the server parser declined
@@ -172,7 +173,56 @@ export function StatusMark({ asset }: { asset: FileAssetRecord }) {
  * same graceful absence as a missing `serverFileId`. */
 export function ParserBadge({ asset }: { asset: FileAssetRecord }) {
   const { t } = useLocale()
-  if (asset.parsePending) {
+  const ingestState = ingestBadgeState(asset)
+  if (ingestState === 'uploading') {
+    // The original bytes are queued for or in flight to the server — the
+    // row appeared instantly, this pill is the honest "not stored yet".
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex shrink-0 cursor-help items-center gap-1 rounded border border-brand/30 bg-brand-subtle px-1 t-hint font-medium text-brand">
+            <span className="inqtrix-running-dot size-1.5 rounded-full bg-brand" />
+            {asset.uploadStatus === 'awaiting_upload'
+              ? t.fileLibrary.uploadAwaiting
+              : asset.uploadStatus === 'retrying'
+                ? t.fileLibrary.uploadRetrying
+                : asset.uploadStatus === 'parsing'
+                  ? t.fileLibrary.parserRunning
+                  : asset.uploadStatus === 'finalizing'
+                    ? t.fileLibrary.uploadFinalizing
+                    : t.fileLibrary.uploadRunning}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-[260px]" side="top">
+          {asset.uploadStatus === 'awaiting_upload'
+            ? t.fileLibrary.uploadAwaitingNote
+            : asset.uploadStatus === 'retrying'
+              ? asset.uploadError ?? t.fileLibrary.uploadRetryingNote
+              : asset.uploadStatus === 'parsing'
+                ? t.fileLibrary.parserRunningNote
+                : asset.uploadStatus === 'finalizing'
+                  ? t.fileLibrary.uploadFinalizingNote
+                  : t.fileLibrary.uploadRunningNote}
+        </TooltipContent>
+      </Tooltip>
+    )
+  }
+  if (ingestState === 'upload-error') {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex shrink-0 cursor-help items-center gap-1 rounded border border-warning/40 bg-warning/10 px-1 t-hint font-medium text-warning">
+            <AlertTriangle className="size-3" />
+            {t.fileLibrary.uploadFailedLabel}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-[260px]" side="top">
+          {asset.uploadError ?? t.fileLibrary.uploadFailedNote}
+        </TooltipContent>
+      </Tooltip>
+    )
+  }
+  if (ingestState === 'parsing') {
     // A background server (MarkItDown) parse is in flight — make it visible
     // (pulsing dot) so the upgrade is not silent magic; it resolves to the
     // MarkItDown badge (or back to the client state) when it lands.
@@ -210,11 +260,13 @@ export function ParserBadge({ asset }: { asset: FileAssetRecord }) {
  * trigger, or a labeled outline button when `label` is provided. */
 export function ConfirmDelete({
   ariaLabel,
+  disabled = false,
   hint,
   label,
   onConfirm,
 }: {
   ariaLabel: string
+  disabled?: boolean
   hint: string
   label?: string
   onConfirm: () => void
@@ -227,6 +279,7 @@ export function ConfirmDelete({
           <Button
             aria-label={ariaLabel}
             className="gap-1.5 text-muted-foreground hover:text-destructive"
+            disabled={disabled}
             size="sm"
             type="button"
             variant="outline"
@@ -238,6 +291,7 @@ export function ConfirmDelete({
           <Button
             aria-label={ariaLabel}
             className="size-7 text-muted-foreground hover:text-destructive"
+            disabled={disabled}
             size="icon"
             type="button"
             variant="ghost"
@@ -253,6 +307,7 @@ export function ConfirmDelete({
         <DropdownMenuSeparator />
         <DropdownMenuItem
           className="text-destructive focus:bg-destructive/10 focus:text-destructive"
+          disabled={disabled}
           onClick={() => onConfirm()}
         >
           <Trash2 className="size-4" />
@@ -268,6 +323,37 @@ export type MoveTarget = {
   key: string
   label: string
   sectionId: string
+}
+
+/** The move-target list shared by the per-row menu and the bulk-selection
+ * menu — one rendering of "pick a collection/group destination". */
+function MoveTargetItems({
+  isCurrent,
+  onSelect,
+  targets,
+}: {
+  isCurrent?: (target: MoveTarget) => boolean
+  onSelect: (target: MoveTarget) => void
+  targets: MoveTarget[]
+}) {
+  return (
+    <>
+      {targets.map((target) => {
+        const current = isCurrent?.(target) ?? false
+        return (
+          <DropdownMenuItem
+            disabled={current}
+            key={target.key}
+            onClick={() => onSelect(target)}
+          >
+            <FolderOpen className="size-3.5 text-muted-foreground" />
+            <span className="min-w-0 flex-1 truncate">{target.label}</span>
+            {current ? <Check className="size-3.5 text-brand" /> : null}
+          </DropdownMenuItem>
+        )
+      })}
+    </>
+  )
 }
 
 export function MoveMenu({
@@ -296,20 +382,45 @@ export function MoveMenu({
       <DropdownMenuContent align="end" className="max-h-72 w-60 overflow-y-auto">
         <DropdownMenuLabel>{t.fileLibrary.move}</DropdownMenuLabel>
         <DropdownMenuSeparator />
-        {targets.map((target) => {
-          const current = target.sectionId === asset.sectionId && target.groupId === asset.groupId
-          return (
-            <DropdownMenuItem
-              disabled={current}
-              key={target.key}
-              onClick={() => onMove(asset.id, target.sectionId, target.groupId)}
-            >
-              <FolderOpen className="size-3.5 text-muted-foreground" />
-              <span className="min-w-0 flex-1 truncate">{target.label}</span>
-              {current ? <Check className="size-3.5 text-brand" /> : null}
-            </DropdownMenuItem>
-          )
-        })}
+        <MoveTargetItems
+          isCurrent={(target) => target.sectionId === asset.sectionId && target.groupId === asset.groupId}
+          onSelect={(target) => onMove(asset.id, target.sectionId, target.groupId)}
+          targets={targets}
+        />
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+/** Bulk variant for the selection action bar: same destination list, applied
+ * to every selected file. A labeled outline trigger (the bar has room and the
+ * action needs a name), no "current" marker — a mixed selection has none. */
+export function BulkMoveMenu({
+  disabled,
+  label,
+  onMoveAll,
+  targets,
+}: {
+  disabled?: boolean
+  label: string
+  onMoveAll: (sectionId: string, groupId: string | null) => void
+  targets: MoveTarget[]
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button className="gap-1.5" disabled={disabled} size="sm" type="button" variant="outline">
+          <FolderOpen className="size-4" />
+          {label}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="max-h-72 w-60 overflow-y-auto">
+        <DropdownMenuLabel>{label}</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <MoveTargetItems
+          onSelect={(target) => onMoveAll(target.sectionId, target.groupId)}
+          targets={targets}
+        />
       </DropdownMenuContent>
     </DropdownMenu>
   )

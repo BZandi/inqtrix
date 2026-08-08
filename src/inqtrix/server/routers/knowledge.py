@@ -8,25 +8,41 @@ historical route set untouched.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 
-from inqtrix.auth.permissions import AccessMode, ResourceAccess
+from inqtrix.auth.permissions import AccessMode, ResourceAccess, SharePermission
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.knowledge.stores.ports import (
     CollectionMaintenanceActive,
     CollectionNotFound,
     DocumentNotFound,
+    DocumentRevisionSuperseded,
     EmbeddingDimensionMismatch,
     KnowledgeCollection,
     KnowledgeDocument,
     RetrievalCandidate,
+    SourceDeletionConflict,
+)
+from inqtrix.knowledge.contextualize import (
+    ContextualizationDependencyError,
+    ContextualizationValidationError,
+)
+from inqtrix.knowledge.evidence import (
+    KnowledgeEvidenceProjector,
+    UnverifiedKnowledgeEvidence,
 )
 from inqtrix.content.ports import FileNotFound
 from inqtrix.knowledge.page_mapping import extract_pdf_page_texts
 from inqtrix.knowledge.parsing import DocumentParseError
+from inqtrix.knowledge.retrieval_warnings import (
+    project_retrieval_exclusion_warnings,
+)
 from inqtrix.pagination import (
     InvalidCursor,
     clamp_limit,
@@ -34,16 +50,32 @@ from inqtrix.pagination import (
     list_envelope,
 )
 from inqtrix.providers.embeddings import EmbeddingProviderError
+from inqtrix.project.asset_records_ports import (
+    AssetDeletionInProgress,
+    AssetNotFound,
+    AssetUploadConflict,
+)
 from inqtrix.quota.models import QuotaDimension, estimate_tokens
 from inqtrix.server.routers import (
     quota_admission,
     quota_record,
 )
+from inqtrix.server.indexing import IndexingJobConflict, IndexingQueueFull
+from inqtrix.runs.deletion_operations import DeletionOperationConflict
 from inqtrix.services.knowledge_service import (
     ChunkNotFound,
     KnowledgeValidationError,
+    SourceDocumentResolutionConflict,
 )
-from inqtrix.services.request_parsing import error_response
+from inqtrix.services.file_service import (
+    FileParserUnavailable,
+    FileTextExtractionError,
+)
+from inqtrix.services.request_parsing import (
+    error_response,
+    workspace_id_from_request,
+)
+from inqtrix.source_authority import SourceScope
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
@@ -103,24 +135,17 @@ def _collection_maintenance_response() -> JSONResponse:
 def _candidate_payload(candidate: RetrievalCandidate, *, rank: int) -> dict[str, Any]:
     """One search hit.
 
-    Additive identity/provenance fields (``chunk_id``, ``rank``,
-    ``page_number``, ``source_text``) let an agent cite a hit durably:
-    the citation key stays ``(document_id, chunk_index)`` (stable across
-    reindex), while ``chunk_id`` and ``source_text`` support exact
-    provenance and verbatim-quote checks. Legacy consumers ignore the
-    extra keys; the historical fields keep their shape.
+    The citation key stays ``(document_id, chunk_index)`` across reindex.
+    Only the projected original ``excerpt`` is exposed; synthetic retrieval
+    context and the store's internal embedding text never cross this boundary.
     """
-    chunk = candidate.chunk
+    evidence = KnowledgeEvidenceProjector.project(
+        candidate, reference_id=f"K{rank}"
+    ).as_dict()
     return {
-        "document_id": chunk.document_id,
-        "collection_id": chunk.collection_id,
-        "document_title": candidate.document_title,
-        "chunk_index": chunk.chunk_index,
-        "chunk_id": chunk.id,
+        **evidence,
+        "document_title": evidence["title"],
         "rank": rank,
-        "text": chunk.text,
-        "source_text": chunk.source_text or chunk.text,
-        "page_number": chunk.page_number,
         "score": round(candidate.score, 6),
     }
 
@@ -143,7 +168,92 @@ def build_router(container: "AppContainer") -> APIRouter:
     principal_dep = container.principal_dependency
     user_context_dep = container.user_context_dependency
     file_service = container.file_service
+    asset_service = container.asset_records_service
     quota_service = container.quota_service
+    indexing_service = container.indexing_service
+    deletion_service = container.asset_deletion_service
+    if deletion_service is None:
+        raise RuntimeError("knowledge routes require aggregate deletion service")
+
+    async def _wait_for_document_job(
+        summary: dict[str, Any],
+        *,
+        visible_to: UserContext | None,
+    ):
+        """Compatibility wait over the durable job, never over provider work.
+
+        The asynchronous revision endpoint is the primary contract.  This
+        legacy adapter deliberately has no document deadline: a slow provider
+        must not become a hidden fallback.  Polling backs off while the job is
+        unchanged and resets when durable progress advances.
+        """
+        if indexing_service is None:
+            raise RuntimeError("indexing service is not configured")
+        job_store = indexing_service.job_store
+        current = summary
+        delay_seconds = 0.05
+        last_progress = None
+        while current.get("status") in {
+            "queued",
+            "running",
+            "cancelling",
+        }:
+            progress = (
+                current.get("status"),
+                current.get("phase"),
+                current.get("current_batch"),
+                current.get("completed_documents"),
+            )
+            if progress != last_progress:
+                delay_seconds = 0.05
+                last_progress = progress
+            await asyncio.sleep(delay_seconds)
+            current = await asyncio.to_thread(
+                job_store.get, str(summary["job_id"])
+            )
+            delay_seconds = min(delay_seconds * 1.7, 1.0)
+        status = current.get("status")
+        if status in {"completed", "ready_raw_by_user_choice"}:
+            return await service.get_document(
+                str(current["document_id"]), visible_to=visible_to
+            )
+        error = current.get("error") or {}
+        message = str(error.get("message") or "Indizierung fehlgeschlagen")
+        error_type = str(error.get("type") or "indexing_failed")
+        status_code = 502
+        if status == "paused_dependency":
+            status_code = 503
+            if error_type == "dependency_timeout":
+                error_type = "contextualization_dependency_error"
+        elif status == "paused_validation":
+            status_code = 422
+            error_type = "contextualization_validation_error"
+        elif status == "superseded":
+            status_code = 409
+            error_type = "document_revision_superseded"
+            message = "Eine neuere Dokumentrevision wurde bereits angefordert."
+        elif status == "cancelled":
+            status_code = 409
+            error_type = "document_indexing_cancelled"
+            message = "Dokumentindizierung wurde abgebrochen."
+        elif status == "expired":
+            status_code = 410
+            error_type = "document_indexing_expired"
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "error": {
+                    "message": message,
+                    "type": error_type,
+                    "job_id": current.get("job_id") or summary.get("job_id"),
+                    "job_status": status,
+                    "document_id": current.get("document_id"),
+                    "revision_id": current.get("revision_id"),
+                    "events_url": current.get("events_url")
+                    or summary.get("events_url"),
+                }
+            },
+        )
 
     @router.post("/v1/knowledge/collections", status_code=201)
     async def create_collection(
@@ -177,7 +287,11 @@ def build_router(container: "AppContainer") -> APIRouter:
         except KnowledgeValidationError as exc:
             return error_response(400, str(exc), "invalid_request_error")
         except EmbeddingProviderError as exc:
-            log.warning("Collection-Anlage scheiterte am Embedding-Backend: %s", exc)
+            log.warning(
+                "Collection-Anlage scheiterte am Embedding-Backend "
+                "(error_type=%s)",
+                type(exc).__name__,
+            )
             return error_response(502, str(exc), "server_error")
         access = ResourceAccess(
             AccessMode.OWNER
@@ -201,22 +315,265 @@ def build_router(container: "AppContainer") -> APIRouter:
             )
         return {"object": "list", "data": payloads}
 
-    @router.delete("/v1/knowledge/collections/{collection_id}", status_code=204)
+    @router.delete("/v1/knowledge/collections/{collection_id}", status_code=202)
     async def delete_collection(
         collection_id: str,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        """Delete a collection with all its documents (owner-only)."""
+        """Start durable owner-only deletion of a collection and its vectors."""
         try:
-            await service.delete_collection(
+            return await deletion_service.start_knowledge_collection(
                 collection_id,
+                principal=principal,
                 visible_to=visible_to,
             )
         except CollectionNotFound:
             return error_response(404, "Collection nicht gefunden", "not_found")
-        except CollectionMaintenanceActive:
-            return _collection_maintenance_response()
+        except DeletionOperationConflict:
+            return error_response(
+                409,
+                "Für diese Collection läuft bereits eine Löschoperation.",
+                "deletion_conflict",
+            )
+
+    @router.post(
+        "/v1/knowledge/collections/{collection_id}/document-revisions",
+        status_code=202,
+    )
+    async def start_document_revision(
+        collection_id: str,
+        req: Request,
+        principal: Principal = Depends(principal_dep),
+        visible_to: UserContext | None = Depends(user_context_dep),
+    ):
+        """Reserve source text and queue chunk/context/embed/publication work."""
+        if indexing_service is None:
+            return error_response(
+                501,
+                "Asynchrone Dokumentindizierung ist nicht verfügbar.",
+                "not_implemented",
+            )
+        try:
+            body = await req.json()
+        except Exception:
+            return error_response(
+                400, "Ungueltiger JSON-Body", "invalid_request_error"
+            )
+        if not isinstance(body, dict):
+            return error_response(
+                400, "Ungueltiger JSON-Body", "invalid_request_error"
+            )
+        metadata = body.get("metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            return error_response(
+                400, "Feld 'metadata' muss ein Objekt sein", "invalid_request_error"
+            )
+        asset_id = str(body.get("asset_id", "") or "")
+        if asset_id and body.get("text"):
+            return error_response(
+                400,
+                "Entweder 'text' ODER 'asset_id' angeben, nicht beides.",
+                "invalid_request_error",
+            )
+        if body.get("file_id"):
+            return error_response(
+                409,
+                "Asynchrone Dateiindizierung adressiert das vorbereitete Asset "
+                "über 'asset_id', nicht die rohe Datei über 'file_id'.",
+                "file_preparation_required",
+            )
+        denied = await quota_admission(
+            quota_service, principal, QuotaDimension.EMBEDDING_TOKENS
+        )
+        if denied is not None:
+            return denied
+        try:
+            workspace_id = workspace_id_from_request(req, body)
+            prepared_title = str(body.get("title", ""))
+            prepared_text = str(body.get("text", ""))
+            prepared_metadata = dict(metadata or {})
+            page_texts = None
+            prepared_source_scope = None
+            collection = await service.knowledge.store.get_collection(
+                collection_id
+            )
+            await service.collection_access(
+                collection, visible_to, minimum=SharePermission.EDIT
+            )
+            if asset_id:
+                if asset_service is None or file_service is None:
+                    return error_response(
+                        501,
+                        "Serverseitige Dateivorbereitung ist nicht verfügbar.",
+                        "not_implemented",
+                    )
+                asset = await asset_service.get_asset(
+                    asset_id, visible_to=visible_to
+                )
+                if asset.workspace_id != workspace_id:
+                    raise AssetNotFound(asset_id)
+                if asset.upload_status in {
+                    "awaiting_upload",
+                    "uploading",
+                    "retrying",
+                    "parsing",
+                    "finalizing",
+                }:
+                    return error_response(
+                        409,
+                        "Die Datei wird noch serverseitig vorbereitet.",
+                        "source_preparation_pending",
+                    )
+                if asset.upload_status in {"failed", "cancelled"}:
+                    return error_response(
+                        409,
+                        asset.upload_error
+                        or "Die serverseitige Dateivorbereitung ist fehlgeschlagen.",
+                        "source_preparation_failed",
+                    )
+                if not asset.server_file_id:
+                    return error_response(
+                        409,
+                        asset.parse_warning
+                        or "Für diese Datei liegt kein kanonischer Server-Extrakt vor.",
+                        "source_preparation_unavailable",
+                    )
+                file_record = await file_service.get(
+                    asset.server_file_id, principal=principal
+                )
+                preparation_missing = (
+                    not asset.prepared_text.strip()
+                    or not asset.prepared_parser_id
+                    or not asset.prepared_content_hash
+                    or not asset.prepared_file_sha256
+                )
+                if preparation_missing:
+                    # Assets created before durable upload operations still
+                    # have a registered immutable original, but no canonical
+                    # parse fields. Repair that gap from the original bytes.
+                    # A modern operation-owned asset never enters this path:
+                    # its worker remains the sole preparation owner.
+                    if (
+                        asset.upload_status != "ready"
+                        or asset.upload_operation_id is not None
+                    ):
+                        return error_response(
+                            409,
+                            asset.parse_warning
+                            or "Für diese Datei liegt kein kanonischer Server-Extrakt vor.",
+                            "source_preparation_unavailable",
+                        )
+                    try:
+                        extracted = await file_service.extract_text(
+                            asset.server_file_id, principal=principal
+                        )
+                    except FileParserUnavailable as exc:
+                        return error_response(
+                            409, str(exc), "source_preparation_unavailable"
+                        )
+                    except FileTextExtractionError as exc:
+                        return error_response(
+                            422, str(exc), "source_preparation_failed"
+                        )
+                    clean_text = extracted.text.strip()
+                    asset = await asset_service.publish_legacy_prepared_text(
+                        asset.id,
+                        visible_to=visible_to,
+                        server_file_id=file_record.id,
+                        text=clean_text,
+                        parser_id=extracted.parser_id,
+                        content_hash=hashlib.sha256(
+                            clean_text.encode("utf-8")
+                        ).hexdigest(),
+                        file_sha256=file_record.sha256,
+                        page_texts=list(extracted.page_texts),
+                        prepared_at=time.time(),
+                    )
+                actual_text_hash = hashlib.sha256(
+                    asset.prepared_text.encode("utf-8")
+                ).hexdigest()
+                if (
+                    file_record.sha256 != asset.prepared_file_sha256
+                    or actual_text_hash != asset.prepared_content_hash
+                ):
+                    return error_response(
+                        409,
+                        "Der vorbereitete Dateiextrakt stimmt nicht mit seiner "
+                        "gespeicherten Quellidentität überein.",
+                        "source_preparation_integrity_error",
+                    )
+                prepared_title = prepared_title or asset.title
+                prepared_text = asset.prepared_text
+                page_texts = list(asset.prepared_page_texts) or None
+                prepared_metadata.update(
+                    {
+                        "fileId": asset.id,
+                        "file_id": file_record.id,
+                        "file_name": file_record.file_name,
+                        "source_id": f"asset:{asset.id}",
+                        "source_file_sha256": file_record.sha256,
+                        "source_parser_id": asset.prepared_parser_id,
+                    }
+                )
+                prepared_source_scope = SourceScope(
+                    tenant_id=asset.tenant_id,
+                    source_id=f"asset:{asset.id}",
+                    owner_user_id=asset.created_by_user_id,
+                    workspace_id=asset.workspace_id,
+                )
+            summary = await indexing_service.submit_document_revision(
+                collection=collection,
+                title=prepared_title,
+                text=prepared_text,
+                metadata=prepared_metadata,
+                page_texts=page_texts,
+                workspace_id=workspace_id,
+                principal=principal,
+                visible_to=visible_to,
+                source_scope=prepared_source_scope,
+            )
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content=exc.detail)
+        except KnowledgeValidationError as exc:
+            return error_response(400, str(exc), "invalid_request_error")
+        except CollectionNotFound:
+            return error_response(404, "Collection nicht gefunden", "not_found")
+        except (AssetNotFound, FileNotFound):
+            return error_response(404, "Datei nicht gefunden", "not_found")
+        except AssetDeletionInProgress:
+            return error_response(
+                409,
+                "Die Quelldatei wird gelöscht und kann nicht indiziert werden.",
+                "source_deleted",
+            )
+        except AssetUploadConflict:
+            return error_response(
+                409,
+                "Die Quelldatei wurde während der Vorbereitung geändert. "
+                "Bitte erneut versuchen.",
+                "source_preparation_conflict",
+            )
+        except SourceDeletionConflict:
+            return error_response(
+                409,
+                "Die Quelldatei wurde gelöscht und kann nicht wiederbelebt werden.",
+                "source_deleted",
+            )
+        except IndexingQueueFull:
+            return error_response(
+                429,
+                "Zu viele wartende Indizierungen. Bitte warten.",
+                "rate_limit_error",
+            )
+        except IndexingJobConflict:
+            return error_response(
+                409,
+                "Diese Dokumentrevision wird bereits durch eine andere "
+                "berechtigte Sitzung verarbeitet.",
+                "document_revision_in_progress",
+            )
+        return JSONResponse(status_code=202, content=summary)
 
     @router.post(
         "/v1/knowledge/collections/{collection_id}/documents", status_code=201
@@ -256,15 +613,16 @@ def build_router(container: "AppContainer") -> APIRouter:
         )
         if denied is not None:
             return denied
+        metered_by_job = False
         try:
             if file_id:
-                document = await _ingest_file(
-                    collection_id=collection_id,
-                    file_id=file_id,
-                    title=str(body.get("title", "")),
-                    metadata=metadata,
-                    principal=principal,
-                    visible_to=visible_to,
+                prepared_title, prepared_text, prepared_metadata, page_texts = (
+                    await _prepare_file_revision(
+                        file_id=file_id,
+                        title=str(body.get("title", "")),
+                        metadata=metadata,
+                        principal=principal,
+                    )
                 )
             else:
                 # Text path: the caller reuses already-extracted text (e.g. the
@@ -274,14 +632,41 @@ def build_router(container: "AppContainer") -> APIRouter:
                 # (pdfminer only — no MarkItDown re-parse, no LLM) so per-chunk
                 # page numbers are still captured for the citation page-jump.
                 page_texts = await _page_texts_for_metadata(metadata, principal)
+                prepared_title = str(body.get("title", ""))
+                prepared_text = str(body.get("text", ""))
+                prepared_metadata = metadata
+            if indexing_service is not None:
+                collection = await service.knowledge.store.get_collection(
+                    collection_id
+                )
+                await service.collection_access(
+                    collection, visible_to, minimum=SharePermission.EDIT
+                )
+                summary = await indexing_service.submit_document_revision(
+                    collection=collection,
+                    title=prepared_title,
+                    text=prepared_text,
+                    metadata=prepared_metadata,
+                    page_texts=page_texts,
+                    workspace_id=workspace_id_from_request(req, body),
+                    principal=principal,
+                    visible_to=visible_to,
+                )
+                metered_by_job = True
+                document = await _wait_for_document_job(
+                    summary, visible_to=visible_to
+                )
+            else:
                 document = await service.add_document(
                     collection_id=collection_id,
-                    title=str(body.get("title", "")),
-                    text=str(body.get("text", "")),
-                    metadata=metadata,
+                    title=prepared_title,
+                    text=prepared_text,
+                    metadata=prepared_metadata,
                     visible_to=visible_to,
                     page_texts=page_texts,
                 )
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content=exc.detail)
         except FileNotFound:
             return error_response(404, "Datei nicht gefunden", "not_found")
         except DocumentParseError as exc:
@@ -292,37 +677,77 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(404, "Collection nicht gefunden", "not_found")
         except CollectionMaintenanceActive:
             return _collection_maintenance_response()
+        except IndexingJobConflict:
+            return error_response(
+                409,
+                "Diese Dokumentrevision wird bereits durch eine andere "
+                "berechtigte Sitzung verarbeitet.",
+                "document_revision_in_progress",
+            )
+        except DocumentRevisionSuperseded:
+            return error_response(
+                409,
+                "Eine neuere Dokumentrevision wurde bereits angefordert.",
+                "document_revision_superseded",
+            )
+        except SourceDeletionConflict:
+            return error_response(
+                409,
+                "Die Quelldatei wurde gelöscht und kann nicht wiederbelebt werden.",
+                "source_deleted",
+            )
+        except ContextualizationDependencyError as exc:
+            return error_response(
+                503,
+                str(exc),
+                exc.error_type,
+            )
+        except ContextualizationValidationError as exc:
+            return error_response(
+                422,
+                str(exc),
+                "contextualization_validation_error",
+            )
         except EmbeddingDimensionMismatch as exc:
-            log.warning("Embedding-Dimension-Konflikt bei Ingestion: %s", exc)
+            log.warning(
+                "Embedding-Dimension-Konflikt bei Ingestion "
+                "(error_type=%s)",
+                type(exc).__name__,
+            )
             return error_response(409, str(exc), "embedding_dimension_mismatch")
         except EmbeddingProviderError as exc:
-            log.warning("Ingestion scheiterte am Embedding-Backend: %s", exc)
+            log.warning(
+                "Ingestion scheiterte am Embedding-Backend "
+                "(error_type=%s)",
+                type(exc).__name__,
+            )
             return error_response(502, str(exc), "server_error")
         # Book the exact embedded-text size (the chunks partition this
         # text; the ~4-char heuristic mirrors the embedding provider's
         # token accounting closely enough for a usage meter).
-        await quota_record(
-            quota_service,
-            principal,
-            QuotaDimension.EMBEDDING_TOKENS,
-            estimate_tokens(document.text),
-        )
+        if not metered_by_job:
+            await quota_record(
+                quota_service,
+                principal,
+                QuotaDimension.EMBEDDING_TOKENS,
+                estimate_tokens(document.text),
+            )
         return _document_payload(document)
 
-    async def _ingest_file(
+    async def _prepare_file_revision(
         *,
-        collection_id: str,
         file_id: str,
         title: str,
         metadata: dict[str, Any] | None,
         principal: Principal,
-        visible_to: "UserContext | None" = None,
     ):
-        """Fetch a registered file (access-checked), parse, ingest.
+        """Fetch and parse a registered file for the legacy sync adapter.
 
         The file read goes through the FileService so the same
-        owner/share rules gate knowledge ingestion as gate downloads;
-        parsing and ingestion run off the event loop.
+        owner/share rules gate preparation as gate downloads. The additive
+        asynchronous revision endpoint accepts already-prepared text only;
+        this compatibility path may wait for parsing before it reserves and
+        queues the exact same revision build.
         """
         if file_service is None:
             raise KnowledgeValidationError(
@@ -335,13 +760,11 @@ def build_router(container: "AppContainer") -> APIRouter:
         document_metadata = dict(metadata or {})
         document_metadata.setdefault("file_id", record.id)
         document_metadata.setdefault("file_name", record.file_name)
-        return await service.add_document_from_file(
-            collection_id=collection_id,
+        return await service.prepare_document_file(
             file_name=record.file_name,
             content=content,
             metadata=document_metadata,
             title=title,
-            visible_to=visible_to,
         )
 
     async def _page_texts_for_metadata(
@@ -400,22 +823,68 @@ def build_router(container: "AppContainer") -> APIRouter:
             next_cursor,
         )
 
-    @router.delete("/v1/knowledge/documents/{document_id}", status_code=204)
+    @router.get(
+        "/v1/knowledge/collections/{collection_id}/documents/by-source"
+    )
+    async def resolve_document_by_source(
+        collection_id: str,
+        req: Request,
+        principal: Principal = Depends(principal_dep),
+        visible_to: UserContext | None = Depends(user_context_dep),
+    ):
+        """Resolve one legacy index member without exposing document text."""
+
+        del principal
+        source_id = (req.query_params.get("source_id") or "").strip()
+        if not source_id:
+            return error_response(
+                400,
+                "Parameter 'source_id' ist erforderlich",
+                "invalid_request_error",
+            )
+        try:
+            document = await service.resolve_document_by_source(
+                collection_id,
+                source_id,
+                visible_to=visible_to,
+            )
+        except CollectionNotFound:
+            return error_response(404, "Collection nicht gefunden", "not_found")
+        except DocumentNotFound:
+            return error_response(
+                404,
+                "Kein aktives Dokument für diese Quelle gefunden",
+                "knowledge_source_unresolved",
+            )
+        except SourceDocumentResolutionConflict as exc:
+            return error_response(
+                409,
+                str(exc),
+                "knowledge_source_ambiguous",
+            )
+        return _document_payload(document)
+
+    @router.delete("/v1/knowledge/documents/{document_id}", status_code=202)
     async def delete_document(
         document_id: str,
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        """Delete one document and its chunks (edit via parent)."""
+        """Start durable deletion of one document and its vectors."""
         try:
-            await service.delete_document(
+            return await deletion_service.start_knowledge_document(
                 document_id,
+                principal=principal,
                 visible_to=visible_to,
             )
         except DocumentNotFound:
             return error_response(404, "Dokument nicht gefunden", "not_found")
-        except CollectionMaintenanceActive:
-            return _collection_maintenance_response()
+        except DeletionOperationConflict:
+            return error_response(
+                409,
+                "Für dieses Dokument läuft bereits eine Löschoperation.",
+                "deletion_conflict",
+            )
 
     @router.get("/v1/knowledge/documents/{document_id}/text")
     async def document_text(
@@ -484,16 +953,49 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(404, "Dokument nicht gefunden", "not_found")
         except ChunkNotFound:
             return error_response(404, "Chunk nicht gefunden", "not_found")
-        return {
-            "chunk_id": chunk.id,
-            "document_id": chunk.document_id,
-            "chunk_index": chunk.chunk_index,
-            "text": chunk.text,
-            "source_text": chunk.source_text or chunk.text,
-            "page_number": chunk.page_number,
-            "neighbors": [
-                {"chunk_index": neighbor.chunk_index, "text": neighbor.text}
+        try:
+            projected = KnowledgeEvidenceProjector.project_chunk(
+                chunk,
+                reference_id=f"K{chunk.chunk_index + 1}",
+                title="",
+            ).as_dict()
+            projected_neighbors = [
+                KnowledgeEvidenceProjector.project_chunk(
+                    neighbor,
+                    reference_id=f"K{neighbor.chunk_index + 1}",
+                    title="",
+                ).as_dict()
                 for neighbor in neighbors
+            ]
+        except UnverifiedKnowledgeEvidence:
+            return error_response(
+                409,
+                (
+                    "Dieser Dokumentabschnitt besitzt noch keinen verifizierten "
+                    "Quellspan und muss neu indiziert werden."
+                ),
+                "knowledge_reindex_required",
+            )
+        return {
+            "chunk_id": projected["chunk_id"],
+            "document_id": projected["document_id"],
+            "chunk_index": projected["chunk_index"],
+            "excerpt": projected["excerpt"],
+            "page_number": projected["page_number"],
+            "source_span": projected["source_span"],
+            "revision_id": projected["revision_id"],
+            "generation_id": projected["generation_id"],
+            "provenance_status": projected["provenance_status"],
+            "neighbors": [
+                {
+                    "chunk_index": neighbor["chunk_index"],
+                    "excerpt": neighbor["excerpt"],
+                    "source_span": neighbor["source_span"],
+                    "revision_id": neighbor["revision_id"],
+                    "generation_id": neighbor["generation_id"],
+                    "provenance_status": neighbor["provenance_status"],
+                }
+                for neighbor in projected_neighbors
             ],
         }
 
@@ -546,7 +1048,11 @@ def build_router(container: "AppContainer") -> APIRouter:
         except EmbeddingDimensionMismatch as exc:
             return error_response(409, str(exc), "embedding_dimension_mismatch")
         except EmbeddingProviderError as exc:
-            log.warning("Knowledge-Suche scheiterte am Embedding-Backend: %s", exc)
+            log.warning(
+                "Knowledge-Suche scheiterte am Embedding-Backend "
+                "(error_type=%s)",
+                type(exc).__name__,
+            )
             return error_response(502, str(exc), "server_error")
         warnings: list[dict[str, Any]] = []
         if outcome.filtered_collection_ids:
@@ -558,6 +1064,32 @@ def build_router(container: "AppContainer") -> APIRouter:
                         "und wurden aus der Suche ausgeschlossen."
                     ),
                     "filtered_ids": outcome.filtered_collection_ids,
+                }
+            )
+        for warning in project_retrieval_exclusion_warnings(
+            outcome.retrieval_exclusions
+        ):
+            warnings.append(
+                {
+                    "code": warning.code,
+                    "message": warning.message,
+                    "count": warning.count,
+                }
+            )
+        for degradation in outcome.retrieval_degradations:
+            warnings.append(
+                {
+                    "code": degradation.reason,
+                    "message": (
+                        "Der Vektor-Kandidatenpool blieb unter der für das "
+                        "finale Ranking angeforderten Tiefe; die finale "
+                        "Belegzahl wurde dennoch vollständig erreicht."
+                        if degradation.final_evidence_complete
+                        else "Die Vektorsuche erreichte eine technische "
+                        "Kandidatengrenze, bevor die finale angeforderte "
+                        "Belegzahl erreicht war."
+                    ),
+                    **degradation.as_dict(),
                 }
             )
         return {

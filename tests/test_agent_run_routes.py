@@ -22,6 +22,7 @@ from inqtrix.agents.control_ports import (
     PlanTaskRecord,
 )
 from inqtrix.agents.scheduler import TaskOutcome, task_result_payload
+from inqtrix.services.agent_sessions_service import AgentSessionsService
 from tests.test_runs_sharing import (
     OWNER,
     RECIPIENT,
@@ -606,3 +607,33 @@ def test_agent_sessions_crud_is_owner_private(monkeypatch):
             ).status_code
             == 404
         )
+
+        # A durable store deletes through the operation ledger instead: the
+        # route accepts the request and hands back the operation the caller
+        # polls until it is terminal (the executor itself is covered by
+        # tests/test_session_deletion_contract.py).
+        assert (
+            client.put(
+                "/v1/agent-sessions/as_2",
+                json={
+                    "title": "Marktanalyse",
+                    "items_json": "[]",
+                    "group_id": None,
+                    "created_at": 1000.0,
+                    "updated_at": 1000.0,
+                },
+                headers={SUB_HEADER: OWNER},
+            ).status_code
+            == 200
+        )
+        monkeypatch.setattr(
+            AgentSessionsService, "durable", property(lambda _self: True)
+        )
+        accepted = client.delete(
+            "/v1/agent-sessions/as_2", headers={SUB_HEADER: OWNER}
+        )
+        assert accepted.status_code == 202
+        summary = accepted.json()
+        assert summary["operation_id"].startswith("del_")
+        assert summary["target_kind"] == "agent_session"
+        assert summary["target_id"] == "as_2"

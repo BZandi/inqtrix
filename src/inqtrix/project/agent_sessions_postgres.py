@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from inqtrix.project.base_session_store import (
     BaseSessionStore,
     DEFAULT_TENANT as _DEFAULT_TENANT,
 )
+from inqtrix.project.deletion_fence import reject_retained_deletion_target
 from inqtrix.project.agent_sessions_ports import (
     AgentSession,
     AgentSessionGroup,
@@ -42,6 +43,10 @@ _META_COLUMNS = (
     agent_sessions.c.workspace_id,
     agent_sessions.c.title,
     agent_sessions.c.group_id,
+    agent_sessions.c.lifecycle_status,
+    agent_sessions.c.deletion_operation_id,
+    agent_sessions.c.deletion_stage,
+    agent_sessions.c.deletion_error,
     agent_sessions.c.created_at,
     agent_sessions.c.updated_at,
 )
@@ -67,6 +72,13 @@ class PostgresAgentSessionStore(BaseSessionStore):
             updated_at=created_at,
         )
         async with self._session() as session:
+            await reject_retained_deletion_target(
+                session,
+                target_kind="agent_session",
+                target_id=id,
+                tenant_id=_DEFAULT_TENANT,
+                not_found=AgentSessionNotFound,
+            )
             row = (
                 await session.execute(
                     pg_insert(agent_sessions)
@@ -81,9 +93,12 @@ class PostgresAgentSessionStore(BaseSessionStore):
                         select(agent_sessions).where(
                             agent_sessions.c.tenant_id == _DEFAULT_TENANT,
                             agent_sessions.c.id == id,
+                            agent_sessions.c.lifecycle_status == "active",
                         )
                     )
-                ).one()
+                ).first()
+                if row is None:
+                    raise AgentSessionNotFound(id)
         return _from_row(row)
 
     async def upsert_session(
@@ -101,9 +116,20 @@ class PostgresAgentSessionStore(BaseSessionStore):
         )
         mutable = ["title", "group_id", "items_json", "updated_at"]
         stmt = scoped_postgres_upsert(
-            pg_insert(agent_sessions), agent_sessions, values, mutable
+            pg_insert(agent_sessions),
+            agent_sessions,
+            values,
+            mutable,
+            extra_condition=agent_sessions.c.lifecycle_status == "active",
         ).returning(agent_sessions)
         async with self._session() as session:
+            await reject_retained_deletion_target(
+                session,
+                target_kind="agent_session",
+                target_id=id,
+                tenant_id=_DEFAULT_TENANT,
+                not_found=AgentSessionNotFound,
+            )
             if group_id is not None:
                 await require_scoped_parent(
                     session,
@@ -151,6 +177,62 @@ class PostgresAgentSessionStore(BaseSessionStore):
                 session, table=agent_sessions, resource_id=session_id,
                 tenant_id=_DEFAULT_TENANT, scope=scope,
                 not_found=AgentSessionNotFound,
+            )
+
+    async def set_session_deletion_state(
+        self,
+        session_id: str,
+        *,
+        scope: ResourceScope,
+        lifecycle_status: str,
+        deletion_operation_id: str,
+        deletion_stage: str,
+        deletion_error: str | None,
+    ) -> None:
+        async with self._session() as session:
+            changed = await session.scalar(
+                update(agent_sessions)
+                .where(
+                    agent_sessions.c.tenant_id == _DEFAULT_TENANT,
+                    agent_sessions.c.id == session_id,
+                    agent_sessions.c.created_by_user_id.is_not_distinct_from(
+                        scope.created_by_user_id
+                    ),
+                    agent_sessions.c.workspace_id.is_not_distinct_from(
+                        scope.workspace_id
+                    ),
+                )
+                .values(
+                    lifecycle_status=lifecycle_status,
+                    deletion_operation_id=deletion_operation_id,
+                    deletion_stage=deletion_stage,
+                    deletion_error=deletion_error,
+                )
+                .returning(agent_sessions.c.id)
+            )
+            if changed is None:
+                raise AgentSessionNotFound(session_id)
+
+    async def count_session_residuals(
+        self, session_id: str, *, scope: ResourceScope
+    ) -> int:
+        async with self._session() as session:
+            return int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(agent_sessions)
+                    .where(
+                        agent_sessions.c.tenant_id == _DEFAULT_TENANT,
+                        agent_sessions.c.id == session_id,
+                        agent_sessions.c.created_by_user_id.is_not_distinct_from(
+                            scope.created_by_user_id
+                        ),
+                        agent_sessions.c.workspace_id.is_not_distinct_from(
+                            scope.workspace_id
+                        ),
+                    )
+                )
+                or 0
             )
 
     async def upsert_group(
@@ -243,6 +325,10 @@ def _from_row(row) -> AgentSession:
         tenant_id=row.tenant_id,
         created_by_user_id=row.created_by_user_id,
         workspace_id=row.workspace_id,
+        lifecycle_status=getattr(row, "lifecycle_status", "active") or "active",
+        deletion_operation_id=getattr(row, "deletion_operation_id", None),
+        deletion_stage=getattr(row, "deletion_stage", None),
+        deletion_error=getattr(row, "deletion_error", None),
     )
 
 

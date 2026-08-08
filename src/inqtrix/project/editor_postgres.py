@@ -23,7 +23,7 @@ import logging
 from dataclasses import replace
 from typing import Literal
 
-from sqlalchemy import and_, delete, or_, select, tuple_, update
+from sqlalchemy import Integer, and_, delete, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,7 +42,12 @@ from inqtrix.project.editor_ports import (
     EditorComment,
     EditorDocument,
     EditorFolder,
+    EditorSuggestionDraft,
     FolderNotFound,
+    SuggestionDraftNotFound,
+    SuggestionDraftRevisionConflict,
+    suggestion_draft_from_payload,
+    suggestion_draft_payload,
 )
 from inqtrix.project.scoped_upsert import (
     ResourceScope,
@@ -57,8 +62,10 @@ from inqtrix.storage.editor_orm import (
 )
 from inqtrix.storage.resource_access import (
     VISIBLE_SHARE_PERMISSION,
+    append_resource_effects,
     listed_resource_access,
     lock_resource_access,
+    revoke_resource_shares,
     visible_resource_select,
 )
 
@@ -84,6 +91,7 @@ _DOC_META_COLUMNS = (
     editor_documents.c.persisted_sequence,
     editor_documents.c.projection_sequence,
     editor_documents.c.projection_updated_at,
+    editor_documents.c.collaboration_comment_revision,
     editor_documents.c.deleted_at,
     editor_documents.c.diff_anchor_markdown,
     editor_documents.c.diff_anchor_updated_at,
@@ -105,9 +113,16 @@ class PostgresEditorStore(BaseSessionStore):
         engine,
         app_role: str,
         restrict_to_workspace_members: bool = False,
+        sharing_enabled: bool = True,
     ) -> None:
         super().__init__(engine=engine, app_role=app_role)
         self._restrict_to_workspace_members = restrict_to_workspace_members
+        self._sharing_enabled = sharing_enabled
+
+    @property
+    def atomic_delete_resource_effects(self) -> bool:
+        """Whether deletions include audit and invalidations atomically."""
+        return True
 
     # -- documents -------------------------------------------------------- #
 
@@ -297,6 +312,7 @@ class PostgresEditorStore(BaseSessionStore):
             tenant_id=_DEFAULT_TENANT,
             actor_user_id=actor_user_id,
             restrict_to_workspace_members=self._restrict_to_workspace_members,
+            sharing_enabled=self._sharing_enabled,
         )
         permission_column = visible.selected_columns[VISIBLE_SHARE_PERMISSION]
         query = visible.with_only_columns(
@@ -452,10 +468,35 @@ class PostgresEditorStore(BaseSessionStore):
         self, document_id: str, *, scope: ResourceScope
     ) -> None:
         async with self._session() as session:
+            recipients = await revoke_resource_shares(
+                session,
+                tenant_id=_DEFAULT_TENANT,
+                resource_type="editor_document",
+                resource_id=document_id,
+                revoked_by_user_id=scope.created_by_user_id,
+            )
             await delete_scoped_postgres(
-                session, table=editor_documents, resource_id=document_id,
-                tenant_id=_DEFAULT_TENANT, scope=scope,
+                session,
+                table=editor_documents,
+                resource_id=document_id,
+                tenant_id=_DEFAULT_TENANT,
+                scope=scope,
                 not_found=DocumentNotFound,
+                extra_condition=and_(
+                    editor_documents.c.content_mode == "markdown",
+                    editor_documents.c.deleted_at.is_(None),
+                ),
+            )
+            await append_resource_effects(
+                session,
+                tenant_id=_DEFAULT_TENANT,
+                actor_user_id=scope.created_by_user_id,
+                owner_user_id=scope.created_by_user_id,
+                action="editor_document.deleted",
+                resource_type="editor_document",
+                resource_id=document_id,
+                scope="editor_documents",
+                additional_targets=recipients,
             )
 
     # -- folders ---------------------------------------------------------- #
@@ -572,7 +613,7 @@ class PostgresEditorStore(BaseSessionStore):
             where=editor_comments.c.created_by_user_id.is_not_distinct_from(
                 stmt.excluded.created_by_user_id
             ),
-        ).returning(editor_comments.c.id)
+        ).returning(editor_comments)
         async with self._session() as session:
             await self._lock_comment_parent_authority(
                 session,
@@ -582,10 +623,10 @@ class PostgresEditorStore(BaseSessionStore):
                 expected_content_mode=expected_document_content_mode,
                 actor_user_id=actor_user_id,
             )
-            stored_ids = (await session.execute(stmt)).scalars().all()
-            if len(stored_ids) != len(comments):
+            stored_rows = (await session.execute(stmt)).all()
+            if len(stored_rows) != len(comments):
                 raise DocumentNotFound(expected_document_id)
-        return comments
+        return [self._comment_from_row(row) for row in stored_rows]
 
     async def list_comments_page(
         self,
@@ -622,6 +663,32 @@ class PostgresEditorStore(BaseSessionStore):
         )
         return items, next_cursor
 
+    async def get_comment(
+        self,
+        document_id: str,
+        comment_id: str,
+        *,
+        created_by_user_id: uuid.UUID | None = None,
+    ) -> EditorComment:
+        predicates = [
+            editor_comments.c.tenant_id == _DEFAULT_TENANT,
+            editor_comments.c.document_id == document_id,
+            editor_comments.c.id == comment_id,
+        ]
+        if created_by_user_id is not None:
+            predicates.append(
+                editor_comments.c.created_by_user_id == created_by_user_id
+            )
+        async with self._session() as session:
+            row = (
+                await session.execute(
+                    select(editor_comments).where(*predicates)
+                )
+            ).one_or_none()
+        if row is None:
+            raise SuggestionDraftNotFound(comment_id)
+        return self._comment_from_row(row)
+
     async def delete_comment(
         self,
         *,
@@ -655,6 +722,149 @@ class PostgresEditorStore(BaseSessionStore):
                 delete(editor_comments).where(*predicates)
             )
 
+    async def save_comment_suggestion_draft(
+        self,
+        *,
+        document_id: str,
+        comment_id: str,
+        draft: EditorSuggestionDraft,
+        expected_revision: int,
+        expected_document_owner_user_id: uuid.UUID | None,
+        expected_document_workspace_id: str | None,
+        expected_document_content_mode: str,
+        actor_user_id: uuid.UUID | None,
+    ) -> EditorSuggestionDraft:
+        revision_value = editor_comments.c.suggestion_draft[
+            "revision"
+        ].astext.cast(Integer)
+        revision_guard = (
+            editor_comments.c.suggestion_draft.is_(None)
+            if expected_revision == 0
+            else revision_value == expected_revision
+        )
+        async with self._session() as session:
+            await self._lock_comment_parent_authority(
+                session,
+                document_id=document_id,
+                expected_owner_user_id=expected_document_owner_user_id,
+                expected_workspace_id=expected_document_workspace_id,
+                expected_content_mode=expected_document_content_mode,
+                actor_user_id=actor_user_id,
+            )
+            stored = (
+                await session.execute(
+                    update(editor_comments)
+                    .where(
+                        editor_comments.c.tenant_id == _DEFAULT_TENANT,
+                        editor_comments.c.document_id == document_id,
+                        editor_comments.c.id == comment_id,
+                        editor_comments.c.created_by_user_id.is_not_distinct_from(
+                            actor_user_id
+                        ),
+                        revision_guard,
+                    )
+                    .values(suggestion_draft=suggestion_draft_payload(draft))
+                    .returning(editor_comments.c.suggestion_draft)
+                )
+            ).scalar_one_or_none()
+            if stored is None:
+                await self._raise_suggestion_draft_cas_miss(
+                    session,
+                    document_id=document_id,
+                    comment_id=comment_id,
+                    actor_user_id=actor_user_id,
+                )
+                raise RuntimeError("unreachable suggestion draft CAS state")
+        decoded = suggestion_draft_from_payload(stored)
+        if decoded is None:
+            raise RuntimeError("stored suggestion draft unexpectedly absent")
+        return decoded
+
+    async def delete_comment_suggestion_draft(
+        self,
+        *,
+        document_id: str,
+        comment_id: str,
+        expected_revision: int,
+        patch_id: str,
+        expected_document_owner_user_id: uuid.UUID | None,
+        expected_document_workspace_id: str | None,
+        expected_document_content_mode: str,
+        actor_user_id: uuid.UUID | None,
+    ) -> None:
+        revision_value = editor_comments.c.suggestion_draft[
+            "revision"
+        ].astext.cast(Integer)
+        patch_value = editor_comments.c.suggestion_draft["patch_id"].astext
+        async with self._session() as session:
+            await self._lock_comment_parent_authority(
+                session,
+                document_id=document_id,
+                expected_owner_user_id=expected_document_owner_user_id,
+                expected_workspace_id=expected_document_workspace_id,
+                expected_content_mode=expected_document_content_mode,
+                actor_user_id=actor_user_id,
+            )
+            cleared = (
+                await session.execute(
+                    update(editor_comments)
+                    .where(
+                        editor_comments.c.tenant_id == _DEFAULT_TENANT,
+                        editor_comments.c.document_id == document_id,
+                        editor_comments.c.id == comment_id,
+                        editor_comments.c.created_by_user_id.is_not_distinct_from(
+                            actor_user_id
+                        ),
+                        revision_value == expected_revision,
+                        patch_value == patch_id,
+                    )
+                    .values(suggestion_draft=None)
+                    .returning(editor_comments.c.id)
+                )
+            ).scalar_one_or_none()
+            if cleared is None:
+                await self._raise_suggestion_draft_cas_miss(
+                    session,
+                    document_id=document_id,
+                    comment_id=comment_id,
+                    actor_user_id=actor_user_id,
+                )
+                raise RuntimeError("unreachable suggestion draft CAS state")
+
+    @staticmethod
+    async def _raise_suggestion_draft_cas_miss(
+        session: AsyncSession,
+        *,
+        document_id: str,
+        comment_id: str,
+        actor_user_id: uuid.UUID | None,
+    ) -> None:
+        row = (
+            (
+                await session.execute(
+                    select(
+                        editor_comments.c.id,
+                        editor_comments.c.suggestion_draft,
+                    ).where(
+                    editor_comments.c.tenant_id == _DEFAULT_TENANT,
+                    editor_comments.c.document_id == document_id,
+                    editor_comments.c.id == comment_id,
+                    editor_comments.c.created_by_user_id.is_not_distinct_from(
+                        actor_user_id
+                    ),
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            raise SuggestionDraftNotFound(comment_id)
+        current = suggestion_draft_from_payload(row["suggestion_draft"])
+        raise SuggestionDraftRevisionConflict(
+            current_revision=current.revision if current is not None else 0
+        )
+
     async def _lock_comment_parent_authority(
         self,
         session: AsyncSession,
@@ -677,6 +887,7 @@ class PostgresEditorStore(BaseSessionStore):
             owner_column=editor_documents.c.created_by_user_id,
             minimum=comment_write_permission(expected_content_mode),
             restrict_to_workspace_members=self._restrict_to_workspace_members,
+            sharing_enabled=self._sharing_enabled,
         )
         if access is None or access.owner_user_id != expected_owner_user_id:
             raise DocumentNotFound(document_id)
@@ -726,6 +937,9 @@ class PostgresEditorStore(BaseSessionStore):
             persisted_sequence=int(row.persisted_sequence),
             projection_sequence=int(row.projection_sequence),
             projection_updated_at=row.projection_updated_at,
+            collaboration_comment_revision=int(
+                row.collaboration_comment_revision
+            ),
             deleted_at=row.deleted_at,
         )
 
@@ -755,4 +969,7 @@ class PostgresEditorStore(BaseSessionStore):
             updated_at=row.updated_at,
             tenant_id=row.tenant_id,
             created_by_user_id=row.created_by_user_id,
+            suggestion_draft=suggestion_draft_from_payload(
+                row.suggestion_draft
+            ),
         )

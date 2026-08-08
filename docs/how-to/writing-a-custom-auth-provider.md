@@ -48,7 +48,7 @@ cookie-session lookups.
 The `Principal` carries the canonical local `user_id`, `kind`
 (`anonymous`/`static`/`oidc_session`/`pat`), `tenant_id`, and optional
 `display_name`/`email`/`session_id`. The `kind` names the **transport**, not the
-identity provider (ADR-AUTH-3): scoped surfaces (workspaces, sharing, PAT
+identity provider: scoped surfaces (workspaces, sharing, PAT
 ownership) require `kind == "oidc_session"` or `"pat"` plus a non-null
 `user_id`. External issuer/subject values stay inside the authentication
 adapter and its directory binding.
@@ -93,8 +93,9 @@ further wiring. Run it with any ASGI server pointed at this `app`, e.g.
 
 ## Checklist
 
-- `mode` returns one of the existing `AuthMode` values (avoid a new kind unless
-  you also extend every scoped surface — large blast radius, ADR-AUTH-3).
+- `mode` returns one of the existing `AuthMode` values. Avoid a new kind unless
+  you also extend every scoped surface because that change has a large blast
+  radius.
 - Failures raise `HTTPException(401/403)` — never return a partial/anonymous
   principal silently (Designprinzip 1: No Silent Fallbacks).
 - For scoped authentication, resolve every external identity to one active

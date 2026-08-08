@@ -9,7 +9,8 @@ off so the TestClient (http) keeps the cookies.
 
 from __future__ import annotations
 
-import asyncio
+import logging
+import re
 
 import pytest
 from fastapi import Depends, FastAPI
@@ -77,6 +78,20 @@ def test_setup_status_then_owner_then_lock():
     created = _create_owner(client)
     assert created.status_code == 201
     assert created.json()["authenticated"] is True
+    cookies = created.headers.get_list("set-cookie")
+    assert len(cookies) == 2
+    session_cookie = next(
+        header for header in cookies if header.startswith("inqtrix_session=")
+    )
+    csrf_cookie = next(
+        header for header in cookies if header.startswith("inqtrix_csrf=")
+    )
+    assert "HttpOnly" in session_cookie
+    assert "HttpOnly" not in csrf_cookie
+    assert "Path=/" in session_cookie
+    assert "Path=/" in csrf_cookie
+    assert "SameSite=lax" in session_cookie
+    assert "SameSite=lax" in csrf_cookie
     # The owner is logged in immediately (session cookie set).
     assert client.get("/api/setup/status").json() == {"needs_owner": False}
 
@@ -99,8 +114,35 @@ def test_owner_setup_logs_in_and_protected_route_resolves():
 
     protected = client.get("/v1/protected")
     assert protected.status_code == 200
-    # Local sessions are the same cookie-session kind as OIDC (ADR-AUTH-3).
+    # Local sessions use the same cookie-session kind as OIDC.
     assert protected.json()["kind"] == "oidc_session"
+
+
+def test_session_bootstrap_refreshes_the_csrf_cookie():
+    """A live opaque session can repair a token invalidated by secret rotation."""
+    client = make_client()
+    _create_owner(client)
+
+    # Simulate the browser retaining a stale readable token while the opaque
+    # session cookie remains valid.  The safe bootstrap must mint and set the
+    # authoritative token again, not merely return it in JSON.
+    client.cookies.set(
+        "inqtrix_csrf", "stale-token", domain="127.0.0.1", path="/"
+    )
+    response = client.get("/api/auth/session")
+
+    assert response.status_code == 200
+    token = response.json()["csrf_token"]
+    assert token and token != "stale-token"
+    assert response.cookies.get("inqtrix_csrf") == token
+    assert client.cookies.get(
+        "inqtrix_csrf", domain="127.0.0.1", path="/"
+    ) == token
+
+    protected = client.post(
+        "/v1/protected", headers={"X-CSRF-Token": token}
+    )
+    assert protected.status_code == 200
 
 
 def test_login_local_after_logout():
@@ -179,6 +221,46 @@ def test_unsafe_method_requires_csrf():
     token = client.get("/api/auth/session").json()["csrf_token"]
     with_header = client.post("/v1/protected", headers={"X-CSRF-Token": token})
     assert with_header.status_code == 200
+
+
+def test_csrf_warning_uses_only_a_pseudonymous_session_reference(caplog):
+    client = make_client()
+    setup = _create_owner(client)
+    session_id = setup.cookies.get("inqtrix_session")
+    assert session_id is not None and len(session_id) >= 32
+
+    inqtrix_logger = logging.getLogger("inqtrix")
+    inqtrix_logger.addHandler(caplog.handler)
+    previous_level = inqtrix_logger.level
+    previous_propagate = inqtrix_logger.propagate
+    inqtrix_logger.setLevel(logging.WARNING)
+    inqtrix_logger.propagate = False
+    try:
+        rejected = client.post(
+            "/v1/protected",
+            headers={"X-CSRF-Token": "synthetic-invalid-csrf-token"},
+        )
+    finally:
+        inqtrix_logger.removeHandler(caplog.handler)
+        inqtrix_logger.setLevel(previous_level)
+        inqtrix_logger.propagate = previous_propagate
+
+    assert rejected.status_code == 403
+    assert rejected.json()["detail"]["error"]["type"] == "csrf_error"
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if "CSRF-Pruefung fehlgeschlagen" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert re.search(r"session_ref=ses_[0-9a-f]{16}(?:\s|$)", warning)
+    assert "method=POST" in warning
+    assert session_id not in warning
+    assert session_id[:12] not in warning
+    midpoint = len(session_id) // 2
+    assert session_id[midpoint - 6 : midpoint + 6] not in warning
+    assert session_id[-12:] not in warning
 
 
 def test_change_password_flow():

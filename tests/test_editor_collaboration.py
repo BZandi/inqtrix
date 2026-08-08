@@ -5,20 +5,30 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import time
 import uuid
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from inqtrix.auth.permissions import AccessMode, ResourceAccess
+from inqtrix.auth.permissions import (
+    AccessMode,
+    ResourceAccess,
+    SharePermission,
+)
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.project.editor_collaboration_ports import (
     CollaborationActivity,
     CollaborationConflict,
+    CollaborationCommentActivity,
+    CollaborationCommentMessage,
+    CollaborationCommentPage,
+    CollaborationCommentThread,
     CollaborationDocumentNotFound,
     CollaborationDocumentState,
     CollaborationInstanceFenced,
@@ -52,7 +62,12 @@ from inqtrix.services.editor_collaboration_service import (
     CollaborationProtocolConflict,
     EditorCollaborationService,
 )
-from inqtrix.settings import CollaborationSettings
+from inqtrix.settings import (
+    AgentPlatformSettings,
+    AgentSettings,
+    CollaborationSettings,
+    QuotaSettings,
+)
 
 
 DOCUMENT_ID = "ed_collaboration"
@@ -114,8 +129,13 @@ def _document(*, collaboration: bool = False) -> EditorDocument:
 class _Documents:
     """Narrow document port fake retaining the authoritative document record."""
 
-    def __init__(self, document: EditorDocument) -> None:
+    def __init__(
+        self,
+        document: EditorDocument,
+        access: ResourceAccess | None = None,
+    ) -> None:
         self.document = document
+        self.access = access or ResourceAccess(AccessMode.OWNER)
         self.get_calls: list[dict[str, Any]] = []
 
     async def get_document(
@@ -150,7 +170,15 @@ class _Documents:
             visible_to=visible_to,
             minimum=minimum,
         )
-        return document, ResourceAccess(AccessMode.OWNER)
+        if (
+            self.access.mode is AccessMode.SHARED
+            and (
+                self.access.permission is None
+                or not self.access.permission.at_least(minimum)
+            )
+        ):
+            raise DocumentNotFound(document_id)
+        return document, self.access
 
 
 class _Node:
@@ -249,6 +277,7 @@ class _PublicStore:
         self.rotate_error: Exception | None = None
         self.activity_calls: list[dict[str, Any]] = []
         self.activity_rows: tuple[CollaborationActivity, ...] = ()
+        self.comment_activity_rows: tuple[CollaborationCommentActivity, ...] = ()
         self.open_patch_calls: list[dict[str, Any]] = []
         self.open_patch_rows: tuple[CollaborationOpenPatch, ...] = ()
         self.open_patch_next_cursor: tuple[float, str] | None = None
@@ -264,8 +293,14 @@ class _PublicStore:
         ] = []
         self.current_instance_calls: list[dict[str, Any]] = []
         self.instance_validation_calls: list[dict[str, Any]] = []
+        self.policy_cursor = 0
+        self.policy_cursor_calls: list[str] = []
         self.compact_calls: list[dict[str, Any]] = []
         self.purge_calls: list[dict[str, Any]] = []
+        self.comment_threads: dict[uuid.UUID, CollaborationCommentThread] = {}
+        self.comment_revision = 0
+        self.comment_read_revision = 0
+        self.comment_calls: list[dict[str, Any]] = []
 
     async def enable_document(self, **kwargs: Any) -> CollaborationDocumentState:
         """Apply activation atomically to the fake document authority."""
@@ -350,6 +385,13 @@ class _PublicStore:
         self.activity_calls.append(dict(kwargs))
         return self.activity_rows
 
+    async def list_comment_activity(
+        self, **kwargs: Any
+    ) -> tuple[CollaborationCommentActivity, ...]:
+        """Return configured content-free shared-comment activity."""
+        self.activity_calls.append(dict(kwargs))
+        return self.comment_activity_rows
+
     async def list_open_patches(
         self, **kwargs: Any
     ) -> CollaborationOpenPatchPage:
@@ -411,6 +453,11 @@ class _PublicStore:
         """Record the concrete service's tenant-scoped instance fence."""
         self.instance_validation_calls.append(dict(kwargs))
 
+    async def current_policy_cursor(self, *, tenant_id: str) -> int:
+        """Return the configured tenant cursor without exposing event content."""
+        self.policy_cursor_calls.append(tenant_id)
+        return self.policy_cursor
+
     async def get_current_instance(
         self, **kwargs: Any
     ) -> CollaborationInstanceLease | None:
@@ -429,6 +476,183 @@ class _PublicStore:
         """Record one tenant-scoped tombstone purge."""
         self.purge_calls.append(dict(kwargs))
         return 4
+
+    async def list_comment_threads(
+        self, **kwargs: Any
+    ) -> CollaborationCommentPage:
+        """Return incremental shared-comment rows and participant identities."""
+        self.comment_calls.append({"operation": "list", **kwargs})
+        status = kwargs["status"]
+        since_revision = kwargs["since_revision"]
+        rows = tuple(
+            thread
+            for thread in self.comment_threads.values()
+            if thread.revision > since_revision
+            and (
+                since_revision > 0
+                or status == "all"
+                or thread.status == status
+            )
+        )
+        return CollaborationCommentPage(
+            threads=tuple(sorted(rows, key=lambda thread: thread.revision)),
+            revision=self.comment_revision,
+            last_read_revision=self.comment_read_revision,
+            participant_user_ids=(USER_ID, ACTOR_ID),
+        )
+
+    async def create_comment_thread(
+        self, **kwargs: Any
+    ) -> CollaborationCommentThread:
+        """Create one fake durable thread with its first message."""
+        self.comment_calls.append({"operation": "create", **kwargs})
+        if kwargs["expected_revision"] != self.comment_revision:
+            raise CollaborationConflict(
+                "comment_revision_conflict",
+                current_sequence=self.comment_revision,
+            )
+        existing = self.comment_threads.get(kwargs["thread_id"])
+        if existing is not None:
+            return existing
+        self.comment_revision += 1
+        message = CollaborationCommentMessage(
+            message_id=kwargs["message_id"],
+            thread_id=kwargs["thread_id"],
+            revision=self.comment_revision,
+            author_user_id=kwargs["actor_user_id"],
+            body_markdown=kwargs["body_markdown"],
+            mention_user_ids=kwargs["mention_user_ids"],
+            created_at=kwargs["now"],
+        )
+        thread = CollaborationCommentThread(
+            thread_id=kwargs["thread_id"],
+            document_id=kwargs["document_id"],
+            generation=kwargs["generation"],
+            revision=self.comment_revision,
+            status="open",
+            created_by_user_id=kwargs["actor_user_id"],
+            resolved_by_user_id=None,
+            resolved_at=None,
+            anchor=kwargs["anchor"],
+            quote_text=kwargs["quote_text"],
+            created_at=kwargs["now"],
+            updated_at=kwargs["now"],
+            messages=(message,),
+        )
+        self.comment_threads[thread.thread_id] = thread
+        return thread
+
+    async def add_comment_reply(
+        self, **kwargs: Any
+    ) -> CollaborationCommentThread:
+        """Append one fake reply under thread revision CAS."""
+        self.comment_calls.append({"operation": "reply", **kwargs})
+        thread = self.comment_threads[kwargs["thread_id"]]
+        if kwargs["expected_revision"] != thread.revision:
+            raise CollaborationConflict(
+                "comment_revision_conflict",
+                current_sequence=thread.revision,
+            )
+        self.comment_revision += 1
+        message = CollaborationCommentMessage(
+            message_id=kwargs["message_id"],
+            thread_id=thread.thread_id,
+            revision=self.comment_revision,
+            author_user_id=kwargs["actor_user_id"],
+            body_markdown=kwargs["body_markdown"],
+            mention_user_ids=kwargs["mention_user_ids"],
+            created_at=kwargs["now"],
+        )
+        updated = replace(
+            thread,
+            messages=(*thread.messages, message),
+            revision=self.comment_revision,
+            updated_at=kwargs["now"],
+        )
+        self.comment_threads[thread.thread_id] = updated
+        return updated
+
+    async def update_comment_message(
+        self, **kwargs: Any
+    ) -> CollaborationCommentThread:
+        """Edit or tombstone one fake author contribution."""
+        self.comment_calls.append({"operation": "message", **kwargs})
+        thread = self.comment_threads[kwargs["thread_id"]]
+        if kwargs["expected_revision"] != thread.revision:
+            raise CollaborationConflict(
+                "comment_revision_conflict",
+                current_sequence=thread.revision,
+            )
+        target = next(
+            message
+            for message in thread.messages
+            if message.message_id == kwargs["message_id"]
+        )
+        if target.author_user_id != kwargs["actor_user_id"]:
+            raise CollaborationConflict("comment_author_required")
+        self.comment_revision += 1
+        updated_message = replace(
+            target,
+            body_markdown=(
+                "" if kwargs["delete_message"] else kwargs["body_markdown"]
+            ),
+            deleted_at=kwargs["now"] if kwargs["delete_message"] else None,
+            edited_at=None if kwargs["delete_message"] else kwargs["now"],
+            mention_user_ids=(
+                () if kwargs["delete_message"] else kwargs["mention_user_ids"]
+            ),
+            revision=self.comment_revision,
+        )
+        updated = replace(
+            thread,
+            messages=tuple(
+                updated_message if message.message_id == target.message_id
+                else message
+                for message in thread.messages
+            ),
+            revision=self.comment_revision,
+            updated_at=kwargs["now"],
+        )
+        self.comment_threads[thread.thread_id] = updated
+        return updated
+
+    async def set_comment_thread_status(
+        self, **kwargs: Any
+    ) -> CollaborationCommentThread:
+        """Resolve or reopen one fake thread under the service policy."""
+        self.comment_calls.append({"operation": "status", **kwargs})
+        thread = self.comment_threads[kwargs["thread_id"]]
+        if kwargs["expected_revision"] != thread.revision:
+            raise CollaborationConflict(
+                "comment_revision_conflict",
+                current_sequence=thread.revision,
+            )
+        if (
+            thread.created_by_user_id != kwargs["actor_user_id"]
+            and not kwargs["can_moderate"]
+        ):
+            raise CollaborationConflict("comment_resolve_forbidden")
+        self.comment_revision += 1
+        resolved = kwargs["status"] == "resolved"
+        updated = replace(
+            thread,
+            revision=self.comment_revision,
+            status=kwargs["status"],
+            resolved_by_user_id=kwargs["actor_user_id"] if resolved else None,
+            resolved_at=kwargs["now"] if resolved else None,
+            updated_at=kwargs["now"],
+        )
+        self.comment_threads[thread.thread_id] = updated
+        return updated
+
+    async def mark_comments_read(self, **kwargs: Any) -> int:
+        """Advance the fake personal read coordinate."""
+        self.comment_calls.append({"operation": "read", **kwargs})
+        self.comment_read_revision = max(
+            self.comment_read_revision,
+            kwargs["revision"],
+        )
+        return self.comment_read_revision
 
 
 class _Users:
@@ -464,11 +688,18 @@ def _public_harness(
     *,
     principal: Principal | None = None,
     collaboration: bool = False,
+    permission: SharePermission | None = None,
     tenant_id: str = "default",
+    guest_links: Any | None = None,
 ) -> _PublicHarness:
     """Wire the real public router and service around bounded port fakes."""
     active_principal = principal or _cookie_principal()
-    documents = _Documents(_document(collaboration=collaboration))
+    documents = _Documents(
+        _document(collaboration=collaboration),
+        ResourceAccess(AccessMode.SHARED, permission)
+        if permission is not None
+        else None,
+    )
     node = _Node()
     store = _PublicStore(documents)
     settings = SimpleNamespace(
@@ -494,6 +725,7 @@ def _public_harness(
         node=node,
         settings=settings,
         users=_Users(),
+        guest_links=guest_links,
     )
 
     def principal_dependency() -> Principal:
@@ -533,6 +765,230 @@ def _session_body(
     if rotation_command_id is not None:
         body["rotation_command_id"] = str(rotation_command_id)
     return body
+
+
+def _comment_body(
+    *,
+    expected_revision: int = 0,
+    thread_id: uuid.UUID | None = None,
+    message_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    """Return one bounded public shared-comment create command."""
+    return {
+        "anchor": {
+            "from": 1,
+            "to": 7,
+            "quoteBefore": "",
+            "selectedText": "Shared",
+            "quoteAfter": " draft",
+            "relativeFrom": "relative-from",
+            "relativeTo": "relative-to",
+            "relativeVersion": "yjs-relative-position-base64-v1",
+        },
+        "body_markdown": "Please review this wording.",
+        "command_id": str(uuid.uuid4()),
+        "expected_revision": expected_revision,
+        "generation": 4,
+        "mention_user_ids": [str(ACTOR_ID)],
+        "message_id": str(message_id or uuid.uuid4()),
+        "quote": "Shared",
+        "thread_id": str(thread_id or uuid.uuid4()),
+    }
+
+
+def test_public_shared_comment_thread_lifecycle_is_author_enriched() -> None:
+    """Create, reply, edit, resolve, tombstone, list, and read stay separate."""
+    harness = _public_harness(collaboration=True)
+    thread_id = uuid.uuid4()
+    first_message_id = uuid.uuid4()
+    reply_id = uuid.uuid4()
+
+    with harness.client:
+        created = harness.client.post(
+            f"/v1/editor/documents/{DOCUMENT_ID}/collaboration/comments",
+            json=_comment_body(
+                thread_id=thread_id,
+                message_id=first_message_id,
+            ),
+        )
+        assert created.status_code == 200
+        created_thread = created.json()["thread"]
+        assert created_thread["author"]["name"] == "Ada Editor"
+        assert created_thread["messages"][0]["mentions"] == [
+            {"id": str(ACTOR_ID), "name": "Other Editor"}
+        ]
+        replied = harness.client.post(
+            f"/v1/editor/documents/{DOCUMENT_ID}/collaboration/comments/"
+            f"{thread_id}/replies",
+            json={
+                "body_markdown": "I agree.",
+                "command_id": str(uuid.uuid4()),
+                "expected_revision": 1,
+                "generation": 4,
+                "mention_user_ids": [],
+                "message_id": str(reply_id),
+            },
+        )
+        assert replied.status_code == 200
+        edited = harness.client.patch(
+            f"/v1/editor/documents/{DOCUMENT_ID}/collaboration/comments/"
+            f"{thread_id}/messages/{reply_id}",
+            json={
+                "body_markdown": "I agree with this revision.",
+                "command_id": str(uuid.uuid4()),
+                "expected_revision": 2,
+                "generation": 4,
+                "mention_user_ids": [],
+            },
+        )
+        assert edited.status_code == 200
+        resolved = harness.client.patch(
+            f"/v1/editor/documents/{DOCUMENT_ID}/collaboration/comments/"
+            f"{thread_id}",
+            json={
+                "command_id": str(uuid.uuid4()),
+                "expected_revision": 3,
+                "generation": 4,
+                "status": "resolved",
+            },
+        )
+        assert resolved.status_code == 200
+        deleted = harness.client.request(
+            "DELETE",
+            f"/v1/editor/documents/{DOCUMENT_ID}/collaboration/comments/"
+            f"{thread_id}/messages/{reply_id}",
+            json={
+                "command_id": str(uuid.uuid4()),
+                "expected_revision": 4,
+                "generation": 4,
+            },
+        )
+        assert deleted.status_code == 200
+        assert deleted.json()["thread"]["messages"][1] == {
+            **deleted.json()["thread"]["messages"][1],
+            "body_markdown": None,
+            "can_delete": False,
+            "can_edit": False,
+        }
+        listed = harness.client.get(
+            f"/v1/editor/documents/{DOCUMENT_ID}/collaboration/comments"
+        )
+        assert listed.status_code == 200
+        assert listed.json()["current_revision"] == 5
+        assert listed.json()["has_more"] is False
+        assert listed.json()["participants"] == [
+            {"id": str(USER_ID), "name": "Ada Editor"},
+            {"id": str(ACTOR_ID), "name": "Other Editor"},
+        ]
+        assert listed.json()["data"][0]["status"] == "resolved"
+        read = harness.client.post(
+            f"/v1/editor/documents/{DOCUMENT_ID}/collaboration/comments/read",
+            json={"generation": 4, "revision": 5},
+        )
+
+    assert read.status_code == 200
+    assert read.json() == {"last_read_revision": 5}
+    assert [
+        call["operation"] for call in harness.store.comment_calls
+    ] == ["create", "reply", "message", "status", "message", "list", "read"]
+
+
+def test_public_shared_comment_retries_a_postgres_deadlock_victim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fully rolled-back SQLSTATE 40P01 is replayed at the command seam."""
+    harness = _public_harness(collaboration=True)
+    original_create = harness.store.create_comment_thread
+    attempts = 0
+
+    class DeadlockVictim(RuntimeError):
+        sqlstate = "40P01"
+
+    async def create_after_one_deadlock(**kwargs: Any):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise DeadlockVictim("deadlock detected")
+        return await original_create(**kwargs)
+
+    monkeypatch.setattr(
+        harness.store,
+        "create_comment_thread",
+        create_after_one_deadlock,
+    )
+
+    with harness.client:
+        response = harness.client.post(
+            f"/v1/editor/documents/{DOCUMENT_ID}/collaboration/comments",
+            json=_comment_body(),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["revision"] == 1
+    assert attempts == 2
+    assert [
+        call["operation"] for call in harness.store.comment_calls
+    ] == ["create"]
+
+
+def test_public_shared_comments_enforce_view_and_suggest_permissions() -> None:
+    """View-only stays read-only; suggest access may create and resolve own."""
+    view = _public_harness(
+        collaboration=True,
+        permission=SharePermission.VIEW,
+    )
+    suggest = _public_harness(
+        collaboration=True,
+        permission=SharePermission.SUGGEST,
+    )
+
+    with view.client:
+        denied = view.client.post(
+            f"/v1/editor/documents/{DOCUMENT_ID}/collaboration/comments",
+            json=_comment_body(),
+        )
+        visible = view.client.get(
+            f"/v1/editor/documents/{DOCUMENT_ID}/collaboration/comments"
+        )
+    assert denied.status_code == 404
+    assert visible.status_code == 200
+
+    thread_id = uuid.uuid4()
+    with suggest.client:
+        created = suggest.client.post(
+            f"/v1/editor/documents/{DOCUMENT_ID}/collaboration/comments",
+            json=_comment_body(thread_id=thread_id),
+        )
+        resolved = suggest.client.patch(
+            f"/v1/editor/documents/{DOCUMENT_ID}/collaboration/comments/"
+            f"{thread_id}",
+            json={
+                "command_id": str(uuid.uuid4()),
+                "expected_revision": 1,
+                "generation": 4,
+                "status": "resolved",
+            },
+        )
+    assert created.status_code == 200
+    assert resolved.status_code == 200
+
+
+def test_public_shared_comment_validation_is_content_bounded() -> None:
+    """Malformed anchors and oversized bodies never reach persistence."""
+    harness = _public_harness(collaboration=True)
+    invalid = _comment_body()
+    invalid["body_markdown"] = "x" * 8_193
+    invalid["anchor"]["from"] = 20
+    invalid["anchor"]["to"] = 10
+
+    with harness.client:
+        response = harness.client.post(
+            f"/v1/editor/documents/{DOCUMENT_ID}/collaboration/comments",
+            json=invalid,
+        )
+
+    assert response.status_code == 400
+    assert harness.store.comment_calls == []
 
 
 def test_public_activation_converts_owner_document_atomically() -> None:
@@ -726,13 +1182,190 @@ def test_public_session_issues_then_rotates_one_opaque_lease() -> None:
     assert harness.store.issue_calls[0].lease_id not in harness.store.leases
 
 
+@pytest.mark.asyncio
+async def test_guest_session_uses_identity_without_account_session_fk() -> None:
+    """Guest leases leave the account-only auth session reference empty."""
+    harness = _public_harness(
+        collaboration=True,
+        guest_links=object(),
+    )
+    now = time.time()
+    guest_identity_id = uuid.uuid4()
+    guest_link_id = uuid.uuid4()
+    access = SimpleNamespace(
+        link=SimpleNamespace(
+            id=guest_link_id,
+            tenant_id="default",
+            document_id=DOCUMENT_ID,
+            generation=4,
+            permission="edit",
+            label="External review",
+            expires_at=now + 600,
+        ),
+        identity=SimpleNamespace(
+            id=guest_identity_id,
+            display_name="Guest Reviewer",
+            expires_at=now + 600,
+        ),
+    )
+
+    result = await harness.service.create_guest_session(
+        access=access,
+        protocol_version=1,
+        schema_version=1,
+    )
+
+    assert result["access"] == "edit"
+    assert result["user"]["id"] == str(guest_identity_id)
+    assert len(harness.store.issue_calls) == 1
+    lease = harness.store.issue_calls[0]
+    assert lease.actor_kind == "guest"
+    assert lease.user_id is None
+    assert lease.guest_identity_id == guest_identity_id
+    assert lease.guest_link_id == guest_link_id
+    assert lease.session_id is None
+
+
+@pytest.mark.asyncio
+async def test_guest_lease_is_rejected_after_link_permission_changes() -> None:
+    """An open guest socket cannot retain authority after a live role change."""
+    guest_links = SimpleNamespace(guest_identity_by_id=AsyncMock())
+    harness = _public_harness(
+        collaboration=True,
+        guest_links=guest_links,
+    )
+    now = time.time()
+    guest_identity_id = uuid.uuid4()
+    guest_link_id = uuid.uuid4()
+    identity = SimpleNamespace(
+        id=guest_identity_id,
+        display_name="Guest Reviewer",
+        expires_at=now + 600,
+    )
+    original_link = SimpleNamespace(
+        id=guest_link_id,
+        tenant_id="default",
+        document_id=DOCUMENT_ID,
+        generation=4,
+        permission="edit",
+        label="External review",
+        expires_at=now + 600,
+    )
+    result = await harness.service.create_guest_session(
+        access=SimpleNamespace(link=original_link, identity=identity),
+        protocol_version=1,
+        schema_version=1,
+    )
+    lease = harness.store.issue_calls[0]
+    harness.store.introspect_lease = AsyncMock(return_value=lease)  # type: ignore[method-assign]
+    harness.store.load_state = AsyncMock(  # type: ignore[method-assign]
+        return_value=SimpleNamespace(
+            document=SimpleNamespace(schema_hash=_sha256(b"schema"), schema_version=1)
+        )
+    )
+    guest_links.guest_identity_by_id.return_value = (
+        identity,
+        SimpleNamespace(**{**vars(original_link), "permission": "view"}),
+    )
+
+    with pytest.raises(
+        CollaborationAuthenticationRequired,
+        match="guest permission changed",
+    ):
+        await harness.service.introspect_lease(
+            token=result["lease_token"],
+            room=result["room"],
+            instance_id="node-a",
+            epoch=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_lease_introspection_captures_policy_cursor_before_checks() -> None:
+    """A successful lease records which committed policy events its checks cover."""
+    order: list[str] = []
+    guest_links = SimpleNamespace()
+    harness = _public_harness(
+        collaboration=True,
+        guest_links=guest_links,
+    )
+    now = time.time()
+    guest_identity_id = uuid.uuid4()
+    guest_link_id = uuid.uuid4()
+    identity = SimpleNamespace(
+        id=guest_identity_id,
+        display_name="Guest Reviewer",
+        expires_at=now + 600,
+    )
+    link = SimpleNamespace(
+        id=guest_link_id,
+        tenant_id="default",
+        document_id=DOCUMENT_ID,
+        generation=4,
+        permission="edit",
+        label="External review",
+        expires_at=now + 600,
+    )
+    result = await harness.service.create_guest_session(
+        access=SimpleNamespace(link=link, identity=identity),
+        protocol_version=1,
+        schema_version=1,
+    )
+    lease = harness.store.issue_calls[0]
+
+    async def current_policy_cursor(**kwargs: Any) -> int:
+        del kwargs
+        order.append("cursor")
+        return 41
+
+    async def validate_instance(**kwargs: Any) -> None:
+        del kwargs
+        order.append("instance")
+
+    async def introspect_lease(**kwargs: Any) -> CollaborationLease:
+        del kwargs
+        order.append("lease")
+        return lease
+
+    async def load_state(**kwargs: Any) -> Any:
+        del kwargs
+        order.append("state")
+        return SimpleNamespace(
+            document=SimpleNamespace(
+                schema_hash=_sha256(b"schema"),
+                schema_version=1,
+            )
+        )
+
+    async def guest_identity_by_id(**kwargs: Any) -> Any:
+        del kwargs
+        order.append("guest")
+        return identity, link
+
+    harness.store.current_policy_cursor = current_policy_cursor  # type: ignore[attr-defined]
+    harness.store.validate_instance = validate_instance  # type: ignore[method-assign]
+    harness.store.introspect_lease = introspect_lease  # type: ignore[method-assign]
+    harness.store.load_state = load_state  # type: ignore[method-assign]
+    guest_links.guest_identity_by_id = guest_identity_by_id
+
+    payload = await harness.service.introspect_lease(
+        token=result["lease_token"],
+        room=result["room"],
+        instance_id="node-a",
+        epoch=1,
+    )
+
+    assert payload["policy_cursor"] == 41
+    assert order == ["cursor", "instance", "lease", "state", "guest"]
+
+
 def test_public_lease_rotation_rejects_malformed_token_as_401() -> None:
     """A malformed lease token yields the STRUCTURED lease error, never a 500.
 
     Pins the service's own token-validation raise sites: a missing
-    ``CollaborationLeaseInvalid`` import once turned every invalid/expired
-    lease into a NameError 500, so clients could never recover a lease and
-    stayed read-only ("reconnecting read-only", live incident 2026-07-15).
+    ``CollaborationLeaseInvalid`` import turns every invalid or expired lease
+    into a ``NameError`` 500, preventing clients from recovering a lease and
+    leaving them read-only.
     Fake stores raising the exception themselves cannot catch that class of
     regression — this drives the service's OWN ``_decode_token`` path.
     """
@@ -1154,8 +1787,11 @@ def test_public_activity_history_applies_author_and_type_filters() -> None:
             "actor_kind": "human",
             "actor": {"id": str(ACTOR_ID), "name": "Other Editor"},
             "suggestion_ids": [],
-            "command_id": None,
-            "created_at": 12.0,
+                "command_id": None,
+                "created_at": 12.0,
+                "summary": {"edits": [], "omitted_edit_count": 0},
+                "update_count": 1,
+                "outcome": None,
         }
     ]
     assert harness.store.activity_calls == [
@@ -1167,6 +1803,43 @@ def test_public_activity_history_applies_author_and_type_filters() -> None:
             "author_user_id": ACTOR_ID,
             "change_kind": "direct",
             "limit": 21,
+        }
+    ]
+
+
+def test_public_activity_exposes_shared_comments_as_own_filter() -> None:
+    """Comment audit events are readable without mixing IDs into summaries."""
+    harness = _public_harness(collaboration=True)
+    harness.store.comment_activity_rows = (
+        CollaborationCommentActivity(
+            id=17,
+            actor_user_id=ACTOR_ID,
+            action="editor.collaboration_comment.replied",
+            created_at=14.0,
+        ),
+    )
+
+    with harness.client:
+        response = harness.client.get(
+            f"/v1/editor/documents/{DOCUMENT_ID}/activity",
+            params={"view": "history", "type": "comment"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == [
+        {
+            "from_sequence": 17,
+            "to_sequence": 17,
+            "type": "comment",
+            "actor_kind": "human",
+            "actor": {"id": str(ACTOR_ID), "name": "Other Editor"},
+            "comment_action": "replied",
+            "suggestion_ids": [],
+            "command_id": None,
+            "created_at": 14.0,
+            "summary": {"edits": [], "omitted_edit_count": 0},
+            "update_count": 1,
+            "outcome": None,
         }
     ]
 
@@ -1220,7 +1893,7 @@ def test_public_open_activity_returns_exact_patch_preview_when_available() -> No
             author_user_id=ACTOR_ID,
             created_at=13.0,
             suggestion_ids=("suggestion-1",),
-            kinds=("modification",),
+            kinds=("replacement",),
             exact_edits=(exact_edit,),
         ),
     )
@@ -1231,7 +1904,7 @@ def test_public_open_activity_returns_exact_patch_preview_when_available() -> No
             params={
                 "view": "open",
                 "author_id": str(ACTOR_ID),
-                "type": "modification",
+                "type": "replacement",
             },
         )
 
@@ -1244,8 +1917,8 @@ def test_public_open_activity_returns_exact_patch_preview_when_available() -> No
                 "author": {"id": str(ACTOR_ID), "name": "Other Editor"},
                 "created_at": 13.0,
                 "suggestion_ids": ["suggestion-1"],
-                "type": "modification",
-                "types": ["modification"],
+            "type": "replacement",
+            "types": ["replacement"],
                 "preview": {"edits": [exact_edit]},
             }
         ],
@@ -1258,7 +1931,7 @@ def test_public_open_activity_returns_exact_patch_preview_when_available() -> No
             "generation": 4,
             "before": None,
             "author_user_id": ACTOR_ID,
-            "suggestion_kind": "modification",
+            "suggestion_kind": "replacement",
             "limit": 50,
         }
     ]
@@ -1729,6 +2402,17 @@ def _update_payload(update_bytes: bytes = b"binary-yjs-update") -> dict[str, Any
         "update_base64": base64.b64encode(update_bytes).decode("ascii"),
         "actor_kind": "human",
         "change_kind": "suggestion",
+        "change_summary": {
+            "edits": [
+                {
+                    "before": "",
+                    "after": "New text",
+                    "kind": "insertion",
+                    "position": 4,
+                }
+            ],
+            "omitted_edit_count": 0,
+        },
         "suggestion_ids": [suggestion_id],
         "suggestions": [
             {
@@ -1746,9 +2430,11 @@ def _update_payload(update_bytes: bytes = b"binary-yjs-update") -> dict[str, Any
                 "created_at": 1_784_112_000,
                 "active_suggestion_ids": [suggestion_id],
                 "kinds": ["insertion"],
+                "superseded_suggestion_ids": [],
             }
         ],
         "decision": None,
+        "decision_outcome": None,
         "command_id": str(uuid.UUID("55555555-5555-4555-8555-555555555555")),
         "command_payload_hash": _sha256(b"canonical-command"),
         "expected_sequence": 11,
@@ -1783,6 +2469,9 @@ def test_internal_update_validates_and_preserves_binary_metadata() -> None:
     )
     assert update.suggestions[0].kind == "insertion"
     assert update.patches[0].active_suggestion_ids == update.suggestion_ids
+    assert update.patches[0].superseded_suggestion_ids == ()
+    assert update.change_summary["edits"][0]["after"] == "New text"
+    assert update.decision_outcome is None
     assert update.decision is None
     assert update.command_payload_hash == _sha256(b"canonical-command")
     assert update.expected_sequence == 11
@@ -2155,15 +2844,38 @@ class _AvailabilityService:
         return self.available
 
 
-def _capabilities_client(service: _AvailabilityService | None) -> TestClient:
+def _capabilities_client(
+    service: _AvailabilityService | None,
+    *,
+    sharing_enabled: bool = False,
+    sharing_available: bool = False,
+    guest_links_enabled: bool = False,
+    guest_links_available: bool = False,
+    guest_link_stats_enabled: bool = True,
+    guest_links_allow_insecure_http: bool = False,
+    public_base_url: str = "http://localhost:8080",
+) -> TestClient:
     """Build the real manifest route with a minimal no-infrastructure container."""
     settings = SimpleNamespace(
-        server=SimpleNamespace(enable_openapi=False),
+        server=SimpleNamespace(
+            enable_openapi=False,
+            public_base_url=public_base_url,
+        ),
         queue=SimpleNamespace(backend="memory"),
-        storage=SimpleNamespace(backend="memory", max_file_bytes=1024),
-        collaboration=SimpleNamespace(protocol_version=3, schema_version=5),
-        agent=SimpleNamespace(
-            agent_tier=None,
+        storage=SimpleNamespace(backend="postgres", max_file_bytes=1024),
+        sharing=SimpleNamespace(enabled=sharing_enabled),
+        collaboration=SimpleNamespace(
+            enabled=service is not None,
+            protocol_version=3,
+            schema_version=5,
+        ),
+        editor_guest_links=SimpleNamespace(
+            enabled=guest_links_enabled,
+            stats_enabled=guest_link_stats_enabled,
+            allow_insecure_http=guest_links_allow_insecure_http,
+        ),
+        agent=AgentSettings(
+            agent_tier="",
             depth="normal",
             max_total_seconds=300,
             reasoning_timeout=120,
@@ -2171,7 +2883,7 @@ def _capabilities_client(service: _AvailabilityService | None) -> TestClient:
             search_timeout=90,
             claim_extract_timeout=60,
         ),
-        agent_platform=SimpleNamespace(
+        agent_platform=AgentPlatformSettings(
             default_autonomy="balanced",
             default_agent_mode="workspace_agent",
             max_clarification_rounds=2,
@@ -2182,6 +2894,7 @@ def _capabilities_client(service: _AvailabilityService | None) -> TestClient:
             skills_max_attached=5,
             skills_disclosure_budget_chars=20_000,
         ),
+        quota=QuotaSettings(max_tokens_per_run=0),
     )
     registry = _Registry()
     container = SimpleNamespace(
@@ -2192,8 +2905,10 @@ def _capabilities_client(service: _AvailabilityService | None) -> TestClient:
         file_service=None,
         object_store_backend="none",
         capability_registry=None,
+        auth_provider=SimpleNamespace(mode="local"),
         editor_collaboration_service=service,
-        share_service=None,
+        editor_guest_link_service=object() if guest_links_available else None,
+        share_service=object() if sharing_available else None,
         prompt_template_service=None,
         skill_service=None,
         quota_service=None,
@@ -2234,4 +2949,121 @@ def test_capabilities_publish_configured_and_live_collaboration_state(
         "schema_version": 5,
         "mode": "single_replica",
     }
+    assert payload["feature_status"]["collaboration"] == {
+        "configured": configured,
+        "available": available,
+        "state": (
+            "enabled" if available else "degraded" if configured else "disabled"
+        ),
+        "reason_code": (
+            None if available
+            else "service_unreachable" if configured
+            else "operator_disabled"
+        ),
+    }
     assert INTERNAL_SECRET not in response.text
+
+
+def test_capabilities_publish_independent_modular_feature_states() -> None:
+    """Simple gates and operator diagnostics remain consistent per module."""
+    enabled = _capabilities_client(
+        _AvailabilityService(True),
+        sharing_enabled=True,
+        sharing_available=True,
+        guest_links_enabled=True,
+        guest_links_available=True,
+        guest_link_stats_enabled=False,
+        public_base_url="https://inqtrix.example.test",
+    ).get("/v1/capabilities").json()
+
+    assert enabled["features"] == {
+        **enabled["features"],
+        "sharing": True,
+        "collaboration": True,
+        "editor_guest_links": True,
+        "editor_guest_link_stats": False,
+    }
+    assert enabled["feature_status"]["sharing"] == {
+        "configured": True,
+        "available": True,
+        "state": "enabled",
+        "reason_code": None,
+    }
+    assert enabled["feature_status"]["editor_guest_links"] == {
+        "configured": True,
+        "available": True,
+        "state": "enabled",
+        "reason_code": None,
+    }
+    assert enabled["feature_status"]["editor_guest_link_stats"] == {
+        "configured": False,
+        "available": False,
+        "state": "disabled",
+        "reason_code": "operator_disabled",
+    }
+
+    degraded = _capabilities_client(
+        _AvailabilityService(False),
+        sharing_enabled=True,
+        sharing_available=True,
+        guest_links_enabled=True,
+        public_base_url="http://localhost:8080",
+    ).get("/v1/capabilities").json()
+
+    assert degraded["features"]["sharing"] is True
+    assert degraded["features"]["collaboration"] is False
+    assert degraded["features"]["editor_guest_links"] is False
+    assert degraded["feature_status"]["collaboration"]["state"] == "degraded"
+    assert (
+        degraded["feature_status"]["collaboration"]["reason_code"]
+        == "service_unreachable"
+    )
+    assert degraded["feature_status"]["editor_guest_links"] == {
+        "configured": True,
+        "available": False,
+        "state": "degraded",
+        "reason_code": "collaboration_required",
+    }
+
+
+def test_capabilities_explain_https_requirement_for_configured_guest_links() -> None:
+    """A configured guest module never degrades into a generic reason."""
+    payload = _capabilities_client(
+        _AvailabilityService(True),
+        sharing_enabled=True,
+        sharing_available=True,
+        guest_links_enabled=True,
+        guest_links_available=False,
+        public_base_url="http://localhost:8080",
+    ).get("/v1/capabilities").json()
+
+    assert payload["features"]["editor_guest_links"] is False
+    assert payload["feature_status"]["editor_guest_links"] == {
+        "configured": True,
+        "available": False,
+        "state": "degraded",
+        "reason_code": "https_required",
+    }
+
+
+def test_capabilities_accept_http_guest_links_with_explicit_opt_in() -> None:
+    """The insecure-HTTP opt-in serves guest links over http — the
+    manifest must not report https_required for a feature the server
+    actually provides (the FE would hide it)."""
+    payload = _capabilities_client(
+        _AvailabilityService(True),
+        sharing_enabled=True,
+        sharing_available=True,
+        guest_links_enabled=True,
+        guest_links_available=True,
+        guest_links_allow_insecure_http=True,
+        public_base_url="http://localhost:8080",
+    ).get("/v1/capabilities").json()
+
+    assert payload["features"]["editor_guest_links"] is True
+    assert payload["feature_status"]["editor_guest_links"] == {
+        "configured": True,
+        "available": True,
+        "state": "enabled",
+        "reason_code": None,
+    }

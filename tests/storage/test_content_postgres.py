@@ -28,10 +28,7 @@ from tests.storage._canonical_users import (
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
 APP_ROLE = "inqtrix_app"
 ALICE_USER_ID = canonical_user_id("content-alice")

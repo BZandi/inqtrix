@@ -71,6 +71,7 @@ class PostgresChatStore(BaseSessionStore):
         updated_at: float,
         created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
+        model_selection: str = "",
     ) -> ChatThread:
         values = dict(
             id=id,
@@ -81,6 +82,7 @@ class PostgresChatStore(BaseSessionStore):
             preview=preview,
             source=source,
             group_id=group_id,
+            model_selection=model_selection,
             created_at=created_at,
             updated_at=updated_at,
         )
@@ -88,7 +90,9 @@ class PostgresChatStore(BaseSessionStore):
             pg_insert(chat_threads),
             chat_threads,
             values,
-            ["title", "preview", "source", "group_id", "updated_at"],
+            # A column missing here is written by the first INSERT and then
+            # never again — the failure only shows on the SECOND save.
+            ["title", "preview", "source", "group_id", "model_selection", "updated_at"],
         ).returning(chat_threads)
         async with self._session() as session:
             if group_id is not None:
@@ -358,6 +362,7 @@ class PostgresChatStore(BaseSessionStore):
             tenant_id=row.tenant_id,
             created_by_user_id=row.created_by_user_id,
             workspace_id=row.workspace_id,
+            model_selection=row.model_selection,
         )
 
     @staticmethod

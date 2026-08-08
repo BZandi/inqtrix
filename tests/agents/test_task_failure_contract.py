@@ -83,6 +83,7 @@ def _deps(assert_collections) -> SimpleNamespace:
         capabilities=None,
         context=SimpleNamespace(
             principal=None,
+            providers=SimpleNamespace(search=None),
             workspace_id=None,
             run_id="run_x",
         ),

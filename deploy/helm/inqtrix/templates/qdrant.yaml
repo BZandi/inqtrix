@@ -33,6 +33,8 @@ spec:
       {{- include "inqtrix.selectorLabels" (dict "root" . "component" "qdrant") | nindent 6 }}
   template:
     metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
       labels:
         {{- include "inqtrix.labels" (dict "root" . "component" "qdrant") | nindent 8 }}
     spec:
@@ -63,10 +65,11 @@ spec:
               value: /qdrant/storage/snapshots
             - name: QDRANT__STORAGE__TEMP_PATH
               value: /qdrant/storage/tmp
-            {{- with .Values.qdrant.apiKey }}
             - name: QDRANT__SERVICE__API_KEY
-              value: {{ . | quote }}
-            {{- end }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "inqtrix.secretName" . }}
+                  key: INQTRIX_QDRANT_API_KEY
           ports:
             - name: http
               containerPort: 6333

@@ -30,6 +30,15 @@ class AccountPreferences:
         enable_agent_memory: Whether the user opted long-term agent memory
             IN. Default ``False`` — memory is off until the user enables it
             (privacy default), so an absent/legacy row means memory-less.
+        chat_model_tier: Preferred tier for new chats — ``''`` (no
+            preference, deployment default applies), ``high``, ``mid`` or
+            ``fast``.
+        agent_model_tier: The same for agent runs, deliberately a SEPARATE
+            value: an agent run fans out over several thinking nodes while a
+            chat answer is a single call, so a chat preference must never
+            silently raise agent spend. A tier rather than a model id,
+            because this row follows the user across stacks where a concrete
+            id may not exist.
         updated_at: Unix timestamp of the last save.
         tenant_id: The tenant scope (RLS).
     """
@@ -42,6 +51,8 @@ class AccountPreferences:
     updated_at: float
     user_bubble_tone: str = "gray"
     enable_agent_memory: bool = False
+    chat_model_tier: str = ""
+    agent_model_tier: str = ""
     tenant_id: str = "default"
 
 
@@ -66,6 +77,8 @@ class AccountPreferencesStore(Protocol):
         user_bubble_tone: str,
         updated_at: float,
         enable_agent_memory: bool = False,
+        chat_model_tier: str = "",
+        agent_model_tier: str = "",
     ) -> AccountPreferences:
         """Insert or replace the user's preferences row (whole-row upsert)."""
         ...

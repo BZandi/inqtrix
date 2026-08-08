@@ -19,8 +19,9 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from enum import StrEnum
 from queue import Queue
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any, Callable
 
+from inqtrix.auth.log_redaction import log_authorization_denial
 from inqtrix.auth.memory_authority import (
     MemoryAuthorityCoordinator,
     MemoryResourceSnapshot,
@@ -29,6 +30,12 @@ from inqtrix.auth.permissions import SharePermission
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.exceptions import RunNotFound
 from inqtrix.execution_authority import AuthorizationRevoked
+from inqtrix.observability.context import (
+    bind_log_context,
+    reset_log_context,
+)
+from inqtrix.observability.otel import run_execute_span
+from inqtrix.observability.propagation import inject_traceparent
 from inqtrix.execution_failures import terminate_native_run
 from inqtrix.pagination import keyset_page
 from inqtrix.runs.ports import RunStoreMetrics
@@ -36,9 +43,13 @@ from inqtrix.runs.shared import (
     CHILD_PROGRESS_EVENT,
     TERMINAL_RUN_STATUS_VALUES,
     access_annotation,
+    answer_artifact_id,
+    answer_publication_id,
     build_child_progress_payload,
     build_run_summary,
     expand_run_event,
+    run_elapsed_seconds,
+    run_segment_id,
     should_project_child_event,
     status_value,
 )
@@ -173,7 +184,7 @@ class RunRecord:
     root_run_id: str | None = None
     """The tree root (== parent for one-level trees); ``None`` else."""
     session_id: str | None = None
-    """Agent-desk session this run belongs to; ``None`` else."""
+    """Saved Agent or Knowledge session this run belongs to; ``None`` else."""
     origin_key: str | None = None
     """Idempotency key of the SUBMITTING tool call for agent children
     (M2 step 8): a kernel tool re-executing after park/resume finds its
@@ -189,6 +200,14 @@ class RunRecord:
     started_at: float | None = None
     finished_at: float | None = None
     finished_monotonic: float | None = None
+    segment_count: int = 0
+    current_segment_id: str | None = None
+    current_segment_reason: str | None = None
+    queued_since: float | None = None
+    active_started_at: float | None = None
+    active_seconds: float = 0.0
+    waiting_seconds: float = 0.0
+    queued_seconds: float = 0.0
     waiting_since: float | None = None
     """Unix time the run entered a waiting status (TTL anchor);
     cleared on resume."""
@@ -205,6 +224,10 @@ class RunRecord:
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     event_seq: int = 0
     events: deque[dict[str, Any]] = field(default_factory=deque, repr=False)
+    # Latest execution segment's OTel trace id. Captured OUTSIDE the
+    # bounded SSE replay ring: long runs evict old events from `events`,
+    # and the admin trace surface must survive that.
+    trace_id: str | None = None
     subscribers: list[Queue] = field(default_factory=list, repr=False)
 
     @property
@@ -236,44 +259,125 @@ class RunSubscription:
 class RunHandle:
     """Worker-side handle for updating one run without exposing the store."""
 
-    def __init__(self, store: "RunStore", run_id: str, cancel_event: threading.Event) -> None:
+    def __init__(
+        self, store: "RunStore", run_id: str, cancel_event: threading.Event
+    ) -> None:
         self._store = store
         self.run_id = run_id
         self.cancel_event = cancel_event
-        self._external_authority_check: Callable[[], None] | None = None
         self.parked = False
         """This execution parked its run via :meth:`wait` — the worker
         loop reads it to skip the auto-complete safety net and to
         finish the park handoff in its unwind."""
 
     def emit(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
-        """Emit one structured event for this run."""
-        self.check_execution_authority()
+        """Emit one structured event for this run.
+
+        Deliberately unguarded. Revocation is enforced at the documented
+        safepoints — around provider/search calls, at tool, knowledge,
+        skill, child-run and segment boundaries, and around the final
+        publication (see ``docs/architecture/agent-platform.md``). Event
+        emission is not one of them: it produces no external effect that
+        a check could still recall, and bytes already streamed to a
+        viewer cannot be taken back. The read path re-authorizes every
+        SSE frame independently, which is what actually stops delivery.
+        """
         self._store.emit(self.run_id, event_type, payload or {})
 
-    def effective_principal(
-        self, fallback: Principal | None
-    ) -> Principal | None:
+    def effective_principal(self, fallback: Principal | None) -> Principal | None:
         """Return the actor persisted for this execution segment."""
         return self._store.execution_principal(self.run_id, fallback=fallback)
 
-    def check_execution_authority(self) -> None:
-        """Fail when the segment actor no longer has edit authority."""
-        if self._external_authority_check is not None:
-            self._external_authority_check()
-            return
-        self._store.check_execution_authority(self.run_id)
+    @property
+    def publication_fence_attempt(self) -> int | None:
+        """Durable claim attempt owning artifact publication, if any.
 
-    def bind_authority_check(self, check: Callable[[], None]) -> None:
-        """Bind the worker's actor-status plus resource check."""
-        self._external_authority_check = check
+        In-process execution cannot be reclaimed by a second worker and has
+        no attempt fence.  The queue-worker handle overrides this value.
+        """
+        return None
 
-    def emit_answer(self, answer: str) -> None:
-        """Emit final answer text as word-aligned output delta events."""
-        for chunk in iter_word_chunks(answer or ""):
-            self.emit("inqtrix.output_text.delta", {"delta": chunk})
+    def total_elapsed_seconds(self) -> float:
+        """Return durable wall time from first start through this segment.
 
-    def complete(self, result: dict[str, Any], snapshot: dict[str, Any] | None = None) -> None:
+        The store performs an internal lifecycle read and uses the same timing
+        projection as the public summary. A worker must not call the public
+        visibility-gated ``get`` path for its own scoped run.
+        """
+
+        return self._store.total_elapsed_seconds(self.run_id)
+
+    def emit_answer(
+        self,
+        answer: str,
+        *,
+        before_ready: Callable[[], None] | None = None,
+    ) -> None:
+        """Publish final Markdown through one explicit answer lifecycle.
+
+        The chunks are ONE logical publication, not one per word: the
+        caller brackets this call with the final-publication safepoint,
+        so a per-chunk check would re-assert the same fact thousands of
+        times after the answer is already produced.
+
+        ``before_ready`` is the central answer publisher's commit hook.  It
+        runs after the last delta and before ``answer.ready``; an exception
+        emits ``answer.interrupted`` with the final byte offset and propagates
+        so the run cannot claim a successful publication.
+        """
+        artifact_id = answer_artifact_id(self.run_id)
+        publication_id = answer_publication_id(self.run_id)
+        self.emit(
+            "inqtrix.answer.started",
+            {
+                "artifact_id": artifact_id,
+                "publication_id": publication_id,
+                "status": "writing",
+            },
+        )
+        offset = 0
+        stage = "streaming"
+        try:
+            for chunk in iter_word_chunks(answer or ""):
+                self.emit(
+                    "inqtrix.output_text.delta",
+                    {
+                        "artifact_id": artifact_id,
+                        "publication_id": publication_id,
+                        "offset": offset,
+                        "delta": chunk,
+                    },
+                )
+                offset += len(chunk.encode("utf-8"))
+            if before_ready is not None:
+                stage = "finalizing"
+                before_ready()
+            stage = "publishing_ready"
+            self.emit(
+                "inqtrix.answer.ready",
+                {
+                    "artifact_id": artifact_id,
+                    "publication_id": publication_id,
+                    "bytes": offset,
+                    "status": "ready",
+                },
+            )
+        except BaseException:
+            self.emit(
+                "inqtrix.answer.interrupted",
+                {
+                    "artifact_id": artifact_id,
+                    "publication_id": publication_id,
+                    "offset": offset,
+                    "status": "interrupted",
+                    "stage": stage,
+                },
+            )
+            raise
+
+    def complete(
+        self, result: dict[str, Any], snapshot: dict[str, Any] | None = None
+    ) -> None:
         """Mark the run completed and store its short-lived result payload."""
         self._store.complete(self.run_id, result, snapshot=snapshot)
 
@@ -325,7 +429,9 @@ class RunStore:
         event_buffer_size: int,
         waiting_ttl_seconds: float = 7 * 24 * 3600.0,
         max_concurrent_per_user: int | None = None,
+        audit_service_starts: bool = True,
     ) -> None:
+        self._audit_service_starts = bool(audit_service_starts)
         self._max_concurrent = _require_minimum(
             "max_concurrent", max_concurrent, minimum=1
         )
@@ -379,9 +485,7 @@ class RunStore:
         return MemoryResourceSnapshot(
             exists=record is not None
             and (record.created_by_tenant_id or "default") == tenant_id,
-            owner_user_id=(
-                record.created_by_user_id if record is not None else None
-            ),
+            owner_user_id=(record.created_by_user_id if record is not None else None),
         )
 
     def _append_run_effect_locked(
@@ -426,7 +530,12 @@ class RunStore:
         self._restrict_share_workspaces = restrict_to_workspace_members
 
     @classmethod
-    def from_settings(cls, settings: ServerSettings) -> "RunStore":
+    def from_settings(
+        cls,
+        settings: ServerSettings,
+        *,
+        audit_service_starts: bool = True,
+    ) -> "RunStore":
         """Build a run store from HTTP server settings."""
         return cls(
             max_concurrent=settings.run_max_concurrent or settings.max_concurrent,
@@ -434,6 +543,7 @@ class RunStore:
             completed_ttl_seconds=settings.run_completed_ttl_seconds,
             event_buffer_size=settings.run_event_buffer_size,
             max_concurrent_per_user=settings.run_max_concurrent_per_user,
+            audit_service_starts=audit_service_starts,
         )
 
     def submit(
@@ -467,7 +577,7 @@ class RunStore:
                 every historical caller byte-identical).
             parent_run_id: Spawning agent run for ``agent_child`` rows.
             root_run_id: Tree root for child rows.
-            session_id: Agent-desk session grouping.
+            session_id: Saved Agent or Knowledge session grouping.
 
         Returns:
             Public run summary suitable for HTTP responses.
@@ -476,6 +586,10 @@ class RunStore:
             RunQueueFull: When the waiting queue is already full.
         """
         stored_request_payload = deepcopy(request_payload or {})
+        # Carry the submitter's trace context in the run row (W3C
+        # traceparent) so a later worker segment parents its execution
+        # span here — one trace across the process boundary.
+        inject_traceparent(stored_request_payload)
         request_body = (
             stored_request_payload.get("body")
             if isinstance(stored_request_payload, dict)
@@ -564,7 +678,10 @@ class RunStore:
                     for record in self._records.values()
                 ):
                     raise RunSessionActive(session_id)
-            if len(self._pending) >= self._max_queue_size and self._running_count >= self._max_concurrent:
+            if (
+                len(self._pending) >= self._max_queue_size
+                and self._running_count >= self._max_concurrent
+            ):
                 raise RunQueueFull("native run queue is full")
             if (
                 self._max_concurrent_per_user is not None
@@ -591,16 +708,12 @@ class RunStore:
                 in_flight = sum(
                     1
                     for record in self._records.values()
-                    if record.execution_actor_user_id
-                    == execution_actor_user_id
+                    if record.execution_actor_user_id == execution_actor_user_id
                     and record.kind != "agent"
-                    and record.status
-                    in (RunStatus.QUEUED, RunStatus.RUNNING)
+                    and record.status in (RunStatus.QUEUED, RunStatus.RUNNING)
                 )
                 if in_flight >= self._max_concurrent_per_user:
-                    raise RunPerUserLimit(
-                        "per-user in-flight run cap reached"
-                    )
+                    raise RunPerUserLimit("per-user in-flight run cap reached")
 
             run_id = self._new_unique_run_id_locked()
             record = RunRecord(
@@ -730,9 +843,7 @@ class RunStore:
             record.finished_at = now
             record.finished_monotonic = time.monotonic()
             record.snapshot = dict(snapshot or {})
-            record.result = (
-                dict(result) if terminal == RunStatus.COMPLETED else None
-            )
+            record.result = dict(result) if terminal == RunStatus.COMPLETED else None
             record.error = dict(error) if error else None
             self._records[run_id] = record
             self._append_run_effect_locked(record, action="run.imported")
@@ -743,6 +854,39 @@ class RunStore:
         with self._lock:
             record = self._records.get(run_id)
             return record.created_by_user_id if record is not None else None
+
+    def events_snapshot(
+        self, run_id: str, *, after: int = 0
+    ) -> list[dict[str, Any]]:
+        """Replay-buffer events for the admin run drawer (visibility-free).
+
+        Memory tier honesty: the ring holds the LAST N events only —
+        older ones were evicted (the durable tier keeps everything).
+        """
+        with self._lock:
+            record = self._records.get(run_id)
+            if record is None:
+                return []
+            return [
+                # data gets its own copy: the nested payload is shared
+                # with the live replay ring, and a snapshot must never
+                # hand out a mutable view of it.
+                {**event, "data": dict(event.get("data") or {})}
+                for event in record.events
+                if int(event.get("sequence") or 0) > int(after)
+            ]
+
+    def trace_id(self, run_id: str) -> str | None:
+        """Latest execution segment's trace id (admin surface).
+
+        Not visibility-gated — authorization happens at the instance-
+        admin boundary before this lookup (``owner_user_id`` precedent).
+        Reads the dedicated record field, NOT the events deque: that
+        replay ring is bounded and long runs evict the trace event.
+        """
+        with self._lock:
+            record = self._records.get(run_id)
+            return record.trace_id if record is not None else None
 
     def execution_request_body(self, run_id: str) -> dict[str, Any]:
         """Return a detached copy of the run's persisted request body."""
@@ -756,6 +900,18 @@ class RunStore:
             if not isinstance(body, dict):
                 raise RuntimeError("Persisted run request body is invalid.")
             return deepcopy(body)
+
+    def total_elapsed_seconds(self, run_id: str) -> float:
+        """Return worker-visible wall time without public authorization.
+
+        The row has already crossed run admission and the handle owns its
+        execution. This read exposes only timing, not user data, and must work
+        for owner-scoped as well as ownerless runs.
+        """
+
+        with self._lock:
+            record = self._raw_record_locked(run_id)
+            return float(run_elapsed_seconds(record) or 0.0)
 
     def title(self, run_id: str) -> str | None:
         """The run's question as a share-surface title, regardless of
@@ -804,16 +960,14 @@ class RunStore:
                 key=lambda item: (item.created_at, item.run_id),
                 reverse=True,
             ):
-                if _workspace_matches(
-                    record, workspace_id
-                ) and _visible_to_matches(record, visible_to):
+                if _workspace_matches(record, workspace_id) and _visible_to_matches(
+                    record, visible_to
+                ):
                     summaries.append(self._summary_locked(record))
                     continue
                 shared = self._shared_permission_locked(record, visible_to)
                 if shared is not None:
-                    summaries.append(
-                        self._summary_locked(record, shared=shared)
-                    )
+                    summaries.append(self._summary_locked(record, shared=shared))
             return summaries
 
     def list_session_runs(
@@ -871,9 +1025,9 @@ class RunStore:
             self._cleanup_locked()
             visible: list[tuple[RunRecord, "SharePermission | None"]] = []
             for record in self._records.values():
-                if _workspace_matches(
-                    record, workspace_id
-                ) and _visible_to_matches(record, visible_to):
+                if _workspace_matches(record, workspace_id) and _visible_to_matches(
+                    record, visible_to
+                ):
                     visible.append((record, None))
                     continue
                 shared = self._shared_permission_locked(record, visible_to)
@@ -891,8 +1045,7 @@ class RunStore:
                 id_of=lambda item: item[0].run_id,
             )
             summaries = [
-                self._summary_locked(record, shared=shared)
-                for record, shared in page
+                self._summary_locked(record, shared=shared) for record, shared in page
             ]
             return summaries, next_cursor
 
@@ -967,9 +1120,7 @@ class RunStore:
                 raise RunNotFound(run_id)
             try:
                 authority = (
-                    self._caller_control_authority_context_locked(
-                        record, visible_to
-                    )
+                    self._caller_control_authority_context_locked(record, visible_to)
                     if visible_to is not None
                     else self._execution_authority_context_locked(record)
                 )
@@ -1035,12 +1186,29 @@ class RunStore:
     ) -> tuple[dict[str, Any], tuple[str, ...]]:
         """Cancel ``record`` and descendants while the store lock is held."""
         summary = self._cancel_record_locked(record)
-        # Walk the actual parent links so nested Kernel -> Mission ->
-        # Research trees are cancelled as one unit. The store lock also
-        # serializes child admission against this traversal.
+        affected = [record.run_id, *self._cancel_descendants_locked(record)]
+        return summary, tuple(affected)
+
+    def _cancel_descendants_locked(
+        self, record: RunRecord, *, cascade_reason: str | None = None
+    ) -> list[str]:
+        """Cancel every live descendant of ``record`` (lock held).
+
+        The ONE parent-link walk shared by explicit tree cancel and by
+        parent terminal FAILURE: a failed parent must never leave its
+        children running invisibly (orphans burning quota behind a dead
+        run). The store lock also serializes child admission against
+        this traversal, so nested Kernel -> Mission -> Research trees
+        terminate as one unit.
+
+        ``cascade_reason`` overrides the per-state cancel reason on every
+        descendant event (the failure cascade passes ``parent_failed`` so
+        an orphan's cancel says WHY, matching the warning log); the
+        explicit tree cancel leaves it ``None`` to keep its own reasons.
+        """
         frontier = [record.run_id]
         seen = {record.run_id}
-        affected = [record.run_id]
+        affected: list[str] = []
         while frontier:
             parent_id = frontier.pop()
             children = [
@@ -1052,11 +1220,18 @@ class RunStore:
                 seen.add(child.run_id)
                 affected.append(child.run_id)
                 frontier.append(child.run_id)
-                self._cancel_record_locked(child)
-        return summary, tuple(affected)
+                self._cancel_record_locked(child, reason_override=cascade_reason)
+        return affected
 
-    def _cancel_record_locked(self, record: RunRecord) -> dict[str, Any]:
-        """Cancel one record in place (queued/waiting/running semantics)."""
+    def _cancel_record_locked(
+        self, record: RunRecord, *, reason_override: str | None = None
+    ) -> dict[str, Any]:
+        """Cancel one record in place (queued/waiting/running semantics).
+
+        ``reason_override`` replaces the per-state cancel reason (used by
+        the parent-failure cascade to stamp ``parent_failed``); ``None``
+        keeps the state-specific default.
+        """
         if record.status == RunStatus.QUEUED:
             self._remove_pending_locked(record.run_id)
             record.cancel_event.set()
@@ -1064,7 +1239,10 @@ class RunStore:
             self._emit_locked(
                 record,
                 "inqtrix.run.cancelled",
-                {"status": "cancelled", "reason": "cancelled_before_start"},
+                {
+                    "status": "cancelled",
+                    "reason": reason_override or "cancelled_before_start",
+                },
             )
             record.work = None
             return self._summary_locked(record)
@@ -1076,7 +1254,10 @@ class RunStore:
             self._emit_locked(
                 record,
                 "inqtrix.run.cancelled",
-                {"status": "cancelled", "reason": "cancelled_while_waiting"},
+                {
+                    "status": "cancelled",
+                    "reason": reason_override or "cancelled_while_waiting",
+                },
             )
             record.work = None
             return self._summary_locked(record)
@@ -1085,7 +1266,10 @@ class RunStore:
             self._emit_locked(
                 record,
                 "inqtrix.run.cancel_requested",
-                {"status": "running", "reason": "client_requested_cancel"},
+                {
+                    "status": "running",
+                    "reason": reason_override or "client_requested_cancel",
+                },
             )
             return self._summary_locked(record)
         return self._summary_locked(record)
@@ -1113,20 +1297,21 @@ class RunStore:
             if record is None:
                 raise RunNotFound(run_id)
             if (
-                (
-                    record.created_by_user_id is not None
-                    and record.created_by_user_id != requester_user_id
-                )
-                or not _workspace_matches(record, workspace_id)
-            ):
+                record.created_by_user_id is not None
+                and record.created_by_user_id != requester_user_id
+            ) or not _workspace_matches(record, workspace_id):
                 # Owner-only for runs that HAVE a recorded creator; a legacy
                 # pre-scoping run (created_by_user_id is None) has no owner signal
                 # but its workspace, so the namespace match alone gates it —
                 # otherwise such a run would be undeletable by anyone.
-                log.warning(
-                    "authz denied: run %s delete refused for user_id=%s",
-                    run_id,
-                    requester_user_id or "",
+                log_authorization_denial(
+                    log,
+                    action="delete",
+                    principal_kind=None,
+                    actor_user_id=requester_user_id,
+                    tenant_id=record.created_by_tenant_id,
+                    resource_type="run",
+                    resource_id=run_id,
                 )
                 raise RunNotFound(run_id)
             if record.status not in TERMINAL_RUN_STATUSES:
@@ -1343,6 +1528,20 @@ class RunStore:
                 "snapshot": record.snapshot,
             },
         )
+        # Parent terminal failure cascades: live children of a failed
+        # parent are orphans (their results have no consumer) — cancel
+        # them through the same walk explicit tree-cancel uses, stamped
+        # with ``parent_failed`` so each orphan's cancel says why.
+        cancelled = self._cancel_descendants_locked(
+            record, cascade_reason="parent_failed"
+        )
+        if cancelled:
+            log.warning(
+                "Elternlauf %s fehlgeschlagen — %d laufende Kind-Laeufe "
+                "abgebrochen (parent_failed).",
+                record.run_id,
+                len(cancelled),
+            )
 
     def mark_waiting(
         self,
@@ -1396,8 +1595,10 @@ class RunStore:
                 )
                 return
             with self._execution_authority_context_locked(record):
+                now = time.time()
+                self._close_active_interval_locked(record, now)
                 record.status = waiting
-                record.waiting_since = time.time()
+                record.waiting_since = now
                 record.park_in_flight = True
                 self._emit_locked(
                     record,
@@ -1460,9 +1661,7 @@ class RunStore:
                     if record.work is None:
                         # In-memory closures never survive a process restart;
                         # fail before the composed decision writer can mutate.
-                        raise RunActive(
-                            f"run {run_id} has no retained work to resume"
-                        )
+                        raise RunActive(f"run {run_id} has no retained work to resume")
                     if control_write is not None:
                         # Memory lockstep for Postgres' resume transaction:
                         # the callback updates the control store while every
@@ -1472,8 +1671,15 @@ class RunStore:
                     if actor_user_id is not None:
                         record.execution_actor_user_id = actor_user_id
                         record.execution_scopes = frozenset(execution_scopes)
+                    previous_status = record.status
+                    now = time.time()
+                    self._close_waiting_interval_locked(record, now)
+                    self._begin_segment_locked(
+                        record,
+                        reason=self._resume_reason(previous_status),
+                    )
                     record.status = RunStatus.QUEUED
-                    record.waiting_since = None
+                    record.queued_since = now
                     if record.park_in_flight:
                         # The parking worker has not unwound yet: dispatching
                         # now would run the same closure on two threads. The
@@ -1488,6 +1694,8 @@ class RunStore:
                             "status": "queued",
                             "queue_position": self._queue_position_locked(run_id),
                             "resumed": True,
+                            "segment_id": record.current_segment_id,
+                            "segment_ordinal": record.segment_count,
                         },
                     )
                     self._dispatch_locked()
@@ -1620,10 +1828,56 @@ class RunStore:
             )
             return [self._summary_locked(record) for record in records]
 
-    def _run_worker(self, run_id: str, work: RunWork, cancel_event: threading.Event) -> None:
+    def _run_worker(
+        self,
+        run_id: str,
+        work: RunWork,
+        cancel_event: threading.Event,
+        request_payload: dict[str, Any] | None = None,
+        tenant_id: str | None = None,
+        actor_user_id: "uuid.UUID | None" = None,
+    ) -> None:
         handle = RunHandle(self, run_id, cancel_event)
         crashed = False
+        # The in-process pendant to the queue worker's binding: every log
+        # line of this run thread carries the run_id (JSON mode), and the
+        # run root span parents itself in the submitter's trace context
+        # (the dispatcher hands the payload over — this thread must not
+        # touch the store lock before ``work`` starts). Threads are
+        # pooled — both bindings are undone in the outer finally below.
+        # Setup INSIDE the try: a telemetry failure must never skip the
+        # finally below, which is the ONLY place _running_count is
+        # decremented and _dispatch_locked runs — a leaked slot would
+        # silently stall the in-memory dispatcher after max_concurrent.
+        telemetry_stack = ExitStack()
+        log_tokens: dict = {}
         try:
+            # Same correlation field set as the other two execution
+            # boundaries (worker loop, durable no-queue): run + tenant +
+            # subject pseudonym. The values RIDE ALONG from the
+            # dispatcher for the same reason request_payload does — this
+            # thread must not touch the store lock before ``work``
+            # starts (callers observe side effects racing submit-return).
+            span_tenant = str(tenant_id or "default")
+            telemetry_stack.enter_context(
+                run_execute_span(
+                    run_id=run_id,
+                    tenant_id=span_tenant,
+                    attempt=0,
+                    payload=request_payload,
+                )
+            )
+            context_fields: dict[str, object] = {
+                "run_id": run_id,
+                "tenant": span_tenant,
+            }
+            if actor_user_id is not None:
+                from inqtrix.auth.log_redaction import stable_pseudonym
+
+                context_fields["user"] = stable_pseudonym(
+                    "usr", actor_user_id
+                )
+            log_tokens = bind_log_context(**context_fields)
             work(handle)
             with self._lock:
                 record = self._records.get(run_id)
@@ -1639,9 +1893,7 @@ class RunStore:
                     # would destroy the interrupt.
                     try:
                         with self._execution_authority_context_locked(record):
-                            self._mark_terminal_locked(
-                                record, RunStatus.COMPLETED
-                            )
+                            self._mark_terminal_locked(record, RunStatus.COMPLETED)
                             self._emit_locked(
                                 record,
                                 "inqtrix.run.completed",
@@ -1661,6 +1913,9 @@ class RunStore:
             log.exception("Native run %s failed", run_id)
             terminate_native_run(handle, exc)
         finally:
+            reset_log_context(log_tokens)
+            _clear_feature_after_segment()
+            telemetry_stack.close()
             # The park handoff completes HERE: a resume that arrived
             # before this unwind parked its request in
             # ``resume_requested`` and is dispatched now.
@@ -1696,19 +1951,53 @@ class RunStore:
         while self._running_count < self._max_concurrent and self._pending:
             run_id = self._pending.popleft()
             record = self._records.get(run_id)
-            if record is None or record.status != RunStatus.QUEUED or record.work is None:
+            if (
+                record is None
+                or record.status != RunStatus.QUEUED
+                or record.work is None
+            ):
                 continue
+            initial_start = record.started_at is None
+            now = time.time()
+            if initial_start:
+                record.queued_since = None
+            else:
+                self._close_queued_interval_locked(record, now)
+            if initial_start:
+                record.started_at = now
+                self._begin_segment_locked(record, reason="initial")
+            elif record.current_segment_id is None:
+                # Defensive compatibility for an older in-memory record that
+                # was created before execution segments were introduced.
+                self._begin_segment_locked(record, reason="resume")
             record.status = RunStatus.RUNNING
-            record.started_at = time.time()
+            record.active_started_at = now
             self._running_count += 1
             self._emit_locked(
                 record,
-                "inqtrix.run.started",
-                {"status": "running", "snapshot": record.snapshot},
+                ("inqtrix.run.started" if initial_start else "inqtrix.run.resumed"),
+                {
+                    "status": "running",
+                    "snapshot": record.snapshot,
+                    "segment_id": record.current_segment_id,
+                    "segment_ordinal": record.segment_count,
+                    "reason": record.current_segment_reason,
+                },
             )
             thread = threading.Thread(
                 target=self._run_worker,
-                args=(run_id, record.work, record.cancel_event),
+                # request_payload rides along because the dispatcher
+                # already holds the lock here — the run thread must not
+                # re-acquire it before ``work`` starts (callers observe
+                # side effects of ``work`` racing submit-return).
+                args=(
+                    run_id,
+                    record.work,
+                    record.cancel_event,
+                    dict(record.request_payload),
+                    record.created_by_tenant_id,
+                    record.created_by_user_id,
+                ),
                 name=f"inqtrix-run-{run_id}",
                 daemon=True,
             )
@@ -1799,11 +2088,15 @@ class RunStore:
         # stay operator-visible (Designprinzip 1). Persisting it to
         # the audit log arrives with the durable run port — this
         # store is sync/threaded, the audit sink is async.
-        log.warning(
-            "authz denied: run %s hidden from user_id=%s tenant=%s",
-            run_id,
-            visible_to.principal.user_id if visible_to else "",
-            visible_to.principal.tenant_id if visible_to else "",
+        principal = visible_to.principal if visible_to is not None else None
+        log_authorization_denial(
+            log,
+            action="read",
+            principal_kind=principal.kind if principal is not None else None,
+            actor_user_id=principal.user_id if principal is not None else None,
+            tenant_id=principal.tenant_id if principal is not None else None,
+            resource_type="run",
+            resource_id=run_id,
         )
         raise RunNotFound(run_id)
 
@@ -1854,14 +2147,83 @@ class RunStore:
         raise RuntimeError("could not allocate a unique native run id")
 
     def _mark_terminal_locked(self, record: RunRecord, status: RunStatus | str) -> None:
+        now = time.time()
+        self._close_current_interval_locked(record, now)
         record.status = _coerce_status(status)
-        record.finished_at = time.time()
+        record.finished_at = now
         record.finished_monotonic = time.monotonic()
+        self._append_terminal_audit_locked(record)
         # Every terminal transition of an agent child funnels through
         # here (complete/fail/cancel/TTL alike), so this is THE choke
         # point for waking a parent parked on its children.
         if record.kind == "agent_child" and record.parent_run_id:
             self._wake_parent_if_children_done_locked(record.parent_run_id)
+
+    def _append_terminal_audit_locked(self, record: RunRecord) -> None:
+        """Dienststart-Index terminal row (memory twin of the Postgres
+        in-transaction write): metadata + correlation only. Callers set
+        result/error BEFORE the terminal transition, so both are
+        readable here."""
+        if not self._audit_service_starts or self._authority is None:
+            return
+        action = {
+            RunStatus.COMPLETED: "run.completed",
+            RunStatus.FAILED: "run.failed",
+            RunStatus.CANCELLED: "run.cancelled",
+        }.get(record.status)
+        if action is None:
+            return
+        usage = (record.result or {}).get("usage") or {}
+        detail: dict[str, str] = {"mode": record.mode or "standard"}
+        if record.created_at and record.finished_at:
+            detail["duration_s"] = str(
+                round(max(0.0, record.finished_at - record.created_at), 2)
+            )
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        if prompt_tokens or completion_tokens:
+            detail["prompt_tokens"] = str(prompt_tokens)
+            detail["completion_tokens"] = str(completion_tokens)
+        if record.error and record.error.get("type"):
+            detail["error_type"] = str(record.error["type"])
+        correlation = {"run_id": record.run_id}
+        if record.trace_id:
+            correlation["trace_id"] = record.trace_id
+        workspace_uuid = None
+        if record.workspace_id:
+            try:
+                workspace_uuid = uuid.UUID(str(record.workspace_id))
+            except ValueError:
+                workspace_uuid = None
+        append_row = getattr(self._authority, "append_audit_row", None)
+        if append_row is None:
+            return
+        try:
+            append_row(
+                tenant_id=record.created_by_tenant_id or "default",
+                actor_user_id=(
+                    record.execution_actor_user_id
+                    or record.created_by_user_id
+                ),
+                action=action,
+                resource_type="run",
+                resource_id=record.run_id,
+                detail=detail,
+                outcome=(
+                    "success"
+                    if record.status is RunStatus.COMPLETED
+                    else "failure"
+                ),
+                correlation=correlation,
+                workspace_id=workspace_uuid,
+            )
+        except Exception:  # noqa: BLE001 — index row must not kill terminals
+            log.warning(
+                "Dienststart-Index-Zeile fuer Run %s konnte nicht "
+                "geschrieben werden.",
+                record.run_id,
+                exc_info=True,
+            )
 
     def _wake_parent_if_children_done_locked(self, parent_run_id: str) -> None:
         """Resume a children-parked parent once its last child ended.
@@ -1884,7 +2246,10 @@ class RunStore:
         ):
             return
         parent.status = RunStatus.QUEUED
-        parent.waiting_since = None
+        now = time.time()
+        self._close_waiting_interval_locked(parent, now)
+        self._begin_segment_locked(parent, reason="children")
+        parent.queued_since = now
         if parent.park_in_flight:
             parent.resume_requested = True
         else:
@@ -1896,9 +2261,53 @@ class RunStore:
                 "status": "queued",
                 "queue_position": self._queue_position_locked(parent_run_id),
                 "resumed": True,
+                "segment_id": parent.current_segment_id,
+                "segment_ordinal": parent.segment_count,
             },
         )
         self._dispatch_locked()
+
+    @staticmethod
+    def _resume_reason(status: RunStatus) -> str:
+        if status is RunStatus.WAITING_FOR_APPROVAL:
+            return "approval"
+        if status is RunStatus.WAITING_FOR_INPUT:
+            return "input"
+        if status is RunStatus.WAITING_FOR_CHILDREN:
+            return "children"
+        return "resume"
+
+    @staticmethod
+    def _begin_segment_locked(record: RunRecord, *, reason: str) -> None:
+        record.segment_count += 1
+        record.current_segment_id = run_segment_id(record.run_id, record.segment_count)
+        record.current_segment_reason = reason
+
+    @staticmethod
+    def _close_active_interval_locked(record: RunRecord, now: float) -> None:
+        if record.active_started_at is not None:
+            record.active_seconds += max(0.0, now - record.active_started_at)
+            record.active_started_at = None
+
+    @staticmethod
+    def _close_waiting_interval_locked(record: RunRecord, now: float) -> None:
+        if record.waiting_since is not None:
+            record.waiting_seconds += max(0.0, now - record.waiting_since)
+            record.waiting_since = None
+
+    @staticmethod
+    def _close_queued_interval_locked(record: RunRecord, now: float) -> None:
+        if record.queued_since is not None:
+            record.queued_seconds += max(0.0, now - record.queued_since)
+            record.queued_since = None
+
+    def _close_current_interval_locked(self, record: RunRecord, now: float) -> None:
+        if record.status is RunStatus.RUNNING:
+            self._close_active_interval_locked(record, now)
+        elif record.status in WAITING_RUN_STATUSES:
+            self._close_waiting_interval_locked(record, now)
+        elif record.status is RunStatus.QUEUED:
+            self._close_queued_interval_locked(record, now)
 
     def _queue_position_locked(self, run_id: str) -> int | None:
         try:
@@ -1921,9 +2330,7 @@ class RunStore:
         return build_run_summary(
             record,
             queue_position=self._queue_position_locked(record.run_id),
-            access=access_annotation(
-                shared, owner_user_id=record.created_by_user_id
-            ),
+            access=access_annotation(shared, owner_user_id=record.created_by_user_id),
         )
 
     def _emit_locked(
@@ -1978,9 +2385,7 @@ class RunStore:
             status=parent.status.value,
         )
         for projected_type, clean_payload in events:
-            self._append_event_locked(
-                parent, projected_type, clean_payload
-            )
+            self._append_event_locked(parent, projected_type, clean_payload)
 
     def _append_event_locked(
         self,
@@ -1988,6 +2393,12 @@ class RunStore:
         event_type: str,
         clean_payload: dict[str, Any],
     ) -> None:
+        if event_type == "inqtrix.run.trace":
+            # Durable capture outside the bounded replay ring (see
+            # RunRecord.trace_id); recency wins across retries.
+            value = str(clean_payload.get("trace_id") or "")
+            if value:
+                record.trace_id = value
         record.event_seq += 1
         event = {
             "type": event_type,
@@ -2044,3 +2455,14 @@ def _coerce_status(status: RunStatus | str) -> RunStatus:
     if isinstance(status, RunStatus):
         return status
     return RunStatus(status)
+
+
+def _clear_feature_after_segment() -> None:
+    """Reused threads must not leak feature label or ledger subject."""
+    from inqtrix.observability.context import (
+        clear_feature,
+        clear_usage_subject,
+    )
+
+    clear_feature()
+    clear_usage_subject()

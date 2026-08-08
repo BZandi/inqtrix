@@ -13,6 +13,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.pagination import (
@@ -24,6 +25,7 @@ from inqtrix.pagination import (
 from inqtrix.project.vector_index_ports import (
     VectorIndexHistoryEntry,
     VectorIndexMember,
+    VectorIndexMemberUnavailable,
     VectorIndexNotFound,
     VectorIndexRecord,
 )
@@ -32,6 +34,11 @@ from inqtrix.services.request_parsing import (
     workspace_id_from_request,
 )
 from inqtrix.services.vector_index_service import VectorIndexValidationError
+from inqtrix.runs.deletion_operations import (
+    DeletionOperationConflict,
+    DeletionTargetKind,
+)
+from inqtrix.knowledge.stores.ports import CollectionNotFound
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
@@ -138,6 +145,7 @@ def build_router(container: "AppContainer") -> APIRouter:
     router = APIRouter()
     principal_dep = container.principal_dependency
     user_context_dep = container.user_context_dependency
+    deletion_service = container.asset_deletion_service
 
     @router.get("/v1/vector-indexes")
     async def list_indexes(req: Request, principal: Principal = Depends(principal_dep)):
@@ -173,6 +181,12 @@ def build_router(container: "AppContainer") -> APIRouter:
         except _PayloadError as exc:
             return error_response(400, str(exc), "invalid_request_error")
         try:
+            deletion_service.assert_target_allowed(
+                DeletionTargetKind.VECTOR_INDEX,
+                index_id,
+                principal=principal,
+                workspace_id=workspace_id_from_request(req),
+            )
             index = await service.save_index(
                 id=index_id, title=str(body.get("title", "")),
                 handle=str(body.get("handle", "")), model=model, dims=dims,
@@ -197,20 +211,55 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(400, str(exc), "invalid_request_error")
         except VectorIndexNotFound:
             return error_response(404, "Index nicht gefunden", "not_found")
+        except VectorIndexMemberUnavailable:
+            return error_response(
+                409,
+                "Mindestens eine Datei ist nicht mehr verfuegbar; "
+                "der Index wurde nicht veraendert",
+                "vector_index_member_unavailable",
+            )
+        except DeletionOperationConflict:
+            return error_response(
+                409,
+                "Index wird geloescht und kann nicht wiederhergestellt werden",
+                "deletion_in_progress",
+            )
         return _record_payload(index)
 
-    @router.delete("/v1/vector-indexes/{index_id}", status_code=204)
+    @router.delete("/v1/vector-indexes/{index_id}", status_code=202)
     async def delete_index(
         index_id: str, req: Request,
+        principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        try:
-            await service.delete_index(
-                index_id, visible_to=visible_to,
-                request_workspace_id=workspace_id_from_request(req),
+        body = await _json_object(req)
+        if body is not None and not isinstance(body, dict):
+            return error_response(400, "Ungueltiger Body", "invalid_request_error")
+        server_collection_id_hint = (
+            body.get("server_collection_id") if isinstance(body, dict) else None
+        )
+        if server_collection_id_hint is not None and (
+            not isinstance(server_collection_id_hint, str)
+            or not server_collection_id_hint.strip()
+        ):
+            return error_response(
+                400,
+                "server_collection_id muss eine nichtleere Zeichenfolge sein",
+                "invalid_request_error",
             )
-        except VectorIndexNotFound:
+        try:
+            summary = await deletion_service.start_vector_index(
+                index_id,
+                principal=principal,
+                visible_to=visible_to,
+                workspace_id=workspace_id_from_request(req),
+                server_collection_id_hint=server_collection_id_hint,
+            )
+            return JSONResponse(status_code=202, content=summary)
+        except (VectorIndexNotFound, CollectionNotFound):
             return error_response(404, "Index nicht gefunden", "not_found")
+        except DeletionOperationConflict:
+            return error_response(409, "Index wird bereits geloescht", "deletion_in_progress")
 
     return router
 

@@ -143,9 +143,9 @@ def test_postgres_storage_selects_the_durable_store():
 
 
 def test_postgres_store_uses_durable_retention_not_replay_ttl():
-    """The durable store must keep terminal runs for the generous durable
-    retention window, NOT the in-memory store's short replay TTL -- else
-    completed research reports get pruned minutes after finishing (the P3 bug).
+    """The durable store must keep terminal runs for the durable retention
+    window, not the in-memory store's short replay TTL; otherwise completed
+    research reports are pruned minutes after finishing.
 
     Distinct values pin the wiring: a revert to ``run_completed_ttl_seconds``
     would make this go red.

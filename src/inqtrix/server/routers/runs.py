@@ -33,7 +33,9 @@ from inqtrix.core.results import SourcePolicy
 from inqtrix.content.skills import SkillNotFound
 from inqtrix.knowledge.stores.ports import CollectionNotFound
 from inqtrix.project.agent_sessions_ports import AgentSessionNotFound
+from inqtrix.project.knowledge_sessions_ports import KnowledgeSessionNotFound
 from inqtrix.quota.models import QuotaDimension
+from inqtrix.result import merge_knowledge_result_payload
 from inqtrix.server.metrics import record_admission_rejected
 from inqtrix.server.routers import (
     quota_admission,
@@ -289,10 +291,11 @@ def build_router(container: "AppContainer") -> APIRouter:
                 "response_form muss auto, chat oder canvas sein.",
                 "invalid_request_error",
             )
-        if session_id is not None and not is_agent:
+        is_saved_session_run = is_agent or resolved.mode == "knowledge"
+        if session_id is not None and not is_saved_session_run:
             return error_response(
                 400,
-                "session_id gilt nur fuer Agent-Modi.",
+                "session_id gilt nur fuer Agent- oder Wissensmodus.",
                 "invalid_request_error",
             )
         if response_form is not None and not is_agent:
@@ -340,8 +343,8 @@ def build_router(container: "AppContainer") -> APIRouter:
         if is_agent and autonomy is None:
             autonomy = settings.agent_platform.default_autonomy
 
-        # Skill admission (plan M3): strict like collections — ONE
-        # invisible skill denies the whole submission (a run that
+        # Skill admission is strict like collections: ONE invisible
+        # skill denies the whole submission (a run that
         # silently ran with fewer skills than attached would change
         # behavior without a trace), and the count cap is enforced
         # here, never prompted.
@@ -428,6 +431,23 @@ def build_router(container: "AppContainer") -> APIRouter:
                     visible_to=visible_to,
                 )
             except AgentSessionNotFound:
+                return error_response(
+                    404, "Sitzung nicht gefunden", "not_found"
+                )
+        elif resolved.mode == "knowledge" and session_id is not None:
+            try:
+                await container.knowledge_sessions_service.claim_session(
+                    session_id,
+                    title=question[:120],
+                    caller_user_id=(
+                        principal.user_id
+                        if principal.kind in ("oidc_session", "pat")
+                        else None
+                    ),
+                    workspace_id=workspace_id,
+                    visible_to=visible_to,
+                )
+            except KnowledgeSessionNotFound:
                 return error_response(
                     404, "Sitzung nicht gefunden", "not_found"
                 )
@@ -544,20 +564,29 @@ def build_router(container: "AppContainer") -> APIRouter:
             return float(value) if isinstance(value, (int, float)) else None
 
         try:
+            imported_snapshot = merge_knowledge_result_payload(
+                body.get("snapshot")
+                if isinstance(body.get("snapshot"), dict)
+                else {}
+            )
+            imported_result = merge_knowledge_result_payload(
+                body.get("result")
+                if isinstance(body.get("result"), dict)
+                else {},
+                imported_snapshot,
+            )
             summary = await asyncio.to_thread(
                 run_store.import_completed_run,
                 source_run_id=source_run_id,
                 question=str(body.get("question") or ""),
                 stack_name=str(body.get("stack") or "default"),
-                result=body.get("result") if isinstance(body.get("result"), dict) else {},
+                result=imported_result,
                 status=str(body.get("status") or "completed"),
                 mode=str(body.get("mode") or "research"),
                 agent_overrides=body.get("agent_overrides")
                 if isinstance(body.get("agent_overrides"), dict)
                 else {},
-                snapshot=body.get("snapshot")
-                if isinstance(body.get("snapshot"), dict)
-                else {},
+                snapshot=imported_snapshot,
                 error=body.get("error")
                 if isinstance(body.get("error"), dict)
                 else None,
@@ -648,10 +677,16 @@ def build_router(container: "AppContainer") -> APIRouter:
                 status=summary["status"],
             )
         try:
-            return run_store.result(
+            stored_result = run_store.result(
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
+            )
+            return merge_knowledge_result_payload(
+                stored_result,
+                summary.get("snapshot")
+                if isinstance(summary.get("snapshot"), dict)
+                else None,
             )
         except RunNotFound:
             return error_response(404, "Run-Ergebnis nicht gefunden", "not_found")
@@ -831,8 +866,8 @@ def build_router(container: "AppContainer") -> APIRouter:
                 return False
             return True
 
-        # Polling fallback (plan M1 T2): ``?format=json`` returns the
-        # SAME replay buffer as an immediate JSON page instead of a
+        # The polling fallback returns the SAME replay buffer through
+        # ``?format=json`` as an immediate JSON page instead of a
         # stream — for clients behind SSE-buffering proxies. One event
         # pipeline, one auth path; ``terminal`` tells the poller to stop.
         if req.query_params.get("format") == "json":

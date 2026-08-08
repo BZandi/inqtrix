@@ -304,7 +304,7 @@ Key transitions inside `search()`:
   `selected_report_evidence`, `unverified_evidence_notes`, or
   `prompt_evidence_units` state field anymore. The answer composer reads one
   rendered Markdown overview from `render_evidence_ledger_overview()` -- see
-  [Evidence pipeline](evidence-pipeline.md#rendering-evidenceledger-markdown).
+  [Evidence pipeline](evidence-pipeline.md#rendering-evidenceledger--markdown).
 - A round with `claims=[]` is **not** degraded -- claimless records carry
   snippets, passages, and citations and are rendered as
   `source-context` blocks in the overview.
@@ -492,7 +492,7 @@ flowchart TD
 ```
 
 The answer node does not perform new search. It renders the single canonical
-evidence overview from the ledger (see [Evidence pipeline — Rendering](evidence-pipeline.md#rendering-evidenceledger-markdown)),
+evidence overview from the ledger (see [Evidence pipeline — Rendering](evidence-pipeline.md#rendering-evidenceledger--markdown)),
 invokes the section composer (one LLM call per section, body sections first
 and `write_last` sections like Executive Summary / Kurzfazit afterwards),
 sanitizes citations so only URLs in `allowed_urls` remain, then audits

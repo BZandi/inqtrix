@@ -60,10 +60,7 @@ from inqtrix.storage.user_lifecycle_postgres import (
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
 APP_ROLE = "inqtrix_app"
 TENANT_ID = "default"
@@ -123,10 +120,18 @@ async def session_factory(engine: AsyncEngine) -> SessionFactory:
                 workspace_members,
                 knowledge_collections,
                 workspaces,
-                users,
                 tenant_security_state,
             ):
                 await session.execute(table.delete())
+            # This module shares one disposable integration database with
+            # independent storage suites.  Their resource rows legitimately
+            # retain RESTRICT references to their own canonical users between
+            # modules.  Identity fixtures use a dedicated issuer, so remove
+            # only identities created here instead of deleting the global
+            # user registry and making the suite order-dependent.
+            await session.execute(
+                users.delete().where(users.c.issuer == "https://idp.example")
+            )
     return factory
 
 
@@ -508,26 +513,24 @@ async def test_rls_catalog_covers_current_identity_metadata(
 
 
 @pytest.mark.asyncio
-async def test_query_without_tenant_context_fails_loudly(
+@pytest.mark.parametrize("tenant_guc", [None, ""], ids=["unset", "empty"])
+async def test_query_without_usable_tenant_context_fails_loudly(
     session_factory: SessionFactory,
+    tenant_guc: str | None,
 ) -> None:
+    """Seed a row first: the policy expression is a per-row InitPlan, so an
+    empty table never reaches the resolver and would hide a missing guard."""
+    async with scoped(session_factory) as session:
+        await insert_minimal_row(session, workspaces, TENANT_ID)
+
     async with session_factory() as session:
         async with session.begin():
             await session.execute(text(f'SET LOCAL ROLE "{APP_ROLE}"'))
-            with pytest.raises(DBAPIError, match="tenant_id"):
-                await session.execute(select(workspaces.c.id))
-
-
-@pytest.mark.asyncio
-async def test_empty_tenant_guc_fails_loudly(
-    session_factory: SessionFactory,
-) -> None:
-    async with session_factory() as session:
-        async with session.begin():
-            await session.execute(text(f'SET LOCAL ROLE "{APP_ROLE}"'))
-            await session.execute(
-                text("SELECT set_config('inqtrix.tenant_id', '', true)")
-            )
+            if tenant_guc is not None:
+                await session.execute(
+                    text("SELECT set_config('inqtrix.tenant_id', :value, true)"),
+                    {"value": tenant_guc},
+                )
             with pytest.raises(DBAPIError, match="tenant_id"):
                 await session.execute(select(workspaces.c.id))
 
@@ -1608,3 +1611,78 @@ async def test_startup_reconcile_revokes_boundary_invalid_and_orphaned_shares(
         "kc_no_common_workspace",
         "kc_missing",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("revoker", "accept_first", "expected"),
+    [
+        ("owner", False, "share.revoked"),
+        ("owner", True, "share.revoked"),
+        ("recipient", False, "share.declined"),
+        ("recipient", True, "share.left"),
+    ],
+)
+async def test_share_revocation_records_the_same_action_as_the_memory_twin(
+    session_factory: SessionFactory,
+    revoker: str,
+    accept_first: bool,
+    expected: str,
+) -> None:
+    """The Postgres path must answer WHO ended a share and HOW.
+
+    The memory twin derives three distinct actions from the same facts. This
+    path wrote one flat "share.removed" without a recipient, so a rights audit
+    could not tell a decline from a revocation, and the actor was blank in the
+    admin panel because the row bypassed the audit writer that stamps the
+    pseudonym.
+    """
+    identity = backend(session_factory)
+    owner_user_id = await create_user(session_factory, label="share-owner")
+    recipient_user_id = await create_user(
+        session_factory, label="share-recipient"
+    )
+    collection_id = await create_collection(
+        session_factory,
+        owner_user_id=owner_user_id,
+        collection_id=f"kc_{expected}_{int(accept_first)}",
+    )
+    created = await identity.create_shares(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id=collection_id,
+        owner_user_id=owner_user_id,
+        granted_by_user_id=owner_user_id,
+        invitees=[(recipient_user_id, SharePermission.VIEW)],
+    )
+    if accept_first:
+        assert await identity.accept_share_by_id(
+            tenant_id=TENANT_ID,
+            share_id=created[0].id,
+            recipient_user_id=recipient_user_id,
+            owner_user_id=owner_user_id,
+        ) is not None
+
+    revoked_by = owner_user_id if revoker == "owner" else recipient_user_id
+    assert await identity.revoke_share_by_id(
+        tenant_id=TENANT_ID,
+        share_id=created[0].id,
+        revoked_by_user_id=revoked_by,
+        owner_user_id=owner_user_id,
+    ) is not None
+
+    rows, _ = await identity.list_audit_entries(
+        tenant_id=TENANT_ID,
+        resource_type="knowledge_collection",
+        resource_id=collection_id,
+        limit=20,
+    )
+    actions = [row["action"] for row in rows]
+    assert expected in actions
+    assert "share.removed" not in actions
+    row = next(row for row in rows if row["action"] == expected)
+    assert row["detail"]["recipient_user_id"] == str(recipient_user_id)
+    # Every share row must carry the actor reference the panel filters on.
+    assert row["actor_pseudonym"], row
+    grant_row = next(row for row in rows if row["action"] == "share.granted")
+    assert grant_row["actor_pseudonym"], grant_row

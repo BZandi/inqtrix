@@ -51,7 +51,46 @@ The two strings are **word-for-word identical**. Do not summarise, translate, or
 - Comments explain *why*, not *what*. The code itself tells the reader *what*.
 - No narrative comments (`# increment counter`, `# loop over items`, `# return result`).
 - Block comments above module-level constants name their source (provider docs link, spec section, audit log) when the value is not self-explanatory.
+- Describe the current technical cause and invariant without referring to an
+  internal plan, priority, review, incident, private decision id, branch,
+  commit, or the date on which a change was made.
+- Dates and versions remain appropriate when executable behaviour or external
+  interoperability depends on them, such as protocol versions, schema
+  revisions, retention calculations, source provenance, and deterministic
+  temporal fixtures.
 - No emojis — anywhere.
+
+## Reuse and abstraction boundaries
+
+Use the smallest abstraction that has a demonstrated shared responsibility:
+
+- Search for an existing semantic token, motion contract, type, service, or UI
+  primitive before introducing another owner for the same contract.
+- Similar appearance alone does not justify sharing. Components with different
+  behaviour, lifecycle, or ownership may remain separate.
+- A genuinely unique feature composition may remain local while reusing the
+  applicable colour, typography, spacing, control, icon, and motion language.
+- When the same semantic role or interaction contract appears independently in
+  more than one feature, extend an existing primitive or extract one shared
+  implementation instead of copying it.
+- Do not create global abstractions for speculative reuse. New shared tokens
+  and variants name their purpose and document their intended consumers.
+- Prefer deliberate variants over feature-owned forks of a shared primitive.
+  If consumers need different contracts, keep them separate rather than
+  accumulating unrelated conditionals.
+
+For the Research Desk, the ownership flow is:
+
+```text
+Design tokens and motion contracts
+        ↓
+Shared UI primitives
+        ↓
+Feature-owned compositions
+```
+
+The binding visual roles and extension rules are in
+[`apps/research-desk/DESIGN.md`](../../apps/research-desk/DESIGN.md).
 
 ## Logging and secrets
 
@@ -70,13 +109,15 @@ The two strings are **word-for-word identical**. Do not summarise, translate, or
 
 ## Linter / formatter
 
-- `ruff` (rules in `pyproject.toml`) is the primary lint gate.
-- Ruff's `D` (pydocstyle-equivalent) selectors are **recommended** but not globally enforced today. Enabling them globally would flag many out-of-scope modules (`state.py`, `server/**`, `parity/**`); a dedicated clean-up task owns that transition.
-- Do not commit code that fails the currently enabled ruff rules.
+- `ruff` (rules in `[tool.ruff.lint]` of `pyproject.toml`) is the lint gate. It runs green on `src/` today: `uv run ruff check src/`.
+- The enabled set is deliberately small and enforceable: `F` (pyflakes) and `E9` (syntax and IO errors). Both catch defects rather than style. `E9` in particular catches syntax that only parses on a Python newer than `requires-python` promises, which no test on the development interpreter can see.
+- `target-version` is **not** set. Ruff derives it from `requires-python`, so the minimum supported Python is stated once.
+- Rules beyond this set (`I`, `UP`, `B`, `SIM`, and the pydocstyle `D` family) are not enabled. They would flag a large volume of out-of-scope modules at once, which makes a risk-appropriate review impossible; enabling any of them is its own change with its own review.
+- Do not commit code that fails the enabled ruff rules.
 
 ## Backwards compatibility
 
-- Never remove or rename a public constructor signature, a Settings field, or a `ResearchAgent` method without a deprecation cycle.
+- Removing a public constructor signature, a Settings field, or a `ResearchAgent` method is a deliberate decision, not an automatic one. Redundancy is removed at the root rather than softened with a compatibility layer: no shim module, no alias, no `deprecated=True` flag. Call sites move to the surviving path in the same change, and the tests that pinned the removed behaviour move with them. `AGENTS.md` holds the full procedure, including that the removal decision belongs to the operator.
 - Additive changes are always preferred. New fields on `AgentState` must be `NotRequired[...]` and underscore-prefixed when internal.
 - Providers must honour the Constructor-First convention: no direct environment-variable reads inside provider modules.
 

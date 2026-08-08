@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -26,8 +27,20 @@ from inqtrix.providers.azure_web_search import AzureFoundryWebSearch
 # ---------------------------------------------------------------------------
 
 
-def _url_citation(url: str, title: str = ""):
-    return SimpleNamespace(type="url_citation", url=url, title=title)
+def _url_citation(
+    url: str,
+    title: str = "",
+    *,
+    start_index: int | None = None,
+    end_index: int | None = None,
+):
+    return SimpleNamespace(
+        type="url_citation",
+        url=url,
+        title=title,
+        start_index=start_index,
+        end_index=end_index,
+    )
 
 
 def _output_text(text: str, annotations: list | None = None):
@@ -218,6 +231,94 @@ def test_search_returns_answer_and_sources():
     assert result.completion_tokens == 20
 
 
+def test_search_preserves_provider_native_citation_answer_span():
+    client = MagicMock()
+    answer = "Global input costs 5 USD. Data Zone costs more."
+    client.responses.create.return_value = _response(
+        answer,
+        annotations=[
+            _url_citation(
+                "https://example.com/prices",
+                "Prices",
+                start_index=0,
+                end_index=25,
+            ),
+        ],
+    )
+
+    result = _provider(client).search("model prices")
+
+    assert result.sources[0].annotation_start == 0
+    assert result.sources[0].annotation_end == 25
+    assert answer[
+        result.sources[0].annotation_start:result.sources[0].annotation_end
+    ] == "Global input costs 5 USD."
+
+
+def test_search_merges_citations_and_additional_answer_urls():
+    client = MagicMock()
+    client.responses.create.return_value = _response(
+        "Annotated source https://example.com/annotated and "
+        "<https://prices.example/api?$filter="
+        "contains(meterName, 'model family')>",
+        annotations=[
+            _url_citation(
+                "https://example.com/annotated",
+                "Annotated",
+            )
+        ],
+    )
+
+    result = _provider(client).search("Prices")
+
+    assert result.citation_urls == [
+        "https://example.com/annotated",
+        (
+            "https://prices.example/api?$filter="
+            "contains(meterName,%20'model%20family')"
+        ),
+    ]
+    assert result.sources[0].origin == "url_citation"
+    assert result.sources[1].origin == "answer_url_fallback"
+
+
+def test_search_rejects_unsafe_sources_and_recovers_encoded_target():
+    credential_url = "https://example.com/private?client_secret=hidden"
+    compound_url = (
+        "https://wrapper.example/redirect?"
+        "next=https%3A%2F%2Ftarget.example%2Fapi"
+    )
+    client = MagicMock()
+    client.responses.create.return_value = _response(
+        f"Credential {credential_url}; redirect {compound_url}",
+        annotations=[
+            _url_citation(credential_url, "Unsafe"),
+            _url_citation(compound_url, "Compound"),
+        ],
+    )
+
+    result = _provider(client).search("Sources")
+
+    assert result.citation_urls == ["https://target.example/api"]
+    assert "hidden" not in repr(result.sources)
+    assert "wrapper.example" not in repr(result.sources)
+
+
+def test_search_preserves_every_provider_citation():
+    urls = [f"https://source-{index}.example/data" for index in range(60)]
+    client = MagicMock()
+    client.responses.create.return_value = _response(
+        " ".join(urls),
+        annotations=[_url_citation(url) for url in urls],
+    )
+
+    result = _provider(client).search("Many sources")
+
+    assert len(result.sources) == 60
+    assert result.sources[0].rank == 1
+    assert result.sources[-1].rank == 60
+
+
 def test_search_calls_responses_create_with_plain_input():
     client = MagicMock()
     client.responses.create.return_value = _response("ok", [_url_citation("https://a.com")])
@@ -236,6 +337,28 @@ def test_search_empty_response_sets_notice():
     assert result.answer == ""
     assert result.sources == []
     assert provider.consume_nonfatal_notice() is not None
+
+
+def test_failure_does_not_copy_query_or_provider_error_to_logs(caplog):
+    query_secret = "private-azure-query-sentinel-92741"
+    provider_secret = "azure-provider-error-sentinel-63820"
+    client = MagicMock()
+    client.responses.create.side_effect = OpenAIError(provider_secret)
+    provider = _provider(client)
+    logger = logging.getLogger("inqtrix")
+    logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.ERROR, logger="inqtrix"):
+            provider.search(query_secret)
+    finally:
+        logger.removeHandler(caplog.handler)
+
+    notice = provider.consume_nonfatal_notice()
+    assert query_secret not in caplog.text
+    assert provider_secret not in caplog.text
+    assert notice is not None
+    assert query_secret not in notice
+    assert provider_secret not in notice
 
 
 def test_search_markdown_link_fallback_when_no_annotations():

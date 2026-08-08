@@ -3,7 +3,7 @@
 Revision ID: 0039_clarify_questions_answer
 Revises: 0038_account_memory_optin
 
-Two additive pieces of plan M1 (one migration by design):
+This migration adds two related pieces in one revision:
 
 1. ``run_clarifications`` gains the structured gate-round payload —
    ``questions`` (1-3 questions with pickable options, sanitized ids) and
@@ -13,7 +13,7 @@ Two additive pieces of plan M1 (one migration by design):
    working unchanged.
 2. ``ck_run_artifacts_kind`` is recreated to admit ``'answer'`` — the
    run-local chat-form deliverable rendered inline in the agent timeline
-   (written by the synthesize chat branch, M1 S3).
+   and written by the synthesize chat branch.
 """
 
 from __future__ import annotations

@@ -26,8 +26,8 @@ a directory admin would script:
 3. **Re-bind** as the found user DN with the submitted password — that bind is
    the password check; Inqtrix never reads or stores the password hash.
 4. Map attributes to an identity and mint the same cookie session as every
-   other cookie mode (ADR-AUTH-3: the session kind is the transport, not the
-   IdP). A wrong password and an unknown user fail identically.
+   other cookie mode. The session kind names the transport, not the IdP. A
+   wrong password and an unknown user fail identically.
 
 The directory stays the source of truth for credentials; Inqtrix keeps only a
 local mirror row (display name, email, instance role) for the admin list and
@@ -40,6 +40,10 @@ Pick `ldap` mode and point the bind/search variables at your directory. Every
 value is a constructor argument behind the scenes (Constructor-First); only the
 settings bridge reads the environment.
 
+For a host-side server, both blocks below may live in one private `.env`.
+Stack mode keeps them separate. Put visible topology and directory settings in
+the selected `deploy/.env.stack.<name>`:
+
 ```dotenv
 INQTRIX_AUTH_MODE=ldap
 
@@ -48,17 +52,24 @@ INQTRIX_LDAP_URL=ldaps://ldap.example.com:636
 
 # Read-only service account used for the search step (least privilege)
 INQTRIX_LDAP_BIND_DN=cn=inqtrix-svc,ou=services,dc=example,dc=com
-INQTRIX_LDAP_BIND_PASSWORD=CHANGE_ME_SERVICE_PASSWORD
 
 # Where and how to find the user. {username} is escaped before substitution.
 INQTRIX_LDAP_USER_SEARCH_BASE=ou=people,dc=example,dc=com
 INQTRIX_LDAP_USER_SEARCH_FILTER=(uid={username})
 
-# Cookie-session secrets (shared with local/oidc) + durable backend
-INQTRIX_SESSION_SECRET=CHANGE_ME_SESSION_SECRET
-INQTRIX_PAT_PEPPER=CHANGE_ME_PAT_PEPPER
+# Durable backend; the password value itself remains in the companion file.
 INQTRIX_STORAGE_BACKEND=postgres
-INQTRIX_DATABASE_URL=postgresql+asyncpg://inqtrix:...@postgres:5432/inqtrix
+INQTRIX_DATABASE_URL=postgresql+asyncpg://inqtrix:${INQTRIX_PG_PASSWORD}@postgres:5432/inqtrix
+```
+
+Put credentials only in `deploy/.env.stack.secrets.<name>` and keep it mode
+`0600`:
+
+```dotenv
+INQTRIX_PG_PASSWORD=replace-with-a-url-safe-password
+INQTRIX_LDAP_BIND_PASSWORD=replace-with-the-service-password
+INQTRIX_SESSION_SECRET=replace-with-an-independent-session-secret
+INQTRIX_PAT_PEPPER=replace-with-an-independent-pat-pepper
 ```
 
 ### Every LDAP variable
@@ -174,7 +185,12 @@ step-by-step recipe — start it, create a user, log in, verify — is the
 [LDAP stack walkthrough](../../examples/webserver_stacks/ldap_stack.md):
 
 ```bash
-podman compose -f deploy/compose/compose.dev.yaml --profile ldap up -d lldap
+podman compose \
+  -f deploy/compose/compose.stack.yaml \
+  -f deploy/compose/compose.dev-ports.yaml \
+  --env-file deploy/.env.stack.secrets.local \
+  --env-file deploy/.env.stack.local \
+  --profile ldap up -d lldap
 ```
 
 Or run it standalone (local testing only — never a production directory):
@@ -186,8 +202,10 @@ docker run --rm -p 3890:3890 -p 17170:17170 \
   lldap/lldap:stable
 ```
 
-Create a user in the LLDAP web UI (`http://localhost:17170`), then point
-Inqtrix at it — LLDAP's admin bind DN is `cn=admin` (not `uid=admin`):
+Create a user in the LLDAP web UI (`http://localhost:17170`), then point a
+host-side Inqtrix process at it — LLDAP's admin bind DN is `cn=admin` (not
+`uid=admin`). In Stack mode, move the bind password to the selected companion
+secrets file as shown above:
 
 ```dotenv
 INQTRIX_AUTH_MODE=ldap

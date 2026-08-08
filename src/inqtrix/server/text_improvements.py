@@ -8,7 +8,6 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from inqtrix.urls import sanitize_log_message
 
 log = logging.getLogger("inqtrix")
 
@@ -263,8 +262,9 @@ def parse_text_improvement_response(raw_text: str) -> TextImprovementResult:
                 "Text improvement model did not return valid JSON."
             ) from initial_error
         log.warning(
-            "Text improvement response required JSON extraction fallback: %s",
-            sanitize_log_message(str(initial_error)),
+            "Text improvement response required JSON extraction fallback "
+            "(error_type=%s)",
+            type(initial_error).__name__,
         )
         warnings.append("The model returned extra text around the JSON response.")
         try:

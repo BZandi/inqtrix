@@ -1,14 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyProjectState } from './seedProject'
 import {
+  attachmentContextReadiness,
   chatRuleOptions,
+  chatAttachmentChipsFromRefs,
   chatAttachmentsFromRefs,
   chatContextRefKey,
   completedReportOptions,
   mentionableReportOptions,
   dedupeChatContextRefs,
   displayRelativeAge,
+  fileAssetReferenceCount,
+  fileAssetReferenceCounts,
   isResearchDeskRun,
+  projectAgentTargetEditorDocuments,
   projectAllKnowledgeItems,
   projectChatRules,
   projectKnowledgeItems,
@@ -17,7 +22,10 @@ import {
   referenceDocsFromRefs,
 } from './selectors'
 import type {
+  ChatMessageAttachmentRecord,
   ChatRuleRecord,
+  ChatThreadRecord,
+  EditorDocumentRecord,
   FileAssetRecord,
   FileGroupRecord,
   KnowledgeSessionGroupRecord,
@@ -25,6 +33,7 @@ import type {
   KnowledgeThreadItemRecord,
   ProjectState,
   ResearchRunRecord,
+  VectorIndexRecord,
 } from './types'
 
 describe('displayRelativeAge', () => {
@@ -49,6 +58,49 @@ describe('displayRelativeAge', () => {
   it('returns an empty label for invalid dates', () => {
     expect(displayRelativeAge('not-a-date', 'de', now)).toBe('')
     expect(displayRelativeAge('2026-06-26T12:00:00.000Z', 'en', new Date('invalid'))).toBe('')
+  })
+})
+
+describe('projectAgentTargetEditorDocuments', () => {
+  it('keeps local recovery copies visible in project state but out of agent targeting', () => {
+    const base = createEmptyProjectState()
+    const persisted = {
+      contentMarkdown: '# Persisted',
+      createdAt: '2026-07-29T10:00:00.000Z',
+      folderId: null,
+      id: 'persisted-document',
+      metadataRevision: 1,
+      revision: 1,
+      serverSynced: true,
+      source: 'blank',
+      title: 'Persisted.md',
+      updatedAt: '2026-07-29T10:00:00.000Z',
+    } satisfies EditorDocumentRecord
+    const recovery = {
+      ...persisted,
+      id: 'editor-recovery-local',
+      metadataRevision: undefined,
+      recovery: {
+        capturedAt: '2026-07-29T10:01:00.000Z',
+        originalDocumentId: persisted.id,
+        reason: 'remote_deleted',
+      },
+      revision: 0,
+      serverSynced: undefined,
+      title: 'Recovered.md',
+    } satisfies EditorDocumentRecord
+    const state: ProjectState = {
+      ...base,
+      editorDocumentOrder: [persisted.id, recovery.id],
+      editorDocuments: {
+        [persisted.id]: persisted,
+        [recovery.id]: recovery,
+      },
+    }
+
+    expect(projectAgentTargetEditorDocuments(state).map((document) => document.id))
+      .toEqual([persisted.id])
+    expect(state.editorDocuments[recovery.id]).toBe(recovery)
   })
 })
 
@@ -239,6 +291,165 @@ describe('chatAttachmentsFromRefs', () => {
   })
 })
 
+describe('attachmentContextReadiness', () => {
+  it('blocks normal attachments until the durable upload is ready and exposes retryable failures', () => {
+    const pending = stateWith([
+      makeAsset('f1', 'alpha', {
+        serverFileId: null,
+        uploadPending: true,
+        uploadStatus: 'uploading',
+      }),
+    ])
+    expect(attachmentContextReadiness(
+      pending,
+      [{ fileId: 'f1', kind: 'file-asset' }],
+    )).toMatchObject({ reason: 'upload_pending', status: 'pending' })
+
+    const failed = stateWith([
+      makeAsset('f1', 'alpha', {
+        serverFileId: null,
+        uploadError: 'storage unavailable',
+        uploadStatus: 'failed',
+      }),
+    ])
+    expect(attachmentContextReadiness(
+      failed,
+      [{ fileId: 'f1', kind: 'file-asset' }],
+    )).toEqual({
+      error: 'storage unavailable',
+      reason: 'upload_failed',
+      retryAssetIds: ['f1'],
+      status: 'failed',
+    })
+  })
+
+  it('keeps a metadata-only server attachment pending until its body load settles', () => {
+    const state = stateWith([
+      makeAsset('f1', 'alpha', {
+        extractedText: '',
+        preparedAt: '2026-01-01T00:00:00.000Z',
+        preparedContentHash: 'sha256:prepared',
+        preparedParserId: 'markitdown',
+        preparedText: '',
+        serverFileId: 'fl_1',
+        uploadStatus: 'ready',
+      }),
+    ])
+    const ref = [{ fileId: 'f1', kind: 'file-asset' }] as const
+
+    expect(attachmentContextReadiness(state, ref)).toMatchObject({
+      reason: 'upload_pending',
+      status: 'pending',
+    })
+    expect(attachmentContextReadiness(state, ref, {
+      bodyLoadStates: {
+        f1: { error: 'body unavailable', status: 'failed' },
+      },
+    })).toMatchObject({
+      error: 'body unavailable',
+      reason: 'content_empty',
+      status: 'failed',
+    })
+    expect(attachmentContextReadiness(state, ref, {
+      assetBodyOverride: new Map([['f1', 'server body']]),
+      requireContent: true,
+    })).toMatchObject({ reason: null, status: 'ready' })
+    expect(attachmentContextReadiness(state, ref, {
+      assetBodyOverride: new Map([['f1', '']]),
+      requireContent: true,
+    })).toMatchObject({ reason: 'content_empty', status: 'failed' })
+  })
+
+  it('treats groups atomically and never drops a failed child silently', () => {
+    const group: FileGroupRecord = {
+      createdAt: '2026-01-01T00:00:00.000Z',
+      id: 'g1',
+      sectionId: 'file-section-temp',
+      title: 'Dossier',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    }
+    const state = stateWith([
+      makeAsset('f1', 'alpha', {
+        preparedAt: '2026-01-01T00:00:00.000Z',
+        preparedContentHash: 'sha256:prepared',
+        preparedParserId: 'markitdown',
+        preparedText: 'alpha content',
+        serverFileId: 'fl_1',
+        uploadStatus: 'ready',
+      }),
+      makeAsset('f2', 'beta', {
+        groupId: 'g1',
+        uploadError: 'retry me',
+        uploadStatus: 'failed',
+      }),
+    ], [group])
+    state.fileAssets.f1.groupId = 'g1'
+
+    const ref = [{ groupId: 'g1', kind: 'file-group' }] as const
+    expect(attachmentContextReadiness(state, ref)).toEqual({
+      error: 'retry me',
+      reason: 'upload_failed',
+      retryAssetIds: ['f2'],
+      status: 'failed',
+    })
+    expect(chatAttachmentChipsFromRefs(state, ref)[0]).toMatchObject({
+      readiness: 'failed',
+      retryAssetIds: ['f2'],
+    })
+
+    expect(attachmentContextReadiness(stateWith([], [group]), ref)).toMatchObject({
+      reason: 'group_empty',
+      status: 'failed',
+    })
+
+    expect(attachmentContextReadiness(
+      stateWith([], [{ ...group, lifecycleStatus: 'deleting' }]),
+      ref,
+    )).toMatchObject({
+      reason: 'source_deleting',
+      status: 'failed',
+    })
+  })
+
+  it('never admits a bound client body without explicit server preparation', () => {
+    const state = stateWith([
+      makeAsset('f1', 'client-only', {
+        extractedText: 'browser extracted body',
+        parserId: 'markitdown',
+        serverFileId: 'fl_1',
+        uploadStatus: 'ready',
+      }),
+    ])
+    const ref = [{ fileId: 'f1', kind: 'file-asset' }] as const
+
+    expect(attachmentContextReadiness(state, ref)).toMatchObject({
+      reason: 'server_preparation_missing',
+      status: 'failed',
+    })
+    expect(attachmentContextReadiness(state, ref, {
+      assetBodyOverride: new Map([['f1', 'browser extracted body']]),
+      requireContent: true,
+    })).toMatchObject({
+      reason: 'server_preparation_missing',
+      status: 'failed',
+    })
+  })
+
+  it('allows local attachment bodies only for the explicit incognito path', () => {
+    const state = stateWith([makeAsset('f1', 'alpha')])
+    const ref = [{ fileId: 'f1', kind: 'file-asset' }] as const
+
+    expect(attachmentContextReadiness(state, ref)).toMatchObject({
+      reason: 'upload_not_bound',
+      status: 'failed',
+    })
+    expect(attachmentContextReadiness(state, ref, {
+      allowLocalFiles: true,
+      requireContent: true,
+    })).toMatchObject({ reason: null, status: 'ready' })
+  })
+})
+
 describe('projectChatRules', () => {
   it('normalizes legacy rules without new prompt-library fields', () => {
     const state = stateWithRules([makeRule('r1', 'legacy')])
@@ -359,6 +570,106 @@ describe('referenceDocsFromRefs', () => {
       { content: 'alpha content', label: 'alpha', pageCount: 3, sizeBytes: 12 },
       { content: 'report body', label: 'my-report', pageCount: null, sizeBytes: undefined },
     ])
+  })
+})
+
+describe('fileAssetReferenceCounts', () => {
+  const TS = '2026-01-01T00:00:00.000Z'
+
+  function makeIndex(id: string, fileIds: string[]): VectorIndexRecord {
+    return {
+      createdAt: TS,
+      dims: 4,
+      handle: id,
+      id,
+      members: fileIds.map((fileId) => ({ fileId, state: 'embedded' as const })),
+      model: 'text-embedding-3-small',
+      status: 'ready',
+      title: id,
+      updatedAt: TS,
+    }
+  }
+
+  function fileAttachment(fileId: string): ChatMessageAttachmentRecord {
+    return {
+      attachedAt: TS, contentMarkdown: '', fileId, kind: 'file-asset',
+      label: fileId, pageCount: null, sizeBytes: 12, title: fileId,
+    }
+  }
+
+  function groupAttachment(groupId: string): ChatMessageAttachmentRecord {
+    return {
+      attachedAt: TS, contentMarkdown: '', fileId: `${groupId}-first`,
+      groupId, groupLabel: groupId, kind: 'file-group', label: groupId,
+      pageCount: null, sizeBytes: 12, title: groupId,
+    }
+  }
+
+  function makeThread(id: string, attachments: ChatMessageAttachmentRecord[][]): ChatThreadRecord {
+    return {
+      createdAt: TS,
+      id,
+      messages: attachments.map((messageAttachments, n) => ({
+        attachments: messageAttachments,
+        contentMarkdown: `m${n}`,
+        createdAt: TS,
+        id: `${id}-m${n}`,
+        role: 'user',
+      })),
+      preview: '',
+      source: 'imported',
+      title: id,
+      updatedAt: TS,
+    }
+  }
+
+  function fixtureState(): ProjectState {
+    return {
+      ...stateWith([
+        makeAsset('a1', 'a1', { groupId: 'g1' }),
+        makeAsset('a2', 'a2', { groupId: 'g1' }),
+        makeAsset('a3', 'a3'),
+      ]),
+      chatThreads: {
+        // t1: a1 directly AND its group in one thread -> a1 counts once.
+        t1: makeThread('t1', [[fileAttachment('a1'), groupAttachment('g1')]]),
+        t2: makeThread('t2', [[groupAttachment('g1')]]),
+        // t3: the same file in two messages -> the thread counts once.
+        t3: makeThread('t3', [[fileAttachment('a3')], [fileAttachment('a3')]]),
+      },
+      vectorIndexOrder: ['i1', 'i2'],
+      vectorIndexes: {
+        // Duplicate member entries never double-count an index.
+        i1: makeIndex('i1', ['a1', 'a1', 'a3']),
+        i2: makeIndex('i2', ['a2']),
+      },
+    }
+  }
+
+  it('matches the per-id reference count for every asset', () => {
+    const state = fixtureState()
+    const counts = fileAssetReferenceCounts(state)
+    for (const id of state.fileAssetOrder) {
+      expect(counts.get(id) ?? 0).toBe(fileAssetReferenceCount(state, id))
+    }
+  })
+
+  it('counts indexes once per file and threads once per asset (direct, group, or both)', () => {
+    const counts = fileAssetReferenceCounts(fixtureState())
+    expect(counts.get('a1')).toBe(3) // i1 + t1 (direct+group merged) + t2
+    expect(counts.get('a2')).toBe(3) // i2 + t1 (via group) + t2
+    expect(counts.get('a3')).toBe(2) // i1 (deduped member) + t3 (two messages)
+  })
+
+  it('yields zero for unreferenced assets, matching the per-id count', () => {
+    const state = fixtureState()
+    const lonely: ProjectState = {
+      ...state,
+      fileAssetOrder: [...state.fileAssetOrder, 'a4'],
+      fileAssets: { ...state.fileAssets, a4: makeAsset('a4', 'a4') },
+    }
+    expect(fileAssetReferenceCounts(lonely).get('a4') ?? 0).toBe(0)
+    expect(fileAssetReferenceCount(lonely, 'a4')).toBe(0)
   })
 })
 

@@ -4,24 +4,24 @@
 # Postgres 15) — Inqtrix uses PostgreSQL relationally only, the vector
 # extension simply stays unused (vectors live in Qdrant).
 #
-# Usage (add this file AFTER the base stack file):
-#   docker compose -f deploy/compose/compose.stack.yaml \
-#     -f deploy/compose/compose.external-db.yaml \
-#     --env-file deploy/.env.stack up -d --build
+# Usage:
+#   inqtrix-deploy --external-db \
+#     --migration-env-file deploy/.env.migrate.secrets.azure \
+#     up --detach --build
 #
-# Required in deploy/.env.stack (see the "External PostgreSQL" block there):
-#   INQTRIX_DATABASE_URL   -> the external DSN with a dedicated unprivileged
-#                             runtime login
+# Required:
+#   deploy/.env.stack:
+#   INQTRIX_DATABASE_URL   -> visible external DSN expression with a dedicated
+#                             unprivileged runtime login
 #   INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY=restricted
-#   INQTRIX_MIGRATION_ENV_FILE=../.env.migrate  (privileged migration DSN,
-#                             copy deploy/.env.migrate.example)
+#   deploy/.env.stack.secrets:
+#   the password variable referenced by INQTRIX_DATABASE_URL
+#   deploy/.env.stack:
 #   INQTRIX_MIGRATION_RLS_MODE=bypass or owner
-#                             (docs/deployment/database-migrations.md)
+#   deploy/.env.migrate.secrets.azure:
+#   INQTRIX_MIGRATION_DATABASE_URL -> privileged direct migration DSN
 #
 # Notes:
-# - Keep INQTRIX_PG_PASSWORD set to any placeholder: the base file
-#   interpolates it at parse time even though the bundled service no longer
-#   starts; its value is unused with this override.
 # - Do NOT combine with `--profile pgbouncer`: the bundled pooler is
 #   hard-wired to the bundled database (DB_HOST: postgres). Front an
 #   external database with your own pooler and point INQTRIX_DATABASE_URL
@@ -38,3 +38,12 @@ services:
     # starting; the base file defines the service without profiles, so this
     # override is the single switch.
     profiles: ["bundled-db-disabled"]
+
+  migrate:
+    # Keep privileged migration credentials scoped to the one-shot job.
+    # The pointer is repository-root-relative, matching INQTRIX_ENV_FILE and
+    # INQTRIX_SECRETS_FILE. ``../../`` converts that public contract to the
+    # Compose project base (deploy/compose); required=true makes a typo fatal.
+    env_file:
+      - path: ../../${INQTRIX_MIGRATION_ENV_FILE:?set a root-relative migration env file}
+        required: true

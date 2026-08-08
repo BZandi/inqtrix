@@ -4,10 +4,11 @@
 # subject the bcrypt hash below to compose's $-interpolation (every $
 # would need doubling). Field names verified against dex v2.45.1.
 #
-# The issuer must be the SAME string for the backend (discovery/token
-# calls) and the browser (authorize redirect) — with the API on the
-# host and dex published loopback-only, 127.0.0.1 works for both.
-issuer: http://127.0.0.1:5556/dex
+# The issuer must be the SAME string for the backend (discovery/token calls)
+# and browser redirects. ``dex.localhost`` resolves to loopback in browsers
+# and is also a Compose network alias on the Dex service, so API containers
+# and a local browser use one canonical issuer.
+issuer: http://dex.localhost:5556/dex
 
 storage:
   # memory: zero state, but signing keys regenerate on restart and
@@ -42,10 +43,9 @@ staticClients:
       # the callback lands same-origin with the SPA (cookies are
       # host-scoped, ports do not matter).
       - http://127.0.0.1:5173/api/auth/callback
-      # Stack mode (nginx ingress on 8080). NOTE: bundled-Dex
-      # OIDC also needs Dex reachable by the browser AND a matching issuer
-      # (the in-network `dex` host differs from the browser host) — see
-      # docs/deployment/auth-modes.md. For production use your own IdP.
+      # Stack mode (Python web ingress on 8080). NOTE: bundled-Dex
+      # is loopback-only and intended for local validation. Production
+      # deployments use an external IdP.
       - http://localhost:8080/api/auth/callback
       - http://127.0.0.1:8080/api/auth/callback
 

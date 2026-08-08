@@ -1,12 +1,15 @@
 {{- if .Values.migrations.enabled }}
+{{- if and (not .Values.postgres.enabled) (or (eq .Values.migrations.rlsMode "owner") (eq .Values.migrations.rlsMode "bypass")) (not .Values.migrations.databaseSecret.name) }}
+{{- fail "external PostgreSQL with migrations.rlsMode=owner or bypass requires migrations.databaseSecret.name; privileged migration credentials must remain outside the runtime application Secret" }}
+{{- end }}
 {{- if and .Values.migrations.databaseSecret.name (eq .Values.migrations.databaseSecret.name (include "inqtrix.secretName" .)) }}
 {{- fail "migrations.databaseSecret.name must differ from the runtime application Secret; a privileged migration DSN must never enter API or worker envFrom" }}
 {{- end }}
 {{- if not (has .Values.migrations.rlsMode (list "auto" "owner" "bypass")) }}
 {{- fail "migrations.rlsMode must be one of: auto, owner, bypass" }}
 {{- end }}
-{{- if and .Release.IsUpgrade (eq .Values.migrations.rlsMode "owner") (not .Values.migrations.ownerMaintenanceConfirmed) }}
-{{- fail "migrations.rlsMode=owner on upgrade requires migrations.ownerMaintenanceConfirmed=true to authorize the chart-owned quiesce hook before migration" }}
+{{- if and .Release.IsUpgrade (not .Values.migrations.maintenanceConfirmed) }}
+{{- fail "every installed-schema upgrade requires migrations.maintenanceConfirmed=true to authorize the chart-owned quiesce hook before migration" }}
 {{- end }}
 apiVersion: batch/v1
 kind: Job
@@ -70,7 +73,7 @@ spec:
             - name: INQTRIX_MIGRATION_RLS_MODE
               value: {{ .Values.migrations.rlsMode | quote }}
             - name: INQTRIX_MIGRATION_SERVICES_QUIESCED
-              value: {{ .Values.migrations.ownerMaintenanceConfirmed | quote }}
+              value: {{ .Values.migrations.maintenanceConfirmed | quote }}
           {{- if .Values.migrations.databaseSecret.name }}
             - name: INQTRIX_MIGRATION_DATABASE_URL
               valueFrom:

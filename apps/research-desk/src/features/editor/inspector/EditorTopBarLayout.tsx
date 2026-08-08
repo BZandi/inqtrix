@@ -3,15 +3,17 @@ import type { ReactNode } from 'react'
 export function EditorTopBarLayout({
   actions,
   leading,
+  primary,
   toolbar,
 }: {
   actions: ReactNode
   leading: ReactNode
+  primary?: ReactNode
   toolbar: ReactNode
 }) {
   return (
     <header
-      className="grid min-w-0 inqtrix-panel-header grid-cols-[minmax(0,1fr)_minmax(0,auto)_minmax(0,1fr)] items-center gap-2 overflow-hidden border-b border-border bg-background px-3 lg:grid-cols-[minmax(12rem,1fr)_auto_minmax(12rem,1fr)]"
+      className="inqtrix-editor-topbar grid min-w-0 inqtrix-panel-header items-center gap-2 overflow-hidden border-b border-border bg-background px-3"
       data-editor-topbar
     >
       <div className="flex min-w-0 items-center gap-2" data-editor-topbar-leading>
@@ -21,7 +23,13 @@ export function EditorTopBarLayout({
         {toolbar}
       </div>
       <div
-        className="flex min-w-0 justify-end gap-0.5 overflow-x-auto [scrollbar-width:none]"
+        className="flex min-w-0 items-center justify-center gap-1"
+        data-editor-topbar-primary
+      >
+        {primary}
+      </div>
+      <div
+        className="flex min-w-0 justify-end gap-0.5"
         data-editor-topbar-actions
       >
         {actions}

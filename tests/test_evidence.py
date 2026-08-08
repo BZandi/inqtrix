@@ -5,6 +5,7 @@ from __future__ import annotations
 from inqtrix.evidence import (
     assemble_evidence_records,
     audit_answer_evidence_bindings,
+    build_web_search_ledger,
     derive_claim_ledger_from_evidence,
     evidence_id_for_citation,
     project_claim_verification_to_evidence,
@@ -12,6 +13,87 @@ from inqtrix.evidence import (
     select_section_evidence_records,
 )
 from inqtrix.runtime_logging import make_record_id
+
+
+def test_web_search_ledger_uses_provider_annotation_span_without_page_read():
+    answer = "Global input costs 5 USD. Data Zone costs more."
+    ledger = build_web_search_ledger(
+        run_id="run_1",
+        query_records=[
+            {
+                "query_id": "query_1",
+                "query": "model prices",
+                "provider": "AzureFoundryWebSearch",
+                "status": "completed",
+            }
+        ],
+        query_synthesis={
+            "query_1": {
+                "query": "model prices",
+                "provider_answer": answer,
+            }
+        },
+        citation_records=[
+            {
+                "annotation_end": 25,
+                "annotation_start": 0,
+                "canonical_url": "https://example.com/prices",
+                "citation_id": "citation_1",
+                "query_id": "query_1",
+                "source_id": "source_1",
+                "title": "Prices",
+            }
+        ],
+    )
+
+    search = ledger["searches"]["query_1"]
+    assert search["provider_answer"] == answer
+    assert search["citations"][0]["grounded_support"] == (
+        "Global input costs 5 USD."
+    )
+    assert search["citations"][0]["mapping_status"] == (
+        "provider_answer_context"
+    )
+
+
+def test_web_search_ledger_labels_link_only_annotation_as_marker_context():
+    answer = (
+        "Global input costs 5 USD. "
+        "([azure.microsoft.com](https://azure.microsoft.com/prices))"
+    )
+    marker_start = answer.index("([")
+    ledger = build_web_search_ledger(
+        run_id="run_1",
+        query_records=[
+            {
+                "query_id": "query_1",
+                "query": "model prices",
+                "provider": "AzureFoundryWebSearch",
+                "status": "completed",
+            }
+        ],
+        query_synthesis={
+            "query_1": {
+                "query": "model prices",
+                "provider_answer": answer,
+            }
+        },
+        citation_records=[
+            {
+                "annotation_end": len(answer),
+                "annotation_start": marker_start,
+                "canonical_url": "https://azure.microsoft.com/prices",
+                "citation_id": "citation_1",
+                "query_id": "query_1",
+                "source_id": "source_1",
+                "title": "Prices",
+            }
+        ],
+    )
+
+    citation = ledger["searches"]["query_1"]["citations"][0]
+    assert citation["mapping_status"] == "provider_citation_marker"
+    assert citation["grounded_support"] == "Global input costs 5 USD."
 
 
 def _source(source_id: str, url: str, tier: str = "primary") -> dict:
@@ -478,7 +560,7 @@ def test_provider_synthesis_marks_citations_without_visible_source_block():
         assert f"[{label}] " in overview.markdown
 
 
-def test_derive_claim_ledger_groups_claim_supports_from_multiple_evidence_records():
+def test_derive_claim_ledger_merges_one_claim_across_evidence_records():
     query_id = "qry_1"
     urls = ["https://primary.example/report", "https://media.example/story"]
     citations = [

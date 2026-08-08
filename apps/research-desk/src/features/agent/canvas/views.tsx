@@ -99,6 +99,14 @@ import {
   linkifyAgentArtifactCitations,
   type AgentArtifactReference,
 } from '../artifactCitations'
+import {
+  EvidenceProvenancePanel,
+} from '../EvidenceProvenancePanel'
+import {
+  evidenceLineageFromArtifactPayload,
+  safeEvidenceHttpUrl,
+} from '../evidenceProvenance'
+import { WebEvidenceSourceRow } from '../WebEvidenceSourceRow'
 import { activityText } from '../timeline/AgentTimeline'
 import {
   agentTaskExecutionLabel,
@@ -126,7 +134,6 @@ import { prefetchableTaskResultIds } from '../taskResultPrefetch'
 import type { AgentTaskResultWire } from '../types'
 import {
   taskResultReferenceGroups,
-  type TaskResultReference,
 } from '../taskResultReferences'
 
 const SAVE_DEBOUNCE_MS = 900
@@ -505,6 +512,10 @@ function AgentArtifactSources({
       grounded_support: reference.groundedSupport,
       label: reference.label,
       page_number: reference.pageNumber,
+      citation_id: reference.citationId,
+      provider_snippet: reference.providerSnippet,
+      query_id: reference.queryId,
+      source_id: reference.sourceId,
       title: reference.title,
       url: reference.url,
     })),
@@ -517,7 +528,14 @@ function AgentArtifactSources({
           if (sourceGroup.kind === 'web') {
             return [
               <li key={sourceGroup.reference.key}>
-                <WebSourceRow reference={sourceGroup.reference} />
+                <WebEvidenceSourceRow
+                  onInspect={() => {
+                    if (sourceGroup.reference.label) {
+                      onOpen(sourceGroup.reference.label)
+                    }
+                  }}
+                  reference={sourceGroup.reference}
+                />
               </li>,
             ]
           }
@@ -657,16 +675,45 @@ export function EvidenceCanvasView({
 }) {
   const context = useAgentCanvas()
   const { t } = useLocale()
-  const artifact = context.runs[descriptor.runId]?.artifacts[descriptor.artifactId]
+  const run = context.runs[descriptor.runId]
+  const artifact = run?.artifacts[descriptor.artifactId]
   const references = agentArtifactReferences(artifact?.refs)
   const reference = references.find((item) => item.label === descriptor.label)
+  const evidenceArtifact = Object.values(run?.artifacts ?? {}).find(
+    (item) => item.kind === 'evidence_bundle',
+  )
+  const lineage = reference
+    ? evidenceLineageFromArtifactPayload(evidenceArtifact?.payload, reference)
+    : null
+  const safeReferenceUrl = safeEvidenceHttpUrl(reference?.url ?? null)
   const [chunk, setChunk] = useState<KnowledgeChunkDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [lineageLoadFailed, setLineageLoadFailed] = useState(false)
 
   useEffect(() => {
     if (!artifact || artifact.contentMarkdown !== undefined) return
     void context.loadArtifact(descriptor.runId, descriptor.artifactId)
   }, [artifact, context, descriptor.artifactId, descriptor.runId])
+
+  useEffect(() => {
+    setLineageLoadFailed(false)
+    if (
+      reference?.documentId
+      || (!reference?.queryId && !reference?.sourceId)
+      || !evidenceArtifact
+      || evidenceArtifact.payload !== undefined
+    ) return
+    void context
+      .loadArtifact(descriptor.runId, evidenceArtifact.artifactId)
+      .catch(() => setLineageLoadFailed(true))
+  }, [
+    context,
+    descriptor.runId,
+    evidenceArtifact,
+    reference?.documentId,
+    reference?.queryId,
+    reference?.sourceId,
+  ])
 
   useEffect(() => {
     setChunk(null)
@@ -721,10 +768,10 @@ export function EvidenceCanvasView({
             </p>
           </div>
         </div>
-        {reference.url && (
+        {safeReferenceUrl && (
           <a
             className="inline-flex max-w-full items-center gap-1.5 t-meta text-brand hover:underline"
-            href={reference.url}
+            href={safeReferenceUrl}
             rel="noreferrer noopener"
             target="_blank"
           >
@@ -732,7 +779,7 @@ export function EvidenceCanvasView({
             <span className="truncate">{reference.url}</span>
           </a>
         )}
-        {reference.groundedSupport && (
+        {reference.groundedSupport && !lineage && (
           <section className="rounded-lg border border-brand/20 bg-brand-subtle/25 px-3 py-3">
             <p className="t-caption uppercase tracking-wide text-muted-foreground">
               {t.agent.canvas.providerGroundedSupport}
@@ -742,19 +789,10 @@ export function EvidenceCanvasView({
             </p>
           </section>
         )}
-        {!reference.documentId && reference.excerpt && (
-          <section>
-            <p className="t-caption uppercase tracking-wide text-muted-foreground">
-              {t.agent.canvas.sourceExcerpt}
-            </p>
-            <blockquote className="mt-1 rounded-md border-l-2 border-brand bg-surface/60 px-3 py-2 t-body text-foreground">
-              {reference.excerpt}
-            </blockquote>
-          </section>
-        )}
         {!reference.documentId
           && !reference.excerpt
-          && !reference.groundedSupport && (
+          && !reference.groundedSupport
+          && !lineage && (
           <p className="t-meta text-muted-foreground">
             {t.agent.canvas.legacyEvidenceUnavailable}
           </p>
@@ -771,14 +809,14 @@ export function EvidenceCanvasView({
               {t.agent.canvas.exactKnowledgeChunk}
             </p>
             <blockquote className="rounded-md border-l-2 border-brand bg-brand-subtle/30 px-3 py-2 t-body text-foreground">
-              {chunk.source_text || chunk.text}
+              {chunk.excerpt}
             </blockquote>
             {chunk.neighbors?.map((neighbor) => (
               <p
                 className="t-meta text-muted-foreground"
                 key={neighbor.chunk_index}
               >
-                {neighbor.text}
+                {neighbor.excerpt}
               </p>
             ))}
             {chunk.page_number !== null && (
@@ -791,6 +829,11 @@ export function EvidenceCanvasView({
         {reference.documentId && !chunk && !error && (
           <p className="t-hint text-muted-foreground">…</p>
         )}
+        <EvidenceProvenancePanel
+          lineage={lineage}
+          lineageLoadFailed={lineageLoadFailed}
+          reference={reference}
+        />
       </div>
     </ScrollArea>
   )
@@ -1966,7 +2009,7 @@ function TaskResultSources({
           if (group.kind === 'web') {
             return (
               <li key={group.reference.key}>
-                <WebSourceRow reference={group.reference} />
+                <WebEvidenceSourceRow reference={group.reference} />
               </li>
             )
           }
@@ -2021,34 +2064,6 @@ function TaskResultSources({
         })}
       </ul>
     </section>
-  )
-}
-
-function WebSourceRow({ reference }: { reference: TaskResultReference }) {
-  return (
-    <div className="flex min-w-0 items-start gap-2">
-      <Globe2 className="mt-0.5 icon-sm shrink-0 text-muted-foreground/70" />
-      {reference.label && (
-        <span className="mt-0.5 shrink-0 t-mono text-muted-foreground">
-          {reference.label}
-        </span>
-      )}
-      <span className="min-w-0 flex-1">
-        <a
-          className="block break-words t-list text-foreground transition-colors hover:text-brand"
-          href={reference.url ?? undefined}
-          rel="noreferrer"
-          target="_blank"
-        >
-          {reference.title}
-        </a>
-        {reference.domain && (
-          <span className="block truncate t-meta-sm text-muted-foreground">
-            {reference.domain}
-          </span>
-        )}
-      </span>
-    </div>
   )
 }
 

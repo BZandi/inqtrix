@@ -5,7 +5,7 @@ metadata:
   labels:
     {{- include "inqtrix.labels" (dict "root" . "component" "api") | nindent 4 }}
 spec:
-  {{- if and .Values.api.autoscaling.enabled .Values.migrations.enabled .Release.IsUpgrade (eq .Values.migrations.rlsMode "owner") .Values.migrations.ownerMaintenanceConfirmed }}
+  {{- if and .Values.api.autoscaling.enabled .Values.migrations.enabled .Release.IsUpgrade .Values.migrations.maintenanceConfirmed }}
   # The pre-upgrade maintenance hook deliberately sets scale=0, which pauses
   # an HPA until a positive desired replica count is written. This one owner-
   # upgrade render reactivates it after the migration hooks have succeeded.
@@ -54,6 +54,7 @@ spec:
             # the privileged migration DSN is never visible to runtime pods.
             - name: INQTRIX_MIGRATION_DATABASE_URL
               value: ""
+          {{- include "inqtrix.observabilityEnv" . | nindent 12 }}
           {{- if .Values.collaboration.enabled }}
             - name: INQTRIX_COLLABORATION_SECRET
               valueFrom:
@@ -91,8 +92,10 @@ spec:
             {{- toYaml .Values.api.resources | nindent 12 }}
           volumeMounts:
             {{- include "inqtrix.appWritableVolumeMounts" . | nindent 12 }}
+            {{- include "inqtrix.traceSpoolVolumeMount" . | nindent 12 }}
       volumes:
         {{- include "inqtrix.appWritableVolumes" . | nindent 8 }}
+        {{- include "inqtrix.traceSpoolVolume" . | nindent 8 }}
       {{- with .Values.api.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

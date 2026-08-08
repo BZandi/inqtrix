@@ -10,6 +10,7 @@ import type { Dispatch } from 'react'
 import { useReducedMotion } from 'motion/react'
 
 import type { ClientOptions } from '@/api/inqtrixClient'
+import { createProjectEntityId } from '@/features/project/entityId'
 import {
   BookOpen,
   FileText,
@@ -82,6 +83,7 @@ import {
   isActiveAgentRun,
   restoredAgentSessionId,
   type AgentRunRecord,
+  type AgentSessionRecord,
 } from './model'
 import {
   vectorBackendDisplay,
@@ -122,7 +124,6 @@ const AGENT_TIMELINE_PANEL_ID = 'agent-timeline-panel'
 export function AgentWorkspace({
   apiKey,
   cancelRun,
-  deleteRun,
   canvasPanelSize,
   capabilities,
   collections,
@@ -158,17 +159,13 @@ export function AgentWorkspace({
 }: {
   apiKey: string | undefined
   cancelRun: (runId: string) => Promise<unknown> | void
-  /** Runs on the polling fallback (plan M1 T1) — shown as a visible
+  /** Runs on the polling fallback — shown as a visible
    * degradation hint on their live status line. */
   pollingRunIds?: string[]
   /** Initial run-list hydration has settled (success or error). While
    * false, a selected session with no runs shows a loading skeleton
    * instead of the welcome state — the transcript may still be paging in. */
   runsHydrated?: boolean
-  /** Deletes one durable run (cancel-then-delete on 409). Session delete
-   * removes its runs server-side too — otherwise their `session_id`
-   * resurrects the session on the next hydration. */
-  deleteRun: (runId: string) => Promise<unknown> | void
   canvasPanelSize: number
   capabilities: InqtrixCapabilities | null
   collections: AgentCollectionOption[]
@@ -178,7 +175,7 @@ export function AgentWorkspace({
   draftQuestion: string
   /** Account preference `enable_agent_memory` — the run overview shows it. */
   memoryEnabled?: boolean
-  /** Skill library handle (plan M3); null = feature off. */
+  /** Skill library handle; null = feature off. */
   skillsApi?: import('@/features/skills/useSkillsApi').SkillsApiHandle | null
   onCanvasPanelSizeChange: (size: number) => void
   onDraftQuestionChange: (draft: string) => void
@@ -190,9 +187,9 @@ export function AgentWorkspace({
   /** User-picked Stufe; null = server default (capabilities). */
   selectedTier?: import('@/features/researchRuns/types').AgentTierId | null
   onTierChange?: (
-    tier: import('@/features/researchRuns/types').AgentTierId,
+    tier: import('@/features/researchRuns/types').AgentTierId | null,
   ) => void
-  /** Thoroughness (plan M4), lifted like autonomy — genuinely sticky
+  /** Thoroughness, lifted like autonomy — genuinely sticky
    * across view switches. */
   selectedDepth?: 'normal' | 'deep'
   onDepthChange?: (mode: 'normal' | 'deep') => void
@@ -218,10 +215,10 @@ export function AgentWorkspace({
   const reduceMotion = Boolean(useReducedMotion())
   const isDesktop = useMediaQuery('(min-width: 1024px)')
   const [isMobileSessionsOpen, setIsMobileSessionsOpen] = useState(false)
-  // Output-form override (plan M1): workspace-local, defaults to Auto —
+  // Output-form override: workspace-local, defaults to Auto —
   // the agent's intake decides unless the user forces a form.
   const [responseForm, setResponseForm] = useState<AgentResponseForm>('auto')
-  // Engine selection (plan M2 FE wiring): user-selectable only when the
+  // Engine selection: user-selectable only when the
   // server registered the kernel; initialized from the published default
   // once capabilities arrive. The demo simulates a current server.
   const [engineMode, setEngineMode] = useState<AgentEngineMode | null>(null)
@@ -240,7 +237,7 @@ export function AgentWorkspace({
     'balanced',
     'autonomous',
   ]
-  // Two-mode UI (plan M1 S7, Cowork pattern): servers publishing
+  // Two-mode UI: servers publishing
   // mode_presets narrow the composer to Standard/Auto; the legacy
   // three-way control stays for older servers and when the operator
   // republishes it (advanced_autonomy). Wire vocabulary is unchanged.
@@ -380,7 +377,13 @@ export function AgentWorkspace({
     workspaceId,
   })
 
-  const { error: sessionSyncError, settled: sessionsSettled } =
+  const {
+    createSession: persistAgentSession,
+    deleteSession: deletePersistedAgentSession,
+    error: sessionSyncError,
+    retrySessionDeletion,
+    settled: sessionsSettled,
+  } =
     useAgentSessionsApi({
       apiKey,
       dispatch,
@@ -634,20 +637,24 @@ export function AgentWorkspace({
         // A shared-run view is read-only session scaffolding. A recipient's
         // new run starts in their own syncable session and never sends the
         // derived view id back through the run/session persistence surfaces.
-        sessionId = `agent-session-${Date.now().toString(36)}`
         const now = new Date().toISOString()
-        dispatch({
-          session: {
-            id: sessionId,
-            title: question.trim().slice(0, 80),
-            groupId: null,
-            createdAt: now,
-            updatedAt: now,
-            runIds: [],
-            sourcePolicy: submitSourcePolicy,
-          },
-          type: 'createAgentSession',
-        })
+        const candidate: AgentSessionRecord = {
+          id: createProjectEntityId('agent-session'),
+          title: question.trim().slice(0, 80),
+          groupId: null,
+          createdAt: now,
+          updatedAt: now,
+          runIds: [],
+          sourcePolicy: submitSourcePolicy,
+        }
+        sessionId = candidate.id
+        if (demo) {
+          dispatch({ session: candidate, type: 'createAgentSession' })
+        } else if (!await persistAgentSession(candidate)) {
+          // The rail receives the hook's visible sync error. Crucially, no
+          // local session and no run carrying an unconfirmed id exist.
+          return false
+        }
       }
       if (demo) {
         demo.submit({
@@ -704,6 +711,7 @@ export function AgentWorkspace({
     [
       demo,
       dispatch,
+      persistAgentSession,
       runningRun,
       slashSkills,
       state.agentSessions,
@@ -718,19 +726,21 @@ export function AgentWorkspace({
 
   const createSession = useCallback(() => {
     const now = new Date().toISOString()
-    dispatch({
-      session: {
-        id: `agent-session-${Date.now().toString(36)}`,
-        title: t.agent.sessions.create,
-        groupId: null,
-        createdAt: now,
-        updatedAt: now,
-        runIds: [],
-        sourcePolicy: { ...DEFAULT_AGENT_SOURCE_POLICY },
-      },
-      type: 'createAgentSession',
-    })
-  }, [dispatch, t])
+    const session: AgentSessionRecord = {
+      id: createProjectEntityId('agent-session'),
+      title: t.agent.sessions.create,
+      groupId: null,
+      createdAt: now,
+      updatedAt: now,
+      runIds: [],
+      sourcePolicy: { ...DEFAULT_AGENT_SOURCE_POLICY },
+    }
+    if (demo) {
+      dispatch({ session, type: 'createAgentSession' })
+      return
+    }
+    void persistAgentSession(session)
+  }, [demo, dispatch, persistAgentSession, t])
 
   const railVisible = state.ui.isAgentSessionsVisible
   const railMotion = useAnimatedResizablePanelCollapse({
@@ -769,14 +779,14 @@ export function AgentWorkspace({
       onDeleteSession={(sessionId) => {
         const session = state.agentSessions[sessionId]
         if (session?.persistable === false) return
-        if (session && !demo) {
-          for (const runId of session.runIds) void deleteRun(runId)
-        }
-        dispatch({ sessionId, type: 'deleteAgentSession' })
+        void deletePersistedAgentSession(sessionId)
       }}
       onRenameSession={(sessionId, title) => {
         if (state.agentSessions[sessionId]?.persistable === false) return
         dispatch({ sessionId, title, type: 'renameAgentSession' })
+      }}
+      onRetrySessionDeletion={(sessionId) => {
+        void retrySessionDeletion(sessionId)
       }}
       onSelectSession={(sessionId) => {
         dispatch({ sessionId, type: 'selectAgentSession' })
@@ -796,17 +806,21 @@ export function AgentWorkspace({
   )
 
   const activeGate = runningRun ? pendingGate(runningRun) : null
-  const memoWritingOrDone = Boolean(
-    latestRun?.artifactOrder.some(
-      (artifactId) => latestRun.artifacts[artifactId]?.kind === 'memo',
-    ),
-  )
+  // The report pill surfaces the run's document artifact — a mission
+  // `memo` OR a kernel `deliverable` (a kernel run writes the latter, so
+  // a memo-only check would leave a finished kernel document unreachable
+  // from the composer).
+  const reportArtifactId =
+    latestRun?.artifactOrder.find((artifactId) => {
+      const kind = latestRun.artifacts[artifactId]?.kind
+      return kind === 'memo' || kind === 'deliverable'
+    }) ?? null
   const earlyPhase =
     runningRun
     && ['intake', 'discovery', 'planning'].includes(runningRun.phase)
   // Context pills (plan B4): one tap from the composer to the live
   // canvas surface; the pulsing dot marks the live one.
-  const pills = (runningRun || memoWritingOrDone) && (
+  const pills = (runningRun || reportArtifactId) && (
     <div className="mx-auto mb-1.5 flex max-w-5xl flex-wrap items-center gap-1.5">
       {runningRun && (
         <button
@@ -827,21 +841,15 @@ export function AgentWorkspace({
             : t.agent.pills.followExecution}
         </button>
       )}
-      {memoWritingOrDone && latestRun && (
+      {reportArtifactId && latestRun && (
         <button
           className="inline-flex h-6 items-center gap-1.5 rounded-full border border-border bg-surface px-2.5 t-hint font-semibold text-muted-foreground transition-colors hover:text-foreground"
           onClick={() => {
-            const memoId = latestRun.artifactOrder.find(
-              (artifactId) =>
-                latestRun.artifacts[artifactId]?.kind === 'memo',
-            )
-            if (memoId) {
-              openCanvasView({
-                artifactId: memoId,
-                runId: latestRun.runId,
-                view: 'document',
-              })
-            }
+            openCanvasView({
+              artifactId: reportArtifactId,
+              runId: latestRun.runId,
+              view: 'document',
+            })
           }}
           type="button"
         >
@@ -986,12 +994,12 @@ export function AgentWorkspace({
                       t.agent.empty.exampleMission,
                     ].map((example) => (
                       <button
-                        className="inline-flex h-8 max-w-56 items-center rounded-md border border-border bg-background px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
+                        className="inline-flex min-h-8 max-w-full items-center justify-center rounded-md border border-border bg-background px-3 py-1.5 text-center text-xs font-medium leading-snug text-muted-foreground transition-colors hover:bg-surface hover:text-foreground sm:max-w-56"
                         key={example}
                         onClick={() => onDraftQuestionChange(example)}
                         type="button"
                       >
-                        <span className="truncate">{example}</span>
+                        <span className="whitespace-normal break-words">{example}</span>
                       </button>
                     ))}
                   </div>
@@ -1021,6 +1029,13 @@ export function AgentWorkspace({
   const memoArtifactId = latestRun?.artifactOrder.find(
     (artifactId) => latestRun.artifacts[artifactId]?.kind === 'memo',
   )
+  // Kernel `write_canvas` deliverables open as document tabs too (a session may
+  // hold several); the answer stays inline (AgentAnswerBlock), never a tab.
+  const deliverableArtifactIds = latestRun
+    ? latestRun.artifactOrder.filter(
+        (artifactId) => latestRun.artifacts[artifactId]?.kind === 'deliverable',
+      )
+    : []
   const addMenu = latestRun ? (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
@@ -1068,6 +1083,23 @@ export function AgentWorkspace({
                 })}
             />
           )}
+          {deliverableArtifactIds.map((artifactId) => (
+            <OptionMenuItem
+              active={false}
+              icon={FileText}
+              key={artifactId}
+              label={
+                latestRun.artifacts[artifactId]?.title
+                || t.agent.canvas.views.document
+              }
+              onSelect={() =>
+                openCanvasView({
+                  artifactId,
+                  runId: latestRun.runId,
+                  view: 'document',
+                })}
+            />
+          ))}
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -1273,14 +1305,21 @@ function fallbackCanvasDescriptor(
   run: AgentRunRecord | undefined,
 ): CanvasViewDescriptor {
   if (run) {
-    const memoId = run.artifactOrder.find(
-      (artifactId) => run.artifacts[artifactId]?.kind === 'memo',
-    )
-    if (memoId) {
-      return { view: 'document', runId: run.runId, artifactId: memoId }
+    const documentId =
+      run.artifactOrder.find(
+        (artifactId) => run.artifacts[artifactId]?.kind === 'memo',
+      )
+      ?? [...run.artifactOrder]
+        .reverse()
+        .find(
+          (artifactId) =>
+            run.artifacts[artifactId]?.kind === 'deliverable',
+        )
+    if (documentId) {
+      return { view: 'document', runId: run.runId, artifactId: documentId }
     }
-    // A live run without a memo: the Verlauf is what the user opens the
-    // canvas for; settled runs land on the plan.
+    // A live run without a memo/deliverable: the Verlauf is what the user opens
+    // the canvas for; settled runs land on the plan.
     if (run.status === 'running' || run.status === 'queued') {
       return { view: 'run', runId: run.runId }
     }

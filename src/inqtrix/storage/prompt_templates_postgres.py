@@ -71,10 +71,12 @@ class PostgresPromptTemplateRepository:
         session_factory: "async_sessionmaker[AsyncSession]",
         app_role: str,
         restrict_to_workspace_members: bool = False,
+        sharing_enabled: bool = True,
     ) -> None:
         self._session_factory = session_factory
         self._app_role = app_role
         self._restrict_to_workspace_members = restrict_to_workspace_members
+        self._sharing_enabled = sharing_enabled
 
     @property
     def atomic_resource_effects(self) -> bool:
@@ -170,6 +172,7 @@ class PostgresPromptTemplateRepository:
             tenant_id=tenant_id,
             actor_user_id=actor_user_id,
             restrict_to_workspace_members=self._restrict_to_workspace_members,
+            sharing_enabled=self._sharing_enabled,
         ).order_by(prompt_templates.c.created_at.desc())
         async with self._session(tenant_id) as session:
             rows = (await session.execute(statement)).all()
@@ -207,6 +210,7 @@ class PostgresPromptTemplateRepository:
                 restrict_to_workspace_members=(
                     self._restrict_to_workspace_members
                 ),
+                sharing_enabled=self._sharing_enabled,
             )
             if access is None:
                 raise PromptTemplateNotFound(record.id)
@@ -278,6 +282,7 @@ class PostgresPromptTemplateRepository:
                 restrict_to_workspace_members=(
                     self._restrict_to_workspace_members
                 ),
+                sharing_enabled=self._sharing_enabled,
                 owner_only=True,
             )
             if access is None:

@@ -145,7 +145,7 @@ export function SharingPanel({
   const [manage, setManage] = useState<OutgoingShare | null>(null)
 
   const confirmDrop = () => {
-    if (confirm) void sharing.drop(confirm.share.id)
+    if (confirm) void sharing.drop(confirm.share.id).catch(() => undefined)
     setConfirm(null)
   }
 

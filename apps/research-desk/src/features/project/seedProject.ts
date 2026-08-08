@@ -195,6 +195,8 @@ export function createEmptyProjectState(): ProjectState {
     localRunCounter: 1,
     preferences: {
       agentMemoryEnabled: false,
+      agentModelTier: '',
+      chatModelTier: '',
       contrastMode: 'standard',
       locale: 'de',
       theme: 'system',
@@ -366,6 +368,8 @@ export function createSeedProjectState(): ProjectState {
     localRunCounter: 248,
     preferences: {
       agentMemoryEnabled: false,
+      agentModelTier: '',
+      chatModelTier: '',
       contrastMode: 'standard',
       locale: 'de',
       theme: 'dark',

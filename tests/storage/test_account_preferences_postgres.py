@@ -3,24 +3,28 @@
 from __future__ import annotations
 
 import os
+import uuid
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from inqtrix.project.account_preferences_postgres import PostgresAccountPreferencesStore
 from inqtrix.storage.account_orm import account_preferences
 from inqtrix.storage.db import build_engine, build_session_factory
+from inqtrix.storage.identity_orm import users
 from inqtrix.storage.migrate import run_migrations
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
 APP_ROLE = "inqtrix_app"
+USER = uuid.UUID("17171717-1717-4717-8717-171717171717")
+USER_A = uuid.UUID("17171717-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+USER_B = uuid.UUID("17171717-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+TEST_USERS = (USER, USER_A, USER_B)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -44,6 +48,28 @@ async def store():
             if not bypasses:
                 pytest.fail("INQTRIX_TEST_DATABASE_URL must connect as superuser/BYPASSRLS.")
             await session.execute(account_preferences.delete())
+            for user_id in TEST_USERS:
+                label = f"account-preferences-pg-{user_id.hex}"
+                await session.execute(
+                    pg_insert(users)
+                    .values(
+                        id=user_id,
+                        tenant_id="default",
+                        issuer="https://account-preferences-tests.example",
+                        subject=label,
+                        email=f"{label}@example.com",
+                    )
+                    .on_conflict_do_update(
+                        index_elements=(users.c.id,),
+                        set_={
+                            "tenant_id": "default",
+                            "issuer": "https://account-preferences-tests.example",
+                            "subject": label,
+                            "email": f"{label}@example.com",
+                            "disabled_at": None,
+                        },
+                    )
+                )
     prefs_store = PostgresAccountPreferencesStore(engine=engine, app_role=APP_ROLE)
     yield prefs_store
     await prefs_store.aclose()
@@ -51,12 +77,12 @@ async def store():
 
 @pytest.mark.asyncio
 async def test_get_none_then_upsert_roundtrip(store) -> None:
-    assert await store.get_preferences(sub="u") is None
+    assert await store.get_preferences(user_id=USER) is None
     await store.upsert_preferences(
-        sub="u", contrast_mode="high", locale="de", theme="dark",
+        user_id=USER, contrast_mode="high", locale="de", theme="dark",
         theme_preset="sage", user_bubble_tone="mint", updated_at=1.0,
     )
-    prefs = await store.get_preferences(sub="u")
+    prefs = await store.get_preferences(user_id=USER)
     assert (
         prefs.theme,
         prefs.locale,
@@ -71,14 +97,14 @@ async def test_get_none_then_upsert_roundtrip(store) -> None:
 @pytest.mark.asyncio
 async def test_upsert_replaces_row_for_same_user(store) -> None:
     await store.upsert_preferences(
-        sub="u", contrast_mode="standard", locale="en", theme="dark",
+        user_id=USER, contrast_mode="standard", locale="en", theme="dark",
         theme_preset="slate", user_bubble_tone="mint", updated_at=1.0,
     )
     await store.upsert_preferences(
-        sub="u", contrast_mode="high", locale="de", theme="light",
+        user_id=USER, contrast_mode="high", locale="de", theme="light",
         theme_preset="graphite", user_bubble_tone="orange", updated_at=2.0,
     )
-    prefs = await store.get_preferences(sub="u")
+    prefs = await store.get_preferences(user_id=USER)
     assert (prefs.theme, prefs.theme_preset, prefs.user_bubble_tone, prefs.updated_at) == (
         "light", "graphite", "orange", 2.0
     )
@@ -93,17 +119,63 @@ async def test_upsert_replaces_row_for_same_user(store) -> None:
 
 
 @pytest.mark.asyncio
+async def test_second_save_overwrites_the_model_tiers(store) -> None:
+    """The tiers must survive a SECOND upsert, not just the first INSERT.
+
+    A column missing from the ON CONFLICT update set is written once and then
+    silently frozen — the user changes their preference, the request succeeds,
+    and nothing changes. Only a second save exposes that.
+    """
+    await store.upsert_preferences(
+        user_id=USER, contrast_mode="standard", locale="en", theme="dark",
+        theme_preset="slate", user_bubble_tone="mint", updated_at=1.0,
+        chat_model_tier="fast", agent_model_tier="fast",
+    )
+    await store.upsert_preferences(
+        user_id=USER, contrast_mode="standard", locale="en", theme="dark",
+        theme_preset="slate", user_bubble_tone="mint", updated_at=2.0,
+        chat_model_tier="high", agent_model_tier="mid",
+    )
+    prefs = await store.get_preferences(user_id=USER)
+    assert (prefs.chat_model_tier, prefs.agent_model_tier) == ("high", "mid")
+
+
+@pytest.mark.asyncio
+async def test_model_tier_check_constraint_rejects_unknown_tier(store) -> None:
+    """The database refuses an out-of-domain tier even if the service is bypassed."""
+    from sqlalchemy.exc import DBAPIError, IntegrityError
+
+    with pytest.raises((IntegrityError, DBAPIError)):
+        await store.upsert_preferences(
+            user_id=USER, contrast_mode="standard", locale="en", theme="dark",
+            theme_preset="slate", user_bubble_tone="mint", updated_at=1.0,
+            chat_model_tier="turbo",
+        )
+
+
+@pytest.mark.asyncio
+async def test_model_tiers_default_to_no_preference_for_legacy_rows(store) -> None:
+    """A save that predates the feature leaves both tiers empty, never NULL."""
+    await store.upsert_preferences(
+        user_id=USER, contrast_mode="standard", locale="en", theme="dark",
+        theme_preset="slate", user_bubble_tone="mint", updated_at=1.0,
+    )
+    prefs = await store.get_preferences(user_id=USER)
+    assert (prefs.chat_model_tier, prefs.agent_model_tier) == ("", "")
+
+
+@pytest.mark.asyncio
 async def test_distinct_users_independent(store) -> None:
     await store.upsert_preferences(
-        sub="u-a", contrast_mode="high", locale="de", theme="dark",
+        user_id=USER_A, contrast_mode="high", locale="de", theme="dark",
         theme_preset="slate", user_bubble_tone="sky", updated_at=1.0,
     )
     await store.upsert_preferences(
-        sub="u-b", contrast_mode="standard", locale="en", theme="light",
+        user_id=USER_B, contrast_mode="standard", locale="en", theme="light",
         theme_preset="standard", user_bubble_tone="gray", updated_at=1.0,
     )
-    assert (await store.get_preferences(sub="u-a")).theme == "dark"
-    assert (await store.get_preferences(sub="u-b")).theme == "light"
+    assert (await store.get_preferences(user_id=USER_A)).theme == "dark"
+    assert (await store.get_preferences(user_id=USER_B)).theme == "light"
 
 
 @pytest.mark.asyncio
@@ -112,7 +184,7 @@ async def test_db_check_rejects_out_of_domain_theme(store) -> None:
 
     with pytest.raises(IntegrityError):
         await store.upsert_preferences(
-            sub="u", contrast_mode="standard", locale="en", theme="neon",
+            user_id=USER, contrast_mode="standard", locale="en", theme="neon",
             theme_preset="standard", user_bubble_tone="gray", updated_at=1.0,
         )
 
@@ -123,6 +195,6 @@ async def test_db_check_rejects_out_of_domain_user_bubble_tone(store) -> None:
 
     with pytest.raises(IntegrityError):
         await store.upsert_preferences(
-            sub="u", contrast_mode="standard", locale="en", theme="system",
+            user_id=USER, contrast_mode="standard", locale="en", theme="system",
             theme_preset="standard", user_bubble_tone="rainbow", updated_at=1.0,
         )

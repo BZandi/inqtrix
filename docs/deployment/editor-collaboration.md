@@ -14,8 +14,8 @@ guest access.
 Collaboration is disabled by default. Enabling it requires all of the
 following:
 
-- `INQTRIX_STORAGE_BACKEND=postgres` with migration
-  `0048_editor_collaboration` applied;
+- `INQTRIX_STORAGE_BACKEND=postgres` with the current migration head
+  (`0052_editor_review`) applied;
 - cookie-session authentication: `INQTRIX_AUTH_MODE=local`, `ldap`, or `oidc`;
 - the canonical PostgreSQL session/user stores used by those auth modes;
 - the private Node HTTP and WebSocket URLs;
@@ -35,22 +35,26 @@ Only the FastAPI gateway is browser-facing:
 
 ```text
 Browser ws(s)://public-host/collaboration
-  -> Vite, nginx, or scripts/run_research_desk.py
+  -> Vite development proxy or selected web adapter
+     (Python default / nginx opt-in)
   -> FastAPI /collaboration
   -> private ws://collaboration:1234/collaboration
 ```
 
 FastAPI also calls private Node HTTP operations for conversion, projection,
-suggestion publication, and decisions. Node calls FastAPI internal APIs for
+suggestion publication, and decisions. Shared comments persist directly
+through FastAPI and publish only content-free invalidation events to the
+sidecar. Node calls FastAPI internal APIs for
 lease introspection, state loading, durable updates, snapshots, policy events,
 and compaction. Both directions use the collaboration bearer secret. Node has
 no database URL, no host port, and no persistent volume.
 
-The frontend production image remains nginx-only. The collaboration service
-uses its own multi-stage image based on the same `node:22-bookworm-slim` image
-family as the web build. Packages are installed from the workspace lockfile at
-image build time; the container does not run `npx` or download packages at
-startup.
+The frontend production Dockerfile builds the SPA once with Node 22 and exposes
+two explicit final targets: the dependency-light Python web gateway is the
+default, while nginx is the opt-in alternative. Exactly one adapter runs for a
+stack. The collaboration service uses its own multi-stage Node 22 image.
+Packages are installed from the workspace lockfile at image build time; no
+runtime invokes `npx` or downloads packages at startup.
 
 ## Configuration
 
@@ -74,11 +78,11 @@ API URL, collaboration secret, bind/port, and collaboration limits. Do not pass
 the complete API `.env` into the Node process:
 
 ```bash
-corepack pnpm --filter @inqtrix/collaboration-server build
+npm --workspace @inqtrix/collaboration-server run build
 INQTRIX_API_INTERNAL_URL=http://127.0.0.1:5100 \
 INQTRIX_COLLABORATION_SECRET="$INQTRIX_COLLABORATION_SECRET" \
 INQTRIX_COLLABORATION_TENANT_ID=default \
-corepack pnpm --filter @inqtrix/collaboration-server start
+npm --workspace @inqtrix/collaboration-server run start
 ```
 
 The tenant value must match the deployment's canonical `Principal.tenant_id`.
@@ -92,14 +96,20 @@ Every API and sidecar variable, default, and interaction is listed in
 ## Compose
 
 The `collaboration` profile adds only the private Node container. Set the
-feature flag and secret in the same env file used for Compose interpolation
-and API `env_file`, then start:
+feature flag in the visible config and the independent collaboration secret in
+the selected secret file, then start with the same ordered pair:
 
 ```bash
-CF="-f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack"
-docker compose $CF --profile collaboration up -d --build
-docker compose $CF ps
-docker compose $CF logs -f api collaboration
+docker compose -f deploy/compose/compose.stack.yaml \
+  --env-file deploy/.env.stack.secrets \
+  --env-file deploy/.env.stack \
+  --profile collaboration up -d --build
+docker compose -f deploy/compose/compose.stack.yaml \
+  --env-file deploy/.env.stack.secrets \
+  --env-file deploy/.env.stack ps
+docker compose -f deploy/compose/compose.stack.yaml \
+  --env-file deploy/.env.stack.secrets \
+  --env-file deploy/.env.stack logs -f api collaboration
 ```
 
 The API service already receives the private URLs
@@ -149,7 +159,7 @@ The Secret value must also be available to the API pod under the same key and
 must differ from the session secret. Enabling the value renders a one-replica
 Deployment with `Recreate`, a private ClusterIP Service, and no HPA, PDB, or
 PVC. The chart derives the private HTTP/WS URLs and feature flag. An enabled
-Ingress also derives `INQTRIX_PUBLIC_BASE_URL` and the nginx external scheme
+Ingress also derives `INQTRIX_PUBLIC_BASE_URL` and the web gateway's external scheme
 from its host/TLS settings; an explicit `config.INQTRIX_PUBLIC_BASE_URL` keeps
 precedence. Do not change the replica count: version 1 has a database fencing
 lease for fail-safe replacement, not multi-replica fan-out.
@@ -159,25 +169,20 @@ admission, too late for Helm to derive the API trust anchor. With collaboration
 enabled, the chart therefore requires either an explicit `route.host` or the
 final `config.INQTRIX_PUBLIC_BASE_URL` and fails rendering when neither exists.
 
-## Vite, nginx, and the dist launcher
+## Vite and the production Python gateway
 
 - Vite proxies `/collaboration` with WebSocket support to FastAPI during
   development; the same prefix carries the HTTP instance probe.
-- The bundled nginx configuration forwards WebSocket Upgrade traffic for
-  `/collaboration` to FastAPI while serving the SPA on the same origin. It
-  overwrites forwarded proto/host from the deployment-owned external scheme
-  and request Host; an exact HTTP location forwards
-  `/collaboration/instance` through the same upstream instead of SPA fallback.
-  It never relays client-supplied forwarding chains.
-- `scripts/run_research_desk.py` serves an existing `dist/` directory and
+- The default bundled web image runs `python -m inqtrix_web_gateway`, serves
+  `dist/`, and
   performs a real bidirectional binary WebSocket relay plus an explicit HTTP
   instance-probe proxy to FastAPI. Direct HTTP derives forwarding metadata from
-  the ASGI connection. When TLS terminates before the launcher, set the exact
-  `INQTRIX_PUBLIC_BASE_URL`; the launcher then overwrites forwarded scheme and
+  the ASGI connection. When TLS terminates before the gateway, set the exact
+  `INQTRIX_PUBLIC_BASE_URL`; the gateway then overwrites forwarded scheme and
   host from that value and never trusts incoming `X-Forwarded-Proto` or
   `X-Forwarded-Host`.
 
-The Python launcher never starts or targets Node directly. Dist mode is fully
+The Python gateway never starts or targets Node directly. Dist mode is fully
 functional when the separately started API and optional collaboration service
 are healthy. Without Node, the Research Desk still starts, but collaboration
 documents are read-only and the capability reports the service unavailable.
@@ -276,7 +281,9 @@ read-only kill switch, not a conversion or deletion:
 
 Re-enable only with the matching schema/protocol build and one healthy Node
 instance. A planned Node restart closes sockets with `1012`; clients become
-read-only and reconnect after readiness returns.
+read-only and reconnect with capped exponential backoff. After repeated
+failures the status surface exposes a manual reconnect that rotates the lease
+and resynchronizes the room without a page reload.
 
 ## Security and limits
 
@@ -284,7 +291,8 @@ read-only and reconnect after readiness returns.
 - Keep `INQTRIX_PUBLIC_BASE_URL`, the public proxy host, and its TLS mode
   aligned. FastAPI accepts forwarded same-origin only when browser Origin,
   sanitized forwarded proto/host, and that configured public origin all match.
-- Keep Node and `/metrics` private; expose only nginx/web and FastAPI's
+- Keep Node and `/metrics` private; expose only the selected web adapter
+  (Python by default, nginx only when explicitly selected) and FastAPI's
   same-origin gateway.
 - The public instance probe is deliberately unauthenticated and `no-store`; it
   exposes only fixed contract labels plus readiness, process instance ID, and

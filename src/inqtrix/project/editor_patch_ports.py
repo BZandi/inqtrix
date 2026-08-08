@@ -27,9 +27,14 @@ from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 PATCH_SOURCES = ("suggest", "instruct", "agent", "human")
-"""Who proposed the edits: the editor assistant's per-paragraph suggest
-call, its document-level instruct call, or the workspace-agent patch
-phase (M7). The ORM builds its CHECK constraint from this tuple."""
+"""Proposal representation and origin.
+
+``suggest``/``instruct``/``agent`` retain the assistant's exact anchored
+edits. ``human`` stores sidecar-validated descriptors for a patch materialized
+through the live collaboration document; the attributed user remains its
+creator even when a creator-private assistant draft supplied the content. The
+ORM builds its CHECK constraint from this tuple.
+"""
 
 PATCH_STATUSES = ("pending", "accepted", "rejected")
 """Lifecycle of one patch. ``accepted`` means the edits were applied
@@ -88,10 +93,11 @@ class EditorPatchRecord:
             the run — ``SET NULL``).
         source: One of :data:`PATCH_SOURCES`.
         status: One of :data:`PATCH_STATUSES`.
-        edits: The anchored edit objects in the ``editor_instructions``
-            shape (``find``/``quote_before``/``quote_after``/``position``/
-            ``text``/``note``) PLUS a per-edit ``id`` (``ed_1``..``ed_n``)
-            assigned at propose so apply outcomes are addressable.
+        edits: For assistant/agent sources, the anchored edit objects in the
+            ``editor_instructions`` shape (``find``/``quote_before``/
+            ``quote_after``/``position``/``text``/``note``) plus a per-edit
+            id. For descriptor-backed collaboration patches, the
+            sidecar-validated suggestion membership metadata.
         summary: The assistant message that accompanied the proposal.
         warnings: Visible warnings from the proposing call (anchor
             validation, truncation), carried for the review UI.

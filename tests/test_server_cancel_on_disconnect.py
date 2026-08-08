@@ -1,4 +1,4 @@
-"""Tests for the implicit-cancel-on-disconnect pathway (ADR-MS-5/MS-6)."""
+"""Tests for the implicit-cancel-on-disconnect pathway."""
 
 from __future__ import annotations
 
@@ -144,7 +144,7 @@ async def test_stream_response_sets_cancel_event_on_disconnect(monkeypatch):
     """Simulate a Request whose receive() yields http.disconnect; cancel_event must be set.
 
     Replaces the previous polling-based ``is_disconnected`` test: the
-    new pathway (ADR-WS-11) spawns a watcher task that blocks on
+    cancellation pathway spawns a watcher task that blocks on
     ``await request.receive()`` and acts on the first
     ``http.disconnect`` message uvicorn emits. The fake request below
     delays the disconnect by a tiny amount so the streaming loop has a
@@ -303,7 +303,14 @@ async def test_stream_response_cleans_up_watcher_on_normal_completion(monkeypatc
 
 def test_chat_completions_blocking_path_unaffected(monkeypatch):
     """Blocking /v1/chat/completions does not need a cancel_event."""
-    def fake_run(question, *, history, providers, strategies, settings):
+    def fake_run(
+        question,
+        *,
+        history,
+        providers,
+        strategies,
+        settings,
+    ):
         return {
             "answer": "ok",
             "result_state": {},

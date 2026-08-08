@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
 _VALID_ROLES = frozenset({"user", "assistant"})
 _VALID_SOURCES = frozenset({"api", "imported", "mock"})
+_MODEL_SELECTION_MAX_CHARS = 2000
 
 
 class ChatValidationError(ValueError):
@@ -88,6 +89,7 @@ class ChatHistoryService:
         caller_user_id: uuid.UUID | None,
         workspace_id: str | None,
         visible_to: "UserContext | None",
+        model_selection: str = "",
     ) -> ChatThread:
         """Create or update a thread (idempotent autosave).
 
@@ -96,6 +98,12 @@ class ChatHistoryService:
         """
         if source not in _VALID_SOURCES:
             raise ChatValidationError(f"unknown thread source: {source!r}")
+        # Client-owned JSON, the items_json trust model: content is the
+        # client's business, an unbounded blob is not.
+        if len(model_selection) > _MODEL_SELECTION_MAX_CHARS:
+            raise ChatValidationError(
+                f"model_selection exceeds {_MODEL_SELECTION_MAX_CHARS} characters"
+            )
         try:
             existing = await self._store.get_thread(id)
         except ThreadNotFound:
@@ -123,6 +131,7 @@ class ChatHistoryService:
             updated_at=updated_at,
             created_by_user_id=owner_user_id,
             workspace_id=owner_workspace,
+            model_selection=model_selection,
         )
 
     async def list_threads(

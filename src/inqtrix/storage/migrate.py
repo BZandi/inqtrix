@@ -32,6 +32,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import DBAPIError
 
 from inqtrix.storage.migration_contract import (
     MIGRATION_TENANT_RLS_TABLES,
@@ -55,6 +56,7 @@ MigrationRLSMode = Literal["auto", "owner", "bypass"]
 """Supported migration privilege strategies."""
 
 _MIGRATION_ADVISORY_LOCK_KEY = "inqtrix:schema-migration"
+_MIGRATION_LOCK_TIMEOUT_SECONDS = 10
 
 
 @dataclass(frozen=True)
@@ -818,6 +820,9 @@ def _required_legacy_columns(migration: Any) -> dict[str, set[str]]:
         "indexing_jobs": {
             "job_id",
             "tenant_id",
+            "operation_kind",
+            "document_id",
+            "revision_id",
             "status",
             "total_documents",
             "completed_documents",
@@ -1190,21 +1195,35 @@ _V02_INDEX_UPGRADE_ERROR = {
 }
 
 
-def _v02_terminal_statuses_sql() -> str:
-    """Return the shared run/index terminal statuses as a SQL literal list."""
-    from inqtrix.server.indexing import TERMINAL_INDEXING_STATUSES
+def _status_values_sql(statuses: set[str]) -> str:
+    """Render an internal enum value set as a trusted SQL literal list."""
+    if not statuses or any(not status.isidentifier() for status in statuses):
+        raise RuntimeError("invalid internal terminal status contract")
+    return "(" + ", ".join(f"'{status}'" for status in sorted(statuses)) + ")"
+
+
+def _v02_run_terminal_statuses_sql() -> str:
+    """Return the run terminal statuses used by legacy terminalization."""
     from inqtrix.server.runs import TERMINAL_RUN_STATUSES
 
-    run_statuses = {status.value for status in TERMINAL_RUN_STATUSES}
-    indexing_statuses = {
-        status.value for status in TERMINAL_INDEXING_STATUSES
-    }
-    if run_statuses != indexing_statuses:
-        raise RuntimeError(
-            "v0.2 maintenance requires matching run and indexing terminal "
-            "status contracts"
-        )
-    return "(" + ", ".join(f"'{status}'" for status in sorted(run_statuses)) + ")"
+    return _status_values_sql(
+        {status.value for status in TERMINAL_RUN_STATUSES}
+    )
+
+
+def _v02_index_terminal_statuses_sql() -> str:
+    """Return the indexing terminal statuses used by legacy terminalization.
+
+    Runs and indexing jobs are independent lifecycle machines. In particular,
+    indexing can terminate in a deliberately published raw generation, which
+    has no corresponding run state. Keeping the predicates separate prevents
+    upgrade maintenance from rewriting a valid terminal index job.
+    """
+    from inqtrix.server.indexing import TERMINAL_INDEXING_STATUSES
+
+    return _status_values_sql(
+        {status.value for status in TERMINAL_INDEXING_STATUSES}
+    )
 
 
 def _v02_run_failure_events(
@@ -1311,7 +1330,8 @@ async def _terminalize_v02_locked(
     connection: Any,
     preflight: V02PreflightReport,
     *,
-    terminal_statuses_sql: str,
+    run_terminal_statuses_sql: str,
+    indexing_terminal_statuses_sql: str,
 ) -> V02TerminalizationReport:
     """Persist every legacy terminal transition under the preflight locks.
 
@@ -1322,8 +1342,10 @@ async def _terminalize_v02_locked(
     Args:
         connection: Connection inside the locked preflight transaction.
         preflight: Report computed by that same transaction.
-        terminal_statuses_sql: Trusted SQL literal generated from the existing
-            run and indexing status contracts.
+        run_terminal_statuses_sql: Trusted SQL literal generated from the run
+            status contract.
+        indexing_terminal_statuses_sql: Trusted SQL literal generated from the
+            independent indexing status contract.
 
     Returns:
         Counts of terminalized runs and reindex jobs.
@@ -1338,7 +1360,7 @@ async def _terminalize_v02_locked(
         await connection.execute(
             text(
                 "SELECT run_id, tenant_id, snapshot FROM runs "
-                f"WHERE status NOT IN {terminal_statuses_sql} "
+                f"WHERE status NOT IN {run_terminal_statuses_sql} "
                 "ORDER BY run_id FOR UPDATE"
             )
         )
@@ -1354,7 +1376,7 @@ async def _terminalize_v02_locked(
                 "SELECT job_id, tenant_id, total_documents, "
                 "completed_documents, current_document_title "
                 "FROM indexing_jobs "
-                f"WHERE status NOT IN {terminal_statuses_sql} "
+                f"WHERE status NOT IN {indexing_terminal_statuses_sql} "
                 "ORDER BY job_id FOR UPDATE"
             )
         )
@@ -1371,7 +1393,7 @@ async def _terminalize_v02_locked(
         "error = CAST(:error_json AS json), "
         "event_seq = event_seq + :event_count "
         "WHERE run_id = :run_id AND status NOT IN "
-        f"{terminal_statuses_sql} RETURNING event_seq"
+        f"{run_terminal_statuses_sql} RETURNING event_seq"
     )
     run_event_insert = text(
         "INSERT INTO run_events "
@@ -1416,7 +1438,7 @@ async def _terminalize_v02_locked(
         "finished_at = :finished_at, error = CAST(:error_json AS json), "
         "event_seq = event_seq + 1 "
         "WHERE job_id = :job_id AND status NOT IN "
-        f"{terminal_statuses_sql} RETURNING event_seq"
+        f"{indexing_terminal_statuses_sql} RETURNING event_seq"
     )
     indexing_event_insert = text(
         "INSERT INTO indexing_job_events "
@@ -1478,7 +1500,8 @@ async def _terminalize_v02_legacy_work(
     only immediately before migration 0045 and never runs implicitly as part
     of Alembic.
     """
-    terminal_statuses_sql = _v02_terminal_statuses_sql()
+    run_terminal_statuses_sql = _v02_run_terminal_statuses_sql()
+    indexing_terminal_statuses_sql = _v02_index_terminal_statuses_sql()
 
     async def locked_action(
         connection: Any,
@@ -1487,7 +1510,8 @@ async def _terminalize_v02_legacy_work(
         return await _terminalize_v02_locked(
             connection,
             preflight,
-            terminal_statuses_sql=terminal_statuses_sql,
+            run_terminal_statuses_sql=run_terminal_statuses_sql,
+            indexing_terminal_statuses_sql=indexing_terminal_statuses_sql,
         )
 
     return await _v02_preflight(
@@ -1591,6 +1615,60 @@ async def _acquire_migration_advisory_lock(connection: Any) -> None:
         )
 
 
+def _schema_transition_required(
+    report: MigrationRoleReport,
+    expected_revisions: tuple[str, ...],
+) -> bool:
+    """Return whether Alembic would change an installed schema revision."""
+    return report.schema_revision != expected_revisions
+
+
+def _assert_schema_transition_quiesced(
+    report: MigrationRoleReport,
+    *,
+    expected_revisions: tuple[str, ...],
+    services_quiesced: bool,
+) -> bool:
+    """Require an explicit maintenance window for every installed transition.
+
+    RLS authority and workload quiescence are independent contracts. A no-op
+    invocation at the installed target remains safe during normal startup.
+    """
+    transition = _schema_transition_required(report, expected_revisions)
+    if report.existing_schema and transition and not services_quiesced:
+        raise RuntimeError(
+            "migration of an installed schema requires "
+            "services_quiesced=True after API, worker, collaboration, and "
+            "connection-pool sessions have been stopped and drained; this "
+            "requirement applies to auto, owner, and bypass RLS strategies"
+        )
+    return transition
+
+
+async def _assert_database_sessions_drained(connection: Any) -> None:
+    """Prove that the migration connection is the database's only client."""
+    other_sessions = int(
+        (
+            await connection.execute(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datid = (SELECT oid FROM pg_database "
+                    "WHERE datname = current_database()) "
+                    "AND pid <> pg_backend_pid() "
+                    "AND backend_type = 'client backend'"
+                )
+            )
+        ).scalar_one()
+    )
+    if other_sessions:
+        raise RuntimeError(
+            "migration refused before schema mutation: found "
+            f"{other_sessions} other database client session(s); stop the "
+            "API, worker, collaboration service, and pooler, drain their "
+            "sessions, then retry"
+        )
+
+
 def _quoted_table(connection: Any, table_name: str) -> str:
     """Quote one catalog-derived relation name for a utility statement."""
     return str(connection.dialect.identifier_preparer.quote(table_name))
@@ -1640,7 +1718,7 @@ def _maintain_owner_rls_tables(
             for table_name in sorted(lock_names)
         )
         connection.execute(
-            text(f"LOCK TABLE {quoted} IN ACCESS EXCLUSIVE MODE NOWAIT")
+            text(f"LOCK TABLE {quoted} IN ACCESS EXCLUSIVE MODE")
         )
     for table_name, relation_oid, is_forced in tenant_relations:
         if (
@@ -1677,6 +1755,25 @@ async def _begin_owner_rls_maintenance(
     # instead of letting a cross-tenant migration operate on a filtered subset.
     await connection.execute(text("SET LOCAL row_security = off"))
     return tracked_relation_oids
+
+
+async def _begin_bypass_schema_maintenance(
+    connection: Any,
+    report: MigrationRoleReport,
+) -> None:
+    """Lock installed tenant state without changing FORCE-RLS attributes."""
+    lock_names = tuple(table.name for table in report.tenant_tables)
+    if report.version_table_exists:
+        lock_names = (*lock_names, RUNTIME_VERSION_TABLE)
+    if not lock_names:
+        return
+    quoted = ", ".join(
+        _quoted_table(connection, table_name)
+        for table_name in sorted(set(lock_names))
+    )
+    await connection.execute(
+        text(f"LOCK TABLE {quoted} IN ACCESS EXCLUSIVE MODE")
+    )
 
 
 async def _restore_owner_rls(
@@ -1886,38 +1983,71 @@ async def _run_schema_migrations(
     expected_revisions = _resolve_target_revisions(config, revision)
     engine = build_engine(database_url, null_pool=True)
     try:
-        async with engine.connect() as connection:
-            async with connection.begin():
-                report = await _inspect_migration_role(connection)
-                strategy = _assert_migration_role(
-                    report,
-                    rls_mode=rls_mode,
-                    services_quiesced=services_quiesced,
-                )
-                await _acquire_migration_advisory_lock(connection)
-                owner_tables: dict[str, int] | None = None
-                if strategy in {"fresh", "owner"}:
-                    owner_tables = await _begin_owner_rls_maintenance(
-                        connection,
-                        report,
+        try:
+            async with engine.connect() as connection:
+                async with connection.begin():
+                    await connection.execute(
+                        text(
+                            "SET LOCAL lock_timeout = "
+                            f"'{_MIGRATION_LOCK_TIMEOUT_SECONDS}s'"
+                        )
                     )
-                else:
-                    _log_auto_rls_strategy(strategy, rls_mode)
-                await _invoke_alembic(
-                    connection,
-                    config=config,
-                    revision=revision,
-                    downgrade=downgrade,
-                    owner_rls_tables=owner_tables,
-                )
-                await _restore_owner_rls(
-                    connection,
-                    tuple(owner_tables) if owner_tables is not None else (),
-                )
-                await _assert_migration_postconditions(
-                    connection,
-                    expected_revisions=expected_revisions,
-                )
+                    report = await _inspect_migration_role(connection)
+                    transition = _assert_schema_transition_quiesced(
+                        report,
+                        expected_revisions=expected_revisions,
+                        services_quiesced=services_quiesced,
+                    )
+                    strategy = _assert_migration_role(
+                        report,
+                        rls_mode=rls_mode,
+                        services_quiesced=(
+                            services_quiesced or not transition
+                        ),
+                    )
+                    await _acquire_migration_advisory_lock(connection)
+                    if report.existing_schema and transition:
+                        await _assert_database_sessions_drained(connection)
+                    owner_tables: dict[str, int] | None = None
+                    if strategy == "fresh" or (
+                        strategy == "owner" and transition
+                    ):
+                        owner_tables = await _begin_owner_rls_maintenance(
+                            connection,
+                            report,
+                        )
+                    else:
+                        _log_auto_rls_strategy(strategy, rls_mode)
+                        if report.existing_schema and transition:
+                            await _begin_bypass_schema_maintenance(
+                                connection,
+                                report,
+                            )
+                    await _invoke_alembic(
+                        connection,
+                        config=config,
+                        revision=revision,
+                        downgrade=downgrade,
+                        owner_rls_tables=owner_tables,
+                    )
+                    await _restore_owner_rls(
+                        connection,
+                        tuple(owner_tables) if owner_tables is not None else (),
+                    )
+                    await _assert_migration_postconditions(
+                        connection,
+                        expected_revisions=expected_revisions,
+                    )
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) == "55P03":
+                raise RuntimeError(
+                    "migration lock acquisition exceeded "
+                    f"{_MIGRATION_LOCK_TIMEOUT_SECONDS} seconds; PostgreSQL "
+                    "rolled back the transaction and no schema transition "
+                    "was published. Keep services stopped, drain database "
+                    "sessions, and retry."
+                ) from exc
+            raise
     finally:
         await engine.dispose()
 
@@ -1964,8 +2094,10 @@ def run_migrations(
             ``bypass`` requires a dedicated non-superuser ``BYPASSRLS`` role;
             ``owner`` opens a locked, transaction-scoped FORCE-RLS maintenance
             boundary.
-        services_quiesced: Required for owner-mode changes to an installed
-            schema after every application database session is drained.
+        services_quiesced: Required for every change to an installed schema,
+            independent of RLS strategy, after every application and pooler
+            database session is drained. A no-op invocation at the installed
+            target does not require a maintenance window.
     """
     effective_url = migration_database_url or database_url
     asyncio.run(

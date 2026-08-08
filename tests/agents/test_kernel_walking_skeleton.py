@@ -143,11 +143,36 @@ def _answer_turn() -> ChatTurn:
     )
 
 
+def _two_read_calls_turn() -> ChatTurn:
+    """A side-effect-free batch that cannot partially dispatch."""
+    return ChatTurn(
+        text="",
+        tool_calls=(
+            ToolCallRequest(
+                id="call_read0001",
+                name="read_canvas",
+                arguments={"artifact_id": "missing-a"},
+            ),
+            ToolCallRequest(
+                id="call_read0002",
+                name="read_canvas",
+                arguments={"artifact_id": "missing-b"},
+            ),
+        ),
+        finish_reason="tool_calls",
+        model="high-model",
+        prompt_tokens=40,
+        completion_tokens=12,
+        raw=None,
+    )
+
+
 def make_kernel_client(
     llm: ScriptedToolLLM,
     *,
     max_tokens_per_run: int = 0,
     max_tool_calls: int = 30,
+    max_iterations: int = 73,
 ) -> TestClient:
     settings = Settings(
         models=ModelSettings(),
@@ -159,6 +184,7 @@ def make_kernel_client(
         INQTRIX_AGENT_ALLOW_VOLATILE=True,
         INQTRIX_AGENT_KERNEL_ENABLED=True,
         INQTRIX_AGENT_KERNEL_MAX_TOOL_CALLS=max_tool_calls,
+        INQTRIX_AGENT_KERNEL_MAX_ITERATIONS=max_iterations,
     )
     if max_tokens_per_run:
         settings.quota.max_tokens_per_run = max_tokens_per_run
@@ -263,6 +289,50 @@ def test_kernel_model_retries_use_agent_activity_channel():
     assert retries[0]["retry"]["max_attempts"] == 3
 
 
+def test_kernel_completion_materializes_answer_artifact():
+    """A completed kernel run persists the ``answer`` artifact the desk renders.
+
+    Real kernel runs previously returned the answer only in ``AgentResult`` and
+    never as a ``kind="answer"`` artifact, so the Agent Desk showed no answer
+    text (only the demo faked one). This pins the materialization + the
+    ``artifact.created`` event the frontend refetches on.
+    """
+    llm = ScriptedToolLLM([_answer_turn()])
+    client = make_kernel_client(llm)
+    with client:
+        run_id = client.post(
+            "/v1/runs",
+            json={
+                "question": "Fasse den EU AI Act zusammen.",
+                "mode": "agent_kernel",
+            },
+        ).json()["run_id"]
+        wait_status(client, run_id, {"completed"})
+
+        artifacts = client.get(f"/v1/runs/{run_id}/artifacts").json()["data"]
+        answers = [a for a in artifacts if a["kind"] == "answer"]
+        assert len(answers) == 1
+        assert answers[0]["title"] == "Antwort"
+        assert answers[0]["status"] == "ready"
+        # Deterministic id -> idempotent across a redelivered terminal segment.
+        assert answers[0]["artifact_id"] == f"art_{run_id[-12:]}_answer"
+
+        body = client.get(
+            f"/v1/runs/{run_id}/artifacts/{answers[0]['artifact_id']}"
+        ).json()
+        assert body["content_markdown"] == (
+            "Hier ist die kompakte Antwort auf deinen Auftrag."
+        )
+
+        created = [
+            event
+            for event in run_events(client, run_id)
+            if event["type"] == "inqtrix.agent.artifact.created"
+            and event["data"].get("kind") == "answer"
+        ]
+        assert len(created) == 1
+
+
 def test_ask_user_park_resume_trajectory():
     llm = ScriptedToolLLM([_ask_turn(), _answer_turn()])
     client = make_kernel_client(llm)
@@ -322,6 +392,127 @@ def test_ask_user_park_resume_trajectory():
             t["function"]["name"] for t in (llm.chat_calls[0]["tools"] or [])
         }
         assert "ask_user" in tool_names
+
+
+def test_tool_limit_extension_resumes_checkpoint_without_repeating_model_call():
+    """An explicit extension continues the rejected batch exactly once."""
+    llm = ScriptedToolLLM([_two_read_calls_turn(), _answer_turn()])
+    client = make_kernel_client(llm, max_tool_calls=1)
+    with client:
+        run_id = client.post(
+            "/v1/runs", json={"question": "Auftrag.", "mode": "agent_kernel"}
+        ).json()["run_id"]
+
+        waiting = wait_status(client, run_id, {"waiting_for_input"})
+        assert waiting["status"] == "waiting_for_input"
+        assert len(llm.chat_calls) == 1
+        rows = client.get(f"/v1/runs/{run_id}/clarifications").json()["data"]
+        assert len(rows) == 1
+        assert [option["id"] for option in rows[0]["options"]] == [
+            "extend",
+            "partial",
+            "cancel",
+        ]
+
+        answered = client.post(
+            f"/v1/runs/{run_id}/clarifications/{rows[0]['clarification_id']}",
+            json={"option_id": "extend"},
+        )
+        assert answered.status_code == 200, answered.text
+        wait_status(client, run_id, {"completed"})
+
+        # The first provider turn is checkpointed. Resume dispatches the
+        # formerly rejected whole batch, then asks only for the final answer.
+        assert len(llm.chat_calls) == 2
+        result = client.get(f"/v1/runs/{run_id}/result").json()
+        limits = result["execution"]["limits"]
+        assert limits["tool_calls"] == {
+            "used": 2,
+            "limit": 2,
+            "ceiling": 60,
+            "recoverable": True,
+            "extendable": True,
+            "reason": "",
+        }
+        stored = client.get(
+            f"/v1/runs/{run_id}/clarifications"
+        ).json()["data"]
+        assert stored[0]["status"] == "answered"
+        assert stored[0]["option_id"] == "extend"
+
+
+def test_tool_limit_partial_requires_explicit_choice_and_calls_no_model():
+    """A reached limit remains parked until the user accepts a partial."""
+    llm = ScriptedToolLLM([_two_read_calls_turn()])
+    client = make_kernel_client(llm, max_tool_calls=1)
+    with client:
+        run_id = client.post(
+            "/v1/runs", json={"question": "Auftrag.", "mode": "agent_kernel"}
+        ).json()["run_id"]
+        wait_status(client, run_id, {"waiting_for_input"})
+        rows = client.get(f"/v1/runs/{run_id}/clarifications").json()["data"]
+
+        # Merely reaching the boundary never fabricates a partial answer.
+        assert client.get(f"/v1/runs/{run_id}").json()["status"] == "waiting_for_input"
+        assert len(llm.chat_calls) == 1
+        answered = client.post(
+            f"/v1/runs/{run_id}/clarifications/{rows[0]['clarification_id']}",
+            json={"option_id": "partial"},
+        )
+        assert answered.status_code == 200, answered.text
+        wait_status(client, run_id, {"completed"})
+
+        result = client.get(f"/v1/runs/{run_id}/result").json()
+        assert "Teilstand" in result["answer"]
+        assert "keine vollst\u00e4ndige Synthese" in result["answer"]
+        decisions = [
+            event
+            for event in run_events(client, run_id)
+            if event["type"] == "inqtrix.agent.limit.decided"
+        ]
+        assert [event["data"]["choice"] for event in decisions] == ["partial"]
+        assert len(llm.chat_calls) == 1
+
+
+def test_step_limit_extensions_use_cumulative_checkpoint_coordinate():
+    """Repeated resumes widen one cumulative allowance, not fresh segments."""
+    llm = ScriptedToolLLM([_answer_turn()])
+    client = make_kernel_client(llm, max_iterations=3)
+    with client:
+        run_id = client.post(
+            "/v1/runs", json={"question": "Auftrag.", "mode": "agent_kernel"}
+        ).json()["run_id"]
+
+        answered_limits = 0
+        for _ in range(4):
+            summary = wait_status(
+                client, run_id, {"waiting_for_input", "completed", "failed"}
+            )
+            if summary["status"] == "completed":
+                break
+            assert summary["status"] == "waiting_for_input", summary
+            rows = client.get(
+                f"/v1/runs/{run_id}/clarifications"
+            ).json()["data"]
+            pending = [row for row in rows if row["status"] == "pending"]
+            assert len(pending) == 1
+            assert "Ausf\u00fchrungsschritte" in pending[0]["question"]
+            response = client.post(
+                f"/v1/runs/{run_id}/clarifications/"
+                f"{pending[0]['clarification_id']}",
+                json={"option_id": "extend"},
+            )
+            assert response.status_code == 200, response.text
+            answered_limits += 1
+        result_summary = wait_status(client, run_id, {"completed", "failed"})
+        assert result_summary["status"] == "completed", result_summary
+        assert answered_limits >= 1
+        assert len(llm.chat_calls) == 1
+        step_limit = client.get(f"/v1/runs/{run_id}/result").json()[
+            "execution"
+        ]["limits"]["steps"]
+        assert step_limit["used"] <= step_limit["limit"]
+        assert step_limit["limit"] <= step_limit["ceiling"]
 
 
 def test_two_ask_user_rounds_use_distinct_rows():
@@ -391,6 +582,17 @@ def test_token_budget_stops_the_kernel_across_segments():
     llm = ScriptedToolLLM([_ask_turn(), _answer_turn()])
     client = make_kernel_client(llm, max_tokens_per_run=30)
     with client:
+        token_limit = client.get("/v1/capabilities").json()["agent"]["limits"][
+            "tokens"
+        ]
+        assert token_limit == {
+            "enabled": True,
+            "limit": 30,
+            "ceiling": 30,
+            "recoverable": False,
+            "extendable": False,
+            "reason": "operator_ceiling_exactly_once_required",
+        }
         run_id = client.post(
             "/v1/runs", json={"question": "Auftrag.", "mode": "agent_kernel"}
         ).json()["run_id"]
@@ -404,6 +606,21 @@ def test_token_budget_stops_the_kernel_across_segments():
         summary = wait_status(client, run_id, {"failed", "completed"})
         assert summary["status"] == "failed"
         assert summary["error"]["type"] == "token_budget_exceeded"
+        limit_events = [
+            event
+            for event in run_events(client, run_id)
+            if event["type"] == "inqtrix.agent.limit.reached"
+        ]
+        assert limit_events[-1]["data"] == {
+            "kind": "tokens",
+            "used": 52,
+            "limit": 30,
+            "ceiling": 30,
+            "extendable": False,
+            "recoverable": False,
+            "reason": "operator_ceiling_exactly_once_required",
+            "state": "failed_at_model_boundary",
+        }
         # The second scripted turn was never consumed: the abort fired
         # at the model boundary, not after another paid call.
         assert len(llm.chat_calls) == 1

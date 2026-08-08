@@ -33,6 +33,7 @@ construction in tests never trips prometheus' duplicate-timeseries guard.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -185,6 +186,11 @@ def setup_metrics(
     """
     global _admission_counter
     _admission_counter = None
+    # Repeated create_app in tests: clear the shared holder so a
+    # disabled app never records into a previous app's registry.
+    from inqtrix.observability.metrics_defs import set_active_metrics
+
+    set_active_metrics(None)
 
     server = settings.server
     if not server.metrics_enabled:
@@ -212,6 +218,13 @@ def setup_metrics(
     run_store = getattr(container, "run_store", None)
     if run_store is not None:
         registry.register(_RunStoreCollector(run_store, GaugeMetricFamily))
+
+    # Shared call metrics: the provider wrappers, retrieval
+    # timers, and indexing counters reach these instruments through the
+    # process holder — one definition module, per-process registry.
+    from inqtrix.observability.metrics_defs import build_call_metrics
+
+    set_active_metrics(build_call_metrics(registry))
 
     _admission_counter = Counter(
         "inqtrix_run_admission_rejected_total",
@@ -245,10 +258,13 @@ def setup_metrics(
     async def metrics_endpoint(request: Request) -> Response:
         if guard is not None:
             guard(request)
-        return Response(
-            content=generate_latest(registry),
-            media_type=CONTENT_TYPE_LATEST,
-        )
+        # generate_latest runs the custom collectors synchronously, and
+        # the run-store gauges do a real Postgres round-trip. On the
+        # event loop a slow or hung database would stall EVERY request,
+        # not just the DB-bound ones — a scrape must never be able to do
+        # that, so it runs off-loop.
+        payload = await asyncio.to_thread(generate_latest, registry)
+        return Response(content=payload, media_type=CONTENT_TYPE_LATEST)
 
     app.add_api_route(
         "/metrics",

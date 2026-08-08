@@ -319,6 +319,75 @@ describe('applyAgentRunEvent', () => {
     expect(record.artifactsStale).toBe(true)
   })
 
+  it('publishes answer deltas into one Markdown artifact and detects gaps', () => {
+    let record = agentRunFromSummary(summary())
+    record = applyAgentRunEvent(record, event(1, 'inqtrix.answer.started', {
+      artifact_id: 'art-answer',
+      publication_id: 'pub-answer',
+      status: 'writing',
+    }))
+    record = applyAgentRunEvent(record, event(2, 'inqtrix.output_text.delta', {
+      artifact_id: 'art-answer',
+      publication_id: 'pub-answer',
+      offset: 0,
+      delta: '**Preis:** ',
+    }))
+    const firstBytes = new TextEncoder().encode('**Preis:** ').byteLength
+    record = applyAgentRunEvent(record, event(3, 'inqtrix.output_text.delta', {
+      artifact_id: 'art-answer',
+      publication_id: 'pub-answer',
+      offset: firstBytes,
+      delta: '5 €',
+    }))
+
+    expect(record.artifacts['art-answer']).toMatchObject({
+      contentMarkdown: '**Preis:** 5 €',
+      publicationId: 'pub-answer',
+      status: 'writing',
+    })
+
+    const gapped = applyAgentRunEvent(record, event(4, 'inqtrix.output_text.delta', {
+      artifact_id: 'art-answer',
+      publication_id: 'pub-answer',
+      offset: 999,
+      delta: 'untrusted gap',
+    }))
+    expect(gapped.artifacts['art-answer'].contentMarkdown).toBe('**Preis:** 5 €')
+    expect(gapped.artifactsStale).toBe(true)
+
+    const ready = applyAgentRunEvent(gapped, event(5, 'inqtrix.answer.ready', {
+      artifact_id: 'art-answer',
+      publication_id: 'pub-answer',
+      status: 'ready',
+    }))
+    expect(ready.artifacts['art-answer']).toMatchObject({
+      contentMarkdown: '**Preis:** 5 €',
+      publicationNeedsReconcile: true,
+      status: 'ready',
+    })
+    expect(ready.artifactsStale).toBe(true)
+  })
+
+  it('does not fetch a completed answer ahead of its streaming publication', () => {
+    const record = {
+      ...agentRunFromSummary(summary()),
+      artifactsStale: false,
+    }
+    const signalled = applyAgentRunEvent(record, event(
+      1,
+      'inqtrix.agent.artifact.created',
+      { artifact_id: 'art-answer', kind: 'answer', revision: 1 },
+    ))
+    expect(signalled.artifactsStale).toBe(false)
+
+    const failed = applyAgentRunEvent(signalled, event(
+      2,
+      'inqtrix.run.failed',
+      { error: { message: 'publication failed', type: 'server_error' } },
+    ))
+    expect(failed.artifactsStale).toBe(true)
+  })
+
   it('maps waiting and terminal run events onto the status', () => {
     let record = agentRunFromSummary(summary())
     record = applyAgentRunEvent(record, event(1, 'inqtrix.run.waiting', { status: 'waiting_for_approval' }))
@@ -341,6 +410,23 @@ describe('applyAgentRunEvent', () => {
     expect(record.elapsedSeconds).toBe(8)
   })
 
+  it('marks a resumed segment running without replacing the first start', () => {
+    let record = agentRunFromSummary(summary())
+    const firstStartedAt = record.startedAt
+    record = applyAgentRunEvent(record, event(1, 'inqtrix.run.queued', {
+      resumed: true,
+      segment_id: 'seg_agent_1_2',
+    }))
+    record = applyAgentRunEvent(record, event(2, 'inqtrix.run.resumed', {
+      status: 'running',
+      segment_id: 'seg_agent_1_2',
+      segment_ordinal: 2,
+    }))
+
+    expect(record.status).toBe('running')
+    expect(record.startedAt).toBe(firstStartedAt)
+  })
+
   it('preserves authoritative terminal timing while replaying persisted events', () => {
     let record = agentRunFromSummary(summary({
       elapsed_seconds: 77,
@@ -351,6 +437,138 @@ describe('applyAgentRunEvent', () => {
 
     expect(record.finishedAt).toBe('2023-11-14T22:14:38.000Z')
     expect(record.elapsedSeconds).toBe(77)
+  })
+
+  it('maps kernel tool events onto the ONE activity-step protocol', () => {
+    let record = agentRunFromSummary(summary({ mode: 'agent_kernel' }))
+    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.tool.started', {
+      tool: 'web_instant',
+      tool_call_id: 'call_1',
+      args_preview: 'WM 2026 Spielplan',
+    }))
+
+    // Live line: operation + literal query, running.
+    expect(record.activity).toMatchObject({
+      detail: 'WM 2026 Spielplan',
+      operation: 'web_instant',
+      status: 'running',
+    })
+    const running = record.stepLog.filter((item) => item.kind === 'activity')
+    expect(running).toHaveLength(1)
+    expect(running[0]).toMatchObject({
+      activityOperation: 'web_instant',
+      detail: 'WM 2026 Spielplan',
+      status: 'running',
+    })
+
+    // finished SETTLES the same row (no second line) and keeps the query.
+    record = applyAgentRunEvent(record, event(2, 'inqtrix.agent.tool.finished', {
+      tool: 'web_instant',
+      tool_call_id: 'call_1',
+      status: 'success',
+    }))
+    const settled = record.stepLog.filter((item) => item.kind === 'activity')
+    expect(settled).toHaveLength(1)
+    expect(settled[0]).toMatchObject({
+      detail: 'WM 2026 Spielplan',
+      status: 'completed',
+    })
+  })
+
+  it('settles kernel tool rows of tools outside the operation vocabulary', () => {
+    let record = agentRunFromSummary(summary({ mode: 'agent_kernel' }))
+    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.tool.started', {
+      tool: 'read_canvas',
+      tool_call_id: 'call_2',
+      args_preview: '{"artifact_id": "art_1"}',
+    }))
+    record = applyAgentRunEvent(record, event(2, 'inqtrix.agent.tool.finished', {
+      tool: 'read_canvas',
+      tool_call_id: 'call_2',
+      status: 'error',
+    }))
+    const rows = record.stepLog.filter((item) => item.kind === 'activity')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ label: 'read_canvas', status: 'failed' })
+  })
+
+  it('unwraps a legacy JSON args_preview to the bare query', () => {
+    let record = agentRunFromSummary(summary({ mode: 'agent_kernel' }))
+    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.tool.started', {
+      tool: 'search_project_knowledge',
+      tool_call_id: 'call_3',
+      args_preview: '{"query": "Compliance-Last Anbieter"}',
+    }))
+    expect(record.activity).toMatchObject({
+      detail: 'Compliance-Last Anbieter',
+      operation: 'knowledge_search',
+    })
+  })
+
+  it('settles a tool row across a phase flip and by bare call id', () => {
+    let record = agentRunFromSummary(summary({ mode: 'agent_kernel' }))
+    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.tool.started', {
+      tool: 'web_instant',
+      tool_call_id: 'call_9',
+      args_preview: 'Marktlage',
+    }))
+    record = applyAgentRunEvent(record, event(2, 'inqtrix.agent.phase.changed', {
+      phase: 'done', previous_phase: 'execution',
+    }))
+    // finished after the phase flip AND with a lost tool name: the call
+    // id alone must settle the SAME row.
+    record = applyAgentRunEvent(record, event(3, 'inqtrix.agent.tool.finished', {
+      tool: '',
+      tool_call_id: 'call_9',
+      status: 'success',
+    }))
+    const rows = record.stepLog.filter((item) => item.kind === 'activity')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      detail: 'Marktlage',
+      status: 'completed',
+    })
+  })
+
+  it('settles still-running tool rows at a terminal run event', () => {
+    let record = agentRunFromSummary(summary({ mode: 'agent_kernel' }))
+    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.tool.started', {
+      tool: 'web_instant',
+      tool_call_id: 'call_10',
+      args_preview: 'Abbruch mitten im Call',
+    }))
+    record = applyAgentRunEvent(record, event(2, 'inqtrix.run.failed', {
+      error: { code: 'iteration_limit', message: 'Limit erreicht.' },
+    }))
+    const rows = record.stepLog.filter((item) => item.kind === 'activity')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.status).toBe('failed')
+  })
+
+  it('keeps todo and ask_user tool events off the activity log', () => {
+    let record = agentRunFromSummary(summary({ mode: 'agent_kernel' }))
+    record = applyAgentRunEvent(record, event(1, 'inqtrix.agent.tool.started', {
+      tool: 'write_todos',
+      tool_call_id: 'call_4',
+      args_preview: '{"todos": []}',
+    }))
+    expect(record.stepLog).toHaveLength(0)
+    expect(record.activity).toBeUndefined()
+  })
+
+  it('reads structured run.failed errors with the legacy message fallback', () => {
+    let record = agentRunFromSummary(summary({ mode: 'agent_kernel' }))
+    record = applyAgentRunEvent(record, event(1, 'inqtrix.run.failed', {
+      error: { code: 'iteration_limit', message: 'Der Lauf hat sein Schritt-Limit erreicht.' },
+    }))
+    expect(record.status).toBe('failed')
+    expect(record.error).toBe('Der Lauf hat sein Schritt-Limit erreicht.')
+
+    let legacy = agentRunFromSummary(summary({ mode: 'agent_kernel' }))
+    legacy = applyAgentRunEvent(legacy, event(1, 'inqtrix.run.failed', {
+      message: 'Serverfehler.',
+    }))
+    expect(legacy.error).toBe('Serverfehler.')
   })
 
   it('captures the live activity line', () => {

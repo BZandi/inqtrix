@@ -17,14 +17,19 @@ import {
   buildCollaborationSuggestionTargetMarkdown,
   collaborationPublicationFromResponse,
   editorAiReadOnlyReason,
+  editorCollaborationActionDisabledReason,
   invokeEditorAiProvider,
   invokePrivateSuggestionPublication,
+  privateSuggestionDraftCreatePayload,
+  privateSuggestionDraftRevisionPayload,
+  privateSuggestionPublicationIdentity,
   prepareCollaborationSuggestionBatch,
   privateSuggestionPublishDisabledReason,
   resolvePrivateSuggestionAnchor,
   resolveEditorAiDocumentContext,
   serializePrivateSuggestionAnchor,
   sortPrivateSuggestionGroup,
+  tryAcquireEditorRunLatch,
 } from './useEditorSuggestions'
 import type { CollaborationLiveAuthority } from './collaborationAuthority'
 
@@ -42,6 +47,29 @@ const serializer: EditorRelativePositionAdapter = {
   fromProseMirrorPosition: (position) => `relative-${position}`,
   toProseMirrorPosition: () => null,
 }
+
+describe('editor AI run admission', () => {
+  it('holds one shared operation owner before React state can rerender', () => {
+    const sharedEditorRunOwner = { current: false }
+    const acquireCommentRun = () => tryAcquireEditorRunLatch(sharedEditorRunOwner)
+    const acquireGlobalRun = () => tryAcquireEditorRunLatch(sharedEditorRunOwner)
+    const acquireInstructionRun = () => tryAcquireEditorRunLatch(sharedEditorRunOwner)
+    const acquireRefineRun = () => tryAcquireEditorRunLatch(sharedEditorRunOwner)
+
+    expect(acquireCommentRun()).toBe(true)
+    expect(acquireCommentRun()).toBe(false)
+    expect(acquireGlobalRun()).toBe(false)
+    expect(acquireInstructionRun()).toBe(false)
+    expect(acquireRefineRun()).toBe(false)
+
+    sharedEditorRunOwner.current = false
+    expect(acquireRefineRun()).toBe(true)
+    expect(acquireRefineRun()).toBe(false)
+    expect(acquireCommentRun()).toBe(false)
+    expect(acquireGlobalRun()).toBe(false)
+    expect(acquireInstructionRun()).toBe(false)
+  })
+})
 
 describe('private AI suggestion relative anchors', () => {
   it('preserves quote fallback data while resolving live Yjs positions', () => {
@@ -120,6 +148,67 @@ describe('private AI suggestion relative anchors', () => {
     ], adapter)
 
     expect(sorted.map((item) => item.id)).toEqual(['second', 'first'])
+  })
+})
+
+describe('private AI suggestion draft persistence', () => {
+  const suggestion: EditorSuggestionRecord = {
+    anchor: anchor(2, 8),
+    blockId: 'paragraph-1',
+    changeSummary: ['Clearer wording'],
+    createdAt: '2026-08-01T10:00:00.000Z',
+    documentId: 'document-1',
+    evidence: {
+      mode: 'fact_check',
+      sources: [{ title: 'Primary source', url: 'https://example.test/source' }],
+    },
+    groupId: 'group-1',
+    id: 'suggestion-1',
+    originalText: 'old',
+    origin: { commentId: 'comment-1', kind: 'inline_edit' },
+    privateDraft: {
+      patchId: '00000000-0000-4000-8000-000000000003',
+      publicationCommandId: '00000000-0000-4000-8000-000000000002',
+      revision: 1,
+    },
+    proposedText: 'new',
+    revision: 1,
+    status: 'pending',
+    updatedAt: '2026-08-01T10:00:00.000Z',
+    warnings: ['Review terminology'],
+  }
+
+  it('reuses stable publication identifiers in the initial private draft payload', () => {
+    expect(privateSuggestionDraftCreatePayload(suggestion)).toEqual({
+      anchor_version: 1,
+      change_summary: ['Clearer wording'],
+      evidence: suggestion.evidence,
+      group_id: 'group-1',
+      patch_id: '00000000-0000-4000-8000-000000000003',
+      proposed_text: 'new',
+      publication_command_id: '00000000-0000-4000-8000-000000000002',
+      suggestion_id: 'suggestion-1',
+      warnings: ['Review terminology'],
+    })
+    expect(privateSuggestionPublicationIdentity(suggestion, 'en')).toEqual({
+      commandId: '00000000-0000-4000-8000-000000000002',
+      patchId: '00000000-0000-4000-8000-000000000003',
+    })
+  })
+
+  it('sends revisions without replacing the stable draft identity', () => {
+    expect(privateSuggestionDraftRevisionPayload(
+      suggestion,
+      'manual_edit',
+      'Make it shorter',
+    )).toEqual({
+      change_summary: ['Clearer wording'],
+      evidence: suggestion.evidence,
+      instruction: 'Make it shorter',
+      proposed_text: 'new',
+      revision_source: 'manual_edit',
+      warnings: ['Review terminology'],
+    })
   })
 })
 
@@ -216,6 +305,36 @@ describe('editor AI collaboration projection barrier', () => {
 })
 
 describe('editor AI collaboration access', () => {
+  it('keeps recovery copies local until the user promotes them', async () => {
+    const provider = vi.fn(async () => 'provider-result')
+    const document: EditorDocumentRecord = {
+      ...BASE_DOCUMENT,
+      recovery: {
+        capturedAt: '2026-07-29T10:00:00.000Z',
+        originalDocumentId: 'deleted-server-document',
+        reason: 'remote_deleted',
+      },
+    }
+    const disconnectedHandle = {} as never
+
+    expect(editorAiReadOnlyReason(document, null, 'en'))
+      .toBe('Save the local recovery copy as a new document before using AI features.')
+    expect(editorCollaborationActionDisabledReason(
+      document,
+      disconnectedHandle,
+      'write',
+      'de',
+    )).toBe(
+      'Speichern Sie die lokale Recovery-Kopie zuerst als neues Dokument, bevor Sie KI-Funktionen verwenden.',
+    )
+    // Preserved local suggestions remain actionable; no collaboration
+    // publication surface exists on a recovery copy.
+    expect(privateSuggestionPublishDisabledReason(document, disconnectedHandle, 'en')).toBeNull()
+    await expect(invokeEditorAiProvider(document, null, 'en', provider))
+      .rejects.toThrow('Save the local recovery copy')
+    expect(provider).not.toHaveBeenCalled()
+  })
+
   it('does not invoke provider work for view-only collaboration access', async () => {
     const provider = vi.fn(async () => 'provider-result')
     const document: EditorDocumentRecord = {

@@ -1,5 +1,5 @@
 /**
- * `/`-menu detection for the agent composer (plan M3 `3.2`) — the
+ * `/`-menu detection for the agent composer — the
  * slash twin of `detectCollectionMention` (same adapter pattern; the
  * shared composer mention module stays untouched). A slash token only
  * counts at the start of the text or after whitespace, so paths and

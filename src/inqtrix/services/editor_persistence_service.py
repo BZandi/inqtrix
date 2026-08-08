@@ -17,11 +17,13 @@ denial is the indistinct :class:`DocumentNotFound`/
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from urllib.parse import urlsplit
 
 from inqtrix.auth.permissions import (
     ResourceAccess,
@@ -37,8 +39,13 @@ from inqtrix.project.editor_ports import (
     EditorComment,
     EditorDocument,
     EditorFolder,
+    EditorSuggestionDraft,
+    EditorSuggestionDraftRevision,
     EditorStore,
     FolderNotFound,
+    SuggestionDraftNotFound,
+    SuggestionDraftRevisionConflict,
+    suggestion_draft_payload,
 )
 from inqtrix.project.scoped_upsert import ResourceScope
 
@@ -46,6 +53,7 @@ if TYPE_CHECKING:
     from inqtrix.auth.permissions import AuthorizationService
     from inqtrix.auth.principal import UserContext
     from inqtrix.project.editor_collaboration_ports import EditorCollaborationStore
+    from inqtrix.user_events import ResourceInvalidator
 
 _VALID_SOURCES = frozenset(
     {"blank", "imported-research-report", "pasted", "agent-artifact"}
@@ -53,6 +61,14 @@ _VALID_SOURCES = frozenset(
 _VALID_COMMENT_KINDS = frozenset({"collect", "inline_edit", "evidence_review"})
 _VALID_COMMENT_STATUSES = frozenset({"open", "resolved", "stale"})
 _VALID_EVIDENCE_PRESETS = frozenset({"add_sources", "fact_check", "verify_citations"})
+_VALID_DRAFT_REVISION_SOURCES = frozenset({"llm_refine", "manual_edit"})
+_PRIVATE_DRAFT_ANCHOR_VERSION = 1
+_MAX_PRIVATE_DRAFT_BYTES = 1_048_576
+_MAX_PRIVATE_DRAFT_HISTORY = 50
+_MAX_PRIVATE_DRAFT_LIST_ITEMS = 50
+_MAX_PRIVATE_DRAFT_METADATA_TEXT = 4_096
+_MAX_PRIVATE_DRAFT_INSTRUCTION = 8_192
+_MAX_PRIVATE_DRAFT_ID = 255
 
 log = logging.getLogger("inqtrix")
 
@@ -69,6 +85,10 @@ class EditorValidationError(ValueError):
     a clean 400 instead of an opaque 500 (No Silent Fallbacks)."""
 
 
+class SuggestionDraftTooLarge(EditorValidationError):
+    """Raised when a private AI draft exceeds its explicit byte budget."""
+
+
 class EditorPersistenceService:
     """Application service over an :class:`EditorStore`."""
 
@@ -79,11 +99,13 @@ class EditorPersistenceService:
         durable: bool = False,
         authorization: "AuthorizationService | None" = None,
         collaboration_store: "EditorCollaborationStore | None" = None,
+        invalidator: "ResourceInvalidator | None" = None,
     ) -> None:
         self._store = store
         self._durable = durable
         self._authorization = authorization
         self._collaboration_store = collaboration_store
+        self._invalidator = invalidator
         self._collaboration_projector: (
             Callable[..., Awaitable[CollaborationProjection]] | None
         ) = None
@@ -351,6 +373,21 @@ class EditorPersistenceService:
         await self._store.delete_document(
             document_id, scope=ResourceScope.from_record(document)
         )
+        if self._invalidator is not None and not getattr(
+            self._store, "atomic_delete_resource_effects", False
+        ):
+            await self._invalidator.revoke_deleted(
+                tenant_id=document.tenant_id,
+                owner_user_id=document.created_by_user_id,
+                resource_type="editor_document",
+                resource_id=document.id,
+                scope="editor_documents",
+                actor_user_id=(
+                    visible_to.principal.user_id
+                    if visible_to is not None
+                    else None
+                ),
+            )
 
     async def patch_document_metadata(
         self,
@@ -625,6 +662,116 @@ class EditorPersistenceService:
             ),
         )
 
+    async def save_comment_suggestion_draft(
+        self,
+        document_id: str,
+        comment_id: str,
+        *,
+        expected_revision: int,
+        payload: dict[str, Any],
+        visible_to: "UserContext | None",
+    ) -> EditorSuggestionDraft:
+        """Create or revise one creator-private collaboration AI draft."""
+        if (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0
+        ):
+            raise EditorValidationError(
+                "expected_revision must be a non-negative integer"
+            )
+        document = await self._store.get_document(document_id)
+        if document.content_mode != "collaboration":
+            raise DocumentNotFound(document_id)
+        await self._resolve_document_access(
+            document,
+            visible_to=visible_to,
+            minimum=SharePermission.SUGGEST,
+        )
+        actor_user_id = (
+            visible_to.principal.user_id if visible_to is not None else None
+        )
+        if actor_user_id is None:
+            raise DocumentNotFound(document_id)
+        try:
+            comment = await self._store.get_comment(
+                document_id,
+                comment_id,
+                created_by_user_id=actor_user_id,
+            )
+        except SuggestionDraftNotFound:
+            raise SuggestionDraftNotFound(comment_id) from None
+        current = comment.suggestion_draft
+        current_revision = current.revision if current is not None else 0
+        if current_revision != expected_revision:
+            raise SuggestionDraftRevisionConflict(
+                current_revision=current_revision
+            )
+        now = time.time()
+        draft = (
+            self._parse_new_suggestion_draft(payload, now=now)
+            if current is None
+            else self._parse_revised_suggestion_draft(
+                current,
+                payload,
+                now=now,
+            )
+        )
+        self._validate_suggestion_draft_size(draft)
+        return await self._store.save_comment_suggestion_draft(
+            document_id=document_id,
+            comment_id=comment_id,
+            draft=draft,
+            expected_revision=expected_revision,
+            expected_document_owner_user_id=document.created_by_user_id,
+            expected_document_workspace_id=document.workspace_id,
+            expected_document_content_mode=document.content_mode,
+            actor_user_id=actor_user_id,
+        )
+
+    async def delete_comment_suggestion_draft(
+        self,
+        document_id: str,
+        comment_id: str,
+        *,
+        expected_revision: int,
+        patch_id: str,
+        visible_to: "UserContext | None",
+    ) -> None:
+        """Discard one private draft without retaining provider content."""
+        if (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 1
+        ):
+            raise EditorValidationError(
+                "expected_revision must be a positive integer"
+            )
+        self._uuid_string(patch_id, field="patch_id")
+        document = await self._store.get_document(document_id)
+        if document.content_mode != "collaboration":
+            raise DocumentNotFound(document_id)
+        await self._resolve_document_access(
+            document,
+            visible_to=visible_to,
+            minimum=SharePermission.SUGGEST,
+        )
+        actor_user_id = (
+            visible_to.principal.user_id if visible_to is not None else None
+        )
+        if actor_user_id is None:
+            raise DocumentNotFound(document_id)
+        await self._store.delete_comment_suggestion_draft(
+            document_id=document_id,
+            comment_id=comment_id,
+            expected_revision=expected_revision,
+            patch_id=patch_id,
+            expected_document_owner_user_id=document.created_by_user_id,
+            expected_document_workspace_id=document.workspace_id,
+            expected_document_content_mode=document.content_mode,
+            actor_user_id=actor_user_id,
+        )
+
     # -- helpers ---------------------------------------------------------- #
 
     async def _require_document_edit(
@@ -714,3 +861,221 @@ class EditorPersistenceService:
             updated_at=float(updated_at),
             created_by_user_id=created_by_user_id,
         )
+
+    @classmethod
+    def _parse_new_suggestion_draft(
+        cls,
+        payload: dict[str, Any],
+        *,
+        now: float,
+    ) -> EditorSuggestionDraft:
+        allowed = {
+            "anchor_version",
+            "change_summary",
+            "evidence",
+            "group_id",
+            "patch_id",
+            "proposed_text",
+            "publication_command_id",
+            "suggestion_id",
+            "warnings",
+        }
+        cls._reject_unknown_fields(payload, allowed)
+        anchor_version = payload.get("anchor_version")
+        if anchor_version != _PRIVATE_DRAFT_ANCHOR_VERSION:
+            raise EditorValidationError("unsupported suggestion anchor_version")
+        return EditorSuggestionDraft(
+            suggestion_id=cls._bounded_string(
+                payload.get("suggestion_id"),
+                field="suggestion_id",
+                maximum=_MAX_PRIVATE_DRAFT_ID,
+            ),
+            group_id=cls._bounded_string(
+                payload.get("group_id"),
+                field="group_id",
+                maximum=_MAX_PRIVATE_DRAFT_ID,
+            ),
+            patch_id=cls._uuid_string(
+                payload.get("patch_id"), field="patch_id"
+            ),
+            publication_command_id=cls._uuid_string(
+                payload.get("publication_command_id"),
+                field="publication_command_id",
+            ),
+            proposed_text=cls._draft_proposed_text(payload.get("proposed_text")),
+            anchor_version=_PRIVATE_DRAFT_ANCHOR_VERSION,
+            revision=1,
+            change_summary=cls._metadata_strings(
+                payload.get("change_summary", []), field="change_summary"
+            ),
+            warnings=cls._metadata_strings(
+                payload.get("warnings", []), field="warnings"
+            ),
+            evidence=cls._evidence(payload.get("evidence")),
+            revision_history=(),
+            created_at=now,
+            updated_at=now,
+        )
+
+    @classmethod
+    def _parse_revised_suggestion_draft(
+        cls,
+        current: EditorSuggestionDraft,
+        payload: dict[str, Any],
+        *,
+        now: float,
+    ) -> EditorSuggestionDraft:
+        allowed = {
+            "change_summary",
+            "evidence",
+            "instruction",
+            "proposed_text",
+            "revision_source",
+            "warnings",
+        }
+        cls._reject_unknown_fields(payload, allowed)
+        source = payload.get("revision_source")
+        if source not in _VALID_DRAFT_REVISION_SOURCES:
+            raise EditorValidationError("unknown suggestion revision_source")
+        if len(current.revision_history) >= _MAX_PRIVATE_DRAFT_HISTORY:
+            raise EditorValidationError("suggestion revision history is full")
+        instruction_value = payload.get("instruction")
+        instruction = (
+            cls._bounded_string(
+                instruction_value,
+                field="instruction",
+                maximum=_MAX_PRIVATE_DRAFT_INSTRUCTION,
+            )
+            if instruction_value is not None
+            else None
+        )
+        history_entry = EditorSuggestionDraftRevision(
+            proposed_text=current.proposed_text,
+            source=source,
+            created_at=now,
+            instruction=instruction,
+            change_summary=current.change_summary,
+            warnings=current.warnings,
+        )
+        return replace(
+            current,
+            proposed_text=cls._draft_proposed_text(payload.get("proposed_text")),
+            revision=current.revision + 1,
+            change_summary=cls._metadata_strings(
+                payload.get("change_summary", []), field="change_summary"
+            ),
+            warnings=cls._metadata_strings(
+                payload.get("warnings", []), field="warnings"
+            ),
+            evidence=(
+                cls._evidence(payload.get("evidence"))
+                if "evidence" in payload
+                else current.evidence
+            ),
+            revision_history=(*current.revision_history, history_entry),
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _reject_unknown_fields(
+        payload: dict[str, Any], allowed: set[str]
+    ) -> None:
+        if not isinstance(payload, dict):
+            raise EditorValidationError("suggestion draft must be an object")
+        unknown = sorted(set(payload) - allowed)
+        if unknown:
+            raise EditorValidationError(
+                f"unknown suggestion draft field: {unknown[0]}"
+            )
+
+    @staticmethod
+    def _bounded_string(value: Any, *, field: str, maximum: int) -> str:
+        if not isinstance(value, str) or not value or len(value.encode("utf-8")) > maximum:
+            raise EditorValidationError(f"invalid suggestion draft {field}")
+        return value
+
+    @staticmethod
+    def _draft_proposed_text(value: Any) -> str:
+        if not isinstance(value, str) or not value:
+            raise EditorValidationError("invalid suggestion draft proposed_text")
+        if len(value.encode("utf-8")) > _MAX_PRIVATE_DRAFT_BYTES:
+            raise SuggestionDraftTooLarge(
+                "suggestion draft exceeds the size limit"
+            )
+        return value
+
+    @classmethod
+    def _uuid_string(cls, value: Any, *, field: str) -> str:
+        text = cls._bounded_string(
+            value,
+            field=field,
+            maximum=36,
+        )
+        try:
+            parsed = uuid.UUID(text)
+        except ValueError as exc:
+            raise EditorValidationError(
+                f"invalid suggestion draft {field}"
+            ) from exc
+        if str(parsed) != text:
+            raise EditorValidationError(
+                f"invalid suggestion draft {field}"
+            )
+        return text
+
+    @classmethod
+    def _metadata_strings(cls, value: Any, *, field: str) -> tuple[str, ...]:
+        if not isinstance(value, list) or len(value) > _MAX_PRIVATE_DRAFT_LIST_ITEMS:
+            raise EditorValidationError(f"invalid suggestion draft {field}")
+        return tuple(
+            cls._bounded_string(
+                item,
+                field=field,
+                maximum=_MAX_PRIVATE_DRAFT_METADATA_TEXT,
+            )
+            for item in value
+        )
+
+    @classmethod
+    def _evidence(cls, value: Any) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict) or set(value) != {"mode", "sources"}:
+            raise EditorValidationError("invalid suggestion draft evidence")
+        mode = value.get("mode")
+        if mode not in _VALID_EVIDENCE_PRESETS:
+            raise EditorValidationError("invalid suggestion draft evidence mode")
+        sources = value.get("sources")
+        if not isinstance(sources, list) or len(sources) > _MAX_PRIVATE_DRAFT_LIST_ITEMS:
+            raise EditorValidationError("invalid suggestion draft evidence sources")
+        normalized: list[dict[str, str]] = []
+        for source in sources:
+            if not isinstance(source, dict) or set(source) != {"title", "url"}:
+                raise EditorValidationError("invalid suggestion draft evidence source")
+            title = cls._bounded_string(
+                source.get("title"),
+                field="evidence title",
+                maximum=_MAX_PRIVATE_DRAFT_METADATA_TEXT,
+            )
+            url = cls._bounded_string(
+                source.get("url"),
+                field="evidence url",
+                maximum=_MAX_PRIVATE_DRAFT_METADATA_TEXT,
+            )
+            parsed = urlsplit(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise EditorValidationError("invalid suggestion draft evidence url")
+            normalized.append({"title": title, "url": url})
+        return {"mode": mode, "sources": normalized}
+
+    @staticmethod
+    def _validate_suggestion_draft_size(draft: EditorSuggestionDraft) -> None:
+        encoded = json.dumps(
+            suggestion_draft_payload(draft),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) > _MAX_PRIVATE_DRAFT_BYTES:
+            raise SuggestionDraftTooLarge(
+                "suggestion draft exceeds the size limit"
+            )

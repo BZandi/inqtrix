@@ -25,6 +25,8 @@ from inqtrix.storage.identity_orm import tenant_security_state, users
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+    from inqtrix.auth.directory import MirroredUser
+
 DEFAULT_TENANT = "default"
 
 

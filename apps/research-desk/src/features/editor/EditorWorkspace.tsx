@@ -12,9 +12,10 @@ import {
   type ReactNode,
 } from 'react'
 import type { Editor } from '@tiptap/react'
-import { EDITOR_SCHEMA_VERSION } from '@inqtrix/editor-schema'
+import { createSecureUuid, EDITOR_SCHEMA_VERSION } from '@inqtrix/editor-schema'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import {
+  buildLoginUrl,
   enableEditorDocumentCollaboration,
 } from '@/api/inqtrixClient'
 import {
@@ -31,8 +32,10 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  Info,
   ListFilter,
   LoaderCircle,
+  LockKeyhole,
   MessageSquareText,
   MessagesSquare,
   MoreHorizontal,
@@ -43,15 +46,17 @@ import {
   Pin,
   PinOff,
   Redo2,
+  RefreshCw,
   SendHorizontal,
   Scale,
   Sparkles,
+  Share2,
   SquarePen,
   Trash2,
   Undo2,
+  Users,
   X,
 } from '@/components/icons'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Chip } from '@/components/ui/chip'
 import { AnimatedPanelBody, AnimatedResizableHandle } from '@/components/ui/animated-panel'
@@ -85,11 +90,11 @@ import {
   isPastExplorerDragThreshold,
 } from '@/components/ui/explorer-list'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Separator } from '@/components/ui/separator'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ComposerStopButton } from '@/features/composer/ComposerStopButton'
 import {
+  assetIdsFromChatRefs,
   chatAttachmentChipsFromRefs,
   chatAttachmentsFromRefs,
   chatContextRefKey,
@@ -127,15 +132,19 @@ import {
 } from '@/features/files/contextTokens'
 import type {
   ChatContextReferenceRecord,
+  FileAssetBodyLoadState,
+  EditorCommentAnchorRecord,
   EditorCommentKind,
   EditorCommentThreadRecord,
   EditorDocumentRecord,
   EditorEvidencePreset,
+  FileAssetRecord,
   EditorFolderRecord,
   EditorSuggestionRecord,
   ProjectState,
 } from '@/features/project/types'
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
+import { sharePermissionLabel } from '@/features/sharing/shareModel'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { useMediaQuery } from '@/features/researchDesk/hooks/useMediaQuery'
 import { cn } from '@/lib/utils'
@@ -143,6 +152,10 @@ import {
   MarkdownEditorSurface,
   isCollaborationSurfaceSynced,
 } from './core/MarkdownEditorSurface'
+import {
+  canRunEditorHistoryCommand,
+  runEditorHistoryCommand,
+} from './core/editorHistoryCommands'
 import {
   editorForSurfaceIdentity,
   updateEditorSurfaceRegistration,
@@ -178,9 +191,24 @@ import { MentionComposer, type MentionComposerHandle } from '@/features/composer
 import { type LabelResolver } from '@/features/composer/mentionDoc'
 import { moveItem } from '@/features/composer/reorder'
 import { Dropzone } from '@/features/files/Dropzone'
-import { ingestFiles } from '@/features/files/ingest'
+import {
+  createFileAssetPlaceholders,
+  runFileIngestPipeline,
+  type FileUploadRegistry,
+  type ServerFileUpload,
+  uploadBindingForRecord,
+} from '@/features/files/ingest'
+import { createDefaultFileParser } from '@/features/files/parsing'
 import { temporaryFileSectionId } from '@/features/files/sections'
-import { useCollaborationDocument } from './useCollaborationDocument'
+import {
+  collaborationDocumentLifecycleHasUnconfirmedChanges,
+  retireCollaborationDocumentLifecycle,
+  useCollaborationDocument,
+} from './useCollaborationDocument'
+import {
+  clearCollaborationCommentDrafts,
+  useCollaborationComments,
+} from './useCollaborationComments'
 import {
   EditorCollaborationStatus,
   EditorInspector,
@@ -191,7 +219,6 @@ import {
   CollaborationActivationDialog,
   collaborationActivationConflictError,
   collaborationActivationFallbackError,
-  EditorDocumentShareButton,
 } from './inspector/CollaborationActivationDialog'
 import {
   useInspectorCollaborationActivity,
@@ -204,18 +231,24 @@ import {
   type CollaborationEditorPolicyInput,
 } from './inspector/editorPolicy'
 import {
+  resolveEditorCollaborationAnchor,
   resolveCollaborationCommentAnchorWithStatus,
+  serializeEditorCollaborationAnchor,
   serializeCollaborationCommentAnchor,
 } from './inspector/relativeAnchors'
+import { TeamCommentsPanel } from './inspector/TeamCommentsPanel'
 import {
   effectiveEditorWriteMode,
   filterInspectorChanges,
   buildEditorCollaborationStatusModel,
+  localizeEditorCollaborationNotice,
   beginCollaborationPublicationFocus,
   consumeCollaborationPublicationFocus,
   isCollaborationPublicationFocusCurrent,
   pendingCollaborationPublicationFocusForDocument,
   registerCollaborationPublicationFocus,
+  editorDocumentRailCapabilities,
+  editorDocumentRowKind,
   isOwnedEditorDocument,
   partitionEditorDocumentsByAccess,
   type EditorChangesView,
@@ -237,6 +270,7 @@ import {
   type CollaborationProjectionController,
 } from './collaborationProjection'
 import { persistCollaborationDiffAnchor } from './collaborationDiffAnchor'
+import { resolveMaterializedAnchor } from './anchoring'
 
 type EditorWorkspaceProps = {
   apiKey?: string
@@ -251,8 +285,29 @@ type EditorWorkspaceProps = {
   /** Loads attached file-asset bodies on demand before an AI run reads them
    * (M6c load-on-use); forwarded to useEditorSuggestions. */
   ensureAssetBodiesLoaded?: (assetIds: readonly string[]) => Promise<Map<string, string>>
+  assetBodyLoadStates?: Readonly<Record<string, FileAssetBodyLoadState>>
+  /** Persist the target hierarchy before a bound original-file upload. */
+  ensureUploadTarget?: (sectionId: string, groupId: string | null) => Promise<boolean>
+  /** Shared bound upload service used by chat, editor, and the file library. */
+  serverFileUpload?: ServerFileUpload
+  /** Session-local File handles shared across upload entry points so changing
+   * desks does not remove the explicit retry affordance. */
+  uploadRegistry?: FileUploadRegistry
+  /** Whether a ready upload can hand parsing to the shared server parser. */
+  serverParserAvailable?: boolean
+  /** Retry through the root-owned durable UploadOperation/byte registry. */
+  onRetryAttachment?: (chip: ChatAttachmentChipModel) => void
+  /** Starts the common background server parser after an accepted upload. */
+  onAssetsIngested?: (assets: FileAssetRecord[]) => void
   /** Opens the parent-owned global ShareDialog after collaboration is active. */
-  onShareDocument?: (document: EditorDocumentRecord) => void
+  onShareDocument?: (
+    document: EditorDocumentRecord,
+    details: EditorDocumentDetailsSummary,
+    /** `'share'` opened the dialog to grant access (it focuses the recipient
+     * search); `'details'` only wants to read the document's facts. */
+    intent: 'details' | 'share',
+    returnFocusTarget?: HTMLElement | null,
+  ) => void
   /** Pushes the document's current body to the server before collaboration
    * activation and returns the fresh server revisions (null = a concurrent
    * writer won; retry). With this wired, the share flow no longer depends on
@@ -264,6 +319,9 @@ type EditorWorkspaceProps = {
   onCollaborationControllerChange?: (
     registration: { controller: CollaborationProjectionController; documentId: string } | null,
   ) => void
+  onRecoveryCaptureProviderChange?: (
+    provider: EditorRecoveryCaptureProvider | null,
+  ) => void
   onServerDocumentObserved?: (
     document: EditorDocumentRecord,
     provenance: 'exact_detail' | 'metadata',
@@ -272,7 +330,23 @@ type EditorWorkspaceProps = {
   selectedModelTier: ChatModelTier | null
   state: ProjectState
   textImprovement: Omit<TextImprovementApiOptions, 'locale'>
+  /** Canonical authenticated project namespace. This may differ from the
+   * browser-local state.workspaceId on a new device or browser profile. */
+  workspaceId: string
 }
+
+export type EditorDocumentDetailsSummary = {
+  createdAt: string
+  openCommentCount: number | null
+  openSuggestionCount: number | null
+  participantCount: number | null
+  updatedAt: string
+  wordCount: number
+}
+
+export type EditorRecoveryCaptureProvider = (
+  documentId: string,
+) => { contentMarkdown: string } | null
 
 type EditorDocumentDropTarget = {
   folderId: string | null
@@ -290,6 +364,7 @@ const EDITOR_CENTER_COMMENTS_PANEL_ID = 'editor-center-comments-panel'
 
 export default function EditorWorkspace({
   apiKey,
+  assetBodyLoadStates = {},
   capabilities,
   chatModelOptions,
   chatModelOptionsStatus,
@@ -297,14 +372,22 @@ export default function EditorWorkspace({
   defaultChatModel,
   dispatch,
   ensureAssetBodiesLoaded,
+  ensureUploadTarget,
   onCollaborationControllerChange,
   onFlushDocumentForShare,
+  onRecoveryCaptureProviderChange,
   onShareDocument,
   onServerDocumentObserved,
+  onAssetsIngested,
+  onRetryAttachment,
   reportOptions,
   selectedModelTier,
+  serverFileUpload,
+  serverParserAvailable = false,
+  uploadRegistry,
   state,
   textImprovement,
+  workspaceId,
 }: EditorWorkspaceProps) {
   const { locale } = useLocale()
   const copy = editorCopy[locale]
@@ -312,6 +395,8 @@ export default function EditorWorkspace({
   const folders = useMemo(() => projectEditorFolders(state), [state.editorFolderOrder, state.editorFolders])
   const documents = useMemo(() => projectEditorDocuments(state), [state.editorDocumentOrder, state.editorDocuments])
   const activeDocument = selectedEditorDocument(state)
+  const collaborationFeatureAvailable =
+    capabilities?.features.collaboration === true
   const activeDocumentIdRef = useRef(activeDocument?.id ?? null)
   activeDocumentIdRef.current = activeDocument?.id ?? null
   const activeSurfaceIdentity = useMemo<EditorSurfaceIdentity | null>(() => (
@@ -333,12 +418,116 @@ export default function EditorWorkspace({
     ))
   }, [activeSurfaceIdentity])
   const collaborationActive = activeDocument?.contentMode === 'collaboration'
+  const collaborationSessionActive =
+    collaborationActive && collaborationFeatureAvailable
   const collaboration = useCollaborationDocument({
-    active: collaborationActive,
+    active: collaborationSessionActive,
     apiKey,
     document: activeDocument,
-    workspaceId: state.workspaceId,
+    workspaceId,
   })
+  const teamComments = useCollaborationComments({
+    active: collaborationSessionActive,
+    apiKey,
+    documentId: activeDocument?.id ?? null,
+    eventVersion: collaboration.commentEventVersion,
+    generation: activeDocument?.collaboration?.generation ?? null,
+    initialRevision: activeDocument?.collaboration?.commentRevision ?? 0,
+    locale,
+    mentionEventVersion: collaboration.commentMentionEventVersion,
+    workspaceId,
+  })
+  const recoverySnapshotsRef = useRef(new Map<string, {
+    commentDrafts: string[]
+    documentMarkdown: string
+    generation: number
+    locale: 'de' | 'en'
+    title: string
+    workspaceId: string
+  }>())
+  useEffect(() => {
+    const documentId = activeDocument?.id
+    const generation = activeDocument?.collaboration?.generation
+    if (
+      !documentId
+      || generation === undefined
+      || activeDocument.contentMode !== 'collaboration'
+    ) return
+    const commentDrafts = Object.values(teamComments.drafts)
+      .filter((value) => value.trim().length > 0)
+    if (
+      !collaboration.hasUnconfirmedLocalChanges
+      && commentDrafts.length === 0
+    ) {
+      recoverySnapshotsRef.current.delete(documentId)
+      return
+    }
+    const liveMarkdown = collaboration.hasUnconfirmedLocalChanges
+      ? activeEditor && !activeEditor.isDestroyed
+        ? serializeEditorMarkdown(activeEditor)
+        : activeDocument.contentMarkdown
+      : ''
+    recoverySnapshotsRef.current.set(documentId, {
+      commentDrafts,
+      documentMarkdown: liveMarkdown,
+      generation,
+      locale,
+      title: activeDocument.title,
+      workspaceId,
+    })
+  }, [
+    activeDocument,
+    activeEditor,
+    collaboration,
+    locale,
+    teamComments.drafts,
+    workspaceId,
+  ])
+  const consumeRecoveryCapture = useCallback<EditorRecoveryCaptureProvider>((
+    documentId,
+  ) => {
+    const snapshot = recoverySnapshotsRef.current.get(documentId)
+    if (!snapshot) return null
+    recoverySnapshotsRef.current.delete(documentId)
+    const hasUnconfirmedDocumentChanges =
+      collaborationDocumentLifecycleHasUnconfirmedChanges({
+        documentId,
+        generation: snapshot.generation,
+        workspaceId: snapshot.workspaceId,
+      })
+    if (
+      !hasUnconfirmedDocumentChanges
+      && snapshot.commentDrafts.length === 0
+    ) return null
+    clearCollaborationCommentDrafts({
+      documentId,
+      generation: snapshot.generation,
+      workspaceId: snapshot.workspaceId,
+    })
+    retireCollaborationDocumentLifecycle({
+      documentId,
+      generation: snapshot.generation,
+      workspaceId: snapshot.workspaceId,
+    })
+    return {
+      contentMarkdown: editorRecoveryMarkdown({
+        commentDrafts: snapshot.commentDrafts,
+        documentMarkdown: hasUnconfirmedDocumentChanges
+          ? snapshot.documentMarkdown
+          : '',
+        locale: snapshot.locale,
+        title: snapshot.title,
+      }),
+    }
+  }, [])
+  useEffect(() => {
+    onRecoveryCaptureProviderChange?.(consumeRecoveryCapture)
+    return () => {
+      onRecoveryCaptureProviderChange?.(
+        recoverySnapshotsRef.current.size > 0 ? consumeRecoveryCapture : null,
+      )
+    }
+  }, [consumeRecoveryCapture, onRecoveryCaptureProviderChange])
   const collaborationController = useMemo(
     () => collaborationProjectionController(
       collaboration,
@@ -349,7 +538,7 @@ export default function EditorWorkspace({
   )
   const openCollaborationSuggestionIds = useInspectorOpenSuggestionIds(activeEditor)
   const collaborationActivity = useInspectorCollaborationActivity({
-    active: collaborationActive,
+    active: collaborationSessionActive,
     activityRevision: collaboration.activityRevision,
     apiKey,
     authorityRevision: collaboration.authorityRevision,
@@ -359,7 +548,7 @@ export default function EditorWorkspace({
     locale,
     openSuggestionIds: openCollaborationSuggestionIds,
     readAuthority: collaboration.readAuthority,
-    workspaceId: state.workspaceId,
+    workspaceId,
   })
   const collaborationSnapshot = useInspectorCollaborationSnapshot(
     activeEditor,
@@ -367,6 +556,7 @@ export default function EditorWorkspace({
     collaborationActivity.suggestionAuthors,
   )
   const [inspectorTab, setInspectorTab] = useState<EditorInspectorTab>('assistant')
+  const [selectedTeamCommentId, setSelectedTeamCommentId] = useState<string | null>(null)
   const [changesView, setChangesView] = useState<EditorChangesView>('open')
   const [reviewDisplay, setReviewDisplay] = useState<CollaborationReviewDisplay>('simple')
   const [openChangeFilters, setOpenChangeFilters] = useState<InspectorOpenFilters>({
@@ -378,7 +568,9 @@ export default function EditorWorkspace({
     type: null,
   })
   const [selectedCollaborationChangeId, setSelectedCollaborationChangeId] = useState<string | null>(null)
-  const [requestedWriteModes, setRequestedWriteModes] = useState<Record<string, 'edit' | 'suggest'>>({})
+  const [requestedWriteModes, setRequestedWriteModes] = useState<
+    Record<string, 'comment' | 'edit' | 'suggest'>
+  >({})
   const [decisionState, setDecisionState] = useState<{
     documentId: string
     error: string | null
@@ -441,6 +633,36 @@ export default function EditorWorkspace({
   const [isMobileCommentsOpen, setIsMobileCommentsOpen] = useState(false)
 
   useEffect(() => {
+    setSelectedTeamCommentId(null)
+    if (!collaborationActive) setInspectorTab('assistant')
+  }, [activeDocument?.id, collaborationActive])
+
+  useEffect(() => {
+    const inspectorVisible = isDesktop
+      ? state.editorUi.isCommentPanelVisible
+      : isMobileCommentsOpen
+    if (
+      !collaborationActive
+      || inspectorTab !== 'comments'
+      || !inspectorVisible
+      || teamComments.revision <= teamComments.lastReadRevision
+    ) return
+    const timer = window.setTimeout(() => {
+      void teamComments.markRead()
+    }, 600)
+    return () => window.clearTimeout(timer)
+  }, [
+    collaborationActive,
+    inspectorTab,
+    isDesktop,
+    isMobileCommentsOpen,
+    state.editorUi.isCommentPanelVisible,
+    teamComments.lastReadRevision,
+    teamComments.markRead,
+    teamComments.revision,
+  ])
+
+  useEffect(() => {
     if (!onCollaborationControllerChange) return
     if (!collaborationActive || !activeDocument || !collaborationController) {
       onCollaborationControllerChange(null)
@@ -475,6 +697,29 @@ export default function EditorWorkspace({
       degraded: resolved.some((item) => item.status === 'degraded'),
     }
   }, [activeEditor, collaboration.document, collaborationActive, collaborationSnapshot, comments])
+  const surfaceTeamComments = useMemo(() => {
+    const orphanedThreadIds = new Set<string>()
+    const positionByThreadId = new Map<string, number>()
+    if (!activeEditor || !collaboration.document) {
+      return { orphanedThreadIds, positionByThreadId, threads: teamComments.threads }
+    }
+    const threads = teamComments.threads.map((thread) => {
+      const resolved = resolveEditorCollaborationAnchor(
+        activeEditor,
+        collaboration.document!,
+        thread.anchor as EditorCommentAnchorRecord,
+      )
+      const materialized = resolveMaterializedAnchor(activeEditor, resolved.anchor)
+      if (resolved.status === 'degraded' && !materialized) {
+        orphanedThreadIds.add(thread.id)
+      }
+      if (materialized) {
+        positionByThreadId.set(thread.id, materialized.range.from)
+      }
+      return { ...thread, anchor: resolved.anchor }
+    })
+    return { orphanedThreadIds, positionByThreadId, threads }
+  }, [activeEditor, collaboration.document, teamComments.threads])
   const ruleOptions = useMemo(() => chatRuleOptions(state, 'editor'), [state.chatRuleOrder, state.chatRules])
   const fileOptions = useMemo(() => fileMentionOptions(state), [state.fileAssetOrder, state.fileAssets])
   const fileGroupOptions = useMemo(() => fileGroupMentionOptions(state), [state.fileGroupOrder, state.fileGroups])
@@ -489,9 +734,22 @@ export default function EditorWorkspace({
     [pillRefs, extraRefs],
   )
   const attachmentChips = useMemo(
-    () => chatAttachmentChipsFromRefs(state, attachedRefs),
-    [state, attachedRefs],
+    () => chatAttachmentChipsFromRefs(
+      state,
+      attachedRefs,
+      { bodyLoadStates: assetBodyLoadStates },
+    ),
+    [assetBodyLoadStates, state, attachedRefs],
   )
+  useEffect(() => {
+    if (!ensureAssetBodiesLoaded) return
+    const assetIds = assetIdsFromChatRefs(state, attachedRefs)
+    if (assetIds.length === 0) return
+    // The shared loader owns de-duplication plus visible loading/error state.
+    // A prefetch rejection is represented by that state; run admission still
+    // awaits the same promise and refuses an empty context.
+    void ensureAssetBodiesLoaded(assetIds).catch(() => undefined)
+  }, [attachedRefs, ensureAssetBodiesLoaded, state])
   const editorSelectedCard = chatModelCatalog?.find(
     (entry) => entry.model_id === state.ui.selectedChatModel,
   )?.card ?? null
@@ -548,7 +806,9 @@ export default function EditorWorkspace({
     collaborationEditorPolicy,
   ])
 
-  const handleWriteModeChange = useCallback((mode: 'edit' | 'suggest') => {
+  const handleWriteModeChange = useCallback((
+    mode: 'comment' | 'edit' | 'suggest',
+  ) => {
     if (!activeDocument) return
     applyCollaborationEditorPolicy(activeEditor, {
       ...collaborationEditorPolicy,
@@ -567,16 +827,21 @@ export default function EditorWorkspace({
     collaborationEditorPolicy,
   ])
 
-  const handleCollaborationDecision = useCallback((
+  const runCollaborationDecision = useCallback(async (
     decision: 'accept' | 'reject',
     patchIds: string[],
-  ) => {
-    if (
-      !activeDocument
-      || patchIds.length === 0
-      || decisionInFlightRef.current
-    ) return
+  ): Promise<void> => {
+    if (!activeDocument || patchIds.length === 0) {
+      throw new Error(locale === 'de'
+        ? 'Für diese Änderung ist keine gültige Entscheidung verfügbar.'
+        : 'No valid decision is available for this change.')
+    }
     const documentId = activeDocument.id
+    if (decisionInFlightRef.current) {
+      throw new Error(locale === 'de'
+        ? 'Eine Änderungsentscheidung wird bereits verarbeitet.'
+        : 'A change decision is already in progress.')
+    }
     let authorityGuard
     try {
       authorityGuard = beginEditorCollaborationAuthorityGuard(
@@ -591,36 +856,37 @@ export default function EditorWorkspace({
         error: error instanceof Error ? error.message : collaborationDecisionDisabledReason,
         pending: false,
       })
-      return
+      throw error
     }
     decisionInFlightRef.current = true
     setDecisionState({ documentId, error: null, pending: true })
-    void (async () => {
+    try {
       await decideCollaborationPatchesAfterBarrier({
         authorityGuard,
-        clientOptions: { apiKey, workspaceId: state.workspaceId },
+        clientOptions: { apiKey, workspaceId },
         controller: collaborationController,
         decision,
-        decisionId: crypto.randomUUID(),
+        decisionId: createSecureUuid(),
         documentId,
         generation: activeDocument.collaboration?.generation,
         patchIds,
       })
-    })().then(() => {
       setDecisionState({ documentId, error: null, pending: false })
-    }).catch((error: unknown) => {
+    } catch (error) {
+      const decisionError = error instanceof Error
+        ? error
+        : new Error(locale === 'de'
+          ? 'Die Änderung konnte nicht entschieden werden.'
+          : 'The change could not be decided.')
       setDecisionState({
         documentId,
-        error: error instanceof Error
-          ? error.message
-          : locale === 'de'
-            ? 'Die Änderung konnte nicht entschieden werden.'
-            : 'The change could not be decided.',
+        error: decisionError.message,
         pending: false,
       })
-    }).finally(() => {
+      throw decisionError
+    } finally {
       decisionInFlightRef.current = false
-    })
+    }
   }, [
     activeDocument,
     apiKey,
@@ -628,15 +894,68 @@ export default function EditorWorkspace({
     collaborationController,
     collaborationDecisionDisabledReason,
     locale,
-    state.workspaceId,
+    workspaceId,
   ])
 
-  const handleShareDocument = useCallback((document: EditorDocumentRecord) => {
-    if (!onShareDocument || !isOwnedEditorDocument(document)) return
-    if (document.contentMode === 'collaboration') {
-      onShareDocument(document)
+  const handleCollaborationDecision = useCallback((
+    decision: 'accept' | 'reject',
+    patchIds: string[],
+  ) => {
+    void runCollaborationDecision(decision, patchIds).catch(() => undefined)
+  }, [runCollaborationDecision])
+
+  const handleCollaborationSuggestionUndo = useCallback(async (
+    patchId: string,
+  ): Promise<void> => {
+    const userId = collaboration.user?.id
+    const patch = collaborationSnapshot.changes.find((change) => change.id === patchId)
+    if (!userId || !patch || patch.author.id !== userId) {
+      throw new Error(locale === 'de'
+        ? 'Die letzte eigene Änderung ist nicht mehr als offener Vorschlag verfügbar.'
+        : 'The latest local change is no longer available as an open suggestion.')
+    }
+    await runCollaborationDecision('reject', [patchId])
+  }, [
+    collaboration.user?.id,
+    collaborationSnapshot.changes,
+    locale,
+    runCollaborationDecision,
+  ])
+
+  const handleShareDocument = useCallback((
+    document: EditorDocumentRecord,
+    intent: 'details' | 'share' = 'share',
+    returnFocusTarget?: HTMLElement | null,
+  ) => {
+    if (!onShareDocument || document.recovery) return
+    const isActiveDocument = activeDocument?.id === document.id
+    const details: EditorDocumentDetailsSummary = {
+      createdAt: document.createdAt,
+      openCommentCount: isActiveDocument && document.contentMode === 'collaboration'
+        ? teamComments.threads.filter((thread) => thread.status === 'open').length
+        : null,
+      openSuggestionCount: isActiveDocument && document.contentMode === 'collaboration'
+        ? collaborationSnapshot.changes.length
+        : null,
+      participantCount: isActiveDocument && document.contentMode === 'collaboration'
+        ? collaborationSnapshot.participants.length
+        : null,
+      updatedAt: document.updatedAt,
+      wordCount: countEditorDocumentWords(document.contentMarkdown),
+    }
+    if (!isOwnedEditorDocument(document)) {
+      onShareDocument(document, details, intent, returnFocusTarget)
       return
     }
+    if (document.contentMode === 'collaboration') {
+      onShareDocument(document, details, intent, returnFocusTarget)
+      return
+    }
+    // Direct editor sharing requires an atomic Markdown-to-Yjs conversion.
+    // A deployment may still expose sharing for runs/templates while its
+    // collaboration module is deliberately disabled or temporarily degraded.
+    // Never offer a conversion that can only end in a route-level 404/503.
+    if (!collaborationFeatureAvailable) return
     // Without a flush seam the legacy gates apply: the document must already
     // be durably on the server and nothing may be pending. With the seam,
     // the confirm step flushes THIS document itself, so neither the global
@@ -648,7 +967,16 @@ export default function EditorWorkspace({
       return
     }
     setCollaborationActivation({ document, error: null, pending: false })
-  }, [onFlushDocumentForShare, onShareDocument, state.dirty])
+  }, [
+    activeDocument?.id,
+    collaborationSnapshot.changes.length,
+    collaborationSnapshot.participants.length,
+    collaborationFeatureAvailable,
+    onFlushDocumentForShare,
+    onShareDocument,
+    state.dirty,
+    teamComments.threads,
+  ])
 
   const handleEnableCollaboration = useCallback(async () => {
     if (!collaborationActivation || !onShareDocument || collaborationActivation.pending) return
@@ -680,11 +1008,12 @@ export default function EditorWorkspace({
           expected_revision: expectedRevision,
           schema_version: EDITOR_SCHEMA_VERSION,
         },
-        { apiKey, workspaceId: state.workspaceId },
+        { apiKey, workspaceId },
       )
       const activatedDocument: EditorDocumentRecord = {
         ...document,
         collaboration: {
+          commentRevision: 0,
           generation: response.generation,
           persistedSequence: response.persisted_sequence,
           projectionSequence: response.projection_sequence,
@@ -702,7 +1031,16 @@ export default function EditorWorkspace({
       })
       onServerDocumentObserved?.(activatedDocument, 'metadata')
       setCollaborationActivation(null)
-      onShareDocument(activatedDocument)
+      onShareDocument(activatedDocument, {
+        createdAt: activatedDocument.createdAt,
+        openCommentCount: 0,
+        openSuggestionCount: 0,
+        participantCount: 1,
+        updatedAt: activatedDocument.updatedAt,
+        wordCount: countEditorDocumentWords(
+          activatedDocument.contentMarkdown,
+        ),
+      }, 'share')
     } catch (error: unknown) {
       setCollaborationActivation((current) => current
         ? {
@@ -722,7 +1060,7 @@ export default function EditorWorkspace({
     onFlushDocumentForShare,
     onShareDocument,
     onServerDocumentObserved,
-    state.workspaceId,
+    workspaceId,
   ])
 
   const resolveWordExportMarkdown = useCallback(async (): Promise<string> => {
@@ -734,7 +1072,7 @@ export default function EditorWorkspace({
     }
     try {
       const projection = await flushCollaborationProjectionBarrier({
-        clientOptions: { apiKey, workspaceId: state.workspaceId },
+        clientOptions: { apiKey, workspaceId },
         controller: collaborationController,
         documentId: activeDocument.id,
         generation: activeDocument.collaboration?.generation,
@@ -763,7 +1101,7 @@ export default function EditorWorkspace({
     dispatch,
     locale,
     state.editorUi.viewMode,
-    state.workspaceId,
+    workspaceId,
   ])
 
   const handleSetDiffAnchor = useCallback(() => {
@@ -810,7 +1148,7 @@ export default function EditorWorkspace({
     setDiffAnchorOperation({ documentId, error: null, pending: true })
     void persistCollaborationDiffAnchor({
       authorityGuard,
-      clientOptions: { apiKey, workspaceId: state.workspaceId },
+      clientOptions: { apiKey, workspaceId },
       controller: collaborationController,
       documentId,
       expectedMetadataRevision: activeDocument.metadataRevision,
@@ -849,7 +1187,7 @@ export default function EditorWorkspace({
     locale,
     onServerDocumentObserved,
     state.editorUi.viewMode,
-    state.workspaceId,
+    workspaceId,
   ])
 
   const handleCreateComment = useCallback((comment: EditorCommentThreadRecord) => {
@@ -884,6 +1222,100 @@ export default function EditorWorkspace({
       })
     }
   }, [activeEditor, collaboration.document, collaborationActive, dispatch, locale])
+
+  const handleCreateTeamComment = useCallback((input: {
+    anchor: EditorCommentAnchorRecord
+    bodyMarkdown: string
+    mentionUserIds: string[]
+    quote: string
+  }) => {
+    if (
+      !activeDocument
+      || !activeEditor
+      || !collaboration.document
+      || !collaborationActive
+    ) return
+    try {
+      const anchor = serializeEditorCollaborationAnchor(
+        activeEditor,
+        collaboration.document,
+        input.anchor,
+      )
+      setCollaborationAnchorError(null)
+      setInspectorTab('comments')
+      if (isDesktop) {
+        dispatch({ isVisible: true, type: 'setEditorCommentPanelVisible' })
+      } else {
+        setIsMobileCommentsOpen(true)
+      }
+      void teamComments.createThread({
+        anchor,
+        bodyMarkdown: input.bodyMarkdown,
+        mentionUserIds: input.mentionUserIds,
+        quote: input.quote,
+      }).then((thread) => {
+        setSelectedTeamCommentId(thread.id)
+      }).catch((error: unknown) => {
+        setCollaborationAnchorError({
+          documentId: activeDocument.id,
+          message: error instanceof Error
+            ? error.message
+            : locale === 'de'
+              ? 'Der Team-Kommentar konnte nicht gespeichert werden.'
+              : 'The team comment could not be saved.',
+        })
+      })
+    } catch (error) {
+      console.error('Inqtrix team comment anchor failed.', error)
+      setCollaborationAnchorError({
+        documentId: activeDocument.id,
+        message: locale === 'de'
+          ? 'Der Team-Kommentar konnte nicht stabil verankert werden.'
+          : 'The team comment could not be anchored safely.',
+      })
+    }
+  }, [
+    activeDocument,
+    activeEditor,
+    collaboration.document,
+    collaborationActive,
+    dispatch,
+    isDesktop,
+    locale,
+    teamComments.createThread,
+  ])
+
+  const handleSelectTeamComment = useCallback((threadId: string | null) => {
+    setSelectedTeamCommentId(threadId)
+    if (!threadId) return
+    setInspectorTab('comments')
+    if (isDesktop) {
+      dispatch({ isVisible: true, type: 'setEditorCommentPanelVisible' })
+    } else {
+      setIsMobileCommentsOpen(true)
+    }
+  }, [dispatch, isDesktop])
+
+  const handleUseTeamCommentWithAssistant = useCallback((
+    thread: (typeof teamComments.threads)[number],
+  ) => {
+    const discussion = thread.messages
+      .map((message) => (
+        message.deleted_at === null
+          ? `${message.author.name}: ${message.body_markdown ?? ''}`
+          : null
+      ))
+      .filter((value): value is string => value !== null)
+      .join('\n')
+    const context = locale === 'de'
+      ? `Nutze diese ausdrücklich ausgewählte Team-Diskussion als Kontext:\n\n> ${thread.quote}\n\n${discussion}\n\n`
+      : `Use this explicitly selected team discussion as context:\n\n> ${thread.quote}\n\n${discussion}\n\n`
+    dispatch({
+      draft: `${state.editorUi.assistantDraft}${state.editorUi.assistantDraft ? '\n\n' : ''}${context}`,
+      type: 'setEditorAssistantDraft',
+    })
+    setInspectorTab('assistant')
+  }, [dispatch, locale, state.editorUi.assistantDraft, teamComments.threads])
 
   const addExtraRef = useCallback((ref: ChatContextReferenceRecord) => {
     setExtraRefs((prev) => dedupeChatContextRefs([...prev, ref]))
@@ -933,19 +1365,74 @@ export default function EditorWorkspace({
   const handleAttachEditorFiles = useCallback(async (files: File[]) => {
     if (files.length === 0) return
     const existingLabels = projectFileAssets(state).map((asset) => asset.label)
-    const assets = await ingestFiles(
+    const sectionId = temporaryFileSectionId(Object.values(state.fileLibrarySections))
+    const { queue, records } = createFileAssetPlaceholders(
       files,
-      {
-        kind: 'editor',
-        sectionId: temporaryFileSectionId(Object.values(state.fileLibrarySections)),
-      },
-      undefined,
+      { kind: 'editor', sectionId },
       existingLabels,
+      Boolean(serverFileUpload),
     )
-    if (assets.length === 0) return
-    dispatch({ assets, type: 'ingestFileAssets' })
-    for (const asset of assets) addExtraRef({ fileId: asset.id, kind: 'file-asset' })
-  }, [addExtraRef, dispatch, state])
+    dispatch({ assets: records, type: 'ingestFileAssets' })
+    for (const asset of records) addExtraRef({ fileId: asset.id, kind: 'file-asset' })
+    const recordsById = new Map(records.map((record) => [record.id, record]))
+    const bindings = new Map(records.map((record) => [record.id, uploadBindingForRecord(record)]))
+    for (const item of queue) {
+      const binding = bindings.get(item.assetId)
+      if (binding) uploadRegistry?.register(item.assetId, { binding, file: item.file })
+    }
+    const parser = createDefaultFileParser()
+    void (async () => {
+      const bindingReady = serverFileUpload && ensureUploadTarget
+        ? await ensureUploadTarget(sectionId, null).catch(() => false)
+        : false
+      await runFileIngestPipeline(queue, {
+        needsClientParse: () => true,
+        onParsed: (assetId, parsed, clearParsePending) => dispatch({
+          assetId,
+          clearParsePending,
+          extractedText: parsed.extractedText,
+          pageCount: parsed.pageCount,
+          parseStatus: parsed.parseStatus,
+          parseWarning: parsed.parseWarning,
+          textTruncated: parsed.textTruncated,
+          type: 'applyFileAssetClientParse',
+        }),
+        onUploadAccepted: (assetId, result) => {
+          dispatch({ assetId, ...result, type: 'adoptFileAssetUploadLifecycle' })
+          if (result.status !== 'ready' || !result.serverFileId) return
+          uploadRegistry?.delete(assetId)
+          const record = recordsById.get(assetId)
+          if (record) onAssetsIngested?.([{ ...record, serverFileId: result.serverFileId }])
+        },
+        onUploadFailed: (assetId, message) => {
+          dispatch({ assetId, message, type: 'failFileAssetUpload' })
+        },
+        parse: (file) => parser.parse(file),
+        serverParseWillRun: (_assetId, uploaded) => uploaded && serverParserAvailable,
+        upload: serverFileUpload
+          ? (item) => {
+              const binding = bindings.get(item.assetId)
+              if (!binding) return Promise.reject(new Error('Upload-Bindung fehlt'))
+              if (!bindingReady) {
+                return Promise.reject(
+                  new Error('Zielordner konnte nicht auf dem Server reserviert werden'),
+                )
+              }
+              return serverFileUpload(item.file, binding)
+            }
+          : undefined,
+      })
+    })()
+  }, [
+    addExtraRef,
+    dispatch,
+    ensureUploadTarget,
+    onAssetsIngested,
+    serverFileUpload,
+    serverParserAvailable,
+    state,
+    uploadRegistry,
+  ])
 
   const {
     aiReadOnlyReason,
@@ -967,6 +1454,7 @@ export default function EditorWorkspace({
     isGlobalRunning,
     runErrors,
     runningCommentIds,
+    savingCommentDraftIds,
     runningSuggestionIds,
     suggestionPublishDisabledReason,
     suggestionErrors,
@@ -991,6 +1479,27 @@ export default function EditorWorkspace({
     selectedModelTier,
     state,
   })
+  const surfaceSuggestions = useMemo(() => {
+    if (!collaborationActive || !activeEditor || !collaboration.document) {
+      return documentSuggestions
+    }
+    return documentSuggestions.map((suggestion) => {
+      const resolved = resolveEditorCollaborationAnchor(
+        activeEditor,
+        collaboration.document!,
+        suggestion.anchor,
+      )
+      return resolved.status === 'relative'
+        ? { ...suggestion, anchor: resolved.anchor }
+        : suggestion
+    })
+  }, [
+    activeEditor,
+    collaboration.document,
+    collaborationActive,
+    collaborationSnapshot,
+    documentSuggestions,
+  ])
 
   const handleSelectSuggestion = useCallback((suggestionId: string) => {
     if (state.editorUi.isDiffVisible) {
@@ -1119,6 +1628,7 @@ export default function EditorWorkspace({
       dispatch={dispatch}
       documents={documents}
       folders={folders}
+      onDocumentDetails={(document) => handleShareDocument(document, 'details')}
       pinnedDocumentIds={state.ui.pinnedExplorer.editorDocumentIds}
       reportOptions={reportOptions}
       runningDocumentId={
@@ -1150,6 +1660,7 @@ export default function EditorWorkspace({
       onSelectSuggestion={handleSelectSuggestion}
       runErrors={runErrors}
       runningCommentIds={runningCommentIds}
+      savingCommentDraftIds={savingCommentDraftIds}
       selectedCommentId={state.editorUi.selectedCommentId}
       suggestionPublishDisabledReason={suggestionPublishDisabledReason}
       suggestions={documentSuggestions}
@@ -1163,26 +1674,59 @@ export default function EditorWorkspace({
       ? 'Diese Bearbeitung überschneidet sich mit einer Änderung einer anderen Person. Prüfen Sie die markierte Änderung zuerst.'
       : 'This edit overlaps a change from another collaborator. Review the selected change first.'
     : collaborationSnapshot.error
-      ?? collaboration.blockingFailure
-      ?? collaboration.error
       ?? collaborationActivity.attributionWarning
+  const collaborationConnectionError = collaborationActive
+    && !collaborationFeatureAvailable
+    ? locale === 'de'
+      ? 'Live-Kollaboration wurde von der Administration deaktiviert. Angezeigt wird der letzte bestätigte Stand.'
+      : 'Live collaboration was disabled by an administrator. The last confirmed version is shown.'
+    : localizeEditorCollaborationNotice(
+        collaboration.blockingFailure ?? collaboration.error,
+        locale,
+      )
   const collaborationStatus = useMemo(() => buildEditorCollaborationStatusModel({
     access: collaboration.access,
     active: collaborationActive,
     canEdit: collaboration.canEdit,
     connectionStatus: collaboration.connectionStatus,
     durabilityStatus: collaboration.durabilityStatus,
-    notice: collaborationChangeError,
+    hasUnconfirmedLocalChanges: collaboration.hasUnconfirmedLocalChanges,
+    nextReconnectAt: collaboration.nextReconnectAt,
+    notice: collaborationConnectionError,
     participants: collaborationSnapshot.participants,
     projectionUpdatedAt: activeDocument?.collaboration?.projectionUpdatedAt,
+    reconnectAttempt: collaboration.reconnectAttempt,
+    recoverability: collaboration.recoverability,
     synced: isCollaborationSurfaceSynced(collaboration),
   }), [
     activeDocument?.collaboration?.projectionUpdatedAt,
     collaboration,
     collaborationActive,
-    collaborationChangeError,
+    collaborationConnectionError,
     collaborationSnapshot.participants,
   ])
+  const handleCollaborationLogin = useCallback(() => {
+    const next = `${window.location.pathname}${window.location.search}${window.location.hash}`
+    window.location.assign(buildLoginUrl(undefined, next))
+  }, [])
+  const handleCollaborationReload = useCallback(() => {
+    window.location.reload()
+  }, [])
+  const teamCommentsPanel = (
+    <TeamCommentsPanel
+      canComment={
+        collaboration.canEdit
+        && (collaboration.access === 'edit' || collaboration.access === 'suggest')
+      }
+      comments={teamComments}
+      currentUserId={collaboration.user?.id ?? null}
+      onSelectThread={handleSelectTeamComment}
+      onUseWithAssistant={handleUseTeamCommentWithAssistant}
+      orphanedThreadIds={surfaceTeamComments.orphanedThreadIds}
+      positionByThreadId={surfaceTeamComments.positionByThreadId}
+      selectedThreadId={selectedTeamCommentId}
+    />
+  )
   const commentsPanel = (
     <EditorInspector
       activeTab={inspectorTab}
@@ -1191,7 +1735,11 @@ export default function EditorWorkspace({
       changes={collaborationSnapshot.changes}
       changesError={collaborationChangeError}
       changesView={changesView}
+      collaborationActive={collaborationActive}
       collaborationStatus={collaborationStatus}
+      commentCount={teamComments.threads.length}
+      comments={teamCommentsPanel}
+      commentUnreadCount={teamComments.unreadCount}
       decisionError={activeDecisionState?.error ?? null}
       display={reviewDisplay}
       history={collaborationActivity.entries}
@@ -1205,7 +1753,10 @@ export default function EditorWorkspace({
       onDecision={handleCollaborationDecision}
       onDisplayChange={setReviewDisplay}
       onHistoryFiltersChange={setHistoryFilters}
+      onLogin={handleCollaborationLogin}
       onOpenFiltersChange={setOpenChangeFilters}
+      onReconnect={collaboration.retryConnection}
+      onReload={handleCollaborationReload}
       onSelectedChangeIdChange={handleSelectCollaborationChange}
       openFilters={openChangeFilters}
       selectedChangeId={selectedCollaborationChangeId}
@@ -1221,7 +1772,6 @@ export default function EditorWorkspace({
             collaborationActive={collaborationActive}
             collaborationCanEdit={collaboration.canEdit}
             collaborationStatus={collaborationStatus}
-            commentCount={comments.length}
             copy={copy}
             dispatch={dispatch}
             document={activeDocument}
@@ -1241,13 +1791,43 @@ export default function EditorWorkspace({
             onCommentPanelVisibleChange={handleCommentsVisibleChange}
             onExportWordMarkdown={resolveWordExportMarkdown}
             onSetDiffAnchor={handleSetDiffAnchor}
-            onShareDocument={handleShareDocument}
+            onShareDocument={(document, returnFocusTarget) => {
+              handleShareDocument(document, 'share', returnFocusTarget)
+            }}
             onTreeVisibleChange={handleTreeVisibleChange}
             onWriteModeChange={handleWriteModeChange}
-            sharingAvailable={onShareDocument !== undefined}
+            onCollaborationLogin={handleCollaborationLogin}
+            onCollaborationReconnect={collaboration.retryConnection}
+            onCollaborationReload={handleCollaborationReload}
+            sharingAvailable={
+              onShareDocument !== undefined
+              && (collaborationActive || collaborationFeatureAvailable)
+            }
             viewMode={state.editorUi.viewMode}
             writeMode={editorWriteMode}
           />
+          {activeDocument.recovery ? (
+            <EditorRemoteDeletionRecoveryBar
+              locale={locale}
+              onDiscard={() => dispatch({
+                documentId: activeDocument.id,
+                type: 'deleteEditorDocument',
+              })}
+              onSaveAsNew={() => dispatch({
+                documentId: activeDocument.id,
+                type: 'promoteEditorRecoveryDocument',
+              })}
+            />
+          ) : null}
+          {collaborationActive
+            && collaboration.recoverability === 'retry'
+            && collaboration.reconnectAttempt >= 3 ? (
+              <CollaborationRecoveryBar
+                hasUnconfirmedLocalChanges={collaboration.hasUnconfirmedLocalChanges}
+                locale={locale}
+                onReconnect={collaboration.retryConnection}
+              />
+            ) : null}
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="relative min-h-0 flex-1">
               <div
@@ -1275,6 +1855,12 @@ export default function EditorWorkspace({
                     })
                   }}
                   onCreateComment={handleCreateComment}
+                  onCreateTeamComment={collaborationActive
+                    ? handleCreateTeamComment
+                    : undefined}
+                  onCollaborationSuggestionUndo={collaborationActive
+                    ? handleCollaborationSuggestionUndo
+                    : undefined}
                   onEditorReady={handleEditorReady}
                   onAcceptSuggestion={handleAcceptSuggestion}
                   onEditSuggestion={handleEditSuggestionProposal}
@@ -1282,14 +1868,22 @@ export default function EditorWorkspace({
                   onRefineSuggestion={handleRefineSuggestion}
                   onRejectSuggestion={handleRejectSuggestion}
                   onSelectComment={(commentId) => dispatch({ commentId, type: 'selectEditorComment' })}
+                  onSelectTeamComment={handleSelectTeamComment}
                   onStopSuggestion={handleStopSuggestionRun}
+                  onTeamCommentDraftChange={(value) => teamComments.setDraft('new', value)}
                   runningSuggestionIds={runningSuggestionIds}
                   selectedCommentId={inspectorTab === 'assistant' ? state.editorUi.selectedCommentId : null}
                   suggestionActionsDisabled={Boolean(suggestionPublishDisabledReason)}
                   suggestionErrors={suggestionErrors}
                   suggestions={inspectorTab === 'assistant'
-                    ? documentSuggestions.filter((suggestion) => suggestion.status === 'pending')
+                    ? surfaceSuggestions.filter((suggestion) => suggestion.status === 'pending')
                     : []}
+                  selectedTeamCommentId={inspectorTab === 'comments'
+                    ? selectedTeamCommentId
+                    : null}
+                  teamCommentParticipants={teamComments.participants}
+                  teamCommentDraft={teamComments.drafts.new ?? ''}
+                  teamComments={surfaceTeamComments.threads}
                   textImprovement={textImprovement}
                 />
               </div>
@@ -1332,6 +1926,7 @@ export default function EditorWorkspace({
               onRemoveAttachedComment={(commentId) =>
                 setAttachedCommentIds((prev) => prev.filter((id) => id !== commentId))}
               onRemoveChip={handleRemoveEditorChip}
+              onRetryAttachment={onRetryAttachment}
               pendingKeys={editorPendingKeys}
               pillKeys={editorPillKeys}
               onToggleAttach={() => {
@@ -1534,6 +2129,7 @@ function EditorFileTree({
   dispatch,
   documents,
   folders,
+  onDocumentDetails,
   pinnedDocumentIds,
   reportOptions,
   runningDocumentId,
@@ -1543,11 +2139,12 @@ function EditorFileTree({
   dispatch: Dispatch<ResearchDeskAction>
   documents: EditorDocumentRecord[]
   folders: EditorFolderRecord[]
+  onDocumentDetails: (document: EditorDocumentRecord) => void
   pinnedDocumentIds: readonly string[]
   reportOptions: CompletedReportOption[]
   runningDocumentId: string | null
 }) {
-  const { locale } = useLocale()
+  const { locale, t } = useLocale()
   const [expandedFolderIds, setExpandedFolderIds] = useState<ReadonlySet<string>>(() => new Set(folders.map((folder) => folder.id)))
   const [visibleDocumentCounts, setVisibleDocumentCounts] = useState<Record<string, number>>({})
   const [draggedDocumentId, setDraggedDocumentId] = useState<string | null>(null)
@@ -1878,6 +2475,7 @@ function EditorFileTree({
                     isRunning={runningDocumentId === document.id}
                     key={document.id}
                     onDelete={() => dispatch({ documentId: document.id, type: 'deleteEditorDocument' })}
+                    onDetails={() => onDocumentDetails(document)}
                     onDraftChange={setDocumentTitleDraft}
                     onOpen={() => openDocumentFromTree(document.id)}
                     onTogglePinned={() => dispatch({ documentId: document.id, type: 'togglePinnedEditorDocument' })}
@@ -1912,6 +2510,7 @@ function EditorFileTree({
                   isRunning={runningDocumentId === document.id}
                   key={document.id}
                   onDelete={() => dispatch({ documentId: document.id, type: 'deleteEditorDocument' })}
+                  onDetails={() => onDocumentDetails(document)}
                   onDraftChange={setDocumentTitleDraft}
                   onOpen={() => openDocumentFromTree(document.id)}
                   onTogglePinned={() => dispatch({ documentId: document.id, type: 'togglePinnedEditorDocument' })}
@@ -1926,8 +2525,16 @@ function EditorFileTree({
           ) : null}
           {sharedDocuments.length > 0 ? (
             <section className="space-y-0.5" data-editor-shared-documents>
-              <ExplorerSectionLabel>
-                {locale === 'de' ? 'Mit mir geteilt' : 'Shared with me'}
+              <ExplorerSectionLabel className="flex items-center justify-between">
+                <span>{t.sharing.sharedWithMe}</span>
+                <span
+                  className="t-hint tabular-nums text-muted-foreground"
+                >
+                  <span aria-hidden="true">{sharedDocuments.length}</span>
+                  <span className="sr-only">
+                    {sharedDocuments.length} {t.sharing.sharedBadge}
+                  </span>
+                </span>
               </ExplorerSectionLabel>
               {sharedDocuments
                 .slice(0, visibleDocumentCount('__shared__'))
@@ -1946,6 +2553,7 @@ function EditorFileTree({
                     isRunning={runningDocumentId === document.id}
                     key={document.id}
                     onDelete={() => undefined}
+                    onDetails={() => onDocumentDetails(document)}
                     onDraftChange={setDocumentTitleDraft}
                     onOpen={() => openDocumentFromTree(document.id)}
                     onTogglePinned={() => undefined}
@@ -1966,6 +2574,16 @@ function EditorFileTree({
               />
             </section>
           ) : null}
+          <div
+            className={cn(
+              'space-y-1',
+              sharedDocuments.length > 0 && 'mt-2 border-t border-border pt-1',
+            )}
+            data-editor-owned-documents
+          >
+            <ExplorerSectionLabel>
+              {locale === 'de' ? 'Meine Dokumente' : 'My documents'}
+            </ExplorerSectionLabel>
           {folders.map((folder, folderIndex) => {
             const isExpanded = expandedFolderIds.has(folder.id)
             const isDraggingFolder = draggedFolderId === folder.id
@@ -2083,6 +2701,7 @@ function EditorFileTree({
                         isRunning={runningDocumentId === document.id}
                         key={document.id}
                         onDelete={() => dispatch({ documentId: document.id, type: 'deleteEditorDocument' })}
+                        onDetails={() => onDocumentDetails(document)}
                         onDraftChange={setDocumentTitleDraft}
                         onOpen={() => openDocumentFromTree(document.id)}
                         onTogglePinned={() => dispatch({ documentId: document.id, type: 'togglePinnedEditorDocument' })}
@@ -2115,7 +2734,6 @@ function EditorFileTree({
               data-editor-document-section
               data-editor-folder-id="__ungrouped__"
             >
-              {hasFolders && <p className="t-caption px-1.5 py-1 text-muted-foreground">{copy.documents}</p>}
               {ungroupedDocuments.slice(0, ungroupedVisibleCount).map((document, index) => (
                 <EditorDocumentTreeItem
                   beginDocumentDrag={beginDocumentDrag}
@@ -2131,6 +2749,7 @@ function EditorFileTree({
                   isRunning={runningDocumentId === document.id}
                   key={document.id}
                   onDelete={() => dispatch({ documentId: document.id, type: 'deleteEditorDocument' })}
+                  onDetails={() => onDocumentDetails(document)}
                   onDraftChange={setDocumentTitleDraft}
                   onOpen={() => openDocumentFromTree(document.id)}
                   onTogglePinned={() => dispatch({ documentId: document.id, type: 'togglePinnedEditorDocument' })}
@@ -2154,6 +2773,7 @@ function EditorFileTree({
               ) : null}
             </section>
           ) : null}
+          </div>
           </>
           )}
         </div>
@@ -2176,6 +2796,7 @@ function EditorDocumentTreeItem({
   isPinned,
   isRunning,
   onDelete,
+  onDetails,
   onDraftChange,
   onOpen,
   onTogglePinned,
@@ -2197,6 +2818,7 @@ function EditorDocumentTreeItem({
   isPinned: boolean
   isRunning: boolean
   onDelete: () => void
+  onDetails: () => void
   onDraftChange: (value: string) => void
   onOpen: () => void
   onTogglePinned: () => void
@@ -2206,40 +2828,87 @@ function EditorDocumentTreeItem({
   titleDraft: string
   titleInputRef: RefObject<HTMLInputElement | null>
 }) {
-  const { locale } = useLocale()
+  const { locale, t } = useLocale()
   const timeLabel = displayRelativeAge(document.updatedAt, locale)
-  const ownerControls = isOwnedEditorDocument(document)
+  const permission = sharePermissionLabel(document.access?.permission ?? 'view', locale, {
+    edit: t.sharing.permissionEdit,
+    view: t.sharing.permissionView,
+  })
+  const ownerName = document.access?.owner?.name
+    ?? (locale === 'de' ? 'Unbekannter Nutzer' : 'Unknown user')
+  const shareDetails = t.sharing.sharedBy
+    .replace('{name}', ownerName)
+    .concat(` · ${permission}`)
+  // One grammar for every row: the leading icon says who is involved, the
+  // trailing hover actions say what can be done — and the details action
+  // appears exactly where a details page exists.
+  const rowKind = editorDocumentRowKind(document)
+  const railCapabilities = editorDocumentRailCapabilities(document)
+  const detailsLabel = locale === 'de' ? 'Dokumentdetails' : 'Document details'
+  const title = (
+    <span
+      className="flex min-w-0 items-center gap-1.5"
+      title={document.recovery
+        ? locale === 'de' ? 'Lokales Recovery-Artefakt' : 'Local recovery artifact'
+        : rowKind === 'shared-with-me' ? shareDetails : undefined}
+    >
+      {railCapabilities.leadingRole === 'file' ? (
+        <FileText aria-hidden="true" className="icon-sm shrink-0 text-muted-foreground" />
+      ) : (
+        <Users
+          aria-label={rowKind === 'owned-shared' ? t.sharing.collaborationBadge : t.sharing.sharedBadge}
+          className="icon-sm shrink-0 text-muted-foreground"
+        />
+      )}
+      <span className="min-w-0 truncate">{document.title}</span>
+      {document.recovery ? (
+        <span className="shrink-0 rounded-sm border border-warning/40 bg-warning-subtle px-1 py-0.5 t-hint text-foreground">
+          Recovery
+        </span>
+      ) : null}
+    </span>
+  )
+  const detailsAction = {
+    ariaLabel: `${detailsLabel}: ${document.title}`,
+    icon: <Info className="icon-sm" />,
+    label: detailsLabel,
+    onSelect: onDetails,
+  }
+  const ownerActions = [
+    // A private document has no details page — offering the icon would open
+    // an unrelated activation gate, so it only appears once details exist.
+    ...(railCapabilities.canOpenDetails ? [detailsAction] : []),
+    {
+      ariaLabel: `${isPinned ? copy.unpinDocument : copy.pinDocument}: ${document.title}`,
+      icon: isPinned ? <PinOff className="icon-sm" /> : <Pin className="icon-sm" />,
+      label: isPinned ? copy.unpinDocument : copy.pinDocument,
+      onSelect: onTogglePinned,
+    },
+    {
+      ariaLabel: `${copy.deleteDocument}: ${document.title}`,
+      destructive: true,
+      icon: <Trash2 className="icon-sm" />,
+      label: copy.deleteDocument,
+      onSelect: onDelete,
+    },
+  ]
 
   return (
-    <div className="relative" data-editor-document-id={document.id}>
+    <div className="group/editor-document relative" data-editor-document-id={document.id}>
       {showBeforeIndicator ? <DropIndicator className="-top-1" /> : null}
       {showAfterIndicator ? <DropIndicator className="-bottom-1" /> : null}
       <ExplorerHistoryRow
-        actions={ownerControls
-          ? [
-              {
-                icon: isPinned ? <PinOff className="icon-sm" /> : <Pin className="icon-sm" />,
-                label: isPinned ? copy.unpinDocument : copy.pinDocument,
-                onSelect: onTogglePinned,
-              },
-              {
-                destructive: true,
-                icon: <Trash2 className="icon-sm" />,
-                label: copy.deleteDocument,
-                onSelect: onDelete,
-              },
-            ]
-          : undefined}
+        actions={railCapabilities.canDelete ? ownerActions : [detailsAction]}
         active={isActive}
         dragging={isDragging}
         indicator={isRunning ? <ExplorerRunningIndicator label={copy.runningSuggestion} /> : undefined}
         nested={isNested}
-        onPointerDown={ownerControls
+        onPointerDown={railCapabilities.canDrag
           ? (event) => beginDocumentDrag(event, document.id)
           : undefined}
         onSelect={onOpen}
-        onStartRename={ownerControls ? () => startTitleEdit(document) : undefined}
-        renameEditor={ownerControls && isEditing ? (
+        onStartRename={railCapabilities.canRename ? () => startTitleEdit(document) : undefined}
+        renameEditor={railCapabilities.canRename && isEditing ? (
           <ExplorerHistoryTitleInput
             inputRef={titleInputRef}
             label={copy.renameDocument}
@@ -2249,9 +2918,9 @@ function EditorDocumentTreeItem({
             value={titleDraft}
           />
         ) : undefined}
-        renameLabel={ownerControls ? copy.renameDocument : undefined}
+        renameLabel={railCapabilities.canRename ? copy.renameDocument : undefined}
         timeLabel={timeLabel}
-        title={document.title}
+        title={title}
       />
     </div>
   )
@@ -2261,6 +2930,11 @@ function DropIndicator({ className }: { className?: string }) {
   return (
     <span className={cn('pointer-events-none absolute left-1 right-1 z-20 h-0.5 rounded-full bg-brand shadow-[0_0_0_1px_var(--background)]', className)} />
   )
+}
+
+function countEditorDocumentWords(markdown: string): number {
+  return markdown.match(/[\p{L}\p{N}]+(?:['’\u2010-\u2015][\p{L}\p{N}]+)*/gu)
+    ?.length ?? 0
 }
 
 function ImportReportMenu({
@@ -2369,9 +3043,9 @@ function EditorPanelToggle({
     />
   ) : (
     <PanelToggle
-      collapseLabel={copy.hideAssistant}
+      collapseLabel={copy.hideComments}
       controlsId={EDITOR_COMMENTS_PANEL_ID}
-      expandLabel={copy.showAssistant}
+      expandLabel={copy.showComments}
       expanded={visible}
       onToggle={(next) => {
         if (onToggle) {
@@ -2385,12 +3059,110 @@ function EditorPanelToggle({
   )
 }
 
+export function editorRecoveryMarkdown({
+  commentDrafts,
+  documentMarkdown,
+  locale,
+  title,
+}: {
+  commentDrafts: readonly string[]
+  documentMarkdown: string
+  locale: 'de' | 'en'
+  title: string
+}): string {
+  const normalizedTitle = title.replace(/\s+/g, ' ').trim()
+  const body = documentMarkdown.trim()
+    || `# ${normalizedTitle || (locale === 'de' ? 'Wiederhergestelltes Dokument' : 'Recovered document')}`
+  if (commentDrafts.length === 0) return body
+  const sectionTitle = locale === 'de'
+    ? 'Nicht gesendete Kommentarentwürfe'
+    : 'Unsent comment drafts'
+  const drafts = commentDrafts.map((draft, index) => (
+    `### ${locale === 'de' ? 'Entwurf' : 'Draft'} ${index + 1}\n\n${draft}`
+  ))
+  return `${body}\n\n---\n\n## ${sectionTitle}\n\n${drafts.join('\n\n')}`
+}
+
+export function EditorRemoteDeletionRecoveryBar({
+  locale,
+  onDiscard,
+  onSaveAsNew,
+}: {
+  locale: 'de' | 'en'
+  onDiscard: () => void
+  onSaveAsNew: () => void
+}) {
+  return (
+    <div
+      className="flex flex-wrap items-center gap-2 border-b border-warning/40 bg-warning-subtle px-3 py-2"
+      data-editor-recovery-artifact
+      role="alert"
+    >
+      <AlertTriangle className="icon-sm shrink-0 text-warning" />
+      <p className="t-meta min-w-64 flex-1 text-foreground">
+        {locale === 'de'
+          ? 'Das ursprüngliche Dokument wurde remote gelöscht. Hier ist ausschließlich eine lokale Kopie nicht bestätigter Arbeit; sie wird nicht automatisch synchronisiert.'
+          : 'The original document was deleted remotely. This is only a local copy of unconfirmed work and is not synchronized automatically.'}
+      </p>
+      <Button onClick={onSaveAsNew} size="sm" type="button" variant="outline">
+        {locale === 'de' ? 'Als neues Dokument speichern' : 'Save as new document'}
+      </Button>
+      <Button onClick={onDiscard} size="sm" type="button" variant="ghost">
+        {locale === 'de' ? 'Verwerfen' : 'Discard'}
+      </Button>
+    </div>
+  )
+}
+
+function CollaborationRecoveryBar({
+  hasUnconfirmedLocalChanges,
+  locale,
+  onReconnect,
+}: {
+  hasUnconfirmedLocalChanges: boolean
+  locale: 'de' | 'en'
+  onReconnect: () => Promise<void>
+}) {
+  const [pending, setPending] = useState(false)
+  const reconnect = () => {
+    if (pending) return
+    setPending(true)
+    void onReconnect().finally(() => setPending(false))
+  }
+  return (
+    <div
+      className="flex min-h-9 items-center gap-2 border-b border-border bg-warning-subtle px-3 py-1"
+      role="alert"
+    >
+      <AlertTriangle className="icon-sm shrink-0 text-warning" />
+      <p className="t-meta min-w-0 flex-1 text-foreground">
+        {locale === 'de'
+          ? hasUnconfirmedLocalChanges
+            ? 'Die Verbindung ist unterbrochen. Nicht bestätigte Änderungen bleiben erhalten.'
+            : 'Die Verbindung konnte mehrfach nicht wiederhergestellt werden.'
+          : hasUnconfirmedLocalChanges
+            ? 'The connection is interrupted. Unconfirmed changes remain preserved.'
+            : 'The connection could not be restored after several attempts.'}
+      </p>
+      <Button
+        disabled={pending}
+        onClick={reconnect}
+        size="sm"
+        type="button"
+        variant="outline"
+      >
+        <RefreshCw className={pending ? 'animate-spin' : undefined} />
+        {locale === 'de' ? 'Jetzt erneut verbinden' : 'Reconnect now'}
+      </Button>
+    </div>
+  )
+}
+
 export function EditorTopBar({
   collaborationAccess,
   collaborationActive,
   collaborationCanEdit,
   collaborationStatus,
-  commentCount,
   copy,
   canFlushForShare,
   diffAnchorError,
@@ -2404,6 +3176,9 @@ export function EditorTopBar({
   isDirty,
   isTreeVisible,
   onCommentPanelVisibleChange,
+  onCollaborationLogin,
+  onCollaborationReconnect,
+  onCollaborationReload,
   onExportWordMarkdown,
   onSetDiffAnchor,
   onShareDocument,
@@ -2416,11 +3191,10 @@ export function EditorTopBar({
   /** The share flow flushes the document itself before converting, so the
    * dirty/server-ready gates on the Share button do not apply. */
   canFlushForShare: boolean
-  collaborationAccess: 'edit' | 'suggest' | 'view' | null
+  collaborationAccess: 'comment' | 'edit' | 'suggest' | 'view' | null
   collaborationActive: boolean
   collaborationCanEdit: boolean
   collaborationStatus: EditorCollaborationStatusModel
-  commentCount: number
   copy: EditorCopy
   diffAnchorError: string | null
   diffAnchorDisabledReason: string | null
@@ -2433,21 +3207,30 @@ export function EditorTopBar({
   isDirty: boolean
   isTreeVisible: boolean
   onCommentPanelVisibleChange?: (visible: boolean) => void
+  onCollaborationLogin?: () => void
+  onCollaborationReconnect?: () => Promise<void>
+  onCollaborationReload?: () => void
   onExportWordMarkdown: () => Promise<string>
   onSetDiffAnchor: () => void
-  onShareDocument: (document: EditorDocumentRecord) => void
+  onShareDocument: (
+    document: EditorDocumentRecord,
+    returnFocusTarget?: HTMLElement | null,
+  ) => void
   onTreeVisibleChange?: (visible: boolean) => void
-  onWriteModeChange: (mode: 'edit' | 'suggest') => void
+  onWriteModeChange: (mode: 'comment' | 'edit' | 'suggest') => void
   sharingAvailable: boolean
   viewMode: ProjectState['editorUi']['viewMode']
-  writeMode: 'edit' | 'suggest' | 'view'
+  writeMode: 'comment' | 'edit' | 'suggest' | 'view'
 }) {
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const [titleDraft, setTitleDraft] = useState(document.title)
   const titleInputRef = useRef<HTMLInputElement | null>(null)
+  const overflowTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const shareDialogRequestedRef = useRef(false)
   const [isExporting, setIsExporting] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
   const ownerControls = isOwnedEditorDocument(document)
+  const { locale } = useLocale()
 
   useLayoutEffect(() => {
     if (!isEditingTitle) return
@@ -2496,86 +3279,105 @@ export function EditorTopBar({
   const documentStatusText = provenanceLabel
     ? `${provenanceLabel} ${document.sourceRunId} · ${copy.updated} ${formatEditorTime(document.updatedAt)}`
     : `${copy.updated} ${formatEditorTime(document.updatedAt)}`
+  const shareDisabled = editorDocumentShareDisabled({
+    canFlushForShare,
+    document,
+    isDirty,
+    sharingAvailable,
+  })
+  const diffAnchorDisabled = !ownerControls
+    || diffAnchorPending
+    || Boolean(diffAnchorDisabledReason)
+  const overflowLabel = locale === 'de' ? 'Weitere Dokumentaktionen' : 'More document actions'
+  const shareLabel = locale === 'de' ? 'Dokument teilen' : 'Share document'
 
   return (
     <EditorTopBarLayout
       actions={(
         <>
-          {collaborationActive ? (
-            <EditorCollaborationStatus model={collaborationStatus} variant="topbar" />
-          ) : null}
-          <EditorWriteModeControl
-            access={collaborationAccess}
-            canEdit={collaborationCanEdit}
-            collaborationActive={collaborationActive}
-            mode={writeMode}
-            onModeChange={onWriteModeChange}
-            sourceReadOnly={viewMode === 'source'}
-          />
-          <Badge className="h-5 rounded-full px-1.5 py-0" variant="outline">{commentCount}</Badge>
-          <Badge className="h-5 rounded-full px-1.5 py-0" variant="outline">R{document.revision}</Badge>
-          <Separator className="mx-0.5 h-5" orientation="vertical" />
-          <EditorDocumentShareButton
-            dirty={canFlushForShare ? false : isDirty}
-            onClick={() => onShareDocument(document)}
-            owner={ownerControls}
-            serverReady={canFlushForShare || document.metadataRevision !== undefined}
-            sharingAvailable={sharingAvailable}
-          />
-          <TooltipButton
-            label={viewMode === 'source' ? copy.live : copy.source}
-            onClick={() => dispatch({ mode: viewMode === 'source' ? 'live' : 'source', type: 'setEditorViewMode' })}
-          >
-            {viewMode === 'source' ? <Eye className="size-4" /> : <Code2 className="size-4" />}
-          </TooltipButton>
-          <TooltipButton
-            className={diffAnchorError
-              ? 'text-destructive hover:text-destructive'
-              : document.diffAnchorMarkdown
-                ? 'bg-brand-subtle text-brand hover:bg-brand-subtle/80 hover:text-brand'
-                : undefined}
-            disabled={!ownerControls || diffAnchorPending || Boolean(diffAnchorDisabledReason)}
-            label={diffAnchorError ?? diffAnchorDisabledReason ?? copy.setDiffAnchor}
-            onClick={onSetDiffAnchor}
-          >
-            {diffAnchorPending
-              ? <LoaderCircle className="size-4 animate-spin" />
-              : diffAnchorError
-                ? <AlertTriangle className="size-4" />
-                : <Anchor className="size-4" />}
-          </TooltipButton>
-          <TooltipButton
-            className={isDiffVisible ? 'bg-brand text-brand-foreground hover:bg-brand/90 hover:text-brand-foreground' : undefined}
-            label={isDiffVisible ? copy.hideDiff : copy.showDiff}
-            onClick={() => dispatch({ isVisible: !isDiffVisible, type: 'setEditorDiffVisible' })}
-          >
-            <Scale className="size-4" />
-          </TooltipButton>
-          <Separator className="mx-0.5 h-5" orientation="vertical" />
-          <TooltipButton
-            className={exportError ? 'text-destructive hover:text-destructive' : undefined}
-            disabled={isExporting}
-            label={exportError ?? copy.exportWord}
-            onClick={() => { void handleExportWord() }}
-          >
-            {isExporting
-              ? <LoaderCircle className="size-4 animate-spin" />
-              : exportError
-                ? <AlertTriangle className="size-4" />
-                : <FileDown className="size-4" />}
-          </TooltipButton>
-          {ownerControls ? (
-            <>
-              <Separator className="mx-0.5 h-5" orientation="vertical" />
-              <TooltipButton
-                label={copy.deleteDocument}
-                onClick={() => dispatch({ documentId: document.id, type: 'deleteEditorDocument' })}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                aria-label={overflowLabel}
+                className="size-7 shrink-0 text-muted-foreground hover:text-foreground"
+                data-editor-topbar-overflow
+                ref={overflowTriggerRef}
+                size="icon"
+                title={overflowLabel}
+                type="button"
+                variant="ghost"
               >
-                <Trash2 className="size-4" />
-              </TooltipButton>
-            </>
-          ) : null}
-          <Separator className="mx-0.5 h-5" orientation="vertical" />
+                <MoreHorizontal className="icon-sm" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              className="w-56"
+              onCloseAutoFocus={(event) => {
+                if (!shareDialogRequestedRef.current) return
+                shareDialogRequestedRef.current = false
+                event.preventDefault()
+              }}
+            >
+              {ownerControls ? (
+                <DropdownMenuItem
+                  disabled={shareDisabled}
+                  onSelect={() => {
+                    shareDialogRequestedRef.current = true
+                    overflowTriggerRef.current?.focus({ preventScroll: true })
+                    onShareDocument(document, overflowTriggerRef.current)
+                  }}
+                >
+                  <Share2 />
+                  {shareLabel}
+                </DropdownMenuItem>
+              ) : null}
+              <DropdownMenuItem
+                onSelect={() => dispatch({
+                  mode: viewMode === 'source' ? 'live' : 'source',
+                  type: 'setEditorViewMode',
+                })}
+              >
+                {viewMode === 'source' ? <Eye /> : <Code2 />}
+                {viewMode === 'source' ? copy.live : copy.source}
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={diffAnchorDisabled} onSelect={onSetDiffAnchor}>
+                <Anchor />
+                {diffAnchorError ?? diffAnchorDisabledReason ?? copy.setDiffAnchor}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={() => dispatch({
+                  isVisible: !isDiffVisible,
+                  type: 'setEditorDiffVisible',
+                })}
+              >
+                <Scale />
+                {isDiffVisible ? copy.hideDiff : copy.showDiff}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={isExporting}
+                onSelect={() => { void handleExportWord() }}
+              >
+                <FileDown />
+                {exportError ?? copy.exportWord}
+              </DropdownMenuItem>
+              {ownerControls ? (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    className="text-destructive focus:text-destructive"
+                    onSelect={() => dispatch({
+                      documentId: document.id,
+                      type: 'deleteEditorDocument',
+                    })}
+                  >
+                    <Trash2 />
+                    {copy.deleteDocument}
+                  </DropdownMenuItem>
+                </>
+              ) : null}
+            </DropdownMenuContent>
+          </DropdownMenu>
           <EditorPanelToggle
             copy={copy}
             dispatch={dispatch}
@@ -2632,14 +3434,67 @@ export function EditorTopBar({
                 {document.title}
               </button>
             )}
-            {isDirty ? <span className="size-1.5 shrink-0 rounded-full bg-brand" aria-label="Unsaved changes" /> : null}
+            {isDirty ? (
+              // role makes the label count: a bare span carries no name for
+              // assistive technology, so "unsaved changes" existed only as a
+              // coloured dot. status also announces the change when it appears.
+              <span
+                className="size-1.5 shrink-0 rounded-full bg-brand"
+                role="status"
+                aria-label="Unsaved changes"
+              />
+            ) : null}
           </div>
         </div>
         </>
       )}
-      toolbar={<EditorCommandToolbar editor={editor} isSource={viewMode === 'source'} />}
+      primary={(
+        <>
+          <EditorWriteModeControl
+            access={collaborationAccess}
+            canEdit={collaborationCanEdit}
+            collaborationActive={collaborationActive}
+            mode={writeMode}
+            onModeChange={onWriteModeChange}
+            sourceReadOnly={viewMode === 'source'}
+          />
+          {collaborationActive ? (
+            <EditorCollaborationStatus
+              model={collaborationStatus}
+              onLogin={onCollaborationLogin}
+              onReconnect={onCollaborationReconnect}
+              onReload={onCollaborationReload}
+              variant="topbar"
+            />
+          ) : null}
+        </>
+      )}
+      toolbar={(
+        <EditorCommandToolbar
+          editor={editor}
+          isSource={viewMode === 'source' || writeMode === 'comment' || writeMode === 'view'}
+        />
+      )}
     />
   )
+}
+
+export function editorDocumentShareDisabled({
+  canFlushForShare,
+  document,
+  isDirty,
+  sharingAvailable,
+}: {
+  canFlushForShare: boolean
+  document: EditorDocumentRecord
+  isDirty: boolean
+  sharingAvailable: boolean
+}): boolean {
+  return !isOwnedEditorDocument(document)
+    || document.recovery !== undefined
+    || (!canFlushForShare && isDirty)
+    || (!canFlushForShare && document.metadataRevision === undefined)
+    || !sharingAvailable
 }
 
 function EditorCommandToolbar({
@@ -2650,11 +3505,25 @@ function EditorCommandToolbar({
   isSource: boolean
 }) {
   const disabled = !editor || isSource
+  const undoDisabled = disabled
+    || !canRunEditorHistoryCommand(editor, 'undo')
+  const redoDisabled = disabled
+    || !canRunEditorHistoryCommand(editor, 'redo')
 
   return (
-    <div className="flex min-w-0 items-center justify-center gap-0.5 overflow-x-auto px-1 [scrollbar-width:none]">
-      <ToolbarButton disabled={disabled} icon={Undo2} label="Undo" onClick={() => editor?.chain().focus().undo().run()} />
-      <ToolbarButton disabled={disabled} icon={Redo2} label="Redo" onClick={() => editor?.chain().focus().redo().run()} />
+    <div className="flex min-w-0 items-center justify-center gap-0.5 px-1">
+      <ToolbarButton
+        disabled={undoDisabled}
+        icon={Undo2}
+        label="Undo"
+        onClick={() => runEditorHistoryCommand(editor, 'undo')}
+      />
+      <ToolbarButton
+        disabled={redoDisabled}
+        icon={Redo2}
+        label="Redo"
+        onClick={() => runEditorHistoryCommand(editor, 'redo')}
+      />
     </div>
   )
 }
@@ -2686,6 +3555,7 @@ export function EditorAssistantComposer({
   onReorderPill,
   onRemoveAttachedComment,
   onRemoveChip,
+  onRetryAttachment,
   pendingKeys,
   pillKeys,
   onSend,
@@ -2727,6 +3597,7 @@ export function EditorAssistantComposer({
   onReorderPill: (fromIndex: number, toIndex: number) => void
   onRemoveAttachedComment: (commentId: string) => void
   onRemoveChip: (ref: ChatContextReferenceRecord) => void
+  onRetryAttachment?: (chip: ChatAttachmentChipModel) => void
   pendingKeys: string[]
   pillKeys: string[]
   onSend: () => void
@@ -2779,10 +3650,15 @@ export function EditorAssistantComposer({
       && comment.kind === 'collect'
       && attachedCommentIds.includes(comment.id),
   )
+  const hasUnreadyAttachment = attachmentChips.some((chip) => chip.readiness !== 'ready')
   const canEditorSend = !aiReadOnlyReason
-    && (isRunning || attachedComments.length > 0 || draft.trim().length > 0)
+    && (
+      isRunning
+      || (!hasUnreadyAttachment && (attachedComments.length > 0 || draft.trim().length > 0))
+    )
   const guardedSend = () => {
     if (aiReadOnlyReason) return
+    if (!isRunning && hasUnreadyAttachment) return
     if (!isRunning && contextOverflow && canEditorSend) {
       setOverflowConfirmOpen(true)
       return
@@ -2970,12 +3846,16 @@ export function EditorAssistantComposer({
           <ContextChipLegend
             chips={attachmentChips}
             labels={{
+              attachmentFailed: t.chat.attachmentContextFailed,
+              attachmentPending: t.chat.attachmentContextPending,
+              attachmentRetry: t.chat.attachmentContextRetry,
               removeContext: copy.removeFromQueue,
               reorderHint: t.chat.reorderContextHint,
             }}
             onRemove={onRemoveChip}
             onReorderPending={onReorderPending}
             onReorderPill={onReorderPill}
+            onRetry={onRetryAttachment}
             pendingKeys={pendingKeys}
             pillKeys={pillKeys}
           />
@@ -3142,6 +4022,7 @@ function EditorCommentsPanel({
   onSelectSuggestion,
   runErrors,
   runningCommentIds,
+  savingCommentDraftIds,
   selectedCommentId,
   suggestionPublishDisabledReason,
   suggestions,
@@ -3159,10 +4040,12 @@ function EditorCommentsPanel({
   onSelectSuggestion: (suggestionId: string) => void
   runErrors: Record<string, string>
   runningCommentIds: readonly string[]
+  savingCommentDraftIds: readonly string[]
   selectedCommentId: string | null
   suggestionPublishDisabledReason: string | null
   suggestions: EditorSuggestionRecord[]
 }) {
+  const { locale } = useLocale()
   const [statusTab, setStatusTab] = useState<'open' | 'resolved'>('open')
   const [kindFilter, setKindFilter] = useState<'all' | EditorCommentKind>('all')
 
@@ -3187,6 +4070,17 @@ function EditorCommentsPanel({
 
   return (
     <div className="flex h-full w-full min-w-0 flex-col bg-background">
+      <div className="border-b border-border px-3 py-2">
+        <div className="flex items-center gap-1.5 t-meta font-semibold text-foreground">
+          <LockKeyhole className="icon-sm text-muted-foreground" />
+          <span>{copy.comments}</span>
+        </div>
+        <p className="mt-0.5 t-hint text-muted-foreground">
+          {locale === 'de'
+            ? 'Nur für mich sichtbar · niemals automatisch mit dem Team oder der KI geteilt'
+            : 'Visible only to me · never shared with the team or AI automatically'}
+        </p>
+      </div>
       <div className="flex flex-col gap-2 border-b border-border px-3 py-2">
         <div className="grid grid-cols-2 gap-0.5 rounded-md bg-muted/60 p-0.5">
           <CommentStatusTab active={statusTab === 'open'} count={openComments.length} label={copy.tabOpen} onClick={() => setStatusTab('open')} />
@@ -3250,6 +4144,7 @@ function EditorCommentsPanel({
               copy={copy}
               dispatch={dispatch}
               isRunning={runningCommentIds.includes(comment.id)}
+              isSavingDraft={savingCommentDraftIds.includes(comment.id)}
               isSelected={selectedCommentId === comment.id}
               key={comment.id}
               onAcceptSuggestion={onAcceptSuggestion}
@@ -3307,6 +4202,7 @@ function EditorCommentCard({
   copy,
   dispatch,
   isRunning,
+  isSavingDraft,
   isSelected,
   onAcceptSuggestion,
   onRejectSuggestion,
@@ -3321,6 +4217,7 @@ function EditorCommentCard({
   copy: EditorCopy
   dispatch: Dispatch<ResearchDeskAction>
   isRunning: boolean
+  isSavingDraft: boolean
   isSelected: boolean
   onAcceptSuggestion: (suggestion: EditorSuggestionRecord) => void
   onRejectSuggestion: (suggestionId: string) => void
@@ -3446,7 +4343,7 @@ function EditorCommentCard({
           isRunning ? (
             <div className="mt-2.5 flex items-center justify-center gap-2 rounded-md border border-brand/25 bg-brand-subtle/30 py-2 t-meta-sm font-medium text-brand">
               <LoaderCircle className="size-3.5 animate-spin" />
-              {copy.runningSuggestion}
+              {isSavingDraft ? copy.savingPrivateDraft : copy.runningSuggestion}
             </div>
           ) : suggestion && suggestion.status === 'pending' ? (
             <SuggestionReview
@@ -3553,6 +4450,16 @@ function SuggestionReview({ copy, onAccept, onReject, publishDisabledReason, sug
         <Sparkles className="size-3.5 shrink-0" />
         {reviewInEditor ? copy.reviewInEditor : copy.reviewInPanel}
       </div>
+      {suggestion.privateDraft ? (
+        <div
+          className="mt-1.5 flex items-center gap-1.5 t-caption text-success"
+          data-private-suggestion-draft-saved="true"
+          role="status"
+        >
+          <Check className="size-3 shrink-0" />
+          {copy.privateDraftSaved}
+        </div>
+      ) : null}
       <div className="mt-2 rounded-md border border-success/20 bg-success-subtle/25 p-2">
         <div className="t-caption text-success">{copy.proposedText}</div>
         <p className="t-meta mt-1 line-clamp-4 whitespace-pre-wrap text-foreground">{suggestion.proposedText}</p>

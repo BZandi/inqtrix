@@ -1,10 +1,17 @@
 {{- if and .Values.openshift.enabled .Values.route.enabled }}
+{{- if and .Values.route.tls.enabled (ne .Values.route.tls.termination "edge") }}
+{{- fail (printf "route.tls.termination=%q is unsupported in this release; the bundled Python web runtime supports OpenShift edge termination only" .Values.route.tls.termination) }}
+{{- end }}
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
   name: {{ include "inqtrix.fullname" . }}
   labels:
     {{- include "inqtrix.labels" (dict "root" .) | nindent 4 }}
+  {{- with .Values.route.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   {{- with .Values.route.host }}
   host: {{ . | quote }}

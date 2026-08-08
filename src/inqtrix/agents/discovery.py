@@ -36,6 +36,13 @@ class ProbePlan:
     """The deterministic probe list (shown to the user in strict mode)."""
 
     probes: list[dict[str, Any]] = field(default_factory=list)
+    requested_count: int = 0
+    limit: int = 0
+
+    @property
+    def omitted_count(self) -> int:
+        """Number of probes visibly excluded by the server budget."""
+        return max(0, self.requested_count - len(self.probes))
 
     def as_payload(self) -> list[dict[str, Any]]:
         """Wire shape for the discovery approval / discovery event."""
@@ -97,14 +104,19 @@ def build_probe_plan(
         probes.append(
             {"kind": "web.search.instant", "query": scoped_question}
         )
-    if len(probes) > max_calls:
+    requested_count = len(probes)
+    if requested_count > max_calls:
         log.warning(
             "Discovery-Probenplan auf das Budget gekuerzt (%d -> %d).",
             len(probes),
             max_calls,
         )
         probes = probes[:max_calls]
-    return ProbePlan(probes=probes)
+    return ProbePlan(
+        probes=probes,
+        requested_count=requested_count,
+        limit=max_calls,
+    )
 
 
 def execute_probes(
@@ -131,6 +143,7 @@ def execute_probes(
     lines: list[str] = []
     executed = 0
     failed = 0
+    degraded = 0
     source_tool_counts = {"web": 0, "knowledge": 0}
     for probe in plan.probes:
         kind = probe["kind"]
@@ -153,7 +166,12 @@ def execute_probes(
                     payload["collection_ids"] = probe["collection_ids"]
                 output = call("knowledge.search", payload)
                 for hit in _rows(output)[:5]:
-                    text = str(hit.get("text", ""))[:_PROBE_SNIPPET_CHARS]
+                    # ``knowledge.search`` exposes only the canonical evidence
+                    # projection.  Retrieval ``text`` may contain generated
+                    # context and is intentionally absent from the capability
+                    # contract; using it here both emptied the analyst digest
+                    # and invited callers to reintroduce the unsafe field.
+                    text = str(hit.get("excerpt", ""))[:_PROBE_SNIPPET_CHARS]
                     lines.append(
                         "[Intern doc:"
                         f"{hit.get('document_id', '?')}#"
@@ -163,6 +181,18 @@ def execute_probes(
                     lines.append(
                         f"[Intern] Keine Treffer fuer: {probe['query']}"
                     )
+                warnings = _rows(output, key="warnings")
+                if warnings:
+                    degraded += 1
+                    for warning in warnings:
+                        lines.append(
+                            "[EINGESCHRAENKT knowledge.search] "
+                            + str(
+                                warning.get("message")
+                                or warning.get("code")
+                                or "Unvollständige Retrieval-Ausführung."
+                            )
+                        )
             elif kind == "web.search.instant":
                 output = call(
                     "web.search.instant",
@@ -181,14 +211,20 @@ def execute_probes(
         except Exception as exc:  # noqa: BLE001 — probe failures stay visible
             failed += 1
             log.warning(
-                "Discovery-Probe %s fehlgeschlagen: %s", kind, exc
+                "Discovery-Probe %s fehlgeschlagen (error_type=%s)",
+                kind,
+                type(exc).__name__,
             )
             lines.append(f"[FEHLGESCHLAGEN {kind}] {exc}")
     digest = "\n".join(lines) or "(keine Sondierungsergebnisse)"
     stats = {
         "planned": len(plan.probes),
+        "requested": max(plan.requested_count, len(plan.probes)),
+        "omitted": plan.omitted_count,
+        "limit": plan.limit,
         "executed": executed,
         "failed": failed,
+        "degraded": degraded,
         "source_tool_counts": source_tool_counts,
     }
     return digest, stats

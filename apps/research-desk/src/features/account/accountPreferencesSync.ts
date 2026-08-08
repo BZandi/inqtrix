@@ -10,9 +10,13 @@
  * defensive like the other converters).
  */
 
-import type { ServerAccountPreferences } from '@/api/inqtrixClient'
+import type {
+  AccountPreferencesPayload,
+  ServerAccountPreferences,
+} from '@/api/inqtrixClient'
 import type { Locale } from '@/i18n/translations'
 import type { ProjectPreferences } from '@/features/project/types'
+import type { ModelTierPreference } from '@/features/researchRuns/types'
 import type {
   ContrastMode,
   ThemeMode,
@@ -32,6 +36,17 @@ const VALID_USER_BUBBLE_TONE: ReadonlySet<string> = new Set([
   'violet',
   'ink',
 ])
+/** `''` is a legitimate value here — it means "no preference", which is what
+ * the picker shows as its server-default entry. */
+const VALID_MODEL_TIER: ReadonlySet<string> = new Set(['', 'high', 'mid', 'fast'])
+
+function modelTierOrFallback(
+  value: string | null | undefined,
+  fallback: ModelTierPreference,
+): ModelTierPreference {
+  if (value === undefined || value === null) return fallback
+  return VALID_MODEL_TIER.has(value) ? (value as ModelTierPreference) : fallback
+}
 
 /** One server row -> local preferences, falling back per field to the given
  * defaults when a value is out of domain (so a corrupt row never breaks the UI). */
@@ -46,6 +61,8 @@ export function preferencesFromServer(
       typeof server.enable_agent_memory === 'boolean'
         ? server.enable_agent_memory
         : fallback.agentMemoryEnabled,
+    agentModelTier: modelTierOrFallback(server.agent_model_tier, fallback.agentModelTier),
+    chatModelTier: modelTierOrFallback(server.chat_model_tier, fallback.chatModelTier),
     contrastMode: VALID_CONTRAST.has(server.contrast_mode)
       ? (server.contrast_mode as ContrastMode)
       : fallback.contrastMode,
@@ -66,15 +83,7 @@ export function preferencesFromServer(
 export function serverAccountPreferencesPayload(
   preferences: ProjectPreferences,
   updatedAt: number,
-): {
-  contrast_mode: string
-  locale: string
-  theme: string
-  theme_preset: string
-  user_bubble_tone: string
-  enable_agent_memory: boolean
-  updated_at: number
-} {
+): AccountPreferencesPayload {
   return {
     contrast_mode: preferences.contrastMode,
     locale: preferences.locale,
@@ -82,13 +91,20 @@ export function serverAccountPreferencesPayload(
     theme_preset: preferences.themePreset,
     user_bubble_tone: preferences.userBubbleTone,
     // Whole-row upsert: the opt-in MUST ride every save or the server resets
-    // it to the default OFF.
+    // it to the default OFF. The same holds for every field below.
     enable_agent_memory: preferences.agentMemoryEnabled,
+    chat_model_tier: preferences.chatModelTier,
+    agent_model_tier: preferences.agentModelTier,
     updated_at: updatedAt,
   }
 }
 
-/** Equality key for the autosave diff — the account preference fields. */
+/** Equality key for the autosave diff — the account preference fields.
+ *
+ * This is the ONLY thing that decides whether a change is pushed. A field
+ * missing here syncs silently never: the user changes it, no request goes
+ * out, nothing fails, and the value is gone after a reload. Every field in
+ * the payload belongs here. */
 export function preferencesFingerprint(preferences: ProjectPreferences): string {
   return [
     preferences.contrastMode,
@@ -97,5 +113,7 @@ export function preferencesFingerprint(preferences: ProjectPreferences): string 
     preferences.themePreset,
     preferences.userBubbleTone,
     preferences.agentMemoryEnabled ? 'mem:on' : 'mem:off',
+    `chat:${preferences.chatModelTier}`,
+    `agent:${preferences.agentModelTier}`,
   ].join('|')
 }

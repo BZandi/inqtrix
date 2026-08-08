@@ -62,8 +62,9 @@ def extract_pdf_page_texts(content: bytes) -> list[str] | None:
             )
     except Exception as exc:  # noqa: BLE001 — best-effort, visible, non-fatal
         log.warning(
-            "PDF page extraction failed (%s); chunk page numbers unavailable",
-            exc,
+            "PDF page extraction failed (error_type=%s); "
+            "chunk page numbers unavailable",
+            type(exc).__name__,
         )
         return None
     return pages or None

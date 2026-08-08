@@ -109,9 +109,9 @@ vector_index_members = Table(
     Column("state", Text, nullable=False, server_default=text("'pending'")),
     # The backend knowledge-document id this member was ingested as, once known.
     # Lets "remove from index" delete the exact document from the searchable
-    # collection without a full rebuild. Must persist across reload, else every
-    # post-reload removal degrades to local-only while the document stays
-    # searchable server-side. Null = ingested before this was tracked / offline.
+    # collection without a full rebuild. Must persist across reload; a null
+    # legacy value is reconciled through stable source identity before the
+    # durable deletion starts. Null = ingested before this was tracked / offline.
     Column("server_document_id", Text, nullable=True),
 )
 """The documents referenced by an index (n:m). Replaced wholesale on each

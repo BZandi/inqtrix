@@ -43,7 +43,7 @@ _SENTENCE_END = re.compile(
 
 
 def dedup_key(ref: dict[str, Any]) -> str:
-    """The citation identity (result.py precedent, decision E4)."""
+    """Return the citation identity shared with ``result.py``."""
     document_id = ref.get("document_id")
     if document_id is not None and ref.get("chunk_index") is not None:
         return f"doc:{document_id}#{ref['chunk_index']}"

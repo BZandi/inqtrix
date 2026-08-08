@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { ServerVectorIndex } from '@/api/inqtrixClient'
 import type { VectorIndexRecord } from '@/features/project/types'
 import {
+  autosaveDelayForVectorIndexes,
   serverVectorIndexPayload,
   vectorIndexChanged,
   vectorIndexFingerprint,
@@ -127,5 +128,36 @@ describe('vectorIndexChanged (defer-while-indexing)', () => {
     expect(
       vectorIndexChanged(vectorIndexFingerprint(base), vectorIndexFingerprint(base)),
     ).toBe(false)
+  })
+})
+
+describe('autosaveDelayForVectorIndexes (membership growth flushes immediately)', () => {
+  const record = (id: string, memberCount: number): VectorIndexRecord => ({
+    createdAt: '2026-01-01T00:00:00.000Z', dims: 3072, handle: id, id,
+    members: Array.from({ length: memberCount }, (_, n) => ({
+      fileId: `fa_${n}`, state: 'pending' as const,
+    })),
+    model: 'm', status: 'stale', title: id,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  })
+
+  it('returns 0 when an index gained members', () => {
+    expect(autosaveDelayForVectorIndexes(
+      { i1: record('i1', 1) }, { i1: record('i1', 3) }, 1500,
+    )).toBe(0)
+  })
+
+  it('returns 0 for a brand-new index that already has members', () => {
+    expect(autosaveDelayForVectorIndexes({}, { i1: record('i1', 2) }, 1500)).toBe(0)
+  })
+
+  it('keeps the debounce for edits, removals, and empty new indexes', () => {
+    expect(autosaveDelayForVectorIndexes(
+      { i1: record('i1', 3) }, { i1: record('i1', 2) }, 1500,
+    )).toBe(1500)
+    expect(autosaveDelayForVectorIndexes(
+      { i1: record('i1', 2) }, { i1: { ...record('i1', 2), title: 'renamed' } }, 1500,
+    )).toBe(1500)
+    expect(autosaveDelayForVectorIndexes({}, { i1: record('i1', 0) }, 1500)).toBe(1500)
   })
 })

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from queue import Queue
@@ -17,12 +18,15 @@ from inqtrix.providers.base import ProviderContext
 from inqtrix.runtime_logging import (
     describe_search_provider,
     emit_runtime_event,
+    log_run_end,
     normalize_source_provenance,
+    sanitize_grounded_search_result,
     sanitize_event_payload,
 )
+from inqtrix.evidence_limits import OBSERVATION_TEXT_BYTES_LIMIT
 from inqtrix.search_result import GroundedSearchResult, GroundedSource
 from inqtrix.settings import AgentSettings
-from inqtrix.state import append_iteration_log, initial_state
+from inqtrix.state import append_iteration_log, emit_run_event, initial_state
 from inqtrix.strategies import StrategyContext, create_default_strategies
 
 
@@ -85,6 +89,87 @@ def _flush_inqtrix_handlers() -> None:
             handler.flush()
 
 
+@pytest.fixture()
+def recording_span(monkeypatch):
+    """Collect the span events a runtime event produces.
+
+    Lineage events live on the trace, so the assertions that used to
+    read the log file now read the span the event was attached to.
+    """
+    from opentelemetry import trace as real_trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    from inqtrix.observability import otel as otel_module
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+    class _ProxyTrace:
+        def get_tracer(self, name, tracer_provider=None):
+            return (tracer_provider or provider).get_tracer(name)
+
+        def get_current_span(self):
+            return real_trace.get_current_span()
+
+    monkeypatch.setattr(otel_module, "_otel_trace", _ProxyTrace())
+    yield exporter
+    provider.shutdown()
+
+
+
+def test_run_event_sink_failure_logs_type_without_exception_message(tmp_path):
+    log_path = configure_logging(
+        enabled=True,
+        level="DEBUG",
+        log_dir=str(tmp_path / "logs"),
+    )
+
+    def _broken_sink(_event_type, _payload):
+        raise RuntimeError("PRIVATE_SINK_EXCEPTION_MESSAGE")
+
+    emit_run_event(
+        {"_run_event_sink": _broken_sink},
+        "inqtrix.run.test",
+        {"status": "completed"},
+    )
+
+    _flush_inqtrix_handlers()
+    content = Path(log_path).read_text(encoding="utf-8")
+
+    assert "Native run event sink failed" in content
+    assert "error_code=RuntimeError" in content
+    assert "PRIVATE_SINK_EXCEPTION_MESSAGE" not in content
+
+
+def test_run_end_banner_rejects_free_form_reason_text(tmp_path):
+    log_path = configure_logging(
+        enabled=True,
+        level="DEBUG",
+        log_dir=str(tmp_path / "logs"),
+    )
+
+    log_run_end(
+        run_id="run_safe_123",
+        run_mode="run",
+        status="failed",
+        elapsed_s=1.25,
+        state={"round": 2, "done": False},
+        reason="PRIVATE FREE FORM FAILURE DETAIL",
+    )
+
+    _flush_inqtrix_handlers()
+    content = Path(log_path).read_text(encoding="utf-8")
+
+    assert "id=run_safe_123" in content
+    assert "status=failed" in content
+    assert "PRIVATE FREE FORM FAILURE DETAIL" not in content
+
+
 def test_run_logs_start_metadata_banner(tmp_path, monkeypatch):
     log_path = configure_logging(enabled=True, level="DEBUG", log_dir=str(tmp_path / "logs"))
 
@@ -115,8 +200,6 @@ def test_run_logs_start_metadata_banner(tmp_path, monkeypatch):
     assert "search=AzureFoundryWebSearch" in content
     assert "engine=web-search-agent@2026-04-01" in content
     assert "default_max_tokens=4096" in content
-    assert '"event": "run_start"' in content
-    assert '"report_profile": "compact"' in content
 
 
 def test_describe_search_provider_handles_common_engine_labels():
@@ -146,35 +229,51 @@ def test_describe_search_provider_prefers_standard_search_model_property():
     assert metadata["engine"] == "custom-search-engine"
 
 
-def test_runtime_event_drops_sensitive_fields_and_redacts_nested_values(tmp_path):
-    log_path = configure_logging(enabled=True, level="DEBUG", log_dir=str(tmp_path / "logs"))
+def test_runtime_event_drops_content_and_credentials(recording_span):
+    """Credentials and content never reach a runtime event.
 
-    emit_runtime_event(
-        "forensic_probe",
-        {
-            "event": "forensic_probe",
-            "request_kwargs": {"api_key": "sk-secretsecretsecretsecret"},
-            "headers": {"authorization": "Bearer abc.def.ghi"},
-            "raw_response": {"token": "pplx-secretsecretsecretsecret"},
-            "safe_url": "https://api.example.com/v1?api_key=sk-realLookingApiKey1234567890&page=2",
-            "nested": [
-                {"url": "https://example.com/report?sig=abc123&page=1"},
-            ],
-        },
-    )
+    The projection is fail-closed: only operational identifiers, codes,
+    statuses, counters and timings are admitted. A caller that hands in
+    an api key, a bearer header, a raw provider payload or a URL must
+    not be able to leak it — the event carries the fields it declared
+    safe and nothing else.
+    """
+    exporter = recording_span
+    from inqtrix.observability.otel import operation_span
 
-    _flush_inqtrix_handlers()
-    content = Path(log_path).read_text(encoding="utf-8")
+    with operation_span("probe"):
+        emit_runtime_event(
+            "forensic_probe",
+            {
+                "event": "forensic_probe",
+                "request_kwargs": {"api_key": "sk-secretsecretsecretsecret"},
+                "headers": {"authorization": "Bearer abc.def.ghi"},
+                "raw_response": {"token": "pplx-secretsecretsecretsecret"},
+                "safe_url": (
+                    "https://api.example.com/v1"
+                    "?api_key=sk-realLookingApiKey1234567890&page=2"
+                ),
+                "nested": [
+                    {"url": "https://example.com/report?sig=abc123&page=1"},
+                ],
+                "status": "completed",
+                "source_count": 2,
+            },
+        )
 
-    assert "forensic_probe" in content
-    assert "request_kwargs" not in content
-    assert "headers" not in content
-    assert "raw_response" not in content
-    assert "sk-secretsecretsecretsecret" not in content
-    assert "Bearer abc.def.ghi" not in content
-    assert "api_key=[REDACTED]" in content
-    assert "sig=[REDACTED]" in content
-    assert "page=2" in content
+    (span,) = exporter.get_finished_spans()
+    (event,) = [e for e in span.events if e.name == "forensic_probe"]
+    rendered = json.dumps(dict(event.attributes))
+
+    assert "request_kwargs" not in rendered
+    assert "headers" not in rendered
+    assert "raw_response" not in rendered
+    assert "sk-secretsecretsecretsecret" not in rendered
+    assert "Bearer abc.def.ghi" not in rendered
+    assert "page=2" not in rendered
+    assert "https://" not in rendered
+    assert event.attributes["status"] == "completed"
+    assert event.attributes["source_count"] == 2
 
 
 def test_normalize_source_provenance_builds_records_from_grounded_result():
@@ -211,37 +310,169 @@ def test_normalize_source_provenance_builds_records_from_grounded_result():
     assert citations[0]["title"] == "Source title"
     assert citations[0]["source_date"] == "2026-05-01"
     assert citations[0]["last_updated"] == "2026-05-02"
+
+
+def test_search_provenance_redacts_credential_urls_before_state_persistence():
+    secret = "search-provider-secret"
+    result = GroundedSearchResult(
+        answer=(
+            "Use https://api.example/report?X-Amz-Signature=" + secret
+        ),
+        sources=[
+            GroundedSource(
+                url=f"https://api.example/report?x-api-key={secret}&page=2",
+                title=(
+                    "Download https://api.example/report?client_secret=" + secret
+                ),
+                snippet=(
+                    "Raw https://api.example/report?access_token=" + secret
+                ),
+            )
+        ],
+    )
+
+    sources, citations = normalize_source_provenance(
+        result,
+        query_id="qry_safe_url",
+        provider="CustomSearch",
+    )
+    serialized = __import__("json").dumps(
+        {"sources": sources, "citations": citations}
+    )
+
+    assert secret not in serialized
+    assert sources[0]["access_status"] == "blocked_credentials"
+    assert "x-api-key=[REDACTED]" in sources[0]["url"]
+    assert "client_secret=[REDACTED]" in citations[0]["title"]
+    assert "access_token=[REDACTED]" in citations[0]["snippet"]
     assert "source" not in citations[0]
     assert "headers" not in citations[0]
 
 
-def test_append_iteration_log_writes_debug_payload_without_testing_mode(tmp_path):
-    log_path = configure_logging(enabled=True, level="DEBUG", log_dir=str(tmp_path / "logs"))
+def test_provider_text_is_bounded_before_run_state_and_prompt_use() -> None:
+    oversized = "ä" * OBSERVATION_TEXT_BYTES_LIMIT
+    result = sanitize_grounded_search_result(
+        GroundedSearchResult(
+            answer=oversized,
+            sources=[GroundedSource(url="https://example.com", snippet=oversized)],
+        )
+    )
+
+    assert len(result.answer.encode("utf-8")) <= OBSERVATION_TEXT_BYTES_LIMIT
+    assert (
+        len(result.sources[0].snippet.encode("utf-8"))
+        <= OBSERVATION_TEXT_BYTES_LIMIT
+    )
+    assert "truncated at persistence limit" in result.answer
+    assert "truncated at persistence limit" in result.sources[0].snippet
+
+
+def test_append_iteration_log_keeps_audit_content_out_of_events(
+    recording_span,
+):
+    """The protected audit copy keeps the exact text; the event does not.
+
+    Queries, provider prose, claim/evidence text, prompt views and URLs
+    stay inside the run's own audit representation. What reaches the
+    trace event is the operational projection — counters, codes, model
+    ids, stop reasons.
+    """
+    from inqtrix.observability.otel import operation_span
+
+    exporter = recording_span
     state = {"iteration_logs": []}
 
-    append_iteration_log(
+    with operation_span("probe"):
+        append_iteration_log(
         state,
         {
             "node": "answer",
-            "prompt_citations": ["https://example.com/report"],
+            "query": "PRIVATE_QUERY_EXACT_TEXT",
+            "provider_answer": "PRIVATE_PROVIDER_EXACT_TEXT",
+            "claim_text": "PRIVATE_CLAIM_EXACT_TEXT",
+            "evidence_snippet": "PRIVATE_EVIDENCE_EXACT_TEXT",
+            "report_evidence_prompt": "PRIVATE_PROMPT_EXACT_TEXT",
+            "prompt_citations": ["https://private.example.test/report"],
             "fallback_attempted": True,
+            "_claim_extraction_fallback": True,
+            "_stop_reason": "confidence_stop",
+            "model": "openai/gpt-5.6-sol",
+            "evidence_record_count": 3,
         },
-        testing_mode=False,
+        testing_mode=True,
     )
 
-    _flush_inqtrix_handlers()
-    content = Path(log_path).read_text(encoding="utf-8")
+    (span,) = exporter.get_finished_spans()
+    (event,) = span.events
+    content = json.dumps(dict(event.attributes))
 
-    assert state["iteration_logs"] == []
-    assert "ITERATION answer:" in content
-    # URLs in iteration logs must remain visible (Phase 7 fix: only credential
-    # query parameters are redacted, no more pauschal [URL] replacement).
-    assert '"prompt_citations": ["https://example.com/report"]' in content
-    assert '"fallback_attempted": true' in content
+    audit_entry = state["iteration_logs"][0]
+    assert audit_entry["query"] == "PRIVATE_QUERY_EXACT_TEXT"
+    assert audit_entry["provider_answer"] == "PRIVATE_PROVIDER_EXACT_TEXT"
+    assert audit_entry["claim_text"] == "PRIVATE_CLAIM_EXACT_TEXT"
+    assert audit_entry["evidence_snippet"] == "PRIVATE_EVIDENCE_EXACT_TEXT"
+    assert audit_entry["report_evidence_prompt"] == "PRIVATE_PROMPT_EXACT_TEXT"
+    assert audit_entry["prompt_citations"] == [
+        "https://private.example.test/report"
+    ]
+    assert event.attributes["fallback_attempted"] is True
+    assert event.attributes["_claim_extraction_fallback"] is True
+    assert event.attributes["_stop_reason"] == "confidence_stop"
+    assert event.attributes["model"] == "openai/gpt-5.6-sol"
+    assert event.attributes["evidence_record_count"] == 3
+    for private_value in (
+        "PRIVATE_QUERY_EXACT_TEXT",
+        "PRIVATE_PROVIDER_EXACT_TEXT",
+        "PRIVATE_CLAIM_EXACT_TEXT",
+        "PRIVATE_EVIDENCE_EXACT_TEXT",
+        "PRIVATE_PROMPT_EXACT_TEXT",
+        "https://private.example.test/report",
+    ):
+        assert private_value not in content
 
 
-def test_search_logs_per_query_runtime_debug_artifacts(tmp_path):
-    log_path = configure_logging(enabled=True, level="DEBUG", log_dir=str(tmp_path / "logs"))
+def test_event_name_projection_fails_closed(recording_span):
+    """An unrecognised event or node name must not pass through.
+
+    Names are attacker-influenceable free text; the projection admits
+    only known operational tokens and falls back to a neutral one. The
+    protected audit copy keeps the original.
+    """
+    from inqtrix.observability.otel import operation_span
+
+    exporter = recording_span
+    state = {"iteration_logs": []}
+
+    with operation_span("probe"):
+        append_iteration_log(
+            state,
+            {
+                "event": "PRIVATE EVENT TEXT",
+                "node": "PRIVATE NODE TEXT",
+                "status": "completed",
+            },
+            testing_mode=True,
+        )
+
+    assert state["iteration_logs"][0]["event"] == "PRIVATE EVENT TEXT"
+    assert state["iteration_logs"][0]["node"] == "PRIVATE NODE TEXT"
+    (span,) = exporter.get_finished_spans()
+    (event,) = span.events
+    assert event.name == "iteration_summary"
+    rendered = json.dumps(dict(event.attributes))
+    assert "PRIVATE EVENT TEXT" not in rendered
+    assert "PRIVATE NODE TEXT" not in rendered
+    assert event.attributes["status"] == "completed"
+
+
+def test_search_emits_per_query_runtime_artifacts(recording_span):
+    """Per-query lineage reaches the trace with content held back.
+
+    Fallback counters, extraction mode/schema and claim counts are
+    operational and must be visible; provider prose, claim text and
+    URLs stay in the run's protected representation.
+    """
+    exporter = recording_span
 
     class _SearchWithNotice:
         def __init__(self) -> None:
@@ -340,29 +571,42 @@ def test_search_logs_per_query_runtime_debug_artifacts(tmp_path):
     state = initial_state("Was ist passiert?", progress_queue=Queue(), max_total_seconds=30)
     state["queries"] = ["q1"]
 
-    search(
-        state,
-        providers=ProviderContext(llm=llm, search=_SearchWithNotice()),
-        strategies=strategies,
-        settings=settings,
+    from inqtrix.observability.otel import operation_span
+
+    with operation_span("probe"):
+        search(
+            state,
+            providers=ProviderContext(llm=llm, search=_SearchWithNotice()),
+            strategies=strategies,
+            settings=settings,
+        )
+
+    events = [e for span in exporter.get_finished_spans() for e in span.events]
+    content = json.dumps(
+        [{"name": e.name, **dict(e.attributes)} for e in events]
     )
 
-    _flush_inqtrix_handlers()
-    content = Path(log_path).read_text(encoding="utf-8")
-
-    assert "ITERATION search:" in content
+    assert any(e.name == "query_summary" for e in events)
     assert '"search_fallbacks": 1' in content
     assert '"claim_fallbacks": 1' in content
-    assert '"provider_notice": "search fallback"' in content
-    assert '"claim_notice": "claim fallback"' in content
     assert '"claim_extraction_mode": "structured_output"' in content
     assert '"claim_extraction_schema": "inqtrix_claim_extraction_v1"' in content
     assert '"claim_extraction_structured_supported": true' in content
     assert '"claim_extraction_raw_claim_count": 1' in content
     assert '"claim_extraction_normalized_claim_count": 1' in content
     assert '"claim_extraction_filtered_claim_count": 0' in content
-    assert '"event": "query_summary"' in content
-    assert '"evidence_snippet": "Die Quelle nennt diesen wichtigen Fakt direkt."' in content
+    assert '"provider_notice": "search fallback"' not in content
+    assert '"claim_notice": "claim fallback"' not in content
+    assert "Gefundener Text" not in content
+    assert "Passiert ist ein wichtiger Fakt aus der Quelle" not in content
+    assert "Die Quelle nennt diesen wichtigen Fakt direkt." not in content
+    assert "https://example.com/report" not in content
+
+    assert state["query_synthesis"]
+    assert next(iter(state["query_synthesis"].values()))["provider_answer"] == "Gefundener Text"
+    assert state["evidence_ledger"][0]["claims"][0]["claim_text"] == (
+        "Passiert ist ein wichtiger Fakt aus der Quelle"
+    )
 
 
 def test_search_forensic_lineage_works_with_legacy_custom_provider():
@@ -1027,7 +1271,9 @@ def test_append_iteration_log_sanitizes_iteration_logs_export_for_testing_mode(t
     assert "abc123" not in entry["prompt_citations"][0]
     assert "page=2" in entry["prompt_citations"][1]
 
-    assert "token=[REDACTED]" in file_content
+    assert "prompt_citations" not in file_content
+    assert "token=[REDACTED]" not in file_content
+    assert "https://example.com" not in file_content
     assert "abc123" not in file_content
     assert "Bearer leak" not in file_content
 
